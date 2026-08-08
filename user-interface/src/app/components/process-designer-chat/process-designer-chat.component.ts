@@ -4,6 +4,7 @@ import {
   Input,
   OnInit,
   OnChanges,
+  OnDestroy,
   Output,
   SimpleChanges,
   ViewChild,
@@ -24,6 +25,7 @@ import { MatChipsModule } from '@angular/material/chips';
 import { MatTooltipModule } from '@angular/material/tooltip';
 import { MatMenuModule } from '@angular/material/menu';
 import { MatDialog, MatDialogModule } from '@angular/material/dialog';
+import { Subject, takeUntil } from 'rxjs';
 import { AgenticTeamApiService } from '../../services/agentic-team-api.service';
 import { FlowStepEditorComponent } from '../flow-step-editor/flow-step-editor.component';
 import {
@@ -70,7 +72,7 @@ const SUGGEST_AGENT_PROMPT = 'Suggest an additional agent for this team.';
   templateUrl: './process-designer-chat.component.html',
   styleUrl: './process-designer-chat.component.scss',
 })
-export class ProcessDesignerChatComponent implements OnInit, OnChanges, AfterViewChecked {
+export class ProcessDesignerChatComponent implements OnInit, OnChanges, AfterViewChecked, OnDestroy {
   @Input() team!: AgenticTeam;
 
   /**
@@ -87,6 +89,9 @@ export class ProcessDesignerChatComponent implements OnInit, OnChanges, AfterVie
   private readonly fb = inject(FormBuilder);
   private readonly sanitizer = inject(DomSanitizer);
   private readonly dialog = inject(MatDialog);
+  // Completes on destroy; every subscription in this component is gated on it
+  // so a late response can't mutate a torn-down component.
+  private readonly destroy$ = new Subject<void>();
 
   messages = signal<AgenticConversationMessage[]>([]);
   currentProcess = signal<ProcessDefinition | null>(null);
@@ -110,6 +115,13 @@ export class ProcessDesignerChatComponent implements OnInit, OnChanges, AfterVie
   expandedAgent = signal<string | null>(null);
   /** Guards `refreshRoster` against out-of-order refresh results. */
   private readonly rosterRefreshGuard = new LatestOnly();
+
+  /**
+   * Click listeners bound by `attachFlowchartClickHandlers`, tracked so they
+   * can be explicitly removed (see `detachFlowchartClickHandlers`) instead of
+   * being silently discarded whenever the flowchart SVG is replaced.
+   */
+  private readonly flowchartClickListeners: { node: HTMLElement; listener: (e: Event) => void }[] = [];
 
   private conversationId: string | null = null;
   /** Monotonic stamp for `startConversation`; guards against out-of-order createConversation results. */
@@ -146,6 +158,12 @@ export class ProcessDesignerChatComponent implements OnInit, OnChanges, AfterVie
     this.attachFlowchartClickHandlers();
   }
 
+  ngOnDestroy(): void {
+    this.detachFlowchartClickHandlers();
+    this.destroy$.next();
+    this.destroy$.complete();
+  }
+
   private scrollToBottom(): void {
     if (this.messagesContainer?.nativeElement) {
       const el = this.messagesContainer.nativeElement;
@@ -159,12 +177,29 @@ export class ProcessDesignerChatComponent implements OnInit, OnChanges, AfterVie
     nodes.forEach((node: Element) => {
       if ((node as HTMLElement).dataset['bound']) return;
       (node as HTMLElement).dataset['bound'] = '1';
-      node.addEventListener('click', (e) => {
+      const listener = (e: Event) => {
         e.stopPropagation();
         const stepId = (node as HTMLElement).dataset['stepId'];
         if (stepId) this.onStepClick(stepId);
-      });
+      };
+      node.addEventListener('click', listener);
+      this.flowchartClickListeners.push({ node: node as HTMLElement, listener });
     });
+  }
+
+  /**
+   * Remove every click listener bound by `attachFlowchartClickHandlers` and
+   * clear their `data-bound` markers. Called before each `buildFlowchart`
+   * replaces the flowchart's DOM (so the outgoing nodes' listeners don't
+   * linger) and from `ngOnDestroy` (so the component doesn't leave listeners
+   * closing over `this` attached to nodes still in the document).
+   */
+  private detachFlowchartClickHandlers(): void {
+    for (const { node, listener } of this.flowchartClickListeners) {
+      node.removeEventListener('click', listener);
+      delete node.dataset['bound'];
+    }
+    this.flowchartClickListeners.length = 0;
   }
 
   private startConversation(): void {
@@ -182,7 +217,7 @@ export class ProcessDesignerChatComponent implements OnInit, OnChanges, AfterVie
     this.selectedStepId.set(null);
     this.selectedStep.set(null);
 
-    this.api.createConversation(this.team.team_id).subscribe({
+    this.api.createConversation(this.team.team_id).pipe(takeUntil(this.destroy$)).subscribe({
       next: (res) => {
         if (seq !== this.conversationSeq) return; // superseded by a newer call
         this.applyState(res);
@@ -231,13 +266,13 @@ export class ProcessDesignerChatComponent implements OnInit, OnChanges, AfterVie
     const token = this.rosterRefreshGuard.next();
     this.rosterLoading.set(true);
     this.rosterActionError.set(null);
-    this.api.listTeamAgents(this.team.team_id).subscribe({
+    this.api.listTeamAgents(this.team.team_id).pipe(takeUntil(this.destroy$)).subscribe({
       next: (agents) => {
         if (!this.rosterRefreshGuard.isCurrent(token)) return; // superseded by a newer refresh
         this.rosterAgents.set(agents);
         // Keep the loading indicator up until validation also resolves — the
         // roster isn't "fully loaded" until its staffing gaps are known.
-        this.api.validateRoster(this.team.team_id).subscribe({
+        this.api.validateRoster(this.team.team_id).pipe(takeUntil(this.destroy$)).subscribe({
           next: (result) => {
             if (!this.rosterRefreshGuard.isCurrent(token)) return;
             this.rosterValidation.set(result);
@@ -299,13 +334,16 @@ export class ProcessDesignerChatComponent implements OnInit, OnChanges, AfterVie
       AddAgentFromRegistryDialogData,
       AddAgentFromRegistryDialogResult
     >(AddAgentFromRegistryDialogComponent, { data, width: '480px' });
-    ref.afterClosed().subscribe((manifestId) => this.onAddFromRegistryDialogClosed(manifestId));
+    ref
+      .afterClosed()
+      .pipe(takeUntil(this.destroy$))
+      .subscribe((manifestId) => this.onAddFromRegistryDialogClosed(manifestId));
   }
 
   /** Public for unit tests; invoked by `openAddFromRegistry` after the dialog closes. */
   onAddFromRegistryDialogClosed(manifestId: AddAgentFromRegistryDialogResult | undefined): void {
     if (!manifestId) return;
-    this.api.addAgentFromRegistry(this.team.team_id, manifestId).subscribe({
+    this.api.addAgentFromRegistry(this.team.team_id, manifestId).pipe(takeUntil(this.destroy$)).subscribe({
       next: () => this.refreshRoster(),
       error: (err) => {
         this.rosterActionError.set(extractErrorDetail(err, 'Failed to add agent from registry'));
@@ -337,14 +375,17 @@ export class ProcessDesignerChatComponent implements OnInit, OnChanges, AfterVie
       },
       width: '420px',
     });
-    ref.afterClosed().subscribe((confirmed) => this.onDeleteAgentConfirmed(agent, confirmed));
+    ref
+      .afterClosed()
+      .pipe(takeUntil(this.destroy$))
+      .subscribe((confirmed) => this.onDeleteAgentConfirmed(agent, confirmed));
   }
 
   /** Public for unit tests; invoked by `deleteAgent` after the confirm dialog closes. */
   onDeleteAgentConfirmed(agent: AgenticTeamAgent, confirmed: boolean | undefined): void {
     if (!confirmed) return;
     this.rosterActionError.set(null);
-    this.api.removeTeamAgent(this.team.team_id, agent.agent_name).subscribe({
+    this.api.removeTeamAgent(this.team.team_id, agent.agent_name).pipe(takeUntil(this.destroy$)).subscribe({
       next: () => this.refreshRoster(),
       error: (err) => {
         this.rosterActionError.set(extractErrorDetail(err, 'Failed to remove agent'));
@@ -378,7 +419,7 @@ export class ProcessDesignerChatComponent implements OnInit, OnChanges, AfterVie
     this.loading.set(true);
     this.error.set(null);
 
-    this.api.sendMessage(this.conversationId, message).subscribe({
+    this.api.sendMessage(this.conversationId, message).pipe(takeUntil(this.destroy$)).subscribe({
       next: (res) => {
         this.applyState(res);
         this.loading.set(false);
@@ -414,16 +455,20 @@ export class ProcessDesignerChatComponent implements OnInit, OnChanges, AfterVie
 
   createNewProcess(): void {
     this.saving.set(true);
-    this.api.createProcess(this.team.team_id).subscribe({
+    this.api.createProcess(this.team.team_id).pipe(takeUntil(this.destroy$)).subscribe({
       next: (process) => {
         this.currentProcess.set(process);
         this.buildFlowchart(process);
         this.saving.set(false);
         // Link the new process to the active conversation so chat stays in sync
         if (this.conversationId) {
-          this.api.setConversationProcess(this.conversationId, process.process_id).subscribe({
-            error: (err) => this.error.set(extractErrorDetail(err, 'Failed to link process to conversation')),
-          });
+          this.api
+            .setConversationProcess(this.conversationId, process.process_id)
+            .pipe(takeUntil(this.destroy$))
+            .subscribe({
+              error: (err) =>
+                this.error.set(extractErrorDetail(err, 'Failed to link process to conversation')),
+            });
         }
       },
       error: (err) => {
@@ -542,7 +587,7 @@ export class ProcessDesignerChatComponent implements OnInit, OnChanges, AfterVie
 
   private saveProcess(process: ProcessDefinition, previous: ProcessDefinition | null): void {
     this.saving.set(true);
-    this.api.updateProcess(process.process_id, process).subscribe({
+    this.api.updateProcess(process.process_id, process).pipe(takeUntil(this.destroy$)).subscribe({
       next: () => {
         this.saving.set(false);
         this.refreshRoster();
@@ -565,6 +610,10 @@ export class ProcessDesignerChatComponent implements OnInit, OnChanges, AfterVie
    * Nodes are interactive — clicking them opens the step editor.
    */
   private buildFlowchart(process: ProcessDefinition | null): void {
+    // The outgoing SVG (if any) is about to be discarded via [innerHTML] —
+    // detach its listeners now rather than relying on the DOM nodes becoming
+    // unreferenced garbage.
+    this.detachFlowchartClickHandlers();
     if (!process || process.steps.length === 0) {
       this.flowchartSvg.set(null);
       return;

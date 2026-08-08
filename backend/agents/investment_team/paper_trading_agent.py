@@ -159,7 +159,7 @@ class PaperTradingAgent:
             if slippage_bps is None:
                 slippage_bps = fee_defaults["slippage_bps"]
 
-        session_id = f"pt-{uuid.uuid4().hex[:8]}"
+        session_id = f"pt-{uuid.uuid4().hex}"
         now = datetime.now(tz=timezone.utc).isoformat()
 
         # Determine data period

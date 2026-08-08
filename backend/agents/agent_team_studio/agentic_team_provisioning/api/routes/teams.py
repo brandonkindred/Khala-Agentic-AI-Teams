@@ -30,6 +30,13 @@ def create_team(req: CreateTeamRequest):
 
 @router.get("/teams", response_model=list[TeamSummary])
 def list_teams():
+    """List every persisted agentic team.
+
+    Preconditions: none.
+    Postconditions: returns ``200`` with a ``TeamSummary`` for each team row,
+        delegating directly to ``teams_svc.list_teams`` (store's default
+        order); an empty list if no teams exist.
+    """
     return teams_svc.list_teams()
 
 
@@ -40,6 +47,14 @@ def get_team(team_id: str):
 
 @router.get("/teams/{team_id}/agents", response_model=list[EnrichedRosterAgent])
 def list_team_agents(team_id: str):
+    """Return the named agents pool (roster) for this team.
+
+    Preconditions: ``team_id`` is a non-empty string.
+    Postconditions: returns ``200`` with the team's roster as a list of
+        ``AgenticTeamAgent`` (empty if no agents have been added yet),
+        delegating directly to ``teams_svc.list_team_agents``; ``404`` if
+        the team is not found.
+    """
     return teams_svc.list_team_agents(team_id)
 
 

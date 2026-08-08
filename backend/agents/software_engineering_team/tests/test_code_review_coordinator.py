@@ -16,12 +16,14 @@ from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
+from code_review_agent import mapping
 from code_review_agent.chunk_reviewer import CHUNK_REVIEW_NOTE, CODE_TO_REVIEW_HEADER
 from code_review_agent.chunking import _bisect_segment
 from code_review_agent.coordinator import (
     MAX_CODE_REVIEW_ISSUES,
     MIN_SPLIT_SEGMENT_CHARS,
     _cap_issues,
+    _is_content_failure,
     _issues_from_chunk_output,
     _map_parallelism,
     _reconcile_approval,
@@ -187,6 +189,20 @@ def test_reconcile_approval_mixed_case_non_blocking_still_auto_approves(
     approved, out = _reconcile_approval(False, [_issue(severity, "nit")])
     assert approved is True
     assert len(out) == 1
+
+
+def test_reconcile_approval_override_log_names_non_critical_high(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The auto-approve override log must describe the overridden severities
+    accurately: medium/low/info are 'non-critical/high', not 'minor/nit'.
+    """
+    with caplog.at_level("INFO"):
+        approved, out = _reconcile_approval(False, [_issue("medium", "m"), _issue("low", "l")])
+    assert approved is True
+    assert len(out) == 2
+    assert "2 non-critical/high issues, no critical/high" in caplog.text
+    assert "minor/nit" not in caplog.text
 
 
 def test_parse_code_into_file_blocks_single_file() -> None:
@@ -1898,8 +1914,6 @@ def test_is_content_failure_classifies_model_output_errors_only() -> None:
     ``LLMSemanticExhaustionError``, ``LLMTruncatedError``, and
     ``LLMSchemaValidationError``) are recoverable content failures;
     reviewer-code bugs are not."""
-    from code_review_agent.coordinator import _is_content_failure
-
     assert _is_content_failure(LLMJsonParseError("bad")) is True
     assert _is_content_failure(LLMSemanticExhaustionError("empty")) is True
     assert _is_content_failure(json.JSONDecodeError("Expecting value", "not json", 0)) is True
@@ -2146,8 +2160,6 @@ def test_thinking_off_retry_recovers_semantic_exhaustion(monkeypatch) -> None:
     by the last-resort thinking-off retry, producing a real review (no
     not-reviewed range). The retry is normally skipped for injected strands
     models, so force the production-path gate on to exercise it."""
-    from code_review_agent import mapping
-
     monkeypatch.setenv("CODE_REVIEW_THINKING_OFF_RETRY", "true")
     monkeypatch.setattr(mapping, "thinking_override_supported", lambda llm: True)
 
@@ -2166,8 +2178,6 @@ def test_thinking_off_retry_recovers_semantic_exhaustion(monkeypatch) -> None:
 def test_thinking_off_retry_that_also_fails_degrades(monkeypatch) -> None:
     """When the thinking-off retry ALSO returns a content failure, the chunk
     degrades to a not-reviewed outcome rather than raising."""
-    from code_review_agent import mapping
-
     monkeypatch.setenv("CODE_REVIEW_THINKING_OFF_RETRY", "true")
     monkeypatch.setattr(mapping, "thinking_override_supported", lambda llm: True)
     reviewer = _ThinkAwareReviewer(

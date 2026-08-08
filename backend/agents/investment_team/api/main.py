@@ -62,6 +62,7 @@ from investment_team.models import (
     UserPreferences,
     ValidationReport,
     WorkflowMode,
+    get_fee_defaults,
 )
 from investment_team.orchestrator import InvestmentTeamOrchestrator, QueueItem, WorkflowState
 from investment_team.shared.job_store import (
@@ -3341,9 +3342,15 @@ def resume_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
 
     Raises:
         - ``HTTPException`` 404: ``run_id`` does not resolve to any known run.
+          Can also fire from the post-lock re-read if the run was deleted in
+          the window between the pre-lock existence check and this request
+          acquiring the transition lock (a concurrent delete winning that
+          race), not just when ``run_id`` never existed at all.
         - ``HTTPException`` 400: the run's status is not in
-          ``RESUMABLE_STATUSES``, or its ``request_payload`` is missing/not a
-          dict.
+          ``RESUMABLE_STATUSES``; its ``request_payload`` is missing/not a
+          dict; or the stored ``request_payload`` fails
+          ``RunStrategyLabRequest`` validation (e.g. a corrupted or
+          schema-stale persisted payload).
         - ``HTTPException`` 409: another transition for this run_id is
           already in flight, or another run is already ``"running"``.
         - ``HTTPException`` 503: reading the current durable generation —
@@ -3369,6 +3376,13 @@ def resume_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
         # Preconditions for why reading it beforehand risks a stale-snapshot
         # duplicate dispatch.
         state = _get_run_state(run_id)
+        if state is None:
+            # The cheap pre-lock check above saw the run exist, but it was
+            # deleted before this request acquired the transition lock.
+            # Mirror the early check's exact 404 rather than falling through
+            # to `validate_job_for_action`'s generic "Job ... not found" text
+            # so both races produce the same response shape.
+            raise HTTPException(status_code=404, detail=f"Strategy lab run '{run_id}' not found.")
         try:
             validate_job_for_action(state, run_id, RESUMABLE_STATUSES, "resumed")
         except JobNotFoundError as exc:
@@ -3680,6 +3694,12 @@ def restart_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
         # RESTARTABLE_STATUSES, so status is only trustworthy once no other
         # transition for this run_id can be concurrently rewriting it.
         state = _get_run_state(run_id)
+        if state is None:
+            # A concurrent delete_strategy_lab_run completed in the window between
+            # the pre-lock existence check above and this re-read; validate_job_for_action
+            # below would also 404 via JobNotFoundError, but this mirrors the
+            # pre-lock check's message for a consistent 404 body.
+            raise HTTPException(status_code=404, detail=f"Strategy lab run '{run_id}' not found.")
         try:
             validate_job_for_action(state, run_id, STRATEGY_LAB_RESTARTABLE_STATUSES, "restarted")
         except JobNotFoundError as exc:
@@ -4616,12 +4636,19 @@ def _run_paper_trading_background(
           signal also failed to reach.
 
     Raises:
-        - None. All failures, including import errors for the two lazily-imported
-          dependencies, are caught and logged; the session is marked FAILED instead.
-          This includes a failure to re-parse the persisted session record while
-          handling a crash: that secondary failure is itself caught and logged,
-          so an unparseable record is left as-is (logged, not updated) rather
-          than letting the parse error escape in place of the original crash.
+        - None, for ``Exception`` and its subclasses: import errors for the two
+          lazily-imported dependencies, provider/network failures, and this
+          function's own postcondition guards are all caught and logged; the
+          session is marked FAILED instead. This includes a failure to re-parse
+          the persisted session record while handling a crash: that secondary
+          failure is itself caught and logged, so an unparseable record is left
+          as-is (logged, not updated) rather than letting the parse error escape
+          in place of the original crash.
+        - ``KeyboardInterrupt`` / ``SystemExit`` / ``GeneratorExit`` (``BaseException``
+          but not ``Exception``) are deliberately NOT caught here and propagate to
+          the caller — silently converting a worker-thread interrupt or interpreter
+          shutdown signal into a FAILED session would mask it instead of letting it
+          terminate the worker.
     """
     try:
         # Validate the documented precondition — a missing, unparseable, or
@@ -4676,23 +4703,9 @@ def _run_paper_trading_background(
         )
 
         if not market_data:
-            with _lock:
-                if _paper_trading_session_already_terminal(session_id):
-                    logger.warning(
-                        "Paper trade %s: session already terminal when the "
-                        "empty-market-data write was about to run; leaving it "
-                        "untouched (a concurrent writer already finalized it).",
-                        session_id,
-                    )
-                    return
-                raw = _paper_trading_sessions.get(session_id)
-                if raw is not None:
-                    session = PaperTradingSession.parse_persisted(raw)
-                    session.status = PaperTradingStatus.FAILED
-                    session.error = "Failed to fetch market data from external sources."
-                    session.divergence_analysis = session.error
-                    session.completed_at = datetime.now(tz=timezone.utc).isoformat()
-                    _paper_trading_sessions[session_id] = session
+            _fail_paper_trading_session(
+                session_id, "Failed to fetch market data from external sources."
+            )
             return
 
         agent = PaperTradingAgent()
@@ -4743,7 +4756,18 @@ def _run_paper_trading_background(
                     result_session.verdict,
                     len(result_session.trades),
                 )
-    except Exception as exc:
+    except BaseException as exc:
+        # Deliberately narrower than a bare `except BaseException`: KeyboardInterrupt /
+        # SystemExit / GeneratorExit are BaseException but not Exception and must
+        # propagate rather than being converted into a FAILED session — same
+        # distinction shared.concurrency.parallel_map draws for worker exceptions.
+        # Everything else (import failures, provider/network errors, programming
+        # bugs) is still folded into a FAILED session below: nothing downstream
+        # (run_paper_trading_activity) marks this session terminal if this worker
+        # raises, so surfacing a non-interrupt exception here would leave the
+        # session stuck RUNNING forever instead of failing cleanly.
+        if not isinstance(exc, Exception):
+            raise
         logger.exception("Paper trade %s: background worker crashed", session_id)
         # Nested try/except: parse_persisted() below can itself raise (e.g. a
         # corrupt persisted record) — that secondary exception is not caught by
@@ -5081,6 +5105,40 @@ def _paper_trading_session_already_terminal(session_id: str) -> bool:
     return session.status not in _ACTIVE_PT_STATES
 
 
+def _apply_paper_trading_failure(
+    session: PaperTradingSession,
+    error: str,
+    *,
+    completed_at: Optional[str] = None,
+    terminated_reason: Optional[str] = None,
+    set_legacy_divergence_analysis: bool = False,
+) -> None:
+    """Mutate ``session`` in place to record a terminal failure.
+
+    Shared by ``_fail_paper_trading_session`` (single-session, self-locking) and
+    ``_recover_orphaned_paper_trading_sessions`` (whole-batch, caller-locked) so
+    the terminal-write fields live in one place.
+
+    Preconditions:
+        - Caller holds ``_lock`` and has already decided ``session`` should be
+          failed (e.g. confirmed it isn't already COMPLETED/FAILED).
+    Postconditions:
+        - session.status == FAILED and session.error == error.
+        - session.completed_at is set to ``completed_at`` if given, else the
+          current UTC time.
+        - If ``terminated_reason`` is not None, session.terminated_reason is set.
+        - If ``set_legacy_divergence_analysis``, session.divergence_analysis is
+          mirrored from session.error.
+    """
+    session.status = PaperTradingStatus.FAILED
+    session.error = error
+    session.completed_at = completed_at or datetime.now(tz=timezone.utc).isoformat()
+    if terminated_reason is not None:
+        session.terminated_reason = terminated_reason
+    if set_legacy_divergence_analysis:
+        session.divergence_analysis = session.error
+
+
 def _fail_paper_trading_session(session_id: str, error: str) -> None:
     """Mark a paper-trading session ``failed`` (best-effort, idempotent).
 
@@ -5112,9 +5170,7 @@ def _fail_paper_trading_session(session_id: str, error: str) -> None:
             # deciding to mark it failed).
             return
         try:
-            session.status = PaperTradingStatus.FAILED
-            session.error = error
-            session.completed_at = datetime.now(tz=timezone.utc).isoformat()
+            _apply_paper_trading_failure(session, error)
             _paper_trading_sessions[session_id] = session
         except Exception:
             # The mutations above and the dict write (which round-trips
@@ -5162,19 +5218,32 @@ def _default_slippage_bps() -> float:
     )
 
 
-def _resolve_fee_overrides(request: "RunPaperTradingRequest") -> tuple[float, float]:
+def _resolve_fee_overrides(
+    request: "RunPaperTradingRequest", asset_class: Optional[str] = None
+) -> tuple[float, float]:
     """Return ``(transaction_cost_bps, slippage_bps)`` for the live config.
 
     Uses explicit ``None`` checks instead of ``or`` so a caller asking for
     zero-fee / zero-slippage experiments isn't silently bumped to the
     defaults — ``0.0`` is falsy but semantically meaningful here.
+
+    When ``asset_class`` is given, an omitted override falls back to
+    ``get_fee_defaults(asset_class)`` so non-stock strategies (crypto,
+    forex, ...) get correct per-asset-class fees instead of the flat
+    stock-tier default. Callers that don't have an asset class in scope
+    keep the operator-tunable env-var default.
     """
+    fee_defaults = get_fee_defaults(asset_class) if asset_class is not None else None
     tx = (
         request.transaction_cost_bps
         if request.transaction_cost_bps is not None
-        else _default_tx_cost_bps()
+        else (fee_defaults["transaction_cost_bps"] if fee_defaults else _default_tx_cost_bps())
     )
-    slip = request.slippage_bps if request.slippage_bps is not None else _default_slippage_bps()
+    slip = (
+        request.slippage_bps
+        if request.slippage_bps is not None
+        else (fee_defaults["slippage_bps"] if fee_defaults else _default_slippage_bps())
+    )
     return tx, slip
 
 
@@ -5229,7 +5298,7 @@ def _run_live_paper_trading_background(
 
         strategy_timeframe = request.timeframe or getattr(strategy, "timeframe", None) or "1m"
 
-        tx_cost, slip = _resolve_fee_overrides(request)
+        tx_cost, slip = _resolve_fee_overrides(request, asset_class=strategy.asset_class)
         # Captured once: two separate datetime.now() calls could straddle
         # midnight and produce a start/end date that spans two days for a
         # config meant to represent a single live trading day.
@@ -5262,6 +5331,11 @@ def _run_live_paper_trading_background(
         with _lock:
             raw = _paper_trading_sessions.get(session_id)
             if raw is None:
+                logger.warning(
+                    "Live paper trade %s: session removed before results could "
+                    "be persisted; discarding run result.",
+                    session_id,
+                )
                 return
             session = PaperTradingSession.parse_persisted(raw)
             if session.status not in _ACTIVE_PT_STATES:
@@ -5707,16 +5781,18 @@ def _recover_orphaned_paper_trading_sessions() -> None:
                     continue
                 if session.status not in _ACTIVE_PT_STATES:
                     continue
-                session.status = PaperTradingStatus.FAILED
-                session.completed_at = now_iso
-                session.terminated_reason = "process_exit"
-                session.error = (
-                    "Paper trading did not complete — the worker process exited before "
-                    "finalizing the session. Re-run the paper trade from the Strategy Lab."
-                )
-                # Preserve the legacy free-form field too so older clients still read a message.
-                session.divergence_analysis = session.error
                 try:
+                    _apply_paper_trading_failure(
+                        session,
+                        (
+                            "Paper trading did not complete — the worker process exited "
+                            "before finalizing the session. Re-run the paper trade from "
+                            "the Strategy Lab."
+                        ),
+                        completed_at=now_iso,
+                        terminated_reason="process_exit",
+                        set_legacy_divergence_analysis=True,
+                    )
                     _paper_trading_sessions[session.session_id] = session
                     recovered += 1
                 except Exception:

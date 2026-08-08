@@ -203,7 +203,7 @@ def _wire(
     rules: list[Rule] | None = None,
     pending: list[RuleProposal] | None = None,
 ) -> tuple[CannedLLM, list[RuleProposal]]:
-    """Patch the LLM + the three store readers; capture ``create_proposal`` rows.
+    """Patch the LLM client and the memory/rules store methods used by reflect; capture ``create_proposal`` rows.
 
     Summaries are served for ``Scale.DAY`` only so the run's evidence refs are
     exactly the supplied list.

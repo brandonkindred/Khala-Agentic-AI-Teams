@@ -537,6 +537,23 @@ def test_resume_strategy_lab_run_400_when_payload_missing(lab_job_client, api_cl
     assert resp.status_code == 400
 
 
+def test_resume_strategy_lab_run_400_when_payload_fails_validation(
+    lab_job_client, api_client
+) -> None:
+    """A resumable run whose stored payload is a dict but fails
+    ``RunStrategyLabRequest`` validation (corrupted/schema-stale data)
+    returns a clean 400 rather than an unhandled 500."""
+    from investment_team.api import main as api_main
+
+    state = _resumable_state("run-invalid-schema")
+    state["request_payload"]["batch_size"] = 0  # violates Field(ge=1)
+    api_main._active_runs["run-invalid-schema"] = state
+
+    resp = api_client.post("/strategy-lab/runs/run-invalid-schema/resume")
+    assert resp.status_code == 400
+    assert "Invalid stored request payload" in resp.json()["detail"]
+
+
 def test_resume_strategy_lab_run_409_when_another_active(lab_job_client, api_client) -> None:
     """Resuming is rejected with 409 while a different run_id is already active."""
     from investment_team.api import main as api_main
@@ -1946,6 +1963,42 @@ def test_resume_strategy_lab_run_dispatches_using_state_read_after_lock_not_befo
     # 5 + 1 (fresh), not 2 + 1 (stale).
     assert "resumed from cycle 6" in body["message"]
     assert api_main._active_runs[run_id]["contiguous_cycles"] == 5
+
+
+def test_resume_strategy_lab_run_404_when_state_deleted_between_reads(
+    monkeypatch: pytest.MonkeyPatch, lab_job_client, api_client
+) -> None:
+    """Regression: a run deleted in the window between the pre-lock existence
+    check and the lock-acquired re-read must 404 cleanly with the same
+    message as the early check, not raise or fall through to a different
+    404 shape.
+
+    Simulated via a stateful ``_get_run_state`` stub keyed on call count (the
+    same technique as
+    ``test_resume_strategy_lab_run_dispatches_using_state_read_after_lock_not_before``),
+    except the second call simulates the run vanishing rather than being
+    overwritten.
+    """
+    from investment_team.api import main as api_main
+
+    run_id = "run-deleted-mid-resume"
+    api_main._active_runs[run_id] = _resumable_state(run_id)
+
+    call_count = {"n": 0}
+
+    def _stateful_get_run_state(rid: str):
+        call_count["n"] += 1
+        if call_count["n"] > 1:
+            api_main._active_runs.pop(rid, None)
+            return None
+        return api_main._active_runs.get(rid)
+
+    monkeypatch.setattr(api_main, "_get_run_state", _stateful_get_run_state)
+
+    resp = api_client.post(f"/strategy-lab/runs/{run_id}/resume")
+    assert resp.status_code == 404
+    assert resp.json()["detail"] == f"Strategy lab run '{run_id}' not found."
+    assert call_count["n"] >= 2
 
 
 def test_restart_strategy_lab_run_returns_409_when_transition_lock_held(
@@ -3413,6 +3466,29 @@ def test_delete_strategy_lab_run_409_when_transition_lock_held(
 # ---------------------------------------------------------------------------
 
 
+def _make_subscriber(events):
+    """Build a fake job_event_bus subscription pre-loaded with ``events``.
+
+    Preconditions:
+        - ``events`` is a deque of event dicts (may be empty).
+
+    Postconditions:
+        - Returns an object exposing ``.events`` (the same deque passed in)
+          and a no-op ``touch()`` method, matching the interface
+          ``stream_strategy_lab_run`` expects from a ``job_event_bus``
+          subscription.
+    """
+
+    class _Sub:
+        def __init__(self) -> None:
+            self.events = events
+
+        def touch(self) -> None:  # reaper-liveness signal, no-op for the fake
+            pass
+
+    return _Sub()
+
+
 def test_stream_strategy_lab_run_404(monkeypatch: pytest.MonkeyPatch, api_client) -> None:
     """Streaming a run_id with neither in-memory nor persisted state returns 404."""
     from investment_team.api import main as api_main
@@ -3525,15 +3601,7 @@ def test_stream_strategy_lab_run_does_not_block_on_threading_lock(
 
     pre_events = deque([{"type": "complete", "summary": "ok"}])
 
-    class _Sub:
-        def __init__(self) -> None:
-            self.events = pre_events
-            self.closed = False
-
-        def touch(self) -> None:
-            pass
-
-    monkeypatch.setattr(job_event_bus, "subscribe", lambda rid: _Sub())
+    monkeypatch.setattr(job_event_bus, "subscribe", lambda rid: _make_subscriber(pre_events))
     monkeypatch.setattr(job_event_bus, "unsubscribe", lambda rid, sub: None)
 
     result: Dict[str, Any] = {}
@@ -3660,18 +3728,11 @@ def test_stream_strategy_lab_run_emits_snapshot_update_and_terminates(
         ]
     )
 
-    class _Sub:
-        def __init__(self) -> None:
-            self.events = pre_events
-
-        def touch(self) -> None:  # reaper-liveness signal, no-op for the fake
-            pass
-
     sub_holder = {"sub": None, "unsubscribed": False}
 
     def _fake_subscribe(rid: str):
         assert rid == "active"
-        sub_holder["sub"] = _Sub()
+        sub_holder["sub"] = _make_subscriber(pre_events)
         return sub_holder["sub"]
 
     def _fake_unsubscribe(rid: str, sub) -> None:
@@ -3718,14 +3779,7 @@ def test_stream_strategy_lab_run_terminates_on_error_event(
 
     pre_events = deque([{"type": "error", "error": "kaboom"}])
 
-    class _Sub:
-        def __init__(self) -> None:
-            self.events = pre_events
-
-        def touch(self) -> None:  # reaper-liveness signal, no-op for the fake
-            pass
-
-    monkeypatch.setattr(job_event_bus, "subscribe", lambda rid: _Sub())
+    monkeypatch.setattr(job_event_bus, "subscribe", lambda rid: _make_subscriber(pre_events))
     monkeypatch.setattr(job_event_bus, "unsubscribe", lambda rid, sub: None)
 
     with api_client.stream("GET", "/strategy-lab/runs/boom/stream", timeout=2.0) as resp:
@@ -3777,14 +3831,7 @@ def test_stream_strategy_lab_run_snapshot_reconciles_progress(
 
     pre_events = deque([{"type": "complete", "summary": "ok"}])
 
-    class _Sub:
-        def __init__(self) -> None:
-            self.events = pre_events
-
-        def touch(self) -> None:  # reaper-liveness signal, no-op for the fake
-            pass
-
-    monkeypatch.setattr(job_event_bus, "subscribe", lambda rid: _Sub())
+    monkeypatch.setattr(job_event_bus, "subscribe", lambda rid: _make_subscriber(pre_events))
     monkeypatch.setattr(job_event_bus, "unsubscribe", lambda rid, sub: None)
 
     with api_client.stream("GET", "/strategy-lab/runs/stream-prog/stream", timeout=2.0) as resp:

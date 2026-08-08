@@ -436,7 +436,7 @@ def test_fail_strategy_lab_run_schedules_active_runs_cleanup(monkeypatch) -> Non
     from investment_team.strategy_lab import orchestrator_api
 
     run_id = "run-cleanup-me"
-    active_runs = {run_id: {"run_id": run_id, "status": "running"}}
+    active_runs = {run_id: {"run_id": run_id, "status": "running", "current_cycle": 3}}
     monkeypatch.setattr(orchestrator_api, "_active_runs", active_runs)
     persisted = []
     monkeypatch.setattr(orchestrator_api, "_persist_run_state", lambda *a, **k: persisted.append(a))
@@ -457,6 +457,7 @@ def test_fail_strategy_lab_run_schedules_active_runs_cleanup(monkeypatch) -> Non
     orchestrator_api._fail_strategy_lab_run(run_id, "boom")
 
     assert active_runs[run_id]["status"] == "failed"
+    assert active_runs[run_id]["current_cycle"] is None
     assert persisted[0][0] == run_id
     assert captured["delay"] == 900.0
     assert captured["started"] is True

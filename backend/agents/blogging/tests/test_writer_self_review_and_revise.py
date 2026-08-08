@@ -565,6 +565,49 @@ def test_build_revise_all_items_prompt_previous_feedback_items_getattr() -> None
     assert "2. [minor] grammar [para 2]: missing comma" in prompt
 
 
+def test_build_revise_all_items_prompt_tone_and_audience_no_extra_blank_lines() -> None:
+    """Tone/Purpose and Audience prefix lines must not introduce blank lines.
+
+    ``prompt_parts`` is joined with ``"\\n".join``, so a prefix string that
+    itself ends with ``\\n`` produces a spurious blank line once joined.
+    """
+    from agents.blogging.blog_writer_agent.agent import REVISION_TASK_INSTRUCTIONS
+    from agents.blogging.blog_writer_agent.models import ReviseWriterInput
+    from agents.blogging.shared.content_plan import ContentPlanSection, TitleCandidate
+
+    from ._content_plan_test_utils import make_content_plan
+
+    a = _make_agent_with_guidelines()
+    plan = make_content_plan(
+        overarching_topic="X",
+        narrative_flow="f",
+        sections=[ContentPlanSection(title="A", coverage_description="a", order=0)],
+        title_candidates=[TitleCandidate(title="T", probability_of_success=0.5)],
+    )
+    revise_input = ReviseWriterInput(
+        draft="# Draft\n\nBody.",
+        feedback_items=[],
+        content_plan=plan,
+        tone_or_purpose="technical overview",
+        audience="Platform and SRE teams",
+        length_guidance="",
+        target_word_count=1000,
+    )
+    prompt = a._build_revise_all_items_prompt(
+        draft="# Draft\n\nBody.",
+        feedback_items=[],
+        revision_plan="Fix things.",
+        style_guide_text="Style Guide",
+        revise_input=revise_input,
+    )
+    expected_prefix = (
+        "Tone/Purpose: technical overview\n"
+        "Audience: Platform and SRE teams\n"
+        f"{REVISION_TASK_INSTRUCTIONS}"
+    )
+    assert prompt.startswith(expected_prefix)
+
+
 def test_writer_format_feedback_item_line_missing_required_raises() -> None:
     """Duck-typed items missing severity/category/issue raise ValueError, not AttributeError."""
     from types import SimpleNamespace

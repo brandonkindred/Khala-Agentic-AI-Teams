@@ -411,8 +411,8 @@ def _reconcile_approval(
     Postconditions:
         - ``approved is False`` implies the returned issues contain at least
           one critical/high finding (rejections are always actionable).
-        - A reject with only minor/info issues, or with no actionable feedback
-          at all, flips to approve. The merged summary is never consulted here:
+        - A reject with only non-critical/high issues, or with no actionable
+          feedback at all, flips to approve. The merged summary is never consulted here:
           it mixes every chunk's text, so synthesizing a rejection from it
           could attribute an approving chunk's words to a rejecting chunk.
     """
@@ -423,7 +423,7 @@ def _reconcile_approval(
     if not approved and not critical_or_high:
         if issues:
             logger.info(
-                "CodeReview: overriding to approved=True (only %s minor/nit issues, no critical/high)",
+                "CodeReview: overriding to approved=True (%s non-critical/high issues, no critical/high)",
                 len(issues),
             )
         else:
