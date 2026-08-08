@@ -135,6 +135,13 @@ export class ProcessDesignerChatComponent implements OnInit, OnChanges, AfterVie
   /** Guards `refreshRoster` against out-of-order refresh results. */
   private readonly rosterRefreshGuard = new LatestOnly();
 
+  /**
+   * Click listeners bound by `attachFlowchartClickHandlers`, tracked so they
+   * can be explicitly removed (see `detachFlowchartClickHandlers`) instead of
+   * being silently discarded whenever the flowchart SVG is replaced.
+   */
+  private readonly flowchartClickListeners: { node: HTMLElement; listener: (e: Event) => void }[] = [];
+
   private conversationId: string | null = null;
   /** Monotonic stamp for `startConversation`; guards against out-of-order createConversation results. */
   private conversationSeq = 0;
@@ -188,12 +195,33 @@ export class ProcessDesignerChatComponent implements OnInit, OnChanges, AfterVie
     nodes.forEach((node: Element) => {
       if ((node as HTMLElement).dataset['bound']) return;
       (node as HTMLElement).dataset['bound'] = '1';
-      node.addEventListener('click', (e) => {
+      const listener = (e: Event) => {
         e.stopPropagation();
         const stepId = (node as HTMLElement).dataset['stepId'];
         if (stepId) this.onStepClick(stepId);
-      });
+      };
+      node.addEventListener('click', listener);
+      this.flowchartClickListeners.push({ node: node as HTMLElement, listener });
     });
+  }
+
+  /**
+   * Remove every click listener bound by `attachFlowchartClickHandlers` and
+   * clear their `data-bound` markers. Called before each `buildFlowchart`
+   * replaces the flowchart's DOM (so the outgoing nodes' listeners don't
+   * linger) and from `ngOnDestroy` (so the component doesn't leave listeners
+   * closing over `this` attached to nodes still in the document).
+   */
+  private detachFlowchartClickHandlers(): void {
+    for (const { node, listener } of this.flowchartClickListeners) {
+      node.removeEventListener('click', listener);
+      delete node.dataset['bound'];
+    }
+    this.flowchartClickListeners.length = 0;
+  }
+
+  ngOnDestroy(): void {
+    this.detachFlowchartClickHandlers();
   }
 
   private startConversation(): void {
@@ -690,6 +718,10 @@ export class ProcessDesignerChatComponent implements OnInit, OnChanges, AfterVie
    * Nodes are interactive — clicking them opens the step editor.
    */
   private buildFlowchart(process: ProcessDefinition | null): void {
+    // The outgoing SVG (if any) is about to be discarded via [innerHTML] —
+    // detach its listeners now rather than relying on the DOM nodes becoming
+    // unreferenced garbage.
+    this.detachFlowchartClickHandlers();
     if (!process || process.steps.length === 0) {
       this.flowchartSvg.set(null);
       return;
