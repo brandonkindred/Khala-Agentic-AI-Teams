@@ -198,7 +198,7 @@ def test_index_from_legacy_code_parses_headers() -> None:
 
 
 def test_index_legacy_code_without_headers_has_no_readable_files() -> None:
-    """Headerless legacy code yields no path-addressable files (filter then keeps all)."""
+    """Headerless legacy code yields no path-addressable files."""
     idx = CodebaseIndex.from_input(
         CodeReviewInput(code="just some loose code", task_description="t")
     )
