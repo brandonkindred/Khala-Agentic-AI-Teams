@@ -960,7 +960,7 @@ abort, which remains a loud operator-facing comment.
 
 ### PR_REVIEW_DUPLICATE_THRESHOLD_WITH_LOCATION / PR_REVIEW_DUPLICATE_THRESHOLD_NO_LOCATION
 Similarity-ratio overrides (0.0–1.0) for the `/review-pr` flow's duplicate-issue
-check: before a pre-existing finding is offered to a human as a "file a new
+check: before a finding is offered to a human as a "file a new
 GitHub issue?" candidate, the reviewed repository's open issues are checked for
 one that already tracks the same bug (`difflib.SequenceMatcher` ratio between the
 finding's description headline and a candidate issue's title, casefolded). A
