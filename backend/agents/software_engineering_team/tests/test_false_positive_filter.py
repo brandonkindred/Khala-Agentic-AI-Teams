@@ -771,15 +771,69 @@ def test_find_references_attaches_enclosing_construct_excerpt() -> None:
     assert _NO_REPO in result
 
 
-def test_find_references_unresolved_construct_is_path_line_only() -> None:
-    """Module-level / non-Python hits stay path:line without a construct slice."""
-    idx = CodebaseIndex(files={"mod.py": "NEEDLE = 1\n"})
+def test_find_references_module_level_hit_gets_line_window_fallback() -> None:
+    """Module-level hits (no enclosing construct) get a bounded raw-line window."""
+    src = "A = 1\nB = 2\nNEEDLE = 3\nC = 4\nD = 5\n"
+    idx = CodebaseIndex(files={"mod.py": src})
     result = idx.find_references("NEEDLE")
-    assert _hit_locs(result) == ["mod.py:1"]
-    assert _hit_body(result).strip() == "mod.py:1"
-    assert "function" not in result
-    assert "class" not in result
+    assert _hit_locs(result) == ["mod.py:3"]
+    body = _hit_body(result)
+    assert "function" not in body
+    assert "class" not in body
+    assert "window" in body
+    assert "NEEDLE = 3" in body
     assert _NO_REPO in result
+
+
+def test_find_references_unparsable_python_file_gets_line_window() -> None:
+    """A .py file that fails to parse still gets a bounded window, not just a locator."""
+    src = "def broken(:\n    NEEDLE = 1\n"
+    idx = CodebaseIndex(files={"broken.py": src})
+    result = idx.find_references("NEEDLE")
+    assert _hit_locs(result) == ["broken.py:2"]
+    body = _hit_body(result)
+    assert "window" in body
+    assert "NEEDLE = 1" in body
+
+
+def test_find_references_non_python_file_gets_line_window() -> None:
+    """Non-Python files get a bounded raw-line window instead of an empty excerpt."""
+    src = "line one\nline two\nNEEDLE here\nline four\n"
+    idx = CodebaseIndex(files={"notes.md": src})
+    result = idx.find_references("NEEDLE")
+    assert _hit_locs(result) == ["notes.md:3"]
+    body = _hit_body(result)
+    assert "window" in body
+    assert "NEEDLE here" in body
+
+
+def test_find_references_line_window_clamps_to_file_bounds() -> None:
+    """A window near a small file's edges doesn't request out-of-range lines."""
+    src = "NEEDLE = 1\nB = 2\nC = 3\n"
+    idx = CodebaseIndex(files={"mod.py": src})
+    result = idx.find_references("NEEDLE")
+    body = _hit_body(result)
+    assert "NEEDLE = 1" in body
+    assert "of 3 lines" in body
+
+
+def test_find_references_construct_exceeding_cap_uses_window(monkeypatch) -> None:
+    """A construct bigger than the excerpt cap is windowed, not dumped in full."""
+    import code_review_agent.false_positive_filter as fpf
+
+    monkeypatch.setattr(fpf, "_EXCERPT_MAX_LINES", 3)
+    monkeypatch.setattr(fpf, "_EXCERPT_WINDOW_LINES", 3)
+    lines = ["def big():"] + [f"    x{i} = {i}" for i in range(20)] + ["    return NEEDLE"]
+    src = "\n".join(lines) + "\n"
+    idx = CodebaseIndex(files={"mod.py": src})
+    result = idx.find_references("NEEDLE")
+    hit_line = len(lines)
+    assert f"mod.py:{hit_line}" in _hit_locs(result)
+    body = _hit_body(result)
+    assert "return NEEDLE" in body
+    assert "window" in body
+    assert "x0 = 0" not in body
+    assert "function big" not in body
 
 
 def test_find_references_pre_numbered_uses_original_line_and_correct_excerpt() -> None:
