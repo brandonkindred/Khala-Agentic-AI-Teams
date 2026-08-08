@@ -575,7 +575,7 @@ export class ProcessDesignerChatComponent implements OnInit, OnChanges, AfterVie
             .setConversationProcess(this.conversationId, process.process_id)
             .pipe(takeUntil(this.destroy$))
             .subscribe({
-              error: (err) => this.error.set(err?.error?.detail ?? 'Failed to link process to conversation'),
+              error: (err) => this.error.set(extractErrorDetail(err, 'Failed to link process to conversation')),
             });
         }
       },
