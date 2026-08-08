@@ -39,8 +39,9 @@ structured HITL decisions:
 all coding-team job state in a JSONB `data` column. There is no
 `schema_version` field — legacy vs. current shape is only detectable by
 field presence/absence inside `data`. Job `status` values in use:
-`pending`, `running` (non-terminal, resumable), `completed`, `failed`,
-`cancelled` (terminal, never resumed again). Resume happens via a
+`pending`, `running`, `waiting_for_user` (paused for HITL — still
+non-terminal/resumable, per `job_store.NON_TERMINAL_STATUSES`),
+`completed`, `failed`, `cancelled` (terminal, never resumed again). Resume happens via a
 Temporal `submit_answers` signal that re-invokes the pipeline activity,
 which re-reads the job record and restores `task_graph_snapshot`/
 `stack_specs` — exactly where the repair functions above fire today.
@@ -73,10 +74,12 @@ Once the repair/fallback code above is removed:
   dedicated one-shot migration script would re-implement the same logic
   in a throwaway tool, doubling the maintenance surface this cleanup
   exists to close.
-- **Jobs are short-lived.** Plan → execute → review pipelines don't sit
-  in `pending`/`running` for long, so a pre-deploy audit for any
-  in-flight legacy-shaped job (below) is cheap and should normally find
-  zero rows. There is no large body of long-lived legacy data that would
+- **Jobs are short-lived.** Plan → execute → review pipelines don't sit in
+  `pending`/`running` for long, and even a `waiting_for_user` pause is
+  bounded by how long it takes an operator to answer, so a pre-deploy
+  audit for any in-flight legacy-shaped job (below) is cheap and should
+  normally find zero rows. There is no large body of long-lived legacy
+  data that would
   justify a permanent migration path.
 - **Fail loud, not silent.** A clear, field-identifying error beats
   either silently coercing the data or silently refusing without a
@@ -92,28 +95,39 @@ Once the repair/fallback code above is removed:
 
 Before deploying the repair-code removal, run a one-time audit against
 the `jobs` table for the coding team's `team` key, restricted to
-**non-terminal** rows (`status IN ('pending', 'running')`):
+**non-terminal** rows — `status` in `job_store.NON_TERMINAL_STATUSES`,
+i.e. `pending`, `running`, or `waiting_for_user` (a paused HITL job is
+still in flight and will hit the repair/fail-fast path when it resumes,
+so it must be included, not just `pending`/`running`):
 
 ```sql
 SELECT job_id, status
 FROM jobs
 WHERE team = '<coding-team-key>'
-  AND status IN ('pending', 'running')
+  AND status IN ('pending', 'running', 'waiting_for_user')
   AND (
-    -- (a) a stack_specs entry uses a legacy alias name
+    -- (a) a stack_specs entry uses a legacy alias name, normalized the same
+    -- way _legacy_stack_key does (lowercase, '-'/' ' -> '_') so variants like
+    -- "Senior Software Engineer" or "senior-software-engineer" are caught
     EXISTS (
       SELECT 1 FROM jsonb_array_elements(data->'stack_specs') AS s
-      WHERE s->>'name' IN ('default', 'senior_software_engineer',
-                            'senior_software_engineer_legacy', 'software_engineer')
+      WHERE lower(regexp_replace(s->>'name', '[- ]', '_', 'g')) IN (
+        'default', 'senior_software_engineer',
+        'senior_software_engineer_legacy', 'software_engineer'
+      )
     )
     -- (b) a task in the snapshot is missing target_team
     OR EXISTS (
       SELECT 1 FROM jsonb_array_elements(data->'task_graph_snapshot') AS t
       WHERE NOT (t ? 'target_team') OR t->>'target_team' IS NULL OR t->>'target_team' = ''
     )
-    -- (c) a user_decision revision_feedback entry lacks structured decisions
+    -- (c) a user_decision revision_feedback entry lacks structured decisions;
+    -- revision_feedback is a per-task field inside task_graph_snapshot, not a
+    -- top-level data key, so it must be reached through the task elements
     OR EXISTS (
-      SELECT 1 FROM jsonb_array_elements(COALESCE(data->'revision_feedback', '[]'::jsonb)) AS f
+      SELECT 1
+      FROM jsonb_array_elements(data->'task_graph_snapshot') AS t,
+           jsonb_array_elements(COALESCE(t->'revision_feedback', '[]'::jsonb)) AS f
       WHERE f->>'source' = 'user_decision' AND NOT (f ? 'decisions')
     )
   );
