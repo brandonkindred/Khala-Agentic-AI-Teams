@@ -1828,9 +1828,25 @@ def test_advisor_session_404_for_missing_ids(api_client) -> None:
 
 
 def test_get_advisor_session_returns_found_false_for_missing(api_client) -> None:
+    """An unknown session_id is tolerated, not a 404: found=False pairs with
+    session=None per the endpoint's documented postconditions."""
     resp = api_client.get("/advisor/sessions/missing")
     assert resp.status_code == 200
-    assert resp.json()["found"] is False
+    body = resp.json()
+    assert body["found"] is False
+    assert body["session"] is None
+
+
+def test_get_advisor_session_docstring_documents_tolerant_precondition() -> None:
+    """The docstring must state explicitly that unknown session ids are a
+    tolerated precondition, not imply that session_id must already
+    identify a started session."""
+    from investment_team.api.main import get_advisor_session
+
+    doc = get_advisor_session.__doc__
+    assert "Preconditions:" in doc
+    assert "None. Unknown session IDs are tolerated." in doc
+    assert "must identify a previously started advisor session" not in doc
 
 
 def test_start_advisor_session_502_on_malformed_advisory_result(api_client, monkeypatch) -> None:
