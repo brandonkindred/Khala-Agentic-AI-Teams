@@ -331,6 +331,13 @@ def _save_agents_and_process(
 
 @app.get("/health")
 def health():
+    """Liveness/readiness probe for the service.
+
+    Preconditions: none.
+    Postconditions: ``200`` with ``{"status": "ok", "service": "agentic-team-provisioning"}``;
+        no side effects, and no dependency on the store or infrastructure being
+        reachable (a store outage does not affect this endpoint).
+    """
     return {"status": "ok", "service": "agentic-team-provisioning"}
 
 
@@ -495,7 +502,13 @@ def recommend_agents_for_step(process_id: str, step_id: str):
 
 @app.get("/teams/{team_id}/agent-environments", response_model=List[AgentEnvProvisionSummary])
 def list_team_agent_environments(team_id: str):
-    """Per-step agent provisioning status (Agent Provisioning team / sandboxed envs)."""
+    """Per-step agent provisioning status (Agent Provisioning team / sandboxed envs).
+
+    Preconditions: ``team_id`` is a non-empty string.
+    Postconditions: ``200`` with an ``AgentEnvProvisionSummary`` per row returned
+        by ``_store.list_agent_env_provisions`` (empty list if no steps have
+        been provisioned yet); ``404`` if the team is not found.
+    """
     team = _store.get_team(team_id)
     if not team:
         raise HTTPException(status_code=404, detail="Team not found")
@@ -535,7 +548,14 @@ def _get_team_or_404(team_id: str) -> AgenticTeam:
 
 @app.get("/teams/{team_id}/jobs", response_model=List[TeamJobSummary])
 def list_team_jobs(team_id: str):
-    """List all jobs for a provisioned team."""
+    """List all jobs for a provisioned team.
+
+    Preconditions: ``team_id`` is a non-empty string.
+    Postconditions: ``200`` with a ``TeamJobSummary`` per job reported by the
+        team's infrastructure job client (missing fields default to empty
+        string / ``"unknown"``; empty list if the team has no jobs yet);
+        ``404`` if the team is not found.
+    """
     infra = _get_infra_or_404(team_id)
     raw_jobs = infra.job_client.list_jobs() or []
     return [
@@ -551,7 +571,14 @@ def list_team_jobs(team_id: str):
 
 @app.get("/teams/{team_id}/jobs/{job_id}", response_model=TeamJobDetail)
 def get_team_job(team_id: str, job_id: str):
-    """Get a single job's detail."""
+    """Get a single job's detail.
+
+    Preconditions: ``team_id`` and ``job_id`` are non-empty strings.
+    Postconditions: ``200`` with a ``TeamJobDetail`` wrapping the raw job data
+        (``job_id`` defaults to the path parameter if missing from the data);
+        ``404`` if the team has no infrastructure, or no job with ``job_id``
+        exists.
+    """
     infra = _get_infra_or_404(team_id)
     job = infra.job_client.get_job(job_id)
     if not job:
@@ -570,7 +597,13 @@ def get_team_job(team_id: str, job_id: str):
 
 @app.get("/teams/{team_id}/questions", response_model=List[TeamPendingQuestion])
 def list_team_questions(team_id: str):
-    """Collect pending questions from all active jobs for a team."""
+    """Collect pending questions from all active jobs for a team.
+
+    Preconditions: ``team_id`` is a non-empty string.
+    Postconditions: ``200`` with one ``TeamPendingQuestion`` per pending
+        question across the team's ``pending``/``running`` jobs (empty list
+        if none); ``404`` if the team is not found or has no infrastructure.
+    """
     infra = _get_infra_or_404(team_id)
     active_jobs = infra.job_client.list_jobs(statuses=["pending", "running"]) or []
     result: List[TeamPendingQuestion] = []
@@ -583,7 +616,16 @@ def list_team_questions(team_id: str):
 
 @app.post("/teams/{team_id}/questions/{job_id}/answers")
 def submit_team_answers(team_id: str, job_id: str, req: SubmitTeamAnswersRequest):
-    """Submit answers to pending questions for a job."""
+    """Submit answers to pending questions for a job.
+
+    Preconditions: ``team_id`` and ``job_id`` are non-empty strings;
+        ``req.answers`` maps question id to answer.
+    Postconditions: ``200`` with ``{"job_id": ..., "message": "Answers submitted"}``;
+        the job's ``pending_questions`` is cleared, ``waiting_for_answers`` set
+        to ``False``, and ``req.answers`` appended to ``submitted_answers``;
+        ``404`` if the team has no infrastructure or the job is not found (no
+        side effects in that case).
+    """
     infra = _get_infra_or_404(team_id)
     job = infra.job_client.get_job(job_id)
     if not job:
@@ -624,7 +666,14 @@ def _safe_asset_name(name: str) -> str:
 
 @app.get("/teams/{team_id}/assets", response_model=List[AssetInfo])
 def list_team_assets(team_id: str):
-    """List files in the team's asset directory."""
+    """List files in the team's asset directory.
+
+    Preconditions: ``team_id`` is a non-empty string.
+    Postconditions: ``200`` with an ``AssetInfo`` per regular file directly
+        under the team's assets directory, sorted by name (empty list if the
+        directory doesn't exist yet or has no files; subdirectories are
+        skipped); ``404`` if the team is not found.
+    """
     infra = _get_infra_or_404(team_id)
     assets: List[AssetInfo] = []
     if infra.assets_dir.is_dir():
@@ -726,14 +775,26 @@ async def upload_team_asset(team_id: str, file: UploadFile):
 
 @app.get("/teams/{team_id}/forms", response_model=List[str])
 def list_team_form_keys(team_id: str):
-    """List distinct form keys that have records."""
+    """List distinct form keys that have records.
+
+    Preconditions: ``team_id`` is a non-empty string.
+    Postconditions: ``200`` with the distinct form keys present in the team's
+        form store (empty list if none); ``404`` if the team is not found.
+    """
     infra = _get_infra_or_404(team_id)
     return infra.form_store.list_form_keys()
 
 
 @app.get("/teams/{team_id}/forms/{form_key}", response_model=List[FormRecord])
 def list_team_form_records(team_id: str, form_key: str):
-    """Get all records for a form key."""
+    """Get all records for a form key.
+
+    Preconditions: ``team_id`` is a non-empty string; ``form_key`` need not
+        already have records.
+    Postconditions: ``200`` with a ``FormRecord`` per record stored under
+        ``form_key`` (empty list if none exist); ``404`` if the team is not
+        found.
+    """
     infra = _get_infra_or_404(team_id)
     rows = infra.form_store.get_records(form_key)
     return [FormRecord(**r) for r in rows]
@@ -741,7 +802,14 @@ def list_team_form_records(team_id: str, form_key: str):
 
 @app.post("/teams/{team_id}/forms/{form_key}", response_model=FormRecord, status_code=201)
 def create_team_form_record(team_id: str, form_key: str, req: CreateFormRecordRequest):
-    """Create a new form record."""
+    """Create a new form record.
+
+    Preconditions: ``team_id`` is a non-empty string; ``req.data`` is the
+        record's field data.
+    Postconditions: ``201`` with the newly created ``FormRecord`` (a fresh
+        record id assigned by the store); ``404`` if the team is not found (no
+        record created).
+    """
     infra = _get_infra_or_404(team_id)
     record = infra.form_store.create_record(form_key, req.data)
     return FormRecord(**record)
@@ -751,7 +819,16 @@ def create_team_form_record(team_id: str, form_key: str, req: CreateFormRecordRe
 def update_team_form_record(
     team_id: str, form_key: str, record_id: str, req: UpdateFormRecordRequest
 ):
-    """Update an existing form record."""
+    """Update an existing form record.
+
+    Preconditions: ``team_id`` is a non-empty string; ``record_id`` identifies
+        a record under ``form_key``; ``req.data`` is the replacement field data.
+    Postconditions: ``200`` with the updated ``FormRecord`` re-fetched from the
+        store after the write; ``404`` if the team is not found, if no record
+        with ``record_id`` exists under ``form_key`` (store unchanged), or if
+        the record can no longer be found on the immediate re-fetch after a
+        reported-successful update.
+    """
     infra = _get_infra_or_404(team_id)
     if not infra.form_store.update_record(form_key, record_id, req.data):
         raise HTTPException(status_code=404, detail="Record not found")
@@ -763,7 +840,14 @@ def update_team_form_record(
 
 @app.delete("/teams/{team_id}/forms/{form_key}/{record_id}", status_code=204)
 def delete_team_form_record(team_id: str, form_key: str, record_id: str):
-    """Delete a form record."""
+    """Delete a form record.
+
+    Preconditions: ``team_id`` is a non-empty string; ``record_id`` identifies
+        a record under ``form_key``.
+    Postconditions: ``204`` with no body and the record removed from the
+        store; ``404`` if the team is not found or no record with
+        ``record_id`` exists under ``form_key`` (store unchanged).
+    """
     infra = _get_infra_or_404(team_id)
     if not infra.form_store.delete_record(form_key, record_id):
         raise HTTPException(status_code=404, detail="Record not found")
