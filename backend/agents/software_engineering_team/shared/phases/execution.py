@@ -242,7 +242,7 @@ def run_execution_impl(
             idx + 1,
             total,
             mt.id,
-            mt.tool_agent.value,
+            mt.tool_agent.value if mt.tool_agent else "none",
         )
 
         if progress_callback:
