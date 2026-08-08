@@ -3342,6 +3342,10 @@ def resume_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
 
     Raises:
         - ``HTTPException`` 404: ``run_id`` does not resolve to any known run.
+          Can also fire from the post-lock re-read if the run was deleted in
+          the window between the pre-lock existence check and this request
+          acquiring the transition lock (a concurrent delete winning that
+          race), not just when ``run_id`` never existed at all.
         - ``HTTPException`` 400: the run's status is not in
           ``RESUMABLE_STATUSES``; its ``request_payload`` is missing/not a
           dict; or the stored ``request_payload`` fails
@@ -3372,6 +3376,13 @@ def resume_strategy_lab_run(run_id: str) -> StrategyLabRunStartResponse:
         # Preconditions for why reading it beforehand risks a stale-snapshot
         # duplicate dispatch.
         state = _get_run_state(run_id)
+        if state is None:
+            # The cheap pre-lock check above saw the run exist, but it was
+            # deleted before this request acquired the transition lock.
+            # Mirror the early check's exact 404 rather than falling through
+            # to `validate_job_for_action`'s generic "Job ... not found" text
+            # so both races produce the same response shape.
+            raise HTTPException(status_code=404, detail=f"Strategy lab run '{run_id}' not found.")
         try:
             validate_job_for_action(state, run_id, RESUMABLE_STATUSES, "resumed")
         except JobNotFoundError as exc:
