@@ -49,13 +49,11 @@ def complete_json_with_continuation(
     system_prompt: str = DEFAULT_JSON_SYSTEM_PROMPT,
     temperature: float = 0.0,
     think: Optional[Union[bool, str]] = None,
-    max_continuation_cycles: int = 5,
     task_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Complete JSON request with automatic continuation on truncation.
 
     Uses a Strands Agent for the LLM call. Parses the agent's text output as JSON.
-    max_continuation_cycles is accepted for backward compatibility but ignored.
 
     Preconditions:
         ``prompt`` is a non-empty string. ``client`` is a Strands ``Model``, an
