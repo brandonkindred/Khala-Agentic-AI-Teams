@@ -191,6 +191,20 @@ def test_reconcile_approval_mixed_case_non_blocking_still_auto_approves(
     assert len(out) == 1
 
 
+def test_reconcile_approval_override_log_names_non_critical_high(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The auto-approve override log must describe the overridden severities
+    accurately: medium/low/info are 'non-critical/high', not 'minor/nit'.
+    """
+    with caplog.at_level("INFO"):
+        approved, out = _reconcile_approval(False, [_issue("medium", "m"), _issue("low", "l")])
+    assert approved is True
+    assert len(out) == 2
+    assert "2 non-critical/high issues, no critical/high" in caplog.text
+    assert "minor/nit" not in caplog.text
+
+
 def test_parse_code_into_file_blocks_single_file() -> None:
     """Parse single file block."""
     code = "### app/main.py ###\ndef foo(): pass"
