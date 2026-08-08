@@ -13,7 +13,11 @@ historical output.
 from __future__ import annotations
 
 import pytest
-from code_review_agent.models import ChunkReviewIssueLLM, ChunkReviewLLMResponse
+from code_review_agent.models import (
+    ChunkReviewIssueLLM,
+    ChunkReviewLLMResponse,
+    _normalized_severity,
+)
 from pydantic import ValidationError
 
 
@@ -263,6 +267,22 @@ def test_approved_true_with_an_actionable_critical_issue_is_rejected() -> None:
     }
     with pytest.raises(ValidationError):
         ChunkReviewLLMResponse.model_validate(payload)
+
+
+def test_mixed_case_severity_is_rejected_by_issue_literal_before_consistency_check() -> None:
+    """ChunkReviewIssueLLM.severity is a lowercase Literal, so mixed-case never
+    reaches the after-validator. Coordinator ``CodeReviewIssue`` (free str) is
+    where case-insensitive blocking matters; this locks the schema boundary."""
+    with pytest.raises(ValidationError):
+        ChunkReviewIssueLLM.model_validate(
+            {"severity": "HIGH", "description": "SQL injection risk"}
+        )
+
+
+def test_normalized_severity_helper_matches_blocking_fold_used_by_validator() -> None:
+    """Guard the shared fold the consistency check relies on."""
+    assert _normalized_severity("HIGH") == "high"
+    assert _normalized_severity(" critical ") == "critical"
 
 
 def test_approved_true_with_only_a_non_actionable_critical_issue_is_accepted() -> None:

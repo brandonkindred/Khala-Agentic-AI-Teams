@@ -47,6 +47,9 @@ class ReviewPrepDTO(BaseModel):
           cap (``config.resolve_temporal_fanout_width(len(chunks))``): at most
           this many ``review_chunk_activity`` calls run concurrently for this
           review, regardless of ``len(chunks)``.
+        - ``single_chunk`` is ``True`` iff ``len(chunks) == 1`` after prepare
+          (a convenience flag for the workflow / map phase; it does not change
+          the payload shape — ``chunks`` still holds that one entry).
     """
 
     no_code: bool = False
@@ -67,7 +70,8 @@ class ChunkOutcomeDTO(BaseModel):
           holds one entry per successful sub-review, degraded "not reviewed"
           coverage findings live only in ``not_reviewed_issues``, and genuine
           reviewer findings live only in ``issues`` — the same separation the
-          reduce phase relies on.
+          reduce phase relies on. ``degraded_recovery`` mirrors the dataclass
+          flag (cached entries never set it; included for Temporal round-trips).
     """
 
     issues: List[CodeReviewIssue] = Field(default_factory=list)
@@ -75,13 +79,15 @@ class ChunkOutcomeDTO(BaseModel):
     summaries: List[str] = Field(default_factory=list)
     spec_notes: List[str] = Field(default_factory=list)
     approved_flags: List[bool] = Field(default_factory=list)
+    degraded_recovery: bool = False
 
     @classmethod
     def from_outcome(cls, outcome: Any) -> "ChunkOutcomeDTO":
         """Build a DTO from a ``mapping._ChunkOutcome``.
 
         Preconditions:
-            - ``outcome`` exposes the five ``_ChunkOutcome`` list fields.
+            - ``outcome`` exposes the five ``_ChunkOutcome`` list fields (and
+              optionally ``degraded_recovery``).
 
         Postconditions:
             - Returns a DTO whose lists equal the outcome's, with issues copied
@@ -93,4 +99,25 @@ class ChunkOutcomeDTO(BaseModel):
             summaries=list(outcome.summaries),
             spec_notes=list(outcome.spec_notes),
             approved_flags=list(outcome.approved_flags),
+            degraded_recovery=bool(getattr(outcome, "degraded_recovery", False)),
+        )
+
+    def to_outcome(self) -> Any:
+        """Rebuild a ``mapping._ChunkOutcome`` from this DTO.
+
+        Postconditions:
+            - Returns a fresh ``_ChunkOutcome`` with deep-copied issues and no
+              shared mutable state with ``self``. Lazy-imports the dataclass so
+              this module stays importable from Temporal workers without a
+              circular dependency on ``mapping``.
+        """
+        from ..mapping import _ChunkOutcome  # noqa: PLC0415
+
+        return _ChunkOutcome(
+            issues=[i.model_copy(deep=True) for i in self.issues],
+            not_reviewed_issues=[i.model_copy(deep=True) for i in self.not_reviewed_issues],
+            summaries=list(self.summaries),
+            spec_notes=list(self.spec_notes),
+            approved_flags=list(self.approved_flags),
+            degraded_recovery=self.degraded_recovery,
         )

@@ -119,7 +119,10 @@ def get_job_service_client(team: str) -> "JobServiceClient":
         - Returns the same instance for the same ``team`` across calls
           (one client per team), constructed lazily on first request.
     """
-    assert team, "team must be a non-empty string"
+    # A bare `assert` is stripped under `python -O`, silently admitting
+    # falsy/non-string input; raise explicitly so this precondition always holds.
+    if not team or not isinstance(team, str):
+        raise ValueError("team must be a non-empty string")
     client = _client_cache.get(team)
     if client is not None:
         return client
@@ -581,6 +584,25 @@ RESTARTABLE_STATUSES: frozenset[str] = frozenset(
 )
 
 
+class JobNotFoundError(ValueError):
+    """Raised by :func:`validate_job_for_action` when ``job_id`` has no job data.
+
+    Subclasses ``ValueError`` (not a fresh hierarchy root) so every existing
+    ``except ValueError`` call site across teams keeps catching it unchanged.
+    Callers that want to distinguish "job doesn't exist" from "job exists but
+    isn't in an allowed status" can catch this specifically instead of
+    substring-matching the message.
+    """
+
+
+class JobStateError(ValueError):
+    """Raised by :func:`validate_job_for_action` when the job's status is not
+    in the caller-supplied ``allowed_statuses``.
+
+    See :class:`JobNotFoundError` for why this also subclasses ``ValueError``.
+    """
+
+
 def validate_job_for_action(
     job_data: Optional[Dict[str, Any]],
     job_id: str,
@@ -589,16 +611,33 @@ def validate_job_for_action(
 ) -> Dict[str, Any]:
     """Validate a job exists and is in an allowed status.
 
-    Raises ``ValueError`` with a human-readable message on failure.
-    The caller should catch this and convert to an ``HTTPException``.
+    Preconditions:
+        - ``job_id`` identifies the job ``job_data`` was fetched for (used
+          only to build the error messages below).
+        - ``allowed_statuses`` is the caller's gate for ``action_label``.
 
-    Returns the job data dict on success.
+    Postconditions:
+        - Returns ``job_data`` unchanged when it is truthy and its
+          ``"status"`` (defaulting to ``JOB_STATUS_PENDING`` if absent) is a
+          member of ``allowed_statuses``.
+
+    Raises:
+        - ``JobNotFoundError`` (a ``ValueError`` subclass) when ``job_data``
+          is falsy. Message text is unchanged from before:
+          ``f"Job {job_id} not found"``.
+        - ``JobStateError`` (a ``ValueError`` subclass) when the job's status
+          is not in ``allowed_statuses``. Message text is unchanged:
+          ``f"Job cannot be {action_label} (status={status})."``
+        - Both are ``ValueError`` subclasses with unchanged message text, so
+          this is backward compatible with existing ``except ValueError``
+          callers -- the caller should catch the specific subclasses (or the
+          base ``ValueError``) and convert to an ``HTTPException``.
     """
     if not job_data:
-        raise ValueError(f"Job {job_id} not found")
+        raise JobNotFoundError(f"Job {job_id} not found")
     status = job_data.get("status", JOB_STATUS_PENDING)
     if status not in allowed_statuses:
-        raise ValueError(f"Job cannot be {action_label} (status={status}).")
+        raise JobStateError(f"Job cannot be {action_label} (status={status}).")
     return job_data
 
 
@@ -729,6 +768,11 @@ class BaseJobStore:
             error=None,
             current_phase=None,
             status_text=None,
+            waiting_for_answers=False,
+            pending_questions=[],
+            resume_token=None,
+            pause_kind=None,
+            pause_context=None,
         )
 
 

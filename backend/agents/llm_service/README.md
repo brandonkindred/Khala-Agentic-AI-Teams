@@ -16,7 +16,7 @@ The Postgres-backed **provider list is the sole source of LLM resolution** (see 
 
 The settings UI manages an **ordered list of provider entries** (`GET/POST/PUT/DELETE /api/llm-config/providers` + `PUT /api/llm-config/providers/order`), persisted in the dedicated `llm_provider_configs` table by `llm_service.provider_store`. All containers share the Fernet key (`INTEGRATION_ENCRYPTION_KEY` env, or `$AGENT_CACHE/integration.key` on the shared volume) and the same Postgres, so every team container reads the list back with **no dependency on `unified_api`**. Entries are ordered most→least preferred and are **self-contained**: each carries its own provider/model/base URL and its **own API key** — there is no environment fallback for keys (a keyless Claude / Ollama-Cloud entry is rejected at write time). Blank non-secret fields (model/base URL) fall back to provider defaults via the shared resolvers.
 
-`get_client` resolves the active provider by loading the ordered list (`provider_store.load_ordered_entries`) and selecting with `provider_store.select_active_entry`: the first entry that is **not** usage-limited wins; an entry whose `reset_at` has passed is returned immediately and its reset is *enqueued* for a background sweep (`LLM_PROVIDER_RESET_SWEEP_INTERVAL_S`) rather than written synchronously, so the discovering call never blocks on a Postgres round trip; when **all** are limited the entry with the soonest reset time is returned — the `FailoverLLMClient` still attempts the call on it, and if that 429s it marks the entry and tries the next provider, ultimately re-raising the last `LLMRateLimitError` once every provider is exhausted. `get_client` returns a `FailoverLLMClient` (wrapped in `_AttributingClient` for a keyed call) that, on an `LLMRateLimitError`, marks the current entry exhausted (computing `reset_at` from a classified `session`/`weekly`/`rate` `limit_kind`: session ≈ 5h and weekly ≈ 24h fixed windows that ignore `Retry-After`; rate uses `Retry-After` or a short fallback) and retries the **same** call on the next available provider. `unwrap_client` deliberately stops at the `FailoverLLMClient` (peeling only the attribution wrapper) so the Strands adapter's `unwrap_client(client).chat` dispatch still routes through failover.
+`get_client` resolves the active provider by loading the ordered list (`provider_store.load_ordered_entries`) and selecting with `provider_store.select_active_entry`: the first entry that is **not** usage-limited wins; an entry whose `reset_at` has passed is returned immediately and its reset is *enqueued* for a background sweep (`LLM_PROVIDER_RESET_SWEEP_INTERVAL_S`) rather than written synchronously, so the discovering call never blocks on a Postgres round trip; when **all** are limited the entry with the soonest reset time is returned — the `FailoverLLMClient` still attempts the call on it, and if that 429s it marks the entry and tries the next provider, ultimately re-raising the last `LLMRateLimitError` once every provider is exhausted. `get_client` returns a `FailoverLLMClient` (wrapped in `_AttributingClient` for a keyed call) that, on an `LLMRateLimitError`, marks the current entry exhausted (computing `reset_at` from a classified `session`/`weekly`/`rate` `limit_kind`: session ≈ 65m and weekly ≈ 24h fixed windows that ignore `Retry-After`; rate uses `Retry-After` or a short fallback) and retries the **same** call on the next available provider. `unwrap_client` deliberately stops at the `FailoverLLMClient` (peeling only the attribution wrapper) so the Strands adapter's `unwrap_client(client).chat` dispatch still routes through failover.
 
 When the list is empty (or Postgres unset) and the provider is not `dummy`, `get_client` raises **`LLMNotConfiguredError`** — there is no legacy single-provider env fallback. In an agent run this fails the job; the Angular UI shows a "No LLMs configured" dialog whose "Setup LLM" button routes to `/llm-config`. Latency/window tuning: `LLM_FAILOVER_FAST_429`, `LLM_FAILOVER_RATE_WINDOW_S`, `LLM_FAILOVER_SESSION_WINDOW_S`, `LLM_FAILOVER_WEEKLY_WINDOW_S` (see `docs/ENV_VARS.md`).
 
@@ -54,6 +54,11 @@ completion, retry, and error lines of a single call together.
 - **`objective`** is a **required** keyword on `complete_json` / `complete` /
   `complete_text` / `chat` (and `generate_text` / `generate_structured` /
   `complete_validated`). Pass a short phrase describing the purpose.
+  `DummyLLMClient` is the sole documented exception: it defaults `objective`
+  to `"dummy"` on `complete` / `complete_json` / `chat` because it makes no
+  real LLM call and performs no attribution, so test-only call sites are not
+  required to pass one. Real providers (`OllamaLLMClient`, `ClaudeLLMClient`)
+  enforce the non-empty requirement.
 - **`request_id`** is generated per call and printed as `rid=` on the request,
   completion, retry, and error log lines.
 - **`team`** is auto-derived from the calling code's source path (the
@@ -152,14 +157,14 @@ for the design rationale and migration notes.
 | `LLM_RATE_LIMIT_HONOR_RETRY_AFTER` | Honor an integer-seconds `Retry-After` header on a 429 (`max(computed, Retry-After)`, capped); default on, set `false` to disable |
 | `LLM_MAX_CONCURRENCY` | Max concurrent LLM calls, process-global across the Ollama **and** Claude paths (default 4) |
 | `LLM_ENABLE_THINKING` | Enable thinking mode (some Ollama Cloud models reject `think: true`; disable if you see 500s) |
-| `OLLAMA_API_KEY` | **Required for Ollama Cloud.** API key from https://ollama.com/settings/keys. All LLM requests use this when set. |
+| `OLLAMA_API_KEY` | Not read by `get_client`/the provider list — each Ollama-Cloud provider-list entry stores its own key; there is no env fallback, so a keyless entry fails at call time with an auth error. Setting this var alone does not enable Ollama Cloud calls. |
 
 ### Troubleshooting
 
 **ConnectErrors / timeouts**
 
 - **Docker:** If the app runs in Docker, the container may not resolve `ollama.com` or reach the internet. Set `LLM_BASE_URL` to a reachable host (e.g. `http://host.docker.internal:11434` for local Ollama, or ensure the container has outbound HTTPS and DNS for `https://ollama.com`).
-- **Ollama Cloud:** Ensure `OLLAMA_API_KEY` is set (from https://ollama.com/settings/keys). If you get 401, the key is missing or invalid.
+- **Ollama Cloud:** Ensure the active Ollama-Cloud provider-list entry (`/llm-config`) has its own API key set (from https://ollama.com/settings/keys) — there is no env fallback. A 401 means that entry's stored key is missing or invalid.
 - **Firewall / proxy:** Ensure the host (or container) can open HTTPS to your `LLM_BASE_URL`.
 
 **500 Internal Server Error from Ollama Cloud**

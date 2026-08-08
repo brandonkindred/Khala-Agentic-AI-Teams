@@ -24,7 +24,7 @@ async def test_reaper_retry_succeeds_immediately(monkeypatch: pytest.MonkeyPatch
         calls.append(True)
 
     monkeypatch.setattr(
-        "agent_provisioning_team.temporal.sandbox_dispatch.start_sandbox_reaper_workflow",
+        "agent_team_studio.agent_provisioning_team.temporal.sandbox_dispatch.start_sandbox_reaper_workflow",
         _start,
     )
     sleep_calls: list[float] = []
@@ -56,7 +56,7 @@ async def test_reaper_retry_recovers_after_transient_failures(
             raise RuntimeError("Temporal client not available; is the team's worker running?")
 
     monkeypatch.setattr(
-        "agent_provisioning_team.temporal.sandbox_dispatch.start_sandbox_reaper_workflow",
+        "agent_team_studio.agent_provisioning_team.temporal.sandbox_dispatch.start_sandbox_reaper_workflow",
         _start,
     )
     sleep_calls: list[float] = []
@@ -84,7 +84,7 @@ async def test_reaper_retry_propagates_cancellation_from_backoff_sleep(
         raise RuntimeError("still not ready")
 
     monkeypatch.setattr(
-        "agent_provisioning_team.temporal.sandbox_dispatch.start_sandbox_reaper_workflow",
+        "agent_team_studio.agent_provisioning_team.temporal.sandbox_dispatch.start_sandbox_reaper_workflow",
         _start,
     )
 
@@ -109,7 +109,7 @@ async def test_reaper_retry_propagates_cancellation_from_start_attempt(
         raise asyncio.CancelledError()
 
     monkeypatch.setattr(
-        "agent_provisioning_team.temporal.sandbox_dispatch.start_sandbox_reaper_workflow",
+        "agent_team_studio.agent_provisioning_team.temporal.sandbox_dispatch.start_sandbox_reaper_workflow",
         _start,
     )
 
@@ -127,12 +127,12 @@ async def test_start_sandbox_reaper_task_boots_sandbox_worker_when_temporal_enab
     executes correctly if a worker polling SANDBOX_TASK_QUEUE is running
     inside this same process."""
     monkeypatch.setattr(
-        "agent_provisioning_team.temporal.sandbox_dispatch.sandbox_temporal_enabled",
+        "agent_team_studio.agent_provisioning_team.temporal.sandbox_dispatch.sandbox_temporal_enabled",
         lambda: True,
     )
     worker_started = []
     monkeypatch.setattr(
-        "agent_provisioning_team.temporal.worker.start_agent_provisioning_sandbox_temporal_worker_thread",
+        "agent_team_studio.agent_provisioning_team.temporal.worker.start_agent_provisioning_sandbox_temporal_worker_thread",
         lambda: worker_started.append(True),
     )
 
@@ -157,12 +157,12 @@ async def test_start_sandbox_reaper_task_uses_in_process_reaper_when_temporal_di
     """When Temporal is disabled, must fall back to the in-process asyncio
     reaper task and must NOT boot the sandbox Temporal worker."""
     monkeypatch.setattr(
-        "agent_provisioning_team.temporal.sandbox_dispatch.sandbox_temporal_enabled",
+        "agent_team_studio.agent_provisioning_team.temporal.sandbox_dispatch.sandbox_temporal_enabled",
         lambda: False,
     )
     worker_started = []
     monkeypatch.setattr(
-        "agent_provisioning_team.temporal.worker.start_agent_provisioning_sandbox_temporal_worker_thread",
+        "agent_team_studio.agent_provisioning_team.temporal.worker.start_agent_provisioning_sandbox_temporal_worker_thread",
         lambda: worker_started.append(True),
     )
 
@@ -172,7 +172,7 @@ async def test_start_sandbox_reaper_task_uses_in_process_reaper_when_temporal_di
         reaper_started.append(True)
 
     monkeypatch.setattr(
-        "agent_provisioning_team.sandbox.run_idle_reaper",
+        "agent_team_studio.agent_provisioning_team.sandbox.run_idle_reaper",
         fake_run_idle_reaper,
     )
 

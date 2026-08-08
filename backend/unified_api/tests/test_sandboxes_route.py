@@ -1,6 +1,6 @@
 """Route-level tests for the agent-keyed /api/agents/sandboxes/* endpoints.
 
-Backed by the ``agent_provisioning_team.sandbox`` lifecycle. Tests mock the
+Backed by the ``agent_team_studio.agent_provisioning_team.sandbox`` lifecycle. Tests mock the
 docker CLI so no daemon is touched.
 """
 
@@ -22,10 +22,10 @@ if str(_agents) not in sys.path:
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from agent_provisioning_team.sandbox import SandboxStatus, UnknownAgentError
-from agent_provisioning_team.sandbox import lifecycle as lifecycle_mod
-from agent_provisioning_team.sandbox import provisioner as provisioner_mod
-from agent_provisioning_team.sandbox.lifecycle import Lifecycle
+from agent_team_studio.agent_provisioning_team.sandbox import SandboxStatus, UnknownAgentError
+from agent_team_studio.agent_provisioning_team.sandbox import lifecycle as lifecycle_mod
+from agent_team_studio.agent_provisioning_team.sandbox import provisioner as provisioner_mod
+from agent_team_studio.agent_provisioning_team.sandbox.lifecycle import Lifecycle
 
 
 async def _fake_resolve_team(agent_id: str) -> str:
@@ -161,8 +161,8 @@ def test_warm_and_teardown_dispatch_through_temporal_when_enabled(client: TestCl
     sandbox_dispatch.acquire_sandbox/teardown_sandbox would have no route-level
     coverage at all (the branch itself is unit-tested in test_sandbox_temporal.py,
     but never through the actual FastAPI route)."""
-    from agent_provisioning_team.sandbox.state import SandboxHandle
-    from agent_provisioning_team.temporal import sandbox_dispatch as sd
+    from agent_team_studio.agent_provisioning_team.sandbox.state import SandboxHandle
+    from agent_team_studio.agent_provisioning_team.temporal import sandbox_dispatch as sd
 
     handle = SandboxHandle(
         agent_id="blogging.planner",

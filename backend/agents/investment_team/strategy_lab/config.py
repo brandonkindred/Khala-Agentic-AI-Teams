@@ -45,6 +45,31 @@ MAX_BATCH_COUNT = env_positive_int("STRATEGY_LAB_MAX_BATCH_COUNT", 100)
 # so the concurrency-cap default below cannot silently drift from the schema max.
 MAX_PARALLEL = env_positive_int("STRATEGY_LAB_MAX_PARALLEL", 6)
 
+# Upper bound on the request's ``paper_trading_lookback_days`` field (its
+# Pydantic ``le=``). Evaluated at import like ``MAX_BATCH_COUNT`` so operators
+# can raise the schema ceiling without a code change; the default (10 years)
+# is generous enough for any real backtest window while still bounding the
+# market-data fetch size a single request can trigger.
+#
+# Floored at the Field's ``ge=30`` so a mis-set env value below 30 cannot make
+# ``le < ge`` and render every request unsatisfiable.
+_PAPER_TRADING_LOOKBACK_DAYS_FLOOR = 30
+_raw_max_paper_trading_lookback_days = env_positive_int(
+    "STRATEGY_LAB_MAX_PAPER_TRADING_LOOKBACK_DAYS", 3650
+)
+if _raw_max_paper_trading_lookback_days < _PAPER_TRADING_LOOKBACK_DAYS_FLOOR:
+    logger.warning(
+        "STRATEGY_LAB_MAX_PAPER_TRADING_LOOKBACK_DAYS=%d is below the "
+        "paper_trading_lookback_days Field ge=%d; flooring the schema ceiling "
+        "to %d so le cannot fall below ge",
+        _raw_max_paper_trading_lookback_days,
+        _PAPER_TRADING_LOOKBACK_DAYS_FLOOR,
+        _PAPER_TRADING_LOOKBACK_DAYS_FLOOR,
+    )
+    MAX_PAPER_TRADING_LOOKBACK_DAYS = _PAPER_TRADING_LOOKBACK_DAYS_FLOOR
+else:
+    MAX_PAPER_TRADING_LOOKBACK_DAYS = _raw_max_paper_trading_lookback_days
+
 # Hard ceiling on how many Strategy Lab cycles run concurrently per wave,
 # independent of the request's ``max_parallel``. Each concurrent cycle holds its
 # own market data + LLM contexts in the single worker process, so on a
@@ -80,5 +105,6 @@ __all__ = [
     "MAX_BATCH_COUNT",
     "MAX_PARALLEL",
     "MAX_CONCURRENT_CYCLES",
+    "MAX_PAPER_TRADING_LOOKBACK_DAYS",
     "clamp_max_parallel",
 ]

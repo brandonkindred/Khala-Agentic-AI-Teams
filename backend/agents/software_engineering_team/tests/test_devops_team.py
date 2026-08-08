@@ -7,7 +7,7 @@ import subprocess
 import tempfile
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 from unittest.mock import MagicMock
 
 import pytest
@@ -102,10 +102,16 @@ class _ScriptedClient(DummyLLMClient):
     ``complete_json`` call. Replaces the Wave 1/2/3 pre-migration pattern of
     ``mock.complete_json.side_effect = [...]`` for scripted DevOps pipelines."""
 
-    def __init__(self, responses: List[Dict[str, Any]]) -> None:
+    def __init__(
+        self,
+        responses: List[Dict[str, Any]],
+        *,
+        default_factory: Optional[Callable[[], Dict[str, Any]]] = None,
+    ) -> None:
         super().__init__()
         self._responses = list(responses)
         self._idx = 0
+        self._default_factory = default_factory
 
     def complete_json(
         self,
@@ -121,14 +127,53 @@ class _ScriptedClient(DummyLLMClient):
             resp = self._responses[self._idx]
             self._idx += 1
             return resp
-        # After the scripted list is exhausted, fall back to the last entry
-        # so extra pipeline steps don't crash the test.
+        # After the scripted list is exhausted, use the caller-supplied
+        # neutral default when given (so drift onto this fallback is an
+        # obviously-generic response, not a real step's payload silently
+        # overloaded with extra fields); otherwise fall back to the last
+        # entry so extra pipeline steps don't crash the test.
+        if self._default_factory is not None:
+            return self._default_factory()
         return self._responses[-1] if self._responses else {}
+
+    @property
+    def responses(self) -> List[Dict[str, Any]]:
+        """Copy of the scripted response list (safe to mutate by callers)."""
+        return list(self._responses)
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+# Shared prefix for the security-blocking pipeline script: task_clarifier →
+# iac → cicd → deployment → devsecops (blocked). Tests that need this
+# five-step blocked-by-security-review sequence append their own differing
+# tail entries rather than re-inlining the prefix.
+_SECURITY_BLOCKING_SCRIPT_PREFIX: List[Dict[str, Any]] = [
+    {"approved_for_execution": True},
+    {"artifacts": {}, "summary": "iac"},
+    {"artifacts": {}, "summary": "cicd", "required_gates_present": True},
+    {
+        "artifacts": {},
+        "summary": "deploy",
+        "strategy": "rolling",
+        "rollback_plan": ["rb"],
+    },
+    {
+        "approved": False,
+        "findings": [
+            {
+                "finding_id": "F1",
+                "severity": "high",
+                "blocking": True,
+                "issue": "bad iam",
+            }
+        ],
+        "summary": "blocked",
+    },
+]
 
 
 def _base_task_spec(**overrides) -> DevOpsTaskSpec:
@@ -219,7 +264,17 @@ def _scripted_llm_for_happy_path(*, alerting_configured: bool = True) -> _Script
                 "summary": "validation ok",
             },
             {"files": {"docs/runbook.md": "# Runbook"}, "summary": "doc ok"},
-        ]
+        ],
+        # Once the scripted list is exhausted, any further call (e.g. an
+        # unrelated upstream corrective retry -- a chunk-review bisection,
+        # say -- consuming an extra slot and shifting a later named step
+        # onto an overrun call) gets this DevSecOps-shaped clean-approval
+        # fallback instead of the real (and now schema-validated)
+        # doc_runbook payload silently overloaded with extra fields. This
+        # keeps DevSecOpsReviewAgent from crashing the test on such drift
+        # while still making non-DevSecOps drift landing here fail schema
+        # validation loudly, rather than masking every step's drift equally.
+        default_factory=lambda: {"approved": True, "findings": [], "summary": "fallback"},
     )
 
 
@@ -354,32 +409,42 @@ class TestNestedModels:
 
 
 class TestEnvPolicy:
+    """Verify ENV_POLICY defines the expected auto-deploy, approval, and rollback rules per environment."""
+
     def test_dev_allows_auto_deploy(self) -> None:
+        """Dev allows auto-deploy and does not require approval."""
         assert ENV_POLICY["dev"]["auto_deploy_allowed"] is True
         assert ENV_POLICY["dev"]["approval_required"] is False
 
     def test_staging_requires_rollback_test(self) -> None:
+        """Staging requires a rollback test before deploy."""
         assert ENV_POLICY["staging"]["rollback_test_required"] is True
 
     def test_production_requires_approval(self) -> None:
+        """Production requires approval and disallows auto-deploy."""
         assert ENV_POLICY["production"]["approval_required"] is True
         assert ENV_POLICY["production"]["auto_deploy_allowed"] is False
 
 
 class TestEnforceEnvPolicy:
+    """Verify DevOpsTeamLeadAgent._enforce_env_policy blocks task specs that violate ENV_POLICY."""
+
     def test_blocks_prod_without_approval(self) -> None:
+        """A production-scope spec without an approval step is blocked with an approval-related reason."""
         spec = _base_task_spec(scope={"included": ["build"], "excluded": []})
         reason = DevOpsTeamLeadAgent._enforce_env_policy(spec)
         assert reason is not None
         assert "approval" in reason.lower()
 
     def test_blocks_prod_without_rollback(self) -> None:
+        """A production-scope spec without rollback requirements is blocked with a rollback-related reason."""
         spec = _base_task_spec(rollback_requirements=[])
         reason = DevOpsTeamLeadAgent._enforce_env_policy(spec)
         assert reason is not None
         assert "rollback" in reason.lower()
 
     def test_allows_dev_only(self) -> None:
+        """A dev-only spec with no rollback requirements passes the policy check."""
         spec = _base_task_spec(
             platform_scope={"environments": ["dev"]},
             rollback_requirements=[],
@@ -388,6 +453,7 @@ class TestEnforceEnvPolicy:
         assert reason is None
 
     def test_allows_full_spec(self) -> None:
+        """A fully-specified spec satisfying all environment policies passes the check."""
         spec = _base_task_spec()
         reason = DevOpsTeamLeadAgent._enforce_env_policy(spec)
         assert reason is None
@@ -582,7 +648,10 @@ class TestRepoNavigatorToolAgent:
 
 
 class TestIaCValidationToolAgent:
+    """Verify IaCValidationToolAgent skips Terraform checks when no .tf files exist."""
+
     def test_skipped_when_no_tf_files(self) -> None:
+        """When the repo contains no Terraform files, both iac_validate and iac_validate_fmt are skipped."""
         with tempfile.TemporaryDirectory() as tmp:
             out = IaCValidationToolAgent().run(IaCValidationInput(repo_path=tmp))
             assert out.checks["iac_validate"] == "skipped"
@@ -591,7 +660,10 @@ class TestIaCValidationToolAgent:
 
 
 class TestPolicyAsCodeToolAgent:
+    """Verify PolicyAsCodeToolAgent skips policy-as-code checks when checkov is unavailable."""
+
     def test_skipped_when_checkov_missing(self) -> None:
+        """When checkov is not installed, the policy_checks gate is reported as skipped."""
         with tempfile.TemporaryDirectory() as tmp:
             out = PolicyAsCodeToolAgent().run(PolicyAsCodeInput(repo_path=tmp))
             assert out.checks["policy_checks"] == "skipped"
@@ -599,7 +671,11 @@ class TestPolicyAsCodeToolAgent:
 
 
 class TestCICDLintToolAgent:
+    """Verify CICDLintPipelineValidationToolAgent lints GitHub Actions workflows for
+    structure and production-deploy safeguards."""
+
     def test_pass_valid_workflow(self) -> None:
+        """A workflow with a valid job definition passes the pipeline_lint gate."""
         with tempfile.TemporaryDirectory() as tmp:
             wf_dir = Path(tmp) / ".github" / "workflows"
             wf_dir.mkdir(parents=True)
@@ -611,6 +687,7 @@ class TestCICDLintToolAgent:
             assert out.success is True
 
     def test_fail_missing_jobs(self) -> None:
+        """A workflow missing a jobs section fails the pipeline_lint gate."""
         with tempfile.TemporaryDirectory() as tmp:
             wf_dir = Path(tmp) / ".github" / "workflows"
             wf_dir.mkdir(parents=True)
@@ -620,6 +697,7 @@ class TestCICDLintToolAgent:
             assert out.success is False
 
     def test_fail_prod_deploy_without_approval(self) -> None:
+        """A workflow that deploys to production without an approval step fails the pipeline_gate_check gate."""
         with tempfile.TemporaryDirectory() as tmp:
             wf_dir = Path(tmp) / ".github" / "workflows"
             wf_dir.mkdir(parents=True)
@@ -631,6 +709,7 @@ class TestCICDLintToolAgent:
             assert out.success is False
 
     def test_skipped_no_workflows(self) -> None:
+        """When no workflow files exist, the pipeline_lint gate is reported as skipped."""
         with tempfile.TemporaryDirectory() as tmp:
             out = CICDLintPipelineValidationToolAgent().run(CICDLintInput(repo_path=tmp))
             assert out.checks["pipeline_lint"] == "skipped"
@@ -638,11 +717,31 @@ class TestCICDLintToolAgent:
 
 
 class TestDeploymentDryRunToolAgent:
+    """Verify DeploymentDryRunPlanToolAgent skips the dry-run gate when no Helm chart is present."""
+
     def test_skipped_no_chart(self) -> None:
+        """When the repo contains no Helm chart, the deployment_dry_run gate is reported as skipped."""
         with tempfile.TemporaryDirectory() as tmp:
             out = DeploymentDryRunPlanToolAgent().run(DeploymentDryRunInput(repo_path=tmp))
             assert out.checks["deployment_dry_run"] == "skipped"
             assert out.success is True
+
+
+def test_devops_env_policy_and_tool_agent_test_classes_have_docstrings() -> None:
+    """Docstring-coverage guard for the DevOps env-policy and tool-agent test classes."""
+    target_classes = [
+        TestEnvPolicy,
+        TestEnforceEnvPolicy,
+        TestIaCValidationToolAgent,
+        TestPolicyAsCodeToolAgent,
+        TestCICDLintToolAgent,
+        TestDeploymentDryRunToolAgent,
+    ]
+    for cls in target_classes:
+        assert cls.__doc__, f"{cls.__name__} is missing a class docstring"
+        for name, member in vars(cls).items():
+            if name.startswith("test_"):
+                assert member.__doc__, f"{cls.__name__}.{name} is missing a docstring"
 
 
 # ===========================================================================
@@ -892,6 +991,68 @@ class TestDevSecOpsReviewAgent:
         agent = DevSecOpsReviewAgent(client)
         out = agent.run(DevSecOpsReviewInput(task_description="test", artifacts={}))
         assert out.approved
+
+    def test_recovers_from_malformed_first_response(self) -> None:
+        """A schema-invalid first reply (missing the required ``summary``
+        key) drives ``run_single_shot_review``'s corrective retry; a valid
+        second reply is used instead of falling back."""
+        from software_engineering_team.devops_team.devsecops_review_agent import (
+            DevSecOpsReviewAgent,
+            DevSecOpsReviewInput,
+        )
+
+        client = _ScriptedClient(
+            [
+                {"findings": []},  # missing required "summary" -- schema-invalid
+                {"approved": True, "findings": [], "summary": "recovered on retry"},
+            ]
+        )
+        agent = DevSecOpsReviewAgent(client)
+        out = agent.run(DevSecOpsReviewInput(task_description="test", artifacts={}))
+        assert out.approved is True
+        assert out.summary == "recovered on retry"
+        assert client._idx == 2
+
+    def test_recovers_from_malformed_finding(self) -> None:
+        """A finding dict missing its required ``finding_id`` used to crash
+        ``run()`` via a bare ``ReviewFinding(**f)`` call -- it now fails
+        schema validation and drives a corrective retry instead."""
+        from software_engineering_team.devops_team.devsecops_review_agent import (
+            DevSecOpsReviewAgent,
+            DevSecOpsReviewInput,
+        )
+
+        client = _ScriptedClient(
+            [
+                {
+                    "approved": False,
+                    "findings": [{"severity": "high", "issue": "no finding_id here"}],
+                    "summary": "malformed finding",
+                },
+                {"approved": True, "findings": [], "summary": "clean on retry"},
+            ]
+        )
+        agent = DevSecOpsReviewAgent(client)
+        out = agent.run(DevSecOpsReviewInput(task_description="test", artifacts={}))
+        assert out.approved is True
+        assert out.findings == []
+        assert out.summary == "clean on retry"
+        assert client._idx == 2
+
+    def test_falls_back_when_retries_exhausted(self) -> None:
+        """A reply that stays schema-invalid across the corrective retry
+        still yields the safe fallback -- never raises out of ``run()``."""
+        from software_engineering_team.devops_team.devsecops_review_agent import (
+            DevSecOpsReviewAgent,
+            DevSecOpsReviewInput,
+        )
+
+        client = _StubClient({"findings": []})  # missing required "summary" every call
+        agent = DevSecOpsReviewAgent(client)
+        out = agent.run(DevSecOpsReviewInput(task_description="test", artifacts={}))
+        assert out.approved is False
+        assert out.findings == []
+        assert "DevSecOps review failed" in out.summary
 
 
 class TestDevOpsTestValidationAgent:
@@ -1445,9 +1606,10 @@ class TestDevOpsTeamLeadAgentIntegration:
         # Without this, hosts with a working terraform CLI skip debug and consume
         # 8 LLM calls while hosts without it consume 9 — which desynchronizes a
         # chained two-run script. Use the full 9-response happy-path script twice.
-        per_run = list(_scripted_llm_for_happy_path()._responses)
+        happy_path = _scripted_llm_for_happy_path()
+        per_run = list(happy_path.responses)
         assert len(per_run) == 9
-        chained = _ScriptedClient(per_run + per_run)
+        chained = _ScriptedClient(per_run + per_run, default_factory=happy_path._default_factory)
         agent = DevOpsTeamLeadAgent(chained)
 
         def _failing_exec(_repo: str, _artifacts: dict) -> list:
@@ -1491,28 +1653,8 @@ class TestDevOpsTeamLeadAgentIntegration:
 
     def test_blocked_by_security_review(self) -> None:
         mock_llm = _ScriptedClient(
-            [
-                {"approved_for_execution": True},
-                {"artifacts": {}, "summary": "iac"},
-                {"artifacts": {}, "summary": "cicd", "required_gates_present": True},
-                {
-                    "artifacts": {},
-                    "summary": "deploy",
-                    "strategy": "rolling",
-                    "rollback_plan": ["rb"],
-                },
-                {
-                    "approved": False,
-                    "findings": [
-                        {
-                            "finding_id": "F1",
-                            "severity": "high",
-                            "blocking": True,
-                            "issue": "bad iam",
-                        }
-                    ],
-                    "summary": "blocked",
-                },
+            _SECURITY_BLOCKING_SCRIPT_PREFIX
+            + [
                 {"approved": True, "findings": [], "summary": "ok"},
                 {"approved": True, "quality_gates": {"iac_validate": "pass"}, "summary": "ok"},
             ]
@@ -1535,28 +1677,8 @@ class TestDevOpsTeamLeadAgentIntegration:
         a blocking DevSecOps review: the gate is force-assigned from the
         DevSecOps + policy result, not preserved via setdefault."""
         mock_llm = _ScriptedClient(
-            [
-                {"approved_for_execution": True},
-                {"artifacts": {}, "summary": "iac"},
-                {"artifacts": {}, "summary": "cicd", "required_gates_present": True},
-                {
-                    "artifacts": {},
-                    "summary": "deploy",
-                    "strategy": "rolling",
-                    "rollback_plan": ["rb"],
-                },
-                {
-                    "approved": False,
-                    "findings": [
-                        {
-                            "finding_id": "F1",
-                            "severity": "high",
-                            "blocking": True,
-                            "issue": "bad iam",
-                        }
-                    ],
-                    "summary": "blocked",
-                },
+            _SECURITY_BLOCKING_SCRIPT_PREFIX
+            + [
                 {"approved": True, "findings": [], "summary": "ok"},
                 # Validation agent wrongly reports the security gate as passing.
                 {
@@ -1657,10 +1779,7 @@ class TestDevOpsTeamLeadAgentIntegration:
         spec = _base_task_spec()
         pkg = agent.run(spec)
         assert len(pkg.files_changed) > 0
-        assert any(
-            path.endswith((".tf", ".yml", ".yaml", ".md")) or "/" in path
-            for path in pkg.files_changed
-        )
+        assert any(path.endswith((".tf", ".yml", ".yaml", ".md")) for path in pkg.files_changed)
 
     def test_quality_gates_in_completion(self) -> None:
         mock_llm = _scripted_llm_for_happy_path()
@@ -2452,11 +2571,19 @@ class TestMainOrchestratorRegistration:
 # ===========================================================================
 # FENCE-RECOVERY REGRESSION TESTS
 #
-# Each of these 8 agents now routes its raw LLM completion through
+# Each of these 7 agents now routes its raw LLM completion through
 # complete_json_with_continuation() instead of a bare json.loads(). These
 # tests exercise the real recovery path (llm_mod.Agent is mocked at the
 # shared/llm.py level, not at complete_json_with_continuation itself) to
 # prove a markdown-fenced response no longer crashes the agent.
+#
+# devsecops_review is deliberately absent here: it was retrofitted onto
+# software_engineering_team.shared.single_shot_review.run_single_shot_review
+# (a raw LLMClient.complete_json call), which no longer goes through a
+# Strands Agent or complete_json_with_continuation at all, so this
+# fence-recovery mechanism doesn't apply to it. Fenced/markdown-wrapped
+# replies are the underlying LLMClient implementation's responsibility now,
+# same as every other complete_json-based caller (e.g. code_review_agent).
 # ===========================================================================
 
 
@@ -2554,18 +2681,6 @@ def _fenced_infra_patch_case():
     )
 
 
-def _fenced_devsecops_case():
-    from software_engineering_team.devops_team.devsecops_review_agent import (
-        DevSecOpsReviewAgent,
-        DevSecOpsReviewInput,
-    )
-
-    return (
-        DevSecOpsReviewAgent(_strands_model_double()),
-        DevSecOpsReviewInput(task_description="test", artifacts={}),
-    )
-
-
 def _fenced_task_clarifier_case():
     return (
         DevOpsTaskClarifierAgent(_strands_model_double()),
@@ -2599,14 +2714,17 @@ def _check_fenced_infra_patch(out) -> None:
     assert "main.tf" in out.patched_artifacts
 
 
-def _check_fenced_devsecops(out) -> None:
-    assert out.approved is True
-
-
 def _check_fenced_task_clarifier(out) -> None:
     assert out.approved_for_execution is True
 
 
+# DevSecOpsReviewAgent is deliberately absent from this list: it no longer
+# builds a Strands Agent or calls complete_json_with_continuation (see
+# devsecops_review_agent/agent.py), so this Strands-Agent-double-based
+# fenced-markdown-recovery harness no longer applies to it. Fenced-JSON
+# recovery for its new run_single_shot_review/complete_json call path is
+# each concrete LLMClient's own extract_json_from_response usage, already
+# covered by llm_service's own tests -- not a per-agent concern here.
 _FENCED_RECOVERY_CASES = [
     (
         "iac",
@@ -2673,12 +2791,6 @@ _FENCED_RECOVERY_CASES = [
         _check_fenced_infra_patch,
     ),
     (
-        "devsecops_review",
-        _fenced_devsecops_case,
-        {"approved": True, "findings": [], "summary": "fenced sec ok"},
-        _check_fenced_devsecops,
-    ),
-    (
         "task_clarifier",
         _fenced_task_clarifier_case,
         {
@@ -2693,7 +2805,8 @@ _FENCED_RECOVERY_CASES = [
 
 
 class TestDevOpsAgentsRecoverFencedJson:
-    """Markdown-fenced LLM JSON must recover for every DevOps LLM agent."""
+    """Markdown-fenced LLM JSON must recover for each DevOps LLM agent that
+    still uses ``complete_json_with_continuation``."""
 
     @pytest.mark.parametrize(
         "build,payload,check",
@@ -2701,7 +2814,7 @@ class TestDevOpsAgentsRecoverFencedJson:
         ids=[case[0] for case in _FENCED_RECOVERY_CASES],
     )
     def test_recovers_fenced_json(self, monkeypatch, build, payload, check) -> None:
-        """Each DevOps LLM agent recovers markdown-fenced JSON via complete_json_with_continuation."""
+        """Each remaining DevOps LLM agent recovers markdown-fenced JSON via complete_json_with_continuation."""
         _patch_fenced_response(monkeypatch, payload)
         agent, inp = build()
         check(agent.run(inp))

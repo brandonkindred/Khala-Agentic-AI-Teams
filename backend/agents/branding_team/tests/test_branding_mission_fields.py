@@ -320,11 +320,58 @@ def test_default_mission_and_detection_use_shared_placeholders() -> None:
     assert _is_real_value("Acme Corp") is True
 
 
-def test_is_real_value_none_and_whitespace_are_not_real() -> None:
+def test_is_real_value_rejects_missing_empty_whitespace_and_placeholders() -> None:
     from branding_team.api.state import _is_real_value
+    from branding_team.models import MISSION_PLACEHOLDERS
 
     assert _is_real_value(None) is False
+    assert _is_real_value("") is False
     assert _is_real_value("   ") is False
+    for sentinel in MISSION_PLACEHOLDERS:
+        assert _is_real_value(sentinel) is False
+    assert _is_real_value("Acme Corp") is True
+
+
+def test_is_real_value_empty_does_not_depend_on_empty_placeholder(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Emptiness must be rejected even when '' is not a placeholder sentinel."""
+    from branding_team.api import state
+    from branding_team.api.state import _is_real_value
+    from branding_team.models import MISSION_PLACEHOLDERS
+
+    without_empty = tuple(p for p in MISSION_PLACEHOLDERS if p != "")
+    assert "" not in without_empty
+    monkeypatch.setattr(state, "MISSION_PLACEHOLDERS", without_empty)
+
+    assert _is_real_value(None) is False
+    assert _is_real_value("") is False
+    assert _is_real_value("   ") is False
+    assert _is_real_value("Acme Corp") is True
+
+
+def test_mission_completeness_helpers_reject_empty_fields() -> None:
+    from branding_team.api.state import (
+        _mission_has_brand_name,
+        _mission_has_minimal_required_fields,
+    )
+    from branding_team.models import BrandingMission
+
+    empty_mission = BrandingMission.model_construct(
+        company_name="",
+        company_description="",
+        target_audience="",
+    )
+    assert _mission_has_brand_name(empty_mission) is False
+    assert _mission_has_minimal_required_fields(empty_mission) is False
+
+    real_mission = BrandingMission(
+        company_name="Acme Corp",
+        company_description="We build widgets for makers worldwide.",
+        target_audience="Independent makers",
+    )
+    assert _mission_has_brand_name(real_mission) is True
+    assert _mission_has_minimal_required_fields(real_mission) is True
 
 
 def test_update_brand_request_includes_shared_and_extra_fields() -> None:

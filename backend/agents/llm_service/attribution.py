@@ -22,7 +22,7 @@ Usage::
     with llm_attribution(team="blogging", objective="draft intro section"):
         client.complete(prompt, objective="draft intro section")
 
-The pattern mirrors ``agent_provisioning_team/shared/logging_context.py``.
+The pattern mirrors ``agent_team_studio/agent_provisioning_team/shared/logging_context.py``.
 """
 
 from __future__ import annotations

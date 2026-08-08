@@ -293,7 +293,7 @@ AGENT_DEFAULT_MODELS: dict[str, str] = {
     # established smaller/faster model tier (already used for soc2,
     # accessibility_audit) and has no registered thinking levels of its own, so no
     # AGENT_DEFAULT_THINK entry applies here.
-    "code_review_verify": "glm-5.2:cloud",
+    "code_review_verify": "deepseek-v4-flash:cloud",
     "repair": "deepseek-v4-pro:cloud",
     "devops": "deepseek-v4-pro:cloud",
     "dbc_comments": "deepseek-v4-pro:cloud",
@@ -319,10 +319,10 @@ AGENT_DEFAULT_MODELS: dict[str, str] = {
     "security": "deepseek-v4-pro:cloud",
     "accessibility": "deepseek-v4-pro:cloud",
     # Other teams
-    "soc2": "glm-5.2:cloud",
+    "soc2": "deepseek-v4-flash:cloud",
     "blog": "deepseek-v4-pro:cloud",
     "personal_assistant": "llama3.2",
-    "accessibility_audit": "glm-5.2:cloud",
+    "accessibility_audit": "deepseek-v4-flash:cloud",
     "strategy_ideation": "deepseek-v4-pro:cloud",
     "signal_intelligence": "deepseek-v4-pro:cloud",
     "deepthought": "deepseek-v4-pro:cloud",
@@ -374,7 +374,7 @@ OLLAMA_MODEL_SUGGESTIONS: list[str] = [
     "deepseek-v4-pro:cloud",
     "qwen3-coder:480b-cloud",
     "qwen3.5:9b-mlx",
-    "glm-5.2:cloud",
+    "deepseek-v4-flash:cloud",
     "llama3.2",
 ]
 
@@ -470,7 +470,7 @@ def resolve_max_output_tokens() -> int:
 # present, else the short rate window (~5m). Weekly defaults to 24h because
 # Ollama Cloud weekly 429 bodies do not include a reset timestamp.
 _DEFAULT_FAILOVER_RATE_WINDOW_S = 300.0
-_DEFAULT_FAILOVER_SESSION_WINDOW_S = 5 * 3600.0
+_DEFAULT_FAILOVER_SESSION_WINDOW_S = 65 * 60.0
 _DEFAULT_FAILOVER_WEEKLY_WINDOW_S = 24 * 3600.0
 
 
@@ -506,7 +506,7 @@ def failover_rate_window_seconds() -> float:
 
 
 def failover_session_window_seconds() -> float:
-    """Fixed reset window for a session-limit 429 (default 5h).
+    """Fixed reset window for a session-limit 429 (default 65m).
 
     Session/weekly classifications ignore ``Retry-After``; this window is measured
     from the error time.
@@ -600,18 +600,17 @@ def resolve_claude_model(agent_key: Optional[str] = None) -> str:
             if agent_key:
                 logger.warning(
                     "Ignoring non-Claude model %r for the Claude provider for agent %s; "
-                    "using default %s. Set a Claude model in the LLM Provider settings or "
-                    "LLM_MODEL.",
+                    "falling back to the next candidate. Set a Claude model in the LLM "
+                    "Provider settings or LLM_MODEL.",
                     candidate,
                     agent_key,
-                    DEFAULT_CLAUDE_MODEL,
                 )
             else:
                 logger.warning(
-                    "Ignoring non-Claude model %r for the Claude provider; using default %s. "
-                    "Set a Claude model in the LLM Provider settings or LLM_MODEL.",
+                    "Ignoring non-Claude model %r for the Claude provider; falling back "
+                    "to the next candidate. Set a Claude model in the LLM Provider "
+                    "settings or LLM_MODEL.",
                     candidate,
-                    DEFAULT_CLAUDE_MODEL,
                 )
     return DEFAULT_CLAUDE_MODEL
 
@@ -722,11 +721,15 @@ def resolve_base_url() -> str:
 
     The runtime value lets the settings UI toggle between local Ollama
     (``http://host:11434``) and Ollama Cloud (``https://ollama.com``).
+
+    Postconditions: returns a non-empty URL with no trailing slash. A
+        whitespace-only runtime or env candidate is treated as unset and falls
+        through to the next candidate. Never raises.
     """
     key = _runtime_key("KEY_OLLAMA_BASE_URL")
-    runtime = _runtime(key) if key else ""
-    raw = runtime or os.environ.get(ENV_LLM_BASE_URL) or "https://ollama.com"
-    return raw.strip().rstrip("/")
+    runtime = (_runtime(key) or "").strip() if key else ""
+    env_url = (os.environ.get(ENV_LLM_BASE_URL) or "").strip()
+    return (runtime or env_url or "https://ollama.com").rstrip("/")
 
 
 def resolve_timeout(agent_key: Optional[str] = None) -> float:

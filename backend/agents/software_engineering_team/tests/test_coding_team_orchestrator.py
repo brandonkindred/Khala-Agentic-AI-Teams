@@ -1468,7 +1468,7 @@ def test_failed_direct_write_does_not_leak_into_background_graph_persist(tmp_pat
 # ----------------------------------------------------- real quality-gate path
 
 
-def _gate_provider(*, build_ok=True, build_raises=False, lint_ok=True):
+def _gate_provider(*, build_ok=True, build_raises=False, lint_ok=True, lint_raises=False):
     """A fake CodeEngineProvider exposing just the quality-gate methods the swarm calls."""
     import types
 
@@ -1479,6 +1479,8 @@ def _gate_provider(*, build_ok=True, build_raises=False, lint_ok=True):
             return types.SimpleNamespace(success=build_ok, error="" if build_ok else "boom build")
 
         def run_linting(self, *a, **k):
+            if lint_raises:
+                raise RuntimeError("lint tool crashed")
             if lint_ok:
                 return types.SimpleNamespace(passed=True, issues=[])
             return types.SimpleNamespace(
@@ -1555,13 +1557,30 @@ def test_quality_gate_lint_failure_returns_for_revision(tmp_path):
     )
 
 
-def test_quality_gate_tool_exception_proceeds_to_review(tmp_path):
-    """An unexpected quality-gate tool error is logged and the task still proceeds (best-effort)."""
+def test_quality_gate_build_tool_exception_returns_for_revision(tmp_path):
+    """An unexpected build-tool error is logged AND the gate is failed (not silently passed) —
+    a crashed tool means the gate never actually ran, so unverified code must not proceed."""
     swarm, graph = _make_real_swarm(tmp_path, _gate_provider(build_raises=True))
 
     swarm._implement_and_verify(swarm.workers[0], lambda **kw: None)
 
-    assert graph.get_task("t1").status == TaskStatus.IN_REVIEW  # proceeded despite the tool error
+    task = graph.get_task("t1")
+    assert task.status == TaskStatus.TO_DO  # returned for revision, not merged silently
+    assert task.assigned_agent_id is None
+    assert any(e.get("type") == "tool_error" for e in task.revision_feedback or [])
+
+
+def test_quality_gate_lint_tool_exception_returns_for_revision(tmp_path):
+    """Build succeeds but linting raises — the gate must still fail closed, matching the
+    build-tool-exception case, rather than falling through to a silent pass."""
+    swarm, graph = _make_real_swarm(tmp_path, _gate_provider(build_ok=True, lint_raises=True))
+
+    swarm._implement_and_verify(swarm.workers[0], lambda **kw: None)
+
+    task = graph.get_task("t1")
+    assert task.status == TaskStatus.TO_DO  # returned for revision, not merged silently
+    assert task.assigned_agent_id is None
+    assert any(e.get("type") == "tool_error" for e in task.revision_feedback or [])
 
 
 def test_quality_gate_tool_exception_logs_full_traceback(tmp_path, caplog):

@@ -5,10 +5,9 @@ agents) needs the same shape: build a fresh, history-free ``Agent``, invoke it
 under the fault-tolerance envelope, extract a JSON object from the raw text,
 optionally validate the parsed shape, and re-prompt with a caller-specific
 correction message on either kind of failure — bounded by a retry budget.
-Today that loop is duplicated almost verbatim in ``design.py``'s
-``_legacy_parse_retry_loop`` and ``refinement.py``'s ``_invoke_and_parse``.
-:func:`run_json_with_parse_retry` is the single driver those call sites can
-converge on (a follow-up change, not part of this module).
+
+Both ``design.py`` and ``refinement.py`` currently consume 
+:func:`run_json_with_parse_retry` for their execution paths.
 
 Preconditions:
   * ``agent_key`` / ``phase`` are non-empty diagnostic + model-routing

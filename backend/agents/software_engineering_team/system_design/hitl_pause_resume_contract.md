@@ -703,11 +703,11 @@ while True:
     through the redesigned Phase 3 activity) takes the signal-only branch;
     a pause with no such envelope (PRA's Phase 1, or SE V1 entirely) takes
     the store-and-clear branch regardless of the workflow's class.
-- `POST /run/{job_id}/resume`'s cross-worker lease mechanism
-  (`resume_claim_at` / `resume_claim_seq` in `job_store.py`) becomes
-  unnecessary for Temporal-mode jobs — Temporal itself durably tracks a
-  waiting workflow across worker restarts — and is retained only for
-  thread-mode jobs.
+- `POST /run/{job_id}/resume` is Temporal-native only: it requires a
+  `resume_token` and `waiting_for_user`, then signals `CodingTeamWorkflow`.
+  The old cross-worker claim lease (`resume_claim_at` / `resume_claim_seq`)
+  and thread-spawn resume path are deleted — Temporal itself durably tracks
+  a waiting workflow across worker restarts.
 - Orchestrator re-entry still loads `task_graph_snapshot` via
   `graph.restore()` + `reset_in_flight()` exactly as today. Neither
   `RunRequest` (fields: `repo_path`, `plan_input`) nor `CodingTeamPlanInput`

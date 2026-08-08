@@ -1172,10 +1172,10 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
   }
 
   /**
-   * Restart the selected run's orchestrator after answers were stored but auto-resume failed. No-op
-   * when no run is selected or a resume is already in flight (`resumingJob`), so a double-click can't
-   * fire overlapping resume requests. On success, restarts polling from scratch; on error, surfaces
-   * `issueError`.
+   * Signal CodingTeamWorkflow to continue a Temporal-native paused run (`resume_token` present).
+   * No-op when no run is selected or a resume is already in flight (`resumingJob`), so a double-click
+   * can't fire overlapping resume requests. On success, restarts polling from scratch; on error,
+   * surfaces `issueError`.
    */
   resumeJob(): void {
     if (!this.selectedRunId || this.resumingJob) return;

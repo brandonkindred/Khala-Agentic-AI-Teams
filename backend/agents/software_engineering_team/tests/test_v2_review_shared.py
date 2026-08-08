@@ -34,6 +34,7 @@ from software_engineering_team.shared.v2_models import ReviewIssue
 from software_engineering_team.shared.v2_review import (
     ReviewConfig,
     _lint_passed,
+    _maybe_build_change_surface_from_pairs,
     run_microtask_review,
     run_review,
 )
@@ -120,8 +121,11 @@ def _build_verify_fn(
 # ---------------------------------------------------------------------------
 
 
-def test_run_review_lint_agent_raises_is_logged_not_raised(tmp_path: Path) -> None:
+def test_run_review_lint_agent_raises_is_logged_not_raised(tmp_path: Path, caplog) -> None:
     """A raising linting tool agent is logged and skipped (run_review lint except)."""
+    import logging
+
+    caplog.set_level(logging.WARNING, logger="software_engineering_team.shared.v2_review")
     config = _build_config()
 
     def _boom(*a, **kw):
@@ -138,6 +142,34 @@ def test_run_review_lint_agent_raises_is_logged_not_raised(tmp_path: Path) -> No
         **_noop_runners(),
     )
     assert result.passed  # lint failure was swallowed; no blocking issue
+    assert any("lint crashed" in r.message for r in caplog.records)
+
+
+def test_run_review_forwards_language_to_llm_review_fn(tmp_path: Path) -> None:
+    """The code-review step's LLM fallback must see the caller's ``language``
+    (not silently drop it) -- a fallback that forwards it to ``CodeReviewInput``
+    (e.g. backend's coordinator-backed fallback) would otherwise review the
+    code under ``CodeReviewInput``'s ``typescript`` default regardless of the
+    caller's actual language."""
+    captured: dict = {}
+
+    def _spy_llm_review_fn(*, llm, task, files, **kw):
+        captured["language"] = kw.get("language")
+        return []
+
+    runners = _noop_runners()
+    runners["llm_review_fn"] = _spy_llm_review_fn
+
+    run_review(
+        config=_build_config(),
+        llm=DummyLLMClient(),
+        task=_task(),
+        execution_result=_execution_result({"x.py": "code"}),
+        repo_path=tmp_path,
+        language="python",
+        **runners,
+    )
+    assert captured["language"] == "python"
 
 
 def test_lint_passed_defends_missing_execution_result() -> None:
@@ -876,3 +908,88 @@ def test_microtask_intro_logged(tmp_path: Path, caplog) -> None:
         **_noop_runners(),
     )
     assert any("intro:mt-1:1" in r.message for r in caplog.records)
+
+
+# ---------------------------------------------------------------------------
+# _maybe_build_change_surface_from_pairs
+# ---------------------------------------------------------------------------
+
+
+def test_maybe_build_change_surface_empty_new_contents_skips_builder(monkeypatch) -> None:
+    calls: list = []
+    monkeypatch.setattr(
+        "software_engineering_team.shared.v2_review.build_change_surface_from_pairs",
+        lambda *a, **kw: calls.append((a, kw)),
+    )
+
+    result = _maybe_build_change_surface_from_pairs({}, old_contents={"a.py": "x"})
+
+    assert result is None
+    assert calls == []
+
+
+def test_maybe_build_change_surface_identical_maps_skip_builder(monkeypatch) -> None:
+    calls: list = []
+    monkeypatch.setattr(
+        "software_engineering_team.shared.v2_review.build_change_surface_from_pairs",
+        lambda *a, **kw: calls.append((a, kw)),
+    )
+    same = {"a.py": "unchanged\n"}
+
+    result = _maybe_build_change_surface_from_pairs(same, old_contents=dict(same))
+
+    assert result is None
+    assert calls == []
+
+
+def test_maybe_build_change_surface_meaningful_diff_calls_builder_once(monkeypatch) -> None:
+    calls: list = []
+    old = {"a.py": "def f():\n    return 0\n"}
+    new = {"a.py": "def f():\n    return 1\n"}
+    real_builder = _real_build_change_surface_from_pairs()
+
+    def _spy(new_contents, old_contents=None):
+        calls.append((new_contents, old_contents))
+        return real_builder(new_contents, old_contents)
+
+    monkeypatch.setattr(
+        "software_engineering_team.shared.v2_review.build_change_surface_from_pairs", _spy
+    )
+
+    result = _maybe_build_change_surface_from_pairs(new, old_contents=old)
+
+    assert len(calls) == 1
+    assert calls[0] == (new, old)
+    assert result is not None
+    assert not result.is_empty
+    assert "a.py" in result.blocks
+
+
+def test_maybe_build_change_surface_none_old_contents_treated_as_new_file() -> None:
+    new = {"a.py": "def f():\n    return 1\n"}
+
+    result = _maybe_build_change_surface_from_pairs(new, old_contents=None)
+
+    assert result is not None
+    assert not result.is_empty
+    assert "### a.py ###" in result.code
+
+
+def test_maybe_build_change_surface_empty_result_is_none_not_fake_surface() -> None:
+    # Distinct key sets whose only overlapping path is identical -> the
+    # builder still has to run (dicts are not equal), but nothing is
+    # meaningfully different, so no surface should be returned.
+    new = {"a.py": "same\n"}
+    old = {"a.py": "same\n", "unrelated.py": "irrelevant\n"}
+
+    result = _maybe_build_change_surface_from_pairs(new, old_contents=old)
+
+    assert result is None
+
+
+def _real_build_change_surface_from_pairs():
+    from software_engineering_team.code_review_agent.change_surface import (
+        build_change_surface_from_pairs,
+    )
+
+    return build_change_surface_from_pairs

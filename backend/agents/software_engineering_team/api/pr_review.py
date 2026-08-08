@@ -28,6 +28,10 @@ from software_engineering_team.api.coding_team_models import (
 from software_engineering_team.api.coding_team_state import (
     _HEARTBEAT_CLOCK_SKEW_TOLERANCE_S,
 )
+from software_engineering_team.code_review_agent.change_surface import (
+    ChangeSurface,
+    build_change_surface_from_patches,
+)
 from software_engineering_team.github_source import (
     GitHubAPIError,
     GitHubRepoReader,
@@ -71,9 +75,8 @@ def _review_job_heartbeat_live(job: Dict[str, Any]) -> bool:
         whose age is in ``[-_HEARTBEAT_CLOCK_SKEW_TOLERANCE_S,
         _REVIEW_GUARD_HEARTBEAT_STALE_S)`` — a stamp up to the skew tolerance in the
         future still counts as live (NTP drift), but a stamp further in the future is
-        NOT live (implausible skew or corrupt data), mirroring
-        ``_answer_wait_heartbeat_fresh``: a dead job with a far-future stamp must not
-        block new reviews until that future time passes. A MISSING or unparseable
+        NOT live (implausible skew or corrupt data): a dead job with a far-future stamp
+        must not block new reviews until that future time passes. A MISSING or unparseable
         stamp returns True (treated as live): the job service stamps
         ``last_heartbeat_at`` on every create/update, so an absent stamp means an
         unfamiliar store, and the guard must fail toward blocking duplicates, not toward
@@ -237,16 +240,13 @@ class ReviewCode(NamedTuple):
 # the "is this file removed" check isn't a bare string literal at each call site.
 _FILE_STATUS_REMOVED = "removed"
 
-# Prefix of the scope-tagging focus note (whole-file or hunk mode), exposed so
-# callers/tests can detect the note (e.g. in task_requirements) without
-# duplicating its full wording.
+# Prefix of the scope-tagging focus note, exposed so callers/tests can detect
+# the note (e.g. in task_requirements) without duplicating its full wording.
 REVIEW_FOCUS_NOTE_PREFIX = "Review focus:"
 
-# Shared "tag pre-existing findings" instruction body, reused by both the
-# whole-file and hunk-mode focus notes below (only the framing sentence
-# ahead of it differs, since the two modes show the reviewer different
-# content). Kept as one instruction so the tagging contract can never drift
-# between the two modes.
+# Shared "tag pre-existing findings" instruction body, appended after the
+# diff-first framing and eight-criteria list. Kept as one constant so the
+# tagging contract cannot drift from call-site edits.
 _PRE_EXISTING_TAG_INSTRUCTIONS = (
     "For EVERY issue you report, add a boolean field named `pre_existing` to the issue "
     "object:\n"
@@ -260,57 +260,40 @@ _PRE_EXISTING_TAG_INSTRUCTIONS = (
     "true` when it is a real defect in code outside this PR's change."
 )
 
-
-def _whole_file_focus(body: str) -> str:
-    """Append a "tag pre-existing findings" instruction to ``body`` (whole-file mode).
-
-    Whole-file review shows the reviewer complete files (for context and existing-
-    code awareness), which also lets it see unchanged code. Rather than silently
-    dropping problems it notices in that unchanged code, the reviewer is told to
-    still report them but tag each issue with a ``pre_existing`` boolean, so the
-    review flow can route pre-existing findings to GitHub-issue proposals (offered
-    to a human) instead of posting them as comments on this PR.
-
-    Preconditions:
-        - ``body`` is a string (the PR body or "").
-
-    Postconditions:
-        - Returns ``body`` with the focus note appended (or the note alone when
-          ``body`` is blank). The note starts with ``REVIEW_FOCUS_NOTE_PREFIX``
-          and instructs the reviewer to emit a ``pre_existing`` field per issue.
-    """
-    note = (
-        f"{REVIEW_FOCUS_NOTE_PREFIX} evaluate the changes this pull request makes. The complete "
-        "file contents are provided for context, which also lets you see unchanged code.\n"
-        f"{_PRE_EXISTING_TAG_INSTRUCTIONS}"
-    )
-    return f"{body}\n\n{note}" if body.strip() else note
+_DIFF_FIRST_FOCUS_NOTE = (
+    f"{REVIEW_FOCUS_NOTE_PREFIX} evaluate what this pull request changes (and enclosing "
+    "constructs when shown). Treat surrounding or unchanged code as context, not the primary "
+    "target — this is a diff-first review.\n"
+    "Judge the change against these eight criteria:\n"
+    "1. Logical / syntactic correctness of the change\n"
+    "2. Contract changes on touched functions/classes (DbC, signatures, invariants)\n"
+    "3. Side effects on callers of those encapsulating constructs\n"
+    "4. Architectural standards\n"
+    "5. Language / library / framework best practices\n"
+    "6. New issues introduced by the change\n"
+    "7. Does the change actually implement/fix the ticket/spec?\n"
+    "8. Project style preferences\n"
+    f"{_PRE_EXISTING_TAG_INSTRUCTIONS}"
+)
 
 
-def _hunk_review_focus(body: str) -> str:
-    """Append the same "tag pre-existing findings" instruction to ``body`` (hunk mode).
+def _diff_first_focus(body: str) -> str:
+    """Append the shared diff-first focus note to ``body``.
 
-    Hunk-mode review shows the reviewer diff hunks — added lines plus some
-    surrounding unchanged context lines — rather than complete files. A context
-    line can still reveal a genuine, unrelated pre-existing bug, so this mode
-    asks for the same ``pre_existing`` tag whole-file mode does (previously this
-    mode carried no tagging instruction at all, so every hunk-mode finding
-    defaulted ``pre_existing=False`` and was posted regardless of relevance).
+    Every PR reviewer attempt (change surface, whole-file fallback, or hunk
+    ``code``) gets the same note so findings stay change-scoped, the eight
+    review criteria are explicit, and ``pre_existing`` tagging stays consistent.
 
     Preconditions:
         - ``body`` is a string (the PR body or "").
 
     Postconditions:
         - Returns ``body`` with the focus note appended (or the note alone when
-          ``body`` is blank). The note starts with ``REVIEW_FOCUS_NOTE_PREFIX``
-          and instructs the reviewer to emit a ``pre_existing`` field per issue.
+          ``body`` is blank/whitespace). The note starts with
+          ``REVIEW_FOCUS_NOTE_PREFIX``, lists the eight criteria, and includes
+          ``_PRE_EXISTING_TAG_INSTRUCTIONS``.
     """
-    note = (
-        f"{REVIEW_FOCUS_NOTE_PREFIX} evaluate the changes this pull request makes. You are "
-        "shown diff hunks (added lines plus some surrounding unchanged context lines), not "
-        "complete files.\n"
-        f"{_PRE_EXISTING_TAG_INSTRUCTIONS}"
-    )
+    note = _DIFF_FIRST_FOCUS_NOTE
     return f"{body}\n\n{note}" if body.strip() else note
 
 
@@ -414,6 +397,36 @@ def _build_review_code(files: List[Any]) -> ReviewCode:
         blocks.append(f"### {f.filename} ###\n{rendered}")
         reviewed += 1
     return ReviewCode("\n\n".join(blocks), reviewed)
+
+
+def _build_change_surface_for_reviewable(
+    files: List[Any],
+    head_files: Dict[str, str],
+) -> ChangeSurface:
+    """Build a change surface for head-backed reviewable patched files.
+
+    Preconditions:
+        - ``files`` is the PR changed-file list (may be empty). Each entry
+          exposes ``.filename``, ``.status``, and ``.patch``.
+        - ``head_files`` maps path → non-blank head text for successfully
+          fetched files.
+
+    Postconditions:
+        - Considers only files that pass ``_is_whole_file_reviewable`` and
+          whose ``filename`` is present in ``head_files``.
+        - Returns ``build_change_surface_from_patches`` for those patches with
+          ``new_contents=head_files`` (empty ``ChangeSurface`` when no
+          candidates or the builder omits all paths).
+        - Never raises for well-typed inputs.
+    """
+    patches = {
+        f.filename: f.patch
+        for f in files
+        if _is_whole_file_reviewable(f) and f.filename in head_files
+    }
+    if not patches:
+        return ChangeSurface(blocks={})
+    return build_change_surface_from_patches(patches, new_contents=head_files)
 
 
 # Optional dependency: author tagging for persisted review history. Imported once
@@ -772,9 +785,11 @@ def _run_reviewer(
     code: str,
     head_files: Optional[Dict[str, str]] = None,
     repo_reader: Any = None,
+    change_surface: Optional[ChangeSurface] = None,
 ) -> Optional[Any]:
-    """Run the injected review engine over ``head_files`` and/or ``code``,
-    merging their outputs; records a failure and returns ``None`` on error.
+    """Run the injected review engine over ``change_surface``, ``head_files``,
+    and/or ``code``, merging their outputs; records a failure and returns
+    ``None`` on error.
 
     The PR reviewer is an injected engine (software_engineering_team owns it);
     coding_team calls it through the CodeEngineProvider so this package imports
@@ -782,34 +797,37 @@ def _run_reviewer(
     (shared schema, swallow-on-failure) across every attempt, cleared once on
     the way out so it never outlives the review.
 
-    One reviewer call per non-empty source: a truthy ``head_files`` drives a
-    whole-file attempt (``pre_numbered=False``, steered via
-    ``_whole_file_focus`` to focus on the change since it now also sees
-    unchanged code); a truthy ``code`` drives a diff-hunk attempt
-    (``pre_numbered=True``, since ``_build_review_code``'s rendering already
-    carries its own ``"N: "`` line-number prefixes, steered via
-    ``_hunk_review_focus`` for the same reason — a hunk's surrounding context
-    lines are unchanged code too). The two sources can never be mixed into a
-    single call (the underlying engine's ``files``/``code`` are mutually
-    exclusive), which is why a partial fetch needs two calls instead of one.
+    One reviewer call per non-empty source. A non-empty ``change_surface``
+    drives the primary pre-numbered attempt (``pre_numbered=True``,
+    ``_diff_first_focus``) and replaces a whole-file ``head_files`` attempt;
+    when the surface is empty or absent, a truthy ``head_files`` drives
+    whole-file review (``pre_numbered=False``, ``_diff_first_focus``). A
+    truthy ``code`` always drives an additional diff-hunk attempt
+    (``pre_numbered=True``, ``_diff_first_focus``). The sources can never be
+    mixed into a single call (the underlying engine's ``files``/``code`` are
+    mutually exclusive), which is why partial-fetch PRs may need two calls
+    instead of one.
 
     Preconditions:
         - ``provider`` was resolved before the first GitHub call.
-        - ``head_files`` and ``code`` are not BOTH empty/falsy — the caller
-          (``_run_pr_review_body``) never reaches this function otherwise (its
-          own "nothing reviewable" guard returns first). A PR whose whole-file
-          fetch fully succeeds supplies only ``head_files`` (``code=""``); one
-          whose fetch fully failed supplies only ``code`` (``head_files``
-          falsy); one whose fetch PARTIALLY failed supplies BOTH —
-          ``head_files`` for the fetched subset, ``code`` built ONLY from the
-          files that failed to fetch — so both attempts run and are merged.
+        - At least one of ``change_surface`` (non-empty), ``head_files``, or
+          ``code`` is truthy — the caller (``_run_pr_review_body``) never
+          reaches this function otherwise (its own "nothing reviewable" guard
+          returns first). A PR whose whole-file fetch fully succeeds supplies
+          only ``head_files`` (``code=""``); one whose fetch fully failed
+          supplies only ``code`` (``head_files`` falsy); one whose fetch
+          PARTIALLY failed supplies BOTH — ``head_files`` for the fetched
+          subset, ``code`` built ONLY from the files that failed to fetch — so
+          both attempts run and are merged. When admission attaches a non-empty
+          ``change_surface``, it replaces the whole-file attempt while hunk
+          ``code`` still merges when present.
         - ``repo_reader`` is None or a ``RepoReader`` handed to the false-positive
           verifier so it can confirm existing repository files outside the diff.
     Postconditions:
         - On success, returns the single attempt's output unchanged when only
           one ran (identical behavior/kwargs to a single-mode dispatch for
-          both the all-whole-file and all-hunk cases). When two ran, returns a
-          merged duck-typed output — see ``_MergedReviewerOutput``.
+          the all-whole-file, all-surface, and all-hunk cases). When two ran,
+          returns a merged duck-typed output — see ``_MergedReviewerOutput``.
         - On ANY attempt's failure — an exception, OR a reviewer that returns
           ``None`` without raising — records the failure on the PR/job via
           ``_record_review_outage`` and returns ``None`` immediately, without
@@ -831,12 +849,18 @@ def _run_reviewer(
         language=_infer_review_language(files),
         progress_callback=pr_bridge,
     )
-    # One reviewer call per non-empty source; see the docstring above. A PR
-    # whose whole-file fetch fully succeeds supplies only head_files (code is
-    # ""); one that fully fails supplies only code; a partial fetch supplies
-    # both and both attempts run, merged below.
+    # One reviewer call per non-empty source; see the docstring above.
     attempts: List[Dict[str, Any]] = []
-    if head_files:
+    surface = change_surface
+    if surface is not None and not surface.is_empty:
+        attempts.append(
+            dict(
+                code=surface.code,
+                pre_numbered=True,
+                task_requirements=_diff_first_focus(pr.body or ""),
+            )
+        )
+    elif head_files:
         # Whole-file review: the reviewer sees complete files (no hunk-end
         # "truncation"), and the false-positive filter (via repo_reader) can
         # confirm existing files a finding claims are missing. Because it now
@@ -847,7 +871,7 @@ def _run_reviewer(
             dict(
                 files=head_files,
                 pre_numbered=False,
-                task_requirements=_whole_file_focus(pr.body or ""),
+                task_requirements=_diff_first_focus(pr.body or ""),
             )
         )
     if code:
@@ -861,10 +885,12 @@ def _run_reviewer(
             dict(
                 code=code,
                 pre_numbered=True,
-                task_requirements=_hunk_review_focus(pr.body or ""),
+                task_requirements=_diff_first_focus(pr.body or ""),
             )
         )
-    assert attempts, "caller must supply a non-empty head_files and/or non-empty code"
+    assert attempts, (
+        "caller must supply a non-empty change_surface, head_files, and/or non-empty code"
+    )
 
     outputs: List[Any] = []
     try:
@@ -1103,6 +1129,7 @@ class ReviewModeDecision(NamedTuple):
     valid_by_path: Dict[str, List[int]]
     changed_by_path: Dict[str, List[int]]
     head_files: Dict[str, str]
+    change_surface: ChangeSurface
     code: str
     files_reviewed: int
     repo_reader: Any
@@ -1144,14 +1171,25 @@ def _decide_review_mode(
           comment and finalized the job ``COMPLETED``; the caller must return
           immediately without further GitHub calls.
         - Otherwise returns a :class:`ReviewModeDecision` where: ``head_files``
-          is fetched via :func:`_fetch_head_files` for the reviewable files;
-          when every reviewable file fetched whole, ``code == ""`` and
-          ``files_reviewed == len(head_files)``; when only some fetched,
-          ``code`` is built (via :func:`_build_review_code`) ONLY from the
-          files that failed to fetch, and ``files_reviewed`` sums both; when
-          none fetched, ``code`` is built from all ``files`` and
-          ``files_reviewed`` is the hunk count. ``repo_reader`` is always
-          constructed for ``pr.head_sha``, whole-file success or not.
+          is fetched via :func:`_fetch_head_files` for the reviewable files,
+          and ``change_surface`` is built from it via
+          :func:`_build_change_surface_for_reviewable`. When ``change_surface``
+          is non-empty, :func:`_run_reviewer` dispatches it as the PRIMARY
+          input and bypasses ``head_files`` entirely, so every reviewable file
+          the surface does NOT cover (``reviewable - set(change_surface.blocks)``
+          — whether its fetch failed, or fetch succeeded but the builder
+          produced no usable body for it, e.g. a patch with no added lines)
+          is hunk-rendered into ``code`` here, and ``files_reviewed`` sums the
+          surfaced count plus the hunk count: no reviewable file is ever
+          covered by neither ``change_surface.blocks`` nor ``code``. When
+          ``change_surface`` is empty, the whole-file/hunk decision falls back
+          to ``head_files`` alone: every reviewable file fetched whole yields
+          ``code == ""`` and ``files_reviewed == len(head_files)``; a partial
+          fetch renders ``code`` (via :func:`_build_review_code`) ONLY from the
+          files that failed to fetch, summing both counts; a total fetch
+          failure renders ``code`` from all ``files``. ``repo_reader`` is
+          always constructed for ``pr.head_sha``, whole-file/surface success
+          or not.
         - Never raises for GitHub-fetch failures (:func:`_fetch_head_files`
           degrades internally); any other exception propagates to the
           caller's outer handler.
@@ -1207,15 +1245,48 @@ def _decide_review_mode(
     # partial fetch failure must not discard the whole-file bodies
     # that DID come back.
     head_files = _fetch_head_files(client, owner, repo, files, pr.head_sha)
+    # Built before the code/files_reviewed decision below (it is a pure
+    # function of files/head_files) since _run_reviewer dispatches a
+    # non-empty change_surface as PRIMARY and bypasses head_files entirely —
+    # the fallback-code decision needs to know which files that will leave
+    # uncovered, not just which files failed to fetch.
+    change_surface = _build_change_surface_for_reviewable(files, head_files)
     missing = reviewable - set(head_files)
     code = ""
-    if head_files and not missing:
-        # Every reviewable file fetched whole: the hunk blob would be
-        # thrown away unread, so skip rendering it entirely.
+    if not change_surface.is_empty:
+        # The surface covers at least one file and will be dispatched as the
+        # PRIMARY reviewer input (see _run_reviewer), replacing the
+        # whole-file head_files attempt entirely. Any reviewable file the
+        # surface does NOT cover — whether its fetch failed, or fetch
+        # succeeded but the builder produced no usable body for it (e.g. a
+        # patch with no added lines) — must still fall back to hunk
+        # rendering here, or it would be silently dropped from review
+        # entirely: neither the surface nor the (bypassed) whole-file body
+        # would ever reach the reviewer for it.
+        surfaced = set(change_surface.blocks)
+        uncovered = reviewable - surfaced
+        if uncovered:
+            fallback_files = [f for f in files if f.filename in uncovered]
+            code, hunk_reviewed = _build_review_code(fallback_files)
+            files_reviewed = len(surfaced) + hunk_reviewed
+            logger.info(
+                "PR review #%s: change surface covers %d/%d reviewable "
+                "file(s); the remaining %d fall back to hunk review",
+                pr_number,
+                len(surfaced),
+                len(reviewable),
+                len(uncovered),
+            )
+        else:
+            files_reviewed = len(surfaced)
+    elif head_files and not missing:
+        # Every reviewable file fetched whole but none produced a usable
+        # change surface: the hunk blob would be thrown away unread, so skip
+        # rendering it entirely.
         files_reviewed = len(head_files)
     elif head_files:
-        # Partial fetch: hunk-render ONLY the files that failed to
-        # fetch whole; files that DID fetch stay in whole-file mode.
+        # Partial fetch, no surface at all: hunk-render ONLY the files that
+        # failed to fetch whole; files that DID fetch stay in whole-file mode.
         fallback_files = [f for f in files if f.filename in missing]
         code, hunk_reviewed = _build_review_code(fallback_files)
         files_reviewed = len(head_files) + hunk_reviewed
@@ -1264,6 +1335,7 @@ def _decide_review_mode(
         valid_by_path=valid_by_path,
         changed_by_path=changed_by_path,
         head_files=head_files,
+        change_surface=change_surface,
         code=code,
         files_reviewed=files_reviewed,
         repo_reader=repo_reader,
@@ -1348,8 +1420,8 @@ def _partition_review_issues(
     # (comments + REQUEST_CHANGES); pre-existing bugs the reviewer noticed
     # in unchanged code are NOT posted on this PR — they become GitHub-issue
     # proposals a human approves later on the Code Review page. A finding
-    # without the tag defaults to a PR finding (hunk-mode reviews now tag
-    # too, per _hunk_review_focus, but any caller that doesn't ask still
+    # without the tag defaults to a PR finding (reviews now tag via
+    # _diff_first_focus, but any caller that doesn't ask still
     # behaves exactly as before). The LLM's self-reported tag is not trusted
     # unconditionally: a finding whose file/line is verified to be a line
     # this PR actually ADDED (per is_within_diff against changed_by_path —
@@ -1753,6 +1825,7 @@ def _run_pr_review_body(
                 files,
                 mode.code,
                 head_files=mode.head_files or None,
+                change_surface=mode.change_surface,
                 repo_reader=mode.repo_reader,
             )
             if output is None:

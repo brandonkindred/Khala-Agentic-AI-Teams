@@ -23,6 +23,8 @@ psycopg_pool>=3.3,<4.0
 # Knowledge-graph layer over Agent Cognition (shared.neo4j + agent_cognition.graph)
 neo4j>=5.26,<6.0
 graphiti-core>=0.29,<0.30
+# Shared review/compaction cache (shared.cache Redis backend)
+redis>=7.4,<8.0
 temporalio>=1.25,<2.0
 APScheduler>=3.11,<4.0
 pytz>=2026.1

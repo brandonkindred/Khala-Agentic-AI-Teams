@@ -22,7 +22,9 @@ retry (which fires on worker crash / start_to_close timeout):
 * it rehydrates the in-memory job entry from the durable job store, so progress is
   tracked even when the retry lands in a fresh process after a restart;
 * it short-circuits a job that already completed — so a retry does not duplicate
-  work;
+  work (entry short-circuit reads the job store);
+* outcome determination (completed / cancelled / failed) uses the worker return
+  value from ``_run_backtest_background``, not a post-run job-store read;
 * a worker-level failure is re-raised as an ``ApplicationError`` so Temporal sees
   the failure (and retries within the bounded policy) instead of the swallowed
   exception being reported as success.
@@ -73,10 +75,16 @@ def run_backtest_activity(
         - Short-circuits (no recompute) when the job already completed, so a
           retry whose predecessor finished does not orphan a duplicate record.
         - Otherwise ``_run_backtest_background`` has run and persisted the job
-          result; raises ``ApplicationError`` if the job ended ``failed`` (so
-          Temporal retries within the bounded policy). Returns a status dict.
+          result; outcome is taken from the worker's return value (entry
+          short-circuit still reads the job store). Raises ``ApplicationError``
+          if the worker returned ``failed`` (so Temporal retries within the
+          bounded policy). If the worker returned ``cancelled`` (a user-initiated
+          cancel during the run), returns a status dict reporting ``cancelled``
+          rather than ``completed``. Returns a ``completed`` status dict
+          otherwise.
     """
     from investment_team.api.main import (
+        _BT_JOB_STATUS_CANCELLED,
         _BT_JOB_STATUS_COMPLETED,
         _BT_JOB_STATUS_FAILED,
         _backtest_job_status,
@@ -87,7 +95,7 @@ def run_backtest_activity(
     if _backtest_job_status(job_id) == _BT_JOB_STATUS_COMPLETED:
         return {"job_id": job_id, "status": "completed"}
 
-    _run_backtest_background(
+    final_status = _run_backtest_background(
         job_id,
         StrategySpec(**strategy),
         BacktestConfig(**config),
@@ -95,8 +103,10 @@ def run_backtest_activity(
         notes,
     )
 
-    if _backtest_job_status(job_id) == _BT_JOB_STATUS_FAILED:
+    if final_status == _BT_JOB_STATUS_FAILED:
         raise ApplicationError(f"Backtest {job_id} failed", type="BacktestFailed")
+    if final_status == _BT_JOB_STATUS_CANCELLED:
+        return {"job_id": job_id, "status": "cancelled"}
     return {"job_id": job_id, "status": "completed"}
 
 

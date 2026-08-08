@@ -104,6 +104,29 @@ def test_fe_run_llm_review(monkeypatch):
     assert len(out.issues) == 1
 
 
+def test_fe_run_llm_review_accepts_language_kwarg(monkeypatch):
+    """The shared ``llm_review_fn`` contract now always passes ``language``
+    (see ``shared.v2_review._code_review_step``); the frontend fallback must
+    accept it without raising ``TypeError`` even though it does not use it --
+    this team's ``REVIEW_PROMPT`` has no language placeholder and its code is
+    always TypeScript."""
+    from software_engineering_team.frontend_code_v2_team.phases import review as review_mod
+    from software_engineering_team.frontend_code_v2_team.phases.review import _run_llm_review
+
+    resp = (
+        "## PASSED ##\ntrue\n## END PASSED ##\n"
+        "## ISSUES ##\n## END ISSUES ##\n"
+        "## SUMMARY ##\nok\n## END SUMMARY ##\n"
+    )
+    monkeypatch.setattr(review_mod, "Agent", lambda *a, **kw: _StubAgent(resp))
+    monkeypatch.setattr(review_mod, "resolve_text_mode_strands_model", lambda llm: object())
+
+    out = _run_llm_review(
+        llm=MagicMock(), task=_task(), files={"x.ts": "code"}, language="typescript"
+    )
+    assert out.issues == []
+
+
 def test_fe_run_llm_review_forwards_review_context(monkeypatch):
     """The LLM fallback reviewer also sees architecture/spec_content (mirrors the
     backend regression test — previously only the external agent path received

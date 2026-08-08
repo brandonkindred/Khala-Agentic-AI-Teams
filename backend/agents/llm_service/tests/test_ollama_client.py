@@ -364,8 +364,8 @@ def test_ollama_429_classifies_session_and_weekly_bodies(
         with pytest.raises(LLMRateLimitError) as exc_info:
             client.complete_json("hello", objective="test", temperature=0)
     assert exc_info.value.limit_kind == expected_kind
-    assert expected_kind in str(exc_info.value)
-    assert "usage limit" in str(exc_info.value).lower() or "weekly" in body or "session" in body
+    assert expected_kind in str(exc_info.value).lower()
+    assert "usage limit" in str(exc_info.value).lower()
 
 
 def test_ollama_httpstatuserror_429_classifies_session_body(
@@ -1895,7 +1895,7 @@ def test_list_ollama_models_parses_and_sorts_names(monkeypatch: pytest.MonkeyPat
     payload = {
         "models": [
             {"name": "llama3.2", "model": "llama3.2:latest"},
-            {"name": "glm-5.2:cloud"},
+            {"name": "deepseek-v4-flash:cloud"},
             {"model": "qwen3-coder:480b-cloud"},  # no name -> falls back to model
             {"name": "llama3.2"},  # duplicate -> collapsed
             {"name": ""},  # blank -> dropped
@@ -1904,7 +1904,7 @@ def test_list_ollama_models_parses_and_sorts_names(monkeypatch: pytest.MonkeyPat
     }
     mock_cls, mock_client = _patch_tags_get(_make_tags_response(200, payload))
     with patch("httpx.Client", mock_cls):
-        assert list_ollama_models() == ["glm-5.2:cloud", "llama3.2", "qwen3-coder:480b-cloud"]
+        assert list_ollama_models() == ["deepseek-v4-flash:cloud", "llama3.2", "qwen3-coder:480b-cloud"]
     # The request targets {base_url}/api/tags.
     called_url = mock_client.__enter__.return_value.get.call_args[0][0]
     assert called_url == "http://localhost:11434/api/tags"
