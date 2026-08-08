@@ -248,6 +248,21 @@ def test_create_profile_duplicate_user_id_returns_409(api_client) -> None:
     assert got.json()["ips"] == first_ips
 
 
+def test_create_profile_docstring_documents_errors_not_preconditions() -> None:
+    """DbC: enum-validity/profile-existence are handled with specific HTTP
+    responses (422/409), not undefined-behavior-on-violation preconditions —
+    they belong under Raises:, not Preconditions:."""
+    from investment_team.api import main as api_main
+
+    doc = api_main.create_profile.__doc__
+    assert doc
+    assert "Preconditions:" not in doc
+    assert "Raises:" in doc
+    assert "HTTPException(422)" in doc
+    assert "HTTPException(409)" in doc
+    assert "already exists" in doc
+
+
 def test_create_profile_non_dict_goal_rejected(api_client) -> None:
     # ``CreateProfileRequest.goals`` is typed ``List[Dict[str, Any]]``, so a
     # non-dict element should already be rejected by FastAPI/Pydantic request

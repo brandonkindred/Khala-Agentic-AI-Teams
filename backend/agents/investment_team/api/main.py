@@ -1021,21 +1021,18 @@ def health() -> dict:
 def create_profile(request: CreateProfileRequest) -> CreateProfileResponse:
     """Create an Investment Policy Statement (IPS) for a user.
 
-    Preconditions:
-        - ``request.risk_tolerance``/``request.default_mode`` are already
-          guaranteed to be valid ``RiskTolerance``/``WorkflowMode`` members —
-          FastAPI/Pydantic rejects any other value with a 422 before this
-          handler runs, since both fields are typed as the enum itself.
-        - No profile may already exist for ``request.user_id`` — this endpoint
-          creates; it does not upsert.
-
     Postconditions:
-        - On success: a new IPS is persisted under ``_profiles[request.user_id]``
-          and returned; no prior profile is overwritten.
-        - Raises ``HTTPException`` 422 if constructing the nested ``UserGoal``,
+        On success: a new IPS is persisted under ``_profiles[request.user_id]``
+        and returned; no prior profile is overwritten.
+
+    Raises:
+        - ``HTTPException(422)`` if ``request.risk_tolerance``/``request.default_mode``
+          are not valid ``RiskTolerance``/``WorkflowMode`` members — rejected by
+          FastAPI/Pydantic before this handler runs, since both fields are typed
+          as the enum itself — or if constructing the nested ``UserGoal``,
           ``InvestmentProfile``, or ``IPS`` models fails Pydantic validation.
-        - Raises ``HTTPException`` 409 if a profile already exists for
-          ``request.user_id``.
+        - ``HTTPException(409)`` if a profile already exists for
+          ``request.user_id`` — this endpoint creates; it does not upsert.
     """
     risk_tol = request.risk_tolerance
     workflow_mode = request.default_mode
