@@ -865,8 +865,10 @@ waiting on is reclaimed (freeing its worker slots) at essentially the same
 moment, rather than running unbounded server-side.
 
 ### CODE_REVIEW_MIN_SPLIT_SEGMENT_CHARS
-A failing chunk smaller than twice this is retried once as-is instead of being
-bisected. Default `8000`, floor `1000`.
+Int (default `8000`, floor `1000`). A failing chunk smaller than twice this is
+retried once as-is instead of being bisected. Parsed via the shared `env_int`
+(unset/garbage → default; a parsed value below the floor is clamped up to it,
+not reset to the default).
 
 ### CODE_REVIEW_MAX_BISECT_DEPTH
 Max bisect-and-retry recursion depth for a failing review chunk before the chunk
