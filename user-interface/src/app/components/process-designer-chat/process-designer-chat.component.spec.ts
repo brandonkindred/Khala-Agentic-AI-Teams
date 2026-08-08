@@ -753,4 +753,56 @@ describe('ProcessDesignerChatComponent', () => {
       expect(node.dataset['bound']).toBeUndefined();
     });
   });
+
+  // ── auto-scroll: only scroll when a message is added while near the bottom ──
+  //
+  // ngAfterViewChecked used to force scrollTop = scrollHeight unconditionally on
+  // every change-detection cycle, yanking the view back down even when the user
+  // had deliberately scrolled up to read earlier messages. It must now only
+  // scroll when a message was actually added (via sendMessage/applyState) and
+  // the user was already near the bottom beforehand.
+
+  describe('auto-scroll on new messages', () => {
+    function mockScrollMetrics(
+      el: HTMLElement,
+      { scrollHeight, clientHeight, scrollTop }: { scrollHeight: number; clientHeight: number; scrollTop: number },
+    ): void {
+      Object.defineProperty(el, 'scrollHeight', { value: scrollHeight, configurable: true });
+      Object.defineProperty(el, 'clientHeight', { value: clientHeight, configurable: true });
+      Object.defineProperty(el, 'scrollTop', { value: scrollTop, writable: true, configurable: true });
+    }
+
+    it('does not scroll on a view-checked cycle with no new message', () => {
+      const el = component.messagesContainer.nativeElement;
+      mockScrollMetrics(el, { scrollHeight: 1000, clientHeight: 200, scrollTop: 150 });
+
+      component.ngAfterViewChecked(); // no message added since init; must be a no-op
+
+      expect(el.scrollTop).toBe(150);
+    });
+
+    it('scrolls to bottom when a message is sent while the user is near the bottom', () => {
+      const el = component.messagesContainer.nativeElement;
+      // 10px from the bottom — within the "near bottom" threshold.
+      mockScrollMetrics(el, { scrollHeight: 500, clientHeight: 200, scrollTop: 290 });
+
+      component.form.setValue({ message: 'hi' });
+      component.onSubmit(); // optimistic append + synchronous mocked response
+      component.ngAfterViewChecked();
+
+      expect(el.scrollTop).toBe(500);
+    });
+
+    it('does not force-scroll when a message is sent while the user has scrolled up to read history', () => {
+      const el = component.messagesContainer.nativeElement;
+      // Far from the bottom.
+      mockScrollMetrics(el, { scrollHeight: 1000, clientHeight: 200, scrollTop: 0 });
+
+      component.form.setValue({ message: 'hi' });
+      component.onSubmit();
+      component.ngAfterViewChecked();
+
+      expect(el.scrollTop).toBe(0);
+    });
+  });
 });
