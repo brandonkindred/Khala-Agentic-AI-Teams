@@ -3466,6 +3466,29 @@ def test_delete_strategy_lab_run_409_when_transition_lock_held(
 # ---------------------------------------------------------------------------
 
 
+def _make_subscriber(events):
+    """Build a fake job_event_bus subscription pre-loaded with ``events``.
+
+    Preconditions:
+        - ``events`` is a deque of event dicts (may be empty).
+
+    Postconditions:
+        - Returns an object exposing ``.events`` (the same deque passed in)
+          and a no-op ``touch()`` method, matching the interface
+          ``stream_strategy_lab_run`` expects from a ``job_event_bus``
+          subscription.
+    """
+
+    class _Sub:
+        def __init__(self) -> None:
+            self.events = events
+
+        def touch(self) -> None:  # reaper-liveness signal, no-op for the fake
+            pass
+
+    return _Sub()
+
+
 def test_stream_strategy_lab_run_404(monkeypatch: pytest.MonkeyPatch, api_client) -> None:
     """Streaming a run_id with neither in-memory nor persisted state returns 404."""
     from investment_team.api import main as api_main
@@ -3578,15 +3601,7 @@ def test_stream_strategy_lab_run_does_not_block_on_threading_lock(
 
     pre_events = deque([{"type": "complete", "summary": "ok"}])
 
-    class _Sub:
-        def __init__(self) -> None:
-            self.events = pre_events
-            self.closed = False
-
-        def touch(self) -> None:
-            pass
-
-    monkeypatch.setattr(job_event_bus, "subscribe", lambda rid: _Sub())
+    monkeypatch.setattr(job_event_bus, "subscribe", lambda rid: _make_subscriber(pre_events))
     monkeypatch.setattr(job_event_bus, "unsubscribe", lambda rid, sub: None)
 
     result: Dict[str, Any] = {}
@@ -3713,18 +3728,11 @@ def test_stream_strategy_lab_run_emits_snapshot_update_and_terminates(
         ]
     )
 
-    class _Sub:
-        def __init__(self) -> None:
-            self.events = pre_events
-
-        def touch(self) -> None:  # reaper-liveness signal, no-op for the fake
-            pass
-
     sub_holder = {"sub": None, "unsubscribed": False}
 
     def _fake_subscribe(rid: str):
         assert rid == "active"
-        sub_holder["sub"] = _Sub()
+        sub_holder["sub"] = _make_subscriber(pre_events)
         return sub_holder["sub"]
 
     def _fake_unsubscribe(rid: str, sub) -> None:
@@ -3771,14 +3779,7 @@ def test_stream_strategy_lab_run_terminates_on_error_event(
 
     pre_events = deque([{"type": "error", "error": "kaboom"}])
 
-    class _Sub:
-        def __init__(self) -> None:
-            self.events = pre_events
-
-        def touch(self) -> None:  # reaper-liveness signal, no-op for the fake
-            pass
-
-    monkeypatch.setattr(job_event_bus, "subscribe", lambda rid: _Sub())
+    monkeypatch.setattr(job_event_bus, "subscribe", lambda rid: _make_subscriber(pre_events))
     monkeypatch.setattr(job_event_bus, "unsubscribe", lambda rid, sub: None)
 
     with api_client.stream("GET", "/strategy-lab/runs/boom/stream", timeout=2.0) as resp:
@@ -3830,14 +3831,7 @@ def test_stream_strategy_lab_run_snapshot_reconciles_progress(
 
     pre_events = deque([{"type": "complete", "summary": "ok"}])
 
-    class _Sub:
-        def __init__(self) -> None:
-            self.events = pre_events
-
-        def touch(self) -> None:  # reaper-liveness signal, no-op for the fake
-            pass
-
-    monkeypatch.setattr(job_event_bus, "subscribe", lambda rid: _Sub())
+    monkeypatch.setattr(job_event_bus, "subscribe", lambda rid: _make_subscriber(pre_events))
     monkeypatch.setattr(job_event_bus, "unsubscribe", lambda rid, sub: None)
 
     with api_client.stream("GET", "/strategy-lab/runs/stream-prog/stream", timeout=2.0) as resp:
