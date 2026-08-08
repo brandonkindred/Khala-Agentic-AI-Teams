@@ -646,8 +646,9 @@ def _fail_strategy_lab_run(run_id: str, error: str) -> None:
     Postconditions:
         - If the run exists and isn't already in
           ``STRATEGY_LAB_TERMINAL_STATUSES``, its status becomes ``"failed"``
-          with ``error`` recorded, the new state persisted, and a delayed
-          cleanup of the ``_active_runs`` entry scheduled
+          with ``error`` recorded, ``current_cycle`` reset to ``None`` to
+          indicate the run is no longer advancing, the new state persisted,
+          and a delayed cleanup of the ``_active_runs`` entry scheduled
           ``STRATEGY_LAB_FAILED_RUN_CLEANUP_DELAY_SECONDS`` out — so a
           dispatch failure (e.g. a Temporal outage) doesn't leak the entry
           forever. That cleanup is a no-op if
