@@ -405,6 +405,31 @@ def test_run_backtest_activity_reports_cancelled_status(monkeypatch) -> None:
     assert result == {"job_id": "job-cancelled", "status": "cancelled"}
 
 
+def test_run_backtest_activity_raises_on_non_terminal_status(monkeypatch) -> None:
+    """A worker return value that is none of the three known terminal statuses
+    (e.g. a stuck/non-terminal ``pending``/``running`` status — the modern
+    equivalent of a polling timeout) is a postcondition violation of
+    ``_run_backtest_background`` and must raise ``ApplicationError``, not be
+    silently reported as ``completed``."""
+    from investment_team import models as inv_models
+    from investment_team.api import main as api_main
+    from investment_team.temporal.workflows import run_backtest_activity
+
+    monkeypatch.setattr(inv_models, "StrategySpec", lambda **kw: object())
+    monkeypatch.setattr(inv_models, "BacktestConfig", lambda **kw: object())
+    monkeypatch.setattr(api_main, "_backtest_job_status", lambda jid: None)
+    monkeypatch.setattr(
+        api_main,
+        "_run_backtest_background",
+        lambda *a: api_main._BT_JOB_STATUS_PENDING,
+    )
+
+    from temporalio.exceptions import ApplicationError
+
+    with pytest.raises(ApplicationError, match="non-terminal"):
+        run_backtest_activity("job-stuck", {}, {}, "agent", [])
+
+
 # ---------------------------------------------------------------------------
 # 3. Dispatch branch
 # ---------------------------------------------------------------------------
