@@ -49,6 +49,14 @@ def test_dummy_complete_returns_str() -> None:
     assert "Dummy" in s
 
 
+def test_dummy_complete_docstring_documents_contract() -> None:
+    doc = " ".join((DummyLLMClient.complete.__doc__ or "").split()).lower()
+    assert "making a real llm call" in doc
+    assert "preconditions:" in doc
+    assert "postconditions:" in doc
+    assert "_request_count" in doc
+
+
 def test_dummy_complete_json_returns_dict() -> None:
     c = DummyLLMClient()
     j = c.complete_json("hello", temperature=0.1)
