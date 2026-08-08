@@ -15,7 +15,7 @@ import logging
 from pathlib import Path
 from typing import Callable, Set, Tuple
 
-from software_engineering_team.shared.git_utils import (
+from shared.git.git_utils import (
     ensure_development_branch,
     initialize_new_repo,
     write_files_and_commit,

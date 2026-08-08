@@ -47,7 +47,7 @@ def test_small_code_returns_code_review_output() -> None:
 def test_small_code_with_all_optional_fields_does_not_crash() -> None:
     """spec_content, task_requirements, acceptance_criteria, architecture,
     existing_codebase all plumbed through the builder."""
-    from software_engineering_team.shared.models import SystemArchitecture
+    from shared.dev_models.models import SystemArchitecture
 
     arch = SystemArchitecture(
         overview="Tiny service",

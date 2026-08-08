@@ -14,8 +14,8 @@ import logging
 from pathlib import Path
 from typing import Tuple
 
+from shared.dev_models.models import Task
 from shared.repo_context.repo_utils import find_repo_files
-from software_engineering_team.shared.models import Task
 from software_engineering_team.shared.stack_profile import StackProfile
 from software_engineering_team.shared.v2_review import ReviewConfig
 

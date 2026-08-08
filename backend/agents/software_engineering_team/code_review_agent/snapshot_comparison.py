@@ -33,9 +33,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
+from shared.dev_models.models import SystemArchitecture
 from shared.env import env_flag_enabled
 from shared.git.git_utils import add_worktree, remove_worktree
-from software_engineering_team.shared.models import SystemArchitecture
 
 from .architecture_consistency_pass import find_architecture_and_redundancy_issues
 from .false_positive_filter import CodebaseIndex

@@ -37,10 +37,6 @@ DEFAULT_JSON_SYSTEM_PROMPT = "You are a helpful assistant. Always respond with v
 
 logger = logging.getLogger(__name__)
 
-# Backward-compat aliases so existing "from software_engineering_team.shared.llm import get_llm_for_agent" still works
-get_llm_for_agent = get_client
-get_llm_client = get_client
-
 
 def complete_json_with_continuation(
     client: LLMClient,
@@ -102,7 +98,5 @@ __all__ = [
     "extract_json_from_response",
     "get_client",
     "get_llm_config_summary",
-    "get_llm_for_agent",
-    "get_llm_client",
     "get_strands_model",
 ]

@@ -426,10 +426,10 @@ def _run_architecture_for_planning(
     Invariants:
         - Never propagates an exception into the Planning workflow.
     """
+    from shared.dev_models.models import ProductRequirements
     from software_engineering_team.architect_agents.architecture_expert.models import (
         ArchitectureInput,
     )
-    from software_engineering_team.shared.models import ProductRequirements
 
     req_desc = (spec_content or "").strip()
     if (prd_content or "").strip():

@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from software_engineering_team.shared.git_utils import (
+from shared.git.git_utils import (
     _clear_disposable_files_if_blocking,
     branch_diff,
     commit_paths,

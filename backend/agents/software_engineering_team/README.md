@@ -364,7 +364,7 @@ software_engineering_team/
 │                          # the coding-team engine's own app-assembly hub + routers
 ├── agent_implementations/
 │   └── run_api_server.py  # HTTP API entry point (uvicorn)
-├── shared/                # LLM client, models, coding_standards, git_utils, plan_dir,
+├── shared/                # LLM client, coding_standards, plan_dir,
 │                          # phases/, deliver_utils, logging_config, ...
 │
 │  # --- Design / setup ---

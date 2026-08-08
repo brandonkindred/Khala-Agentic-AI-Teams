@@ -19,7 +19,7 @@ def _assert_raw_source(codes: list[str]) -> None:
 
 
 def _task(**overrides):
-    from software_engineering_team.shared.models import Task, TaskType
+    from shared.dev_models.models import Task, TaskType
 
     base = dict(
         id="t1",
@@ -132,9 +132,9 @@ def test_fe_run_llm_review_forwards_review_context(monkeypatch):
     backend regression test — previously only the external agent path received
     this context)."""
     from llm_service.clients.dummy import DummyLLMClient
+    from shared.dev_models.models import ReviewContext, SystemArchitecture
     from software_engineering_team.frontend_code_v2_team.phases import review as review_mod
     from software_engineering_team.frontend_code_v2_team.phases.review import _run_llm_review
-    from software_engineering_team.shared.models import ReviewContext, SystemArchitecture
 
     prompts: list[str] = []
 
@@ -729,9 +729,9 @@ def test_fe_run_review_passes_files_dict_unmodified(monkeypatch, tmp_path: Path)
 def test_fe_run_review_forwards_architecture_and_spec_content(monkeypatch, tmp_path: Path):
     """``run_review``'s ``architecture``/``spec_content`` reach the code-review
     agent's input, and default to ``None``/``""`` when omitted."""
+    from shared.dev_models.models import ReviewContext, SystemArchitecture
     from software_engineering_team.frontend_code_v2_team.phases import review as review_mod
     from software_engineering_team.frontend_code_v2_team.phases.review import run_review
-    from software_engineering_team.shared.models import ReviewContext, SystemArchitecture
 
     monkeypatch.setattr(
         review_mod, "Agent", lambda *a, **kw: _StubAgent("## PASSED ##\ntrue\n## END PASSED ##\n")

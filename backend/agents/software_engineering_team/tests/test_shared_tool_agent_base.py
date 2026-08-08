@@ -95,9 +95,7 @@ def test_lenient_json_non_object_returns_empty():
     ``{}`` so callers can rely on the dict postcondition."""
     for raw in ("[1, 2]", '"str"', "3", "true", "null"):
         assert (
-            lenient_json_object(
-                raw, logger=logging.getLogger("t"), context="ctx", on_fail_msg="x"
-            )
+            lenient_json_object(raw, logger=logging.getLogger("t"), context="ctx", on_fail_msg="x")
             == {}
         )
 
@@ -948,9 +946,7 @@ def test_constructor_resolves_text_model(monkeypatch):
         seen.append(response_format)
         return object()
 
-    monkeypatch.setattr(
-        "software_engineering_team.shared.strands_model.resolve_strands_model", _record
-    )
+    monkeypatch.setattr("llm_service.strands_model.resolve_strands_model", _record)
     agent = _DemoAgent(llm=None)
     assert agent._model is not None
     assert seen == ["text"]  # uses_json_model defaults False
@@ -969,9 +965,7 @@ def test_constructor_resolves_json_model_when_enabled(monkeypatch):
         seen.append(response_format)
         return object()
 
-    monkeypatch.setattr(
-        "software_engineering_team.shared.strands_model.resolve_strands_model", _record
-    )
+    monkeypatch.setattr("llm_service.strands_model.resolve_strands_model", _record)
     agent = _JsonDemoAgent(llm=None)
     assert agent._model is not None and agent._model_json is not None
     assert "text" in seen and "json" in seen

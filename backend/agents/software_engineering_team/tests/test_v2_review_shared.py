@@ -29,7 +29,7 @@ from typing import Any, Callable, Dict, Optional, Tuple
 from unittest.mock import MagicMock
 
 from llm_service.clients.dummy import DummyLLMClient
-from software_engineering_team.shared.models import ReviewContext, SystemArchitecture
+from shared.dev_models.models import ReviewContext, SystemArchitecture
 from software_engineering_team.shared.v2_models import ReviewIssue
 from software_engineering_team.shared.v2_review import (
     ReviewConfig,

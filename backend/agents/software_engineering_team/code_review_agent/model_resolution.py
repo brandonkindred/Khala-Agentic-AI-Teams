@@ -17,7 +17,7 @@ cannot shadow the lighter selection; wiring synthesis onto that key is separate
 follow-up work.
 
 This is intentionally distinct from the generic
-``software_engineering_team.shared.strands_model.resolve_strands_model``: the
+``llm_service.strands_model.resolve_strands_model``: the
 code-review subsystem resolves its production model by agent key via the cached
 ``get_strands_model(...)`` helpers (so ``LLM_MODEL_code_review`` /
 ``LLM_MODEL_code_review_verify`` routing applies and one cached, concurrency-safe

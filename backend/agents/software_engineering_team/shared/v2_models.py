@@ -20,7 +20,7 @@ from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field
 
-from software_engineering_team.shared.models import ToolRecommendation
+from shared.dev_models.models import ToolRecommendation
 
 # ---------------------------------------------------------------------------
 # Lifecycle phases (identical across teams)

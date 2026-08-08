@@ -37,7 +37,7 @@ def load_requirements_from_sprint(sprint_id: str) -> Tuple[Any, str]:
         UnknownProductDeliveryEntity,
         get_store,
     )
-    from software_engineering_team.shared.models import ProductRequirements
+    from shared.dev_models.models import ProductRequirements
 
     sprint_view = get_store().get_sprint_with_stories(sprint_id)
     if sprint_view is None:
