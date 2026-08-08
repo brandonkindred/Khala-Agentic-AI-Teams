@@ -4658,7 +4658,11 @@ class TestDecideReviewModeUnit:
         assert result is not None
         assert result.code == ""
         assert result.files_reviewed == 2
-        assert set(result.head_files) == {"a.py", "b.py"}
+        # Both files' fetched content builds a usable change surface, which
+        # takes priority over whole-file review -- head_files stays empty and
+        # hunk rendering is skipped entirely (hence "skips hunk rendering").
+        assert result.head_files == {}
+        assert set(result.change_surface.blocks) == {"a.py", "b.py"}
         assert set(result.valid_by_path["a.py"]) == {1}
         assert set(result.changed_by_path["a.py"]) == {1}
         from software_engineering_team.code_review_agent.change_surface import ChangeSurface
@@ -4684,10 +4688,11 @@ class TestDecideReviewModeUnit:
         assert result is not None
         assert not result.change_surface.is_empty
         assert "mod.py" in result.change_surface.blocks
-        # hunk-fallback code is empty because the whole-file fetch fully
-        # succeeded, so nothing needs hunk rendering. Which of change_surface
-        # vs head_files actually gets dispatched to the reviewer is decided in
-        # _run_reviewer (surface-first), not here.
+        # The change surface covers this path, so it is excluded from
+        # head_files at decide-time (not merely deprioritized in
+        # _run_reviewer), and hunk-fallback code is empty since nothing is
+        # left uncovered.
+        assert result.head_files == {}
         assert result.code == ""
 
     def test_partial_fetch_falls_back_to_hunks_for_the_missing_subset(self) -> None:
@@ -4708,10 +4713,14 @@ class TestDecideReviewModeUnit:
             files,
         )
         assert result is not None
-        assert set(result.head_files) == {"a.py"}
+        # a.py's fetched content builds a usable change surface, so it is
+        # excluded from head_files; b.py's fetch failed entirely, so it falls
+        # back to hunk rendering rather than being dropped.
+        assert result.head_files == {}
+        assert "a.py" in result.change_surface.blocks
         assert "b.py" in result.code  # missing file's hunk was rendered
-        assert "a.py" not in result.code  # fetched file's hunk was NOT rendered
-        assert result.files_reviewed == 2  # 1 whole + 1 hunk
+        assert "a.py" not in result.code  # surface-covered file's hunk was NOT rendered
+        assert result.files_reviewed == 2  # 1 surface + 1 hunk
         assert "b.py" not in result.change_surface.blocks
 
     def test_total_fetch_failure_renders_every_files_hunks(self) -> None:
