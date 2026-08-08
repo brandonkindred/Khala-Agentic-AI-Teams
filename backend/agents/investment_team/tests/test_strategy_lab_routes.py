@@ -537,7 +537,9 @@ def test_resume_strategy_lab_run_400_when_payload_missing(lab_job_client, api_cl
     assert resp.status_code == 400
 
 
-def test_resume_strategy_lab_run_400_when_payload_fails_validation(lab_job_client, api_client) -> None:
+def test_resume_strategy_lab_run_400_when_payload_fails_validation(
+    lab_job_client, api_client
+) -> None:
     """A resumable run whose stored payload is a dict but fails
     ``RunStrategyLabRequest`` validation (corrupted/schema-stale data)
     returns a clean 400 rather than an unhandled 500."""
