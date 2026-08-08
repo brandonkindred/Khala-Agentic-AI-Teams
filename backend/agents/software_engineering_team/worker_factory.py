@@ -75,15 +75,32 @@ def _build_implementation_worker(
           specification, when available; ``None`` means "nothing to add" so a
           caller without this context yet is unaffected.
 
-    Postconditions: returns a ``V2TeamWorker`` whose ``team_lead`` came from the
-    provider. Raises ``ValueError`` for an unsupported stack and ``RuntimeError``
-    when no provider was injected.
+    Postconditions: returns a ``V2TeamWorker`` (frontend/backend, ``team_lead`` from
+    the provider) or a ``DevOpsTeamWorker`` (devops, ``team_lead`` constructed
+    directly since ``CodeEngineProvider`` only covers frontend/backend). Raises
+    ``ValueError`` for an unsupported stack and ``RuntimeError`` when no provider
+    was injected for a frontend/backend stack.
     """
     kind = _v2_team_kind_for_stack(spec)
     if not kind:
         raise ValueError(
             f"Unsupported coding-team stack {spec.name!r}. "
-            "Only frontend_v2 and backend_v2 implementation teams are available."
+            "Only frontend_v2, backend_v2, and devops implementation teams are available."
+        )
+    if kind == "devops":
+        # DevOpsTeamLeadAgent isn't behind the CodeEngineProvider protocol (that
+        # protocol only covers frontend/backend v2 teams), so it's constructed
+        # directly here rather than via engine_provider.build_implementation_team_lead.
+        # Not wrapped in _v2_text_mode_llm: that forces text-mode parsing for the v2
+        # teams' template parsers, but devops agents want JSON mode
+        # (complete_json_with_continuation).
+        from software_engineering_team.devops_team import DevOpsTeamLeadAgent
+        from software_engineering_team.devops_team_worker import DevOpsTeamWorker
+
+        return DevOpsTeamWorker(
+            agent_id=agent_id,
+            stack_spec=spec,
+            team_lead=DevOpsTeamLeadAgent(llm_getter(kind)),
         )
     if engine_provider is None:
         raise RuntimeError(

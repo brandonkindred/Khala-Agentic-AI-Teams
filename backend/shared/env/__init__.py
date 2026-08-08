@@ -24,9 +24,10 @@ import math
 import os
 from typing import Optional
 
-__all__ = ["env_flag_enabled", "parse_float", "parse_int"]
+__all__ = ["env_flag_enabled", "env_flag_opt_in", "parse_float", "parse_int"]
 
 _FALSY = frozenset({"false", "0", "no"})
+_TRUTHY = frozenset({"true", "1", "yes", "on"})
 
 
 def env_flag_enabled(env_name: str) -> bool:
@@ -41,6 +42,24 @@ def env_flag_enabled(env_name: str) -> bool:
     if not env_name:
         raise ValueError("env_name must be non-empty")
     return (os.environ.get(env_name) or "").strip().lower() not in _FALSY
+
+
+def env_flag_opt_in(env_name: str) -> bool:
+    """Return a default-OFF boolean env toggle (the inverse of ``env_flag_enabled``).
+
+    Use for new, unproven, or behaviorally significant code paths that must stay
+    inert until explicitly enabled — unlike ``env_flag_enabled``, an unset or
+    blank value here means disabled.
+
+    Preconditions: ``env_name`` is a non-empty environment-variable name
+        (enforced with an explicit ``ValueError`` so the check survives ``-O``).
+    Postconditions: returns ``True`` only for an explicit ``"true"`` / ``"1"`` /
+        ``"yes"`` / ``"on"`` (case-insensitive, whitespace-tolerant); an unset,
+        blank, or any other value means disabled. Never raises on the env value.
+    """
+    if not env_name:
+        raise ValueError("env_name must be non-empty")
+    return (os.environ.get(env_name) or "").strip().lower() in _TRUTHY
 
 
 def parse_int(

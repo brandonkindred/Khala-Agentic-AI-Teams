@@ -32,6 +32,9 @@ from software_engineering_team.shared.team_lead_base import TeamLeadSharedState
 from software_engineering_team.task_graph import TaskGraphService
 from software_engineering_team.team_routing import (
     _BACKEND_V2_STACK_SPEC,
+    _DEVOPS_ROUTING_ENV,
+    _DEVOPS_STACK_SPEC,
+    _DEVOPS_TEAM_ALIASES,
     _quality_gate_agent_type,
     _target_matches_agent,
     _team_key,
@@ -1531,6 +1534,52 @@ def test_quality_gates_skip_with_warning_when_no_engine_provider(tmp_path):
     assert graph.get_task("t1").status == TaskStatus.IN_REVIEW
 
 
+def test_quality_gates_skipped_for_devops_worker(tmp_path):
+    """DevOps runs its own internal gates; the generic build/lint gate must never
+    touch a devops worker's output -- prove it by making the provider raise if called."""
+
+    class _RaisingProvider:
+        def run_build_verification(self, *a, **k):
+            raise AssertionError("build verification must not run for a devops worker")
+
+        def run_linting(self, *a, **k):
+            raise AssertionError("linting must not run for a devops worker")
+
+    devops_worker = StubWorker("devops_worker")
+    devops_worker.team_kind = "devops"
+    graph = TaskGraphService(job_id="j1")
+    swarm = CodingTeamSwarm(
+        tech_lead=StubTechLead(approved=True),
+        workers=[devops_worker],
+        graph=graph,
+        path=Path(tmp_path),
+        agent_ids=["devops_worker"],
+        llm_getter=lambda k: None,
+        engine_provider=_RaisingProvider(),
+    )
+    swarm._worktrees = _FakeWorktreeManager(swarm.path, ["devops_worker"])
+    swarm._worktrees.prepare()
+    graph.add_task("t1", title="T1", target_team="devops")
+    graph.assign_task_to_agent("t1", "devops_worker")
+
+    ok = swarm._run_quality_gates(
+        devops_worker, graph.get_task("t1"), lambda **kw: None, worktree_path=Path(tmp_path)
+    )
+
+    assert ok is True
+
+
+def test_quality_gates_run_normally_for_worker_without_team_kind_attr(tmp_path):
+    """A worker with no team_kind attribute at all (e.g. a minimal duck-typed stub)
+    still runs the normal gate path -- getattr defaults to None, not "devops"."""
+    swarm, graph = _make_real_swarm(tmp_path, _gate_provider(build_ok=True))
+    assert not hasattr(swarm.workers[0], "team_kind")
+
+    swarm._implement_and_verify(swarm.workers[0], lambda **kw: None)
+
+    assert graph.get_task("t1").status == TaskStatus.IN_REVIEW
+
+
 def test_quality_gate_build_failure_returns_for_revision(tmp_path):
     swarm, graph = _make_real_swarm(tmp_path, _gate_provider(build_ok=False))
 
@@ -1774,7 +1823,11 @@ def test_pinned_agent_reserved_before_unrelated_tech_lead_assignment(tmp_path):
 
 
 def test_assignment_normalizes_backend_owned_target_aliases(tmp_path):
-    """Backend-owned target aliases such as devops route to the backend v2 worker."""
+    """Backend-owned target aliases such as devops route to the backend v2 worker.
+
+    This documents CODING_TEAM_DEVOPS_ROUTING's default-OFF behavior — see
+    test_devops_aliases_route_to_devops_when_flag_on for the flag-enabled case.
+    """
 
     class AssignDevOpsTL(StubTechLead):
         def run_assignments(self, agent_ids, ready_tasks, free_agents):
@@ -1857,6 +1910,106 @@ def test_team_key_accepts_compact_v2_labels() -> None:
     assert _team_key("myfrontend") == "myfrontend"
 
 
+# ----------------------------------------------------- CODING_TEAM_DEVOPS_ROUTING
+
+
+@pytest.mark.parametrize("alias", sorted(_DEVOPS_TEAM_ALIASES))
+def test_devops_aliases_stay_backend_when_flag_off(monkeypatch, alias) -> None:
+    monkeypatch.delenv(_DEVOPS_ROUTING_ENV, raising=False)
+    assert _team_key(alias) == "backend_v2"
+
+
+@pytest.mark.parametrize("alias", sorted(_DEVOPS_TEAM_ALIASES))
+def test_devops_aliases_route_to_devops_when_flag_on(monkeypatch, alias) -> None:
+    monkeypatch.setenv(_DEVOPS_ROUTING_ENV, "1")
+    assert _team_key(alias) == "devops"
+
+
+@pytest.mark.parametrize("value", ["", "0", "false", "off", "maybe"])
+def test_devops_flag_falsy_values_stay_off(monkeypatch, value) -> None:
+    monkeypatch.setenv(_DEVOPS_ROUTING_ENV, value)
+    assert _team_key("devops") == "backend_v2"
+
+
+def test_target_matches_devops_worker_when_flag_on(monkeypatch) -> None:
+    monkeypatch.setenv(_DEVOPS_ROUTING_ENV, "1")
+    assert _target_matches_agent("infra", "devops") is True
+    assert _target_matches_agent("devops", "backend_v2") is False
+
+
+def test_ensure_target_team_stack_specs_adds_devops_stack_when_flag_on(monkeypatch) -> None:
+    monkeypatch.setenv(_DEVOPS_ROUTING_ENV, "1")
+    graph = TaskGraphService(job_id="j1")
+    graph.add_task("deploy", title="Deploy service", target_team="devops")
+
+    stacks = orch_mod._ensure_target_team_stack_specs([], graph.get_tasks())
+
+    assert dict(_DEVOPS_STACK_SPEC) in stacks
+    assert not any(s.get("name") == "backend_v2" for s in stacks)
+
+
+def test_ensure_target_team_stack_specs_does_not_add_devops_stack_when_flag_off(
+    monkeypatch,
+) -> None:
+    monkeypatch.delenv(_DEVOPS_ROUTING_ENV, raising=False)
+    graph = TaskGraphService(job_id="j1")
+    graph.add_task("deploy", title="Deploy service", target_team="devops")
+
+    stacks = orch_mod._ensure_target_team_stack_specs([], graph.get_tasks())
+
+    assert dict(_BACKEND_V2_STACK_SPEC) in stacks
+    assert not any(s.get("name") == "devops" for s in stacks)
+
+
+def test_worker_team_key_for_devops_worker() -> None:
+    """A worker with a fixed ``team_kind == "devops"`` reports the "devops"
+    scheduler key directly, ungated -- such a worker can only ever be
+    constructed when the routing flag is already on (see worker_factory)."""
+    from types import SimpleNamespace
+
+    worker = SimpleNamespace(team_kind="devops", stack_spec=None)
+    assert orch_mod._worker_team_key(worker) == "devops"
+
+
+def test_v2_team_kind_for_stack_devops(monkeypatch) -> None:
+    monkeypatch.setenv(_DEVOPS_ROUTING_ENV, "1")
+    assert _v2_team_kind_for_stack(StackSpec(name="devops", tools_services=[])) == "devops"
+    monkeypatch.delenv(_DEVOPS_ROUTING_ENV, raising=False)
+    assert _v2_team_kind_for_stack(StackSpec(name="devops", tools_services=[])) == "backend"
+
+
+def test_backend_stack_with_devops_tooling_stays_backend_when_flag_on(monkeypatch) -> None:
+    """A backend-named stack that merely lists IaC/CI tools among its
+    tools_services must not be misrouted to a devops worker -- devops routing
+    is explicit-label-only (_BACKEND_HINTS is untouched)."""
+    monkeypatch.setenv(_DEVOPS_ROUTING_ENV, "1")
+    spec = StackSpec(name="platform", tools_services=["Terraform", "CI/CD"])
+    assert _v2_team_kind_for_stack(spec) == "backend"
+
+
+def test_devops_assignment_end_to_end_flag_on(tmp_path, monkeypatch) -> None:
+    """A target_team="devops" task lands on the devops worker and no other,
+    once CODING_TEAM_DEVOPS_ROUTING is enabled."""
+    monkeypatch.setenv(_DEVOPS_ROUTING_ENV, "1")
+
+    class AssignDevOpsTL(StubTechLead):
+        def run_assignments(self, agent_ids, ready_tasks, free_agents):
+            return {"assignments": [{"agent_id": "devops_worker", "task_id": "provision"}]}
+
+    devops_worker = StubWorker("devops_worker")
+    devops_worker.team_kind = "devops"
+    workers = [StubWorker("frontend_v2"), StubWorker("backend_v2"), devops_worker]
+    swarm, graph = _make_swarm(tmp_path, AssignDevOpsTL(approved=True), workers)
+    graph.add_task("provision", title="Provision infra", target_team="devops")
+
+    swarm._assign_tasks(graph.get_tasks(), ["frontend_v2", "backend_v2", "devops_worker"])
+
+    task = graph.get_task("provision")
+    assert task.assigned_agent_id == "devops_worker"
+    assert graph.get_task_for_agent("frontend_v2") is None
+    assert graph.get_task_for_agent("backend_v2") is None
+
+
 def test_assign_tasks_survives_assignment_error(tmp_path):
     """A transient assign_task_to_agent error is logged and skipped, not propagated."""
 
@@ -1929,7 +2082,11 @@ def test_assignment_fails_task_with_unrecognized_target_team(tmp_path, caplog):
 
 
 def test_target_match_normalizes_raw_v2_agent_ids() -> None:
-    """Raw worker IDs with suffixes still compare by their canonical v2 team."""
+    """Raw worker IDs with suffixes still compare by their canonical v2 team.
+
+    ``devops`` -> ``backend_v2_worker_1`` documents CODING_TEAM_DEVOPS_ROUTING's
+    default-OFF behavior.
+    """
     assert _target_matches_agent("frontend_v2", "frontend-v2-worker-2") is True
     assert _target_matches_agent("devops", "backend_v2_worker_1") is True
     assert _target_matches_agent("frontend_v2", "backend_v2_worker_1") is False
@@ -2215,6 +2372,52 @@ def test_frontend_v2_worker_uses_injected_llm_getter():
 
     assert captured_keys == ["frontend"]
     assert worker.team_lead.llm == "frontend-client"
+
+
+def test_build_implementation_worker_returns_devops_worker_when_flag_on(monkeypatch) -> None:
+    """A devops stack builds a DevOpsTeamWorker directly, bypassing CodeEngineProvider,
+    with the LLM handed through unwrapped (no v2 text-mode coercion)."""
+    monkeypatch.setenv(_DEVOPS_ROUTING_ENV, "1")
+    from software_engineering_team.devops_team_worker import DevOpsTeamWorker
+
+    captured_keys: List[str] = []
+
+    def _llm_getter(key: str) -> str:
+        captured_keys.append(key)
+        return f"{key}-client"
+
+    worker = orch_mod._build_implementation_worker(
+        "devops_worker",
+        StackSpec(name="devops", tools_services=["Terraform"]),
+        _llm_getter,
+        engine_provider=None,  # proves the provider is genuinely bypassed
+    )
+
+    assert isinstance(worker, DevOpsTeamWorker)
+    assert worker.team_kind == "devops"
+    assert captured_keys == ["devops"]
+    assert worker.team_lead.llm == "devops-client"
+
+
+def test_build_implementation_worker_devops_stack_is_backend_when_flag_off() -> None:
+    """The same stack, with the flag off, resolves to an ordinary backend V2TeamWorker."""
+
+    class _FakeLead:
+        def __init__(self, llm):
+            self.llm = llm
+
+    class _FakeProvider:
+        def build_implementation_team_lead(self, team_kind, llm):
+            return _FakeLead(llm)
+
+    worker = orch_mod._build_implementation_worker(
+        "devops_worker",
+        StackSpec(name="devops", tools_services=["Terraform"]),
+        lambda key: f"{key}-client",
+        _FakeProvider(),
+    )
+
+    assert worker.team_kind == "backend"
 
 
 def test_target_team_alias_adds_missing_backend_v2_stack_spec() -> None:

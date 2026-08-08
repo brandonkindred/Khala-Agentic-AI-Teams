@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from shared.env import env_flag_enabled, parse_float, parse_int
+from shared.env import env_flag_enabled, env_flag_opt_in, parse_float, parse_int
 
 # ---------------------------------------------------------------------------
 # env_flag_enabled
@@ -31,6 +31,33 @@ def test_flag_on_for_unset_or_other(monkeypatch, value):
 def test_flag_requires_name():
     with pytest.raises(ValueError):
         env_flag_enabled("")
+
+
+# ---------------------------------------------------------------------------
+# env_flag_opt_in
+# ---------------------------------------------------------------------------
+
+
+def test_opt_in_default_off_when_unset(monkeypatch):
+    monkeypatch.delenv("FLAG_Y", raising=False)
+    assert env_flag_opt_in("FLAG_Y") is False
+
+
+@pytest.mark.parametrize("value", ["true", "TRUE", "1", "yes", "YES", "on", " On "])
+def test_opt_in_on_for_explicit_truthy(monkeypatch, value):
+    monkeypatch.setenv("FLAG_Y", value)
+    assert env_flag_opt_in("FLAG_Y") is True
+
+
+@pytest.mark.parametrize("value", ["", "false", "0", "no", "off", "garbage", "maybe"])
+def test_opt_in_off_for_blank_or_other(monkeypatch, value):
+    monkeypatch.setenv("FLAG_Y", value)
+    assert env_flag_opt_in("FLAG_Y") is False
+
+
+def test_opt_in_requires_name():
+    with pytest.raises(ValueError):
+        env_flag_opt_in("")
 
 
 # ---------------------------------------------------------------------------

@@ -13,9 +13,22 @@ import logging
 import re
 from typing import Any, Dict, List, Optional
 
+from shared.env import env_flag_opt_in
 from software_engineering_team.models import StackSpec, Task
 
 logger = logging.getLogger(__name__)
+
+# Opt-in (default OFF) gate for routing "devops"/"infra"/"ci"/"cicd" target-team
+# labels to a dedicated DevOps worker instead of aliasing them to backend_v2.
+# See docs/ENV_VARS.md. Kept unset/false, behavior is byte-for-byte identical to
+# pre-devops-routing: those aliases still resolve to "backend_v2" everywhere.
+_DEVOPS_ROUTING_ENV = "CODING_TEAM_DEVOPS_ROUTING"
+
+
+def _devops_routing_enabled() -> bool:
+    """Whether devops-labeled tasks/stacks route to a dedicated devops worker."""
+    return env_flag_opt_in(_DEVOPS_ROUTING_ENV)
+
 
 _FRONTEND_V2_EXPLICIT = {
     "frontend_v2",
@@ -81,16 +94,10 @@ _BACKEND_TEAM_ALIASES = {
     "api",
     "apis",
     "backend_api",
-    "ci",
-    "ci_cd",
-    "cicd",
     "database",
     "databases",
     "data",
     "db",
-    "devops",
-    "infra",
-    "infrastructure",
     "node",
     "platform",
     "server",
@@ -182,6 +189,25 @@ _BACKEND_V2_STACK_SPEC = {
     "name": "backend_v2",
     "tools_services": ["Java", "Python", "Node.js", "Databases", "APIs", "DevOps"],
 }
+# DevOps-owned target_team/stack aliases, gated behind _devops_routing_enabled().
+# Explicit-label-only (compared by exact normalized-label equality, same as the
+# frontend/backend alias sets) — deliberately NOT mirrored into _BACKEND_HINTS'
+# token-fallback matching, so a backend stack that merely lists "Terraform"/
+# "CI/CD" among its tools_services stays routed to backend_v2 rather than a
+# DevOps worker that cannot write application code.
+_DEVOPS_TEAM_ALIASES = {
+    "devops",
+    "dev_ops",
+    "infra",
+    "infrastructure",
+    "ci",
+    "ci_cd",
+    "cicd",
+}
+_DEVOPS_STACK_SPEC = {
+    "name": "devops",
+    "tools_services": ["Terraform", "Docker", "Kubernetes", "Helm", "GitHub Actions"],
+}
 
 
 def _team_key(value: Optional[str]) -> str:
@@ -214,6 +240,8 @@ def _team_key(value: Optional[str]) -> str:
         return "backend_v2"
     if text in _FRONTEND_TEAM_ALIASES:
         return "frontend_v2"
+    if text in _DEVOPS_TEAM_ALIASES:
+        return "devops" if _devops_routing_enabled() else "backend_v2"
     if text in _BACKEND_TEAM_ALIASES:
         return "backend_v2"
     return text
@@ -242,7 +270,7 @@ def _stack_hint_tokens(spec: StackSpec) -> set[str]:
 
 
 def _v2_team_kind_for_stack(spec: StackSpec) -> Optional[str]:
-    """Return 'frontend'/'backend' when this stack should be backed by a v2 team."""
+    """Return 'frontend'/'backend'/'devops' when this stack should be backed by a team."""
     raw_name = (spec.name or "").strip().lower()
     normalized_name = raw_name.replace("_", " ").replace("-", " ")
     exactish = {raw_name, normalized_name}
@@ -256,6 +284,10 @@ def _v2_team_kind_for_stack(spec: StackSpec) -> Optional[str]:
         return "frontend"
     if canonical_key == "backend_v2":
         return "backend"
+    # _team_key only ever returns "devops" when _devops_routing_enabled() — no
+    # separate flag check needed here.
+    if canonical_key == "devops":
+        return "devops"
     if _legacy_stack_key(spec.name) in _LEGACY_BACKEND_STACK_ALIASES:
         return "backend"
     if hint_tokens & _FRONTEND_HINTS:
@@ -295,6 +327,8 @@ def _worker_team_key(worker: Any) -> str:
         return "frontend_v2"
     if kind == "backend":
         return "backend_v2"
+    if kind == "devops":
+        return "devops"
     spec = getattr(worker, "stack_spec", None)
     raw_name = (getattr(spec, "name", "") or "").strip().lower()
     normalized_name = raw_name.replace("_", " ").replace("-", " ")
@@ -340,4 +374,6 @@ def _ensure_target_team_stack_specs(
         )
     if "backend_v2" in target_keys and "backend" not in present:
         stacks.append(dict(_BACKEND_V2_STACK_SPEC))
+    if "devops" in target_keys and "devops" not in present:
+        stacks.append(dict(_DEVOPS_STACK_SPEC))
     return stacks

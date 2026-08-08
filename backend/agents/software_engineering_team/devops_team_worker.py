@@ -1,0 +1,235 @@
+"""Adapter that lets the DevOps team act as a coding-team worker.
+
+Sibling of ``v2_team_worker.py``: implements the same duck-typed coding-team
+worker contract (``agent_id``, ``stack_spec``, ``team_kind``,
+``run_implement(task, repo_path) -> dict``) but delegates to
+``DevOpsTeamLeadAgent.run_task`` instead of a v2 team's ``run_workflow``. Only
+constructed by ``worker_factory._build_implementation_worker`` when
+``CODING_TEAM_DEVOPS_ROUTING`` routes a stack to ``"devops"`` (see
+``team_routing.py``).
+"""
+
+from __future__ import annotations
+
+import logging
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+
+from software_engineering_team.devops_team.models import (
+    DevOpsCompletionPackage,
+    DevOpsConstraints,
+    DevOpsTaskSpec,
+    PlatformScope,
+    RepoContext,
+    SecretsConstraints,
+    TaskGoal,
+    TaskScope,
+)
+from software_engineering_team.models import StackSpec
+from software_engineering_team.v2_team_worker import (
+    _changes_summary,
+    _failed_result,
+    _feedback_lines,
+    _prepare_feature_branch,
+    _task_feature_name,
+    _validate_task_interface,
+)
+
+logger = logging.getLogger(__name__)
+
+_TEAM_LABEL = "devops"
+
+# Static defaults mirroring devops_team/orchestrator.py's _build_legacy_spec, for
+# DevOpsTaskSpec fields the coding-team Task model does not carry. Deliberate
+# scope cut: no rich platform_scope/repo_context/constraints planning yet (see
+# the plan's "Scope cuts" section) -- this can grow richer once the Tech Lead's
+# planning phase threads real repo/platform context through.
+_DEFAULT_CLOUD = "on-premises"
+_DEFAULT_APP_REPO = "application"
+_DEFAULT_INFRA_REPO = "platform-infra"
+_DEFAULT_SECRETS_SOURCE = "managed_secret_store"
+_DEFAULT_ACCEPTANCE_CRITERIA = (
+    "CI/CD workflow exists and validates",
+    "Deployment strategy and rollback documented",
+    "Security and policy review executed",
+)
+_DEFAULT_ROLLBACK_REQUIREMENTS = ("Rollback to previous known good release",)
+_DEFAULT_SECURITY_CONSTRAINTS = ("No plaintext credentials", "Least privilege IAM")
+_DEFAULT_COMPLIANCE_CONSTRAINTS = ("Audit trail required",)
+
+# This handoff never reaches a production environment: the coding team always
+# produces a PR for Tech Lead review, never a live deployment. Production
+# approval/rollback policy applies at merge time, outside this path.
+_ENVIRONMENT = "dev"
+
+
+def _augment_goal_summary(task: Any) -> str:
+    """Fold coding-team Tech Lead revision feedback into the DevOps goal summary."""
+    summary = task.description or task.title or task.id
+    feedback = _feedback_lines(list(task.revision_feedback or []))
+    if not feedback:
+        return summary
+    rendered = "\n".join(f"- {line}" for line in feedback)
+    return (
+        f"{summary}\n\n"
+        f"CODING TEAM TECH LEAD FEEDBACK FOR {_TEAM_LABEL}:\n"
+        f"Address every item below on the existing task before sending the branch back "
+        f"for Tech Lead review. Include a short summary of how each item was addressed.\n"
+        f"{rendered}"
+    )
+
+
+def _to_devops_task_spec(task: Any) -> DevOpsTaskSpec:
+    """Build a structured ``DevOpsTaskSpec`` from a coding-team ``Task``.
+
+    Preconditions:
+        - ``task`` satisfies the coding-team worker task interface (validated
+          by the caller via ``_validate_task_interface`` before this runs).
+    Postconditions:
+        - ``title`` is exactly ``task.title`` (or ``task.id`` when blank),
+          never truncated -- it must match what ``make_branch_suffix`` hashes
+          when the pipeline cuts its feature branch, or the worker and
+          pipeline disagree on the branch name.
+        - ``environment``/``platform_scope.environments`` are pinned to
+          ``"dev"``: this handoff never targets production (see module docstring).
+        - Fields the coding-team ``Task`` model does not carry (cloud/runtime,
+          repo_context, constraints) use the static ``_DEFAULT_*`` module
+          constants, mirroring ``_build_legacy_spec``'s existing defaulting
+          pattern for the same problem.
+    """
+    goal_summary = _augment_goal_summary(task)
+    scope_excluded = [task.out_of_scope] if getattr(task, "out_of_scope", "") else []
+    acceptance_criteria = list(task.acceptance_criteria or []) or list(_DEFAULT_ACCEPTANCE_CRITERIA)
+    return DevOpsTaskSpec(
+        task_id=task.id,
+        title=task.title or task.id,
+        priority=str(getattr(task, "priority", "") or "medium"),
+        platform_scope=PlatformScope(cloud=_DEFAULT_CLOUD, environments=[_ENVIRONMENT]),
+        repo_context=RepoContext(
+            app_repo=_DEFAULT_APP_REPO,
+            infra_repo=_DEFAULT_INFRA_REPO,
+            pipeline_repo=_DEFAULT_APP_REPO,
+        ),
+        goal=TaskGoal(summary=goal_summary),
+        scope=TaskScope(
+            included=[task.description or task.title or task.id], excluded=scope_excluded
+        ),
+        constraints=DevOpsConstraints(secrets=SecretsConstraints(source=_DEFAULT_SECRETS_SOURCE)),
+        acceptance_criteria=acceptance_criteria,
+        dependencies=list(task.dependencies or []),
+        rollback_requirements=list(_DEFAULT_ROLLBACK_REQUIREMENTS),
+        security_constraints=list(_DEFAULT_SECURITY_CONSTRAINTS),
+        compliance_constraints=list(_DEFAULT_COMPLIANCE_CONSTRAINTS),
+        environment=_ENVIRONMENT,
+    )
+
+
+def _devops_result_summary(pkg: Optional[DevOpsCompletionPackage]) -> str:
+    """Render a completion package's gates/readiness/notes as review prose."""
+    if pkg is None:
+        return ""
+    lines: List[str] = []
+    if pkg.quality_gates:
+        gates = ", ".join(f"{name}={status}" for name, status in sorted(pkg.quality_gates.items()))
+        lines.append(f"Quality gates: {gates}")
+    rr = pkg.release_readiness
+    if rr is not None:
+        lines.append(
+            f"Release readiness: strategy={rr.deployment_strategy or 'unspecified'}, "
+            f"rollback_available={rr.rollback_available}, "
+            f"alerting_configured={rr.alerting_configured}"
+        )
+    if pkg.notes:
+        lines.append("Notes:\n" + "\n".join(f"- {note}" for note in pkg.notes))
+    if pkg.risks_remaining:
+        lines.append("Risks remaining:\n" + "\n".join(f"- {risk}" for risk in pkg.risks_remaining))
+    return "\n\n".join(lines)
+
+
+class DevOpsTeamWorker:
+    """Coding-team worker facade for ``devops_team``.
+
+    Preconditions:
+        - ``team_lead`` is a ``DevOpsTeamLeadAgent`` (or duck-typed
+          equivalent exposing ``run_task(spec, *, repo_path, merge_to_development)``).
+    Invariants:
+        - ``team_kind`` is always ``"devops"`` -- fixed at construction, not a
+          caller-supplied parameter, since only one devops worker shape exists.
+    """
+
+    def __init__(self, *, agent_id: str, stack_spec: StackSpec, team_lead: Any) -> None:
+        self.agent_id = agent_id
+        self.stack_spec = stack_spec
+        self.team_kind = "devops"
+        self.team_lead = team_lead
+
+    def run_implement(self, task: Any, repo_path: str | Path) -> Dict[str, Any]:
+        """Execute the task via DevOps and return a coding-team handoff result.
+
+        Args:
+            task: Coding-team task-like object to implement.
+            repo_path: Repository root where the task should be implemented.
+
+        Returns:
+            A dict containing status, feature_branch, changes_summary,
+            files_to_create_or_edit, commands_run, open_questions, and error --
+            the same generic shape ``V2TeamWorker.run_implement`` returns.
+        """
+        path = Path(repo_path).resolve()
+        task_id = str(getattr(task, "id", "") or "unknown-task")
+        try:
+            _validate_task_interface(task)
+        except ValueError as exc:
+            logger.warning("devops worker received malformed task %s: %s", task_id, exc)
+            return _failed_result(
+                getattr(task, "feature_branch", None) or f"feature/{_task_feature_name(task)}",
+                str(exc),
+            )
+        branch_ok, prepared_branch = _prepare_feature_branch(path, task)
+        if not branch_ok:
+            logger.warning(
+                "devops worker could not prepare branch for task %s: %s", task_id, prepared_branch
+            )
+            return _failed_result(
+                getattr(task, "feature_branch", None) or f"feature/{_task_feature_name(task)}",
+                f"failed to prepare feature branch: {prepared_branch}",
+            )
+        spec = _to_devops_task_spec(task)
+        try:
+            result = self.team_lead.run_task(spec, repo_path=path, merge_to_development=False)
+        except Exception as exc:  # noqa: BLE001 - worker failure is task-local
+            logger.exception("devops worker failed for task %s", task_id)
+            return _failed_result(prepared_branch, str(exc))
+
+        pkg = result.completion_package
+        branch = (pkg.git_operations.branch_created if pkg is not None else "") or prepared_branch
+        files_changed = list(pkg.files_changed) if pkg is not None else []
+        commands_run = (
+            [commit.message for commit in pkg.git_operations.commits if commit.message]
+            if pkg is not None
+            else []
+        )
+        success = bool(result.success and pkg is not None and pkg.status == "completed")
+        if not success:
+            reason = str(result.failure_reason or "DevOps pipeline did not complete")
+            return _failed_result(
+                branch,
+                reason,
+                changes_summary=_devops_result_summary(pkg),
+                files_to_create_or_edit=files_changed,
+                commands_run=commands_run,
+            )
+        return {
+            "status": "in_review",
+            "feature_branch": branch,
+            "changes_summary": _changes_summary(
+                team_label=_TEAM_LABEL,
+                branch=branch,
+                result_summary=_devops_result_summary(pkg),
+                feedback=list(task.revision_feedback or []),
+            ),
+            "files_to_create_or_edit": files_changed,
+            "commands_run": commands_run,
+            "open_questions": [],
+            "error": None,
+        }

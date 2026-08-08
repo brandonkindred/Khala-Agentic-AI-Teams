@@ -12,8 +12,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
+from shared.git.branch_utils import make_branch_suffix
 from shared.git.git_utils import DEVELOPMENT_BRANCH
-from software_engineering_team.shared.deliver_utils import DeliverGitOps, deliver_inline_merge
+from software_engineering_team.shared.deliver_utils import (
+    DeliverGitOps,
+    deliver_inline_merge,
+    prepare_handoff_branch,
+)
 from software_engineering_team.shared.team_lead_base import build_team_failure_result
 
 from ..doc_runbook_agent import DocumentationRunbookAgent, DocumentationRunbookInput
@@ -134,6 +139,7 @@ def run_phase5_deliver_merge(
     doc_runbook_agent: DocumentationRunbookAgent,
     git_ops: DeliverGitOps,
     get_head_sha: Callable[[Path], Tuple[bool, str]],
+    merge_to_development: bool = True,
 ) -> Phase5DeliverMergeResult:
     """Phase 5: completion package assembly + deliver/merge.
 
@@ -146,7 +152,10 @@ def run_phase5_deliver_merge(
       failed ``DevOpsTeamResult`` via ``build_team_failure_result`` with the
       blocked completion package; otherwise returns ``completion``
       (completed status, git ops, handoff, quality gates) with
-      ``blocked_result=None``.
+      ``blocked_result=None``. When ``merge_to_development`` is ``False``,
+      the feature branch is committed and left in place (not merged or
+      deleted) for external review, and ``completion.git_operations.merge``
+      is ``None`` rather than fabricated merge metadata.
     """
     doc = doc_runbook_agent.run(
         DocumentationRunbookInput(
@@ -176,26 +185,50 @@ def run_phase5_deliver_merge(
         runtime_verification_checklist=list(getattr(deploy_result, "health_checks", []))
         or list(DEFAULT_RUNTIME_CHECKS),
     )
-    # Deliver the artifacts for real via the shared inline-merge helper and
-    # report the actual outcome (real branch, commit SHA, merge status) rather
-    # than fabricated placeholders. A model-only run (write_changes=False) does
-    # no git work, so the neutral default honestly reports "nothing delivered".
+    # Deliver the artifacts for real via the shared deliver helper and report
+    # the actual outcome (real branch, commit SHA, merge status) rather than
+    # fabricated placeholders. A model-only run (write_changes=False) does no
+    # git work, so the neutral default honestly reports "nothing delivered".
+    # merge_to_development=False (the coding-team handoff mode) commits the
+    # feature branch and leaves it in place for external Tech Lead review
+    # instead of merging/deleting it — deliver_inline_merge cannot run from a
+    # per-task git worktree (merge_branch requires checking out development,
+    # which git refuses while it's attached in another worktree).
     git_operations = GitOperationsMetadata()
     if write_changes and aggregated_artifacts:
-        deliver_result = deliver_inline_merge(
-            task_id=task_spec.task_id,
-            repo_path=repo_path,
-            deliver_files=aggregated_artifacts,
-            summary=f"implement task [{task_spec.task_id}]",
-            task_title=task_spec.title,
-            commit_msg_template=DEVOPS_DELIVER_COMMIT_MSG_TEMPLATE,
-            ops=git_ops,
-            logger=logger,
-        )
+        if merge_to_development:
+            deliver_result = deliver_inline_merge(
+                task_id=task_spec.task_id,
+                repo_path=repo_path,
+                deliver_files=aggregated_artifacts,
+                summary=f"implement task [{task_spec.task_id}]",
+                task_title=task_spec.title,
+                commit_msg_template=DEVOPS_DELIVER_COMMIT_MSG_TEMPLATE,
+                ops=git_ops,
+                logger=logger,
+            )
+        else:
+            # Recompute the same branch suffix deliver_inline_merge would use
+            # internally and pass it explicitly so prepare_handoff_branch
+            # reuses/checks out an existing branch (e.g. on a revision round)
+            # instead of deleting and recreating it.
+            deliver_result = prepare_handoff_branch(
+                task_id=task_spec.task_id,
+                repo_path=repo_path,
+                deliver_files=aggregated_artifacts,
+                summary=f"implement task [{task_spec.task_id}]",
+                task_title=task_spec.title,
+                feature_branch_name=(
+                    f"feature/{make_branch_suffix(task_spec.task_id, task_spec.title)}"
+                ),
+                commit_msg_template=DEVOPS_DELIVER_COMMIT_MSG_TEMPLATE,
+                ops=git_ops,
+                logger=logger,
+            )
         # deliver_inline_merge leaves development checked out at the merged
-        # commit. merge_branch fast-forwards (development never advanced since
-        # the branch was cut), so this single HEAD SHA is the honest identifier
-        # for both the delivered commit and the merge result.
+        # commit; prepare_handoff_branch leaves the feature branch checked
+        # out at its tip. Either way this single HEAD SHA is the honest
+        # identifier for the delivered commit.
         head_ok, head_sha = get_head_sha(repo_path)
         sha = head_sha if head_ok else ""
         commit_msg = (
@@ -203,12 +236,20 @@ def run_phase5_deliver_merge(
             if deliver_result.commit_messages
             else f"feat(devops): implement task [{task_spec.task_id}]"
         )
-        if not deliver_result.merged:
+        delivered_ok = (
+            deliver_result.merged if merge_to_development else deliver_result.branch_ready
+        )
+        if not delivered_ok:
+            failure_summary = deliver_result.summary or (
+                "DevOps delivery merge failed"
+                if merge_to_development
+                else "DevOps delivery branch preparation failed"
+            )
             return Phase5DeliverMergeResult(
                 completion=completion,
                 blocked_result=build_team_failure_result(
                     DevOpsTeamResult,
-                    deliver_result.summary or "DevOps delivery merge failed",
+                    failure_summary,
                     completion_package=DevOpsCompletionPackage(
                         task_id=task_spec.task_id,
                         status="blocked",
@@ -217,31 +258,44 @@ def run_phase5_deliver_merge(
                         git_operations=GitOperationsMetadata(
                             branch_created=deliver_result.branch_name,
                             commits=[GitCommitMetadata(hash="", message=commit_msg)],
-                            merge=GitMergeMetadata(
-                                target_branch=DEVELOPMENT_BRANCH,
-                                strategy="merge",
-                                merge_commit_hash="",
-                                status="failed",
+                            merge=(
+                                GitMergeMetadata(
+                                    target_branch=DEVELOPMENT_BRANCH,
+                                    strategy="merge",
+                                    merge_commit_hash="",
+                                    status="failed",
+                                )
+                                if merge_to_development
+                                else None
                             ),
                         ),
-                        notes=[deliver_result.summary],
+                        notes=[failure_summary],
                     ),
                 ),
             )
-        merge_status = "merged" if head_ok else "merged_sha_unknown"
-        if not head_ok:
-            completion.notes.append(
-                "Merge succeeded but HEAD SHA could not be read after merge; commit hash unknown."
-            )
-        git_operations = GitOperationsMetadata(
-            branch_created=deliver_result.branch_name,
-            commits=[GitCommitMetadata(hash=sha, message=commit_msg)],
-            merge=GitMergeMetadata(
+        if merge_to_development:
+            merge_status = "merged" if head_ok else "merged_sha_unknown"
+            if not head_ok:
+                completion.notes.append(
+                    "Merge succeeded but HEAD SHA could not be read after merge; "
+                    "commit hash unknown."
+                )
+            merge_metadata: Optional[GitMergeMetadata] = GitMergeMetadata(
                 target_branch=DEVELOPMENT_BRANCH,
                 strategy="merge",
                 merge_commit_hash=sha,
                 status=merge_status,
-            ),
+            )
+        else:
+            if not head_ok:
+                completion.notes.append(
+                    "Branch prepared but HEAD SHA could not be read; commit hash unknown."
+                )
+            merge_metadata = None
+        git_operations = GitOperationsMetadata(
+            branch_created=deliver_result.branch_name,
+            commits=[GitCommitMetadata(hash=sha, message=commit_msg)],
+            merge=merge_metadata,
         )
     completion.git_operations = git_operations
     completion.handoff = HandoffInfo(

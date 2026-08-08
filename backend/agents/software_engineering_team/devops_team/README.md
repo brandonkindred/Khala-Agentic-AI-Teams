@@ -177,6 +177,12 @@ else:
     print(f"Failed: {result.failure_reason}")
 ```
 
+`run_task` merges the feature branch into `development` by default. Pass
+`merge_to_development=False` to commit the branch and leave it in place for
+external review instead — the mode the coding-team handoff
+(`CODING_TEAM_DEVOPS_ROUTING`, see `docs/ENV_VARS.md`) uses, since a per-task
+git worktree cannot merge back into the shared `development` checkout.
+
 ## Task Specification
 
 The `DevOpsTaskSpec` model defines all task inputs:

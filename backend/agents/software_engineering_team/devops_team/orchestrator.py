@@ -697,6 +697,49 @@ class DevOpsTeamLeadAgent(BaseTeamLead):
             subdir=subdir,
         )
 
+    def run_task(
+        self,
+        task_spec: DevOpsTaskSpec,
+        *,
+        repo_path: Path,
+        build_verifier: Optional[Any] = None,
+        merge_to_development: bool = True,
+        subdir: str = "",
+    ) -> DevOpsTeamResult:
+        """Structured entry point: run the full pipeline against a real repo.
+
+        The write-capable counterpart to ``run``, and the structured
+        counterpart to ``run_workflow``: takes a pre-built ``DevOpsTaskSpec``
+        directly instead of free text, and (unlike ``run()``) writes, commits,
+        and by default merges the result. ``merge_to_development=False`` commits
+        the feature branch and leaves it unmerged for an external Tech Lead
+        review — the mode the coding-team swarm uses when dispatching a
+        ``target_team="devops"`` task from a per-task git worktree.
+
+        Preconditions:
+            - ``task_spec`` is a valid ``DevOpsTaskSpec``.
+            - ``repo_path`` is a path to an existing directory initialised as a git repo.
+            - ``build_verifier``, when provided, is callable and returns ``(bool, str)``.
+        Postconditions:
+            - Returns a ``DevOpsTeamResult`` reflecting the full pipeline outcome.
+            - Artifacts are written to the repo on a feature branch; the branch is
+              merged into ``development`` when ``merge_to_development`` is ``True``
+              (the default) and left in place otherwise.
+        """
+        assert task_spec is not None, "task_spec is required"
+        repo_path_obj = Path(repo_path).resolve()
+        assert repo_path_obj.is_dir(), f"repo_path must be an existing directory: {repo_path_obj}"
+        if build_verifier is not None:
+            assert callable(build_verifier), "build_verifier must be callable"
+        return self._run_pipeline(
+            repo_path=repo_path_obj,
+            task_spec=task_spec,
+            build_verifier=build_verifier,
+            write_changes=True,
+            merge_to_development=merge_to_development,
+            subdir=subdir,
+        )
+
     @staticmethod
     def _build_subtask_contracts(task_spec: DevOpsTaskSpec) -> List[SubtaskContract]:
         """Create the IaC, CI/CD, and deployment subtask contracts for a run.
@@ -803,6 +846,7 @@ class DevOpsTeamLeadAgent(BaseTeamLead):
         task_spec: DevOpsTaskSpec,
         build_verifier: Optional[Any],
         write_changes: bool,
+        merge_to_development: bool = True,
         subdir: str = "",
     ) -> DevOpsTeamResult:
         """Sequence the 5 DevOps phases via the shared gated-phase framework.
@@ -830,6 +874,12 @@ class DevOpsTeamLeadAgent(BaseTeamLead):
               ``success=False`` and ``failure_reason`` set.
             - Raises ``RuntimeError`` if Phase 5 returns without assigning the
               completion package (internal contract violation).
+            - ``merge_to_development`` only matters when ``write_changes=True``:
+              ``True`` (default) merges and deletes the feature branch, matching
+              ``run_workflow``'s existing behavior; ``False`` commits the branch
+              and leaves it in place for external review (required when running
+              from a detached per-task git worktree, where merging back into
+              ``development`` is not possible).
         Invariants:
             - ``task_spec`` is not mutated by this method or its phase closures.
         """
@@ -1000,6 +1050,7 @@ class DevOpsTeamLeadAgent(BaseTeamLead):
                 doc_runbook_agent=self.doc_runbook_agent,
                 git_ops=_git_ops(),
                 get_head_sha=get_head_sha,
+                merge_to_development=merge_to_development,
             )
             if result.blocked_result is not None:
                 return result.blocked_result

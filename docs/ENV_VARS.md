@@ -1670,6 +1670,23 @@ timeout the job fails closed (`failed`) rather than proceeding on a guessed deci
 orchestrator thread (e.g. server restart) is recovered via
 `POST /api/coding-team/run/{job_id}/resume`.
 
+### CODING_TEAM_DEVOPS_ROUTING
+Opt-in (**default OFF**) gate for dispatching `target_team="devops"`/`"infra"`/`"infrastructure"`/
+`"ci"`/`"ci_cd"`/`"cicd"`/`"dev_ops"` coding-team tasks to a dedicated DevOps worker
+(`DevOpsTeamWorker`, backed by `DevOpsTeamLeadAgent.run_task`) instead of the pre-existing behavior
+of aliasing them to the `backend_v2` worker. Unlike this file's other boolean toggles (which build on
+`shared.env.env_flag_enabled`'s default-**on** contract), this one uses `shared.env.env_flag_opt_in`:
+only an explicit `1`/`true`/`yes`/`on` (case-insensitive, whitespace-tolerant) enables it — unset,
+blank, or any other value (including `false`/`0`/`off`) leaves it disabled. With the flag off, devops-
+labeled tasks route exactly as before: aliased to `backend_v2` and implemented by an ordinary v2
+worker. With it on, such tasks are routed to a devops worker that builds a structured
+`DevOpsTaskSpec`, runs the full DevOps pipeline (including its own internal IaC/CI/CD/security/change-
+review gates — the coding team's generic build/lint gate is skipped for these tasks), and hands the
+resulting feature branch back for the normal Tech Lead review/merge step, the same as a v2 team's
+output. The devops worker's `DevOpsTaskSpec` is always built with `environment="dev"` — this path
+never targets a production environment; production approval happens at PR merge, outside DevOps's own
+pipeline gates.
+
 ---
 
 ## SE CI Gate and Git Identity

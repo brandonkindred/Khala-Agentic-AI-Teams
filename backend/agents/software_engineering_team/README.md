@@ -592,9 +592,17 @@ notes:
   - "OIDC used for GitHub Actions to AWS, no long-lived deploy keys"
 ```
 
-### Backward Compatibility
+### Entry Points
 
-The `DevOpsTeamLeadAgent` provides a `run_workflow()` method that accepts the same parameters as the earlier DevOps agent's `run_workflow()`. When called by the Tech Lead's `trigger_devops_for_backend/frontend`, it constructs a `DevOpsTaskSpec` internally (adding defaults for rollback, security, approval gates) and runs the full pipeline.
+`DevOpsTeamLeadAgent` exposes three entry points, all funneling through the same 5-phase pipeline:
+
+- **`run(spec: DevOpsTaskSpec) -> DevOpsCompletionPackage`** — model-only: runs the pipeline with `write_changes=False`, so it never commits or merges (Phase 4.5 validation tools like `terraform init`/`helm lint` may still write under the working directory as side effects).
+- **`run_workflow(*, repo_path, task_description, requirements, ...) -> DevOpsTeamResult`** — the legacy free-text adapter: builds a `DevOpsTaskSpec` internally via `_build_legacy_spec` (adding defaults for rollback, security, approval gates), then writes and merges into `development`.
+- **`run_task(spec: DevOpsTaskSpec, *, repo_path, merge_to_development=True, ...) -> DevOpsTeamResult`** — the structured, write-capable entry point: takes a pre-built `DevOpsTaskSpec` directly instead of free text. Set `merge_to_development=False` to commit the feature branch and leave it for external review instead of merging it immediately — the mode the coding-team handoff below uses.
+
+### Coding-Team Handoff (`CODING_TEAM_DEVOPS_ROUTING`)
+
+Opt-in (default off; see `CODING_TEAM_DEVOPS_ROUTING` in `docs/ENV_VARS.md`). When enabled, a coding-team Task Graph task with `target_team="devops"` — genuinely infrastructure-only work: a CI/CD pipeline definition, IaC provisioning, or deployment/container-orchestration configuration — is dispatched to a `DevOpsTeamWorker` (`software_engineering_team/devops_team_worker.py`) instead of being aliased to `backend_v2`. The worker builds a `DevOpsTaskSpec` from the coding-team `Task`, calls `DevOpsTeamLeadAgent.run_task(spec, repo_path=..., merge_to_development=False)`, and returns the resulting feature branch for the normal Tech Lead code-review/merge step — the coding team's generic build/lint gate is skipped for these tasks since DevOps already runs its own internal gates (`DEVOPS_REQUIRED_GATE_NAMES`). With the flag off, `target_team="devops"`/`"infra"`/`"ci"`/`"cicd"` continue to alias to `backend_v2` as before.
 
 ### Expanded Team (Phase 2, not yet implemented)
 

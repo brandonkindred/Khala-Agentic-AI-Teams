@@ -1941,6 +1941,167 @@ class TestDevOpsTeamLeadAgentIntegration:
 
 
 # ===========================================================================
+# STRUCTURED, WRITE-CAPABLE ENTRY POINT -- run_task
+# ===========================================================================
+
+
+class TestRunTaskStructuredEntrypoint:
+    """``run_task`` is the structured (``DevOpsTaskSpec`` in, no free text)
+    counterpart to ``run_workflow`` — the entry point the coding-team's
+    devops worker adapter uses."""
+
+    def test_run_task_accepts_structured_spec_and_merges(self) -> None:
+        """Default ``merge_to_development=True`` behaves exactly like
+        ``run_workflow``: cuts a feature branch, merges it into development,
+        and deletes it."""
+        mock_llm = _scripted_llm_for_happy_path()
+        agent = DevOpsTeamLeadAgent(mock_llm)
+        spec = _base_task_spec(task_id="devops-run-task-merge")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp)
+            init_ok, _ = initialize_new_repo(path)
+            assert init_ok
+            result = agent.run_task(
+                spec, repo_path=path, build_verifier=MagicMock(return_value=(True, ""))
+            )
+            branches = subprocess.run(
+                ["git", "branch"], cwd=path, capture_output=True, text=True, check=True
+            ).stdout
+            rev = subprocess.run(
+                ["git", "rev-parse", "development"],
+                cwd=path,
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            dev_head = rev.stdout.strip()
+        assert result.success
+        assert result.completion_package is not None
+        assert result.completion_package.status == "completed"
+        gitops = result.completion_package.git_operations
+        assert gitops.branch_created.startswith("feature/")
+        assert gitops.merge is not None
+        assert gitops.merge.status == "merged"
+        assert gitops.merge.merge_commit_hash == dev_head
+        assert "feature/" not in branches
+
+    def test_run_task_handoff_mode_leaves_branch_unmerged(self) -> None:
+        """``merge_to_development=False`` commits the feature branch and
+        leaves it in place — the mode the coding-team worker uses — instead
+        of merging/deleting it."""
+        mock_llm = _scripted_llm_for_happy_path()
+        agent = DevOpsTeamLeadAgent(mock_llm)
+        spec = _base_task_spec(task_id="devops-run-task-handoff")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp)
+            init_ok, _ = initialize_new_repo(path)
+            assert init_ok
+            rev_before = subprocess.run(
+                ["git", "rev-parse", "development"],
+                cwd=path,
+                capture_output=True,
+                text=True,
+                check=True,
+            ).stdout.strip()
+            result = agent.run_task(spec, repo_path=path, merge_to_development=False)
+            branches = subprocess.run(
+                ["git", "branch"], cwd=path, capture_output=True, text=True, check=True
+            ).stdout
+            rev_after = subprocess.run(
+                ["git", "rev-parse", "development"],
+                cwd=path,
+                capture_output=True,
+                text=True,
+                check=True,
+            ).stdout.strip()
+        assert result.success
+        assert result.completion_package is not None
+        assert result.completion_package.status == "completed"
+        gitops = result.completion_package.git_operations
+        assert gitops.branch_created.startswith("feature/")
+        assert gitops.merge is None
+        assert len(result.completion_package.files_changed) > 0
+        # The branch is still there, and development never advanced.
+        assert gitops.branch_created in branches
+        assert rev_after == rev_before
+
+    def test_run_task_handoff_branch_matches_make_branch_suffix(self) -> None:
+        """The branch name the pipeline actually cuts must match what a
+        caller (the coding-team devops worker) independently computes via
+        ``make_branch_suffix`` — otherwise the Tech Lead review diffs the
+        wrong branch."""
+        from shared.git.branch_utils import make_branch_suffix
+
+        mock_llm = _scripted_llm_for_happy_path()
+        agent = DevOpsTeamLeadAgent(mock_llm)
+        spec = _base_task_spec(task_id="devops-branch-name", title="Add deploy workflow")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp)
+            init_ok, _ = initialize_new_repo(path)
+            assert init_ok
+            result = agent.run_task(spec, repo_path=path, merge_to_development=False)
+        expected = f"feature/{make_branch_suffix(spec.task_id, spec.title)}"
+        assert result.completion_package.git_operations.branch_created == expected
+
+    def test_run_task_reports_delivery_failure_in_handoff_mode(self, monkeypatch) -> None:
+        """A commit failure in handoff mode still reports a blocked package
+        with ``merge=None`` (no merge was even attempted)."""
+        import software_engineering_team.devops_team.orchestrator as orch
+
+        monkeypatch.setattr(orch, "commit_working_tree", lambda *a, **k: (False, "boom"))
+        mock_llm = _scripted_llm_for_happy_path()
+        agent = DevOpsTeamLeadAgent(mock_llm)
+        spec = _base_task_spec(task_id="devops-handoff-fail")
+        with tempfile.TemporaryDirectory() as tmp:
+            init_ok, _ = initialize_new_repo(Path(tmp))
+            assert init_ok
+            result = agent.run_task(spec, repo_path=Path(tmp), merge_to_development=False)
+        assert not result.success
+        assert result.completion_package is not None
+        assert result.completion_package.status == "blocked"
+        assert result.completion_package.git_operations.merge is None
+
+    def test_run_task_rejects_missing_repo_path(self) -> None:
+        mock_llm = _scripted_llm_for_happy_path()
+        agent = DevOpsTeamLeadAgent(mock_llm)
+        spec = _base_task_spec(task_id="devops-missing-repo")
+        with pytest.raises(AssertionError):
+            agent.run_task(spec, repo_path=Path("/nonexistent/does/not/exist"))
+
+    def test_run_task_requires_task_spec(self) -> None:
+        mock_llm = _scripted_llm_for_happy_path()
+        agent = DevOpsTeamLeadAgent(mock_llm)
+        with tempfile.TemporaryDirectory() as tmp:
+            with pytest.raises(AssertionError):
+                agent.run_task(None, repo_path=Path(tmp))
+
+    def test_run_workflow_unchanged_by_merge_to_development_default(self) -> None:
+        """Regression guard: adding ``merge_to_development`` to the shared
+        pipeline plumbing must not change ``run_workflow``'s existing
+        merge-and-delete behavior."""
+        mock_llm = _scripted_llm_for_happy_path()
+        agent = DevOpsTeamLeadAgent(mock_llm)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp)
+            init_ok, _ = initialize_new_repo(path)
+            assert init_ok
+            result = agent.run_workflow(
+                repo_path=path,
+                task_description="Add backend deployment automation",
+                requirements="Include prod approval gate and rollback plan",
+                build_verifier=MagicMock(return_value=(True, "")),
+                task_id="devops-run-workflow-regression",
+            )
+            branches = subprocess.run(
+                ["git", "branch"], cwd=path, capture_output=True, text=True, check=True
+            ).stdout
+        assert result.success
+        assert result.completion_package.git_operations.merge is not None
+        assert result.completion_package.git_operations.merge.status == "merged"
+        assert "feature/" not in branches
+
+
+# ===========================================================================
 # COMPATIBILITY / MIGRATION TESTS
 # ===========================================================================
 
