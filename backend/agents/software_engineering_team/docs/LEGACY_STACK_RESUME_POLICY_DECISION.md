@@ -143,11 +143,16 @@ WHERE (
   )
   AND (
     -- (a) a stack_specs entry uses a legacy alias name, normalized the same
-    -- way _legacy_stack_key does (strip, lowercase, '-'/' ' -> '_') so variants
-    -- like " Senior Software Engineer " or "senior-software-engineer" are caught
+    -- way _legacy_stack_key does (strip, lowercase, '-'/' ' -> '_'). Python's
+    -- .strip() removes all whitespace (tabs/newlines included), not just
+    -- spaces, so the leading/trailing trim uses \s+ rather than trim() (which
+    -- is space-only in Postgres) — variants like " Senior Software Engineer ",
+    -- "\tsenior-software-engineer\n" are all caught
     EXISTS (
       SELECT 1 FROM jsonb_array_elements(data->'stack_specs') AS s
-      WHERE lower(regexp_replace(trim(s->>'name'), '[- ]', '_', 'g')) IN (
+      WHERE lower(regexp_replace(
+        regexp_replace(s->>'name', '^\s+|\s+$', '', 'g'), '[- ]', '_', 'g'
+      )) IN (
         'default', 'senior_software_engineer',
         'senior_software_engineer_legacy', 'software_engineer'
       )
