@@ -86,38 +86,59 @@ def _augment_goal_summary(task: Any) -> str:
     )
 
 
-_ENV_SIGNAL_TOKEN = re.compile(r"\b(?:production|prod|staging|stage)\b", re.IGNORECASE)
+_ENV_SIGNAL_TOKEN = re.compile(
+    r"\b(?:production|prod|staging|stage|dev|development)\b", re.IGNORECASE
+)
 
 
-def _latest_feedback_environment(task: Any) -> Optional[str]:
-    """Return the environment implied by the newest revision-feedback line that
-    mentions an environment at all, or ``None`` when no feedback line does.
+def _latest_feedback_environment_text(task: Any) -> Optional[str]:
+    """Return the newest revision-feedback line that mentions an environment at
+    all, or ``None`` when no feedback line does.
 
     ``task.revision_feedback`` is append-only, so an early round's "make this
-    production" and a later round's "actually, staging only" both persist in
-    the list. Blending every entry into one combined-text scan (the prior
-    approach) means a stale early mention of production can never be
-    overridden by a later redirect -- ``_legacy_environment_from_text``
-    returns ``"production"`` if ANY clause across the combined text implies
-    it. Scanning newest-first and stopping at the first line that mentions an
-    environment at all lets the latest instruction win instead.
+    production" and a later round's "actually, staging only" (or "make this
+    dev-only") both persist in the list. Blending every entry into one
+    combined-text scan means a stale early mention can never be overridden --
+    ``_legacy_environment_from_text`` returns ``"production"`` if ANY clause
+    across the combined text implies it. Scanning newest-first and stopping at
+    the first line that mentions an environment at all lets the latest
+    instruction win instead.
 
     Preconditions: none.
     Postconditions:
-        - Returns ``_legacy_environment_from_text``'s verdict for the single
-          newest feedback line containing "production"/"prod"/"staging"/
-          "stage" (case-insensitive), or ``None`` if no feedback line
-          mentions any of those -- callers should fall back to the original
-          task text in that case, not assume ``"staging"``.
+        - Returns the single newest feedback line containing "production"/
+          "prod"/"staging"/"stage"/"dev"/"development" (case-insensitive), or
+          ``None`` if no feedback line mentions any of those -- callers should
+          fall back to the original task text in that case.
     """
     for line in reversed(_feedback_lines(list(task.revision_feedback or []))):
         if _ENV_SIGNAL_TOKEN.search(line):
-            return _legacy_environment_from_text(line.lower())
+            return line.lower()
     return None
 
 
+def _environment_resolution_text(task: Any) -> str:
+    """Return the single text span that determines both ``environment`` and
+    ``platform_scope.environments`` -- the newest revision-feedback line that
+    mentions an environment (see ``_latest_feedback_environment_text``) when
+    one exists, since the latest instruction is authoritative and must govern
+    both the production/staging verdict and any dev-only exclusion together;
+    otherwise the task's own description, title, and acceptance criteria (a
+    groomed task commonly carries its environment scope in a criterion, e.g.
+    "Production deploy requires explicit approval" or "development only; do
+    not deploy to staging", rather than the title/description, and the CI/CD
+    and Deployment specialist agents already consume ``acceptance_criteria``
+    directly).
+    """
+    latest_feedback_text = _latest_feedback_environment_text(task)
+    if latest_feedback_text is not None:
+        return latest_feedback_text
+    parts = [task.description or "", task.title or "", *(task.acceptance_criteria or [])]
+    return " ".join(parts).lower()
+
+
 def _derive_environment(task: Any) -> str:
-    """Infer the target environment from the task's own text.
+    """Infer the target environment from ``_environment_resolution_text(task)``.
 
     Reuses ``_legacy_environment_from_text`` -- the same inference
     ``_build_legacy_spec`` already applies for free-text ``run_workflow``
@@ -129,38 +150,22 @@ def _derive_environment(task: Any) -> str:
     production deployment workflow"), letting production-targeting config
     merge without the scrutiny DevOps normally enforces for it.
 
-    Scans ``task.acceptance_criteria`` in addition to description/title: a
-    groomed task commonly carries its production signal there (e.g. "Production
-    deploy requires explicit approval" as a criterion) rather than in the
-    title/description, and the CI/CD and Deployment specialist agents already
-    consume ``acceptance_criteria`` directly -- they can produce
-    production-targeting artifacts even when the description reads generically.
-
-    Checks ``task.revision_feedback`` via ``_latest_feedback_environment``
-    first: a Tech Lead rejection can redirect a generic task toward production
-    (e.g. "this needs to be the production deploy workflow, not staging") --
-    or redirect a stale production mention back to staging -- and only the
-    newest such redirect should win, not every historical mention blended
-    together. Falls back to the original task text when no feedback line
-    mentions an environment at all.
-
     Preconditions: none.
     Postconditions:
         - Returns ``"production"`` or ``"staging"`` per
           ``_legacy_environment_from_text``'s rules (defaults to
           ``"staging"`` absent an explicit production signal -- matching
-          ``_build_legacy_spec``'s existing default for the same problem).
+          ``_build_legacy_spec``'s existing default for the same problem;
+          also the value returned for a dev-only task, since the model has no
+          distinct "dev" environment enum -- ``_platform_environments``
+          separately excludes staging from the environments list for that
+          case).
         - A task that IS production-scoped but whose description carries no
           explicit approval-gate language will correctly fail Phase 1's
           environment-policy gate rather than silently proceeding -- the
           same trade-off ``run_workflow`` callers already accept.
     """
-    latest_feedback_environment = _latest_feedback_environment(task)
-    if latest_feedback_environment is not None:
-        return latest_feedback_environment
-    parts = [task.description or "", task.title or "", *(task.acceptance_criteria or [])]
-    combined_text = " ".join(parts).lower()
-    return _legacy_environment_from_text(combined_text)
+    return _legacy_environment_from_text(_environment_resolution_text(task))
 
 
 _STAGING_INTERVENING_TOKENS = frozenset(
@@ -200,16 +205,19 @@ def _platform_environments(task: Any, environment: str) -> List[str]:
     Postconditions:
         - ``"production"`` always returns ``["dev", "production"]`` -- a
           production-scoped task never claims to also be dev-only.
-        - ``"staging"`` returns ``["dev"]`` alone when the task's own text
-          explicitly excludes staging (see ``_excludes_staging``, e.g. "dev
-          only; do not deploy to staging"), so the CI/CD and Deployment
-          specialists -- which read this list -- don't generate staging
-          configuration the task explicitly ruled out; otherwise returns
-          ``["dev", "staging"]`` as before.
+        - ``"staging"`` returns ``["dev"]`` alone when
+          ``_environment_resolution_text(task)`` -- the SAME text
+          ``_derive_environment`` used, so a dev-only exclusion never
+          disagrees with the environment verdict it came from -- explicitly
+          excludes staging (see ``_excludes_staging``, e.g. "dev only; do not
+          deploy to staging"), so the CI/CD and Deployment specialists --
+          which read this list -- don't generate staging configuration the
+          task explicitly ruled out; otherwise returns ``["dev", "staging"]``
+          as before.
     """
     if environment == "production":
         return ["dev", "production"]
-    text = f"{task.description or ''} {task.title or ''}"
+    text = _environment_resolution_text(task)
     return ["dev"] if _excludes_staging(text) else ["dev", "staging"]
 
 
@@ -365,7 +373,7 @@ def _devops_result_summary(pkg: Optional[DevOpsCompletionPackage]) -> str:
     return "\n\n".join(lines)
 
 
-def _reset_prepared_branch_to_development(path: Path, task_id: str) -> None:
+def _reset_prepared_branch_to_development(path: Path, task_id: str) -> tuple[bool, str]:
     """Wipe the just-checked-out feature branch's content back to development's tip.
 
     DevOps's Phase 2 specialists (IaC/CI-CD/Deployment) always regenerate their
@@ -391,14 +399,16 @@ def _reset_prepared_branch_to_development(path: Path, task_id: str) -> None:
         - ``_prepare_feature_branch(path, task)`` returned success; ``path``
           is currently checked out on the branch that call prepared.
     Postconditions:
-        - Best-effort: a reset failure (e.g. development doesn't exist yet on
-          a brand-new repo) is logged and swallowed so it never blocks the
-          task from proceeding to implementation on the freshly-prepared
-          branch.
+        - Returns ``(True, message)`` on success. On failure returns
+          ``(False, message)`` -- the caller must abort rather than proceed:
+          continuing on a branch this reset failed to clean would silently
+          reuse a rejected round's stale commits/validation leftovers, which
+          is exactly what this reset exists to prevent.
     """
     ok, msg = reset_hard_to(path, DEVELOPMENT_BRANCH)
     if not ok:
-        logger.debug("No stale devops branch state to reset for task %s: %s", task_id, msg)
+        logger.warning("Failed to reset devops branch state for task %s: %s", task_id, msg)
+    return ok, msg
 
 
 class DevOpsTeamWorker:
@@ -449,7 +459,11 @@ class DevOpsTeamWorker:
                 getattr(task, "feature_branch", None) or f"feature/{_task_feature_name(task)}",
                 f"failed to prepare feature branch: {prepared_branch}",
             )
-        _reset_prepared_branch_to_development(path, task_id)
+        reset_ok, reset_msg = _reset_prepared_branch_to_development(path, task_id)
+        if not reset_ok:
+            return _failed_result(
+                prepared_branch, f"failed to reset stale branch state: {reset_msg}"
+            )
         spec = _to_devops_task_spec(task)
         try:
             result = self.team_lead.run_task(spec, repo_path=path, merge_to_development=False)

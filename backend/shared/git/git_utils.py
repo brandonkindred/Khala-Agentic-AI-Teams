@@ -382,11 +382,15 @@ def reset_hard_to(repo_path: str | Path, ref: str) -> Tuple[bool, str]:
           ``ref``'s commit (any commits/changes unique to the current branch
           are discarded) and any untracked, non-ignored files are removed;
           returns ``(True, message)``.
-        - On failure (not a repo, or ``ref`` does not resolve) returns
-          ``(False, message)`` and leaves the repository state unchanged. A
-          post-reset clean failure is logged but does not fail the call --
-          the branch/commit state (this function's primary contract) is
-          already correct at that point.
+        - On failure (not a repo, ``ref`` does not resolve, or the post-reset
+          untracked-file clean fails) returns ``(False, message)``. When the
+          reset itself fails, the repository state is unchanged; when the
+          reset succeeds but the clean fails, the branch/commit state is
+          already correct but untracked leftovers may remain -- callers must
+          treat this as a failure, not a success with a side note, since a
+          caller that only clean-relies on this call (e.g. to guarantee no
+          validation-tool output survives) would otherwise silently commit
+          that leftover on its next ``git add -A``.
     """
     path = Path(repo_path).resolve()
     if not (path / ".git").exists():
@@ -396,7 +400,9 @@ def reset_hard_to(repo_path: str | Path, ref: str) -> Tuple[bool, str]:
         return False, f"Failed to reset to {ref}: {out}"
     clean_ok, clean_msg = clean_untracked_files(path)
     if not clean_ok:
-        logger.warning("Reset to '%s' succeeded but cleaning untracked files failed: %s", ref, clean_msg)
+        message = f"Reset to {ref} succeeded but cleaning untracked files failed: {clean_msg}"
+        logger.warning(message)
+        return False, message
     logger.info("Reset current branch to '%s'", ref)
     return True, f"Reset to {ref}"
 

@@ -497,15 +497,21 @@ def test_reset_prepared_branch_to_development_resets_current_branch(tmp_path, mo
         devops_worker_mod, "reset_hard_to", lambda p, ref: calls.append((p, ref)) or (True, "ok")
     )
 
-    _reset_prepared_branch_to_development(tmp_path, "provision")
+    ok, msg = _reset_prepared_branch_to_development(tmp_path, "provision")
 
+    assert ok, msg
     assert calls == [(tmp_path, devops_worker_mod.DEVELOPMENT_BRANCH)]
 
 
-def test_reset_prepared_branch_to_development_swallows_reset_failure(tmp_path, monkeypatch) -> None:
+def test_reset_prepared_branch_to_development_reports_reset_failure(tmp_path, monkeypatch) -> None:
+    """A reset failure must be reported (not swallowed): the caller needs it to
+    decide whether to abort rather than proceed on possibly-stale branch state."""
     monkeypatch.setattr(devops_worker_mod, "reset_hard_to", lambda p, ref: (False, "boom"))
 
-    _reset_prepared_branch_to_development(tmp_path, "provision")  # must not raise
+    ok, msg = _reset_prepared_branch_to_development(tmp_path, "provision")
+
+    assert not ok
+    assert "boom" in msg
 
 
 def test_devops_worker_resets_branch_after_preparing_it_for_new_branch(
@@ -571,6 +577,28 @@ def test_devops_worker_resets_branch_after_preparing_it_for_existing_branch(
     worker.run_implement(_base_task(feature_branch="feature/existing"), tmp_path)
 
     assert order == ["checkout", "reset"]
+
+
+def test_devops_worker_aborts_when_branch_reset_fails(tmp_path, monkeypatch) -> None:
+    """If the post-checkout reset fails (lock, timeout, other git error), run_implement
+    must abort rather than proceed on the branch as-is: Phase 3 would then reuse that
+    currently-checked-out (possibly stale/rejected) branch and only add/overwrite paths
+    in the new artifact map, leaving files from a prior rejected round in the eventual
+    diff unreviewed."""
+    _patch_branch_handoff(monkeypatch, branch="feature/provision")
+    monkeypatch.setattr(devops_worker_mod, "reset_hard_to", lambda p, ref: (False, "boom"))
+    lead = _FakeDevOpsLead()
+    worker = DevOpsTeamWorker(
+        agent_id="devops_worker",
+        stack_spec=StackSpec(name="devops", tools_services=[]),
+        team_lead=lead,
+    )
+
+    out = worker.run_implement(_base_task(), tmp_path)
+
+    assert out["status"] == "failed"
+    assert "boom" in out["error"]
+    assert lead.calls == []
 
 
 # --------------------------------------------------- actual-diff verification (finding D)
@@ -713,6 +741,40 @@ def test_devops_worker_spec_production_never_dev_only() -> None:
 
     assert spec.environment == "production"
     assert spec.platform_scope.environments == ["dev", "production"]
+
+
+def test_devops_worker_spec_excludes_staging_from_acceptance_criteria() -> None:
+    """A groomed task can carry its dev-only scope in an acceptance criterion rather
+    than the title/description -- the same field _derive_environment already scans
+    for the production/staging verdict must also govern the dev-only exclusion, or
+    the two would disagree about whether staging is in play."""
+    task = _base_task(
+        title="Add deployment workflow",
+        description="Set up the deploy pipeline",
+        acceptance_criteria=["development only; do not deploy to staging"],
+    )
+
+    spec = _to_devops_task_spec(task)
+
+    assert spec.platform_scope.environments == ["dev"]
+
+
+def test_devops_worker_spec_dev_only_revision_feedback_overrides_stale_production() -> None:
+    """A task originally scoped to production can be redirected to dev-only by
+    revision feedback that never says "staging" at all -- only "development"/"dev".
+    The newest such redirect must still be recognized as an environment signal and
+    exclude staging, not fall through to the stale original production text."""
+    task = _base_task(
+        title="Add production deployment workflow",
+        description="Deploy to production with a blue-green rollout.",
+        revision_feedback=[
+            {"source": "tech_lead", "reason": "Actually, make this development-only for now."}
+        ],
+    )
+
+    spec = _to_devops_task_spec(task)
+
+    assert spec.platform_scope.environments == ["dev"]
 
 
 # ------------------------------------------------- task scope in acceptance_criteria (finding H)

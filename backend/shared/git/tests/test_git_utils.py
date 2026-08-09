@@ -528,3 +528,18 @@ def test_reset_hard_to_fails_honestly_for_unresolvable_ref(repo: Path) -> None:
     ok, msg = reset_hard_to(repo, "does-not-exist")
     assert not ok
     assert "Failed to reset" in msg
+
+
+def test_reset_hard_to_propagates_untracked_cleanup_failure(repo: Path, monkeypatch) -> None:
+    """A post-reset git clean failure must not be swallowed into a reported success:
+    a caller relying on this call to guarantee no untracked leftovers survive (e.g.
+    before a delivery commit stages the whole tree with `git add -A`) would otherwise
+    proceed as though the working tree were clean when it isn't."""
+    import shared.git.git_utils as git_utils_mod
+
+    monkeypatch.setattr(git_utils_mod, "clean_untracked_files", lambda p: (False, "boom"))
+
+    ok, msg = reset_hard_to(repo, DEVELOPMENT_BRANCH)
+
+    assert not ok
+    assert "boom" in msg
