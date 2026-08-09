@@ -63,13 +63,22 @@ export interface AgenticTeamAgent {
  * Thin roster reference to an AgentManifest identity (target roster shape).
  *
  * Not yet the persisted/API roster row — `AgenticTeamAgent` above remains that
- * shape until the store/API/consumers are migrated in a later change. `manifest_id`
- * is required whenever `source === 'registry'`.
+ * shape until the store/API/consumers are migrated in a later change. A
+ * discriminated union on `source` so `manifest_id` is non-null whenever
+ * `source === 'registry'` at compile time, matching the backend validator.
  */
-export interface AgenticTeamAgentRef {
+export type AgenticTeamAgentRef = AgenticTeamAgentRefGenerated | AgenticTeamAgentRefRegistry;
+
+export interface AgenticTeamAgentRefGenerated {
   agent_name: string;
-  source: AgenticTeamAgentSource;
+  source: 'generated';
   manifest_id: string | null;
+}
+
+export interface AgenticTeamAgentRefRegistry {
+  agent_name: string;
+  source: 'registry';
+  manifest_id: string;
 }
 
 /** Request body for `POST /teams/{id}/agents/from-registry`. */
