@@ -30,7 +30,7 @@ from code_review_agent.false_positive_filter import (
     DEFAULT_VERIFY_MAX_FINDINGS_PER_GROUP,
     DEFAULT_VERIFY_TIMEOUT_SECONDS,
     CodebaseIndex,
-    _agent_read_real_code,
+    _agent_read_the_cited_file,
     _build_group_prompt,
     _build_tools,
     _code_fence_for,
@@ -153,15 +153,17 @@ def _final_text_stream_events(text: str) -> List[Dict[str, Any]]:
 
 class _SimulatesFileReadToolCall(DummyLLMClient):
     """``DummyLLMClient`` variant that issues one real, successful ``read_file``
-    tool call before answering a false-positive-verification prompt, mirroring
-    a well-behaved model. ``_build_group_prompt`` never inlines the cited
-    file's content (only names it and directs the model to a tool), and
-    ``_verify_group`` discards any false-positive verdict from a run that
-    never obtained real code via a successful code-reading tool call (see
-    ``_agent_read_real_code``) -- stubs that want a drop honored must actually
-    exercise that tool-call turn instead of answering on the first turn,
-    exactly as this mixin does. Subclasses still customize the final verdict
-    via ``complete_json``, called with the *original* prompt text once the
+    call for the CITED file before answering a false-positive-verification
+    prompt, mirroring a well-behaved model. ``_build_group_prompt`` never
+    inlines the cited file's content (only names it and directs the model to
+    read it), and ``_verify_group`` discards any false-positive verdict from a
+    run that never obtained that exact file's full content via a successful
+    ``read_file`` call (see ``_agent_read_the_cited_file``) -- stubs that want
+    a drop honored must actually exercise that tool-call turn instead of
+    answering on the first turn, exactly as this mixin does (it extracts the
+    cited path from the prompt's ``read_file("...")`` directive, so it always
+    targets the right file). Subclasses still customize the final verdict via
+    ``complete_json``, called with the *original* prompt text once the
     simulated tool call has round-tripped.
     """
 
@@ -1935,13 +1937,16 @@ def test_filter_keeps_ungrounded_drop_from_a_run_with_no_tool_call(caplog) -> No
     with caplog.at_level(logging.WARNING):
         out = filter_false_positives(NoToolCallDropStub(), _input(), issues)
     assert out == issues  # the drop is discarded -- kept, not removed
-    assert any("without ever successfully reading real code" in r.message for r in caplog.records)
+    assert any(
+        "without ever successfully reading that file's full content" in r.message
+        for r in caplog.records
+    )
 
 
 def test_filter_keeps_drop_when_run_only_called_list_files(caplog) -> None:
     """A run that calls only list_files() (no code content) before a confident
     drop is treated the same as no tool call at all -- listing paths is not
-    evidence of having read any code."""
+    evidence of having read the cited file."""
     issues = [_issue()]
 
     class ListFilesOnlyDropStub(DummyLLMClient):
@@ -1959,57 +1964,22 @@ def test_filter_keeps_drop_when_run_only_called_list_files(caplog) -> None:
     with caplog.at_level(logging.WARNING):
         out = filter_false_positives(ListFilesOnlyDropStub(), _input(), issues)
     assert out == issues
-    assert any("without ever successfully reading real code" in r.message for r in caplog.records)
+    assert any(
+        "without ever successfully reading that file's full content" in r.message
+        for r in caplog.records
+    )
 
 
-def test_filter_keeps_drop_when_read_file_call_errored(caplog) -> None:
-    """A read_file() call on a path that does not exist (the tool returns an
-    "Error: ..." string rather than raising -- see _build_tools) does not
-    ground a subsequent confident drop: the model attempted a read but never
-    actually saw any code."""
-    issues = [_issue()]
-
-    class FailedReadDropStub(DummyLLMClient):
-        async def stream(self, messages, tool_specs=None, system_prompt=None, **kwargs: Any):  # type: ignore[override]
-            if "toolUse" not in str(messages):
-                for event in _tool_use_stream_events(
-                    "t_read", "read_file", {"path": "definitely/does-not-exist.py"}
-                ):
-                    yield event
-                return
-            text = json.dumps(
-                {"verdicts": [{"index": 0, "is_real_issue": False, "confidence": "high"}]}
-            )
-            for event in _final_text_stream_events(text):
-                yield event
-
-    with caplog.at_level(logging.WARNING):
-        out = filter_false_positives(FailedReadDropStub(), _input(), issues)
-    assert out == issues
-    assert any("without ever successfully reading real code" in r.message for r in caplog.records)
-
-
-def test_filter_honors_drop_when_run_did_call_a_tool() -> None:
-    """The mirror of the above: the same high-confidence drop IS honored once
-    the run actually issued a successful read_file() call first
-    (``_SimulatesFileReadToolCall``), confirming the new check is about
-    grounded-read evidence, not confidence level (which was already high in
-    the discarded cases above)."""
-    issues = [_issue()]
-    stub = _VerdictStub(verdicts=[{"index": 0, "is_real_issue": False, "confidence": "high"}])
-    out = filter_false_positives(stub, _input(), issues)
-    assert out == []
-
-
-def test_filter_honors_drop_grounded_in_a_different_related_file() -> None:
-    """A run that successfully reads a DIFFERENT (but real) file than the one
-    cited -- e.g. confirming "foo is defined in util.py" -- before dropping
-    still has its drop honored: file identity is not enforced, only that some
-    real code was actually read. This is legitimate cross-file verification,
-    which the system prompt explicitly directs the model to do."""
+def test_filter_keeps_drop_when_only_a_different_file_was_read(caplog) -> None:
+    """A run that successfully reads a DIFFERENT file than the one cited --
+    e.g. confirming "foo is defined in util.py" -- but never reads the cited
+    file itself does NOT have its drop honored: file identity IS enforced for
+    the cited file specifically (unlike merely-related files, which remain
+    useful for cross-file reasoning but are never sufficient on their own --
+    see test_filter_honors_drop_when_cited_file_and_a_related_file_are_both_read)."""
     issues = [_issue(file_path="app/main.py")]
 
-    class ReadsSiblingFileDropStub(DummyLLMClient):
+    class ReadsSiblingFileOnlyDropStub(DummyLLMClient):
         async def stream(self, messages, tool_specs=None, system_prompt=None, **kwargs: Any):  # type: ignore[override]
             if "toolUse" not in str(messages):
                 for event in _tool_use_stream_events(
@@ -2029,13 +1999,132 @@ def test_filter_honors_drop_grounded_in_a_different_related_file() -> None:
             "app/util.py": "def foo():\n    return 1\n",
         }
     )
-    out = filter_false_positives(ReadsSiblingFileDropStub(), inp, issues)
+    with caplog.at_level(logging.WARNING):
+        out = filter_false_positives(ReadsSiblingFileOnlyDropStub(), inp, issues)
+    assert out == issues
+    assert any(
+        "without ever successfully reading that file's full content" in r.message
+        for r in caplog.records
+    )
+
+
+def test_filter_keeps_all_drops_in_a_batch_when_only_a_narrow_slice_was_read(caplog) -> None:
+    """The exact scenario the batch-level check exists to close: a batch with
+    MULTIPLE findings on the cited file, where the run calls read_lines() for
+    only a narrow region (never the full file via read_file) before confidently
+    dropping every finding. None of those drops is honored -- a partial slice
+    never satisfies the ``read_file``-on-the-whole-cited-file bar, regardless
+    of how many findings are in the batch."""
+    issues = [_issue(description=f"finding-{i}") for i in range(3)]
+
+    class NarrowSliceOnlyDropStub(DummyLLMClient):
+        async def stream(self, messages, tool_specs=None, system_prompt=None, **kwargs: Any):  # type: ignore[override]
+            if "toolUse" not in str(messages):
+                for event in _tool_use_stream_events(
+                    "t_slice", "read_lines", {"path": "app/main.py", "start": 1, "end": 1}
+                ):
+                    yield event
+                return
+            text = json.dumps(
+                {
+                    "verdicts": [
+                        {"index": i, "is_real_issue": False, "confidence": "high"} for i in range(3)
+                    ]
+                }
+            )
+            for event in _final_text_stream_events(text):
+                yield event
+
+    with caplog.at_level(logging.WARNING):
+        out = filter_false_positives(NarrowSliceOnlyDropStub(), _input(), issues)
+    assert out == issues  # every drop in the batch discarded, not just some
+    assert any(
+        "without ever successfully reading that file's full content" in r.message
+        for r in caplog.records
+    )
+
+
+def test_filter_honors_drop_when_run_did_call_a_tool() -> None:
+    """The mirror of the above: the same high-confidence drop IS honored once
+    the run actually issued a successful read_file() call on the cited file
+    first (``_SimulatesFileReadToolCall``), confirming the new check is about
+    grounded-read evidence, not confidence level (which was already high in
+    the discarded cases above)."""
+    issues = [_issue()]
+    stub = _VerdictStub(verdicts=[{"index": 0, "is_real_issue": False, "confidence": "high"}])
+    out = filter_false_positives(stub, _input(), issues)
+    assert out == []
+
+
+def test_filter_honors_all_drops_in_a_multi_finding_batch_after_full_cited_file_read() -> None:
+    """The positive mirror of the narrow-slice test above: one successful
+    read_file() call for the WHOLE cited file grounds drops for EVERY finding
+    in that batch, not just the one nearest whatever the model happened to
+    inspect first -- the bar is per-batch (all findings share one cited
+    file), by design, once it is actually met."""
+    issues = [_issue(description=f"finding-{i}") for i in range(3)]
+    stub = _VerdictStub(
+        verdicts=[{"index": i, "is_real_issue": False, "confidence": "high"} for i in range(3)]
+    )
+    out = filter_false_positives(stub, _input(), issues)
+    assert out == []
+
+
+def test_filter_honors_drop_when_cited_file_and_a_related_file_are_both_read() -> None:
+    """A run that reads BOTH the cited file (satisfying the required bar) AND
+    a related file for cross-file verification (e.g. confirming a symbol is
+    defined in util.py) still has its drop honored -- reading related files
+    remains useful and encouraged, it is just never a SUBSTITUTE for reading
+    the cited file itself."""
+    issues = [_issue(file_path="app/main.py")]
+
+    class ReadsCitedThenSiblingDropStub(DummyLLMClient):
+        async def stream(self, messages, tool_specs=None, system_prompt=None, **kwargs: Any):  # type: ignore[override]
+            # Branch on how many read_file toolUse blocks have already
+            # appeared, rather than matching path substrings in str(messages):
+            # once Strands parses a streamed toolUse back into a real message,
+            # its "input" dict renders with Python's single-quote repr, so a
+            # double-quoted substring check (matching this stub's own earlier
+            # bug) silently never matches and loops the tool call forever.
+            read_file_calls = sum(
+                1
+                for message in messages
+                for block in (message.get("content") or [])
+                if isinstance(block, dict)
+                and isinstance(block.get("toolUse"), dict)
+                and block["toolUse"].get("name") == "read_file"
+            )
+            if read_file_calls == 0:
+                for event in _tool_use_stream_events(
+                    "t_cited", "read_file", {"path": "app/main.py"}
+                ):
+                    yield event
+                return
+            if read_file_calls == 1:
+                for event in _tool_use_stream_events(
+                    "t_sibling2", "read_file", {"path": "app/util.py"}
+                ):
+                    yield event
+                return
+            text = json.dumps(
+                {"verdicts": [{"index": 0, "is_real_issue": False, "confidence": "high"}]}
+            )
+            for event in _final_text_stream_events(text):
+                yield event
+
+    inp = _input(
+        files={
+            "app/main.py": "def bar():\n    return foo()\n",
+            "app/util.py": "def foo():\n    return 1\n",
+        }
+    )
+    out = filter_false_positives(ReadsCitedThenSiblingDropStub(), inp, issues)
     assert out == []
 
 
 def _fake_agent(messages: List[Dict[str, Any]]) -> Any:
     """Build a minimal duck-typed stand-in for a Strands ``Agent`` exposing
-    only the ``.messages`` attribute ``_agent_read_real_code`` reads."""
+    only the ``.messages`` attribute ``_agent_read_the_cited_file`` reads."""
 
     class _FakeAgent:
         pass
@@ -2045,11 +2134,14 @@ def _fake_agent(messages: List[Dict[str, Any]]) -> Any:
     return agent
 
 
-def _tool_use_message(role: str, tool_use_id: str, name: str) -> Dict[str, Any]:
+def _tool_use_message(
+    role: str, tool_use_id: str, name: str, path: Optional[str] = None
+) -> Dict[str, Any]:
     """Build one assistant-style message containing a single toolUse block."""
+    tool_input: Dict[str, Any] = {"path": path} if path is not None else {}
     return {
         "role": role,
-        "content": [{"toolUse": {"toolUseId": tool_use_id, "name": name, "input": {}}}],
+        "content": [{"toolUse": {"toolUseId": tool_use_id, "name": name, "input": tool_input}}],
     }
 
 
@@ -2069,84 +2161,119 @@ def _tool_result_message(tool_use_id: str, text: str) -> Dict[str, Any]:
     }
 
 
-def test_agent_read_real_code_false_with_no_tool_call() -> None:
+def test_agent_read_the_cited_file_false_with_no_tool_call() -> None:
     """No toolUse block at all -> not grounded."""
+    idx = CodebaseIndex(files={"app/main.py": "x = 1\n"})
     agent = _fake_agent(
         [
             {"role": "user", "content": [{"text": "hi"}]},
             {"role": "assistant", "content": [{"text": "ok"}]},
         ]
     )
-    assert _agent_read_real_code(agent) is False
+    assert _agent_read_the_cited_file(agent, idx, "app/main.py") is False
 
 
-def test_agent_read_real_code_false_for_non_code_reading_tool() -> None:
-    """A toolUse for list_files (not a code-reading tool) with a "successful"
-    toolResult still does not count -- it never returns code content."""
-    agent = _fake_agent(
-        [
-            _tool_use_message("assistant", "t1", "list_files"),
-            _tool_result_message("t1", "a.py\nb.py"),
-        ]
-    )
-    assert _agent_read_real_code(agent) is False
-
-
-def test_agent_read_real_code_false_for_errored_read() -> None:
-    """A read_file() toolUse whose matching toolResult text starts with
-    "Error:" is not grounded evidence -- the model attempted a read but never
-    saw real code."""
-    agent = _fake_agent(
-        [
-            _tool_use_message("assistant", "t1", "read_file"),
-            _tool_result_message("t1", "Error: file not found: missing.py."),
-        ]
-    )
-    assert _agent_read_real_code(agent) is False
-
-
-def test_agent_read_real_code_true_for_successful_code_reading_tools() -> None:
-    """A read_file()/read_lines()/read_function() toolUse whose matching
-    toolResult has real (non-error) text is grounded evidence."""
-    for tool_name in ("read_file", "read_lines", "read_function"):
+def test_agent_read_the_cited_file_false_for_non_read_file_tools() -> None:
+    """A toolUse for list_files/read_lines/read_function/search_codebase --
+    anything other than a whole-file read_file() call -- does not count, even
+    with a "successful" toolResult."""
+    idx = CodebaseIndex(files={"app/main.py": "x = 1\n"})
+    for tool_name in ("list_files", "read_lines", "read_function", "search_codebase"):
         agent = _fake_agent(
             [
-                _tool_use_message("assistant", "t1", tool_name),
+                _tool_use_message("assistant", "t1", tool_name, path="app/main.py"),
                 _tool_result_message("t1", "def foo():\n    return 1\n"),
             ]
         )
-        assert _agent_read_real_code(agent) is True, tool_name
+        assert _agent_read_the_cited_file(agent, idx, "app/main.py") is False, tool_name
 
 
-def test_agent_read_real_code_ignores_mismatched_tool_use_id() -> None:
-    """A toolResult for a *different* toolUseId than any code-reading toolUse
-    is not credited to it -- the match is by id, not just tool-name presence
-    anywhere in the conversation."""
+def test_agent_read_the_cited_file_false_for_errored_read() -> None:
+    """A read_file() toolUse for the cited file whose matching toolResult text
+    starts with "Error:" is not grounded evidence -- the model attempted a
+    read but never saw real code."""
+    idx = CodebaseIndex(files={"app/main.py": "x = 1\n"})
     agent = _fake_agent(
         [
-            _tool_use_message("assistant", "t1", "read_file"),
-            _tool_result_message("some-other-id", "def foo():\n    return 1\n"),
+            _tool_use_message("assistant", "t1", "read_file", path="app/main.py"),
+            _tool_result_message("t1", "Error: file not found: app/main.py."),
         ]
     )
-    assert _agent_read_real_code(agent) is False
+    assert _agent_read_the_cited_file(agent, idx, "app/main.py") is False
 
 
-def test_agent_read_real_code_is_failsafe_on_malformed_messages() -> None:
+def test_agent_read_the_cited_file_false_for_a_different_file() -> None:
+    """A successful read_file() for a DIFFERENT (but real) path than the
+    cited one does not ground it -- file identity is enforced for the exact
+    cited file, unlike the coarser "any real code" check this replaced."""
+    idx = CodebaseIndex(files={"app/main.py": "x = 1\n", "app/util.py": "y = 2\n"})
+    agent = _fake_agent(
+        [
+            _tool_use_message("assistant", "t1", "read_file", path="app/util.py"),
+            _tool_result_message("t1", "y = 2\n"),
+        ]
+    )
+    assert _agent_read_the_cited_file(agent, idx, "app/main.py") is False
+
+
+def test_agent_read_the_cited_file_true_for_successful_read_file() -> None:
+    """A read_file() toolUse for the exact cited path whose matching
+    toolResult has real (non-error) text is grounded evidence."""
+    idx = CodebaseIndex(files={"app/main.py": "x = 1\n"})
+    agent = _fake_agent(
+        [
+            _tool_use_message("assistant", "t1", "read_file", path="app/main.py"),
+            _tool_result_message("t1", "x = 1\n"),
+        ]
+    )
+    assert _agent_read_the_cited_file(agent, idx, "app/main.py") is True
+
+
+def test_agent_read_the_cited_file_true_for_a_resolvable_near_miss_path() -> None:
+    """A read_file() call using a bare/near-miss name that still resolves
+    (via index.resolve_path) to the cited canonical path still counts -- the
+    model is not required to echo the exact quoted string back verbatim."""
+    idx = CodebaseIndex(files={"app/services/main.py": "x = 1\n"})
+    agent = _fake_agent(
+        [
+            _tool_use_message("assistant", "t1", "read_file", path="main.py"),
+            _tool_result_message("t1", "x = 1\n"),
+        ]
+    )
+    assert _agent_read_the_cited_file(agent, idx, "app/services/main.py") is True
+
+
+def test_agent_read_the_cited_file_ignores_mismatched_tool_use_id() -> None:
+    """A toolResult for a *different* toolUseId than the cited-file toolUse is
+    not credited to it -- the match is by id, not just presence anywhere in
+    the conversation."""
+    idx = CodebaseIndex(files={"app/main.py": "x = 1\n"})
+    agent = _fake_agent(
+        [
+            _tool_use_message("assistant", "t1", "read_file", path="app/main.py"),
+            _tool_result_message("some-other-id", "x = 1\n"),
+        ]
+    )
+    assert _agent_read_the_cited_file(agent, idx, "app/main.py") is False
+
+
+def test_agent_read_the_cited_file_is_failsafe_on_malformed_messages() -> None:
     """A malformed/empty ``messages`` never raises -- degrades to False (no
     grounded read), so the caller's fail-safe keeps rather than drops on
     ambiguity."""
+    idx = CodebaseIndex(files={"app/main.py": "x = 1\n"})
 
     class _EmptyAgent:
         messages: List[Any] = []
 
-    assert _agent_read_real_code(_EmptyAgent()) is False  # type: ignore[arg-type]
+    assert _agent_read_the_cited_file(_EmptyAgent(), idx, "app/main.py") is False  # type: ignore[arg-type]
 
     class _BrokenAgent:
         @property
         def messages(self):
             raise RuntimeError("boom")
 
-    assert _agent_read_real_code(_BrokenAgent()) is False  # type: ignore[arg-type]
+    assert _agent_read_the_cited_file(_BrokenAgent(), idx, "app/main.py") is False  # type: ignore[arg-type]
 
 
 @pytest.mark.parametrize("parallelism", ["1", "4"])

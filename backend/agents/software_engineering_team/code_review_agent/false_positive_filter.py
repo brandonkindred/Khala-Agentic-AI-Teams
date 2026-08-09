@@ -26,14 +26,19 @@ Three invariants hold:
 
     - **Grounded-only drops.** The cited file's content is never inlined into
       the verification prompt (see ``_build_group_prompt``) -- the verifier
-      must call a tool to see it. A verdict is trusted only when the run
-      obtained real code via a *successful* call to a code-reading tool
-      (``read_file``/``read_lines``/``read_function``) -- calling only
-      ``list_files()`` (no code content) or a code-reading tool that errored
-      (unknown/ambiguous path) does not count. ``_verify_group`` discards any
-      false-positive verdict from a run that never met this bar (see
-      ``_agent_read_real_code``) rather than trusting an ungrounded guess (an
-      absent verdict means "keep", per the fail-safe invariant above).
+      must call ``read_file`` on it to see it. A batch's false-positive
+      verdicts are trusted only when the run made a *successful* ``read_file``
+      call for that exact cited file -- a narrow ``read_lines``/
+      ``read_function`` slice, a successful read of a merely *related* file,
+      calling only ``list_files()`` (no code content), or a ``read_file`` call
+      that errored (unknown/ambiguous path), do not count. Since every
+      finding in one batch cites the same file, this is a per-batch bar, not
+      per-finding, but it still restores the guarantee the original inlined
+      design had: the whole cited file was visible before any drop in that
+      batch is honored. ``_verify_group`` discards any false-positive verdict
+      from a run that never met this bar (see ``_agent_read_the_cited_file``)
+      rather than trusting an ungrounded guess (an absent verdict means
+      "keep", per the fail-safe invariant above).
 
     - **Coverage/safety findings never reach this module.** The coordinator
       passes only genuine reviewer findings here; the "not reviewed" degraded
@@ -1611,8 +1616,12 @@ def _build_group_prompt(
 
     parts.append(
         f"**File the findings below are about: `{file_path}`.** Its content is NOT "
-        f'inlined here — call read_file("{file_path}") (or read_lines for a bounded '
-        "slice) FIRST to see the real, current code before judging any finding below."
+        f'inlined here — you MUST call read_file("{file_path}") FIRST to see the '
+        "real, current code before judging any finding below. A false-positive "
+        "verdict for ANY finding below will be ignored (that finding kept) unless "
+        "you successfully call read_file on this exact path first — reading a "
+        "different file, or only a partial slice via read_lines, is not enough on "
+        "its own, even if you also inspect other related files."
     )
     parts.append("")
 
@@ -1634,16 +1643,6 @@ def _build_group_prompt(
     return "\n".join(parts)
 
 
-# Tool names whose successful result contains real code content. Deliberately
-# excludes list_files() (paths only, no code), find_function_at_line()
-# (locates a construct without returning its body), and search_codebase()
-# (short match snippets, not the fuller context _agent_read_real_code
-# requires) -- a call to one of those alone should not count as "the model
-# saw real code", so the check below stays conservative rather than counting
-# any tool call whatsoever.
-_CODE_READING_TOOL_NAMES = frozenset({"read_file", "read_lines", "read_function"})
-
-
 def _tool_result_text(tool_result: Dict[str, Any]) -> str:
     """Flatten a Strands toolResult block's content into text.
 
@@ -1661,59 +1660,70 @@ def _tool_result_text(tool_result: Dict[str, Any]) -> str:
         return ""
 
 
-def _agent_read_real_code(agent: Agent) -> bool:
-    """Whether ``agent``'s just-finished run obtained real code via a
-    successful code-reading tool call.
+def _agent_read_the_cited_file(agent: Agent, index: CodebaseIndex, file_path: str) -> bool:
+    """Whether ``agent``'s just-finished run obtained ``file_path``'s full
+    content via a successful ``read_file`` call.
 
-    The cited file's content is never inlined into the verification prompt
-    (see ``_build_group_prompt``) -- the model must fetch it via a tool. The
-    mere presence of *some* toolUse block is not enough: a run could call
-    list_files() (no code content) or attempt read_file()/read_lines()/
-    read_function() on a path that does not exist (``_build_tools``'s tools
-    never raise; they return an ``"Error: ..."`` string on failure instead of
-    the code) and still answer confidently. This requires at least one call
-    to a code-reading tool (``_CODE_READING_TOOL_NAMES``) whose *result* text
-    does not start with ``"Error:"`` -- i.e. the model actually saw some real
-    code, not merely attempted to look at some.
+    Every finding in one ``_verify_group`` batch cites the same ``file_path``
+    (batches are grouped by file; see ``_verify_and_filter``). Requiring only
+    *some* successful code-reading tool call anywhere in the run is not
+    enough: a narrow ``read_lines`` call for one finding's line, or a
+    successful ``read_file`` of a merely *related* file, would still let the
+    model confidently drop every OTHER finding in the batch without ever
+    having seen their code. Requiring a full ``read_file`` of ``file_path``
+    itself restores the guarantee the original inlined-body design had (the
+    whole cited file was always visible) while still fetching it on demand
+    rather than inlining it unconditionally (see ``_build_group_prompt``).
 
-    File identity is intentionally NOT enforced: the system prompt directs
-    the model to inspect "any related file" to confirm a finding (e.g. "foo
-    is defined in util.py" refutes a finding cited against a different file),
-    so a successful read of a *different* file than the one cited still
-    counts as grounded -- only "no successful code read happened at all" is
-    disqualifying.
+    The model may still additionally read other related files for cross-file
+    verification (e.g. confirming a symbol is defined in ``util.py``) -- that
+    remains encouraged and does not disqualify a drop -- but it is never
+    SUFFICIENT on its own; the cited file itself must also have been read in
+    full, via ``read_file`` specifically (not a partial ``read_lines``/
+    ``read_function`` slice, which does not cover findings outside that slice).
 
     Preconditions:
         - ``agent`` has already completed a run (``agent(prompt)`` returned),
           so ``agent.messages`` holds the full conversation for that run.
+        - ``file_path`` is the canonical path this ``_verify_group`` call was
+          given (already resolved by the caller); ``index`` is the same
+          index the run's tools were bound to.
 
     Postconditions:
-        - Returns ``True`` iff some toolUse block naming a
-          ``_CODE_READING_TOOL_NAMES`` tool has a matching toolResult (by
-          ``toolUseId``) whose text is non-empty and does not start with
-          ``"Error:"``. Never raises: a malformed/empty message list yields
-          ``False`` (fail-safe: treated as "no grounded read", so the caller
-          keeps rather than drops on ambiguity).
+        - Returns ``True`` iff some ``read_file`` toolUse whose input path
+          equals ``file_path`` (or resolves to it via ``index.resolve_path``,
+          covering a near-miss the model typed instead of the exact quoted
+          path) has a matching toolResult (by ``toolUseId``) whose text is
+          non-empty and does not start with ``"Error:"``. Never raises: a
+          malformed/empty message list yields ``False`` (fail-safe: treated
+          as "not grounded", so the caller keeps rather than drops on
+          ambiguity).
     """
     try:
-        code_reading_ids = {
-            tool_use["toolUseId"]
-            for message in agent.messages
-            for block in (message.get("content") or [])
-            if isinstance(block, dict)
-            for tool_use in [block.get("toolUse")]
-            if isinstance(tool_use, dict)
-            and tool_use.get("name") in _CODE_READING_TOOL_NAMES
-            and tool_use.get("toolUseId") is not None
-        }
-        if not code_reading_ids:
+        read_file_ids = set()
+        for message in agent.messages:
+            for block in message.get("content") or []:
+                if not isinstance(block, dict):
+                    continue
+                tool_use = block.get("toolUse")
+                if not isinstance(tool_use, dict) or tool_use.get("name") != "read_file":
+                    continue
+                tool_use_id = tool_use.get("toolUseId")
+                if tool_use_id is None:
+                    continue
+                candidate = (tool_use.get("input") or {}).get("path")
+                if not isinstance(candidate, str):
+                    continue
+                if candidate == file_path or index.resolve_path(candidate) == file_path:
+                    read_file_ids.add(tool_use_id)
+        if not read_file_ids:
             return False
         for message in agent.messages:
             for block in message.get("content") or []:
                 if not isinstance(block, dict):
                     continue
                 result = block.get("toolResult")
-                if not isinstance(result, dict) or result.get("toolUseId") not in code_reading_ids:
+                if not isinstance(result, dict) or result.get("toolUseId") not in read_file_ids:
                     continue
                 text = _tool_result_text(result).lstrip()
                 if text and not text.startswith("Error:"):
@@ -1744,11 +1754,12 @@ def _verify_group(
           position of the finding within ``issues`` (i.e. a valid index into
           the ``issues``/``group`` list the caller passed in), so callers may
           index back into their own list with it.
-        - A false-positive verdict from a run that never obtained real code
-          via a successful code-reading tool call (``_agent_read_real_code``
-          is False) is dropped from the result rather than returned -- the
-          caller treats an absent index as "keep", so an ungrounded drop
-          never reaches the merge (see ``_agent_read_real_code``).
+        - A false-positive verdict from a run that never obtained the cited
+          file's full content via a successful ``read_file`` call
+          (``_agent_read_the_cited_file`` is False) is dropped from the
+          result rather than returned -- the caller treats an absent index as
+          "keep", so an ungrounded drop never reaches the merge (see
+          ``_agent_read_the_cited_file``).
     """
     prompt = _build_group_prompt(index, file_path, issues, input_data)
     agent = Agent(
@@ -1759,13 +1770,13 @@ def _verify_group(
     raw = str(agent(prompt)).strip()
     data = extract_json_from_response(raw)
     verdicts = _parse_verdicts(data, len(issues))
-    if not _agent_read_real_code(agent):
+    if not _agent_read_the_cited_file(agent, index, file_path):
         false_positive_count = sum(1 for v in verdicts.values() if v.is_false_positive)
         if false_positive_count:
             logger.warning(
                 "FalsePositiveFilter: verification call for %s returned %s false-positive "
-                "verdict(s) without ever successfully reading real code; discarding them "
-                "and keeping those findings",
+                "verdict(s) without ever successfully reading that file's full content via "
+                "read_file; discarding them and keeping those findings",
                 file_path,
                 false_positive_count,
             )
