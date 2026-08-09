@@ -5240,6 +5240,7 @@ def _fail_paper_trading_session(session_id: str, error: str) -> None:
             return
         try:
             _apply_paper_trading_failure(session, error)
+            session.divergence_analysis = error
             _paper_trading_sessions[session_id] = session
         except Exception:
             # The mutations above and the dict write (which round-trips
