@@ -860,7 +860,13 @@ describe('ProcessDesignerChatComponent', () => {
       const flowFixture = createFlowchartFixture(proc);
       const container = flowFixture.nativeElement.querySelector('.flowchart-container') as HTMLElement;
 
-      expect(container.innerHTML).not.toContain('<img');
+      // step.name also feeds the node's aria-label attribute. Browsers only
+      // re-escape &/" when serializing a quoted attribute value back to
+      // innerHTML — literal </> there are valid and never parsed as markup,
+      // so a raw '<img' substring check would false-positive on that safe
+      // attribute content. What actually matters is that no live <img>
+      // element was created.
+      expect(container.querySelector('img')).toBeNull();
       // Browsers only re-escape &, <, > when serializing text-node content
       // back to innerHTML — quotes stay literal outside of attribute values.
       expect(container.innerHTML).toContain('"&gt;&lt;img');
@@ -913,7 +919,12 @@ describe('ProcessDesignerChatComponent', () => {
       const container = flowFixture.nativeElement.querySelector('.flowchart-container') as HTMLElement;
       const raw = container.innerHTML;
 
-      expect(raw).not.toContain('<xss-');
+      // step.name also feeds the node's aria-label attribute, where a raw
+      // '<xss-step>' legitimately survives as literal (but inert) attribute
+      // text — see the quote-breakout test above. The real invariant is that
+      // an unescaped marker in TEXT CONTENT is never parsed as a live
+      // element, so assert that directly instead of a blanket substring check.
+      expect(container.querySelector('xss-trig, xss-step, xss-agent, xss-out')).toBeNull();
       expect(raw).toContain('&lt;xss-trig&gt;');
       expect(raw).toContain('&lt;xss-step&gt;');
       expect(raw).toContain('&lt;xss-agent&gt;');
