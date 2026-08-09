@@ -3899,9 +3899,10 @@ def test_user_decisions_for_latest_answer_wins_for_same_question(tmp_path):
     assert lines == ["Which DB? → MySQL"], f"latest answer must win, got {lines}"
 
 
-def test_user_decisions_for_falls_back_to_reason_for_legacy_entry(tmp_path):
-    """A user_decision entry predating the structured 'decisions' field (resumed across an upgrade)
-    still surfaces its decision via the rendered 'reason' text, rather than being dropped."""
+def test_user_decisions_for_fails_fast_on_legacy_entry_without_decisions(tmp_path):
+    """A user_decision entry predating the structured 'decisions' field (resumed across an
+    upgrade) raises instead of being auto-parsed from its free-text 'reason' — resume of that
+    legacy shape is unsupported and must fail clearly, identifying the offending task."""
     graph = TaskGraphService(job_id="j1")
     swarm = CodingTeamSwarm(
         tech_lead=StubTechLead(approved=True),
@@ -3918,9 +3919,8 @@ def test_user_decisions_for_falls_back_to_reason_for_legacy_entry(tmp_path):
         revision_feedback=[{"source": "user_decision", "reason": "Use TLS? → Yes"}],
     )
 
-    lines = swarm._user_decisions_for(task)
-
-    assert lines == ["Use TLS? → Yes"]
+    with pytest.raises(ValueError, match="t1"):
+        swarm._user_decisions_for(task)
 
 
 def test_user_decisions_for_empty_decisions_does_not_fall_back_to_reason(tmp_path):
@@ -3982,33 +3982,6 @@ def test_user_decisions_for_handles_answer_only_lines(tmp_path):
     assert "Use TLS" in lines  # rendered as the bare answer (no "→")
     assert "Use SSL" in lines
     assert len(lines) == 2, f"identical answer-only lines must collapse, got {lines}"
-
-
-def test_user_decisions_for_legacy_multiline_reason_extracts_bullets(tmp_path):
-    """A legacy entry whose 'reason' is the full multi-line block contributes clean per-decision
-    lines (the preamble is dropped, the '- q → a' bullets are extracted), not one messy line."""
-    graph = TaskGraphService(job_id="j1")
-    swarm = CodingTeamSwarm(
-        tech_lead=StubTechLead(approved=True),
-        workers=[StubWorker("a1")],
-        graph=graph,
-        path=Path(tmp_path),
-        agent_ids=["a1"],
-        llm_getter=lambda k: None,
-    )
-    reason = (
-        "The user answered the open question(s) you raised. Implement these decisions exactly; "
-        "do not ask again:\n- Which DB? → Postgres\n- Use TLS? → Yes"
-    )
-    task = Task(
-        id="t1",
-        title="T1",
-        revision_feedback=[{"source": "user_decision", "reason": reason}],
-    )
-
-    lines = swarm._user_decisions_for(task)
-
-    assert lines == ["Which DB? → Postgres", "Use TLS? → Yes"]
 
 
 def test_review_and_merge_passes_user_decisions(tmp_path, monkeypatch):
