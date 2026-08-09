@@ -2,9 +2,8 @@
 
 Public contract for turning PR unified patches or SE old/new file pairs into a
 bounded, pre-numbered review input suitable for ``CodeReviewInput`` with
-``pre_numbered=True``. Callers consume ``ChangeSurface.code`` (concatenated
-``### path ###`` blocks) or ``ChangeSurface.blocks`` (path → body without
-headers).
+``pre_numbered=True``. Callers consume ``ChangeSurface.blocks`` (path → body
+without headers) via ``CodeReviewInput.files=``.
 
 This module locks types, signatures, and empty/no-op builder contracts.
 ``expand_touched_ranges`` expands touched lines via Python AST when possible,
@@ -45,7 +44,6 @@ __all__ = [
     "build_change_surface_from_patches",
     "expand_touched_ranges",
     "extract_touched_lines",
-    "format_change_surface_code",
     "render_patch_hunks",
     "unified_diffs_from_pairs",
 ]
@@ -94,22 +92,11 @@ class ChangeSurface:
     Invariants:
         - ``blocks`` maps each path to a pre-numbered body (``N: `` prefixes)
           without ``### path ###`` headers.
-        - ``code`` equals ``format_change_surface_code(blocks)``.
         - Non-empty surfaces are always consumed with
           ``CodeReviewInput.pre_numbered=True``.
     """
 
     blocks: Mapping[str, str] = field(default_factory=dict)
-
-    @property
-    def code(self) -> str:
-        """Concatenated ``### path ###`` blocks for the legacy ``code`` channel.
-
-        Postconditions:
-            - Empty ``blocks`` yields ``""``.
-            - Otherwise matches the join style used by PR ``_build_review_code``.
-        """
-        return format_change_surface_code(self.blocks)
 
     @property
     def is_empty(self) -> bool:
@@ -122,28 +109,11 @@ class ChangeSurface:
         return len(self.blocks)
 
 
-def format_change_surface_code(blocks: Mapping[str, str]) -> str:
-    """Render path → pre-numbered body mapping as ``### path ###`` blocks.
-
-    Preconditions:
-        - ``blocks`` is a mapping (may be empty). Values are treated as opaque
-          body text (already pre-numbered when produced by assemblers).
-
-    Postconditions:
-        - Empty mapping → ``""``.
-        - Otherwise ``"\\n\\n".join(f"### {path} ###\\n{body}" ...)`` in
-          insertion order, matching PR ``_build_review_code``.
-    """
-    if not blocks:
-        return ""
-    return "\n\n".join(f"### {path} ###\n{body}" for path, body in blocks.items())
-
-
 def _empty_surface() -> ChangeSurface:
     """Return the canonical empty change surface.
 
     Postconditions:
-        - ``is_empty`` is True, ``code == ""``, ``blocks == {}``.
+        - ``is_empty`` is True, ``blocks == {}``.
     """
     return ChangeSurface(blocks={})
 
@@ -341,12 +311,11 @@ def build_change_surface_from_patches(
 
     Postconditions:
         - ``patches == {}`` or every patch value is blank → empty
-          ``ChangeSurface`` (``code == ""``, ``blocks == {}``).
+          ``ChangeSurface`` (``blocks == {}``).
         - For each path with a non-blank patch, in iteration order: omit when
           ``new_contents`` is missing/blank for that path, when there are no
           added touched lines, or when the assembled body is empty; otherwise
           include a pre-numbered expanded body.
-        - ``ChangeSurface.code`` equals ``format_change_surface_code(blocks)``.
         - Never raises for well-typed string mappings.
     """
     if not _mapping_has_nonblank_value(patches):

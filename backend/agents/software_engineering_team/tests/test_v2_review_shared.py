@@ -1351,7 +1351,7 @@ def test_maybe_build_change_surface_none_old_contents_treated_as_new_file() -> N
 
     assert result is not None
     assert not result.is_empty
-    assert "### a.py ###" in result.code
+    assert "a.py" in result.blocks
 
 
 def test_maybe_build_change_surface_empty_result_is_none_not_fake_surface() -> None:
