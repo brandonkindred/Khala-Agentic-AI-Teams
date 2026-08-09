@@ -4847,7 +4847,8 @@ def _run_paper_trading_background(
         if not isinstance(exc, Exception):
             raise
         logger.exception("Paper trade %s: background worker crashed", session_id)
-        _fail_paper_trading_session(session_id, "Paper trading crashed due to an internal error.")
+        safe_error = "Paper trading crashed due to an internal error."
+        _fail_paper_trading_session(session_id, error=safe_error, divergence_analysis=safe_error)
 
 
 @app.post("/strategy-lab/paper-trade", response_model=PaperTradingResponse)
@@ -5240,7 +5241,8 @@ def _fail_paper_trading_session(session_id: str, error: str) -> None:
             return
         try:
             _apply_paper_trading_failure(session, error)
-            session.divergence_analysis = error
+            if divergence_analysis:
+                session.divergence_analysis = divergence_analysis
             _paper_trading_sessions[session_id] = session
         except Exception:
             # The mutations above and the dict write (which round-trips
