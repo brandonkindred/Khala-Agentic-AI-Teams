@@ -172,12 +172,6 @@ _FRONTEND_TEAM_ALIASES = {
     # "JavaScript" target_team must not be hard-routed to frontend. The Tech Lead should
     # emit the canonical frontend_v2/backend_v2 (or a specific framework) for those.
 }
-_LEGACY_BACKEND_STACK_ALIASES = {
-    "default",
-    "senior_software_engineer",
-    "senior_software_engineer_legacy",
-    "software_engineer",
-}
 _BACKEND_V2_STACK_SPEC = {
     "name": "backend_v2",
     "tools_services": ["Java", "Python", "Node.js", "Databases", "APIs", "DevOps"],
@@ -219,11 +213,6 @@ def _team_key(value: Optional[str]) -> str:
     return text
 
 
-def _legacy_stack_key(value: Optional[str]) -> str:
-    """Normalize legacy stack labels that predate frontend/backend v2 routing."""
-    return (value or "").strip().lower().replace("-", "_").replace(" ", "_")
-
-
 def _stack_hint_tokens(spec: StackSpec) -> set[str]:
     """Return normalized stack hint tokens without substring false positives."""
     tokens: set[str] = set()
@@ -255,8 +244,6 @@ def _v2_team_kind_for_stack(spec: StackSpec) -> Optional[str]:
     if canonical_key == "frontend_v2":
         return "frontend"
     if canonical_key == "backend_v2":
-        return "backend"
-    if _legacy_stack_key(spec.name) in _LEGACY_BACKEND_STACK_ALIASES:
         return "backend"
     if hint_tokens & _FRONTEND_HINTS:
         return "frontend"
@@ -319,15 +306,7 @@ def _ensure_target_team_stack_specs(
     tasks: List[Task],
 ) -> List[Dict[str, Any]]:
     """Ensure targeted frontend/backend tasks have matching v2 team workers in the roster."""
-    stacks = []
-    for entry in list(stacks_raw) if isinstance(stacks_raw, list) else []:
-        if not isinstance(entry, dict):
-            stacks.append(entry)
-            continue
-        if _legacy_stack_key(entry.get("name")) in _LEGACY_BACKEND_STACK_ALIASES:
-            stacks.append(dict(_BACKEND_V2_STACK_SPEC))
-        else:
-            stacks.append(entry)
+    stacks = list(stacks_raw) if isinstance(stacks_raw, list) else []
     present = {_v2_team_kind_for_stack(_stack_spec_from_raw(entry)) for entry in stacks}
     target_keys = {_team_key(task.target_team) for task in tasks if task.target_team}
 

@@ -31,7 +31,6 @@ from software_engineering_team.models import (
 from software_engineering_team.shared.team_lead_base import TeamLeadSharedState
 from software_engineering_team.task_graph import TaskGraphService
 from software_engineering_team.team_routing import (
-    _BACKEND_V2_STACK_SPEC,
     _quality_gate_agent_type,
     _target_matches_agent,
     _team_key,
@@ -1984,28 +1983,26 @@ def test_v2_team_kind_accepts_backend_alias_stack_names(stack_name: str) -> None
 
 
 @pytest.mark.parametrize("stack_name", ["default", "Senior Software Engineer"])
-def test_v2_team_kind_accepts_legacy_default_stack_names(stack_name: str) -> None:
-    """Legacy generic stack names now route to backend v2 after removing the Senior SWE worker."""
-    assert _v2_team_kind_for_stack(StackSpec(name=stack_name, tools_services=[])) == "backend"
+def test_v2_team_kind_no_longer_repairs_legacy_default_stack_names(stack_name: str) -> None:
+    """Legacy generic stack names no longer silently route to backend v2 (issue #5487 policy):
+    an unrecognized persisted name is unclassified, same as any other unknown stack."""
+    assert _v2_team_kind_for_stack(StackSpec(name=stack_name, tools_services=[])) is None
 
 
-def test_legacy_default_stack_spec_is_repaired_to_backend_v2() -> None:
-    """Persisted pre-v2 fallback stacks are replaced with the backend v2 team."""
+def test_legacy_default_stack_spec_is_no_longer_repaired() -> None:
+    """Persisted pre-v2 fallback stacks pass through unchanged instead of being silently
+    rewritten to backend_v2 (issue #5487 fail-fast policy)."""
     stacks = orch_mod._ensure_target_team_stack_specs(
         [{"name": "default", "tools_services": ["legacy"]}],
         [],
     )
 
-    assert stacks == [
-        {
-            "name": "backend_v2",
-            "tools_services": ["Java", "Python", "Node.js", "Databases", "APIs", "DevOps"],
-        }
-    ]
+    assert stacks == [{"name": "default", "tools_services": ["legacy"]}]
 
 
-def test_resume_with_legacy_default_stack_builds_backend_v2_worker(tmp_path, monkeypatch):
-    """Old persisted jobs with a default stack still resume after the legacy worker removal."""
+def test_resume_with_legacy_default_stack_fails_fast(tmp_path, monkeypatch):
+    """Resuming a job with a legacy default/Senior-SWE stack fails clearly instead of being
+    silently rewritten to backend_v2 (issue #5487 policy)."""
 
     class ExplodingTL:
         def __init__(self, llm):
@@ -2014,23 +2011,7 @@ def test_resume_with_legacy_default_stack_builds_backend_v2_worker(tmp_path, mon
         def run_plan_to_task_graph(self, plan_input):
             raise AssertionError("planning must not run on resume")
 
-    captured_specs: List[str] = []
-
-    class StubSwarm:
-        def __init__(self, *a, **k):
-            self.graph = k["graph"]
-            self.aborted = False
-
-        def run(self, **kw):
-            pass
-
-    def _build_worker(agent_id, spec, llm_getter, engine_provider, **kwargs):
-        captured_specs.append(spec.name)
-        return StubWorker(agent_id)
-
     monkeypatch.setattr(orch_mod, "TechLeadAgent", ExplodingTL)
-    monkeypatch.setattr(orch_mod, "_build_implementation_worker", _build_worker)
-    monkeypatch.setattr(orch_mod, "CodingTeamSwarm", StubSwarm)
 
     snapshot = {
         "task_graph_snapshot": [
@@ -2050,8 +2031,8 @@ def test_resume_with_legacy_default_stack_builds_backend_v2_worker(tmp_path, mon
         get_llm=lambda key: None,
     )
 
-    assert captured_specs == ["backend_v2"]
-    assert any(update.get("stack_specs") == [_BACKEND_V2_STACK_SPEC] for update in updates)
+    assert updates[-1]["status"] == "failed"
+    assert "default" in updates[-1]["error"]
 
 
 def test_backend_v2_worker_uses_injected_llm_getter():
