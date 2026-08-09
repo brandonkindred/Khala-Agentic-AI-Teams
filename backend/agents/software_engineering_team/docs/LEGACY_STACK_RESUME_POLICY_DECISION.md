@@ -199,10 +199,23 @@ moment the query is run until the repair-code-removal build is live:
 2. Existing `pending`/`running`/`waiting_for_user` workers are drained to
    a terminal state or stopped — not merely left running — so none of
    them can persist a legacy `stack_specs`/`task_graph_snapshot` write
-   after the gate.
+   after the gate, **and**
+3. Every resume/retry entry point that can start fresh pre-cleanup
+   execution on an audited row is also frozen for the window — not just
+   for `pending`/`running`/`waiting_for_user`. A `failed`/`agent_crash`/
+   `paused_llm_connectivity` SE job, or any row `/retry-failed` accepts
+   because of a non-empty `failed_tasks`, is idle (not actively writing)
+   at audit time, but calling `POST /run-team/{job_id}/resume`, `POST
+   /run-team/{job_id}/retry-failed`, `POST
+   /run-team/{job_id}/resume-after-llm-check`, or the `coding_team`
+   `POST /run/{job_id}/answers` signal on it during the freeze window
+   starts new pre-cleanup work that can write a legacy shape the
+   already-completed audit never saw. Block these endpoints (or the
+   operator actions that would call them) for the full namespace, not
+   just for the three actively-running statuses, until the deploy lands.
 
-Re-run the query right before un-freezing submissions/workers if the
-deploy window is longer than a few minutes.
+Re-run the query right before un-freezing submissions/workers/resume
+endpoints if the deploy window is longer than a few minutes.
 
 - **Zero rows:** safe to deploy.
 - **Any rows:** do not deploy the repair-code removal yet. The valid
@@ -242,7 +255,23 @@ deploy window is longer than a few minutes.
     `CodingTeamWorkflow` Temporal workflow directly (e.g. via `tctl`/the
     Temporal CLI, or an ad hoc script using the same
     `client.get_workflow_handle(...).cancel()` primitive
-    `cancel_run_team_workflow` uses) before re-running the audit.
+    `cancel_run_team_workflow` uses). **Cancelling the Temporal workflow
+    directly does not, by itself, clear the audit gate**:
+    `client.get_workflow_handle(...).cancel()` only closes the workflow —
+    it never touches the job-service row — and `CodingTeamWorkflow.run`'s
+    own docstring states it does not reconcile job-record status on an
+    out-of-band cancellation (a job cancelled while paused is not
+    detected). The row is left exactly as it was (`pending`/`running`/
+    `waiting_for_user`), so a re-run of the audit query still matches it.
+    After confirming the workflow handle shows the workflow closed, an
+    operator must also terminalize the row itself: the guarded `POST
+    /jobs/coding_team/{job_id}/cancel` endpoint only updates rows already
+    in `pending`/`running` (`db_cancel_active_job`'s `WHERE status IN
+    ('pending', 'running')` silently no-ops on `waiting_for_user`), so use
+    the unconditional `PATCH /jobs/coding_team/{job_id}` (`db_update_job`,
+    no status guard) to set `status` to a terminal value for any status,
+    including `waiting_for_user` — only then does a re-run of the audit
+    stop matching the row.
   - `software_engineering_team` rows in `pending`/`running`/
     `waiting_for_user`/`agent_crash`: cancel via `POST
     /run-team/{job_id}/cancel` (allowed for these statuses), which moves
