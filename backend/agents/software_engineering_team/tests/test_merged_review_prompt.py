@@ -173,3 +173,19 @@ def test_architecture_body_prefers_scoped_reads_over_whole_file_first() -> None:
         "you MUST use `list_files()`/`read_file()` to confirm" not in _ARCHITECTURE_CONSISTENCY_BODY
     )
     assert "default path" in _ARCHITECTURE_CONSISTENCY_BODY.lower()
+
+
+def test_side_effect_body_prefers_scoped_reads_over_whole_file_first() -> None:
+    """The side-effect-impact body must document find_references and the
+    scoped construct readers as the default path for finding callers, and
+    must mark read_file/list_files as the non-default fallback rather than
+    the primary way to find every caller of a changed function."""
+    assert "find_references" in _SIDE_EFFECT_IMPACT_BODY
+    assert "read_lines" in _SIDE_EFFECT_IMPACT_BODY
+    assert "read_function" in _SIDE_EFFECT_IMPACT_BODY
+    assert "default path" in _SIDE_EFFECT_IMPACT_BODY.lower()
+    assert "non-default" in _SIDE_EFFECT_IMPACT_BODY.lower()
+    assert (
+        "Use `search_codebase`/`search_repository`/`list_files`/`read_file` to find every caller"
+        not in _SIDE_EFFECT_IMPACT_BODY
+    )
