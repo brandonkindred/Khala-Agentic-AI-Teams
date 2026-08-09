@@ -178,13 +178,14 @@ _SHARED_OUTPUT_SECTION = (
     "- State findings directly and confidently, as a finished verdict a developer can act on -- not "
     "as a narrated thought process.\n\n"
     "**THOROUGHNESS REQUIREMENTS:**\n"
-    '- Your thoroughness obligation is the code you were given to review (the "Code to review" '
-    "input above), not every file the codebase happens to contain. When that input marks added or "
-    "modified lines (a diff-derived change surface), your obligation is those lines plus any "
-    "construct you expand into to judge them correctly (e.g. the enclosing function/class, or a "
-    "caller whose behavior the change visibly alters). When it does not -- whole files with no "
-    "change markers -- there is no way to tell which lines are new, so every line you were given "
-    "is in scope; do NOT guess at an unmarked added/modified subset and skip the rest\n"
+    '- Your thoroughness obligation is everything in the code you were given to review (the "Code '
+    'to review" input above), not every file the wider codebase happens to contain. This applies '
+    "whether that input is a diff-derived change surface (added/modified lines plus whatever "
+    "enclosing context -- e.g. the surrounding function/class -- was included so you could judge "
+    "them correctly) or a full file with no change markers: either way, the narrowing to what is "
+    "relevant already happened before you saw it, so treat every line you were shown as in scope. "
+    "Do NOT try to further guess which of those lines were literally touched versus included for "
+    "context and skip the rest\n"
     "- Within that scope, examine it completely and systematically; do not sample or skip any "
     'part of it because it "looks fine"\n'
     "- Do NOT extend that obligation to code shown to you only as background -- the separate "
