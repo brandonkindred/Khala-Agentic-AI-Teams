@@ -170,14 +170,28 @@ WHERE (
 ```
 
 - **Zero rows:** safe to deploy.
-- **Any rows:** do not deploy the repair-code removal yet. For
-  `coding_team` rows, let the job drain (resume/complete) under the
-  current, pre-cleanup code or cancel it via the existing job-cancel
-  path. For `software_engineering_team` rows, either let it finish
-  resuming/retrying under pre-cleanup code, or clear its retry
-  eligibility (e.g. `POST /run-team/{job_id}/restart`, which fully
-  resets the job record and drops the legacy snapshot). Re-run the check
-  before deploying.
+- **Any rows:** do not deploy the repair-code removal yet. The valid
+  recovery path depends on the row's status — `POST
+  /run-team/{job_id}/restart` only works for a status already in
+  `RESTARTABLE_STATUSES` (`completed`, `failed`, `cancelled`,
+  `agent_crash`, `already_complete`), so it is not a universal fix:
+  - `coding_team` rows (`pending`/`running`/`waiting_for_user`): let the
+    job drain (resume/complete) under the current, pre-cleanup code, or
+    cancel it via the existing job-cancel path.
+  - `software_engineering_team` rows in `pending`/`running`/
+    `waiting_for_user`/`agent_crash`: cancel via `POST
+    /run-team/{job_id}/cancel` (allowed for these statuses), which moves
+    the job to `cancelled` — then `POST /run-team/{job_id}/restart` is
+    valid and drops the legacy snapshot. `failed` is directly
+    restartable/resumable as-is.
+  - `software_engineering_team` rows sitting in `completed_with_failures`
+    (the normal result when some coding-team tasks fail) are **not**
+    restartable — `restart` 400s outside `RESTARTABLE_STATUSES`. The only
+    valid recovery is to run `POST /run-team/{job_id}/retry-failed` under
+    the current, pre-cleanup code until `failed_tasks` is empty and the
+    job reaches a true dead-end (`completed` with nothing left to retry).
+
+  Re-run the check before deploying.
 
 This check only needs to run once per deploy of the repair-code-removal
 work; no recurring migration job or new schema field is introduced.
