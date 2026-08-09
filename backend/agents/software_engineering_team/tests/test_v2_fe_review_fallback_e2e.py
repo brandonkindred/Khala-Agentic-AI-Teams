@@ -23,13 +23,23 @@ from llm_service.clients.dummy import DummyLLMClient
 
 
 @pytest.fixture(autouse=True)
-def _clear_spec_compliance_pass_env(monkeypatch):
-    """Guarantee determinism regardless of the ambient environment: an inherited
-    ``CODE_REVIEW_SPEC_COMPLIANCE_PASS=1`` would add an extra post-dedupe
-    synthesis LLM call even under ``skip_tail_passes=True`` (see
-    ``CODE_REVIEW_SPEC_COMPLIANCE_PASS_ENV`` in ``coordinator.py``), breaking
-    this file's exact ``call_count`` assertions."""
+def _clear_ambient_code_review_env(monkeypatch):
+    """Guarantee determinism regardless of the ambient environment:
+
+    - An inherited ``CODE_REVIEW_SPEC_COMPLIANCE_PASS=1`` would add an extra
+      post-dedupe synthesis LLM call even under ``skip_tail_passes=True``
+      (see ``CODE_REVIEW_SPEC_COMPLIANCE_PASS_ENV`` in ``coordinator.py``),
+      breaking this file's exact ``call_count`` assertions.
+    - An inherited ``CODE_REVIEW_MAX_BISECT_DEPTH=0`` would disable the
+      per-file bisection that
+      ``test_run_llm_review_real_coordinator_isolates_per_chunk_failure``
+      relies on to isolate ``bad.tsx``'s failure from ``good.tsx`` (both
+      files are small enough to share one map chunk); without bisection, the
+      combined chunk simply fails outright and the coordinator raises
+      ``CodeReviewUnavailableError`` instead of degrading gracefully.
+    """
     monkeypatch.delenv("CODE_REVIEW_SPEC_COMPLIANCE_PASS", raising=False)
+    monkeypatch.delenv("CODE_REVIEW_MAX_BISECT_DEPTH", raising=False)
 
 
 def _task(**overrides):
@@ -81,6 +91,34 @@ class _ScriptedClient(DummyLLMClient):
                 self._idx += 1
                 return resp
             return self._responses[-1] if self._responses else {}
+
+
+class _PerFileScriptedClient(DummyLLMClient):
+    """Returns a response keyed by which file marker appears in the prompt.
+
+    Unlike ``_ScriptedClient`` (which returns responses strictly by call
+    order), this binds each canned response to the chunk it actually belongs
+    to via the chunk's ``### path ###`` header. Real map-phase calls may run
+    concurrently, so call order is not guaranteed to match file order; an
+    order-based client would still pass an attribution assertion even if the
+    coordinator mixed up which finding came from which file's content, since
+    each canned response's ``file_path`` is a hard-coded value independent of
+    the prompt it was served to. Selecting by marker closes that gap.
+    """
+
+    def __init__(self, responses_by_marker: dict[str, dict[str, Any]]) -> None:
+        super().__init__()
+        self._responses_by_marker = dict(responses_by_marker)
+        self.call_count = 0
+        self._lock = threading.Lock()
+
+    def complete_json(self, prompt: str, **kwargs: Any) -> dict[str, Any]:
+        with self._lock:
+            self.call_count += 1
+        for marker, response in self._responses_by_marker.items():
+            if marker in prompt:
+                return response
+        raise AssertionError(f"no scripted response matches prompt: {prompt[:200]!r}")
 
 
 class _PromptCapturingClient(DummyLLMClient):
@@ -188,14 +226,21 @@ def test_run_llm_review_real_coordinator_single_chunk_translates_issue():
 def test_run_llm_review_real_coordinator_multi_chunk_attributes_issues_to_source_files():
     """Two files too large to share one map-phase chunk each get their own
     real LLM call, and the two returned issues are attributed to the correct
-    source file -- proving real chunking, not a single stubbed call."""
+    source file -- proving real chunking, not a single stubbed call.
+
+    The scripted client selects its response by the ``### path ###`` marker
+    in the prompt it actually receives (not by call order, which real
+    concurrent map-phase calls do not guarantee), so the assertions below
+    genuinely verify per-file attribution rather than merely echoing
+    hard-coded ``file_path`` values back from whichever response landed on
+    whichever call index."""
     from software_engineering_team.frontend_code_v2_team.phases.review import _run_llm_review
 
     file_a = "x" * 20_000
     file_b = "y" * 20_000
-    client = _ScriptedClient(
-        [
-            {
+    client = _PerFileScriptedClient(
+        {
+            "### a.tsx ###": {
                 "approved": True,
                 "issues": [
                     {
@@ -209,7 +254,7 @@ def test_run_llm_review_real_coordinator_multi_chunk_attributes_issues_to_source
                 "summary": "chunk a",
                 "spec_compliance_notes": "",
             },
-            {
+            "### b.tsx ###": {
                 "approved": True,
                 "issues": [
                     {
@@ -223,7 +268,7 @@ def test_run_llm_review_real_coordinator_multi_chunk_attributes_issues_to_source
                 "summary": "chunk b",
                 "spec_compliance_notes": "",
             },
-        ]
+        }
     )
 
     out = _run_llm_review(llm=client, task=_task(), files={"a.tsx": file_a, "b.tsx": file_b})
