@@ -647,6 +647,45 @@ def test_finds_and_returns_new_findings_with_pre_numbered_input() -> None:
     assert result[0].line == 4242  # not nulled by the 2-physical-line hunk's length
 
 
+def test_finds_and_returns_new_findings_bounds_checks_when_full_content_supplied() -> None:
+    """When ``full_content`` covers the pre-numbered submission, the citation
+    IS bounds-checked against the real full body (not trusted as-is): the
+    same out-of-range line that survives under bare ``pre_numbered=True`` is
+    now nulled, proving the effective flag (``pre_numbered and not
+    full_content_complete``), not the raw ``input_data.pre_numbered``, reaches
+    ``_run_pass``/``_validate_findings`` here too -- matching the fix already
+    applied to the side-effect and merged passes."""
+
+    class _FindingsClient(DummyLLMClient):
+        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+            if _ARCH_PASS_ANCHOR in prompt:
+                return {
+                    "findings": [
+                        {
+                            "severity": "high",
+                            "category": "architecture",
+                            "file_path": "app/main.py",
+                            "line": 4242,
+                            "description": "bypasses the repository layer",
+                        }
+                    ]
+                }
+            return {"approved": True, "issues": [], "summary": "ok", "spec_compliance_notes": ""}
+
+    result = find_architecture_and_redundancy_issues(
+        _FindingsClient(),
+        CodeReviewInput(
+            files={"app/main.py": "4242: def bar():\n4243:     return 1\n"},
+            task_description="wire up bar",
+            architecture=_arch(),
+            pre_numbered=True,
+            full_content={"app/main.py": "def bar():\n    return 1\n"},
+        ),
+    )
+    assert len(result) == 1
+    assert result[0].line is None  # nulled: real file is 2 lines, 4242 is out of range
+
+
 # --------------------------------------------------------------------------- coordinator integration
 
 
@@ -791,3 +830,35 @@ def test_run_pass_inlines_full_arch_doc_without_shrinking_code_budget(
     find_architecture_and_redundancy_issues(_EmptyClient(), _input(architecture=arch))
 
     assert captured["max_inline_chars"] == 20_000
+
+
+def test_run_pass_wires_scoped_tools_into_agent(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The architecture-consistency agent is built with the full shared tool
+    set, including the scoped read_lines/read_function/find_references tools
+    the module docstring previously omitted."""
+    import code_review_agent.architecture_consistency_pass as pass_mod
+
+    captured: Dict[str, Any] = {}
+    original_agent = pass_mod.Agent
+
+    def _spy_agent(*, model, system_prompt, tools):
+        captured["tool_names"] = {t.tool_name for t in tools}
+        return original_agent(model=model, system_prompt=system_prompt, tools=tools)
+
+    monkeypatch.setattr(pass_mod, "Agent", _spy_agent)
+
+    class _EmptyClient(DummyLLMClient):
+        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+            return {"findings": []}
+
+    find_architecture_and_redundancy_issues(_EmptyClient(), _input(architecture=_arch()))
+
+    assert captured["tool_names"] == {
+        "read_file",
+        "read_lines",
+        "read_function",
+        "list_files",
+        "search_codebase",
+        "find_function_at_line",
+        "find_references",
+    }

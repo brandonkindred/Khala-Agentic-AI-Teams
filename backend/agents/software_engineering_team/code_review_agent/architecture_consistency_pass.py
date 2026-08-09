@@ -14,7 +14,8 @@ This pass runs ONCE PER SUBMISSION (never once per chunk), after the
 false-positive filter, and is purely additive: it is given the full
 architecture document and the merged submission, with read access to the rest
 of the repository via the same tools the false-positive filter uses
-(``read_file``, ``list_files``, ``search_codebase``, ``find_function_at_line``),
+(``read_file``, ``read_lines``, ``read_function``, ``list_files``, ``search_codebase``,
+``find_function_at_line``, ``find_references``),
 and emits new findings in two categories only: ``"architecture"`` (a stated
 boundary/pattern/decision the change contradicts) and ``"refactor"`` (a
 capability the change re-implements that already exists elsewhere). Every
@@ -63,6 +64,7 @@ from .models import CodeReviewInput, CodeReviewIssue, coerce_line, is_no_op_sugg
 from .profiles import ReviewProfile
 from .prompts import ARCHITECTURE_CONSISTENCY_PROMPT
 from .repo_reader import RepoReader
+from .side_effect_impact_pass import _effective_pre_numbered
 
 logger = logging.getLogger(__name__)
 
@@ -467,7 +469,9 @@ def _run_pass(
     data = json.loads(raw)
     findings = _parse_findings(data)
     if findings:
-        findings = _validate_findings(index, findings, pre_numbered=input_data.pre_numbered)
+        findings = _validate_findings(
+            index, findings, pre_numbered=_effective_pre_numbered(input_data, index)
+        )
         logger.info(
             "ArchitectureConsistencyPass: found %s new finding(s) (architecture/refactor)",
             len(findings),

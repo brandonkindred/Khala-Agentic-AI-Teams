@@ -69,6 +69,10 @@ from shared.dev_models.models import ReviewContext, Task
 from software_engineering_team.code_review_agent.change_surface import (
     ChangeSurface,
     build_change_surface_from_pairs,
+    unified_diffs_from_pairs,
+)
+from software_engineering_team.code_review_agent.previous_content import (
+    resolve_previous_content,
 )
 from software_engineering_team.shared.agent_review import AgentReviewCache
 from software_engineering_team.shared.review_progress import (
@@ -441,6 +445,133 @@ def _maybe_build_change_surface_from_pairs(
     return surface
 
 
+def _patch_has_any_removal(patch: str) -> bool:
+    """True when ``patch`` deletes any line at all.
+
+    ``build_change_surface_from_pairs`` only ever expands the rendered body
+    around *added* touched lines, anchored to their enclosing construct via
+    AST (Python) or a capped heuristic window (every other language) -- see
+    ``change_surface._assemble_path_block`` / ``expand_touched_ranges``. It
+    never renders a removed line's text, and expansion around some nearby
+    *added* line is not a reliable stand-in: a same-spot replace can delete
+    an entire named construct (a function/class) and add a differently-named,
+    unrelated one in its place, with no added line anywhere that touches the
+    deleted construct's own identity, and no way to check this generically --
+    ``mapping._symbol_surface`` only recognizes Python ``def``/``class``/
+    ``type`` and TS/JS ``export`` bindings, so a non-exported TS/JS function,
+    a module-level constant, or any construct in a language it doesn't parse
+    at all would defeat a symbol-based check. Since there is no general,
+    language-agnostic way to prove a given deletion's information already
+    survives elsewhere in the rendered surface, any deletion at all means the
+    path cannot be proven fully covered.
+
+    Preconditions:
+        - ``patch`` is one file's unified-diff text (``difflib.unified_diff``
+          output, e.g. from :func:`unified_diffs_from_pairs`), or blank for no
+          change.
+
+    Postconditions:
+        - Returns True iff ``patch`` contains at least one line, within a
+          ``@@ ... @@`` hunk body, starting with ``"-"``.
+        - Blank ``patch``, or a patch with no ``@@`` hunk headers -> False.
+        - Never raises.
+    """
+    in_hunk = False
+    for line in (patch or "").splitlines():
+        if line.startswith("@@"):
+            in_hunk = True
+            continue
+        if in_hunk and line.startswith("-"):
+            return True
+    return False
+
+
+def _resolve_change_surface_for_review(
+    files: Mapping[str, str],
+    repo_path: Path,
+    old_contents: Optional[Mapping[str, str]] = None,
+) -> Optional[ChangeSurface]:
+    """Best-effort, fully-represented change surface for ``files``.
+
+    When ``old_contents`` is given (a caller already resolved a base), it is
+    used directly. Otherwise this auto-resolves a base from ``repo_path``'s
+    pre-task ``HEAD``: the SE task engine commits the workspace exactly once,
+    at Deliver (see ``shared/deliver_utils.py``) -- never during Execution or
+    Review -- so at every point this is called, ``HEAD`` in ``repo_path``
+    still points at the commit that preceded this task's in-flight edits, and
+    ``revision="HEAD"`` therefore resolves genuine prior content for any path
+    that existed before this task touched it.
+
+    Preconditions:
+        - ``files`` maps path -> new content (may be empty).
+        - ``repo_path`` is the task's workspace checkout.
+        - ``old_contents``, when given, maps path -> previously resolved file
+          text; ``None`` (the default) means "resolve it from ``repo_path``".
+
+    Postconditions:
+        - Returns ``None`` ("no base") when ``files`` is empty, or when
+          neither ``old_contents`` nor auto-resolution (``resolve_previous_content``
+          against every given path -- no ``.git``, git unavailable, or every
+          path new relative to HEAD) yields previous content for ANY path --
+          the caller must then submit ``files`` as-is.
+        - Returns ``None`` ("empty diff") when a base for at least one path
+          was resolved but the resulting surface has nothing to show (every
+          resolved path is identical to its new content), via
+          ``_maybe_build_change_surface_from_pairs``.
+        - Returns ``None`` ("partial coverage") when at least one path
+          genuinely changed -- it is not a *hit* in ``old_map`` with content
+          identical to its new content; a path absent from ``old_map``
+          (including one whose new content happens to be blank, e.g. a newly
+          added empty marker file) is always genuinely new, never treated as
+          unchanged -- and either: the built surface omits that path entirely
+          (a deletion-only *file*, or a blank new file, contributes no added
+          touched lines), or the path's patch deletes any line at all (see
+          :func:`_patch_has_any_removal` -- the change surface can never
+          faithfully render a removed line's content or prove some nearby
+          addition safely stands in for it, so any deletion means the path
+          cannot be proven fully covered). Submitting a surface that omits a
+          real change -- a whole file, or any deleted line within one --
+          would let the reviewer approve without ever seeing it, so this is
+          treated the same as no surface at all: the caller must submit
+          ``files`` as-is rather than a subset of what changed. In practice
+          this means the surface path only fires for purely-additive changes
+          (a brand-new file, or existing lines left untouched with new ones
+          appended) -- any path that replaces, edits, or removes an existing
+          line falls back to ``files=``, exactly as before this feature
+          existed.
+        - Otherwise (every genuinely-changed path is fully represented)
+          returns the built ``ChangeSurface``.
+        - Never raises: ``resolve_previous_content`` already degrades
+          git/disk failures to misses; the only raise it documents is a blank
+          ``repo_path``, guarded here by the empty-``files`` check plus a
+          defensive ``except ValueError``.
+    """
+    if not files:
+        return None
+    if old_contents is None:
+        try:
+            resolved = resolve_previous_content(str(repo_path), files.keys(), revision="HEAD")
+        except ValueError:
+            return None
+        if not resolved.contents:
+            return None
+        old_map: Mapping[str, str] = resolved.contents
+    else:
+        old_map = old_contents
+    surface = _maybe_build_change_surface_from_pairs(files, old_map)
+    if surface is None:
+        return None
+    patches = unified_diffs_from_pairs(files, old_map)
+    for path, new_text in files.items():
+        if path in old_map and old_map[path] == new_text:
+            continue
+        if path not in surface.blocks:
+            return None
+        if _patch_has_any_removal(patches.get(path, "")):
+            return None
+    return surface
+
+
 def _code_review_step(
     *,
     llm: LLMClient,
@@ -484,25 +615,34 @@ def _code_review_step(
           context yet keeps working unchanged.
         - ``enable_llm_review_grounding`` defaults True; forwarded to the LLM fallback
           (kill switch for ungrounded-claim filtering).
-        - ``old_contents``, when given, maps path -> previously resolved file text and is
-          forwarded to :func:`_maybe_build_change_surface_from_pairs` to attempt a diff-derived
-          surface for the external-agent's ``CodeReviewInput``. ``None`` (the default) means "no
-          base to diff against" and is *not* forwarded to that function -- unlike
-          ``_maybe_build_change_surface_from_pairs`` itself, which treats an explicit
-          ``old_contents=None`` as "every path is wholly new" (a meaningful diff), this step
-          only attempts a surface when a caller actually opts in with real (possibly empty)
-          previous-content data, so every existing caller that has no ``old_contents`` wiring
-          yet keeps today's ``files=`` behavior unchanged.
+        - ``old_contents``, when given, maps path -> previously resolved file text and is used
+          directly as the diff base for the external-agent's ``CodeReviewInput``. ``None`` (the
+          default) means "no caller-supplied base": the base is then auto-resolved from
+          ``repo_path``'s pre-task ``HEAD`` instead of skipping the surface attempt outright --
+          see :func:`_resolve_change_surface_for_review`.
 
     Postconditions:
         - Returns a :class:`_ReviewStepResult`: ``issues`` from the agent or LLM fallback,
           and ``raw_issue_count`` from the LLM fallback when it ran (``None`` when the
           external agent succeeded or a bare-list stub reported no count).
         - The external agent's ``CodeReviewInput`` is built with ``code=<surface>,
-          pre_numbered=True`` (no ``files=``) when ``old_contents`` is not ``None`` and
-          :func:`_maybe_build_change_surface_from_pairs` returns a non-empty surface for
-          ``(files, old_contents)``; otherwise it is built with ``files=files`` exactly as
-          before this parameter existed.
+          pre_numbered=True, full_content=<surface's own paths>`` (no ``files=``) when
+          a change surface can be resolved for ``files`` -- from caller-supplied
+          ``old_contents``, or auto-resolved from ``repo_path``'s pre-task ``HEAD`` when
+          ``old_contents`` is ``None`` -- and every genuinely-changed path is fully
+          represented in it (see ``_resolve_change_surface_for_review``). ``full_content``
+          rides along with the bounded surface, scoped to exactly ``surface.blocks``'
+          paths (never a path ``files`` carries that the surface itself omitted as
+          unchanged), so the coordinator's whole-codebase side-effect and architecture
+          passes (which would otherwise treat ``pre_numbered=True`` as "only a partial
+          excerpt is available" and skip caller-impact analysis entirely) still see real
+          full bodies for exactly the paths this task actually changed -- not a wider
+          changed-file scope than the map review itself used. Otherwise -- no base
+          resolvable for any path, every resolved path identical to its new content, or a
+          genuinely-changed path only partially covered (whole file or any deleted line
+          within it) -- it falls back to submitting ``files`` as-is, exactly as before this
+          parameter existed. Code review runs identically either way; a missing, empty,
+          or partial base never skips it.
         - Never raises: an external ``code_review_agent`` failure logs a warning and falls back
           to the LLM reviewer, matching this step's long-standing solo behavior. The LLM fallback
           itself (used both here and when ``code_review_agent`` is None) is also guarded — any
@@ -526,20 +666,15 @@ def _code_review_step(
             )
         try:
             from software_engineering_team.code_review_agent.models import (
-                CodeReviewInput as _CRInput,
+                build_code_review_input as _build_cr_input,
             )
 
             ctx = review_context or ReviewContext()
-            surface = (
-                _maybe_build_change_surface_from_pairs(files, old_contents)
-                if old_contents is not None
-                else None
-            )
             # repo_root carries the workspace path as a serializable field so a
             # durable Temporal review can rebuild the whole-repo reader worker-side
             # (a live repo_reader object cannot cross that boundary); the live
             # reader below still drives the in-process/thread-mode path.
-            cr_input_kwargs: Dict[str, Any] = dict(
+            common_kwargs: Dict[str, Any] = dict(
                 task_description=task_description,
                 task_requirements=task.requirements or "",
                 acceptance_criteria=getattr(task, "acceptance_criteria", []) or [],
@@ -548,18 +683,29 @@ def _code_review_step(
                 spec_content=ctx.spec_content,
                 repo_root=str(repo_path),
             )
+            # code= (pre-numbered diff surface) when a fully-represented base diff
+            # resolves (caller-supplied old_contents, or auto-resolved from repo_path's
+            # HEAD); otherwise files= (per-file attribution, no header parsing, no
+            # upstream truncation) — see _resolve_change_surface_for_review for the
+            # fallback contract. full_content rides along with the surface so the
+            # coordinator's whole-codebase side-effect/architecture passes still see
+            # real full bodies for the changed paths (CodeReviewInput.full_content)
+            # instead of being silently disabled by pre_numbered=True -- scoped to
+            # surface.blocks' own paths, not all of files: files can include a path
+            # this task left byte-identical to HEAD (surface.blocks correctly omits
+            # it as unchanged), and full_content is documented as complete-or-absent
+            # (CodebaseIndex.from_input), so including that path would pull it into
+            # the tail passes' changed-file scope as if this task had touched it.
+            surface = _resolve_change_surface_for_review(files, repo_path, old_contents)
             if surface is not None:
-                # A meaningful diff was built: submit the bounded, pre-numbered
-                # surface instead of full file bodies, matching api/pr_review.py's
-                # established happy-path shape.
-                cr_input_kwargs["code"] = surface.code
-                cr_input_kwargs["pre_numbered"] = True
+                cr_input = _build_cr_input(
+                    code=surface.code,
+                    pre_numbered=True,
+                    full_content={path: files[path] for path in surface.blocks},
+                    **common_kwargs,
+                )
             else:
-                # No base to diff against (or nothing meaningful changed): files=
-                # keeps per-file attribution and lets the coordinator bound its own
-                # prompts — no header parsing, no upstream truncation.
-                cr_input_kwargs["files"] = files
-            cr_input = _CRInput(**cr_input_kwargs)
+                cr_input = _build_cr_input(files=files, **common_kwargs)
             cr_result = call_code_review_agent(
                 code_review_agent,
                 cr_input,
@@ -942,9 +1088,9 @@ def run_review(
         - ``enable_llm_review_grounding`` is forwarded to the LLM-fallback path
           (defaults True).
         - ``old_contents`` is forwarded to the code-review step only (see
-          ``_code_review_step``'s ``old_contents``); ``None`` (the default) preserves the
-          existing ``files=``-only behavior for every caller that has no base-content
-          resolution wired in yet.
+          ``_code_review_step``'s ``old_contents``); ``None`` (the default) means "no
+          caller-supplied base" -- the code-review step then auto-resolves a base from
+          ``repo_path``'s pre-task ``HEAD`` instead of always using ``files=``.
 
     Postconditions:
         - Returns a :class:`ReviewResult` whose ``passed`` reflects the team's
@@ -1113,9 +1259,9 @@ def run_microtask_review(
         - ``tool_agent_cache``, when given, is forwarded to the tool-agent fan-out
           step only — see ``_run_tool_agents_review``.
         - ``old_contents`` is forwarded to the code-review step only (see
-          ``_code_review_step``'s ``old_contents``); ``None`` (the default) preserves the
-          existing ``files=``-only behavior for every caller that has no base-content
-          resolution wired in yet.
+          ``_code_review_step``'s ``old_contents``); ``None`` (the default) means "no
+          caller-supplied base" -- the code-review step then auto-resolves a base from
+          ``repo_path``'s pre-task ``HEAD`` instead of always using ``files=``.
 
     Postconditions:
         - Returns a :class:`ReviewResult` scoped to ``files``; ``passed``
