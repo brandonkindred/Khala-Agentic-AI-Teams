@@ -70,6 +70,38 @@ def test_agent_not_on_roster_returns_empty_prompts_and_logs_warning(
     assert "Ghost Agent" in caplog.text
 
 
+def test_orphan_manifest_returns_empty_prompts_and_logs_warning(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+):
+    """Orphan manifest_id must soft-fail starter prompts (200 + []), not 500 the GET."""
+    from agent_team_studio.agentic_team_provisioning.api import main
+    from agent_team_studio.agentic_team_provisioning.models import AgenticTeamAgent
+
+    team_id = _new_team()
+    orphan = AgenticTeamAgent(
+        agent_name="orphan.agent",
+        source="registry",
+        manifest_id="registry.orphan.agent",
+    )
+    AgenticTeamStore().save_team_agents(team_id, [orphan])
+    session_id = _stub_session(monkeypatch, team_id, "orphan.agent")
+
+    def _missing(_manifest_id: str):
+        raise LookupError("AgentManifest not found: registry.orphan.agent")
+
+    monkeypatch.setattr(main, "resolve_persona", _missing)
+
+    with caplog.at_level(
+        logging.WARNING, logger="agent_team_studio.agentic_team_provisioning.api.main"
+    ):
+        resp = client.get(f"/teams/{team_id}/test-chat/sessions/{session_id}")
+
+    assert resp.status_code == 200
+    assert resp.json()["suggested_prompts"] == []
+    assert session_id in caplog.text
+    assert "orphan.agent" in caplog.text
+
+
 def test_non_404_failure_during_prompt_generation_propagates(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ):

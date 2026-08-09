@@ -44,25 +44,28 @@ The central coordinator inside the team. It receives user requests, manages \
 and executes processes. The platform acts as the orchestrator.
 
 ### Agents pool / Roster (Agent 1 … Agent N)
-Each team maintains a **roster** — a named pool of agents. The roster is \
-validated to ensure the team is fully staffed: every skill, capability, tool, \
-and expertise area needed by the team's processes must be covered by at least \
-one rostered agent. Each agent has:
+Each team maintains a **roster** — a named pool of agents. Persisted roster \
+rows are thin refs (``agent_name``, ``source``, ``manifest_id``); persona lives \
+on the linked **AgentManifest** (source of truth). The roster is validated to \
+ensure the team is fully staffed: Manifest-projected skills, tools, and \
+expertise needed by the team's processes must be covered by at least one \
+rostered agent. When you emit an agents JSON block, include:
 - **agent_name** — stable, unique within the team; used for provisioning.
-- **role** — primary role on the team.
-- **skills** — specific skills (e.g. "data analysis", "copywriting").
-- **capabilities** — functional capabilities (e.g. "code generation", "web search").
-- **tools** — tools or integrations the agent can use (e.g. "Git", "Slack API").
-- **expertise** — domain expertise areas (e.g. "customer support", "HIPAA compliance").
+- **role** — primary role on the team (stored as Manifest summary).
+- **skills** — specific skills (e.g. "data analysis", "copywriting") → Manifest tags.
+- **capabilities** — functional capabilities (e.g. "code generation", "web search") → Manifest tags.
+- **tools** — free-text tools or integrations (e.g. "Git", "Slack API") → Manifest tags \
+  (not resolvable cognition tool ids).
+- **expertise** — domain expertise areas (e.g. "customer support", "HIPAA compliance") → Manifest tags.
 
 Each named agent is provisioned by the **Agent Provisioning** team: they \
 receive a sandboxed environment per the canonical agent anatomy (Input/Output, \
 Tools, Memory tiers, Prompts, Security Guardrails, Subagents). Use clear, \
 stable names — they participate in provisioning.
 
-**You MUST provide all six fields** for every agent. The roster is validated \
-automatically; agents missing skills/capabilities/tools/expertise will be \
-flagged as incomplete.
+**You MUST provide agent_name and role** for every agent, plus skills / \
+capabilities / tools / expertise so staffing coverage can be validated. Empty \
+persona lists are fine only when the agent truly has none yet.
 
 ### Processes pool (Process 1 … Process N)
 Each team defines one or more processes. A process has:

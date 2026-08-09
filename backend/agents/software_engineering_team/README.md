@@ -622,7 +622,7 @@ notes:
 
 ### Backward Compatibility
 
-`DevOpsTeamLeadAgent` exposes three entry points: `run(spec)` (skips orchestrator-managed artifact writes/branch commits, but Phase 4.5 validation/execution tools such as `terraform init` or `cdk synth` may still write under the working directory as side effects), `run_task(spec, repo_path=...)` (the current structured entry point — writes artifacts to a real repo on a feature branch and merges them into `development`), and a legacy free-text `run_workflow(...)` adapter kept for backward compatibility, which internally builds a `DevOpsTaskSpec` via `_build_legacy_spec` (adding defaults for rollback, security, approval gates) and delegates to `run_task`. No production caller currently invokes any of these — `DevOpsTeamLeadAgent` is registered in the SE orchestrator's agent registry but not yet wired into the Tech Lead handoff; DevOps/infrastructure work is routed to `backend_v2` today.
+`DevOpsTeamLeadAgent` exposes two structured entry points: `run(spec)` (skips orchestrator-managed artifact writes/branch commits, but Phase 4.5 validation/execution tools such as `terraform init` or `cdk synth` may still write under the working directory as side effects) and `run_task(spec, repo_path=...)` (writes artifacts to a real repo on a feature branch and merges them into `development`). Both take a `DevOpsTaskSpec` directly — the free-text `run_workflow(...)` adapter has been removed. No production caller currently invokes either — `DevOpsTeamLeadAgent` is registered in the SE orchestrator's agent registry but not yet wired into the Tech Lead handoff; DevOps/infrastructure work is routed to `backend_v2` today.
 
 ### Expanded Team (Phase 2, not yet implemented)
 

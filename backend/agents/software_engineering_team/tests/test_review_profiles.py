@@ -98,6 +98,27 @@ def test_summary_guidance_enforces_brevity_and_no_praise() -> None:
     assert 'return an empty string "" — do not write reassuring "meets the spec" prose' in prompt
 
 
+def test_thoroughness_requirements_are_surface_scoped_not_whole_codebase() -> None:
+    """Regression guard: the shared THOROUGHNESS REQUIREMENTS block scopes the
+    reviewer's obligation to the code it was given to review, not every file
+    the wider codebase happens to contain -- and no longer carries the old
+    "review EVERY function/class in EVERY file" mandate that predated the
+    diff-first rewrite."""
+    assert (
+        "Your thoroughness obligation is everything in the code you were given to review"
+        in _SHARED_OUTPUT_SECTION
+    )
+    assert '"Code to review" input' in _SHARED_OUTPUT_SECTION
+    assert (
+        "Do NOT extend that obligation to code shown to you only as background"
+        in _SHARED_OUTPUT_SECTION
+    )
+    # The retired whole-codebase thoroughness mandate must not reappear.
+    assert "EVERY file" not in _SHARED_OUTPUT_SECTION
+    assert "EVERY function, method, and class" not in _SHARED_OUTPUT_SECTION
+    assert "review every function" not in _SHARED_OUTPUT_SECTION.lower()
+
+
 def test_code_review_criteria_covers_eight_change_focused_headers() -> None:
     """The default CODE_REVIEW profile's checklist covers all eight change-focused
     criteria the diff-first review goal requires."""
@@ -129,7 +150,9 @@ def test_code_review_contracts_criterion_covers_dbc_and_documentation_accuracy()
     assert "Preconditions: conditions the function requires" in prompt
     assert "Postconditions: what the function guarantees" in prompt
     assert "Invariants: properties that hold before and after" in prompt
-    assert "A docstring or comment that claims behavior the implementation does not provide" in prompt
+    assert (
+        "A docstring or comment that claims behavior the implementation does not provide" in prompt
+    )
 
 
 def test_code_review_style_criterion_keeps_no_fixed_word_limit_guidance() -> None:
@@ -235,7 +258,9 @@ def test_engine_threads_profile_to_chunk_reviewer(profile: ReviewProfile, anchor
     """Running the engine with a profile routes that profile's system prompt to
     the chunk reviewer."""
     probe = _SystemPromptProbe()
-    CodeReviewAgent(probe, force_in_process=True).run(CodeReviewInput(code="def f():\n    return 1", profile=profile))
+    CodeReviewAgent(probe, force_in_process=True).run(
+        CodeReviewInput(code="def f():\n    return 1", profile=profile)
+    )
     assert probe.system_prompts, "expected at least one chunk-review call"
     assert any(anchor in sp for sp in probe.system_prompts)
 
@@ -281,7 +306,9 @@ def test_skip_false_positive_filter_bypasses_verifier(monkeypatch) -> None:
     # promises — the engine's LLM client, the CodeReviewInput, and the raw
     # issue list the chunk reviewer produced (asserting these guards against a
     # silent regression in how the coordinator invokes the filter).
-    CodeReviewAgent(_IssueProbe(), force_in_process=True).run(CodeReviewInput(files={"a.py": "x = 1"}))
+    CodeReviewAgent(_IssueProbe(), force_in_process=True).run(
+        CodeReviewInput(files={"a.py": "x = 1"})
+    )
     assert len(calls) == 1
     spy_llm, spy_input, spy_issues = calls[0]
     assert isinstance(spy_input, CodeReviewInput)
@@ -319,7 +346,9 @@ def test_skip_tail_passes_bypasses_both_tail_passes(monkeypatch) -> None:
     monkeypatch.setattr(coord, "find_architecture_and_side_effect_issues", _merged_spy)
 
     # Default: both tail passes run once.
-    CodeReviewAgent(_IssueProbe(), force_in_process=True).run(CodeReviewInput(files={"a.py": "x = 1"}))
+    CodeReviewAgent(_IssueProbe(), force_in_process=True).run(
+        CodeReviewInput(files={"a.py": "x = 1"})
+    )
     assert len(filter_calls) == 1
     assert len(merged_calls) == 1
 

@@ -96,8 +96,8 @@ def test_tech_lead_plan_to_task_graph_preserves_target_team(monkeypatch) -> None
     assert out["tasks"][1]["target_team"] == "backend_v2"
 
 
-def test_tech_lead_plan_to_task_graph_falls_back_to_legacy_team_fields(monkeypatch) -> None:
-    """Legacy team/stack fields are preserved as target_team routing hints."""
+def test_tech_lead_plan_to_task_graph_ignores_legacy_team_fields(monkeypatch) -> None:
+    """Legacy team/stack/assignee_stack fields are no longer read; only target_team counts."""
     monkeypatch.setattr(tl_mod, "Agent", lambda **kw: object())
     monkeypatch.setattr(
         tl_mod,
@@ -116,11 +116,8 @@ def test_tech_lead_plan_to_task_graph_falls_back_to_legacy_team_fields(monkeypat
         CodingTeamPlanInput(requirements_title="X", repo_path="/tmp")
     )
 
-    assert [task["target_team"] for task in out["tasks"]] == [
-        "frontend_v2",
-        "backend_v2",
-        "devops",
-    ]
+    assert [task["target_team"] for task in out["tasks"]] == ["", "", ""]
+    assert {s["name"] for s in out["stacks"]} == {"frontend_v2", "backend_v2"}
 
 
 def test_tech_lead_run_groom_task(monkeypatch) -> None:
@@ -187,7 +184,7 @@ def test_tech_lead_run_groom_task_retries_transient_error_then_succeeds(monkeypa
 
 
 def test_tech_lead_plan_to_task_graph_llm_failure_returns_defaults(monkeypatch) -> None:
-    """When the LLM call fails, return empty tasks and a single default stack."""
+    """When the LLM call fails, return empty tasks and the canonical v2 stack roster."""
     plan = CodingTeamPlanInput(
         requirements_title="X",
         requirements_description="",
@@ -203,8 +200,8 @@ def test_tech_lead_plan_to_task_graph_llm_failure_returns_defaults(monkeypatch) 
     agent = TechLeadAgent(model=object())
     out = agent.run_plan_to_task_graph(plan)
     assert out["tasks"] == []
-    assert len(out["stacks"]) == 1
-    assert out["stacks"][0]["name"] == "default"
+    assert len(out["stacks"]) == 2
+    assert {s["name"] for s in out["stacks"]} == {"frontend_v2", "backend_v2"}
 
 
 def test_tech_lead_plan_to_task_graph_retries_transient_error_then_succeeds(monkeypatch) -> None:
