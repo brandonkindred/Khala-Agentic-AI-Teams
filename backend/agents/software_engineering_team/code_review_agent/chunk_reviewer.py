@@ -52,20 +52,26 @@ CHUNK_REVIEW_NOTE = "\n**Note:** This is one chunk of the full codebase. Review 
 
 # Guardrails that keep the reviewer from filing the false positives this engine
 # was seeing. Injected into the per-chunk user prompt (NOT the system prompt) so
-# the byte-locked CODE_REVIEW system prompt stays unchanged. Covers the three
+# the byte-locked CODE_REVIEW system prompt stays unchanged. Covers four
 # recurring bad-comment patterns: phantom truncation, "add a file that exists",
-# and flagging conventional intra-package relative imports.
+# flagging conventional intra-package relative imports, and attempting a
+# cross-caller impact check this bounded chunk has no tools to perform.
 REVIEW_GUARDRAILS_NOTE = (
     "\n**Review guardrails (avoid these false positives):**\n"
-    "- The code shown below is COMPLETE. Each function, method, class, and test is presented in "
-    "full. Never report a function, test, or block as 'truncated', 'cut off', or 'missing its "
-    "body' based on where the shown code ends — the end of the shown code is not evidence of an "
-    "incomplete implementation.\n"
+    "- Surface-first completeness: the code shown below is COMPLETE for what is displayed. Each "
+    "function, method, class, and test is presented in full. Never report a function, test, or "
+    "block as 'truncated', 'cut off', or 'missing its body' based on where the shown code ends — "
+    "the end of the shown code is not evidence of an incomplete implementation.\n"
     "- You are shown only the file(s) this change touched, not the whole repository. Do NOT claim "
     "that a file, module, or symbol referenced here 'does not exist', 'must be created', or 'needs "
-    "to be added' merely because it is not shown in this chunk — an unchanged file that already "
-    "exists in the repo is simply not shown. Only flag a genuinely broken reference you can "
-    "substantiate from the code in front of you.\n"
+    "to be added' SOLELY because it is off-chunk (not shown in this chunk) — an unchanged file or "
+    "symbol that already exists elsewhere in the repo is simply not shown here. Only flag a "
+    "genuinely broken reference you can substantiate from the code in front of you.\n"
+    "- Do NOT attempt to verify whether this chunk's changes break their callers elsewhere in the "
+    "codebase — you have no tools to search beyond this chunk, so that verdict would be a guess. "
+    "That cross-caller check is the job of the dedicated side-effect / blast-radius pass, which "
+    "runs once per submission with the tools to do it; defer to it instead of flagging caller "
+    "impact here.\n"
     "- Intra-package relative imports (e.g. `from .models import X`, `from .store import Y`) are "
     "the established convention in this codebase and resolve to sibling modules in the same "
     "package. Do NOT flag them as unclear or ask to convert them to absolute imports.\n"

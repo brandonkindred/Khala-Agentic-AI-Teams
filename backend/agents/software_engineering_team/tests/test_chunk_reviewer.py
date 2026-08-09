@@ -186,8 +186,9 @@ def test_no_segment_note_means_no_segment_section() -> None:
 
 def test_review_guardrails_note_is_in_every_prompt() -> None:
     """The anti-false-positive guardrails (no phantom truncation, don't flag
-    existing files as missing, relative imports are conventional) are injected
-    into the per-chunk user prompt (not the byte-locked system prompt).
+    existing files as missing, defer cross-caller checks to the side-effect
+    pass, relative imports are conventional) are injected into the per-chunk
+    user prompt (not the byte-locked system prompt).
 
     Precondition: a ChunkReviewAgent is instantiated and run once, so exactly one
     prompt is recorded for inspection.
@@ -199,8 +200,13 @@ def test_review_guardrails_note_is_in_every_prompt() -> None:
     assert "**Review guardrails" in prompt
     # Full sentences, not bare substrings, so a stray unrelated occurrence of
     # "COMPLETE" or "does not exist" elsewhere in the prompt can't false-pass.
-    assert "The code shown below is COMPLETE." in prompt
+    assert "Surface-first completeness: the code shown below is COMPLETE" in prompt
     assert "Do NOT claim that a file, module, or symbol referenced here 'does not exist'" in prompt
+    assert "SOLELY because it is off-chunk" in prompt
+    assert (
+        "That cross-caller check is the job of the dedicated side-effect / blast-radius pass"
+        in prompt
+    )
     assert "from .models import" in prompt  # relative imports are conventional
 
 
