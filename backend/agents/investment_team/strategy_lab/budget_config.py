@@ -73,8 +73,8 @@ def _derive_total_budget_s(max_retries: int, timeout_s: float, fallback: float) 
 
 
 def _require_at_least(field_name: str, value: float, floor: float) -> None:
-    """Raise ``ValueError`` naming ``field_name`` when ``value`` is a
-    ``bool``, non-finite, or ``< floor``.
+    """Raise ``ValueError`` naming ``field_name`` when ``value`` is not a
+    plain, non-boolean real number that is finite and ``>= floor``.
 
     A ``nan`` fails every ordering comparison (``nan < floor`` is ``False``),
     so a bare ``<`` check alone would silently accept it; ``from_env()``
@@ -83,11 +83,20 @@ def _require_at_least(field_name: str, value: float, floor: float) -> None:
     past a "validated" config. A ``bool`` is-a ``int`` is-a valid operand for
     both ``math.isfinite`` and ``<`` (``True`` reads as a "finite" ``1.0``),
     so it must be rejected explicitly before either check — otherwise
-    ``llm_timeout_s=True`` would silently become a one-second timeout.
+    ``llm_timeout_s=True`` would silently become a one-second timeout. A
+    non-numeric value (a string, ``None``) makes ``math.isfinite`` raise an
+    unnamed ``TypeError`` instead of the documented field-naming
+    ``ValueError``, and an astronomically large ``int`` makes it raise
+    ``OverflowError`` converting to ``float`` — both are caught and
+    re-raised as the same ``ValueError`` shape as every other rejection.
     """
-    if isinstance(value, bool):
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise ValueError(f"{field_name} must be a float, got {value!r}")
-    if not math.isfinite(value):
+    try:
+        finite = math.isfinite(value)
+    except OverflowError:
+        raise ValueError(f"{field_name} must be finite, got {value!r}") from None
+    if not finite:
         raise ValueError(f"{field_name} must be finite, got {value!r}")
     if value < floor:
         raise ValueError(f"{field_name} must be >= {floor}, got {value!r}")

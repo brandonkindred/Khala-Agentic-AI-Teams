@@ -358,6 +358,36 @@ def test_construction_rejects_bool_for_float_field(field_name: str, bool_value: 
         StrategyLabBudgetConfig(**{field_name: bool_value})
 
 
+@pytest.mark.parametrize(
+    "field_name, bad_value",
+    [
+        (field_name, bad_value)
+        for field_name in (
+            "llm_timeout_s",
+            "llm_backoff_base_s",
+            "llm_backoff_max_s",
+            "llm_rate_limit_backoff_initial_s",
+            "llm_rate_limit_backoff_max_s",
+            "llm_total_budget_s",
+        )
+        # `None` is `llm_total_budget_s`'s own sentinel for "derive it" — not
+        # an invalid value for that one field, so it's excluded there.
+        for bad_value in (
+            ("10", None, 10**400) if field_name != "llm_total_budget_s" else ("10", 10**400)
+        )
+    ],
+)
+def test_construction_rejects_non_numeric_float_field_as_value_error(
+    field_name: str, bad_value: object
+) -> None:
+    """A string or ``None`` would otherwise make ``math.isfinite`` raise an
+    unnamed ``TypeError``, and an astronomically large ``int`` would make it
+    raise ``OverflowError`` converting to ``float`` — both must surface as
+    the documented field-naming ``ValueError`` instead."""
+    with pytest.raises(ValueError, match=field_name):
+        StrategyLabBudgetConfig(**{field_name: bad_value})
+
+
 def test_construction_rejects_rate_limit_max_below_initial() -> None:
     with pytest.raises(ValueError, match="llm_rate_limit_backoff_max_s"):
         StrategyLabBudgetConfig(
