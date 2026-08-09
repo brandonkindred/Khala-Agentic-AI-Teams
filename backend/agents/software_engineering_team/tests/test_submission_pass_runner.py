@@ -25,10 +25,13 @@ from software_engineering_team.shared.context_sizing import MergedPassBudgets
 
 
 def _fixed_budgets(
-    *, max_inline_code_chars: int, max_manifest_chars: int = 10_000
+    *,
+    max_inline_code_chars: int,
+    max_manifest_chars: int = 10_000,
+    max_architecture_chars: int = 0,
 ) -> MergedPassBudgets:
     return MergedPassBudgets(
-        max_architecture_chars=0,
+        max_architecture_chars=max_architecture_chars,
         max_inline_code_chars=max_inline_code_chars,
         max_manifest_chars=max_manifest_chars,
         reserved_response_tokens=4096,
@@ -257,6 +260,41 @@ def test_splits_into_multiple_batches_and_preserves_order(
     assert result == [{"paths": "a.py"}, {"paths": "b.py"}, {"paths": "c.py"}]
 
 
+def test_max_extra_body_chars_propagates_from_computed_architecture_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The runner must expose the computed extra-body allowance to
+    build_prompt, not discard it — otherwise a pass that inlines a
+    pass-specific body (e.g. an architecture document) has no way to know
+    how much of it actually fits."""
+    monkeypatch.setattr(
+        runner_mod,
+        "compute_code_review_merged_pass_budgets",
+        lambda *a, **k: _fixed_budgets(max_inline_code_chars=100_000, max_architecture_chars=777),
+    )
+    seen_budgets = []
+
+    def build_prompt(batch: FileBatch, budgets: Any) -> str:
+        seen_budgets.append(budgets)
+        return _paths_prompt(batch, budgets)
+
+    class _Client(DummyLLMClient):
+        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+            return {"paths": prompt.replace("PATHS:", "")}
+
+    run_submission_pass(
+        _Client(),
+        changed_files=[("a.py", "x")],
+        system_prompt="sys",
+        build_prompt=build_prompt,
+        tools=[],
+        parse=json.loads,
+        extra_reserved_chars=1_000,
+    )
+    assert len(seen_budgets) == 1
+    assert seen_budgets[0].max_extra_body_chars == 777
+
+
 # --- run_submission_pass: reactive recovery ---------------------------------
 
 
@@ -271,6 +309,12 @@ def test_reactive_bisect_recovers_when_multi_file_batch_overflows(
         lambda *a, **k: _fixed_budgets(max_inline_code_chars=100_000),
     )
 
+    seen_batches: List[FileBatch] = []
+
+    def build_prompt(batch: FileBatch, _budgets: Any) -> str:
+        seen_batches.append(batch)
+        return _paths_prompt(batch, _budgets)
+
     class _Client(DummyLLMClient):
         def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
             paths = prompt.replace("PATHS:", "")
@@ -283,11 +327,17 @@ def test_reactive_bisect_recovers_when_multi_file_batch_overflows(
         _Client(),
         changed_files=files,
         system_prompt="sys",
-        build_prompt=_paths_prompt,
+        build_prompt=build_prompt,
         tools=[],
         parse=json.loads,
     )
     assert result == [{"file": "a.py"}, {"file": "b.py"}]
+    # The original combined attempt is not partial; the two bisected retries are.
+    assert [b.is_partial for b in seen_batches] == [False, True, True]
+    assert all(b.total == 1 and b.index == 1 for b in seen_batches), (
+        "bisected children keep the parent's index/total, but is_partial tells "
+        "build_prompt they no longer represent the full batch"
+    )
 
 
 def test_reactive_shrink_recovers_when_single_file_batch_overflows(
@@ -299,7 +349,10 @@ def test_reactive_shrink_recovers_when_single_file_batch_overflows(
         lambda *a, **k: _fixed_budgets(max_inline_code_chars=100_000),
     )
 
+    seen_batches: List[FileBatch] = []
+
     def build_prompt(batch: FileBatch, _budgets: Any) -> str:
+        seen_batches.append(batch)
         return "LEN:" + str(len(batch.items[0][1]))
 
     class _Client(DummyLLMClient):
@@ -319,6 +372,9 @@ def test_reactive_shrink_recovers_when_single_file_batch_overflows(
         parse=json.loads,
     )
     assert result == [{"ok": True, "len": 100}]
+    # The original attempt is not partial; the shrunk retry is (its content is
+    # not the full file body).
+    assert [b.is_partial for b in seen_batches] == [False, True]
 
 
 def test_reactive_shrink_gives_up_after_one_failed_retry(

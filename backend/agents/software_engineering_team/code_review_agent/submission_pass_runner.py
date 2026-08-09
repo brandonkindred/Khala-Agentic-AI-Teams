@@ -112,12 +112,19 @@ class SubmissionPassBudgets:
         max_manifest_chars: Per-call budget for the changed-file path
             manifest, truncated with a tool-reachable overflow note when the
             full list does not fit.
+        max_extra_body_chars: Per-call budget for the pass-specific extra
+            body (sized from ``extra_reserved_chars``, e.g. an architecture
+            document) that ``build_prompt`` inlines alongside the manifest
+            and code; ``0`` when the pass has no such body. A ``build_prompt``
+            that inlines this body in full without truncating to this budget
+            can build a prompt larger than the computed context allowance.
         reserved_response_tokens: Output-token reserve the resolved model is
             clamped to for this call.
     """
 
     max_inline_code_chars: int
     max_manifest_chars: int
+    max_extra_body_chars: int
     reserved_response_tokens: int
 
 
@@ -130,11 +137,18 @@ class FileBatch:
             changed-file set in submission order.
         index: 1-based position of this batch among ``total``.
         total: Total batch count for this submission-pass invocation.
+        is_partial: True when this batch is a reactive-recovery bisect/shrink
+            child rather than one of the ``total`` proactive batches. A
+            partial batch's ``items`` never represents everything ``index``
+            covers — ``build_prompt`` must not render it as a complete batch
+            (e.g. must not imply "batch 1 of 1" means the full changed-file
+            set when a recovery split leaves only some files in ``items``).
     """
 
     items: List[Tuple[str, str]]
     index: int
     total: int
+    is_partial: bool = False
 
 
 def _manifest_chars(paths: List[str]) -> int:
@@ -351,10 +365,13 @@ def _recover_from_overflow(
         - When ``batch.items`` has more than one file and ``depth`` is under
           :data:`_MAX_BATCH_BISECT_DEPTH`, bisects the file list in half and
           recurses into each half at ``depth + 1``, concatenating both halves'
-          results in order (each half may recover independently).
+          results in order (each half may recover independently). Each half's
+          :attr:`FileBatch.is_partial` is True, since neither contains all of
+          ``batch.items``.
         - Otherwise (a single file, or the depth cap reached) attempts exactly
           one shrink-and-retry (:func:`_shrink_items`) with a fresh ``Agent``
-          call; returns ``[result]`` on success.
+          call, also marked ``is_partial=True`` (the shrunk content is not
+          the full file body); returns ``[result]`` on success.
         - Returns ``[]`` when nothing can be shrunk further, or the shrink
           retry itself still raises — logged, never raised.
     """
@@ -372,7 +389,9 @@ def _recover_from_overflow(
         mid = len(batch.items) // 2
         results: List[T] = []
         for half_items in (batch.items[:mid], batch.items[mid:]):
-            half_batch = FileBatch(items=half_items, index=batch.index, total=batch.total)
+            half_batch = FileBatch(
+                items=half_items, index=batch.index, total=batch.total, is_partial=True
+            )
             results.extend(
                 _run_batch_with_recovery(
                     model,
@@ -408,7 +427,7 @@ def _recover_from_overflow(
         type(exc).__name__,
         exc,
     )
-    shrink_batch = FileBatch(items=shrunk, index=batch.index, total=batch.total)
+    shrink_batch = FileBatch(items=shrunk, index=batch.index, total=batch.total, is_partial=True)
     try:
         prompt = build_prompt(shrink_batch, budgets)
         result = _call_agent(model, system_prompt, tools, prompt, parse)
@@ -455,6 +474,12 @@ def run_submission_pass(
         - ``extra_reserved_chars`` is the size of any pass-specific body
           ``build_prompt`` also inlines beyond the changed-file manifest/code
           (e.g. an architecture document); ``0`` when there is none.
+          ``build_prompt`` must truncate that body to
+          ``budgets.max_extra_body_chars`` (the allowance this reserves it,
+          which may be smaller than ``extra_reserved_chars`` when the model
+          context is tight) rather than inlining it in full — otherwise the
+          rendered prompt can exceed the computed context allowance even
+          though the runner accounted for the body's size.
         - ``finding_array_count`` is ``1`` or ``2`` (forwarded to
           :func:`~software_engineering_team.shared.context_sizing.compute_code_review_merged_pass_budgets`,
           which raises ``ValueError`` for any other value).
@@ -493,6 +518,7 @@ def run_submission_pass(
     budgets = SubmissionPassBudgets(
         max_inline_code_chars=raw_budgets.max_inline_code_chars,
         max_manifest_chars=raw_budgets.max_manifest_chars,
+        max_extra_body_chars=raw_budgets.max_architecture_chars,
         reserved_response_tokens=raw_budgets.reserved_response_tokens,
     )
 
