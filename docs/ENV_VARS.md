@@ -797,9 +797,11 @@ within-batch index) confirmed a false positive does not change which finding
 gets dropped. Lowering this cap increases the number of verification LLM
 calls (and therefore cost/latency) for files with many findings; raising it
 trades that against a larger prompt per call. This is a cap on how many
-*findings* share one verification call — separate from any cap on how much
-*file content* a single tool read can return (out of scope here; tracked in
-a separate sub-issue).
+*findings* share one verification call — it has no counterpart for the cited
+*file*'s content, because that content is never inlined into the prompt at
+all (see `CODE_REVIEW_FALSE_POSITIVE_FILTER` above): the model always fetches
+it via the unbounded `read_file`/`read_lines` tools, so there is nothing to
+cap.
 
 ### CODE_REVIEW_MAX_CONCURRENT_ACTIVITIES
 Int (default `8`, floor `1`). Two things, both governed by this one knob (see
@@ -1021,6 +1023,13 @@ Fail-safe: a finding is removed only on an explicit, confident false-positive
 verdict; any ambiguity or verifier error keeps the finding, and the not-reviewed
 coverage findings are never removed. Set to `false`/`0`/`no` to disable the pass
 (any other value, or unset, leaves it enabled).
+
+The verification prompt (`_build_group_prompt`) never inlines the cited
+file's content — it only names the file and directs the model to fetch it via
+`read_file`/`read_lines`. This keeps the per-call prompt size independent of
+the cited file's size with no cap or truncation involved: the model always
+sees the file's full, current content on demand instead of a possibly-stale
+or size-limited inline copy.
 
 When the review is invoked with a repository reader (the GitHub PR-review path
 fetches whole files at the PR head and supplies a reader; the software-engineering

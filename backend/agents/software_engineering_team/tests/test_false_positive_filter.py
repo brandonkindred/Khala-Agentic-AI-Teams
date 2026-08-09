@@ -1424,16 +1424,18 @@ def test_render_finding_block_neutralizes_prompt_metacharacters() -> None:
     assert block[0].count("---") == 2
 
 
-def test_group_prompt_has_anchor_indices_and_full_file_body() -> None:
-    """``_build_group_prompt`` emits per-finding anchor indices, the task description, and the full file body."""
+def test_group_prompt_has_anchor_indices_and_directs_to_read_tool() -> None:
+    """``_build_group_prompt`` emits per-finding anchor indices, the task
+    description, and a directive to fetch the cited file via tools -- it
+    never inlines the file's content."""
     idx = CodebaseIndex(files={"app/main.py": "X" * 50}, existing_codebase="old")
     issues = [_issue(description="d0"), _issue(description="d1", line=None)]
     prompt = _build_group_prompt(idx, "app/main.py", issues, _input())
     assert "verdicts" in prompt.lower()
     assert "Finding index 0" in prompt and "Finding index 1" in prompt
     assert "wire up foo" in prompt  # task description
-    assert "X" * 50 in prompt  # full file body, not truncated
-    assert "first 10 characters" not in prompt
+    assert "X" * 50 not in prompt  # file body never inlined
+    assert 'read_file("app/main.py")' in prompt
 
 
 def test_group_prompt_caps_oversized_task_and_acceptance_fields() -> None:
@@ -1459,11 +1461,13 @@ def test_group_prompt_caps_oversized_task_and_acceptance_fields() -> None:
     assert "short ok" in prompt
 
 
-def test_group_prompt_unreadable_file_uses_placeholder() -> None:
-    """``_build_group_prompt`` never raises when the cited path is unreadable."""
+def test_group_prompt_names_file_without_reading_it() -> None:
+    """``_build_group_prompt`` never reads or resolves ``file_path`` itself --
+    it just names it in the read-tool directive -- so an unresolvable path
+    never raises and is still named."""
     idx = CodebaseIndex(files={"app/main.py": "x = 1\n"})
     prompt = _build_group_prompt(idx, "missing.py", [_issue()], _input())
-    assert "(file content unavailable)" in prompt
+    assert "missing.py" in prompt
     assert "Finding index 0" in prompt
     assert "verdicts" in prompt.lower()
 
@@ -1487,14 +1491,17 @@ def test_code_fence_for_grows_past_backtick_runs() -> None:
     assert _code_fence_for("```") == "````"
 
 
-def test_group_prompt_uses_safe_fence_for_backtick_content() -> None:
-    """A file body containing a ``` fence is wrapped in a longer fence so it cannot close early."""
-    idx = CodebaseIndex(files={"app/doc.md": "before\n```python\nx = 1\n```\nafter\n"})
-    prompt = _build_group_prompt(idx, "app/doc.md", [_issue(file_path="app/doc.md")], _input())
-    # The wrapping fence is four backticks (one longer than the body's run); the
-    # body's own ``` survives intact between them.
-    assert "````" in prompt
-    assert "```python" in prompt
+def test_group_prompt_size_independent_of_file_size() -> None:
+    """``_build_group_prompt`` never inlines the cited file, so its output is
+    byte-identical regardless of how large that file's real content is --
+    there is no budget/cap to exercise because nothing scales with it."""
+    issues = [_issue(description="d0")]
+    small_idx = CodebaseIndex(files={"app/main.py": "x = 1\n"})
+    huge_idx = CodebaseIndex(files={"app/main.py": "y = 2\n" * 100_000})  # ~600KB
+    small_prompt = _build_group_prompt(small_idx, "app/main.py", issues, _input())
+    huge_prompt = _build_group_prompt(huge_idx, "app/main.py", issues, _input())
+    assert small_prompt == huge_prompt
+    assert "y = 2" not in huge_prompt
 
 
 # --------------------------------------------------------------------------- filter behavior
@@ -1807,21 +1814,21 @@ def test_filter_groups_by_file_and_removes_across_groups(monkeypatch, parallelis
     b = _issue(file_path="b.py", description="b-real")
 
     # Both groups send index 0; the stub marks index 0 false → both would drop,
-    # but b's verdict says real, so only a drops. Route on each file's own
-    # inlined body (a stable invariant of _build_group_prompt) rather than the
-    # "Full content of `<path>`" header wording, so rewording that header
-    # can't silently break this.
+    # but b's verdict says real, so only a drops. Route on the group's own
+    # read_file(...) directive rather than a bare "a.py"/"b.py" substring: the
+    # manifest lists every file in the submission (including the other
+    # group's), so a bare filename would match both groups' prompts.
     class PerFileStub(DummyLLMClient):
         def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:  # type: ignore[override]
             if "verdicts" not in prompt.lower():
                 return super().complete_json(prompt, **kwargs)
-            if "SENTINEL_A" in prompt:
+            if 'read_file("a.py")' in prompt:
                 return {"verdicts": [{"index": 0, "is_real_issue": False, "confidence": "high"}]}
-            if "SENTINEL_B" in prompt:
+            if 'read_file("b.py")' in prompt:
                 return {"verdicts": [{"index": 0, "is_real_issue": True, "confidence": "high"}]}
             return super().complete_json(prompt, **kwargs)
 
-    inp = _input(files={"a.py": "SENTINEL_A\n", "b.py": "SENTINEL_B\n"})
+    inp = _input(files={"a.py": "content-a\n", "b.py": "content-b\n"})
     out = filter_false_positives(PerFileStub(), inp, [a, b])
     assert out == [b]
 
@@ -1925,20 +1932,19 @@ def test_filter_timeout_keeps_group_findings_without_hanging(monkeypatch) -> Non
     a = _issue(file_path="a.py", description="a-fp")
     b = _issue(file_path="b.py", description="b-real")
 
-    # Route on each file's own inlined body (see PerFileStub above) rather
-    # than the "Full content of `<path>`" header wording.
+    # Route on the group's own read_file(...) directive (see PerFileStub above).
     class SlowStub(DummyLLMClient):
         def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:  # type: ignore[override]
             if "verdicts" not in prompt.lower():
                 return super().complete_json(prompt, **kwargs)
-            if "SENTINEL_A" in prompt:
+            if 'read_file("a.py")' in prompt:
                 time.sleep(3)  # exceeds the 1s timeout set above
                 return {"verdicts": [{"index": 0, "is_real_issue": False, "confidence": "high"}]}
-            if "SENTINEL_B" in prompt:
+            if 'read_file("b.py")' in prompt:
                 return {"verdicts": [{"index": 0, "is_real_issue": True, "confidence": "high"}]}
             return super().complete_json(prompt, **kwargs)
 
-    inp = _input(files={"a.py": "SENTINEL_A\n", "b.py": "SENTINEL_B\n"})
+    inp = _input(files={"a.py": "content-a\n", "b.py": "content-b\n"})
     start = time.monotonic()
     out = filter_false_positives(SlowStub(), inp, [a, b])
     elapsed = time.monotonic() - start

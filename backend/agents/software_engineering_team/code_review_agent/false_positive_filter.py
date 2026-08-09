@@ -104,10 +104,11 @@ _EXCERPT_WINDOW_LINES = 12
 _MANIFEST_LIMIT = 300
 
 # Cap on the task description / each acceptance criterion inlined into the
-# verification prompt. Unlike the cited file body (deliberately kept in full
-# -- see _build_group_prompt), there is no tool the model can call to read the
-# rest of an oversized task field, so an unbounded field has no fallback path
-# at all if it blows the prompt past context.
+# verification prompt. Unlike the cited file (never inlined at all -- see
+# _build_group_prompt, which only names it and directs the model to
+# read_file/read_lines), there is no tool the model can call to read the rest
+# of an oversized task field, so an unbounded field has no fallback path at
+# all if it blows the prompt past context.
 _CONTEXT_FIELD_CHARS = 4_000
 _CONTEXT_FIELD_TRUNCATION_MARKER = "\n... (truncated)"
 
@@ -1553,26 +1554,30 @@ def _build_group_prompt(
 ) -> str:
     """Render the user prompt for verifying one file's findings.
 
-    The prompt inlines the cited file's full content (so the model has the
-    primary evidence even without a tool call) and lists up to
-    ``_MANIFEST_LIMIT`` available paths; other files (including any manifest
-    overflow) and the existing-codebase excerpt remain reachable through the
-    tools. The wording is a stable anchor for the verdict contract: it names
-    the file, indexes each finding, and asks for a ``verdicts`` array.
+    The cited file's content is NOT inlined -- the prompt only names
+    ``file_path`` and directs the model to fetch it via the ``read_file``/
+    ``read_lines`` tools (``_build_tools``) before judging. This keeps the
+    per-call prompt size independent of the cited file's size, with no cap or
+    truncation needed: the model still gets the file's full, real content on
+    demand, exactly as it does for every other file it inspects. The prompt
+    also lists up to ``_MANIFEST_LIMIT`` available paths; other files
+    (including any manifest overflow) and the existing-codebase excerpt remain
+    reachable through the tools. The wording is a stable anchor for the
+    verdict contract: it names the file, indexes each finding, and asks for a
+    ``verdicts`` array.
 
     Preconditions:
         - ``file_path`` is a canonical key previously returned by
           ``index.resolve_path`` (the production filter only groups resolved
-          paths). Unreadable keys still degrade to a placeholder rather than
-          raising.
+          paths); this function itself never reads or resolves it, so an
+          unresolvable path is simply named as-is without raising.
 
     Postconditions:
         - The returned text contains one indexed block per finding (index 0..n-1
-          matching ``issues`` order) and inlines the cited file's full body
-          when readable, otherwise a ``(file content unavailable)`` placeholder.
-          The task description and each acceptance criterion are capped at
-          ``_CONTEXT_FIELD_CHARS`` so an oversized task field cannot dominate
-          the prompt.
+          matching ``issues`` order) and names ``file_path`` with a directive
+          to read it via tools, never the file's content. The task description
+          and each acceptance criterion are capped at ``_CONTEXT_FIELD_CHARS``
+          so an oversized task field cannot dominate the prompt.
         - Never raises.
     """
     parts: List[str] = []
@@ -1593,14 +1598,11 @@ def _build_group_prompt(
         parts.append(f"... and {len(manifest) - _MANIFEST_LIMIT} more (call list_files()).")
     parts.append("")
 
-    body = index.read_file_or_none(file_path)
-    if body is None:
-        body = "(file content unavailable)"
-    fence = _code_fence_for(body)
-    parts.append(f"**Full content of `{file_path}` (the file the findings below are about):**")
-    parts.append(fence)
-    parts.append(body)
-    parts.append(fence)
+    parts.append(
+        f"**File the findings below are about: `{file_path}`.** Its content is NOT "
+        f'inlined here — call read_file("{file_path}") (or read_lines for a bounded '
+        "slice) FIRST to see the real, current code before judging any finding below."
+    )
     parts.append("")
 
     parts.append(
