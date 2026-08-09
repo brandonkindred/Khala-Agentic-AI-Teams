@@ -838,6 +838,15 @@ _TS_EXPORT_RE = re.compile(
 )
 _TS_EXPORT_LIST_RE = re.compile(r"^[ \t]*export[ \t]*\{([^}]*)\}", re.MULTILINE)
 
+# Pre-numbered content (``FileSegment.pre_numbered`` / ``ChangeSurface`` blocks,
+# e.g. a diff-first submission's ``code=``) prefixes every line with its
+# original line number (``"42: def f():"``), which would otherwise shift every
+# line off column zero and make the anchored symbol patterns above match
+# nothing. Only a genuine ``N: `` prefix at the very start of a line matches
+# (never mid-line, e.g. inside a dict literal or docstring), so stripping it
+# is safe for already-plain content too -- there is nothing to strip there.
+_LINE_NUMBER_PREFIX_RE = re.compile(r"^\d+: ", re.MULTILINE)
+
 
 def _symbol_surface(content: str) -> List[str]:
     """Extract a file's top-level defined/exported symbol names.
@@ -850,7 +859,12 @@ def _symbol_surface(content: str) -> List[str]:
           cache key via ``_sibling_surface``, so a missed export can leave a
           stale map-phase hit after a sibling's public API changes. Prefer
           false positives (extra cache misses) over false negatives.
+        - Pre-numbered content is de-numbered first (see
+          ``_LINE_NUMBER_PREFIX_RE``) so each line's original column position
+          -- and therefore top-level-vs-nested classification -- is unchanged
+          by whether the submission carried ``N: `` prefixes.
     """
+    content = _LINE_NUMBER_PREFIX_RE.sub("", content)
     names: set[str] = set()
     for match in _PY_SYMBOL_RE.finditer(content):
         names.add(match.group(1))

@@ -12,7 +12,6 @@ from software_engineering_team.shared.prompts import (
 )
 from software_engineering_team.shared.prompts import (
     build_batch_fix_prompt,
-    build_code_review_prompt,
     build_documentation_self_review_prompt,
     build_execution_prompt,
     build_planning_prompt,
@@ -134,15 +133,6 @@ EXECUTION_PROMPT = build_execution_prompt(
     has_language_conventions=False,
     file_noun="component/service files",
     path_rules=_EXECUTION_PATH_RULES,
-)
-
-# ---------------------------------------------------------------------------
-# Review phase
-# ---------------------------------------------------------------------------
-
-REVIEW_PROMPT = build_code_review_prompt(
-    project_kind="frontend",
-    extra_verify_clause="accessibility (semantic markup, ARIA, keyboard nav, contrast), ",
 )
 
 # ---------------------------------------------------------------------------

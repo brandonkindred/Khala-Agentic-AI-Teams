@@ -493,6 +493,120 @@ def test_run_design_attempt_activity_maps_unexpected_error(monkeypatch):
     assert exc_info.value.non_retryable is True
 
 
+def test_run_design_attempt_activity_raises_cancelled_between_checkpoints(monkeypatch):
+    """``activity.is_cancelled()`` flipping True at an ``emit`` checkpoint
+    (the "between steps" cancellation check) raises Temporal's
+    ``CancelledError`` and stops the attempt immediately — code past the
+    checkpoint that observed cancellation never runs."""
+    from temporalio.exceptions import CancelledError
+
+    from investment_team.strategy_lab.orchestrator import StrategyLabOrchestrator
+
+    reached_past_checkpoint = False
+
+    def _is_cancelled_after_first_call():
+        calls = {"n": 0}
+
+        def _check():
+            calls["n"] += 1
+            return calls["n"] > 1
+
+        return _check
+
+    monkeypatch.setattr(act, "is_cancelled", _is_cancelled_after_first_call())
+
+    def _fake_attempt(self, **kwargs):
+        nonlocal reached_past_checkpoint
+        kwargs["emit"]("design", {"sub_phase": "round_1"})  # not cancelled yet
+        kwargs["emit"]("design", {"sub_phase": "round_2"})  # cancellation observed here
+        reached_past_checkpoint = True
+        raise AssertionError("should not run past the cancelled checkpoint")
+
+    monkeypatch.setattr(StrategyLabOrchestrator, "_run_design_attempt", _fake_attempt)
+
+    with pytest.raises(CancelledError):
+        act.run_design_attempt_activity(_run_design_attempt_params())
+    assert reached_past_checkpoint is False
+
+
+def test_run_design_attempt_activity_unaffected_when_never_cancelled(monkeypatch):
+    """With ``is_cancelled()`` always False, ``no_thread_cancel_exception=True``
+    and the new ``BackgroundHeartbeat`` wrapping don't change the ordinary
+    (non-cancelled) outcome — regression coverage for those additions."""
+    from investment_team.strategy_lab.orchestrator import StrategyLabOrchestrator
+
+    class _FakeRecord:
+        def model_dump(self, *, mode: str = "python") -> Dict[str, Any]:
+            return {"lab_record_id": "rec-uncancelled"}
+
+    def _fake_attempt(self, **kwargs):
+        kwargs["emit"]("design", {"sub_phase": "round_1"})
+        kwargs["emit"]("coding", {"sub_phase": "completed"})
+        return _FakeRecord()
+
+    monkeypatch.setattr(StrategyLabOrchestrator, "_run_design_attempt", _fake_attempt)
+
+    out = act.run_design_attempt_activity(_run_design_attempt_params())
+    assert out["kind"] == "record"
+    assert out["record"]["lab_record_id"] == "rec-uncancelled"
+
+
+def test_run_design_attempt_activity_stops_promptly_after_cancellation_mid_loop(monkeypatch):
+    """A terminate/cancel landing well into a long attempt (not just at the
+    very first checkpoint, as ``..._raises_cancelled_between_checkpoints``
+    covers) must still stop the activity within a small, bounded number of
+    checkpoints — not let it run anywhere close to completion.
+
+    Simulates a long attempt as a loop of many ``emit`` checkpoints, each
+    separated by a small real sleep (standing in for the many LLM calls the
+    real pipeline makes over up to two hours). ``is_cancelled()`` flips True
+    only after a handful of checkpoints, mimicking cancellation observed
+    mid-run rather than instantly. The assertion is the exact checkpoint
+    count at which cancellation was observed, not elapsed wall-clock time —
+    under a loaded/parallel (xdist) CI runner the process can be descheduled
+    for longer than any fixed wall-clock budget between two checkpoints even
+    though cancellation still lands at exactly the expected one, so a real-time
+    deadline here would be scheduler-dependent flakiness with no additional
+    deterministic coverage.
+    """
+    import time
+
+    from temporalio.exceptions import CancelledError
+
+    from investment_team.strategy_lab.orchestrator import StrategyLabOrchestrator
+
+    TOTAL_CHECKPOINTS = 200  # would take TOTAL_CHECKPOINTS * _STEP_SLEEP_S if never cancelled
+    CANCEL_AFTER = 5  # is_cancelled() starts returning True on call number CANCEL_AFTER + 1
+    _STEP_SLEEP_S = 0.02
+
+    calls = {"n": 0}
+
+    def _is_cancelled_after_n():
+        calls["n"] += 1
+        return calls["n"] > CANCEL_AFTER
+
+    monkeypatch.setattr(act, "is_cancelled", _is_cancelled_after_n)
+
+    def _fake_attempt(self, **kwargs):
+        emit = kwargs["emit"]
+        for i in range(TOTAL_CHECKPOINTS):
+            emit("design", {"sub_phase": f"round_{i}"})
+            time.sleep(_STEP_SLEEP_S)
+        raise AssertionError(
+            "fake design attempt ran to completion despite cancellation — "
+            "the checkpoint mechanism failed to stop it promptly"
+        )
+
+    monkeypatch.setattr(StrategyLabOrchestrator, "_run_design_attempt", _fake_attempt)
+
+    with pytest.raises(CancelledError):
+        act.run_design_attempt_activity(_run_design_attempt_params())
+
+    # Stopped at exactly the checkpoint where cancellation was first observed —
+    # nowhere close to the full TOTAL_CHECKPOINTS loop.
+    assert calls["n"] == CANCEL_AFTER + 1
+
+
 def test_run_design_attempt_activity_returns_skipped_outcome_for_502(monkeypatch):
     """A 502 ("no market data") HTTPException is caught and surfaced as a
     structured ``kind='skipped'`` outcome — cycle-terminal, never re-raised —

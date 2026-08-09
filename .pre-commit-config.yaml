@@ -18,8 +18,8 @@ repos:
   - repo: local
     hooks:
       - id: dbc-docstring-lint
-        name: DbC docstring lint (tech_lead_agent / coding_team_orchestrator)
+        name: DbC docstring lint (tech_lead_agent / coding_team_orchestrator / shared.cache)
         entry: python backend/agents/software_engineering_team/scripts/check_dbc_docstrings.py
         language: system
         pass_filenames: false
-        files: ^backend/agents/software_engineering_team/(tech_lead_agent/|coding_team_orchestrator\.py)
+        files: ^backend/(agents/software_engineering_team/(tech_lead_agent/|coding_team_orchestrator\.py)|shared/cache/)

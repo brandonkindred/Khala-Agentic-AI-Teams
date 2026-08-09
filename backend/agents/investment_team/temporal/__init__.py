@@ -28,6 +28,7 @@ from investment_team.temporal.paper_trading import (
 )
 from investment_team.temporal.workflows import (
     InvestmentBacktestWorkflow,
+    mark_backtest_job_cancelled_activity,
     run_backtest_activity,
 )
 
@@ -38,6 +39,7 @@ from investment_team.temporal.workflows import (
 WORKFLOWS = [InvestmentBacktestWorkflow, PaperTradingWorkflow]
 ACTIVITIES = [
     run_backtest_activity,
+    mark_backtest_job_cancelled_activity,
     run_paper_trading_activity,
     mark_paper_trading_stopped_activity,
 ]
@@ -55,6 +57,7 @@ __all__ = [
     "TASK_QUEUE",
     "WORKFLOWS",
     "WORKFLOW_ID_PREFIX",
+    "mark_backtest_job_cancelled_activity",
     "mark_paper_trading_stopped_activity",
     "run_backtest_activity",
     "run_paper_trading_activity",

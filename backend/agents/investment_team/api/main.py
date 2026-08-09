@@ -102,7 +102,7 @@ from investment_team.shared.job_store import (
     mark_all_running_jobs_failed as _bt_mark_all_running_jobs_failed,
 )
 from investment_team.shared.job_store import (
-    update_job as _bt_update_job,
+    update_job_if_not_cancelled as _bt_update_job_if_not_cancelled,
 )
 from investment_team.signal_intelligence_agent import SignalIntelligenceExpert
 from investment_team.signal_intelligence_models import SignalIntelligenceBriefV1
@@ -167,6 +167,12 @@ from shared.env_config import env_bool, env_float
 from shared.sse import sse_job_stream_async, sse_line
 
 logger = logging.getLogger(__name__)
+
+# Not a persisted job-store status — a local sentinel `_run_backtest_background`
+# returns when `_bt_update_job_if_not_cancelled` reports the job row itself is
+# gone (e.g. deleted mid-run via `DELETE /backtests/jobs/{job_id}`), so callers
+# can tell that apart from an actual user-initiated cancellation.
+_BT_JOB_STATUS_MISSING = "missing"
 
 STRATEGY_LAB_TERMINAL_STATUSES = _strategy_lab_orchestrator_api.STRATEGY_LAB_TERMINAL_STATUSES
 _STRATEGY_LAB_PROGRESS_FIELDS = _strategy_lab_orchestrator_api._STRATEGY_LAB_PROGRESS_FIELDS
@@ -1373,6 +1379,29 @@ class DeleteBacktestJobResponse(BaseModel):
     deleted: bool
 
 
+def _bt_terminal_status_for_write(write_result: Optional[bool]) -> Optional[str]:
+    """Translate a ``_bt_update_job_if_not_cancelled`` tri-state result into a verdict.
+
+    Preconditions:
+        - ``write_result`` is the direct return value of a
+          ``_bt_update_job_if_not_cancelled`` call (``True``/``False``/``None``).
+
+    Postconditions:
+        - Returns ``None`` when the write succeeded (``True``) — the caller should
+          proceed to the next step.
+        - Returns ``_BT_JOB_STATUS_CANCELLED`` when the job exists but is already
+          cancelled (``False``).
+        - Returns ``_BT_JOB_STATUS_MISSING`` when the job row no longer exists at
+          all (``None`` — e.g. deleted mid-run via ``DELETE /backtests/jobs/{job_id}``),
+          which is distinct from an actual cancellation.
+    """
+    if write_result is True:
+        return None
+    if write_result is False:
+        return _BT_JOB_STATUS_CANCELLED
+    return _BT_JOB_STATUS_MISSING
+
+
 def _run_backtest_background(
     job_id: str,
     strategy: StrategySpec,
@@ -1403,21 +1432,26 @@ def _run_backtest_background(
           crash left the job at RUNNING) therefore overwrites the same record
           instead of orphaning a duplicate. Returns ``_BT_JOB_STATUS_COMPLETED``.
         - On ``InvestmentBacktestError`` or other exceptions: job status becomes
-          FAILED with an error string, unless a cancel check already returned.
+          FAILED with an error string, unless the job was already cancelled.
           Returns ``_BT_JOB_STATUS_FAILED`` after persisting FAILED.
-        - If ``_bt_is_job_cancelled(job_id)`` is true at a check point, return
-          ``_BT_JOB_STATUS_CANCELLED`` without writing COMPLETED or FAILED so the
-          cancelled status visible at that check is preserved. Every
-          status-changing ``_bt_update_job`` call (RUNNING, COMPLETED, FAILED)
-          is immediately preceded by its own cancellation check — including a
-          re-check taken right before the COMPLETED write, after the backtest
-          record is built and stored — so no application-level work sits
-          between a check and the update it guards.
+        - Every RUNNING/COMPLETED/FAILED transition is written via
+          ``_bt_update_job_if_not_cancelled``, an atomic compare-and-set that
+          rejects the write when the job is already CANCELLED. So a cancel that
+          lands between a cancel check and the next status write can never be
+          silently overwritten: the write itself either no-ops or the function
+          returns ``_BT_JOB_STATUS_CANCELLED`` instead of persisting RUNNING,
+          COMPLETED, or FAILED over a cancelled job. If instead the job row has
+          been deleted outright (``DELETE /backtests/jobs/{job_id}`` racing this
+          worker), the write reports ``None`` rather than ``False`` and this
+          function returns ``_BT_JOB_STATUS_MISSING`` — a deleted job is not the
+          same outcome as a cancelled one and must not be reported as such.
     """
     try:
-        if _bt_is_job_cancelled(job_id):
-            return _BT_JOB_STATUS_CANCELLED
-        _bt_update_job(job_id, status=_BT_JOB_STATUS_RUNNING)
+        terminal = _bt_terminal_status_for_write(
+            _bt_update_job_if_not_cancelled(job_id, status=_BT_JOB_STATUS_RUNNING)
+        )
+        if terminal is not None:
+            return terminal
         result, trades = _run_real_data_backtest(strategy, config)
         if _bt_is_job_cancelled(job_id):
             return _BT_JOB_STATUS_CANCELLED
@@ -1440,26 +1474,32 @@ def _run_backtest_background(
         )
         with _lock:
             _backtests[backtest_id] = record
-        if _bt_is_job_cancelled(job_id):
-            return _BT_JOB_STATUS_CANCELLED
-        _bt_update_job(
-            job_id,
-            status=_BT_JOB_STATUS_COMPLETED,
-            result=RunBacktestResponse(backtest=record).model_dump(mode="json"),
-            backtest_id=backtest_id,
+        terminal = _bt_terminal_status_for_write(
+            _bt_update_job_if_not_cancelled(
+                job_id,
+                status=_BT_JOB_STATUS_COMPLETED,
+                result=RunBacktestResponse(backtest=record).model_dump(mode="json"),
+                backtest_id=backtest_id,
+            )
         )
+        if terminal is not None:
+            return terminal
         return _BT_JOB_STATUS_COMPLETED
     except InvestmentBacktestError as exc:
         logger.error("Backtest job %s failed with domain error: %s", job_id, exc)
-        if _bt_is_job_cancelled(job_id):
-            return _BT_JOB_STATUS_CANCELLED
-        _bt_update_job(job_id, status=_BT_JOB_STATUS_FAILED, error=str(exc))
+        terminal = _bt_terminal_status_for_write(
+            _bt_update_job_if_not_cancelled(job_id, status=_BT_JOB_STATUS_FAILED, error=str(exc))
+        )
+        if terminal is not None:
+            return terminal
         return _BT_JOB_STATUS_FAILED
     except Exception as exc:
         logger.exception("Backtest job %s failed", job_id)
-        if _bt_is_job_cancelled(job_id):
-            return _BT_JOB_STATUS_CANCELLED
-        _bt_update_job(job_id, status=_BT_JOB_STATUS_FAILED, error=str(exc))
+        terminal = _bt_terminal_status_for_write(
+            _bt_update_job_if_not_cancelled(job_id, status=_BT_JOB_STATUS_FAILED, error=str(exc))
+        )
+        if terminal is not None:
+            return terminal
         return _BT_JOB_STATUS_FAILED
 
 
@@ -2990,9 +3030,13 @@ def run_strategy_lab(request: RunStrategyLabRequest) -> StrategyLabRunStartRespo
     or ``GET /strategy-lab/runs/{run_id}/status`` for polling.
 
     Raises ``HTTPException(409)`` when another run is already active, or
-    (defense-in-depth, collision astronomically unlikely for a fresh uuid4)
-    when another transition for this freshly-minted run_id is already in
-    flight. An early, unlocked check runs before minting a run_id/acquiring
+    (defense-in-depth: when two concurrent requests happen to mint the
+    identical 8-hex-char run_id -- a 32-bit-entropy collision, not the full
+    uuid4 entropy the truncation forfeits -- the losing request's
+    ``_require_run_transition_lock`` call raises this 409; the active-run
+    check above does not itself guard against run_id collisions) when
+    another transition for this freshly-minted run_id is already in flight.
+    An early, unlocked check runs before minting a run_id/acquiring
     its transition lock, so a rejected request never allocates a registry
     entry that would otherwise never be looked up again -- but that check
     alone can't stop two concurrent requests from both minting a run_id and
@@ -4289,7 +4333,13 @@ async def stream_strategy_lab_run(run_id: str) -> StreamingResponse:
         - Otherwise the response subscribes to the per-job event bus and
           streams ``snapshot``/``progress``/``cycle_complete``/
           ``cycle_skipped`` events, terminating on ``complete``/``error``/
-          ``cancelled`` followed by a final ``done``.
+          ``cancelled`` followed by a final ``done``. Its connect-time
+          ``snapshot`` event is sourced from ``_active_runs.get(run_id)`` when
+          present, else falls back to the ``state`` loaded above -- so a
+          non-terminal run that exists only via the job-service fallback
+          (e.g. recovered after a server restart, never yet touched by
+          another endpoint) still receives its documented connect-time
+          snapshot instead of none at all.
 
     Raises:
         - ``HTTPException`` 404: ``run_id`` resolves to no state in either
@@ -4340,9 +4390,14 @@ async def stream_strategy_lab_run(run_id: str) -> StreamingResponse:
         return StreamingResponse(_terminal_gen(), media_type="text/event-stream")
 
     async def _snapshot_event() -> Optional[dict]:
-        # Skip the snapshot when there's no current in-memory state to send.
+        # Fall back to the state loaded above (e.g. from the job service) when
+        # _active_runs has no live entry for run_id -- otherwise a non-terminal
+        # run recovered only from the job-service fallback (never written into
+        # _active_runs) would silently get no connect-time snapshot at all.
         async with _async_lock:
             current = _active_runs.get(run_id, {})
+        if not current:
+            current = state
         if not current:
             return None
         return {"type": "snapshot", **_run_state_to_response(current).model_dump(mode="json")}
@@ -4814,8 +4869,12 @@ def _run_paper_trading_background(
                     if raw is not None:
                         session = PaperTradingSession.parse_persisted(raw)
                         session.status = PaperTradingStatus.FAILED
-                        session.error = f"Paper trading crashed: {exc}"
-                        session.divergence_analysis = f"Paper trading crashed: {exc}"
+                        # User-facing fields must not leak raw exception text (internal
+                        # paths, dependency names) to API consumers; the full exception
+                        # is already captured above via logger.exception.
+                        user_message = "Paper trading crashed due to an internal error."
+                        session.error = user_message
+                        session.divergence_analysis = user_message
                         session.completed_at = datetime.now(tz=timezone.utc).isoformat()
                         _paper_trading_sessions[session_id] = session
         except Exception:
@@ -5236,6 +5295,10 @@ def _fail_paper_trading_session(session_id: str, error: str) -> None:
 _DEFAULT_TX_COST_BPS = 5.0
 _DEFAULT_SLIPPAGE_BPS = 2.0
 
+# Fallback timeframe for live paper trading when neither the request nor the
+# strategy specifies one.
+_DEFAULT_TIMEFRAME = "1m"
+
 
 def _default_tx_cost_bps() -> float:
     """Operator-tunable fallback ``transaction_cost_bps`` (basis points) used
@@ -5322,6 +5385,7 @@ def _run_live_paper_trading_background(
     from investment_team.models import BacktestConfig as _BC
     from investment_team.trading_service.modes.paper_trade import (
         PaperTradeConfig,
+        PaperTradeTerminatedReason,
         StopController,
         run_paper_trade,
     )
@@ -5341,7 +5405,9 @@ def _run_live_paper_trading_background(
         if not symbols:
             raise RuntimeError("no symbols resolved for strategy")
 
-        strategy_timeframe = request.timeframe or getattr(strategy, "timeframe", None) or "1m"
+        strategy_timeframe = (
+            request.timeframe or getattr(strategy, "timeframe", None) or _DEFAULT_TIMEFRAME
+        )
 
         tx_cost, slip = _resolve_fee_overrides(request, asset_class=strategy.asset_class)
         # Captured once: two separate datetime.now() calls could straddle
@@ -5407,12 +5473,13 @@ def _run_live_paper_trading_background(
             # to the exact bars that drove warm-up.
             session.dataset_fingerprint = run_result.dataset_fingerprint
             session.completed_at = datetime.now(tz=timezone.utc).isoformat()
-            if run_result.error or run_result.terminated_reason in {
-                "lookahead_violation",
-                "provider_error",
-                "region_blocked",
-                "no_provider",
-            }:
+            _terminated_reason_failures = {
+                PaperTradeTerminatedReason.LOOKAHEAD_VIOLATION,
+                PaperTradeTerminatedReason.PROVIDER_ERROR,
+                PaperTradeTerminatedReason.REGION_BLOCKED,
+                PaperTradeTerminatedReason.NO_PROVIDER,
+            }
+            if run_result.error or run_result.terminated_reason in _terminated_reason_failures:
                 session.status = PaperTradingStatus.FAILED
             else:
                 session.status = PaperTradingStatus.COMPLETED
@@ -5487,7 +5554,18 @@ def stop_live_paper_trading(session_id: str) -> PaperTradingResponse:
         raise HTTPException(
             status_code=404, detail=f"Paper trading session '{session_id}' not found."
         )
-    session = PaperTradingSession.parse_persisted(raw)
+    try:
+        session = PaperTradingSession.parse_persisted(raw)
+    except Exception as exc:
+        logger.warning(
+            "Stop request for paper-trading session %s: persisted record could not be parsed.",
+            session_id,
+            exc_info=True,
+        )
+        raise HTTPException(
+            status_code=404,
+            detail=f"Paper trading session '{session_id}' not found or is corrupted.",
+        ) from exc
 
     # Idempotent: a terminal session's workflow is already closed, and Temporal
     # rejects signals to closed executions — so only signal an in-flight session

@@ -1542,20 +1542,17 @@ class TestCriterionTracesFromPhase4:
 
 
 class TestDevOpsTeamLeadAgentIntegration:
-    def test_happy_path_run_workflow(self) -> None:
+    def test_happy_path_run_task(self) -> None:
         mock_llm = _scripted_llm_for_happy_path()
         agent = DevOpsTeamLeadAgent(mock_llm)
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp)
             init_ok, _ = initialize_new_repo(path)
             assert init_ok
-            result = agent.run_workflow(
+            result = agent.run_task(
+                _base_task_spec(task_id="devops-backend"),
                 repo_path=path,
-                task_description="Add backend deployment automation",
-                requirements="Include prod approval gate and rollback plan",
-                target_repo="backend",
                 build_verifier=MagicMock(return_value=(True, "")),
-                task_id="devops-backend",
             )
             rev = subprocess.run(
                 ["git", "rev-parse", "development"],
@@ -1661,11 +1658,9 @@ class TestDevOpsTeamLeadAgentIntegration:
         )
         agent = DevOpsTeamLeadAgent(mock_llm)
         with tempfile.TemporaryDirectory() as tmp:
-            result = agent.run_workflow(
+            result = agent.run_task(
+                _base_task_spec(task_id="devops-sec-block"),
                 repo_path=Path(tmp),
-                task_description="Deploy service",
-                requirements="Include prod approval gate and rollback plan",
-                task_id="devops-sec-block",
             )
         assert not result.success
         assert "Quality gates failed" in (result.failure_reason or "")
@@ -1690,11 +1685,9 @@ class TestDevOpsTeamLeadAgentIntegration:
         )
         agent = DevOpsTeamLeadAgent(mock_llm)
         with tempfile.TemporaryDirectory() as tmp:
-            result = agent.run_workflow(
+            result = agent.run_task(
+                _base_task_spec(task_id="devops-sec-mask"),
                 repo_path=Path(tmp),
-                task_description="Deploy service",
-                requirements="Include prod approval gate and rollback plan",
-                task_id="devops-sec-mask",
             )
         assert not result.success
         assert result.completion_package is not None
@@ -1795,18 +1788,16 @@ class TestDevOpsTeamLeadAgentIntegration:
         with tempfile.TemporaryDirectory() as tmp:
             init_ok, _ = initialize_new_repo(Path(tmp))
             assert init_ok
-            result = agent.run_workflow(
+            result = agent.run_task(
+                _base_task_spec(task_id="devops-bv-fail"),
                 repo_path=Path(tmp),
-                task_description="Deploy",
-                requirements="Include prod approval and rollback plan",
                 build_verifier=MagicMock(return_value=(False, "Docker build failed")),
-                task_id="devops-bv-fail",
             )
         assert not result.success
         assert result.failure_reason == "Docker build failed"
 
     def test_completion_package_git_operations_real_merge(self) -> None:
-        """A real ``run_workflow`` delivers the artifacts by cutting a feature
+        """A real ``run_task`` delivers the artifacts by cutting a feature
         branch, merging it into development, and deleting it — the reported
         metadata reflects the actual git state (real SHA equal to development's
         HEAD), not fabricated placeholders."""
@@ -1816,12 +1807,10 @@ class TestDevOpsTeamLeadAgentIntegration:
             path = Path(tmp)
             init_ok, _ = initialize_new_repo(path)
             assert init_ok
-            result = agent.run_workflow(
+            result = agent.run_task(
+                _base_task_spec(task_id="devops-real-merge"),
                 repo_path=path,
-                task_description="Add backend deployment automation",
-                requirements="Include prod approval gate and rollback plan",
                 build_verifier=MagicMock(return_value=(True, "")),
-                task_id="devops-real-merge",
             )
             branches = subprocess.run(
                 ["git", "branch"], cwd=path, capture_output=True, text=True, check=True
@@ -1857,12 +1846,10 @@ class TestDevOpsTeamLeadAgentIntegration:
         with tempfile.TemporaryDirectory() as tmp:
             init_ok, _ = initialize_new_repo(Path(tmp))
             assert init_ok
-            result = agent.run_workflow(
+            result = agent.run_task(
+                _base_task_spec(task_id="devops-head-sha-unknown"),
                 repo_path=Path(tmp),
-                task_description="Add backend deployment automation",
-                requirements="Include prod approval gate and rollback plan",
                 build_verifier=MagicMock(return_value=(True, "")),
-                task_id="devops-head-sha-unknown",
             )
         assert result.success
         gitops = result.completion_package.git_operations
@@ -1883,12 +1870,10 @@ class TestDevOpsTeamLeadAgentIntegration:
         with tempfile.TemporaryDirectory() as tmp:
             init_ok, _ = initialize_new_repo(Path(tmp))
             assert init_ok
-            result = agent.run_workflow(
+            result = agent.run_task(
+                _base_task_spec(task_id="devops-merge-fail"),
                 repo_path=Path(tmp),
-                task_description="Add backend deployment automation",
-                requirements="Include prod approval gate and rollback plan",
                 build_verifier=MagicMock(return_value=(True, "")),
-                task_id="devops-merge-fail",
             )
         assert not result.success
         assert "merge" in (result.failure_reason or "").lower()
@@ -1908,12 +1893,10 @@ class TestDevOpsTeamLeadAgentIntegration:
         with tempfile.TemporaryDirectory() as tmp:
             init_ok, _ = initialize_new_repo(Path(tmp))
             assert init_ok
-            result = agent.run_workflow(
+            result = agent.run_task(
+                _base_task_spec(task_id="devops-dev-branch-fail"),
                 repo_path=Path(tmp),
-                task_description="Add backend deployment automation",
-                requirements="Include prod approval gate and rollback plan",
                 build_verifier=MagicMock(return_value=(True, "")),
-                task_id="devops-dev-branch-fail",
             )
         assert not result.success
         assert "development" in (result.failure_reason or "")
@@ -1929,12 +1912,10 @@ class TestDevOpsTeamLeadAgentIntegration:
         with tempfile.TemporaryDirectory() as tmp:
             init_ok, _ = initialize_new_repo(Path(tmp))
             assert init_ok
-            result = agent.run_workflow(
+            result = agent.run_task(
+                _base_task_spec(task_id="devops-feat-branch-fail"),
                 repo_path=Path(tmp),
-                task_description="Add backend deployment automation",
-                requirements="Include prod approval gate and rollback plan",
                 build_verifier=MagicMock(return_value=(True, "")),
-                task_id="devops-feat-branch-fail",
             )
         assert not result.success
         assert "feature branch" in (result.failure_reason or "")

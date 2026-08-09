@@ -10,12 +10,13 @@ Invariants:
     - **Additive-only, fail-safe.** Never removes or mutates findings the
       caller already has; any setup/LLM/validation failure yields
       ``([], [])``.
-    - **Bounded cost per call.** The changed-file set is split into bounded
-      batches (mirroring the map-phase chunk budget,
-      ``compute_code_review_map_chunk_chars``) whenever it exceeds the
-      per-call inline-code budget; each batch is one independent LLM call.
-      A submission that fits under the budget still makes exactly one call,
-      identical to the pre-batching behavior.
+    - **Bounded cost per call, with reactive recovery.** Agent construction,
+      context budgeting, proactive file-group chunking, and reactive
+      overflow bisect/shrink recovery are all owned by the shared
+      :func:`~code_review_agent.submission_pass_runner.run_submission_pass`
+      runner; this module supplies only its system prompt, tool set, and
+      prompt/parse callbacks. A submission that fits under the budget still
+      makes exactly one call, identical to the pre-runner behavior.
     - **``CODE_REVIEW`` profile only.** Same restriction as each standalone
       pass.
     - **Context-aware budgeting.** Changed-file inlining (and, when needed,
@@ -28,19 +29,12 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Callable, List, Optional, Tuple, Union
+from typing import Callable, List, Optional, Tuple
 
-from strands import Agent, tool
-from strands.models.model import Model as _StrandsModel
+from strands import tool
 
-from llm_service import LLMClient, LLMClientModel
-from llm_service.config import resolve_max_output_tokens
+from llm_service import LLMClient
 from shared.env import env_flag_enabled
-from software_engineering_team.shared.context_sizing import (
-    CODE_REVIEW_MERGED_PASS_BASE_SCAFFOLDING_CHARS,
-    MergedPassBudgets,
-    compute_code_review_merged_pass_budgets,
-)
 
 from . import architecture_consistency_pass as arch_pass
 from . import side_effect_impact_pass as side_pass
@@ -49,11 +43,11 @@ from .architecture_context import (
     architecture_evidence_available,
 )
 from .false_positive_filter import CodebaseIndex, _build_tools, code_fence_for
-from .model_resolution import resolve_code_review_model
 from .models import CodeReviewInput, CodeReviewIssue
 from .profiles import ReviewProfile
 from .prompts import build_merged_architecture_side_effect_prompt
 from .repo_reader import RepoReader
+from .submission_pass_runner import FileBatch, SubmissionPassBudgets, run_submission_pass
 
 logger = logging.getLogger(__name__)
 
@@ -85,20 +79,31 @@ def find_architecture_and_side_effect_issues(
           each validated like the corresponding standalone pass; never raises.
         - When only one half is enabled, still makes the merged call but returns
           ``[]`` for the disabled half. ``pre_numbered`` forces the side-effect
-          half off (same guard as the standalone side-effect pass). Architecture
-          is forced off when there is no architecture payload and no
-          ``repo_reader`` / ``existing_codebase`` evidence.
+          half off (same guard as the standalone side-effect pass, via
+          ``side_pass._effective_pre_numbered`` -- a caller-supplied
+          ``full_content`` that covers every changed path re-enables it; one
+          that covers only some paths does not, see
+          ``CodebaseIndex.full_content_complete``). Architecture is forced off
+          when there is no architecture payload and no ``repo_reader`` /
+          ``existing_codebase`` evidence.
         - When the changed-file set's estimated inline size exceeds one call's
-          budget, it is split into multiple bounded batches (see
-          :func:`_split_changed_files_into_batches`); findings from every
-          batch are concatenated into the same two returned lists. A
-          submission under the budget still makes exactly one call.
+          budget, the shared runner splits it into multiple bounded batches
+          (and reactively bisects/shrinks any batch that still overflows);
+          findings from every batch are concatenated into the same two
+          returned lists. A submission under the budget still makes exactly
+          one call.
     """
+    if index is None:
+        index = CodebaseIndex.from_input(input_data, repo_reader=repo_reader)
     arch_on = env_flag_enabled(_ARCH_ENV)
     # Mirror ``find_side_effect_impact_issues``: pre-numbered hunk mode only has
     # partial file excerpts, so caller-impact analysis must not run (architecture
-    # half may still proceed).
-    side_on = env_flag_enabled(_SIDE_ENV) and not input_data.pre_numbered
+    # half may still proceed) -- unless the caller supplied a fully-covering
+    # ``full_content``, which overlays real full bodies onto the index for every
+    # path in this submission (see ``side_pass._effective_pre_numbered``).
+    side_on = env_flag_enabled(_SIDE_ENV) and not side_pass._effective_pre_numbered(
+        input_data, index
+    )
     # Architecture half needs either a formal architecture payload or off-diff /
     # existing-codebase evidence. Without those, list_files()/read_file() only
     # see the changed submission files, so "established repository structure"
@@ -146,17 +151,13 @@ def _run_pass(
     Postconditions:
         - Same contract as the public entry, minus the env/profile early
           returns the caller already handled.
-        - Skips the LLM call (returns ``([], [])``) when the model context
-          cannot hold the fixed prompt plus a usable response reserve.
-        - When the changed-file set's estimated inline size exceeds one call's
-          budget, splits it into multiple bounded batches (see
-          :func:`_split_changed_files_into_batches`) and issues one
-          independent LLM call per batch, concatenating each batch's
-          validated findings into the two returned lists. A batch whose call
-          raises (malformed reply, agent/LLM failure) contributes no findings
-          but does not discard findings already collected from other
-          batches — only a failure before batching starts (index/budget
-          setup) propagates to the caller's outer fail-safe.
+        - Delegates budgeting, proactive chunking, ``Agent`` construction, and
+          reactive overflow bisect/shrink recovery to
+          :func:`~code_review_agent.submission_pass_runner.run_submission_pass`,
+          which never raises; a batch's findings are folded into the two
+          returned lists in batch order. An empty runner result (context too
+          small, or every batch unrecoverable) folds to ``([], [])`` — never
+          ``None`` and never a raised exception.
     """
     if index is None:
         index = CodebaseIndex.from_input(input_data, repo_reader=repo_reader)
@@ -165,68 +166,72 @@ def _run_pass(
 
     system_prompt = build_merged_architecture_side_effect_prompt(arch_on=arch_on, side_on=side_on)
     arch_body = architecture_document_text(input_data.architecture) if arch_on else ""
-    changed_paths = list(index.files.keys())
-    manifest_chars = _manifest_chars(changed_paths)
-    budgets = compute_code_review_merged_pass_budgets(
-        llm,
-        architecture_chars=len(arch_body),
-        system_prompt_chars=len(system_prompt),
-        manifest_chars=manifest_chars,
-        base_scaffolding_chars=CODE_REVIEW_MERGED_PASS_BASE_SCAFFOLDING_CHARS,
-        finding_array_count=(1 if arch_on ^ side_on else 2),
-    )
-    if budgets is None:
-        logger.warning(
-            "MergedArchitectureSideEffectPass: model context too small for fixed "
-            "prompt + response reserve; skipping merged call"
-        )
-        return [], []
-
-    model = _with_merged_pass_output_budget(
-        resolve_code_review_model(llm),
-        response_tokens=budgets.reserved_response_tokens,
-    )
     tools = _build_merged_pass_tools(index, side_on=side_on)
-    batches = _split_changed_files_into_batches(
-        list(index.files.items()), budgets.max_inline_code_chars
-    )
-    total_batches = len(batches)
-    if total_batches > 1:
-        logger.info(
-            "MergedArchitectureSideEffectPass: changed-file set split into %s batches "
-            "(budget=%s chars/call)",
-            total_batches,
+    pre_numbered = side_pass._effective_pre_numbered(input_data, index)
+
+    def _build_prompt_for_batch(batch: FileBatch, budgets: SubmissionPassBudgets) -> str:
+        return _build_prompt(
+            index,
+            arch_body,
             budgets.max_inline_code_chars,
+            max_architecture_chars=budgets.max_extra_body_chars,
+            max_manifest_chars=budgets.max_manifest_chars,
+            arch_on=arch_on,
+            side_on=side_on,
+            content_items=batch.items,
+            batch_index=batch.index,
+            total_batches=batch.total,
+            is_partial=batch.is_partial,
         )
+
+    def _parse_batch_reply(raw: str) -> Tuple[List[CodeReviewIssue], List[CodeReviewIssue]]:
+        data = json.loads(raw)
+        if not isinstance(data, dict):
+            raise TypeError(f"merged pass expected a JSON object, got {type(data).__name__}")
+        # Validate each half independently. A malformed / missing key on one side
+        # must not discard valid findings from the other (the Agent+tools path
+        # cannot use ``complete_validated``'s corrective retry the way chunk review
+        # does, so per-half salvage matches the standalone passes' ``_parse_findings``
+        # posture instead of all-or-nothing ``MergedArchitectureSideEffectResponse``
+        # validation).
+        architecture_findings: List[CodeReviewIssue] = []
+        side_effect_findings: List[CodeReviewIssue] = []
+        if arch_on:
+            architecture_findings = _issues_from_half(
+                data.get("architecture_findings"),
+                parse=arch_pass.parse_findings,
+                validate=arch_pass.validate_findings,
+                index=index,
+                pre_numbered=pre_numbered,
+            )
+        if side_on:
+            side_effect_findings = _issues_from_half(
+                data.get("side_effect_findings"),
+                parse=side_pass.parse_findings,
+                validate=side_pass.validate_findings,
+                index=index,
+                pre_numbered=pre_numbered,
+            )
+        return architecture_findings, side_effect_findings
+
+    # `find_architecture_and_side_effect_issues` already returns early unless at
+    # least one of arch_on/side_on is True, so this XOR is always 1 or 2 — never
+    # the 0 that would make `run_submission_pass` raise ValueError.
+    results = run_submission_pass(
+        llm,
+        changed_files=list(index.files.items()),
+        system_prompt=system_prompt,
+        build_prompt=_build_prompt_for_batch,
+        tools=tools,
+        parse=_parse_batch_reply,
+        extra_reserved_chars=len(arch_body),
+        finding_array_count=1 if arch_on ^ side_on else 2,
+        pass_label="MergedArchitectureSideEffectPass",
+    )
 
     architecture_findings: List[CodeReviewIssue] = []
     side_effect_findings: List[CodeReviewIssue] = []
-    for batch_number, batch in enumerate(batches, start=1):
-        try:
-            batch_arch, batch_side = _run_batch(
-                model,
-                system_prompt,
-                tools,
-                index,
-                arch_body,
-                budgets,
-                arch_on=arch_on,
-                side_on=side_on,
-                pre_numbered=input_data.pre_numbered,
-                batch_items=batch,
-                batch_index=batch_number if total_batches > 1 else None,
-                total_batches=total_batches if total_batches > 1 else None,
-            )
-        except Exception as exc:  # noqa: BLE001 - one bad batch must not drop the rest
-            logger.warning(
-                "MergedArchitectureSideEffectPass: batch %s/%s failed (%s: %s); "
-                "returning no findings for this batch",
-                batch_number,
-                total_batches,
-                type(exc).__name__,
-                exc,
-            )
-            continue
+    for batch_arch, batch_side in results:
         architecture_findings.extend(batch_arch)
         side_effect_findings.extend(batch_side)
 
@@ -237,163 +242,6 @@ def _run_pass(
             len(side_effect_findings),
         )
     return architecture_findings, side_effect_findings
-
-
-def _run_batch(
-    model: "Union[LLMClient, _StrandsModel]",
-    system_prompt: str,
-    tools: list,
-    index: CodebaseIndex,
-    arch_body: str,
-    budgets: MergedPassBudgets,
-    *,
-    arch_on: bool,
-    side_on: bool,
-    pre_numbered: bool,
-    batch_items: List[Tuple[str, str]],
-    batch_index: Optional[int],
-    total_batches: Optional[int],
-) -> Tuple[List[CodeReviewIssue], List[CodeReviewIssue]]:
-    """Run one merged-pass LLM call for a single batch of changed files; may raise.
-
-    Preconditions:
-        - ``batch_items`` is a non-empty subset of ``index.files.items()``
-          (see :func:`_split_changed_files_into_batches`).
-        - ``batch_index``/``total_batches`` are both ``None`` (single-batch
-          submission) or both set to this batch's 1-based position and the
-          total batch count.
-
-    Postconditions:
-        - Issues exactly one LLM call via a fresh ``Agent`` (never reuses a
-          prior batch's conversation state, so every batch gets the full
-          response/tool-transcript budget).
-        - Returns this batch's validated findings for each enabled half; each
-          half independently falls back to ``[]`` on its own parse/validation
-          failure (see :func:`_issues_from_half`) without raising.
-        - Raises on a malformed top-level reply (non-JSON or non-object) or an
-          ``Agent``/LLM invocation failure; the caller treats a raise from
-          this batch as a fail-safe no-op for the batch, not the submission.
-    """
-    prompt = _build_prompt(
-        index,
-        arch_body,
-        budgets.max_inline_code_chars,
-        max_architecture_chars=budgets.max_architecture_chars,
-        max_manifest_chars=budgets.max_manifest_chars,
-        arch_on=arch_on,
-        side_on=side_on,
-        content_items=batch_items,
-        batch_index=batch_index,
-        total_batches=total_batches,
-    )
-    agent = Agent(model=model, system_prompt=system_prompt, tools=tools)
-    raw = str(agent(prompt)).strip()
-    data = json.loads(raw)
-    if not isinstance(data, dict):
-        raise TypeError(f"merged pass expected a JSON object, got {type(data).__name__}")
-    # Validate each half independently. A malformed / missing key on one side
-    # must not discard valid findings from the other (the Agent+tools path
-    # cannot use ``complete_validated``'s corrective retry the way chunk review
-    # does, so per-half salvage matches the standalone passes' ``_parse_findings``
-    # posture instead of all-or-nothing ``MergedArchitectureSideEffectResponse``
-    # validation).
-    architecture_findings: List[CodeReviewIssue] = []
-    side_effect_findings: List[CodeReviewIssue] = []
-    if arch_on:
-        architecture_findings = _issues_from_half(
-            data.get("architecture_findings"),
-            parse=arch_pass.parse_findings,
-            validate=arch_pass.validate_findings,
-            index=index,
-            pre_numbered=pre_numbered,
-        )
-    if side_on:
-        side_effect_findings = _issues_from_half(
-            data.get("side_effect_findings"),
-            parse=side_pass.parse_findings,
-            validate=side_pass.validate_findings,
-            index=index,
-            pre_numbered=pre_numbered,
-        )
-    return architecture_findings, side_effect_findings
-
-
-def _manifest_chars(paths: List[str]) -> int:
-    """Char count of the changed-file path list as emitted in the user prompt.
-
-    Postconditions: returns ``>= 0``; one newline per path plus the section header.
-    """
-    header = f"**Changed files in this submission ({len(paths)}):**\n"
-    return len(header) + sum(len(p) + 1 for p in paths)
-
-
-def _estimated_file_block_chars(path: str, content: str) -> int:
-    """Conservative estimate of one changed-file block's rendered prompt size.
-
-    Postconditions:
-        - Returns ``>= len(content)``. Used only to group files into batches
-          (:func:`_split_changed_files_into_batches`), not to render — a
-          batch's actual render still goes through ``_fit_changed_file_block``,
-          which truncates/omits at render time as a backstop against any
-          under-estimation here.
-    """
-    heading = f"### {path} ###"
-    return len(heading) + len(content) + 32  # fences + newlines headroom
-
-
-def _split_changed_files_into_batches(
-    items: List[Tuple[str, str]],
-    max_chars: int,
-) -> List[List[Tuple[str, str]]]:
-    """Group changed-file (path, content) pairs into batches bounded by ``max_chars``.
-
-    Mirrors the greedy per-unit packing ``compute_code_review_map_chunk_chars``
-    callers use for map-phase chunking, sized at file granularity: files are
-    kept whole (never split mid-file) and packed in submission order until the
-    next file would push the running estimate over budget, then a new batch
-    starts.
-
-    Preconditions:
-        - ``max_chars`` is ``>= 0`` (the merged pass's per-call inline-code
-          budget, :attr:`MergedPassBudgets.max_inline_code_chars`).
-
-    Postconditions:
-        - Every input pair appears in exactly one returned batch, in original
-          order; no pair is dropped or duplicated.
-        - Returns a single batch holding every pair when their combined
-          estimated size already fits ``max_chars`` — the common case, and
-          identical to the pre-batching single-call behavior (including when
-          ``items`` holds only one file, regardless of ``max_chars``).
-        - Returns a single batch holding every pair when ``max_chars <= 0``:
-          with no positive inline budget, no batch could inline any content
-          either way (every batch would still omit its files and fall back to
-          ``read_file``/``list_changed_files``), so splitting would only add
-          extra LLM calls for no benefit — this preserves the pre-batching
-          single-call omit-and-recover-via-tools behavior exactly.
-        - A single file whose own estimated size exceeds ``max_chars`` becomes
-          its own one-file batch rather than being merged with neighbors (its
-          content is still truncated/omitted to fit at render time by
-          ``_fit_changed_file_block``).
-        - Returns ``[]`` only when ``items`` is empty.
-    """
-    if not items:
-        return []
-    if max_chars <= 0:
-        return [items]
-    batches: List[List[Tuple[str, str]]] = []
-    current: List[Tuple[str, str]] = []
-    current_size = 0
-    for path, content in items:
-        size = _estimated_file_block_chars(path, content)
-        if current and current_size + size > max_chars:
-            batches.append(current)
-            current = []
-            current_size = 0
-        current.append((path, content))
-        current_size += size
-    if current:
-        batches.append(current)
-    return batches
 
 
 # Default / hard caps for ``list_changed_files`` pagination so a truncated
@@ -507,40 +355,6 @@ def _build_merged_pass_tools(index: CodebaseIndex, *, side_on: bool) -> list:
     return [*base, list_changed_files]
 
 
-def _with_merged_pass_output_budget(
-    model: "Union[LLMClient, _StrandsModel]",
-    *,
-    response_tokens: int,
-) -> "Union[LLMClient, _StrandsModel]":
-    """Align the model's output cap with the merged call's response reserve.
-
-    Preconditions:
-        - ``model`` is the result of :func:`resolve_code_review_model`.
-        - ``response_tokens`` is the reserve from
-          :func:`compute_code_review_merged_pass_budgets` (``>= 1024``).
-
-    Postconditions:
-        - When ``model`` is an ``LLMClientModel``, clones with
-          ``max_tokens=response_tokens`` whenever the effective cap (model pin
-          first, else ``LLM_MAX_OUTPUT_TOKENS``, else unset ``0``) differs from that
-          reserve — raising tight caps and clamping oversized / unset provider
-          defaults so the completion cannot exceed the input budget.
-        - Injected non-``LLMClientModel`` test models are returned unchanged.
-        - Never mutates ``model``.
-    """
-    assert response_tokens >= 1024, "response_tokens must be >= 1024"
-    if not isinstance(model, LLMClientModel):
-        return model
-    configured = resolve_max_output_tokens()
-    pinned = model.get_config().get("max_tokens")
-    pinned_int = pinned if isinstance(pinned, int) and pinned > 0 else 0
-    # Match provider precedence: an explicit model pin wins over the env cap.
-    effective = pinned_int if pinned_int > 0 else configured
-    if effective != response_tokens:
-        return model.clone(max_tokens=response_tokens)
-    return model
-
-
 def _issues_from_half(
     raw_list: object,
     *,
@@ -594,6 +408,7 @@ def _build_prompt(
     content_items: Optional[List[Tuple[str, str]]] = None,
     batch_index: Optional[int] = None,
     total_batches: Optional[int] = None,
+    is_partial: bool = False,
 ) -> str:
     """Render the single user prompt for one merged-pass LLM call.
 
@@ -609,6 +424,10 @@ def _build_prompt(
         - ``batch_index``/``total_batches`` are both ``None`` (no batch label
           rendered) or both set to this batch's 1-based position and the
           total batch count.
+        - ``is_partial`` is True only for a reactive-recovery bisect/shrink
+          child batch (:attr:`~code_review_agent.submission_pass_runner.FileBatch.is_partial`),
+          whose ``content_items`` is not a complete representation of
+          everything ``batch_index``/``total_batches`` normally cover.
 
     Postconditions:
         - Omits the architecture section when ``arch_on`` is False.
@@ -619,9 +438,15 @@ def _build_prompt(
           whole-submission awareness of what changed.
         - Inlines ``content_items`` (or every changed file when ``None``) up
           to ``max_inline_chars``, deducting per-file heading/fence wrappers
-          from that allowance. When ``total_batches`` is set (> 1), the
-          content section header names this batch's position and points to
-          the manifest/tools for files not shown in this call.
+          from that allowance. When ``is_partial`` is True, the content
+          section header renders a reduced-view recovery banner instead of a
+          "batch N of M" claim (``total_batches`` is inherited unchanged from
+          the parent batch and would otherwise misrepresent this reduced
+          content as a complete proactive batch); this check takes precedence
+          over the ``total_batches`` check below. Otherwise, when
+          ``total_batches`` is set (> 1), the content section header names
+          this batch's position and points to the manifest/tools for files
+          not shown in this call.
         - Ends with a return instruction containing both response keys so
           DummyLLMClient tests can anchor on the merged call; disabled halves
           are told to stay empty.
@@ -657,7 +482,16 @@ def _build_prompt(
     parts.append("")
 
     batch_files = content_items if content_items is not None else changed_files
-    if total_batches and total_batches > 1:
+    if is_partial:
+        parts.append(
+            f"**Content of the changed files shown in this call ({len(batch_files)} of "
+            f"{len(changed_files)} changed files in this submission — a reduced view "
+            "produced while recovering from a context-size overflow; content may be "
+            "more limited than a normal batch, and any file not shown here is still "
+            "listed in the manifest above and reachable via "
+            "list_changed_files()/read_file()):**"
+        )
+    elif total_batches and total_batches > 1:
         parts.append(
             f"**Full content of the changed files (batch {batch_index} of {total_batches} — "
             f"showing {len(batch_files)} of {len(changed_files)} changed files in this "

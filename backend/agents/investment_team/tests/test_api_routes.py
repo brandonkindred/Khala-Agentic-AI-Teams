@@ -1142,6 +1142,207 @@ def test_promotion_decision_non_dict_escalation_does_not_mutate_audit_log(
     assert all(len(q) == 0 for q in api_main._workflow_state.queues.values())
 
 
+def test_promotion_decision_502_on_empty_escalation_queue_name(api_client, monkeypatch) -> None:
+    """A ``queue`` that is a present, non-empty-typed string but empty (``""``)
+    is falsy — the guard must check ``not queue_name``, not just the type, or
+    it falls through to the ``not in _workflow_state.queues`` membership test
+    with an empty key instead of raising 502."""
+    from investment_team.api import main as api_main
+
+    sid = _setup_promotion_ready_strategy(api_client)
+    monkeypatch.setattr(
+        api_main,
+        "_execute_advisory",
+        lambda op, payload, *, key: {
+            "decision": {
+                "strategy_id": sid,
+                "decided_by": "a1",
+                "outcome": "paper",
+                "rationale": "ok",
+            },
+            "escalation_enqueued": {
+                "queue": "",
+                "payload_id": sid,
+                "priority": "high",
+            },
+        },
+    )
+    resp = api_client.post("/promotions/decide", json=_promotion_decision_body(sid))
+    assert resp.status_code == 502
+    # Assert the specific "invalid queue name" detail, not just any 502 — an
+    # empty string would also fail the later `not in _workflow_state.queues`
+    # check with a (different) 502, which would mask a regression that
+    # dropped the `not queue_name` guard itself.
+    assert resp.json()["detail"] == "Promotion decision result has invalid escalation queue name"
+
+
+def test_promotion_decision_502_on_non_string_payload_id(api_client, monkeypatch) -> None:
+    """A ``payload_id`` of the wrong type (e.g. an int) must raise 502, not
+    propagate into ``QueueItem`` construction with a non-string id."""
+    from investment_team.api import main as api_main
+
+    sid = _setup_promotion_ready_strategy(api_client)
+    monkeypatch.setattr(
+        api_main,
+        "_execute_advisory",
+        lambda op, payload, *, key: {
+            "decision": {
+                "strategy_id": sid,
+                "decided_by": "a1",
+                "outcome": "paper",
+                "rationale": "ok",
+            },
+            "escalation_enqueued": {
+                "queue": "escalation",
+                "payload_id": 123,
+                "priority": "high",
+            },
+        },
+    )
+    resp = api_client.post("/promotions/decide", json=_promotion_decision_body(sid))
+    assert resp.status_code == 502
+    assert resp.json()["detail"]
+
+
+def test_promotion_decision_502_on_empty_payload_id(api_client, monkeypatch) -> None:
+    """A present but empty-string ``payload_id`` is falsy — the guard must
+    reject it rather than enqueue a ``QueueItem`` with no payload id."""
+    from investment_team.api import main as api_main
+
+    sid = _setup_promotion_ready_strategy(api_client)
+    monkeypatch.setattr(
+        api_main,
+        "_execute_advisory",
+        lambda op, payload, *, key: {
+            "decision": {
+                "strategy_id": sid,
+                "decided_by": "a1",
+                "outcome": "paper",
+                "rationale": "ok",
+            },
+            "escalation_enqueued": {
+                "queue": "escalation",
+                "payload_id": "",
+                "priority": "high",
+            },
+        },
+    )
+    resp = api_client.post("/promotions/decide", json=_promotion_decision_body(sid))
+    assert resp.status_code == 502
+    assert resp.json()["detail"]
+
+
+def test_promotion_decision_502_on_escalation_missing_priority(api_client, monkeypatch) -> None:
+    """A ``queue``/``payload_id``-valid escalation missing only ``priority``
+    must 502 — distinct from the existing "missing payload_id" case, which
+    never exercises the ``priority`` guard on its own."""
+    from investment_team.api import main as api_main
+
+    sid = _setup_promotion_ready_strategy(api_client)
+    monkeypatch.setattr(
+        api_main,
+        "_execute_advisory",
+        lambda op, payload, *, key: {
+            "decision": {
+                "strategy_id": sid,
+                "decided_by": "a1",
+                "outcome": "paper",
+                "rationale": "ok",
+            },
+            "escalation_enqueued": {
+                "queue": "escalation",
+                "payload_id": sid,
+            },
+        },
+    )
+    resp = api_client.post("/promotions/decide", json=_promotion_decision_body(sid))
+    assert resp.status_code == 502
+    assert resp.json()["detail"]
+
+
+def test_promotion_decision_502_on_non_string_priority(api_client, monkeypatch) -> None:
+    """A ``priority`` of the wrong type (e.g. an int) must raise 502, not
+    propagate into ``QueueItem`` construction with a non-string priority."""
+    from investment_team.api import main as api_main
+
+    sid = _setup_promotion_ready_strategy(api_client)
+    monkeypatch.setattr(
+        api_main,
+        "_execute_advisory",
+        lambda op, payload, *, key: {
+            "decision": {
+                "strategy_id": sid,
+                "decided_by": "a1",
+                "outcome": "paper",
+                "rationale": "ok",
+            },
+            "escalation_enqueued": {
+                "queue": "escalation",
+                "payload_id": sid,
+                "priority": 5,
+            },
+        },
+    )
+    resp = api_client.post("/promotions/decide", json=_promotion_decision_body(sid))
+    assert resp.status_code == 502
+    assert resp.json()["detail"]
+
+
+def test_promotion_decision_502_on_empty_priority(api_client, monkeypatch) -> None:
+    """A present but empty-string ``priority`` is falsy — the guard must
+    reject it rather than enqueue a ``QueueItem`` with no priority."""
+    from investment_team.api import main as api_main
+
+    sid = _setup_promotion_ready_strategy(api_client)
+    monkeypatch.setattr(
+        api_main,
+        "_execute_advisory",
+        lambda op, payload, *, key: {
+            "decision": {
+                "strategy_id": sid,
+                "decided_by": "a1",
+                "outcome": "paper",
+                "rationale": "ok",
+            },
+            "escalation_enqueued": {
+                "queue": "escalation",
+                "payload_id": sid,
+                "priority": "",
+            },
+        },
+    )
+    resp = api_client.post("/promotions/decide", json=_promotion_decision_body(sid))
+    assert resp.status_code == 502
+    assert resp.json()["detail"]
+
+
+def test_promotion_decision_502_on_audit_log_appended_mixed_types(api_client, monkeypatch) -> None:
+    """An ``audit_log_appended`` list containing a non-string entry alongside
+    valid strings must 502 — the guard must check every element's type, not
+    just that the container is a list, and must leave ``_workflow_state``
+    untouched since the escalation is otherwise well-formed."""
+    from investment_team.api import main as api_main
+
+    sid = _setup_promotion_ready_strategy(api_client)
+    monkeypatch.setattr(
+        api_main,
+        "_execute_advisory",
+        lambda op, payload, *, key: {
+            "decision": {
+                "strategy_id": sid,
+                "decided_by": "a1",
+                "outcome": "paper",
+                "rationale": "ok",
+            },
+            "audit_log_appended": [f"promotion:{sid}:paper", 123],
+        },
+    )
+    resp = api_client.post("/promotions/decide", json=_promotion_decision_body(sid))
+    assert resp.status_code == 502
+    assert resp.json()["detail"]
+    assert api_main._workflow_state.audit_log == []
+
+
 def test_create_memo_invalid_memo_payload_returns_500(api_client, monkeypatch) -> None:
     """A present but schema-invalid 'memo' is a server/integration fault → 500,
     matching advisor routes' handling of malformed Temporal payloads."""

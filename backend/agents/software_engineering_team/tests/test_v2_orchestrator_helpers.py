@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import types
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -1416,6 +1417,55 @@ class TestRunDeliverAndFinalize:
             "WORKFLOW SUCCEEDED in 12.5s (3 microtasks completed, 0 failed review)" in caplog.text
         )
 
+    def test_forwards_build_verifier_and_linting_params_to_run_deliver(
+        self, tmp_path: Path
+    ) -> None:
+        """Regression: build_verifier/linting_tool_agent (and their labels) must
+        reach ``run_deliver`` unchanged -- this is the compensating gate's only
+        entry point into the standalone code-v2 deliver path."""
+        captured: dict = {}
+
+        def _capture_run_deliver(**kw):
+            captured.update(kw)
+            return _FakeDeliverResult(merged=True)
+
+        sentinel_verifier = lambda *a, **k: (True, "")  # noqa: E731
+        sentinel_linter = object()
+
+        failure, _result = self._call(
+            repo_path=tmp_path,
+            run_deliver=_capture_run_deliver,
+            build_verifier=sentinel_verifier,
+            build_verify_label="backend",
+            linting_tool_agent=sentinel_linter,
+            lint_agent_type="backend",
+        )
+
+        assert failure is None
+        assert captured["build_verifier"] is sentinel_verifier
+        assert captured["build_verify_label"] == "backend"
+        assert captured["linting_tool_agent"] is sentinel_linter
+        assert captured["lint_agent_type"] == "backend"
+
+    def test_default_build_verifier_and_linting_params_are_none(self, tmp_path: Path) -> None:
+        """Regression: omitting build_verifier/linting_tool_agent (the
+        swarm-orchestrated path's calling convention) must skip the gate --
+        ``run_deliver`` receives ``None``/``""``, matching the pre-fix
+        no-gate behavior for callers that don't opt in."""
+        captured: dict = {}
+
+        def _capture_run_deliver(**kw):
+            captured.update(kw)
+            return _FakeDeliverResult(merged=True)
+
+        failure, _result = self._call(repo_path=tmp_path, run_deliver=_capture_run_deliver)
+
+        assert failure is None
+        assert captured["build_verifier"] is None
+        assert captured["build_verify_label"] == ""
+        assert captured["linting_tool_agent"] is None
+        assert captured["lint_agent_type"] == ""
+
 
 class _FakeReviewDeps:
     def __init__(self, **kwargs):
@@ -1452,6 +1502,9 @@ class TestRunDevelopmentWorkflow:
         agent.llm = MagicMock()
         agent._repo_context_cache = None
         agent._read_repo_code = lambda repo_path, max_chars=None: "existing code"
+        profile = overrides.pop("profile", None)
+        if profile is not None:
+            agent.PROFILE = profile
 
         git_agent = overrides.pop("git_agent", MagicMock())
         exec_result = overrides.pop(
@@ -1512,6 +1565,53 @@ class TestRunDevelopmentWorkflow:
         assert result.deliver_result is not None
         assert result.success is True
         assert result.iterations_used == 2
+
+    def test_forwards_profile_labels_and_verifier_to_deliver(self, tmp_path: Path) -> None:
+        """Regression: when a concrete subclass sets ``PROFILE`` (e.g.
+        Backend/FrontendDevelopmentAgent), its ``build_verify_label``/``name``
+        must be forwarded to the deliver phase alongside the injected
+        build_verifier/linting_tool_agent -- this is how the standalone
+        code-v2 endpoints' quality gate gets its labels."""
+        captured: dict = {}
+
+        def _capture_run_deliver(**kw):
+            captured.update(kw)
+            return _FakeDeliverResult(merged=True, summary="delivered")
+
+        sentinel_verifier = lambda *a, **k: (True, "")  # noqa: E731
+        sentinel_linter = object()
+        profile = types.SimpleNamespace(name="backend", build_verify_label="Backend build")
+
+        self._call(
+            repo_path=tmp_path,
+            profile=profile,
+            build_verifier=sentinel_verifier,
+            linting_tool_agent=sentinel_linter,
+            run_deliver=_capture_run_deliver,
+        )
+
+        assert captured["build_verifier"] is sentinel_verifier
+        assert captured["build_verify_label"] == "Backend build"
+        assert captured["linting_tool_agent"] is sentinel_linter
+        assert captured["lint_agent_type"] == "backend"
+
+    def test_missing_profile_forwards_empty_labels(self, tmp_path: Path) -> None:
+        """Regression: a bare ``BaseV2DevelopmentAgent`` with no ``PROFILE``
+        attribute (e.g. this unit-test harness) must forward empty labels
+        rather than raising -- locks in the ``getattr(self, "PROFILE", None)``
+        fallback added by the fix."""
+        captured: dict = {}
+
+        def _capture_run_deliver(**kw):
+            captured.update(kw)
+            return _FakeDeliverResult(merged=True, summary="delivered")
+
+        self._call(repo_path=tmp_path, run_deliver=_capture_run_deliver)
+
+        assert captured["build_verify_label"] == ""
+        assert captured["lint_agent_type"] == ""
+        assert captured["build_verifier"] is None
+        assert captured["linting_tool_agent"] is None
 
     def test_preflight_failure_short_circuits(self, tmp_path: Path):
         planning_calls = []

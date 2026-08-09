@@ -666,7 +666,7 @@ class DevOpsTeamLeadAgent(BaseTeamLead):
         task_id: str = "devops",
         subdir: str = "",
     ) -> DevOpsTeamResult:
-        """Legacy adapter: repo/task free-text → ``_build_legacy_spec`` → ``_run_pipeline`` with ``write_changes=True``.
+        """Legacy adapter: repo/task free-text → ``_build_legacy_spec`` → ``run_task``.
 
         Preconditions:
             - ``repo_path`` is a path to an existing directory initialised as a git repo.
@@ -678,10 +678,6 @@ class DevOpsTeamLeadAgent(BaseTeamLead):
             - Artifacts are written to the repo on a feature branch and merged into
               ``development`` when the pipeline completes successfully.
         """
-        repo_path_obj = Path(repo_path).resolve()
-        assert repo_path_obj.is_dir(), f"repo_path must be an existing directory: {repo_path_obj}"
-        if build_verifier is not None:
-            assert callable(build_verifier), "build_verifier must be callable"
         assert isinstance(task_id, str) and task_id, "task_id must be a non-empty string"
         task_spec = DevOpsTeamLeadAgent._build_legacy_spec(
             task_id=task_id,
@@ -689,11 +685,10 @@ class DevOpsTeamLeadAgent(BaseTeamLead):
             requirements=requirements,
             target_repo=target_repo,
         )
-        return self._run_pipeline(
-            repo_path=repo_path_obj,
-            task_spec=task_spec,
+        return self.run_task(
+            task_spec,
+            repo_path=repo_path,
             build_verifier=build_verifier,
-            write_changes=True,
             subdir=subdir,
         )
 
