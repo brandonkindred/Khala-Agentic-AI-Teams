@@ -555,17 +555,19 @@ def test_run_design_attempt_activity_stops_promptly_after_cancellation_mid_loop(
     """A terminate/cancel landing well into a long attempt (not just at the
     very first checkpoint, as ``..._raises_cancelled_between_checkpoints``
     covers) must still stop the activity within a small, bounded number of
-    checkpoints and a small, bounded wall-clock time — not let it run
-    anywhere close to completion.
+    checkpoints — not let it run anywhere close to completion.
 
     Simulates a long attempt as a loop of many ``emit`` checkpoints, each
     separated by a small real sleep (standing in for the many LLM calls the
     real pipeline makes over up to two hours). ``is_cancelled()`` flips True
     only after a handful of checkpoints, mimicking cancellation observed
-    mid-run rather than instantly. Deterministic (no background thread or
-    real Temporal timing involved) — the loop stops at the exact checkpoint
-    count where ``is_cancelled()`` first returns True, so the elapsed-time
-    assertion is a sanity bound rather than a race.
+    mid-run rather than instantly. The assertion is the exact checkpoint
+    count at which cancellation was observed, not elapsed wall-clock time —
+    under a loaded/parallel (xdist) CI runner the process can be descheduled
+    for longer than any fixed wall-clock budget between two checkpoints even
+    though cancellation still lands at exactly the expected one, so a real-time
+    deadline here would be scheduler-dependent flakiness with no additional
+    deterministic coverage.
     """
     import time
 
@@ -597,17 +599,12 @@ def test_run_design_attempt_activity_stops_promptly_after_cancellation_mid_loop(
 
     monkeypatch.setattr(StrategyLabOrchestrator, "_run_design_attempt", _fake_attempt)
 
-    start = time.monotonic()
     with pytest.raises(CancelledError):
         act.run_design_attempt_activity(_run_design_attempt_params())
-    elapsed = time.monotonic() - start
 
     # Stopped at exactly the checkpoint where cancellation was first observed —
     # nowhere close to the full TOTAL_CHECKPOINTS loop.
     assert calls["n"] == CANCEL_AFTER + 1
-    # Bounded wall-clock time: an order of magnitude below what completing the
-    # full (uncancelled) loop would take (TOTAL_CHECKPOINTS * _STEP_SLEEP_S ≈ 4s).
-    assert elapsed < 1.0
 
 
 def test_run_design_attempt_activity_returns_skipped_outcome_for_502(monkeypatch):
