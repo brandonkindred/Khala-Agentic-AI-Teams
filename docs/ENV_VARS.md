@@ -1029,7 +1029,12 @@ file's content — it only names the file and directs the model to fetch it via
 `read_file`/`read_lines`. This keeps the per-call prompt size independent of
 the cited file's size with no cap or truncation involved: the model always
 sees the file's full, current content on demand instead of a possibly-stale
-or size-limited inline copy.
+or size-limited inline copy. Because nothing is inlined, `_verify_group` also
+enforces that at least one tool call happened during the run before honoring
+any false-positive verdict from it (`_agent_used_a_tool`): a run that answers
+on its first turn without calling a tool never saw any real code, so any
+false-positive verdict it returns is discarded (the finding is kept) rather
+than trusted.
 
 When the review is invoked with a repository reader (the GitHub PR-review path
 fetches whole files at the PR head and supplies a reader; the software-engineering

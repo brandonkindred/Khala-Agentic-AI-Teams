@@ -13,7 +13,7 @@ access to every file under review via tools (``read_file``, ``list_files``,
 ``search_codebase``, ``find_function_at_line``), so it can pull up exactly the
 code needed to confirm or refute a finding rather than guessing from a single chunk.
 
-Two invariants hold:
+Three invariants hold:
 
     - **Fail-safe.** A finding is dropped ONLY on an explicit, confident
       false-positive verdict. Anything the verifier cannot assess — a finding
@@ -23,6 +23,14 @@ Two invariants hold:
       invents a finding, upgrades a severity, or breaks the review. Dropping a
       real issue is far worse than keeping a questionable one, so every
       ambiguous case keeps the issue.
+
+    - **Grounded-only drops.** The cited file's content is never inlined into
+      the verification prompt (see ``_build_group_prompt``) -- the verifier
+      must call a tool (``read_file``/``read_lines``/etc.) to see it. A verdict
+      returned by a run that never called any tool was made without ever
+      seeing real code, so ``_verify_group`` discards any false-positive
+      verdict from such a run (an absent verdict means "keep", per the
+      fail-safe invariant above) rather than trusting an ungrounded guess.
 
     - **Coverage/safety findings never reach this module.** The coordinator
       passes only genuine reviewer findings here; the "not reviewed" degraded
@@ -1623,6 +1631,34 @@ def _build_group_prompt(
     return "\n".join(parts)
 
 
+def _agent_used_a_tool(agent: Agent) -> bool:
+    """Whether ``agent``'s just-finished run issued at least one tool call.
+
+    The cited file's content is never inlined into the verification prompt
+    (see ``_build_group_prompt``) -- a run that never called a tool never saw
+    any real code, so its verdicts are ungrounded guesses regardless of how
+    confident the JSON claims to be.
+
+    Preconditions:
+        - ``agent`` has already completed a run (``agent(prompt)`` returned),
+          so ``agent.messages`` holds the full conversation for that run.
+
+    Postconditions:
+        - Returns ``True`` iff any message in ``agent.messages`` contains a
+          ``toolUse`` content block. Never raises: a malformed/empty message
+          list yields ``False`` (fail-safe: treated as "no tool call", so the
+          caller keeps rather than drops on ambiguity).
+    """
+    try:
+        return any(
+            isinstance(block, dict) and "toolUse" in block
+            for message in agent.messages
+            for block in (message.get("content") or [])
+        )
+    except Exception:
+        return False
+
+
 def _verify_group(
     model: _StrandsModel,
     index: CodebaseIndex,
@@ -1644,6 +1680,10 @@ def _verify_group(
           position of the finding within ``issues`` (i.e. a valid index into
           the ``issues``/``group`` list the caller passed in), so callers may
           index back into their own list with it.
+        - A false-positive verdict from a run that never called any tool
+          (``_agent_used_a_tool`` is False) is dropped from the result rather
+          than returned -- the caller treats an absent index as "keep", so an
+          ungrounded drop never reaches the merge (see ``_agent_used_a_tool``).
     """
     prompt = _build_group_prompt(index, file_path, issues, input_data)
     agent = Agent(
@@ -1653,7 +1693,19 @@ def _verify_group(
     )
     raw = str(agent(prompt)).strip()
     data = extract_json_from_response(raw)
-    return _parse_verdicts(data, len(issues))
+    verdicts = _parse_verdicts(data, len(issues))
+    if not _agent_used_a_tool(agent):
+        false_positive_count = sum(1 for v in verdicts.values() if v.is_false_positive)
+        if false_positive_count:
+            logger.warning(
+                "FalsePositiveFilter: verification call for %s returned %s false-positive "
+                "verdict(s) without ever calling a tool to read the code; discarding them "
+                "and keeping those findings",
+                file_path,
+                false_positive_count,
+            )
+            verdicts = {idx: v for idx, v in verdicts.items() if not v.is_false_positive}
+    return verdicts
 
 
 def filter_false_positives(

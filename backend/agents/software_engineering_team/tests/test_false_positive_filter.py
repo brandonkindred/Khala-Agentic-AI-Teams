@@ -16,6 +16,7 @@ chunk review and the verification call in an end-to-end run.
 from __future__ import annotations
 
 import dataclasses
+import json
 import logging
 import re
 import threading
@@ -29,6 +30,7 @@ from code_review_agent.false_positive_filter import (
     DEFAULT_VERIFY_MAX_FINDINGS_PER_GROUP,
     DEFAULT_VERIFY_TIMEOUT_SECONDS,
     CodebaseIndex,
+    _agent_used_a_tool,
     _build_group_prompt,
     _build_tools,
     _code_fence_for,
@@ -79,7 +81,100 @@ def _input(files: Optional[Dict[str, str]] = None, **overrides: Any) -> CodeRevi
     return CodeReviewInput(**base)
 
 
-class _VerdictStub(DummyLLMClient):
+_READ_FILE_CALL_RE = re.compile(r'read_file\("([^"]+)"\)')
+
+
+def _first_user_text(messages: List[Any]) -> str:
+    """Extract the text of the *first* user message in a Strands message list.
+
+    Unlike ``DummyLLMClient``'s own ``_last_user_text`` (which returns the
+    *latest* user turn -- the tool-result turn after a simulated tool call),
+    this returns the original verification prompt so a stub can keep routing
+    on it after the tool round-trip.
+    """
+    for msg in messages:
+        if not isinstance(msg, dict) or msg.get("role") != "user":
+            continue
+        parts = []
+        for block in msg.get("content") or []:
+            if isinstance(block, dict) and "text" in block:
+                parts.append(str(block["text"]))
+            elif isinstance(block, str):
+                parts.append(block)
+        return "\n".join(parts)
+    return ""
+
+
+class _SimulatesFileReadToolCall(DummyLLMClient):
+    """``DummyLLMClient`` variant that issues one real ``read_file`` tool call
+    before answering a false-positive-verification prompt, mirroring a
+    well-behaved model. ``_build_group_prompt`` never inlines the cited file's
+    content (only names it and directs the model to a tool), so
+    ``_verify_group`` now discards any false-positive verdict from a run that
+    never called a tool (see ``_agent_used_a_tool``) -- stubs that want a drop
+    honored must actually exercise that tool-call turn instead of answering on
+    the first turn, exactly as this mixin does. Subclasses still customize the
+    final verdict via ``complete_json``, called with the *original* prompt
+    text once the simulated tool call has round-tripped.
+    """
+
+    async def stream(self, messages, tool_specs=None, system_prompt=None, **kwargs: Any):  # type: ignore[override]
+        already_called = "toolUse" in str(messages)
+        has_read_file_tool = any(
+            isinstance(spec, dict) and spec.get("name") == "read_file"
+            for spec in (tool_specs or [])
+        )
+        first_text = _first_user_text(messages)
+        if has_read_file_tool and "verdicts" in first_text.lower():
+            if not already_called:
+                match = _READ_FILE_CALL_RE.search(first_text)
+                path = match.group(1) if match else "unknown.py"
+                yield {"messageStart": {"role": "assistant"}}
+                yield {
+                    "contentBlockStart": {
+                        "contentBlockIndex": 0,
+                        "start": {"toolUse": {"toolUseId": "sim_read_file", "name": "read_file"}},
+                    },
+                }
+                yield {
+                    "contentBlockDelta": {
+                        "contentBlockIndex": 0,
+                        "delta": {"toolUse": {"input": json.dumps({"path": path})}},
+                    },
+                }
+                yield {"contentBlockStop": {"contentBlockIndex": 0}}
+                yield {
+                    "messageStop": {"stopReason": "tool_use"},
+                    "metadata": {
+                        "usage": {"inputTokens": 0, "outputTokens": 0, "totalTokens": 0},
+                        "metrics": {"latencyMs": 1},
+                    },
+                }
+                return
+            self._request_count += 1
+            response_data = self.complete_json(first_text, system_prompt=system_prompt)
+            response_text = (
+                json.dumps(response_data) if isinstance(response_data, dict) else str(response_data)
+            )
+            yield {"messageStart": {"role": "assistant"}}
+            yield {"contentBlockStart": {"contentBlockIndex": 0, "start": {}}}
+            yield {"contentBlockDelta": {"contentBlockIndex": 0, "delta": {"text": response_text}}}
+            yield {"contentBlockStop": {"contentBlockIndex": 0}}
+            yield {
+                "messageStop": {"stopReason": "end_turn"},
+                "metadata": {
+                    "usage": {"inputTokens": 0, "outputTokens": 0, "totalTokens": 0},
+                    "metrics": {"latencyMs": 1},
+                },
+            }
+            return
+        async for event in super().stream(
+            messages, tool_specs=tool_specs, system_prompt=system_prompt, **kwargs
+        ):
+            yield event
+
+
+class _VerdictStub(_SimulatesFileReadToolCall):
     """Returns canned verdicts for the verification call.
 
     Optionally serves a configured chunk-review response when ``chunk_issues`` is
@@ -132,7 +227,7 @@ class _BadJsonStub(DummyLLMClient):
         return super().complete_json(prompt, **kwargs)
 
 
-class _FencedJsonVerdictStub(DummyLLMClient):
+class _FencedJsonVerdictStub(_SimulatesFileReadToolCall):
     """Returns a verdicts JSON payload wrapped in a ```json fence with leading
     prose from complete_json, simulating an LLM response that still contains
     markdown fencing around its structured output."""
@@ -1803,6 +1898,83 @@ def test_filter_keeps_on_low_confidence_false() -> None:
     assert out == issues
 
 
+def test_filter_keeps_ungrounded_drop_from_a_run_with_no_tool_call(caplog) -> None:
+    """A high-confidence false-positive verdict is discarded (finding kept) when
+    the run that produced it never called any tool -- the cited file's content
+    is never inlined (``_build_group_prompt``), so an answer given on the first
+    turn was never grounded in real code, however confident the JSON claims to
+    be. Uses a plain ``DummyLLMClient`` (not ``_SimulatesFileReadToolCall``):
+    the whole point is that no tool call happens."""
+    issues = [_issue()]
+
+    class NoToolCallDropStub(DummyLLMClient):
+        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:  # type: ignore[override]
+            if "verdicts" in prompt.lower():
+                return {"verdicts": [{"index": 0, "is_real_issue": False, "confidence": "high"}]}
+            return super().complete_json(prompt, **kwargs)
+
+    with caplog.at_level(logging.WARNING):
+        out = filter_false_positives(NoToolCallDropStub(), _input(), issues)
+    assert out == issues  # the drop is discarded -- kept, not removed
+    assert any("without ever calling a tool" in r.message for r in caplog.records)
+
+
+def test_filter_honors_drop_when_run_did_call_a_tool() -> None:
+    """The mirror of the above: the same high-confidence drop IS honored once
+    the run actually issued a tool call first (``_SimulatesFileReadToolCall``),
+    confirming the new check is about tool-call evidence, not confidence level
+    (which was already high in the discarded case above)."""
+    issues = [_issue()]
+    stub = _VerdictStub(verdicts=[{"index": 0, "is_real_issue": False, "confidence": "high"}])
+    out = filter_false_positives(stub, _input(), issues)
+    assert out == []
+
+
+def test_agent_used_a_tool_detects_tooluse_block() -> None:
+    """``_agent_used_a_tool`` scans ``agent.messages`` for any ``toolUse`` content
+    block, regardless of which message/role carries it."""
+
+    class _FakeAgent:
+        def __init__(self, messages: List[Dict[str, Any]]) -> None:
+            self.messages = messages
+
+    no_tool = _FakeAgent(
+        [
+            {"role": "user", "content": [{"text": "hi"}]},
+            {"role": "assistant", "content": [{"text": "ok"}]},
+        ]
+    )
+    assert _agent_used_a_tool(no_tool) is False  # type: ignore[arg-type]
+
+    with_tool = _FakeAgent(
+        [
+            {"role": "user", "content": [{"text": "hi"}]},
+            {
+                "role": "assistant",
+                "content": [{"toolUse": {"toolUseId": "t1", "name": "read_file", "input": {}}}],
+            },
+        ]
+    )
+    assert _agent_used_a_tool(with_tool) is True  # type: ignore[arg-type]
+
+
+def test_agent_used_a_tool_is_failsafe_on_malformed_messages() -> None:
+    """A malformed/empty ``messages`` never raises -- degrades to False (no tool
+    call), so the caller's fail-safe keeps rather than drops on ambiguity."""
+
+    class _EmptyAgent:
+        messages: List[Any] = []
+
+    assert _agent_used_a_tool(_EmptyAgent()) is False  # type: ignore[arg-type]
+
+    class _BrokenAgent:
+        @property
+        def messages(self):
+            raise RuntimeError("boom")
+
+    assert _agent_used_a_tool(_BrokenAgent()) is False  # type: ignore[arg-type]
+
+
 @pytest.mark.parametrize("parallelism", ["1", "4"])
 def test_filter_groups_by_file_and_removes_across_groups(monkeypatch, parallelism) -> None:
     """Findings are verified per file group; a confirmed drop in one group leaves
@@ -1818,7 +1990,7 @@ def test_filter_groups_by_file_and_removes_across_groups(monkeypatch, parallelis
     # read_file(...) directive rather than a bare "a.py"/"b.py" substring: the
     # manifest lists every file in the submission (including the other
     # group's), so a bare filename would match both groups' prompts.
-    class PerFileStub(DummyLLMClient):
+    class PerFileStub(_SimulatesFileReadToolCall):
         def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:  # type: ignore[override]
             if "verdicts" not in prompt.lower():
                 return super().complete_json(prompt, **kwargs)
@@ -1887,7 +2059,7 @@ def test_filter_merges_verdicts_across_split_batches(monkeypatch) -> None:
     monkeypatch.setenv("CODE_REVIEW_VERIFY_MAX_FINDINGS_PER_GROUP", "2")
     issues = [_issue(description=f"finding-{i}") for i in range(4)]
 
-    class AlwaysDropFirstStub(DummyLLMClient):
+    class AlwaysDropFirstStub(_SimulatesFileReadToolCall):
         def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:  # type: ignore[override]
             if "verdicts" not in prompt.lower():
                 return super().complete_json(prompt, **kwargs)
@@ -1933,7 +2105,7 @@ def test_filter_timeout_keeps_group_findings_without_hanging(monkeypatch) -> Non
     b = _issue(file_path="b.py", description="b-real")
 
     # Route on the group's own read_file(...) directive (see PerFileStub above).
-    class SlowStub(DummyLLMClient):
+    class SlowStub(_SimulatesFileReadToolCall):
         def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:  # type: ignore[override]
             if "verdicts" not in prompt.lower():
                 return super().complete_json(prompt, **kwargs)
