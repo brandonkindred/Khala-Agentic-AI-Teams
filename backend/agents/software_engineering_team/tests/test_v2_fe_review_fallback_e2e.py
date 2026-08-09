@@ -22,6 +22,16 @@ from llm_service import LLMSemanticExhaustionError
 from llm_service.clients.dummy import DummyLLMClient
 
 
+@pytest.fixture(autouse=True)
+def _clear_spec_compliance_pass_env(monkeypatch):
+    """Guarantee determinism regardless of the ambient environment: an inherited
+    ``CODE_REVIEW_SPEC_COMPLIANCE_PASS=1`` would add an extra post-dedupe
+    synthesis LLM call even under ``skip_tail_passes=True`` (see
+    ``CODE_REVIEW_SPEC_COMPLIANCE_PASS_ENV`` in ``coordinator.py``), breaking
+    this file's exact ``call_count`` assertions."""
+    monkeypatch.delenv("CODE_REVIEW_SPEC_COMPLIANCE_PASS", raising=False)
+
+
 def _task(**overrides):
     from shared.dev_models.models import Task, TaskType
 
