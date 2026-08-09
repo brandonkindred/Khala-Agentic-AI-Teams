@@ -213,6 +213,15 @@ spans in-process. Grafana queries Tempo via the pre-provisioned "Tempo"
 datasource (`docker/grafana/provisioning/datasources/tempo.yml`, uid
 `khala-tempo`).
 
+Tempo is a Go binary, and the Go garbage collector doesn't know about cgroup
+memory limits — by default (`GOGC=100`) the heap can roughly double before a
+collection runs, which produces RSS spikes that can blow past the 1G cap even
+when average usage is fine. The `tempo` service sets `GOMEMLIMIT=800MiB` (a
+soft heap target the runtime actively collects toward, kept below the 1G cap
+to leave headroom for non-Go-heap memory like mmap'd WAL segments) and
+`GOGC=50` (collects more eagerly than the Go default) so peak RSS stays
+smoothed under the cgroup cap instead of sawtoothing past it.
+
 Query-path memory is bounded by three cooperating caps in `tempo.yaml`:
 
 - **`querier.max_concurrent_queries`** (5, Tempo default 20) — limits concurrently-executing
