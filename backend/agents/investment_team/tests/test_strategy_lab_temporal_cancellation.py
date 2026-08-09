@@ -1,0 +1,252 @@
+"""Integration test: Strategy Lab's cooperative-cancellation contract.
+
+Every other Strategy Lab Temporal test (``test_strategy_lab_temporal_activities.py``,
+``test_strategy_lab_temporal_workflows.py``) drives ``run_design_attempt_activity``
+or ``StrategyLabCycleWorkflow`` directly as plain Python, with
+``activity.is_cancelled()`` / ``workflow.execute_activity`` monkeypatched --
+useful for the checkpoint/loop SHAPE, but none of them touch a real Temporal
+server, so none can observe the actual *timing* a terminate delivers. This
+file is the first real-``WorkflowEnvironment`` test for Strategy Lab: it
+drives the genuine ``StrategyLabCycleWorkflow`` against a real (embedded,
+time-skipping) Temporal test server, substituting a fake
+``run_design_attempt_activity`` -- registered under the exact same activity
+name the production one uses -- so a real ``handle.terminate()`` exercises
+the actual cooperative-cancellation delivery path
+(``BackgroundHeartbeat`` + ``activity.is_cancelled()``) production code added
+for the parent issue's first sub-task, without invoking the real orchestrator/
+LLM/market-data machinery.
+
+``handle.terminate()`` (not ``handle.cancel()``) is the primitive under test
+because it is the exact one Strategy Lab's own restart path uses --
+``shared.temporal.terminate_and_await_workflow_sync``, called from
+``investment_team/api/main.py`` before dispatching a fresh cycle-0 workflow.
+
+Generation fencing (the separate, already-existing correctness guarantee that
+a stale activity's *write* is rejected regardless of whether cancellation
+lands) is untouched by this change and not re-covered here -- its
+comprehensive direct-call tests live in
+``test_strategy_lab_temporal_activities.py`` (``_check_generation_fencing`` /
+``persist_run_state_activity`` / ``finalize_cycle_record_activity`` coverage).
+"""
+
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import threading
+import time
+from typing import Any, Dict
+
+import pytest
+from temporalio import activity
+from temporalio.exceptions import CancelledError
+
+from shared.concurrency.heartbeat import BackgroundHeartbeat
+from shared.temporal.activity_utils import is_cancelled
+
+# Worst-case bound: the fake design-attempt activity loops this many times,
+# sleeping this long between checks, so a totally broken cancellation path
+# still finishes (uncancelled) in single-digit seconds rather than hanging
+# the suite.
+_FAKE_ITERATION_SLEEP_S = 0.25
+_FAKE_MAX_ITERATIONS = 40  # 10s worst-case ceiling if cancellation never lands
+_FAKE_HEARTBEAT_INTERVAL_S = 0.5
+# Prompt-exit bound this test asserts against -- generous relative to
+# _FAKE_HEARTBEAT_INTERVAL_S but far under both the fake activity's own 10s
+# ceiling and the real workflow's _DESIGN_ATTEMPT_HEARTBEAT_TIMEOUT (90s).
+_CANCEL_OBSERVED_BOUND_S = 5.0
+
+
+@contextlib.asynccontextmanager
+async def _workflow_environment():
+    """Start a time-skipping ``WorkflowEnvironment`` with no worker attached.
+
+    Preconditions:
+        - Caller is an async test that will drive the yielded ``env`` and any
+          workers itself.
+    Postconditions:
+        - Yields a started ``WorkflowEnvironment``. Skips the test (rather
+          than failing) when the ephemeral Temporal test-server binary cannot
+          be downloaded -- same egress caveat as
+          ``test_coding_team_temporal_workflow.py``'s helper of the same
+          name, the only other place in this repo that drives
+          ``temporalio.testing.WorkflowEnvironment``. The environment is shut
+          down on exit.
+    """
+    from temporalio.testing import WorkflowEnvironment
+
+    try:
+        test_env = await WorkflowEnvironment.start_time_skipping()
+    except RuntimeError as exc:
+        pytest.skip(f"Temporal ephemeral test server unavailable (no egress?): {exc}")
+
+    async with test_env as env:
+        yield env
+
+
+def _make_fake_run_design_attempt_activity(state: Dict[str, Any]):
+    """Build a fake ``run_design_attempt_activity`` registered under the
+    production activity name, exercising the same ``BackgroundHeartbeat`` +
+    ``is_cancelled()`` checkpoint building blocks
+    ``activities.run_design_attempt_activity`` uses -- so this test proves the
+    real cancellation-delivery mechanism, not a reimplementation of it.
+
+    Preconditions:
+        ``state`` is a fresh dict with a ``"started"`` key holding a
+        ``threading.Event``.
+    Postconditions:
+        Returns a sync callable decorated as
+        ``@activity.defn(name="strategy_lab_run_design_attempt",
+        no_thread_cancel_exception=True)`` (matching the real activity's
+        decorator exactly, so ``StrategyLabCycleWorkflow``'s
+        ``workflow.execute_activity(act.run_design_attempt_activity, ...)``
+        call dispatches to it -- Temporal resolves by registered activity
+        name, not Python object identity). Calling it sets ``state["started"]``
+        immediately and ``state["start_time"]``, then heartbeats on a
+        background thread while checking cancellation between short sleeps.
+        Sets ``state["cancelled_at"]`` and raises ``CancelledError`` the
+        moment cancellation is observed, or sets
+        ``state["ran_to_completion"] = True`` and returns a well-formed
+        ``{"kind": "skipped", ...}`` outcome if the loop exhausts
+        ``_FAKE_MAX_ITERATIONS`` uncancelled.
+    """
+
+    @activity.defn(name="strategy_lab_run_design_attempt", no_thread_cancel_exception=True)
+    def _fake_run_design_attempt_activity(params: Dict[str, Any]) -> Dict[str, Any]:
+        state["start_time"] = time.monotonic()
+        state["started"].set()
+
+        def _beat() -> None:
+            try:
+                activity.heartbeat()
+            except Exception:
+                pass
+
+        with BackgroundHeartbeat(
+            _beat,
+            _FAKE_HEARTBEAT_INTERVAL_S,
+            copy_context=True,
+            name="test-strategy-lab-fake-design-attempt-hb",
+        ):
+            for _ in range(_FAKE_MAX_ITERATIONS):
+                if is_cancelled():
+                    state["cancelled_at"] = time.monotonic()
+                    raise CancelledError("fake design attempt cancelled")
+                time.sleep(_FAKE_ITERATION_SLEEP_S)
+
+        state["ran_to_completion"] = True
+        return {
+            "kind": "skipped",
+            "reason": "no_market_data",
+            "convergence_tracker_state": params["convergence_tracker_state"],
+            "gate_results": [],
+            "budget_calls": 0,
+            "drift": {"spec_history": [], "code_history": [], "gate_timeline": []},
+        }
+
+    return _fake_run_design_attempt_activity
+
+
+async def _wait_until(predicate, *, timeout_s: float, message: str) -> None:
+    """Poll ``predicate`` until it's true or raise ``TimeoutError`` with ``message``."""
+    deadline = asyncio.get_running_loop().time() + timeout_s
+    while not predicate():
+        if asyncio.get_running_loop().time() >= deadline:
+            raise TimeoutError(message)
+        await asyncio.sleep(0.05)
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_design_attempt_activity_stops_promptly_after_workflow_terminate() -> None:
+    """A real ``handle.terminate()`` stops an in-flight design-attempt activity
+    promptly instead of letting it run to completion.
+
+    Drives the real ``StrategyLabCycleWorkflow`` (unmodified) against a fake
+    ``run_design_attempt_activity`` registered under the production activity
+    name (see ``_make_fake_run_design_attempt_activity``). Passing
+    ``workflow_config`` directly in ``cycle_input`` short-circuits the
+    workflow's ``resolve_workflow_config_activity`` /
+    ``compute_regime_summary_activity`` calls (regime summaries disabled), and
+    ``max_design_reentries: 0`` makes the workflow call the design-attempt
+    activity exactly once -- so the fake is the only activity this test needs
+    to register.
+
+    Terminates the workflow via ``handle.terminate()`` -- the same primitive
+    Strategy Lab's own restart path uses -- once the fake activity signals it
+    has started and is heartbeating, then asserts the activity observed
+    cancellation (via ``activity.is_cancelled()``) within
+    ``_CANCEL_OBSERVED_BOUND_S`` and never reached its own completion path.
+    """
+    import concurrent.futures
+
+    from temporalio.worker import Worker
+
+    from investment_team.strategy_lab.temporal.workflows import (
+        TASK_QUEUE,
+        StrategyLabCycleWorkflow,
+    )
+
+    state: Dict[str, Any] = {"started": threading.Event()}
+    fake_activity = _make_fake_run_design_attempt_activity(state)
+
+    cycle_input = {
+        "prior_records": [],
+        "config": {"start_date": "2023-01-01", "end_date": "2023-12-31"},
+        "signal_brief": None,
+        "exclude_asset_classes": None,
+        "convergence_tracker_state": {},
+        "workflow_config": {"regime_summary_enabled": False, "max_design_reentries": 0},
+    }
+
+    async with _workflow_environment() as env:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as activity_executor:
+            worker = Worker(
+                env.client,
+                task_queue=TASK_QUEUE,
+                workflows=[StrategyLabCycleWorkflow],
+                activities=[fake_activity],
+                activity_executor=activity_executor,
+                max_cached_workflows=0,
+            )
+            async with worker:
+                handle = await env.client.start_workflow(
+                    StrategyLabCycleWorkflow.run,
+                    cycle_input,
+                    id="strategy-lab-cancellation-test",
+                    task_queue=TASK_QUEUE,
+                )
+
+                # An outstanding activity task keeps the time-skipping server's
+                # auto-skip disabled, but disable it explicitly too -- this
+                # section's timing bounds must reflect real wall-clock elapsed
+                # time, not the server's logical clock.
+                with env.auto_time_skipping_disabled():
+                    await _wait_until(
+                        state["started"].is_set,
+                        timeout_s=_CANCEL_OBSERVED_BOUND_S,
+                        message="fake design-attempt activity never started",
+                    )
+
+                    await handle.terminate(
+                        reason="test: prompt cancellation after workflow terminate"
+                    )
+
+                    await _wait_until(
+                        lambda: "cancelled_at" in state,
+                        timeout_s=_CANCEL_OBSERVED_BOUND_S,
+                        message=(
+                            "fake design-attempt activity did not observe cancellation "
+                            f"within {_CANCEL_OBSERVED_BOUND_S}s of workflow terminate"
+                        ),
+                    )
+
+    elapsed = state["cancelled_at"] - state["start_time"]
+    assert elapsed < _CANCEL_OBSERVED_BOUND_S, (
+        f"design-attempt activity took {elapsed:.2f}s to observe cancellation, "
+        f"expected under {_CANCEL_OBSERVED_BOUND_S}s"
+    )
+    assert not state.get("ran_to_completion"), (
+        "fake design-attempt activity ran to completion instead of being cancelled "
+        "-- cooperative cancellation regressed"
+    )
