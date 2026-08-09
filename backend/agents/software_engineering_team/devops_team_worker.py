@@ -15,6 +15,7 @@ import logging
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from shared.git.git_utils import DEVELOPMENT_BRANCH, reset_hard_to
 from software_engineering_team.devops_team.models import (
     DevOpsCompletionPackage,
     DevOpsConstraints,
@@ -88,6 +89,13 @@ def _derive_environment(task: Any) -> str:
     production deployment workflow"), letting production-targeting config
     merge without the scrutiny DevOps normally enforces for it.
 
+    Scans ``task.acceptance_criteria`` in addition to description/title: a
+    groomed task commonly carries its production signal there (e.g. "Production
+    deploy requires explicit approval" as a criterion) rather than in the
+    title/description, and the CI/CD and Deployment specialist agents already
+    consume ``acceptance_criteria`` directly -- they can produce
+    production-targeting artifacts even when the description reads generically.
+
     Preconditions: none.
     Postconditions:
         - Returns ``"production"`` or ``"staging"`` per
@@ -99,7 +107,8 @@ def _derive_environment(task: Any) -> str:
           environment-policy gate rather than silently proceeding -- the
           same trade-off ``run_workflow`` callers already accept.
     """
-    combined_text = f"{task.description or ''} {task.title or ''}".lower()
+    parts = [task.description or "", task.title or "", *(task.acceptance_criteria or [])]
+    combined_text = " ".join(parts).lower()
     return _legacy_environment_from_text(combined_text)
 
 
@@ -148,12 +157,19 @@ def _to_devops_task_spec(task: Any) -> DevOpsTaskSpec:
           appended to both ``scope.included`` and ``acceptance_criteria`` (see
           ``_revision_feedback_scope_note``) so every Phase 2 specialist agent
           sees it, not just whichever field each happens to read.
+        - ``task.acceptance_criteria`` is copied into ``scope.included`` too
+          (not just the ``acceptance_criteria`` field): ``_enforce_env_policy``
+          only scans ``scope.included`` for approval-gate language, so an
+          approval requirement recorded as a groomed acceptance criterion
+          (e.g. "Production deploy requires explicit approval") must be
+          visible there too, or a correctly production-derived task would
+          fail Phase 1 despite already carrying the required gate structurally.
     """
     goal_summary = _augment_goal_summary(task)
     environment = _derive_environment(task)
     scope_excluded = [task.out_of_scope] if getattr(task, "out_of_scope", "") else []
-    scope_included = [task.description or task.title or task.id]
     acceptance_criteria = list(task.acceptance_criteria or []) or list(_DEFAULT_ACCEPTANCE_CRITERIA)
+    scope_included = [task.description or task.title or task.id, *acceptance_criteria]
     feedback_note = _revision_feedback_scope_note(task)
     if feedback_note:
         scope_included = scope_included + [feedback_note]
@@ -202,6 +218,51 @@ def _devops_result_summary(pkg: Optional[DevOpsCompletionPackage]) -> str:
     return "\n\n".join(lines)
 
 
+def _reset_stale_feature_branch(path: Path, task: Any) -> None:
+    """Clear a prior DevOps-internal-gate-rejected attempt's branch before retrying.
+
+    DevOps's Phase 2 specialists (IaC/CI-CD/Deployment) always regenerate their
+    full artifact set from scratch each round -- there is nothing incremental
+    to preserve from a rejected attempt, unlike an LLM applying patches. But
+    ``_prepare_feature_branch``'s underlying ``create_feature_branch`` REUSES
+    an already-checked-out branch rather than recreating it (by design, for
+    the transient-failure-retry case other coding-team workers rely on). A
+    devops task's own internal gate rejection (``run_implement`` returning
+    ``status="failed"``, routed through the swarm's
+    ``_handle_incomplete_implementation``) never records ``task.feature_branch``
+    -- only a swarm ``"in_review"`` outcome does -- so a retry after such a
+    rejection would silently reuse the previous attempt's branch complete with
+    its rejected commits. ``write_agent_output`` only ever adds/overwrites
+    paths present in the new artifact map, never removing ones absent from it,
+    so those stale files would leak into the eventual merged diff unreviewed.
+
+    Resets the CURRENT branch (whatever it happens to be, including the stale
+    feature branch left over from the rejected attempt) to development's tip
+    via ``reset_hard_to`` -- not a ``checkout`` of development itself, which
+    would fail here: development stays attached in the swarm's shared
+    checkout, and git refuses to attach the same branch in two worktrees.
+
+    Preconditions: none -- safe to call on a first attempt (no-op: the
+      worktree already sits at development's tip) or before ``repo_path`` is
+      a git repo yet (bootstrap is handled by ``_prepare_feature_branch``).
+    Postconditions:
+        - When ``task.feature_branch`` is already set (a Tech-Lead-review
+          rejection wants that same branch revised in place, not wiped), this
+          is a no-op -- ``_prepare_feature_branch`` handles that case itself.
+        - Otherwise, best-effort: a reset failure (e.g. development doesn't
+          exist yet on a brand-new repo) is logged and swallowed so it never
+          blocks the retry from proceeding through the normal
+          ``_prepare_feature_branch`` path.
+    """
+    if getattr(task, "feature_branch", None):
+        return
+    if not (Path(path) / ".git").exists():
+        return
+    ok, msg = reset_hard_to(path, DEVELOPMENT_BRANCH)
+    if not ok:
+        logger.debug("No stale devops branch state to reset for task %s: %s", task.id, msg)
+
+
 class DevOpsTeamWorker:
     """Coding-team worker facade for ``devops_team``.
 
@@ -241,6 +302,7 @@ class DevOpsTeamWorker:
                 getattr(task, "feature_branch", None) or f"feature/{_task_feature_name(task)}",
                 str(exc),
             )
+        _reset_stale_feature_branch(path, task)
         branch_ok, prepared_branch = _prepare_feature_branch(path, task)
         if not branch_ok:
             logger.warning(

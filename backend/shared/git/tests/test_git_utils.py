@@ -25,6 +25,7 @@ from shared.git.git_utils import (
     initialize_new_repo,
     prune_worktrees,
     remove_worktree,
+    reset_hard_to,
 )
 
 
@@ -430,3 +431,62 @@ def test_create_feature_branch_fails_honestly_when_branch_owned_by_another_workt
         ["git", "branch", "--show-current"], cwd=owner_wt, capture_output=True, text=True
     )
     assert result.stdout.strip() == branch
+
+
+def test_reset_hard_to_discards_commits_unique_to_current_branch(repo: Path) -> None:
+    ok, branch = create_feature_branch(repo, DEVELOPMENT_BRANCH, "t4-reset")
+    assert ok, branch
+    (repo / "rejected.txt").write_text("stale attempt", encoding="utf-8")
+    subprocess.run(["git", "add", "-A"], cwd=repo, capture_output=True, check=True)
+    subprocess.run(["git", "commit", "-m", "rejected attempt"], cwd=repo, capture_output=True, check=True)
+    assert (repo / "rejected.txt").exists()
+
+    ok2, msg2 = reset_hard_to(repo, DEVELOPMENT_BRANCH)
+
+    assert ok2, msg2
+    # Still on the feature branch (reset never switches branches) but its tip and
+    # working tree now exactly match development's -- the rejected commit is gone.
+    result = subprocess.run(["git", "branch", "--show-current"], cwd=repo, capture_output=True, text=True)
+    assert result.stdout.strip() == branch
+    assert not (repo / "rejected.txt").exists()
+    head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True).stdout.strip()
+    dev_head = subprocess.run(
+        ["git", "rev-parse", DEVELOPMENT_BRANCH], cwd=repo, capture_output=True, text=True
+    ).stdout.strip()
+    assert head == dev_head
+
+
+def test_reset_hard_to_works_in_worktree_while_ref_checked_out_elsewhere(repo: Path) -> None:
+    """The crux claim this helper exists for: resetting to ``development`` from a linked
+    worktree must succeed even while ``development`` is attached (checked out) at the main
+    repo path -- unlike ``checkout_branch(path, DEVELOPMENT_BRANCH)``, which git refuses."""
+    wt_path = repo.parent / "wt-reset"
+    add_worktree(repo, wt_path, ref=DEVELOPMENT_BRANCH)
+    ok, branch = create_feature_branch(wt_path, DEVELOPMENT_BRANCH, "t5-reset-wt")
+    assert ok, branch
+    (wt_path / "rejected.txt").write_text("stale attempt", encoding="utf-8")
+    subprocess.run(["git", "add", "-A"], cwd=wt_path, capture_output=True, check=True)
+    subprocess.run(["git", "commit", "-m", "rejected attempt"], cwd=wt_path, capture_output=True, check=True)
+
+    # development is STILL checked out at repo while we reset in the worktree.
+    ok2, msg2 = reset_hard_to(wt_path, DEVELOPMENT_BRANCH)
+
+    assert ok2, msg2
+    assert not (wt_path / "rejected.txt").exists()
+    # repo's own checkout is untouched.
+    result = subprocess.run(["git", "branch", "--show-current"], cwd=repo, capture_output=True, text=True)
+    assert result.stdout.strip() == DEVELOPMENT_BRANCH
+
+
+def test_reset_hard_to_fails_honestly_for_non_repo(tmp_path: Path) -> None:
+    not_a_repo = tmp_path / "plain"
+    not_a_repo.mkdir()
+    ok, msg = reset_hard_to(not_a_repo, DEVELOPMENT_BRANCH)
+    assert not ok
+    assert "Not a git repository" in msg
+
+
+def test_reset_hard_to_fails_honestly_for_unresolvable_ref(repo: Path) -> None:
+    ok, msg = reset_hard_to(repo, "does-not-exist")
+    assert not ok
+    assert "Failed to reset" in msg

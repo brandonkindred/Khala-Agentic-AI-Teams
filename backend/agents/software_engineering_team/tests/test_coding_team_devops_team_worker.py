@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from shared.git.branch_utils import make_branch_suffix
+from software_engineering_team import devops_team_worker as devops_worker_mod
 from software_engineering_team import v2_team_worker as worker_mod
 from software_engineering_team.devops_team.models import (
     DevOpsCompletionPackage,
@@ -15,7 +16,11 @@ from software_engineering_team.devops_team.models import (
     GitOperationsMetadata,
     ReleaseReadiness,
 )
-from software_engineering_team.devops_team_worker import DevOpsTeamWorker, _to_devops_task_spec
+from software_engineering_team.devops_team_worker import (
+    DevOpsTeamWorker,
+    _reset_stale_feature_branch,
+    _to_devops_task_spec,
+)
 from software_engineering_team.models import StackSpec, Task
 from software_engineering_team.v2_team_worker import _task_feature_name
 
@@ -169,6 +174,42 @@ def test_devops_worker_spec_respects_non_production_exclusion() -> None:
     )
     spec = _to_devops_task_spec(task)
     assert spec.environment == "staging"
+
+
+def test_devops_worker_derives_environment_from_acceptance_criteria() -> None:
+    """A groomed task commonly carries its production signal in a criterion
+    ("Production deploy requires explicit approval") rather than the title/
+    description -- the CI/CD and Deployment specialists already consume
+    acceptance_criteria directly, so they can produce production-targeting
+    artifacts even when the description reads generically."""
+    task = _base_task(
+        title="Add deployment workflow",
+        description="Set up the deploy pipeline",
+        acceptance_criteria=["Production deploy requires explicit approval"],
+    )
+
+    spec = _to_devops_task_spec(task)
+
+    assert spec.environment == "production"
+    assert spec.platform_scope.environments == ["dev", "production"]
+
+
+def test_devops_worker_spec_copies_acceptance_criteria_into_scope_included() -> None:
+    """_enforce_env_policy only scans scope.included for approval-gate language,
+    so an approval requirement recorded as a groomed acceptance criterion must
+    be visible there too, or a correctly production-derived task would fail
+    Phase 1 despite already carrying the required gate structurally."""
+    task = _base_task(
+        acceptance_criteria=[
+            "Production deploy requires explicit approval",
+            "Rollback tested",
+        ]
+    )
+
+    spec = _to_devops_task_spec(task)
+
+    assert "Production deploy requires explicit approval" in spec.scope.included
+    assert "Rollback tested" in spec.scope.included
 
 
 def test_devops_worker_threads_revision_feedback_into_goal_summary(tmp_path, monkeypatch) -> None:
@@ -430,3 +471,108 @@ def test_devops_worker_rejects_malformed_task_before_run_task(tmp_path) -> None:
 
     assert out["status"] == "failed"
     assert lead.calls == []
+
+
+# ------------------------------------------------------ stale-branch reset on retry
+
+
+def test_reset_stale_feature_branch_noop_when_feature_branch_recorded(
+    tmp_path, monkeypatch
+) -> None:
+    """A Tech-Lead-review rejection (not a DevOps-internal gate rejection) already
+    recorded task.feature_branch and wants that same branch revised in place --
+    _prepare_feature_branch's own existing_branch path handles that, so no reset."""
+    (tmp_path / ".git").mkdir()
+    calls: List[Any] = []
+    monkeypatch.setattr(
+        devops_worker_mod, "reset_hard_to", lambda p, ref: calls.append((p, ref)) or (True, "ok")
+    )
+
+    _reset_stale_feature_branch(tmp_path, _base_task(feature_branch="feature/existing"))
+
+    assert calls == []
+
+
+def test_reset_stale_feature_branch_noop_when_not_a_git_repo(tmp_path, monkeypatch) -> None:
+    calls: List[Any] = []
+    monkeypatch.setattr(
+        devops_worker_mod, "reset_hard_to", lambda p, ref: calls.append((p, ref)) or (True, "ok")
+    )
+
+    _reset_stale_feature_branch(tmp_path, _base_task())  # no .git dir
+
+    assert calls == []
+
+
+def test_reset_stale_feature_branch_resets_when_no_recorded_branch(tmp_path, monkeypatch) -> None:
+    (tmp_path / ".git").mkdir()
+    calls: List[Any] = []
+    monkeypatch.setattr(
+        devops_worker_mod, "reset_hard_to", lambda p, ref: calls.append((p, ref)) or (True, "ok")
+    )
+
+    _reset_stale_feature_branch(tmp_path, _base_task())
+
+    assert calls == [(tmp_path, devops_worker_mod.DEVELOPMENT_BRANCH)]
+
+
+def test_reset_stale_feature_branch_swallows_reset_failure(tmp_path, monkeypatch) -> None:
+    (tmp_path / ".git").mkdir()
+    monkeypatch.setattr(devops_worker_mod, "reset_hard_to", lambda p, ref: (False, "boom"))
+
+    _reset_stale_feature_branch(tmp_path, _base_task())  # must not raise
+
+
+def test_devops_worker_resets_stale_branch_before_preparing_it(tmp_path, monkeypatch) -> None:
+    """Proves the reset runs BEFORE branch preparation -- the whole point is to clear
+    a rejected attempt's stale commits before create_feature_branch would otherwise
+    reuse the still-checked-out branch as-is."""
+    (tmp_path / ".git").mkdir()
+    order: List[str] = []
+    monkeypatch.setattr(
+        devops_worker_mod, "reset_hard_to", lambda p, ref: order.append("reset") or (True, "ok")
+    )
+
+    def _ensure_development_ready(repo_path):
+        order.append("ensure_development")
+        return True, "development ready"
+
+    def _create_feature_branch(repo_path, base_branch, feature_name):
+        order.append("create")
+        return True, "feature/provision"
+
+    monkeypatch.setattr(worker_mod, "_ensure_development_ready", _ensure_development_ready)
+    monkeypatch.setattr(worker_mod, "create_feature_branch", _create_feature_branch)
+    lead = _FakeDevOpsLead()
+    worker = DevOpsTeamWorker(
+        agent_id="devops_worker",
+        stack_spec=StackSpec(name="devops", tools_services=[]),
+        team_lead=lead,
+    )
+
+    worker.run_implement(_base_task(), tmp_path)
+
+    assert order == ["reset", "ensure_development", "create"]
+
+
+def test_devops_worker_does_not_reset_when_feature_branch_already_recorded(
+    tmp_path, monkeypatch
+) -> None:
+    (tmp_path / ".git").mkdir()
+    calls: List[Any] = []
+    monkeypatch.setattr(
+        devops_worker_mod, "reset_hard_to", lambda p, ref: calls.append((p, ref)) or (True, "ok")
+    )
+    monkeypatch.setattr(
+        worker_mod, "checkout_branch", lambda repo_path, branch: (True, f"Checked out {branch}")
+    )
+    lead = _FakeDevOpsLead()
+    worker = DevOpsTeamWorker(
+        agent_id="devops_worker",
+        stack_spec=StackSpec(name="devops", tools_services=[]),
+        team_lead=lead,
+    )
+
+    worker.run_implement(_base_task(feature_branch="feature/existing"), tmp_path)
+
+    assert calls == []

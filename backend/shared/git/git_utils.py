@@ -334,6 +334,34 @@ def commit_working_tree(repo_path: str | Path, message: str) -> Tuple[bool, str]
     return True, "Committed"
 
 
+def reset_hard_to(repo_path: str | Path, ref: str) -> Tuple[bool, str]:
+    """Hard-reset the CURRENTLY checked-out branch to ``ref``'s commit.
+
+    Unlike checking out ``ref`` directly, this works from inside a linked git
+    worktree even when ``ref`` (e.g. ``development``) is already attached in a
+    different worktree -- ``git reset --hard <ref>`` only reads ``ref``'s
+    commit, it never attaches it here.
+
+    Preconditions:
+        - ``repo_path`` is an existing git repository; ``ref`` resolves to a
+          commit (a local branch name, tag, or SHA).
+    Postconditions:
+        - On success, the current branch's tip and working tree exactly match
+          ``ref``'s commit (any commits/changes unique to the current branch
+          are discarded) and returns ``(True, message)``.
+        - On failure (not a repo, or ``ref`` does not resolve) returns
+          ``(False, message)`` and leaves the repository state unchanged.
+    """
+    path = Path(repo_path).resolve()
+    if not (path / ".git").exists():
+        return False, "Not a git repository"
+    code, out = _run_git(path, ["git", "reset", "--hard", ref])
+    if code != 0:
+        return False, f"Failed to reset to {ref}: {out}"
+    logger.info("Reset current branch to '%s'", ref)
+    return True, f"Reset to {ref}"
+
+
 def get_head_sha(repo_path: str | Path) -> Tuple[bool, str]:
     """Return the full SHA of the current HEAD commit.
 
