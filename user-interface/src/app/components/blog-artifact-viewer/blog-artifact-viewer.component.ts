@@ -1,12 +1,11 @@
 import { Component, inject, OnInit } from '@angular/core';
 import { ActivatedRoute, RouterLink } from '@angular/router';
 import { CommonModule } from '@angular/common';
-import { DomSanitizer, SafeHtml } from '@angular/platform-browser';
-import { marked } from 'marked';
-import DOMPurify from 'dompurify';
+import { SafeHtml } from '@angular/platform-browser';
 import { BloggingApiService } from '../../services/blogging-api.service';
 import { LoadingSpinnerComponent } from '../../shared/loading-spinner/loading-spinner.component';
 import { ErrorMessageComponent } from '../../shared/error-message/error-message.component';
+import { MarkdownRendererService } from '../../shared/markdown-renderer.service';
 import { MatButtonModule } from '@angular/material/button';
 import { MatIconModule } from '@angular/material/icon';
 import { artifactLabel } from '../blogging-dashboard/blogging-dashboard.component';
@@ -28,7 +27,7 @@ import { artifactLabel } from '../blogging-dashboard/blogging-dashboard.componen
 export class BlogArtifactViewerComponent implements OnInit {
   private readonly route = inject(ActivatedRoute);
   private readonly api = inject(BloggingApiService);
-  private readonly sanitizer = inject(DomSanitizer);
+  private readonly markdownRenderer = inject(MarkdownRendererService);
 
   jobId: string | null = null;
   artifactName: string | null = null;
@@ -73,22 +72,9 @@ export class BlogArtifactViewerComponent implements OnInit {
   }
 
   getMarkdownHtml(): SafeHtml {
-    if (this.content == null || !this.isMarkdown()) return this.sanitizer.bypassSecurityTrustHtml('');
+    if (this.content == null || !this.isMarkdown()) return this.markdownRenderer.renderToSafeHtml('');
     const text = typeof this.content === 'string' ? this.content : JSON.stringify(this.content, null, 2);
-    if (!text?.trim()) return this.sanitizer.bypassSecurityTrustHtml('');
-    try {
-      const result = marked.parse(text);
-      const html = typeof result === 'string' ? DOMPurify.sanitize(result) : '';
-      return this.sanitizer.bypassSecurityTrustHtml(html || `<pre>${this.escapeHtml(text)}</pre>`);
-    } catch {
-      return this.sanitizer.bypassSecurityTrustHtml(`<pre>${this.escapeHtml(text)}</pre>`);
-    }
-  }
-
-  private escapeHtml(text: string): string {
-    const div = document.createElement('div');
-    div.textContent = text;
-    return div.innerHTML;
+    return this.markdownRenderer.renderToSafeHtml(text);
   }
 
   isMarkdown(): boolean {

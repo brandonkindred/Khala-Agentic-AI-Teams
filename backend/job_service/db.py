@@ -17,13 +17,17 @@ from __future__ import annotations
 import json
 import logging
 import os
+import threading
 from collections.abc import Generator
 from contextlib import contextmanager
 from datetime import datetime, timezone
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from psycopg.conninfo import make_conninfo
 from psycopg_pool import ConnectionPool
+
+if TYPE_CHECKING:
+    from psycopg import Connection
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +37,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 _pool: ConnectionPool | None = None
+_pool_lock = threading.Lock()
 
 
 def _dsn() -> str:
@@ -47,13 +52,14 @@ def _dsn() -> str:
 
 def get_pool() -> ConnectionPool:
     global _pool
-    if _pool is None or _pool.closed:
-        _pool = ConnectionPool(conninfo=_dsn(), min_size=2, max_size=20, open=True, name="job_service")
-    return _pool
+    with _pool_lock:
+        if _pool is None or _pool.closed:
+            _pool = ConnectionPool(conninfo=_dsn(), min_size=2, max_size=20, open=True, name="job_service")
+        return _pool
 
 
 @contextmanager
-def get_conn() -> Generator:
+def get_conn() -> Generator[Connection, None, None]:
     pool = get_pool()
     # ``ConnectionPool.connection()`` is itself a context manager that commits
     # on clean exit, rolls back on exception, and returns the connection to

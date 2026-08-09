@@ -2,9 +2,7 @@ import { Component, inject, OnDestroy, OnInit, ViewChild } from '@angular/core';
 import { ActivatedRoute } from '@angular/router';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
-import { DomSanitizer, SafeHtml } from '@angular/platform-browser';
-import { marked } from 'marked';
-import DOMPurify from 'dompurify';
+import { SafeHtml } from '@angular/platform-browser';
 import { MatTabsModule } from '@angular/material/tabs';
 import { MatCardModule } from '@angular/material/card';
 import { Subject, Subscription, timer } from 'rxjs';
@@ -26,6 +24,7 @@ import { TeamAssistantChatComponent } from '../team-assistant-chat/team-assistan
 import { DashboardShellComponent } from '../../shared/dashboard-shell/dashboard-shell.component';
 import { Router } from '@angular/router';
 import { InlineBannerComponent } from '../../shared/inline-banner/inline-banner.component';
+import { MarkdownRendererService } from '../../shared/markdown-renderer.service';
 import type {
   BlogJobListItem,
   BlogJobStatusResponse,
@@ -104,7 +103,7 @@ export class BloggingDashboardComponent implements OnInit, OnDestroy {
   private readonly assistantApi = inject(TeamAssistantApiService);
   private readonly route = inject(ActivatedRoute);
   private readonly router = inject(Router);
-  private readonly sanitizer = inject(DomSanitizer);
+  private readonly markdownRenderer = inject(MarkdownRendererService);
   private jobsSub: Subscription | null = null;
   private statusPollSub: Subscription | null = null;
   private sseSub: Subscription | null = null;
@@ -619,20 +618,7 @@ export class BloggingDashboardComponent implements OnInit, OnDestroy {
     if (!this.viewArtifactModal || !this.isArtifactMarkdown(this.viewArtifactModal.name)) return '';
     const content = this.viewArtifactModal.content;
     const text = typeof content === 'string' ? content : JSON.stringify(content, null, 2);
-    if (!text?.trim()) return this.sanitizer.bypassSecurityTrustHtml('');
-    try {
-      const result = marked.parse(text);
-      const html = typeof result === 'string' ? DOMPurify.sanitize(result) : '';
-      return this.sanitizer.bypassSecurityTrustHtml(html || `<pre>${this.escapeHtml(text)}</pre>`);
-    } catch {
-      return this.sanitizer.bypassSecurityTrustHtml(`<pre>${this.escapeHtml(text)}</pre>`);
-    }
-  }
-
-  private escapeHtml(text: string): string {
-    const div = document.createElement('div');
-    div.textContent = text;
-    return div.innerHTML;
+    return this.markdownRenderer.renderToSafeHtml(text);
   }
 
   jobApprovedLabel(): string {

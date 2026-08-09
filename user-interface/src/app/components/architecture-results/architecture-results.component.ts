@@ -9,12 +9,11 @@ import {
   AfterViewInit,
   AfterViewChecked,
 } from '@angular/core';
-import { DomSanitizer, SafeHtml } from '@angular/platform-browser';
+import { SafeHtml } from '@angular/platform-browser';
 import { MatCardModule } from '@angular/material/card';
 import { MatExpansionModule } from '@angular/material/expansion';
-import { marked } from 'marked';
-import DOMPurify from 'dompurify';
 import type { ArchitectDesignResponse } from '../../models';
+import { MarkdownRendererService } from '../../shared/markdown-renderer.service';
 
 @Component({
   selector: 'app-architecture-results',
@@ -24,7 +23,7 @@ import type { ArchitectDesignResponse } from '../../models';
   styleUrl: './architecture-results.component.scss',
 })
 export class ArchitectureResultsComponent implements AfterViewInit, AfterViewChecked {
-  private readonly sanitizer = inject(DomSanitizer);
+  private readonly markdownRenderer = inject(MarkdownRendererService);
   private readonly elementRef = inject(ElementRef);
   private readonly cdr = inject(ChangeDetectorRef);
 
@@ -66,8 +65,10 @@ export class ArchitectureResultsComponent implements AfterViewInit, AfterViewChe
     effect(() => {
       const d = this.data;
       if (!d) return;
-      this.overviewHtml.set(this.renderMarkdown(d.overview));
-      this.architectureDocHtml.set(this.renderMarkdown(d.architecture_document));
+      this.overviewHtml.set(this.markdownRenderer.renderToSafeHtml(d.overview, 'markdown-fallback'));
+      this.architectureDocHtml.set(
+        this.markdownRenderer.renderToSafeHtml(d.architecture_document, 'markdown-fallback')
+      );
       this.diagramEntries = Object.keys(d.diagrams || {}).map((name, i) => ({
         name,
         id: `mermaid-diagram-${i}`,
@@ -82,19 +83,6 @@ export class ArchitectureResultsComponent implements AfterViewInit, AfterViewChe
 
   ngAfterViewChecked(): void {
     this.renderMermaidDiagrams();
-  }
-
-  private renderMarkdown(text: string): SafeHtml {
-    if (!text?.trim()) return '';
-    try {
-      const result = marked.parse(text);
-      const html = typeof result === 'string' ? DOMPurify.sanitize(result) : '';
-      return this.sanitizer.bypassSecurityTrustHtml(html || `<pre class="markdown-fallback">${this.escapeHtml(text)}</pre>`);
-    } catch {
-      return this.sanitizer.bypassSecurityTrustHtml(
-        `<pre class="markdown-fallback">${this.escapeHtml(text)}</pre>`
-      );
-    }
   }
 
   private escapeHtml(text: string): string {
