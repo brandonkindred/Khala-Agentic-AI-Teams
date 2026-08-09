@@ -60,7 +60,7 @@ class PostgresProvisionerTool(BaseToolProvisioner):
             port=self.port,
             user=self.admin_user,
             password=self.admin_password,
-            database="postgres",
+            dbname="postgres",
         )
 
     def provision(
