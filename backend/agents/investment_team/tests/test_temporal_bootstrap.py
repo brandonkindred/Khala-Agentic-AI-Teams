@@ -472,10 +472,10 @@ def test_run_backtest_activity_heartbeats_during_run(monkeypatch) -> None:
 
 
 def test_run_backtest_activity_cancellation_cancels_job(monkeypatch) -> None:
-    """On Temporal cancellation the heartbeat cancels the underlying job so the
-    existing checkpoints inside ``_run_backtest_background`` observe it and
-    honor the cancellation, instead of the run silently continuing to
-    completion/failure with no way for Temporal to stop it."""
+    """On Temporal cancellation the cancellation poller cancels the underlying
+    job so the existing checkpoints inside ``_run_backtest_background``
+    observe it and honor the cancellation, instead of the run silently
+    continuing to completion/failure with no way for Temporal to stop it."""
     from temporalio import activity as tl_activity
 
     from investment_team import models as inv_models
@@ -485,7 +485,7 @@ def test_run_backtest_activity_cancellation_cancels_job(monkeypatch) -> None:
     monkeypatch.setattr(inv_models, "StrategySpec", lambda **kw: object())
     monkeypatch.setattr(inv_models, "BacktestConfig", lambda **kw: object())
     monkeypatch.setattr(api_main, "_backtest_job_status", lambda jid: None)
-    monkeypatch.setattr(wf, "_HEARTBEAT_INTERVAL_S", 0.01)
+    monkeypatch.setattr(wf, "_CANCEL_POLL_INTERVAL_S", 0.01)
     monkeypatch.setattr(tl_activity, "heartbeat", lambda *a, **k: None)
     monkeypatch.setattr(tl_activity, "is_cancelled", lambda: True)
 
@@ -493,7 +493,7 @@ def test_run_backtest_activity_cancellation_cancels_job(monkeypatch) -> None:
     monkeypatch.setattr(api_main, "_bt_cancel_job", lambda jid: cancelled_ids.append(jid))
 
     def _bg(job_id, *a):
-        # Block until the heartbeat observes cancellation (bounded).
+        # Block until the poller observes cancellation (bounded).
         for _ in range(200):
             if cancelled_ids:
                 return api_main._BT_JOB_STATUS_CANCELLED
@@ -506,6 +506,46 @@ def test_run_backtest_activity_cancellation_cancels_job(monkeypatch) -> None:
 
     assert cancelled_ids == ["job-cancel"]
     assert result == {"job_id": "job-cancel", "status": "cancelled"}
+
+
+def test_run_backtest_activity_cancellation_observed_before_heartbeat_tick(monkeypatch) -> None:
+    """Regression for a review finding: cancellation polling must be decoupled
+    from (and much faster than) the network-heartbeat cadence. With
+    ``_HEARTBEAT_INTERVAL_S`` set so large the heartbeat never ticks during
+    this test, cancellation must still be observed and cancel the job via the
+    fast ``_CANCEL_POLL_INTERVAL_S`` poller — otherwise a run that finishes
+    before the first heartbeat tick (or in the tail of any run) could persist
+    ``completed`` despite an already-cancelled activity."""
+    from temporalio import activity as tl_activity
+
+    from investment_team import models as inv_models
+    from investment_team.api import main as api_main
+    from investment_team.temporal import workflows as wf
+
+    monkeypatch.setattr(inv_models, "StrategySpec", lambda **kw: object())
+    monkeypatch.setattr(inv_models, "BacktestConfig", lambda **kw: object())
+    monkeypatch.setattr(api_main, "_backtest_job_status", lambda jid: None)
+    monkeypatch.setattr(wf, "_HEARTBEAT_INTERVAL_S", 1000.0)
+    monkeypatch.setattr(wf, "_CANCEL_POLL_INTERVAL_S", 0.01)
+    monkeypatch.setattr(tl_activity, "heartbeat", lambda *a, **k: None)
+    monkeypatch.setattr(tl_activity, "is_cancelled", lambda: True)
+
+    cancelled_ids = []
+    monkeypatch.setattr(api_main, "_bt_cancel_job", lambda jid: cancelled_ids.append(jid))
+
+    def _bg(job_id, *a):
+        for _ in range(200):
+            if cancelled_ids:
+                return api_main._BT_JOB_STATUS_CANCELLED
+            time.sleep(0.01)
+        return api_main._BT_JOB_STATUS_COMPLETED
+
+    monkeypatch.setattr(api_main, "_run_backtest_background", _bg)
+
+    result = wf.run_backtest_activity("job-cancel-fast", {}, {}, "agent", [])
+
+    assert cancelled_ids == ["job-cancel-fast"]
+    assert result == {"job_id": "job-cancel-fast", "status": "cancelled"}
 
 
 def test_investment_backtest_workflow_sets_heartbeat_timeout(monkeypatch) -> None:

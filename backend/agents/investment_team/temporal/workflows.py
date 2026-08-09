@@ -61,12 +61,21 @@ _ACTIVITY_RETRY = RetryPolicy(
 # Temporal does not time it out.
 _ACTIVITY_TIMEOUT = timedelta(hours=6)
 
-# How often the activity heartbeats (and re-checks for Temporal cancellation),
-# mirroring paper_trading.py's driver. Wide enough to avoid heartbeat spam over
-# a run that can last hours, but short enough that Temporal detects a worker
-# crash well within a single retry cycle.
+# How often the activity heartbeats, mirroring paper_trading.py's driver. Wide
+# enough to avoid heartbeat spam (a network round-trip) over a run that can
+# last hours, but short enough that Temporal detects a worker crash well
+# within a single retry cycle.
 _HEARTBEAT_INTERVAL_S = 30.0
 _HEARTBEAT_TIMEOUT = timedelta(seconds=120)
+
+# How often cancellation is polled — deliberately decoupled from, and much
+# tighter than, _HEARTBEAT_INTERVAL_S. is_cancelled() is a free in-memory
+# flag read (no network round-trip), unlike activity.heartbeat(), so polling
+# it on the network-heartbeat cadence would leave a run that finishes before
+# the first heartbeat tick (or in the last _HEARTBEAT_INTERVAL_S of any run)
+# with no chance to ever observe a mid-run cancellation and persist it as
+# cancelled instead of completed.
+_CANCEL_POLL_INTERVAL_S = 1.0
 
 
 # no_thread_cancel_exception=True: by default temporalio forcibly raises
@@ -99,13 +108,15 @@ def run_backtest_activity(
     Postconditions:
         - Short-circuits (no recompute) when the job already completed, so a
           retry whose predecessor finished does not orphan a duplicate record.
-        - Otherwise a background heartbeat runs for the duration of the call:
-          it beats on ``activity.heartbeat()`` so Temporal can detect a worker
-          crash, and, once ``activity.is_cancelled()`` observes a Temporal
-          cancellation, cancels the job (``_bt_cancel_job``) so
-          ``_run_backtest_background``'s own cancellation checkpoints see it and
-          return ``cancelled`` at their next check rather than overwriting the
-          job to completed/failed.
+        - Otherwise two background loops run for the duration of the call: one
+          beats on ``activity.heartbeat()`` (``_HEARTBEAT_INTERVAL_S``) so
+          Temporal can detect a worker crash; a second, much faster one polls
+          ``activity.is_cancelled()`` (``_CANCEL_POLL_INTERVAL_S`` — decoupled
+          from the heartbeat cadence since it is a free in-memory check, not a
+          network call) and, on the first observed Temporal cancellation,
+          cancels the job (``_bt_cancel_job``) so ``_run_backtest_background``'s
+          own cancellation checkpoints see it and return ``cancelled`` at their
+          next check rather than overwriting the job to completed/failed.
         - ``_run_backtest_background`` has run and persisted the job result;
           outcome is taken from the worker's return value (entry short-circuit
           still reads the job store). Raises ``ApplicationError`` if the worker
@@ -135,16 +146,33 @@ def run_backtest_activity(
 
     def _beat() -> None:
         # Best-effort: outside a real activity context (e.g. a direct-call unit
-        # test) these raise and BackgroundHeartbeat swallows them.
+        # test) this raises and BackgroundHeartbeat swallows it.
         activity.heartbeat()
-        if activity.is_cancelled():
-            _bt_cancel_job(job_id)
 
-    with BackgroundHeartbeat(
-        _beat,
-        _HEARTBEAT_INTERVAL_S,
-        copy_context=True,
-        name=f"backtest-hb-{job_id}",
+    # Cancelled at most once: _bt_cancel_job need not be re-invoked on every
+    # subsequent poll tick once the job store already reflects the cancel.
+    _cancelled = False
+
+    def _watch_cancellation() -> None:
+        nonlocal _cancelled
+        if not _cancelled and activity.is_cancelled():
+            _bt_cancel_job(job_id)
+            _cancelled = True
+
+    with (
+        BackgroundHeartbeat(
+            _beat,
+            _HEARTBEAT_INTERVAL_S,
+            copy_context=True,
+            name=f"backtest-hb-{job_id}",
+        ),
+        BackgroundHeartbeat(
+            _watch_cancellation,
+            _CANCEL_POLL_INTERVAL_S,
+            copy_context=True,
+            beat_first=True,
+            name=f"backtest-cancel-{job_id}",
+        ),
     ):
         final_status = _run_backtest_background(
             job_id,
