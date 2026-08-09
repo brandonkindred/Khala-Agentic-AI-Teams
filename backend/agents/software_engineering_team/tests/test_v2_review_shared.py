@@ -31,6 +31,7 @@ from unittest.mock import MagicMock
 
 from llm_service.clients.dummy import DummyLLMClient
 from shared.dev_models.models import ReviewContext, SystemArchitecture
+from software_engineering_team.code_review_agent.repo_reader import DiskRepoReader
 from software_engineering_team.shared.v2_models import ReviewIssue
 from software_engineering_team.shared.v2_review import (
     ReviewConfig,
@@ -1462,6 +1463,51 @@ def test_run_review_no_git_repo_falls_back_to_files(tmp_path: Path) -> None:
     assert cr_input.files == files
     assert cr_input.pre_numbered is False
     assert cr_input.code == ""
+
+
+def test_run_review_no_git_repo_preserves_reader_language_and_context(
+    tmp_path: Path,
+) -> None:
+    """Combines what the narrower tests above pin individually: with no ``.git``
+    under ``repo_path`` (no base resolves, so the external agent's
+    ``CodeReviewInput`` still falls back to ``files=`` as-is), the *same* call
+    also carries a real, working ``DiskRepoReader`` rooted at ``repo_path`` --
+    not a monkeypatched stand-in -- plus the caller's ``language`` and
+    ``review_context`` (architecture + spec_content), all in one no-base
+    round trip through ``run_review``'s external-agent path."""
+    config = _build_config()
+    (tmp_path / "x.py").write_text("code")
+    files = {"x.py": "code"}
+    ctx = ReviewContext(architecture=SystemArchitecture(overview="layered"), spec_content="spec")
+    cr_agent = MagicMock()
+    cr_agent.run.return_value = MagicMock(issues=[])
+
+    run_review(
+        config=config,
+        llm=DummyLLMClient(),
+        task=_task(),
+        execution_result=_execution_result(files),
+        repo_path=tmp_path,
+        code_review_agent=cr_agent,
+        language="python",
+        review_context=ctx,
+        **_noop_runners(),
+    )
+
+    assert cr_agent.run.called
+    cr_input = cr_agent.run.call_args.args[0]
+    # Fallback shape: no base resolved, so `files=` is submitted as-is.
+    assert cr_input.files == files
+    assert cr_input.pre_numbered is False
+    assert cr_input.code == ""
+    # language / review_context preserved onto the same CodeReviewInput.
+    assert cr_input.language == "python"
+    assert cr_input.architecture is ctx.architecture
+    assert cr_input.spec_content == "spec"
+    # A real DiskRepoReader, rooted at repo_path, actually reads back the file.
+    reader = cr_agent.run.call_args.kwargs["repo_reader"]
+    assert isinstance(reader, DiskRepoReader)
+    assert reader.read_file("x.py") == "code"
 
 
 def test_code_review_empty_diff_falls_back_to_files(tmp_path: Path) -> None:
