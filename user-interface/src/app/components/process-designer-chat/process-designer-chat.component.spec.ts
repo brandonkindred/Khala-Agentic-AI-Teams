@@ -128,6 +128,16 @@ describe('ProcessDesignerChatComponent', () => {
     fixture.detectChanges();
   });
 
+  function createFlowchartFixture(proc: ProcessDefinition): ComponentFixture<ProcessDesignerChatComponent> {
+    api.createConversation.mockReturnValueOnce(
+      of({ conversation_id: 'c-flow', messages: [], current_process: proc, suggested_questions: [] }),
+    );
+    const flowFixture = TestBed.createComponent(ProcessDesignerChatComponent);
+    flowFixture.componentInstance.team = team();
+    flowFixture.detectChanges();
+    return flowFixture;
+  }
+
   it('should create and load the roster on init', () => {
     expect(component).toBeTruthy();
     expect(api.listTeamAgents).toHaveBeenCalledWith('t-1');
@@ -719,16 +729,6 @@ describe('ProcessDesignerChatComponent', () => {
   // reachable by keyboard, with Enter/Space mirroring a click.
 
   describe('flowchart click delegation', () => {
-    function createFlowchartFixture(proc: ProcessDefinition): ComponentFixture<ProcessDesignerChatComponent> {
-      api.createConversation.mockReturnValueOnce(
-        of({ conversation_id: 'c-flow', messages: [], current_process: proc, suggested_questions: [] }),
-      );
-      const flowFixture = TestBed.createComponent(ProcessDesignerChatComponent);
-      flowFixture.componentInstance.team = team();
-      flowFixture.detectChanges();
-      return flowFixture;
-    }
-
     it('clicking a rendered node invokes onStepClick', () => {
       const proc = process({ steps: [step({ step_id: 's-1' })] });
       const flowFixture = createFlowchartFixture(proc);
@@ -830,6 +830,113 @@ describe('ProcessDesignerChatComponent', () => {
       node.dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', bubbles: true }));
 
       expect(onStepClickSpy).not.toHaveBeenCalled();
+    });
+  });
+
+  // buildFlowchart string-templates raw SVG and trusts the result via
+  // sanitizer.bypassSecurityTrustHtml (rendered through [innerHTML] in the
+  // template). trigger.description, step.name, agent_name, and
+  // output.description can all originate from LLM-generated content seeded
+  // by untrusted chat input, so every one of them must be passed through
+  // escSvg before interpolation.
+  describe('flowchart SVG escaping (XSS hardening)', () => {
+    it('escapes a <script> payload in the trigger description', () => {
+      const payload = '<script>window.__pwned = true;</script>';
+      const proc = process({
+        trigger: { trigger_type: 'manual', description: payload },
+        steps: [step({ step_id: 's-1' })],
+      });
+      const flowFixture = createFlowchartFixture(proc);
+      const container = flowFixture.nativeElement.querySelector('.flowchart-container') as HTMLElement;
+
+      expect(container).toBeTruthy();
+      expect(container.innerHTML).not.toContain('<script');
+      expect(container.innerHTML).toContain('&lt;script');
+    });
+
+    it('escapes a quote-breakout payload in a step name', () => {
+      const payload = '"><img src=x onerror=alert(1)>';
+      const proc = process({ steps: [step({ step_id: 's-1', name: payload })] });
+      const flowFixture = createFlowchartFixture(proc);
+      const container = flowFixture.nativeElement.querySelector('.flowchart-container') as HTMLElement;
+
+      // step.name also feeds the node's aria-label attribute. Browsers only
+      // re-escape &/" when serializing a quoted attribute value back to
+      // innerHTML — literal </> there are valid and never parsed as markup,
+      // so a raw '<img' substring check would false-positive on that safe
+      // attribute content. What actually matters is that no live <img>
+      // element was created.
+      expect(container.querySelector('img')).toBeNull();
+      // Browsers only re-escape &, <, > when serializing text-node content
+      // back to innerHTML — quotes stay literal outside of attribute values.
+      expect(container.innerHTML).toContain('"&gt;&lt;img');
+    });
+
+    it('escapes an XSS payload in an agent name', () => {
+      const payload = '<img src=x onerror=alert(1)>';
+      const proc = process({
+        steps: [step({ step_id: 's-1', agents: [agent({ agent_name: payload })] })],
+      });
+      const flowFixture = createFlowchartFixture(proc);
+      const container = flowFixture.nativeElement.querySelector('.flowchart-container') as HTMLElement;
+
+      expect(container.innerHTML).not.toContain('<img');
+      expect(container.innerHTML).toContain('&lt;img src=x onerror=alert(1)&gt;');
+    });
+
+    it('escapes an XSS payload in the output description', () => {
+      const payload = '<svg onload=alert(1)>';
+      const proc = process({
+        steps: [step({ step_id: 's-1' })],
+        output: { description: payload, destination: '' },
+      });
+      const flowFixture = createFlowchartFixture(proc);
+      const container = flowFixture.nativeElement.querySelector('.flowchart-container') as HTMLElement;
+
+      expect(container.innerHTML).not.toContain('<svg onload');
+      expect(container.innerHTML).toContain('&lt;svg onload=alert(1)&gt;');
+    });
+
+    it('escapes a short marker in every known dynamic field in a single render (regression guard)', () => {
+      // Broader guard: renders all four currently-escaped dynamic fields at
+      // once with distinct markers, so a regression in ANY of them (e.g. an
+      // escSvg() wrapper accidentally dropped in a future refactor) fails
+      // this one test. Markers are kept short to stay under each field's
+      // truncate() limit (trigger: 20, step name: 22, agent label: 28,
+      // output: 22) so the full closing '>' survives truncation.
+      const proc = process({
+        trigger: { trigger_type: 'manual', description: '<xss-trig>' },
+        steps: [
+          step({
+            step_id: 's-1',
+            name: '<xss-step>',
+            agents: [agent({ agent_name: '<xss-agent>' })],
+          }),
+        ],
+        output: { description: '<xss-out>', destination: '' },
+      });
+      const flowFixture = createFlowchartFixture(proc);
+      const container = flowFixture.nativeElement.querySelector('.flowchart-container') as HTMLElement;
+      const raw = container.innerHTML;
+
+      // step.name also feeds the node's aria-label attribute, where a raw
+      // '<xss-step>' legitimately survives as literal (but inert) attribute
+      // text — see the quote-breakout test above. The real invariant is that
+      // an unescaped marker in TEXT CONTENT is never parsed as a live
+      // element, so assert that directly instead of a blanket substring check.
+      expect(container.querySelector('xss-trig, xss-step, xss-agent, xss-out')).toBeNull();
+      expect(raw).toContain('&lt;xss-trig&gt;');
+      expect(raw).toContain('&lt;xss-step&gt;');
+      expect(raw).toContain('&lt;xss-agent&gt;');
+      expect(raw).toContain('&lt;xss-out&gt;');
+    });
+  });
+
+  describe('escSvg', () => {
+    it('escapes &, <, >, ", and \' (defense-in-depth for future attribute changes)', () => {
+      const raw = `&<>"'`;
+      const escaped = (component as unknown as { escSvg(t: string): string }).escSvg(raw);
+      expect(escaped).toBe('&amp;&lt;&gt;&quot;&#39;');
     });
   });
 

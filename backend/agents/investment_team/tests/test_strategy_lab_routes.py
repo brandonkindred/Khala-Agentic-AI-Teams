@@ -4070,3 +4070,62 @@ def test_stream_strategy_lab_run_snapshot_reconciles_progress(
     # contiguous_cycles is intentionally absent from the response schema
     # (internal resume-offset math only); assert it landed in _active_runs.
     assert api_main._active_runs["stream-prog"]["contiguous_cycles"] == 5
+
+
+def test_stream_strategy_lab_run_emits_snapshot_for_job_service_only_run(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """A non-terminal run known only to the job service (e.g. recovered after
+    a server restart, never yet touched by another endpoint, so it has no
+    ``_active_runs`` entry) must still receive its documented connect-time
+    ``snapshot`` event -- not silence until the next incremental bus event.
+
+    Regression test: before the fix, ``_snapshot_event`` only read
+    ``_active_runs.get(run_id, {})`` and returned ``None`` on a miss, since
+    the job-service-loaded ``state`` was never written back into
+    ``_active_runs``.
+    """
+    import json
+    from collections import deque
+
+    from investment_team.api import job_event_bus
+    from investment_team.api import main as api_main
+
+    run_id = "job-service-only"
+    assert run_id not in api_main._active_runs
+
+    # ``_load_run_from_job_service`` (imported from ``run_state``) is what the
+    # SSE handler's job-service fallback branch calls directly -- patch it
+    # the same way the 404 test does, rather than the job client, since its
+    # internal client lookup is ``run_state``'s own, not ``api_main``'s.
+    job_service_state = {
+        "run_id": run_id,
+        "status": "running",
+        "started_at": "2024-01-01T00:00:00Z",
+        "total_cycles": 5,
+        "completed_cycles": 2,
+        "skipped_cycles": 0,
+        "errored_cycles": 0,
+        "current_batch": 1,
+    }
+    monkeypatch.setattr(api_main, "_load_run_from_job_service", lambda rid: job_service_state)
+
+    pre_events = deque([{"type": "complete", "summary": "ok"}])
+    monkeypatch.setattr(job_event_bus, "subscribe", lambda rid: _make_subscriber(pre_events))
+    monkeypatch.setattr(job_event_bus, "unsubscribe", lambda rid, sub: None)
+
+    with api_client.stream("GET", f"/strategy-lab/runs/{run_id}/stream", timeout=2.0) as resp:
+        assert resp.status_code == 200
+        body = _wait_for_terminal_sse(resp.iter_text())
+
+    segments = [s for s in body.split("\n\n") if s.strip()]
+    snapshot_segs = [s for s in segments if '"type": "snapshot"' in s]
+    assert snapshot_segs, "expected a connect-time snapshot event for a job-service-only run"
+    data_lines = [
+        line[len("data: ") :] for line in snapshot_segs[0].splitlines() if line.startswith("data: ")
+    ]
+    snapshot = json.loads("\n".join(data_lines))
+    assert snapshot["run_id"] == run_id
+    assert snapshot["status"] == "running"
+    assert snapshot["completed_cycles"] == 2
+    assert snapshot["total_cycles"] == 5

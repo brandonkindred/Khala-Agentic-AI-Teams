@@ -448,7 +448,7 @@ def test_run_review_threads_repo_path_into_tool_agents(tmp_path: Path) -> None:
 def test_run_review_raw_issue_count_from_llm_fallback(tmp_path: Path) -> None:
     """run_review forwards the LLM fallback's pre-grounding raw_issue_count onto
     ReviewResult via _code_review_step's _ReviewStepResult return value."""
-    from software_engineering_team.shared.llm_review import LlmReviewOutput
+    from software_engineering_team.shared.v2_review import LlmReviewOutput
 
     config = _build_config()
     result = run_review(
@@ -731,7 +731,7 @@ def test_microtask_code_review_agent_issue_uses_suggestion_field(tmp_path: Path)
 def test_microtask_raw_issue_count_from_llm_fallback(tmp_path: Path) -> None:
     """run_microtask_review forwards the LLM fallback's raw_issue_count too
     via _code_review_step's _ReviewStepResult return value."""
-    from software_engineering_team.shared.llm_review import LlmReviewOutput
+    from software_engineering_team.shared.v2_review import LlmReviewOutput
 
     config = _build_config()
     result = run_microtask_review(

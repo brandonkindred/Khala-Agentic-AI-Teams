@@ -8,19 +8,21 @@ tool-agent phase input carries spec context, whether the run-review ``passed``
 flag includes lint, and the summary / log strings). This module collapses that
 fork into one parameterised implementation driven by :class:`ReviewConfig`.
 
-The chunking/prompt/parse orchestration (``_run_llm_review``) and the external
-QA / security / build-verify runners stay **per-team** (in each team's
-``phases/review.py``) so each team can inject its own prompt/parser and
-``ReviewIssue`` factory. For frontend, ``_run_llm_review`` is also the test
-patch surface for ``Agent`` / ``resolve_text_mode_strands_model``, since it
-builds the Strands invocation itself; backend's ``_run_llm_review`` is a
-documented exception (see ``backend_code_v2_team.phases.review``'s own
-module docstring) that calls ``code_review_agent.coordinator.run_coordinator``
-directly instead, so ``Agent`` / ``resolve_text_mode_strands_model`` are not
-part of its patch surface. The shared bodies here call back into these
-runners via injected callables either way, so each team's patch surface is
-preserved and existing tests stay green without rewriting their patch
-targets.
+The external QA / security / build-verify runners stay **per-team** (in each
+team's ``phases/review.py``) so each team can inject its own prompt/parser and
+``ReviewIssue`` factory. The code-review LLM fallback (``_run_llm_review``) is
+a thin per-team wrapper over this module's :func:`run_coordinator_llm_review`,
+which calls ``code_review_agent.coordinator.run_coordinator`` directly for
+both teams — neither is a Strands ``Agent`` / ``resolve_text_mode_strands_model``
+patch surface for code review (only ``run_documentation_self_review`` in each
+team's module still is, for the parts of that module that remain
+template-based). Each team's ``phases/review.py`` still imports
+``run_coordinator`` itself and passes it into
+:func:`run_coordinator_llm_review` as ``run_coordinator_fn``, so that module
+stays the test patch surface for the coordinator call, and existing tests
+stay green without rewriting their patch targets. The shared bodies here call
+back into the per-team QA/security/build runners via injected callables the
+same way.
 
 The code-review / QA / security checks are independent — none reads another's
 output, they only contribute to the shared ``issues`` list — so the shared body
@@ -60,7 +62,7 @@ import json
 import logging
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple, Union
+from typing import Any, Callable, Dict, Generic, List, Mapping, Optional, Tuple, TypeVar, Union
 
 from llm_service import LLMClient
 from shared.dev_models.models import ReviewContext, Task
@@ -73,7 +75,6 @@ from software_engineering_team.code_review_agent.previous_content import (
     resolve_previous_content,
 )
 from software_engineering_team.shared.agent_review import AgentReviewCache
-from software_engineering_team.shared.llm_review import LlmReviewOutput
 from software_engineering_team.shared.review_progress import (
     build_disk_repo_reader,
     call_code_review_agent,
@@ -86,6 +87,32 @@ logger = logging.getLogger(__name__)
 # The microtask build-failure recommendation is identical across teams, so it is
 # a shared constant rather than a config knob.
 _MICROTASK_BUILD_FAIL_RECOMMENDATION = "Fix build errors before proceeding."
+
+# The two V2 teams each own a distinct ``ReviewIssue`` type, so the helper is
+# generic over whatever the caller's ``issue_factory``/coordinator translation
+# produces.
+IssueT = TypeVar("IssueT")
+
+
+@dataclass(frozen=True)
+class LlmReviewOutput(Generic[IssueT]):
+    """Result of one code-review fallback call: kept issues plus the raw count.
+
+    Preconditions: constructed by :func:`run_coordinator_llm_review` (either
+    V2 team's coordinator-backed ``_run_llm_review``).
+
+    Postconditions/Invariants:
+        - ``raw_issue_count`` is always ``None`` for the coordinator-backed
+          fallback — that path has no separate grounding pass to report a
+          pre-filter count for, and reporting a fabricated int (e.g.
+          ``len(issues)``) would make the circuit breaker see a false "0%
+          rejected" instead of "no data" for every call (see
+          ``shared.phases.review_cycle.grounding_rejection_ratio``, which
+          already treats ``None`` as "no ratio available").
+    """
+
+    issues: List[IssueT]
+    raw_issue_count: Optional[int]
 
 
 @dataclass(frozen=True)
@@ -247,6 +274,136 @@ def _unwrap_llm_review_result(result: Any) -> _ReviewStepResult:
             raw_issue_count=result.raw_issue_count,
         )
     return _ReviewStepResult(issues=list(result))
+
+
+def run_coordinator_llm_review(
+    *,
+    llm: LLMClient,
+    task: Task,
+    files: Dict[str, str],
+    language: str,
+    run_coordinator_fn: Callable[..., Any],
+    review_context: Optional[ReviewContext] = None,
+    extra_task_requirements: str = "",
+) -> LlmReviewOutput[ReviewIssue]:
+    """Shared lightweight code-review fallback for both V2 teams' ``_run_llm_review``.
+
+    Calls the shared code-review engine's coordinator directly in its
+    lightweight mode (``skip_tail_passes=True``: no false-positive filter, no
+    merged architecture/side-effect pass) instead of a hand-rolled
+    chunk/prompt/parse loop. Both ``backend_code_v2_team`` and
+    ``frontend_code_v2_team``'s ``_run_llm_review`` are thin wrappers over this
+    function, mirroring how ``_run_qa_agent``/``_run_security_agent`` delegate
+    to the shared ``run_qa_agent``/``run_security_agent`` in
+    ``shared.agent_review`` — the translation logic is identical for both
+    teams (``ReviewIssue`` is the same class either team imports from
+    ``shared.v2_models``), so only the caller-supplied
+    ``run_coordinator_fn``/``extra_task_requirements`` vary per team.
+
+    Preconditions:
+        - See ``code_review_agent.coordinator.run_coordinator`` for ``llm``.
+        - ``files`` maps file paths to their full source text.
+        - ``run_coordinator_fn`` is the caller's own module-global
+          ``run_coordinator`` reference (imported directly into each team's
+          ``phases/review.py``, not re-exported from here), so that module
+          stays the test patch surface for the coordinator call, exactly as
+          it already is for ``run_documentation_self_review``'s
+          ``Agent``/``resolve_text_mode_strands_model`` patch surface.
+        - ``language`` is forwarded to ``CodeReviewInput`` so the
+          coordinator's chunk reviewer prompts against the caller's actual
+          detected language instead of ``CodeReviewInput``'s ``typescript``
+          default.
+        - ``review_context`` bundles the caller's system architecture and
+          project specification, when available; ``None`` means "nothing to
+          add" so a caller without this context yet keeps working unchanged.
+        - ``extra_task_requirements``, when non-empty, is appended to
+          ``task.requirements`` (with a blank-line separator, or used
+          verbatim when ``task.requirements`` is empty) before it reaches
+          ``CodeReviewInput.task_requirements`` — the channel
+          ``frontend_code_v2_team`` uses to restore the accessibility
+          verification guidance its retired ``REVIEW_PROMPT`` used to state
+          explicitly (semantic markup, ARIA, keyboard nav, contrast), since
+          the shared engine's ``CODE_REVIEW`` profile has no per-team
+          criteria slot to carry it instead.
+        - Does NOT special-case ``files == {}``: ``CodeReviewInput`` itself
+          deliberately raises ``ValueError`` on an empty mapping (a caller
+          bug per its own docstring, "so a caller bug never silently
+          becomes an approved empty review") rather than exposing a
+          fail-open "nothing to review" shortcut here — the external
+          ``code_review_agent`` branch of ``_code_review_step`` already
+          relies on that same fail-closed validation for this exact edge
+          case, and this function stays consistent with it rather than
+          reintroducing the asymmetry the retired ``run_llm_review`` had
+          (a silent clean pass on empty input, unlike the external-agent
+          path).
+
+    Postconditions:
+        - Returns an ``LlmReviewOutput`` whose ``issues`` are
+          ``result.issues`` translated to ``ReviewIssue``
+          (``suggestion`` -> ``recommendation``; ``category``/``line``/
+          ``start_line``/``title``/``pre_existing`` have no ``ReviewIssue``
+          field and are dropped) and whose ``raw_issue_count`` is always
+          ``None`` — the lightweight coordinator has no separate raw-vs-
+          grounded distinction to report, and reporting a fabricated int
+          (e.g. ``len(issues)``) would make
+          ``shared.phases.review_cycle``'s grounding circuit breaker see a
+          false "0% rejected" instead of "no grounding data" for every call
+          (see ``grounding_rejection_ratio``, which already treats ``None``
+          as "no ratio available"). This also means the grounding circuit
+          breaker can no longer trip for this fallback path specifically
+          (it still can for the external ``code_review_agent`` path) — an
+          intentional, accepted trade-off first made for
+          ``backend_code_v2_team``'s migration and now shared by both teams.
+        - Propagates ``CodeReviewUnavailableError`` (no chunk could be
+          reviewed at all) and ``ValueError`` (empty ``files``, see above)
+          uncaught: the caller (``_code_review_step``) already converts any
+          uncaught exception from this function into a synthetic
+          high-severity "could not complete" issue, which is the correct,
+          fail-closed signal for a total review failure.
+        - Does not call ``run_coordinator_fn`` with the ``profile``/
+          ``skip_false_positive_filter`` fields set; ``skip_tail_passes=True``
+          does not gate the coordinator's separate, independently-configured
+          post-dedupe spec-compliance synthesis pass (see
+          ``CodeReviewInput.skip_tail_passes``'s own docstring) — if a
+          deployment has ``CODE_REVIEW_SPEC_COMPLIANCE_PASS`` enabled, this
+          "lightweight" fallback can still make that one additional LLM
+          call beyond the map phase.
+    """
+    ctx = review_context or ReviewContext()
+    task_requirements = task.requirements or ""
+    if extra_task_requirements:
+        task_requirements = (
+            f"{task_requirements}\n\n{extra_task_requirements}"
+            if task_requirements
+            else extra_task_requirements
+        )
+
+    from software_engineering_team.code_review_agent.models import (
+        CodeReviewInput as _CodeReviewInput,
+    )
+
+    cr_input = _CodeReviewInput(
+        files=files,
+        task_description=task.description or "",
+        task_requirements=task_requirements,
+        acceptance_criteria=task.acceptance_criteria or [],
+        architecture=ctx.architecture,
+        spec_content=ctx.spec_content or "",
+        language=language,
+        skip_tail_passes=True,
+    )
+    result = run_coordinator_fn(llm, cr_input)
+    issues = [
+        ReviewIssue(
+            source="code_review",
+            severity=issue.severity,
+            description=issue.description,
+            file_path=issue.file_path,
+            recommendation=issue.suggestion,
+        )
+        for issue in result.issues
+    ]
+    return LlmReviewOutput(issues=issues, raw_issue_count=None)
 
 
 def _maybe_build_change_surface_from_pairs(
@@ -438,22 +595,21 @@ def _code_review_step(
           description surfaced to the external agent (the caller scopes this to the task or a
           single microtask; the LLM fallback always reasons over the full ``task``, unaffected).
         - ``llm_review_fn(llm=, task=, files=, language=, review_context=,
-          enable_llm_review_grounding=)`` is the per-team chunking/prompt/parse
-          reviewer. For frontend, this is also the test patch surface for
-          ``Agent`` / ``resolve_text_mode_strands_model``; backend's version
-          calls ``code_review_agent.coordinator.run_coordinator`` directly
-          instead (see this module's own docstring), so it has no ``Agent``
-          patch surface. Either way it must accept ``review_context`` so the
+          enable_llm_review_grounding=)`` is the per-team reviewer. Both V2
+          teams' versions call ``code_review_agent.coordinator.run_coordinator``
+          directly (see each team's own ``_run_llm_review`` docstring), so
+          neither is an ``Agent`` / ``resolve_text_mode_strands_model`` patch
+          surface for code review. It must accept ``review_context`` so the
           fallback reviewer sees the same context the external agent path
-          does, and ``language`` so a fallback that forwards it to
-          ``CodeReviewInput`` (e.g. backend's coordinator-backed fallback) reviews
-          the code under its actual language instead of ``CodeReviewInput``'s
-          ``typescript`` default. It returns an :class:`LlmReviewOutput` in
-          production; a bare issue list is also accepted (see
-          ``_unwrap_llm_review_result``) so a stub runner without a raw count is
-          unaffected. ``files=`` is always what this fallback receives, regardless of
-          ``old_contents`` -- only the external-agent's ``CodeReviewInput`` adopts the
-          surface (see ``old_contents`` below).
+          does, and ``language`` so it can forward it to ``CodeReviewInput``
+          and review the code under its actual language instead of
+          ``CodeReviewInput``'s ``typescript`` default. It returns an
+          :class:`LlmReviewOutput` in production; a bare issue list is also
+          accepted (see ``_unwrap_llm_review_result``) so a stub runner
+          without a raw count is unaffected. ``files=`` is always what this
+          fallback receives, regardless of ``old_contents`` -- only the
+          external-agent's ``CodeReviewInput`` adopts the surface (see
+          ``old_contents`` below).
         - ``review_context`` bundles the caller's system architecture and project specification,
           when available; ``None`` means "nothing to add" so a caller that does not have this
           context yet keeps working unchanged.
