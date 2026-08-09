@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import sys
+
 import pytest
 
 from agent_team_studio.assistant_kernel.fenced_json import (
@@ -93,10 +95,19 @@ def test_parse_none_on_oversized_integer() -> None:
 
 def test_parse_none_on_excessive_nesting() -> None:
     # Deeply nested JSON can blow the interpreter's recursion limit inside
-    # json.loads, raising RecursionError rather than JSONDecodeError.
-    body = "[" * 3000 + "]" * 3000
+    # json.loads, raising RecursionError rather than JSONDecodeError. The
+    # exact nesting depth needed varies by Python build/version, so the
+    # recursion limit is lowered for the duration of this test (well above
+    # pytest's own call depth, which is a few dozen frames) to make the
+    # failure deterministic rather than tied to a magic depth number.
+    body = "[" * 500 + "]" * 500
     text = f"```agent\n{body}\n```"
-    assert parse_fenced_json(text, "agent", expected_type=list) is None
+    old_limit = sys.getrecursionlimit()
+    sys.setrecursionlimit(100)
+    try:
+        assert parse_fenced_json(text, "agent", expected_type=list) is None
+    finally:
+        sys.setrecursionlimit(old_limit)
 
 
 # ---------------------------------------------------------------------------

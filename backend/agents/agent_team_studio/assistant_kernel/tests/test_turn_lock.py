@@ -192,34 +192,54 @@ def test_turn_serializes_concurrent_turns_no_lost_update() -> None:
 
 
 def test_different_keys_do_not_contend() -> None:
+    """Proves conv-b's turn enters promptly *while conv-a is still held* —
+    not merely that it eventually enters. A regression to one shared lock
+    for every key would still let conv-b in eventually (once conv-a's
+    2s-timeout releases it), so asserting only ``entered_b.is_set()`` after
+    the fact wouldn't catch that; the tight 0.5s deadline below, checked
+    before conv-a is released, is what actually distinguishes "independent
+    per-key locks" from "one lock, got lucky/unlucky on timing"."""
     record_a = {"history": [], "draft": "a0"}
     record_b = {"history": [], "draft": "b0"}
     ops_a = _record_ops(record_a)
     ops_b = _record_ops(record_b)
     locks = InMemoryTurnLocks()
 
-    entered_b = threading.Event()
+    holding_a = threading.Event()
     release_a = threading.Event()
 
     def hold_a() -> None:
         with locks.turn(
             "conv-a", read=ops_a[0], on_message=ops_a[1], on_draft=ops_a[2], restore=ops_a[3]
         ):
+            holding_a.set()
             release_a.wait(timeout=2)
 
-    t = threading.Thread(target=hold_a)
-    t.start()
+    a_thread = threading.Thread(target=hold_a)
+    a_thread.start()
     try:
-        with locks.turn(
-            "conv-b", read=ops_b[0], on_message=ops_b[1], on_draft=ops_b[2], restore=ops_b[3]
-        ) as turn:
-            entered_b.set()
-            turn.set_draft("b1")
+        assert holding_a.wait(timeout=2), "conv-a's turn was never entered"
+
+        entered_b = threading.Event()
+
+        def try_b() -> None:
+            with locks.turn(
+                "conv-b", read=ops_b[0], on_message=ops_b[1], on_draft=ops_b[2], restore=ops_b[3]
+            ) as turn:
+                entered_b.set()
+                turn.set_draft("b1")
+
+        b_thread = threading.Thread(target=try_b)
+        b_thread.start()
+        try:
+            entered_promptly = entered_b.wait(timeout=0.5)
+        finally:
+            b_thread.join(timeout=2)
     finally:
         release_a.set()
-        t.join(timeout=2)
+        a_thread.join(timeout=2)
 
-    assert entered_b.is_set()
+    assert entered_promptly, "conv-b's turn was blocked by conv-a's lock"
     assert record_b["draft"] == "b1"
 
 
