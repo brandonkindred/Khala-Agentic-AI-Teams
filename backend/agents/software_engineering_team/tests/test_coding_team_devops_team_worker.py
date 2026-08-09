@@ -18,7 +18,7 @@ from software_engineering_team.devops_team.models import (
 )
 from software_engineering_team.devops_team_worker import (
     DevOpsTeamWorker,
-    _reset_stale_feature_branch,
+    _reset_prepared_branch_to_development,
     _to_devops_task_spec,
 )
 from software_engineering_team.models import StackSpec, Task
@@ -53,9 +53,15 @@ class _FakeDevOpsLead:
         )
 
 
-def _patch_branch_handoff(monkeypatch, *, branch: str = "feature/devops-task") -> None:
+def _patch_branch_handoff(
+    monkeypatch, *, branch: str = "feature/devops-task", diff: tuple = (["stub.tf"], [])
+) -> None:
     """Stub the git branch-prep calls ``_prepare_feature_branch`` (imported from
-    ``v2_team_worker``) reaches through that module's own namespace."""
+    ``v2_team_worker``) reaches through that module's own namespace, the post-prepare
+    reset (real git operations never run against a bare ``tmp_path``, so it must be a
+    harmless no-op here), and the post-completion diff check (defaults to reporting a
+    non-empty diff so existing happy-path tests don't have to know about it; override
+    ``diff=([], [])`` for tests specifically exercising the no-diff rejection path)."""
 
     def _ensure_development_ready(repo_path):
         return True, "development ready"
@@ -69,6 +75,8 @@ def _patch_branch_handoff(monkeypatch, *, branch: str = "feature/devops-task") -
     monkeypatch.setattr(worker_mod, "_ensure_development_ready", _ensure_development_ready)
     monkeypatch.setattr(worker_mod, "create_feature_branch", _create_feature_branch)
     monkeypatch.setattr(worker_mod, "checkout_branch", _checkout_branch)
+    monkeypatch.setattr(devops_worker_mod, "reset_hard_to", lambda p, ref: (True, "ok"))
+    monkeypatch.setattr(devops_worker_mod, "list_changed_and_deleted", lambda p, base: diff)
 
 
 def _base_task(**overrides: Any) -> Task:
@@ -473,61 +481,33 @@ def test_devops_worker_rejects_malformed_task_before_run_task(tmp_path) -> None:
     assert lead.calls == []
 
 
-# ------------------------------------------------------ stale-branch reset on retry
+# ------------------------------------------------------ branch reset on retry
 
 
-def test_reset_stale_feature_branch_noop_when_feature_branch_recorded(
-    tmp_path, monkeypatch
-) -> None:
-    """A Tech-Lead-review rejection (not a DevOps-internal gate rejection) already
-    recorded task.feature_branch and wants that same branch revised in place --
-    _prepare_feature_branch's own existing_branch path handles that, so no reset."""
-    (tmp_path / ".git").mkdir()
+def test_reset_prepared_branch_to_development_resets_current_branch(tmp_path, monkeypatch) -> None:
     calls: List[Any] = []
     monkeypatch.setattr(
         devops_worker_mod, "reset_hard_to", lambda p, ref: calls.append((p, ref)) or (True, "ok")
     )
 
-    _reset_stale_feature_branch(tmp_path, _base_task(feature_branch="feature/existing"))
-
-    assert calls == []
-
-
-def test_reset_stale_feature_branch_noop_when_not_a_git_repo(tmp_path, monkeypatch) -> None:
-    calls: List[Any] = []
-    monkeypatch.setattr(
-        devops_worker_mod, "reset_hard_to", lambda p, ref: calls.append((p, ref)) or (True, "ok")
-    )
-
-    _reset_stale_feature_branch(tmp_path, _base_task())  # no .git dir
-
-    assert calls == []
-
-
-def test_reset_stale_feature_branch_resets_when_no_recorded_branch(tmp_path, monkeypatch) -> None:
-    (tmp_path / ".git").mkdir()
-    calls: List[Any] = []
-    monkeypatch.setattr(
-        devops_worker_mod, "reset_hard_to", lambda p, ref: calls.append((p, ref)) or (True, "ok")
-    )
-
-    _reset_stale_feature_branch(tmp_path, _base_task())
+    _reset_prepared_branch_to_development(tmp_path, "provision")
 
     assert calls == [(tmp_path, devops_worker_mod.DEVELOPMENT_BRANCH)]
 
 
-def test_reset_stale_feature_branch_swallows_reset_failure(tmp_path, monkeypatch) -> None:
-    (tmp_path / ".git").mkdir()
+def test_reset_prepared_branch_to_development_swallows_reset_failure(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(devops_worker_mod, "reset_hard_to", lambda p, ref: (False, "boom"))
 
-    _reset_stale_feature_branch(tmp_path, _base_task())  # must not raise
+    _reset_prepared_branch_to_development(tmp_path, "provision")  # must not raise
 
 
-def test_devops_worker_resets_stale_branch_before_preparing_it(tmp_path, monkeypatch) -> None:
-    """Proves the reset runs BEFORE branch preparation -- the whole point is to clear
-    a rejected attempt's stale commits before create_feature_branch would otherwise
-    reuse the still-checked-out branch as-is."""
-    (tmp_path / ".git").mkdir()
+def test_devops_worker_resets_branch_after_preparing_it_for_new_branch(
+    tmp_path, monkeypatch
+) -> None:
+    """Proves the reset runs AFTER branch preparation, not before: resetting
+    whatever was checked out BEFORE _prepare_feature_branch ran would reset the
+    wrong branch (e.g. a different task's leftover state in this shared per-agent
+    worktree) instead of the branch this task is actually about to use."""
     order: List[str] = []
     monkeypatch.setattr(
         devops_worker_mod, "reset_hard_to", lambda p, ref: order.append("reset") or (True, "ok")
@@ -543,6 +523,7 @@ def test_devops_worker_resets_stale_branch_before_preparing_it(tmp_path, monkeyp
 
     monkeypatch.setattr(worker_mod, "_ensure_development_ready", _ensure_development_ready)
     monkeypatch.setattr(worker_mod, "create_feature_branch", _create_feature_branch)
+    monkeypatch.setattr(devops_worker_mod, "list_changed_and_deleted", lambda p, base: (["x"], []))
     lead = _FakeDevOpsLead()
     worker = DevOpsTeamWorker(
         agent_id="devops_worker",
@@ -552,20 +533,27 @@ def test_devops_worker_resets_stale_branch_before_preparing_it(tmp_path, monkeyp
 
     worker.run_implement(_base_task(), tmp_path)
 
-    assert order == ["reset", "ensure_development", "create"]
+    assert order == ["ensure_development", "create", "reset"]
 
 
-def test_devops_worker_does_not_reset_when_feature_branch_already_recorded(
+def test_devops_worker_resets_branch_after_preparing_it_for_existing_branch(
     tmp_path, monkeypatch
 ) -> None:
-    (tmp_path / ".git").mkdir()
-    calls: List[Any] = []
+    """A Tech-Lead-review revision round DOES record task.feature_branch and reuses
+    that branch's name, but DevOps regenerates its full artifact set from scratch
+    every round -- there is nothing incremental to preserve, so the branch content
+    is reset here too (finding: a rejected artifact the revision correctly omits
+    must not linger on the branch just because the branch name is being reused)."""
+    order: List[str] = []
     monkeypatch.setattr(
-        devops_worker_mod, "reset_hard_to", lambda p, ref: calls.append((p, ref)) or (True, "ok")
+        devops_worker_mod, "reset_hard_to", lambda p, ref: order.append("reset") or (True, "ok")
     )
     monkeypatch.setattr(
-        worker_mod, "checkout_branch", lambda repo_path, branch: (True, f"Checked out {branch}")
+        worker_mod,
+        "checkout_branch",
+        lambda repo_path, branch: order.append("checkout") or (True, f"Checked out {branch}"),
     )
+    monkeypatch.setattr(devops_worker_mod, "list_changed_and_deleted", lambda p, base: (["x"], []))
     lead = _FakeDevOpsLead()
     worker = DevOpsTeamWorker(
         agent_id="devops_worker",
@@ -575,4 +563,70 @@ def test_devops_worker_does_not_reset_when_feature_branch_already_recorded(
 
     worker.run_implement(_base_task(feature_branch="feature/existing"), tmp_path)
 
-    assert calls == []
+    assert order == ["checkout", "reset"]
+
+
+# --------------------------------------------------- actual-diff verification (finding D)
+
+
+def test_devops_worker_rejects_completed_result_with_no_actual_diff(tmp_path, monkeypatch) -> None:
+    """pkg.files_changed is only the generated artifact map's keys, not proof anything
+    differs from what's already on the branch: write_files_and_commit/commit_working_tree
+    both treat regenerated-but-identical content as a successful "nothing to commit". A
+    nonempty artifact map alone must not be accepted as review-ready."""
+    _patch_branch_handoff(monkeypatch, branch="feature/provision", diff=([], []))
+    worker = DevOpsTeamWorker(
+        agent_id="devops_worker",
+        stack_spec=StackSpec(name="devops", tools_services=[]),
+        team_lead=_FakeDevOpsLead(),
+    )
+
+    out = worker.run_implement(_base_task(), tmp_path)
+
+    assert out["status"] == "failed"
+    assert "no changes" in out["error"].lower()
+    assert out["feature_branch"]  # pkg.git_operations.branch_created wins over prepared_branch
+
+
+def test_devops_worker_fails_closed_when_diff_check_raises(tmp_path, monkeypatch) -> None:
+    """list_changed_and_deleted itself fails closed (raises BaselineDiffUnavailable)
+    when the merge-base/diff can't be computed -- the worker must not treat that as
+    "no news is good news" and wave the result through as review-ready."""
+    _patch_branch_handoff(monkeypatch, branch="feature/provision")
+
+    def _raise(path, base):
+        raise devops_worker_mod.BaselineDiffUnavailable("cannot compute merge base")
+
+    monkeypatch.setattr(devops_worker_mod, "list_changed_and_deleted", _raise)
+    worker = DevOpsTeamWorker(
+        agent_id="devops_worker",
+        stack_spec=StackSpec(name="devops", tools_services=[]),
+        team_lead=_FakeDevOpsLead(),
+    )
+
+    out = worker.run_implement(_base_task(), tmp_path)
+
+    assert out["status"] == "failed"
+
+
+# ------------------------------------------- environment from revision feedback (finding G)
+
+
+def test_devops_worker_derives_environment_from_revision_feedback() -> None:
+    """A Tech Lead rejection can redirect a generic task toward production (e.g. "this
+    needs to be the production deploy workflow"). That feedback text is injected into
+    scope.included/acceptance_criteria for the Phase 2 specialists, so environment
+    derivation must see it too, or the specialists could generate production-targeting
+    artifacts while the spec itself stayed pinned to the original (non-production) read."""
+    task = _base_task(
+        title="Add deployment workflow",
+        description="Set up the deploy pipeline",
+        revision_feedback=[
+            {"source": "tech_lead", "reason": "This must target production, not staging."}
+        ],
+    )
+
+    spec = _to_devops_task_spec(task)
+
+    assert spec.environment == "production"
+    assert spec.platform_scope.environments == ["dev", "production"]

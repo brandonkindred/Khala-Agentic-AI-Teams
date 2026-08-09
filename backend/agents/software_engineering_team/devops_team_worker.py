@@ -15,7 +15,12 @@ import logging
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from shared.git.git_utils import DEVELOPMENT_BRANCH, reset_hard_to
+from shared.git.git_utils import (
+    DEVELOPMENT_BRANCH,
+    BaselineDiffUnavailable,
+    list_changed_and_deleted,
+    reset_hard_to,
+)
 from software_engineering_team.devops_team.models import (
     DevOpsCompletionPackage,
     DevOpsConstraints,
@@ -96,6 +101,15 @@ def _derive_environment(task: Any) -> str:
     consume ``acceptance_criteria`` directly -- they can produce
     production-targeting artifacts even when the description reads generically.
 
+    Also scans ``task.revision_feedback``: a Tech Lead rejection can redirect a
+    generic task toward production (e.g. "this needs to be the production
+    deploy workflow, not staging"), and that same feedback text is injected
+    into ``scope.included``/``acceptance_criteria`` for the Phase 2 specialists
+    (see ``_revision_feedback_scope_note``) -- so without also scanning it
+    here, the specialists could generate production-targeting artifacts while
+    the spec itself stayed pinned to whatever environment the ORIGINAL task
+    text implied.
+
     Preconditions: none.
     Postconditions:
         - Returns ``"production"`` or ``"staging"`` per
@@ -107,7 +121,12 @@ def _derive_environment(task: Any) -> str:
           environment-policy gate rather than silently proceeding -- the
           same trade-off ``run_workflow`` callers already accept.
     """
-    parts = [task.description or "", task.title or "", *(task.acceptance_criteria or [])]
+    parts = [
+        task.description or "",
+        task.title or "",
+        *(task.acceptance_criteria or []),
+        *_feedback_lines(list(task.revision_feedback or [])),
+    ]
     combined_text = " ".join(parts).lower()
     return _legacy_environment_from_text(combined_text)
 
@@ -218,49 +237,40 @@ def _devops_result_summary(pkg: Optional[DevOpsCompletionPackage]) -> str:
     return "\n\n".join(lines)
 
 
-def _reset_stale_feature_branch(path: Path, task: Any) -> None:
-    """Clear a prior DevOps-internal-gate-rejected attempt's branch before retrying.
+def _reset_prepared_branch_to_development(path: Path, task_id: str) -> None:
+    """Wipe the just-checked-out feature branch's content back to development's tip.
 
     DevOps's Phase 2 specialists (IaC/CI-CD/Deployment) always regenerate their
-    full artifact set from scratch each round -- there is nothing incremental
-    to preserve from a rejected attempt, unlike an LLM applying patches. But
-    ``_prepare_feature_branch``'s underlying ``create_feature_branch`` REUSES
-    an already-checked-out branch rather than recreating it (by design, for
-    the transient-failure-retry case other coding-team workers rely on). A
-    devops task's own internal gate rejection (``run_implement`` returning
-    ``status="failed"``, routed through the swarm's
-    ``_handle_incomplete_implementation``) never records ``task.feature_branch``
-    -- only a swarm ``"in_review"`` outcome does -- so a retry after such a
-    rejection would silently reuse the previous attempt's branch complete with
-    its rejected commits. ``write_agent_output`` only ever adds/overwrites
-    paths present in the new artifact map, never removing ones absent from it,
-    so those stale files would leak into the eventual merged diff unreviewed.
+    full artifact set from scratch every round -- there is nothing incremental
+    to preserve on a retry, whether that retry follows a DevOps-internal gate
+    rejection or a Tech Lead review rejection asking for changes, unlike an LLM
+    applying patches. ``write_agent_output`` only ever adds/overwrites paths
+    present in the new artifact map, never removing ones absent from it, so any
+    file left over from a prior round -- including one the new round correctly
+    omits -- would otherwise leak into the eventual diff unreviewed.
 
-    Resets the CURRENT branch (whatever it happens to be, including the stale
-    feature branch left over from the rejected attempt) to development's tip
-    via ``reset_hard_to`` -- not a ``checkout`` of development itself, which
-    would fail here: development stays attached in the swarm's shared
-    checkout, and git refuses to attach the same branch in two worktrees.
+    Must be called AFTER ``_prepare_feature_branch`` has already checked out
+    the branch this task will use (whether newly created or reused/existing):
+    ``reset_hard_to`` resets whatever is CURRENTLY checked out, so calling it
+    before that checkout would reset the wrong branch (e.g. a different task's
+    leftover state in this shared per-agent worktree) instead of this task's.
+    For a brand-new branch this is a true no-op (it was just created from
+    development's tip); for a reused/existing branch it clears prior commits
+    and validation-tool leftovers (e.g. ``.terraform.lock.hcl``) alike, since
+    ``reset_hard_to`` also cleans untracked files.
 
-    Preconditions: none -- safe to call on a first attempt (no-op: the
-      worktree already sits at development's tip) or before ``repo_path`` is
-      a git repo yet (bootstrap is handled by ``_prepare_feature_branch``).
+    Preconditions:
+        - ``_prepare_feature_branch(path, task)`` returned success; ``path``
+          is currently checked out on the branch that call prepared.
     Postconditions:
-        - When ``task.feature_branch`` is already set (a Tech-Lead-review
-          rejection wants that same branch revised in place, not wiped), this
-          is a no-op -- ``_prepare_feature_branch`` handles that case itself.
-        - Otherwise, best-effort: a reset failure (e.g. development doesn't
-          exist yet on a brand-new repo) is logged and swallowed so it never
-          blocks the retry from proceeding through the normal
-          ``_prepare_feature_branch`` path.
+        - Best-effort: a reset failure (e.g. development doesn't exist yet on
+          a brand-new repo) is logged and swallowed so it never blocks the
+          task from proceeding to implementation on the freshly-prepared
+          branch.
     """
-    if getattr(task, "feature_branch", None):
-        return
-    if not (Path(path) / ".git").exists():
-        return
     ok, msg = reset_hard_to(path, DEVELOPMENT_BRANCH)
     if not ok:
-        logger.debug("No stale devops branch state to reset for task %s: %s", task.id, msg)
+        logger.debug("No stale devops branch state to reset for task %s: %s", task_id, msg)
 
 
 class DevOpsTeamWorker:
@@ -302,7 +312,6 @@ class DevOpsTeamWorker:
                 getattr(task, "feature_branch", None) or f"feature/{_task_feature_name(task)}",
                 str(exc),
             )
-        _reset_stale_feature_branch(path, task)
         branch_ok, prepared_branch = _prepare_feature_branch(path, task)
         if not branch_ok:
             logger.warning(
@@ -312,6 +321,7 @@ class DevOpsTeamWorker:
                 getattr(task, "feature_branch", None) or f"feature/{_task_feature_name(task)}",
                 f"failed to prepare feature branch: {prepared_branch}",
             )
+        _reset_prepared_branch_to_development(path, task_id)
         spec = _to_devops_task_spec(task)
         try:
             result = self.team_lead.run_task(spec, repo_path=path, merge_to_development=False)
@@ -336,12 +346,34 @@ class DevOpsTeamWorker:
         completed_without_artifacts = (
             result.success and pkg is not None and pkg.status == "completed" and not files_changed
         )
-        success = bool(
+        candidate_success = bool(
             result.success and pkg is not None and pkg.status == "completed" and files_changed
         )
+        # files_changed being non-empty only proves Phase 2 GENERATED content, not that it
+        # differs from what's already on the branch: write_files_and_commit/commit_working_tree
+        # both treat "nothing to commit" (regenerated content identical to the existing tree --
+        # e.g. a revision round whose artifacts happen to match a prior accepted attempt) as
+        # success, so pkg.git_operations.commits can carry a synthetic commit message with no
+        # actual commit behind it. Verify the branch actually diverges from development before
+        # accepting it as review-ready; fail closed (treat as no verified diff) if the check
+        # itself can't run, matching list_changed_and_deleted's own fail-closed contract.
+        completed_without_diff = False
+        if candidate_success:
+            try:
+                changed, deleted = list_changed_and_deleted(path, DEVELOPMENT_BRANCH)
+            except BaselineDiffUnavailable as exc:
+                logger.warning(
+                    "devops worker could not verify branch diff for task %s: %s", task_id, exc
+                )
+                changed, deleted = [], []
+            if not changed and not deleted:
+                completed_without_diff = True
+        success = candidate_success and not completed_without_diff
         if not success:
             summary = _devops_result_summary(pkg)
-            if completed_without_artifacts:
+            if completed_without_diff:
+                reason = "DevOps pipeline reported completion but the branch has no changes versus development"
+            elif completed_without_artifacts:
                 reason = "DevOps pipeline completed without producing any files to deliver"
             else:
                 reason = str(result.failure_reason or "DevOps pipeline did not complete")

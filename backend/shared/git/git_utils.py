@@ -335,12 +335,19 @@ def commit_working_tree(repo_path: str | Path, message: str) -> Tuple[bool, str]
 
 
 def reset_hard_to(repo_path: str | Path, ref: str) -> Tuple[bool, str]:
-    """Hard-reset the CURRENTLY checked-out branch to ``ref``'s commit.
+    """Hard-reset the CURRENTLY checked-out branch to ``ref``'s commit and clean the tree.
 
     Unlike checking out ``ref`` directly, this works from inside a linked git
     worktree even when ``ref`` (e.g. ``development``) is already attached in a
     different worktree -- ``git reset --hard <ref>`` only reads ``ref``'s
     commit, it never attaches it here.
+
+    ``git reset --hard`` only touches tracked files; a caller-run tool (e.g. a
+    validation dry-run that shells out to a package/build tool) can leave
+    untracked files behind that survive the reset and later get swept into an
+    unrelated commit by a subsequent ``git add -A``. Following the reset with
+    ``git clean -fd`` (no ``-x``, so gitignored paths like caches/build output
+    are left alone) removes those untracked leftovers too.
 
     Preconditions:
         - ``repo_path`` is an existing git repository; ``ref`` resolves to a
@@ -348,9 +355,13 @@ def reset_hard_to(repo_path: str | Path, ref: str) -> Tuple[bool, str]:
     Postconditions:
         - On success, the current branch's tip and working tree exactly match
           ``ref``'s commit (any commits/changes unique to the current branch
-          are discarded) and returns ``(True, message)``.
+          are discarded) and any untracked, non-ignored files are removed;
+          returns ``(True, message)``.
         - On failure (not a repo, or ``ref`` does not resolve) returns
-          ``(False, message)`` and leaves the repository state unchanged.
+          ``(False, message)`` and leaves the repository state unchanged. A
+          post-reset clean failure is logged but does not fail the call --
+          the branch/commit state (this function's primary contract) is
+          already correct at that point.
     """
     path = Path(repo_path).resolve()
     if not (path / ".git").exists():
@@ -358,6 +369,9 @@ def reset_hard_to(repo_path: str | Path, ref: str) -> Tuple[bool, str]:
     code, out = _run_git(path, ["git", "reset", "--hard", ref])
     if code != 0:
         return False, f"Failed to reset to {ref}: {out}"
+    clean_code, clean_out = _run_git(path, ["git", "clean", "-fd"])
+    if clean_code != 0:
+        logger.warning("Reset to '%s' succeeded but cleaning untracked files failed: %s", ref, clean_out)
     logger.info("Reset current branch to '%s'", ref)
     return True, f"Reset to {ref}"
 

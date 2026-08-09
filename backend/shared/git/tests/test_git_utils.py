@@ -478,6 +478,22 @@ def test_reset_hard_to_works_in_worktree_while_ref_checked_out_elsewhere(repo: P
     assert result.stdout.strip() == DEVELOPMENT_BRANCH
 
 
+def test_reset_hard_to_removes_untracked_files(repo: Path) -> None:
+    """git reset --hard only touches tracked files; a caller-run tool (e.g. a validation
+    dry-run that shells out to a package/build tool) can leave untracked files behind
+    that survive a bare reset and later get swept into an unrelated commit by a
+    subsequent `git add -A`. reset_hard_to must clean those up too."""
+    ok, branch = create_feature_branch(repo, DEVELOPMENT_BRANCH, "t6-reset-clean")
+    assert ok, branch
+    (repo / "untracked.lock").write_text("leftover from a validation tool", encoding="utf-8")
+    assert (repo / "untracked.lock").exists()
+
+    ok2, msg2 = reset_hard_to(repo, DEVELOPMENT_BRANCH)
+
+    assert ok2, msg2
+    assert not (repo / "untracked.lock").exists()
+
+
 def test_reset_hard_to_fails_honestly_for_non_repo(tmp_path: Path) -> None:
     not_a_repo = tmp_path / "plain"
     not_a_repo.mkdir()
