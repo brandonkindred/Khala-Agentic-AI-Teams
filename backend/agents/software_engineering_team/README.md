@@ -622,7 +622,7 @@ notes:
 
 ### Backward Compatibility
 
-The `DevOpsTeamLeadAgent` provides a `run_workflow()` method that accepts the same parameters as the earlier DevOps agent's `run_workflow()`. When called by the Tech Lead's `trigger_devops_for_backend/frontend`, it constructs a `DevOpsTaskSpec` internally (adding defaults for rollback, security, approval gates) and runs the full pipeline.
+`DevOpsTeamLeadAgent` exposes three entry points: `run(spec)` (model-only, no repo I/O), `run_task(spec, repo_path=...)` (the current structured entry point — writes artifacts to a real repo on a feature branch and merges them into `development`), and a legacy free-text `run_workflow(...)` adapter kept for backward compatibility, which internally builds a `DevOpsTaskSpec` via `_build_legacy_spec` (adding defaults for rollback, security, approval gates) and delegates to `run_task`. No production caller currently invokes any of these — `DevOpsTeamLeadAgent` is registered in the SE orchestrator's agent registry but not yet wired into the Tech Lead handoff; DevOps/infrastructure work is routed to `backend_v2` today.
 
 ### Expanded Team (Phase 2, not yet implemented)
 
