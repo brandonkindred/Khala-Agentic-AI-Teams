@@ -213,7 +213,26 @@ class TestDeliverInlineMergeQualityGate:
         assert checkout_calls[-1][1] == (tmp_path, DEVELOPMENT_BRANCH)
 
     def test_gate_pass_sweeps_autofix_commit_before_merge(self, tmp_path: Path) -> None:
+        """The gate must run against the final delivered file state -- i.e.
+        after write_agent_output -- and its build/lint checks must themselves
+        precede the autofix commit and merge. The verifier/linter calls are
+        recorded into the *same* ordered trace as the git ops (not tracked
+        separately) so an implementation that ran the gate before writing the
+        delivered files, or reordered the gate relative to the autofix
+        commit/merge, would fail this assertion instead of passing silently.
+        """
         ops = _RecordingOps()
+
+        def _build_verifier(repo_path, label, task_id):
+            ops.calls.append(("build_verifier", (repo_path, label, task_id), {}))
+            return True, ""
+
+        class _TracedLintAgent:
+            def run(self, inp):
+                ops.calls.append(("linting_tool_agent.run", (inp,), {}))
+                return MagicMock(
+                    execution_result=MagicMock(success=True), passed=True, linter_issues=[]
+                )
 
         result = deliver_inline_merge(
             task_id="t1",
@@ -224,14 +243,16 @@ class TestDeliverInlineMergeQualityGate:
             commit_msg_template="[{scope}] {summary}",
             ops=ops.as_deliver_git_ops(),
             logger=_logger(),
-            build_verifier=lambda repo_path, label, task_id: (True, ""),
-            linting_tool_agent=_passing_lint_agent(),
+            build_verifier=_build_verifier,
+            linting_tool_agent=_TracedLintAgent(),
             lint_agent_type="backend",
         )
 
         assert result.merged is True
         names = ops.names()
-        assert "merge_branch" in names
+        assert names.index("write_agent_output") < names.index("build_verifier")
+        assert names.index("build_verifier") < names.index("linting_tool_agent.run")
+        assert names.index("linting_tool_agent.run") < names.index("commit_working_tree")
         assert names.index("commit_working_tree") < names.index("merge_branch")
         autofix_calls = [
             c
