@@ -21,7 +21,9 @@ module only introduces the validated config object.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
+from typing import Optional
 
 from llm_service.backoff import parse_rate_limit_retry_config
 from llm_service.config import resolve_timeout
@@ -29,7 +31,17 @@ from shared.env_config import env_float, env_int
 
 
 def _require_at_least(field_name: str, value: float, floor: float) -> None:
-    """Raise ``ValueError`` naming ``field_name`` when ``value < floor``."""
+    """Raise ``ValueError`` naming ``field_name`` when ``value`` is non-finite
+    or ``< floor``.
+
+    A ``nan`` fails every ordering comparison (``nan < floor`` is ``False``),
+    so a bare ``<`` check alone would silently accept it; ``from_env()``
+    already can't produce one (``env_float`` rejects non-finite values), but
+    a direct caller passing ``float("nan")``/``float("inf")`` must not slip
+    past a "validated" config.
+    """
+    if not math.isfinite(value):
+        raise ValueError(f"{field_name} must be finite, got {value!r}")
     if value < floor:
         raise ValueError(f"{field_name} must be >= {floor}, got {value!r}")
 
@@ -56,9 +68,12 @@ class StrategyLabBudgetConfig:
       ``STRATEGY_LAB_LLM_RATE_LIMIT_BACKOFF_INITIAL`` /
       ``STRATEGY_LAB_LLM_RATE_LIMIT_BACKOFF_MAX`` (fall back to the platform
       429 schedule). Slow backoff schedule applied on a rate-limit response.
-    - ``llm_total_budget_s`` — ``STRATEGY_LAB_LLM_TOTAL_BUDGET`` (defaults to
-      ``(llm_max_retries + 1) * llm_timeout_s * 1.5``). Hard wall-time cap
-      across all attempts of a single envelope call.
+    - ``llm_total_budget_s`` — ``STRATEGY_LAB_LLM_TOTAL_BUDGET`` (``None``
+      derives ``(llm_max_retries + 1) * llm_timeout_s * 1.5`` in
+      ``__post_init__``, from *this instance's* — not the field defaults' —
+      retries/timeout, so a direct-construction override of either still
+      gets a sized budget instead of silently keeping the all-defaults
+      value). Hard wall-time cap across all attempts of a single envelope call.
     - ``design_review_rounds`` — ``STRATEGY_LAB_DESIGN_REVIEW_ROUNDS``
       (default ``20``). Cap on the design <-> design-review loop.
     - ``design_review_stall_rounds`` — ``STRATEGY_LAB_DESIGN_REVIEW_STALL_ROUNDS``
@@ -84,12 +99,14 @@ class StrategyLabBudgetConfig:
 
     Invariants:
         Every "retries" field is ``>= 0``; every "rounds"/"calls" cap field is
-        ``>= 1``; every timeout/backoff/budget field is ``> 0`` (backoff-max
-        fields ``>= 0``, and each rate-limit/backoff *max* is ``>=`` its
-        paired *initial*/*base*). Enforced in ``__post_init__`` regardless of
-        construction path (``from_env`` or direct instantiation), so a caller
-        building this object with explicit overrides — tests included — gets
-        the same guarantees as the env-driven default.
+        ``>= 1``; every timeout/backoff/budget field is finite and ``> 0``
+        (backoff-max fields ``>= 0``, and each rate-limit/backoff *max* is
+        ``>=`` its paired *initial*/*base*) — ``nan``/``inf`` are rejected
+        even though a bare ``<`` comparison would let ``nan`` slip through.
+        Enforced in ``__post_init__`` regardless of construction path
+        (``from_env`` or direct instantiation), so a caller building this
+        object with explicit overrides — tests included — gets the same
+        guarantees as the env-driven default.
     """
 
     alignment_retries: int = 2
@@ -99,7 +116,7 @@ class StrategyLabBudgetConfig:
     llm_backoff_max_s: float = 60.0
     llm_rate_limit_backoff_initial_s: float = 30.0
     llm_rate_limit_backoff_max_s: float = 120.0
-    llm_total_budget_s: float = 16200.0
+    llm_total_budget_s: Optional[float] = None
     design_review_rounds: int = 20
     design_review_stall_rounds: int = 3
     design_parse_retries: int = 2
@@ -117,7 +134,12 @@ class StrategyLabBudgetConfig:
         Preconditions: none — runs on every construction path.
         Postconditions: returns normally iff every field satisfies its
         documented invariant; otherwise raises ``ValueError`` naming the
-        offending field.
+        offending field. When constructed with ``llm_total_budget_s=None``
+        (the field default), it is replaced with
+        ``(llm_max_retries + 1) * llm_timeout_s * 1.5`` computed from *this
+        instance's* (already-validated) retries/timeout before validation —
+        so a direct-construction override of either still yields a budget
+        sized to it, matching ``from_env()``'s derivation.
         """
         _require_at_least("alignment_retries", self.alignment_retries, 0)
         _require_at_least("llm_max_retries", self.llm_max_retries, 0)
@@ -132,6 +154,12 @@ class StrategyLabBudgetConfig:
             self.llm_rate_limit_backoff_max_s,
             self.llm_rate_limit_backoff_initial_s,
         )
+        if self.llm_total_budget_s is None:
+            object.__setattr__(
+                self,
+                "llm_total_budget_s",
+                (self.llm_max_retries + 1) * self.llm_timeout_s * 1.5,
+            )
         _require_at_least("llm_total_budget_s", self.llm_total_budget_s, 0.001)
         _require_at_least("design_review_rounds", self.design_review_rounds, 1)
         _require_at_least("design_review_stall_rounds", self.design_review_stall_rounds, 1)

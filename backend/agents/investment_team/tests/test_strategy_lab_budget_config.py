@@ -206,6 +206,27 @@ def test_direct_construction_accepts_explicit_overrides() -> None:
     assert config.max_alignment_rounds == 1
 
 
+def test_default_construction_derives_total_budget_from_defaults() -> None:
+    config = StrategyLabBudgetConfig()
+    assert config.llm_total_budget_s == pytest.approx(16200.0)
+
+
+def test_direct_construction_total_budget_derives_from_overridden_retries_and_timeout() -> None:
+    """A partial override (no explicit ``llm_total_budget_s``) must size the
+    budget to the *overridden* retries/timeout, not silently keep the
+    all-defaults 16200s value."""
+    config = StrategyLabBudgetConfig(llm_timeout_s=10.0)
+    assert config.llm_total_budget_s == pytest.approx((2 + 1) * 10.0 * 1.5)
+
+    config = StrategyLabBudgetConfig(llm_max_retries=5, llm_timeout_s=10.0)
+    assert config.llm_total_budget_s == pytest.approx((5 + 1) * 10.0 * 1.5)
+
+
+def test_direct_construction_explicit_total_budget_overrides_derived_default() -> None:
+    config = StrategyLabBudgetConfig(llm_timeout_s=10.0, llm_total_budget_s=999.0)
+    assert config.llm_total_budget_s == 999.0
+
+
 @pytest.mark.parametrize(
     "field_name, bad_value",
     [
@@ -231,6 +252,27 @@ def test_direct_construction_accepts_explicit_overrides() -> None:
 def test_construction_rejects_out_of_bounds_field(field_name: str, bad_value: float) -> None:
     with pytest.raises(ValueError, match=field_name):
         StrategyLabBudgetConfig(**{field_name: bad_value})
+
+
+@pytest.mark.parametrize(
+    "field_name",
+    [
+        "llm_timeout_s",
+        "llm_backoff_base_s",
+        "llm_backoff_max_s",
+        "llm_rate_limit_backoff_initial_s",
+        "llm_rate_limit_backoff_max_s",
+        "llm_total_budget_s",
+    ],
+)
+def test_construction_rejects_nan_field(field_name: str) -> None:
+    with pytest.raises(ValueError, match=field_name):
+        StrategyLabBudgetConfig(**{field_name: float("nan")})
+
+
+def test_construction_rejects_infinite_field() -> None:
+    with pytest.raises(ValueError, match="llm_backoff_max_s"):
+        StrategyLabBudgetConfig(llm_backoff_max_s=float("inf"))
 
 
 def test_construction_rejects_rate_limit_max_below_initial() -> None:
