@@ -161,21 +161,34 @@ class StrategyLabBudgetConfig:
         """
         alignment_retries = env_int("STRATEGY_LAB_ALIGNMENT_RETRIES", 2, floor=0)
 
-        llm_max_retries = env_int(
-            "STRATEGY_LAB_LLM_MAX_RETRIES", env_int("LLM_MAX_RETRIES", 2), floor=0
-        )
-        llm_timeout_s = env_float("STRATEGY_LAB_LLM_TIMEOUT", resolve_timeout(), floor=0.001)
+        # Each generic ``LLM_*``/platform fallback is clamped to the floor
+        # *before* being handed to the outer ``env_*`` call as its ``default``:
+        # ``env_int``/``env_float`` reject a default that already violates the
+        # supplied floor (a caller-contract check, raised even when the
+        # STRATEGY_LAB_* override is absent or valid, since the default
+        # argument is evaluated eagerly). A sub-floor generic fallback (e.g.
+        # ``LLM_MAX_RETRIES=-1``) would otherwise turn a merely-unset
+        # STRATEGY_LAB_* var into a ``ValueError`` instead of the documented
+        # never-raises resolution.
+        generic_max_retries = max(0, env_int("LLM_MAX_RETRIES", 2))
+        llm_max_retries = env_int("STRATEGY_LAB_LLM_MAX_RETRIES", generic_max_retries, floor=0)
+        platform_timeout = max(0.001, resolve_timeout())
+        llm_timeout_s = env_float("STRATEGY_LAB_LLM_TIMEOUT", platform_timeout, floor=0.001)
+        generic_backoff_base = max(1.0, env_float("LLM_BACKOFF_BASE", 2.0))
         llm_backoff_base_s = env_float(
-            "STRATEGY_LAB_LLM_BACKOFF_BASE", env_float("LLM_BACKOFF_BASE", 2.0), floor=1.0
+            "STRATEGY_LAB_LLM_BACKOFF_BASE", generic_backoff_base, floor=1.0
         )
+        generic_backoff_max = max(0.0, env_float("LLM_BACKOFF_MAX", 60.0))
         llm_backoff_max_s = env_float(
-            "STRATEGY_LAB_LLM_BACKOFF_MAX", env_float("LLM_BACKOFF_MAX", 60.0), floor=0.0
+            "STRATEGY_LAB_LLM_BACKOFF_MAX", generic_backoff_max, floor=0.0
         )
 
         _, global_rl_initial, global_rl_cap = parse_rate_limit_retry_config()
+        global_rl_initial = max(1.0, global_rl_initial)
         llm_rate_limit_backoff_initial_s = env_float(
             "STRATEGY_LAB_LLM_RATE_LIMIT_BACKOFF_INITIAL", global_rl_initial, floor=1.0
         )
+        global_rl_cap = max(llm_rate_limit_backoff_initial_s, global_rl_cap)
         llm_rate_limit_backoff_max_s = env_float(
             "STRATEGY_LAB_LLM_RATE_LIMIT_BACKOFF_MAX",
             global_rl_cap,

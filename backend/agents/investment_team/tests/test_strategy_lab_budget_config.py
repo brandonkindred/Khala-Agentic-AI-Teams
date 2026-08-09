@@ -165,6 +165,36 @@ def test_rate_limit_max_floors_at_initial_when_max_env_is_lower(
     assert config.llm_rate_limit_backoff_max_s == 50.0
 
 
+@pytest.mark.parametrize(
+    "generic_env_var, sub_floor_value",
+    [
+        ("LLM_MAX_RETRIES", "-1"),
+        ("LLM_BACKOFF_BASE", "0.5"),
+        ("LLM_BACKOFF_MAX", "-1"),
+        ("LLM_TIMEOUT", "0.0000001"),
+        ("LLM_RATE_LIMIT_BACKOFF_INITIAL", "0.5"),
+    ],
+)
+def test_sub_floor_generic_fallback_does_not_raise(
+    monkeypatch: pytest.MonkeyPatch, generic_env_var: str, sub_floor_value: str
+) -> None:
+    """A sub-floor generic ``LLM_*``/platform fallback must not turn an unset
+    ``STRATEGY_LAB_*`` override into a ``ValueError`` — the generic fallback
+    is clamped to the same floor before being used as the outer default."""
+    monkeypatch.setenv(generic_env_var, sub_floor_value)
+    StrategyLabBudgetConfig.from_env()  # must not raise
+
+
+def test_strategy_lab_override_still_wins_over_sub_floor_generic_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The STRATEGY_LAB_* override is honored even when the unused generic
+    fallback would itself have been sub-floor."""
+    monkeypatch.setenv("LLM_MAX_RETRIES", "-1")
+    monkeypatch.setenv("STRATEGY_LAB_LLM_MAX_RETRIES", "7")
+    assert StrategyLabBudgetConfig.from_env().llm_max_retries == 7
+
+
 # ---------------------------------------------------------------------------
 # Direct construction / validation
 # ---------------------------------------------------------------------------
