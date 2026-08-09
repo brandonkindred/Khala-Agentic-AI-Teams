@@ -119,8 +119,10 @@ def test_devops_worker_builds_spec_from_task() -> None:
     assert spec.title == long_title
     assert spec.acceptance_criteria == ["pipeline lints"]
     assert spec.dependencies == ["other"]
-    assert spec.environment == "dev"
-    assert spec.platform_scope.environments == ["dev"]
+    # No explicit production language in the task text -> staging (matches
+    # _build_legacy_spec's existing default for the same "no signal" case).
+    assert spec.environment == "staging"
+    assert spec.platform_scope.environments == ["dev", "staging"]
     assert spec.scope.excluded == ["cluster provisioning"]
     assert spec.repo_context.infra_repo == "platform-infra"
     assert spec.constraints.secrets.source == "managed_secret_store"
@@ -132,6 +134,41 @@ def test_devops_worker_builds_spec_from_task() -> None:
 def test_devops_worker_spec_defaults_acceptance_criteria_when_task_has_none() -> None:
     spec = _to_devops_task_spec(_base_task(acceptance_criteria=[]))
     assert spec.acceptance_criteria  # falls back to module defaults, never empty
+
+
+def test_devops_worker_spec_derives_production_environment_from_task_text() -> None:
+    """A task explicitly about production infra must NOT be silently downgraded to
+    dev/staging -- that would strip the production approval-gate check
+    (_enforce_env_policy) and leave release_readiness.required_approvals /
+    handoff.prod_approval_required empty even though the artifacts target prod."""
+    task = _base_task(
+        title="Add production deployment workflow",
+        description="Deploy the billing service to production with a blue-green rollout",
+    )
+
+    spec = _to_devops_task_spec(task)
+
+    assert spec.environment == "production"
+    assert spec.platform_scope.environments == ["dev", "production"]
+
+
+def test_devops_worker_spec_derives_staging_environment_when_no_prod_signal() -> None:
+    spec = _to_devops_task_spec(
+        _base_task(title="Add lint pipeline", description="Lint and test on PRs")
+    )
+    assert spec.environment == "staging"
+    assert spec.platform_scope.environments == ["dev", "staging"]
+
+
+def test_devops_worker_spec_respects_non_production_exclusion() -> None:
+    """_legacy_environment_from_text's negation handling ("not for production",
+    "non-production", ...) applies here too -- reused, not reimplemented."""
+    task = _base_task(
+        title="Add staging smoke test",
+        description="This workflow is explicitly not for production use.",
+    )
+    spec = _to_devops_task_spec(task)
+    assert spec.environment == "staging"
 
 
 def test_devops_worker_threads_revision_feedback_into_goal_summary(tmp_path, monkeypatch) -> None:

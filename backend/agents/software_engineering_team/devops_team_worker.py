@@ -25,6 +25,7 @@ from software_engineering_team.devops_team.models import (
     TaskGoal,
     TaskScope,
 )
+from software_engineering_team.devops_team.orchestrator import _legacy_environment_from_text
 from software_engineering_team.models import StackSpec
 from software_engineering_team.v2_team_worker import (
     _changes_summary,
@@ -57,11 +58,6 @@ _DEFAULT_ROLLBACK_REQUIREMENTS = ("Rollback to previous known good release",)
 _DEFAULT_SECURITY_CONSTRAINTS = ("No plaintext credentials", "Least privilege IAM")
 _DEFAULT_COMPLIANCE_CONSTRAINTS = ("Audit trail required",)
 
-# This handoff never reaches a production environment: the coding team always
-# produces a PR for Tech Lead review, never a live deployment. Production
-# approval/rollback policy applies at merge time, outside this path.
-_ENVIRONMENT = "dev"
-
 
 def _augment_goal_summary(task: Any) -> str:
     """Fold coding-team Tech Lead revision feedback into the DevOps goal summary."""
@@ -77,6 +73,34 @@ def _augment_goal_summary(task: Any) -> str:
         f"for Tech Lead review. Include a short summary of how each item was addressed.\n"
         f"{rendered}"
     )
+
+
+def _derive_environment(task: Any) -> str:
+    """Infer the target environment from the task's own text.
+
+    Reuses ``_legacy_environment_from_text`` -- the same inference
+    ``_build_legacy_spec`` already applies for free-text ``run_workflow``
+    callers -- rather than pinning every coding-team-dispatched task to
+    ``"dev"``. Pinning would silently strip the production approval-gate
+    check (``_enforce_env_policy``) and leave ``release_readiness.
+    required_approvals``/``handoff.prod_approval_required`` empty even when
+    the task is explicitly about production infrastructure (e.g. "add a
+    production deployment workflow"), letting production-targeting config
+    merge without the scrutiny DevOps normally enforces for it.
+
+    Preconditions: none.
+    Postconditions:
+        - Returns ``"production"`` or ``"staging"`` per
+          ``_legacy_environment_from_text``'s rules (defaults to
+          ``"staging"`` absent an explicit production signal -- matching
+          ``_build_legacy_spec``'s existing default for the same problem).
+        - A task that IS production-scoped but whose description carries no
+          explicit approval-gate language will correctly fail Phase 1's
+          environment-policy gate rather than silently proceeding -- the
+          same trade-off ``run_workflow`` callers already accept.
+    """
+    combined_text = f"{task.description or ''} {task.title or ''}".lower()
+    return _legacy_environment_from_text(combined_text)
 
 
 def _revision_feedback_scope_note(task: Any) -> Optional[str]:
@@ -111,8 +135,11 @@ def _to_devops_task_spec(task: Any) -> DevOpsTaskSpec:
           never truncated -- it must match what ``make_branch_suffix`` hashes
           when the pipeline cuts its feature branch, or the worker and
           pipeline disagree on the branch name.
-        - ``environment``/``platform_scope.environments`` are pinned to
-          ``"dev"``: this handoff never targets production (see module docstring).
+        - ``environment``/``platform_scope.environments`` are derived from the
+          task's own text via ``_derive_environment`` (never pinned to
+          ``"dev"``), so a genuinely production-scoped task retains the
+          production environment-policy/approval-gate checks instead of
+          silently losing them.
         - Fields the coding-team ``Task`` model does not carry (cloud/runtime,
           repo_context, constraints) use the static ``_DEFAULT_*`` module
           constants, mirroring ``_build_legacy_spec``'s existing defaulting
@@ -123,6 +150,7 @@ def _to_devops_task_spec(task: Any) -> DevOpsTaskSpec:
           sees it, not just whichever field each happens to read.
     """
     goal_summary = _augment_goal_summary(task)
+    environment = _derive_environment(task)
     scope_excluded = [task.out_of_scope] if getattr(task, "out_of_scope", "") else []
     scope_included = [task.description or task.title or task.id]
     acceptance_criteria = list(task.acceptance_criteria or []) or list(_DEFAULT_ACCEPTANCE_CRITERIA)
@@ -134,7 +162,7 @@ def _to_devops_task_spec(task: Any) -> DevOpsTaskSpec:
         task_id=task.id,
         title=task.title or task.id,
         priority=str(getattr(task, "priority", "") or "medium"),
-        platform_scope=PlatformScope(cloud=_DEFAULT_CLOUD, environments=[_ENVIRONMENT]),
+        platform_scope=PlatformScope(cloud=_DEFAULT_CLOUD, environments=["dev", environment]),
         repo_context=RepoContext(
             app_repo=_DEFAULT_APP_REPO,
             infra_repo=_DEFAULT_INFRA_REPO,
@@ -148,7 +176,7 @@ def _to_devops_task_spec(task: Any) -> DevOpsTaskSpec:
         rollback_requirements=list(_DEFAULT_ROLLBACK_REQUIREMENTS),
         security_constraints=list(_DEFAULT_SECURITY_CONSTRAINTS),
         compliance_constraints=list(_DEFAULT_COMPLIANCE_CONSTRAINTS),
-        environment=_ENVIRONMENT,
+        environment=environment,
     )
 
 
