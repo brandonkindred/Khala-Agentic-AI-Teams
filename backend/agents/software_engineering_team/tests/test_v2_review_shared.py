@@ -36,7 +36,7 @@ from software_engineering_team.shared.v2_review import (
     ReviewConfig,
     _lint_passed,
     _maybe_build_change_surface_from_pairs,
-    _patch_has_removal_only_hunk,
+    _patch_has_unrepresented_removal,
     _resolve_change_surface_for_review,
     run_microtask_review,
     run_review,
@@ -1583,54 +1583,197 @@ def test_code_review_deletion_only_file_falls_back_to_files(tmp_path: Path) -> N
 
 
 # ---------------------------------------------------------------------------
-# _patch_has_removal_only_hunk
+# _patch_has_unrepresented_removal
 # ---------------------------------------------------------------------------
 
 
-def test_patch_has_removal_only_hunk_true_for_pure_deletion_hunk() -> None:
+def test_patch_has_unrepresented_removal_true_for_pure_deletion_hunk() -> None:
     patch = "--- a/a.py\n+++ b/a.py\n@@ -1,3 +1,0 @@\n-def validate():\n-    pass\n-\n"
-    assert _patch_has_removal_only_hunk(patch) is True
+    assert _patch_has_unrepresented_removal(patch) is True
 
 
-def test_patch_has_removal_only_hunk_false_for_pure_addition_hunk() -> None:
+def test_patch_has_unrepresented_removal_false_for_pure_addition_hunk() -> None:
     patch = "--- a/a.py\n+++ b/a.py\n@@ -1,0 +1,2 @@\n+def added():\n+    return 1\n"
-    assert _patch_has_removal_only_hunk(patch) is False
+    assert _patch_has_unrepresented_removal(patch) is False
 
 
-def test_patch_has_removal_only_hunk_false_for_mixed_modify_hunk() -> None:
-    """A hunk with both a removed and an added line (a same-spot modification)
-    is not a removal-only hunk -- the touched added line still anchors the
-    surface's expansion around that location."""
+def test_patch_has_unrepresented_removal_false_for_mixed_modify_hunk() -> None:
+    """A hunk with a removed line immediately followed by an added line (a
+    same-spot modification) is not an unrepresented removal -- the touched
+    added line still anchors the surface's expansion around that exact
+    location."""
     patch = "--- a/a.py\n+++ b/a.py\n@@ -1,2 +1,2 @@\n-def old_name():\n+def new_name():\n     return 1\n"
-    assert _patch_has_removal_only_hunk(patch) is False
+    assert _patch_has_unrepresented_removal(patch) is False
 
 
-def test_patch_has_removal_only_hunk_true_when_earlier_hunk_is_removal_only() -> None:
+def test_patch_has_unrepresented_removal_true_when_earlier_hunk_is_removal_only() -> None:
     """A later hunk with additions must not mask an earlier removal-only hunk."""
     patch = (
         "--- a/a.py\n+++ b/a.py\n"
         "@@ -1,2 +1,0 @@\n-def removed():\n-    pass\n"
         "@@ -10,0 +9,2 @@\n+def added():\n+    return 1\n"
     )
-    assert _patch_has_removal_only_hunk(patch) is True
+    assert _patch_has_unrepresented_removal(patch) is True
 
 
-def test_patch_has_removal_only_hunk_true_when_later_hunk_is_removal_only() -> None:
+def test_patch_has_unrepresented_removal_true_when_later_hunk_is_removal_only() -> None:
     """An earlier hunk with additions must not mask a later removal-only hunk."""
     patch = (
         "--- a/a.py\n+++ b/a.py\n"
         "@@ -1,0 +1,2 @@\n+def added():\n+    return 1\n"
         "@@ -10,2 +12,0 @@\n-def removed():\n-    pass\n"
     )
-    assert _patch_has_removal_only_hunk(patch) is True
+    assert _patch_has_unrepresented_removal(patch) is True
 
 
-def test_patch_has_removal_only_hunk_blank_patch_returns_false() -> None:
-    assert _patch_has_removal_only_hunk("") is False
+def test_patch_has_unrepresented_removal_true_for_mixed_hunk_with_unrelated_deletion() -> None:
+    """A SINGLE hunk that merges an unrelated deletion (no replacement) with a
+    same-spot modification elsewhere must still be flagged: the deletion run
+    is not immediately followed by an addition run, even though the hunk as a
+    whole contains added lines. This is the precise gap a whole-hunk-level
+    "does this hunk have any '+' line" check would miss."""
+    patch = (
+        "--- a/a.py\n+++ b/a.py\n"
+        "@@ -1,7 +1,2 @@\n"
+        "-def validate(x):\n"
+        "-    if not x:\n"
+        "-        raise ValueError('bad')\n"
+        "-    return x\n"
+        "-\n"
+        " def other():\n"
+        "-    return 1\n"
+        "+    return 2\n"
+    )
+    assert _patch_has_unrepresented_removal(patch) is True
 
 
-def test_patch_has_removal_only_hunk_no_hunks_returns_false() -> None:
-    assert _patch_has_removal_only_hunk("--- a/a.py\n+++ b/a.py\n") is False
+def test_patch_has_unrepresented_removal_blank_patch_returns_false() -> None:
+    assert _patch_has_unrepresented_removal("") is False
+
+
+def test_patch_has_unrepresented_removal_no_hunks_returns_false() -> None:
+    assert _patch_has_unrepresented_removal("--- a/a.py\n+++ b/a.py\n") is False
+
+
+# ---------------------------------------------------------------------------
+# Mixed hunk with an unrepresented deletion, and a new blank-content path
+# treated as unchanged -- GitHub issue #5400 follow-up (round 2)
+# ---------------------------------------------------------------------------
+
+# validate() is deleted immediately before other(), and other()'s body is
+# also modified -- close enough that difflib merges the deletion and the
+# modification into ONE hunk (see the reproduction in
+# test_patch_has_unrepresented_removal_true_for_mixed_hunk_with_unrelated_deletion).
+_MIXED_SINGLE_HUNK_OLD = (
+    "def validate(x):\n"
+    "    if not x:\n"
+    "        raise ValueError('bad')\n"
+    "    return x\n"
+    "\n"
+    "def other():\n"
+    "    return 1\n"
+)
+_MIXED_SINGLE_HUNK_NEW = "def other():\n    return 2\n"
+
+
+def test_resolve_change_surface_for_review_mixed_hunk_unrepresented_deletion_returns_none(
+    tmp_path: Path,
+) -> None:
+    """A path present in ``surface.blocks`` (its hunk has an added line) whose
+    same hunk also deletes an unrelated function must not be treated as
+    covered."""
+    _init_repo(tmp_path)
+    _commit_file(tmp_path, "a.py", _MIXED_SINGLE_HUNK_OLD)
+
+    result = _resolve_change_surface_for_review({"a.py": _MIXED_SINGLE_HUNK_NEW}, tmp_path)
+
+    assert result is None
+
+
+def test_code_review_mixed_hunk_unrepresented_deletion_falls_back_to_files(
+    tmp_path: Path,
+) -> None:
+    """End-to-end: the same mixed-single-hunk scenario must submit ``files=``
+    rather than a surface whose rendered body omits the deletion."""
+    config = _build_config()
+    _init_repo(tmp_path)
+    _commit_file(tmp_path, "a.py", _MIXED_SINGLE_HUNK_OLD)
+    files = {"a.py": _MIXED_SINGLE_HUNK_NEW}
+
+    cr_agent = MagicMock()
+    cr_agent.run.return_value = MagicMock(issues=[])
+
+    run_microtask_review(
+        config=config,
+        llm=DummyLLMClient(),
+        task=_task(),
+        microtask=_microtask(),
+        repo_path=tmp_path,
+        files=files,
+        code_review_agent=cr_agent,
+        language="python",
+        **_noop_runners(),
+    )
+
+    assert cr_agent.run.called
+    cr_input = cr_agent.run.call_args.args[0]
+    assert cr_input.files == files
+    assert cr_input.pre_numbered is False
+    assert cr_input.code == ""
+
+
+def test_resolve_change_surface_for_review_new_blank_path_not_treated_as_unchanged(
+    tmp_path: Path,
+) -> None:
+    """A brand-new path (never in the resolved base) whose new content happens
+    to be blank -- e.g. a newly added ``.gitkeep`` marker -- must not be
+    silently treated as "unchanged": it can never appear in the built
+    surface (blank content is always omitted), so its presence must force
+    the fallback rather than being skipped by an ``old.get(path, "") ==
+    new_text`` coincidence."""
+    _init_repo(tmp_path)
+    _commit_file(tmp_path, "a.py", "def f():\n    return 0\n")
+    files = {
+        "a.py": "def f():\n    return 1\n",
+        ".gitkeep": "",
+    }
+
+    result = _resolve_change_surface_for_review(files, tmp_path)
+
+    assert result is None
+
+
+def test_code_review_new_blank_path_falls_back_to_files(tmp_path: Path) -> None:
+    """End-to-end: a new blank-content path alongside a real change must
+    submit ``files=`` rather than a surface that silently excludes it."""
+    config = _build_config()
+    _init_repo(tmp_path)
+    _commit_file(tmp_path, "a.py", "def f():\n    return 0\n")
+    files = {
+        "a.py": "def f():\n    return 1\n",
+        ".gitkeep": "",
+    }
+
+    cr_agent = MagicMock()
+    cr_agent.run.return_value = MagicMock(issues=[])
+
+    run_microtask_review(
+        config=config,
+        llm=DummyLLMClient(),
+        task=_task(),
+        microtask=_microtask(),
+        repo_path=tmp_path,
+        files=files,
+        code_review_agent=cr_agent,
+        language="python",
+        **_noop_runners(),
+    )
+
+    assert cr_agent.run.called
+    cr_input = cr_agent.run.call_args.args[0]
+    assert cr_input.files == files
+    assert cr_input.pre_numbered is False
+    assert cr_input.code == ""
 
 
 # ---------------------------------------------------------------------------

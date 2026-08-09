@@ -288,16 +288,22 @@ def _maybe_build_change_surface_from_pairs(
     return surface
 
 
-def _patch_has_removal_only_hunk(patch: str) -> bool:
-    """True when a unified-diff ``patch`` contains a hunk with no added lines.
+def _patch_has_unrepresented_removal(patch: str) -> bool:
+    """True when ``patch`` deletes lines that the change surface cannot render.
 
     ``build_change_surface_from_pairs`` only expands the rendered body around
     *added* touched lines (see ``change_surface._assemble_path_block`` /
-    ``extract_touched_lines``); a hunk that is pure removal -- deleting lines
-    with nothing added in their place -- has no added line for that expansion
-    to anchor on, so its region is silently absent from the rendered block
-    even when the path as a whole has other, unrelated additions and is
-    otherwise present in ``ChangeSurface.blocks``.
+    ``extract_touched_lines``); a deletion is only "covered" by that expansion
+    when it is a same-spot modification -- a run of removed (``-``) lines
+    immediately followed by a run of added (``+``) lines, with no context line
+    between them, which is exactly how ``difflib.unified_diff`` renders a
+    replace. A deletion run NOT immediately followed by an addition run --
+    whether its hunk has no additions at all, or the hunk also happens to
+    contain an unrelated addition elsewhere (difflib merges nearby changes
+    into one hunk whenever they fall within its default context window) --
+    has no added line anywhere for the AST/heuristic expansion to anchor on,
+    so that region is silently absent from the rendered block even when the
+    path as a whole is otherwise present in ``ChangeSurface.blocks``.
 
     Preconditions:
         - ``patch`` is one file's unified-diff text (``difflib.unified_diff``
@@ -305,24 +311,38 @@ def _patch_has_removal_only_hunk(patch: str) -> bool:
           change.
 
     Postconditions:
-        - Returns True iff at least one ``@@ ... @@`` hunk's body (the lines
-          up to the next hunk header or end of patch) contains no line
-          starting with ``"+"``.
-        - Blank ``patch``, or a patch with no ``@@`` hunk headers -> False.
+        - Returns True iff ``patch`` contains at least one maximal run of
+          ``"-"``-prefixed lines that is not immediately followed by a
+          ``"+"``-prefixed line (end of hunk, a context line, or end of
+          patch all count as "not immediately followed").
+        - Blank ``patch``, a patch with no ``@@`` hunk headers, or a patch
+          whose every deletion run is immediately paired with an addition
+          run -> False.
         - Never raises.
     """
+    lines = (patch or "").splitlines()
+    n = len(lines)
     in_hunk = False
-    hunk_has_addition = False
-    for line in (patch or "").splitlines():
+    i = 0
+    while i < n:
+        line = lines[i]
         if line.startswith("@@"):
-            if in_hunk and not hunk_has_addition:
-                return True
             in_hunk = True
-            hunk_has_addition = False
+            i += 1
             continue
-        if in_hunk and line.startswith("+"):
-            hunk_has_addition = True
-    return in_hunk and not hunk_has_addition
+        if not in_hunk:
+            i += 1
+            continue
+        if line.startswith("-"):
+            j = i
+            while j < n and lines[j].startswith("-"):
+                j += 1
+            if j >= n or not lines[j].startswith("+"):
+                return True
+            i = j
+            continue
+        i += 1
+    return False
 
 
 def _resolve_change_surface_for_review(
@@ -358,16 +378,18 @@ def _resolve_change_surface_for_review(
           resolved path is identical to its new content), via
           ``_maybe_build_change_surface_from_pairs``.
         - Returns ``None`` ("partial coverage") when at least one path
-          genuinely changed (its resolved old content differs from its new
-          content) and either: the built surface omits that path entirely
-          (a deletion-only *file* contributes no added touched lines), or the
-          path's patch contains a removal-only *hunk* (see
-          :func:`_patch_has_removal_only_hunk`) whose deleted region is
-          absent from an otherwise-covered path's rendered body. Submitting a
-          surface that omits a real change -- whole file or one hunk within
-          it -- would let the reviewer approve without ever seeing it, so
-          this is treated the same as no surface at all: the caller must
-          submit ``files`` as-is rather than a subset of what changed.
+          genuinely changed -- it is not a *hit* in ``old_map`` with content
+          identical to its new content; a path absent from ``old_map``
+          (including one whose new content happens to be blank, e.g. a newly
+          added empty marker file) is always genuinely new, never treated as
+          unchanged -- and either: the built surface omits that path entirely
+          (a deletion-only *file*, or a blank new file, contributes no added
+          touched lines), or the path's patch deletes lines the surface
+          cannot render (see :func:`_patch_has_unrepresented_removal`).
+          Submitting a surface that omits a real change -- a whole file, or
+          part of one -- would let the reviewer approve without ever seeing
+          it, so this is treated the same as no surface at all: the caller
+          must submit ``files`` as-is rather than a subset of what changed.
         - Otherwise (every genuinely-changed path is fully represented)
           returns the built ``ChangeSurface``.
         - Never raises: ``resolve_previous_content`` already degrades
@@ -392,11 +414,11 @@ def _resolve_change_surface_for_review(
         return None
     patches = unified_diffs_from_pairs(files, old_map)
     for path, new_text in files.items():
-        if old_map.get(path, "") == new_text:
+        if path in old_map and old_map[path] == new_text:
             continue
         if path not in surface.blocks:
             return None
-        if _patch_has_removal_only_hunk(patches.get(path, "")):
+        if _patch_has_unrepresented_removal(patches.get(path, "")):
             return None
     return surface
 
