@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+
 import pytest
 
 from investment_team.strategy_lab.budget_config import StrategyLabBudgetConfig
@@ -193,6 +195,31 @@ def test_strategy_lab_override_still_wins_over_sub_floor_generic_fallback(
     monkeypatch.setenv("LLM_MAX_RETRIES", "-1")
     monkeypatch.setenv("STRATEGY_LAB_LLM_MAX_RETRIES", "7")
     assert StrategyLabBudgetConfig.from_env().llm_max_retries == 7
+
+
+@pytest.mark.parametrize(
+    "generic_env_var, non_finite_value",
+    [
+        ("LLM_TIMEOUT", "inf"),
+        ("LLM_RATE_LIMIT_BACKOFF_INITIAL", "inf"),
+        ("LLM_RATE_LIMIT_BACKOFF_INITIAL", "nan"),
+        ("LLM_RATE_LIMIT_BACKOFF_MAX", "inf"),
+        ("LLM_RATE_LIMIT_BACKOFF_MAX", "nan"),
+    ],
+)
+def test_non_finite_generic_fallback_does_not_raise(
+    monkeypatch: pytest.MonkeyPatch, generic_env_var: str, non_finite_value: str
+) -> None:
+    """``resolve_timeout()``/``parse_rate_limit_retry_config()`` pass a
+    non-finite parsed value straight through (neither guards against
+    ``inf``/``nan`` the way ``env_float`` does), so a malformed generic
+    fallback must not turn an unset ``STRATEGY_LAB_*`` override into a
+    ``ValueError`` — the fallback is sanitized to a finite value first."""
+    monkeypatch.setenv(generic_env_var, non_finite_value)
+    config = StrategyLabBudgetConfig.from_env()  # must not raise
+    assert math.isfinite(config.llm_timeout_s)
+    assert math.isfinite(config.llm_rate_limit_backoff_initial_s)
+    assert math.isfinite(config.llm_rate_limit_backoff_max_s)
 
 
 # ---------------------------------------------------------------------------

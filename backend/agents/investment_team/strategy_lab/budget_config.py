@@ -29,6 +29,23 @@ from llm_service.backoff import parse_rate_limit_retry_config
 from llm_service.config import resolve_timeout
 from shared.env_config import env_float, env_int
 
+# Last-resort finite fallbacks for platform helpers (`resolve_timeout`,
+# `parse_rate_limit_retry_config`) that can themselves return a non-finite
+# value when the *generic* env var they read (``LLM_TIMEOUT``,
+# ``LLM_RATE_LIMIT_BACKOFF_INITIAL``/``_MAX``) is set to ``"inf"``/``"nan"``
+# — neither helper's own env parsing guards against a non-finite *parsed*
+# value the way ``shared.env_config.env_float`` does. Mirror each field's
+# own dataclass default so a malformed generic var degrades to the same
+# value an unset one would.
+_DEFAULT_LLM_TIMEOUT_S = 3600.0
+_DEFAULT_RATE_LIMIT_BACKOFF_INITIAL_S = 30.0
+_DEFAULT_RATE_LIMIT_BACKOFF_MAX_S = 120.0
+
+
+def _finite_or(value: float, fallback: float) -> float:
+    """Return ``value`` if finite, else ``fallback``."""
+    return value if math.isfinite(value) else fallback
+
 
 def _require_at_least(field_name: str, value: float, floor: float) -> None:
     """Raise ``ValueError`` naming ``field_name`` when ``value`` is non-finite
@@ -111,11 +128,11 @@ class StrategyLabBudgetConfig:
 
     alignment_retries: int = 2
     llm_max_retries: int = 2
-    llm_timeout_s: float = 3600.0
+    llm_timeout_s: float = _DEFAULT_LLM_TIMEOUT_S
     llm_backoff_base_s: float = 2.0
     llm_backoff_max_s: float = 60.0
-    llm_rate_limit_backoff_initial_s: float = 30.0
-    llm_rate_limit_backoff_max_s: float = 120.0
+    llm_rate_limit_backoff_initial_s: float = _DEFAULT_RATE_LIMIT_BACKOFF_INITIAL_S
+    llm_rate_limit_backoff_max_s: float = _DEFAULT_RATE_LIMIT_BACKOFF_MAX_S
     llm_total_budget_s: Optional[float] = None
     design_review_rounds: int = 20
     design_review_stall_rounds: int = 3
@@ -200,7 +217,11 @@ class StrategyLabBudgetConfig:
         # never-raises resolution.
         generic_max_retries = max(0, env_int("LLM_MAX_RETRIES", 2))
         llm_max_retries = env_int("STRATEGY_LAB_LLM_MAX_RETRIES", generic_max_retries, floor=0)
-        platform_timeout = max(0.001, resolve_timeout())
+        # ``resolve_timeout()`` returns its parsed ``LLM_TIMEOUT`` value
+        # unchanged when positive — including ``inf`` — so a non-finite
+        # result is sanitized before use, the same as the rate-limit
+        # fallbacks below.
+        platform_timeout = max(0.001, _finite_or(resolve_timeout(), _DEFAULT_LLM_TIMEOUT_S))
         llm_timeout_s = env_float("STRATEGY_LAB_LLM_TIMEOUT", platform_timeout, floor=0.001)
         generic_backoff_base = max(1.0, env_float("LLM_BACKOFF_BASE", 2.0))
         llm_backoff_base_s = env_float(
@@ -211,12 +232,21 @@ class StrategyLabBudgetConfig:
             "STRATEGY_LAB_LLM_BACKOFF_MAX", generic_backoff_max, floor=0.0
         )
 
+        # ``parse_rate_limit_retry_config`` parses its env vars with plain
+        # ``float()`` + a ``<= 0`` guard, which "inf"/"nan" both pass (neither
+        # is ``<= 0``) — so a malformed ``LLM_RATE_LIMIT_BACKOFF_INITIAL``/
+        # ``_MAX`` can hand back a non-finite value here. Sanitize before use.
         _, global_rl_initial, global_rl_cap = parse_rate_limit_retry_config()
-        global_rl_initial = max(1.0, global_rl_initial)
+        global_rl_initial = max(
+            1.0, _finite_or(global_rl_initial, _DEFAULT_RATE_LIMIT_BACKOFF_INITIAL_S)
+        )
         llm_rate_limit_backoff_initial_s = env_float(
             "STRATEGY_LAB_LLM_RATE_LIMIT_BACKOFF_INITIAL", global_rl_initial, floor=1.0
         )
-        global_rl_cap = max(llm_rate_limit_backoff_initial_s, global_rl_cap)
+        global_rl_cap = max(
+            llm_rate_limit_backoff_initial_s,
+            _finite_or(global_rl_cap, _DEFAULT_RATE_LIMIT_BACKOFF_MAX_S),
+        )
         llm_rate_limit_backoff_max_s = env_float(
             "STRATEGY_LAB_LLM_RATE_LIMIT_BACKOFF_MAX",
             global_rl_cap,
