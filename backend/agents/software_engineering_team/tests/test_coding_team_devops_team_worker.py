@@ -152,6 +152,18 @@ def test_devops_worker_threads_revision_feedback_into_goal_summary(tmp_path, mon
     assert "CODING TEAM TECH LEAD FEEDBACK" in spec.goal.summary
     assert "Add rollback docs" in spec.goal.summary
     assert "Revision feedback provided" in out["changes_summary"]
+    # goal.summary alone isn't enough: none of the Phase 2 specialist agents
+    # (IaC/CICD/Deployment) read it -- only scope.included and acceptance_criteria.
+    # The feedback must also land in both of those or a revision round regenerates
+    # the same rejected artifacts blind.
+    assert any("Add rollback docs" in item for item in spec.scope.included)
+    assert any("Add rollback docs" in item for item in spec.acceptance_criteria)
+
+
+def test_devops_worker_spec_has_no_feedback_note_without_revision_feedback() -> None:
+    spec = _to_devops_task_spec(_base_task())
+    assert not any("REVISION FEEDBACK" in item for item in spec.scope.included)
+    assert not any("REVISION FEEDBACK" in item for item in spec.acceptance_criteria)
 
 
 def test_devops_worker_translates_completed_package(tmp_path, monkeypatch) -> None:

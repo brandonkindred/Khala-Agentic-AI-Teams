@@ -79,6 +79,27 @@ def _augment_goal_summary(task: Any) -> str:
     )
 
 
+def _revision_feedback_scope_note(task: Any) -> Optional[str]:
+    """Render ``task.revision_feedback`` as a single scope/acceptance-criteria entry.
+
+    None of the Phase 2 specialist agents (``InfrastructureAsCodeAgent``,
+    ``CICDPipelineAgent``, ``DeploymentStrategyAgent``) read
+    ``DevOpsTaskSpec.goal.summary`` -- only ``scope.included`` (IaC) and
+    ``acceptance_criteria`` (CI/CD, Deployment). Folding feedback only into
+    ``goal.summary``, as ``_augment_goal_summary`` does, would leave every
+    specialist agent blind to it on a revision round -- likely regenerating
+    the same rejected output until the revision cap. This note is additionally
+    injected into both ``scope.included`` and ``acceptance_criteria`` (see
+    ``_to_devops_task_spec``) to reach all three.
+
+    Returns ``None`` when there is no revision feedback to report.
+    """
+    feedback = _feedback_lines(list(task.revision_feedback or []))
+    if not feedback:
+        return None
+    return "REVISION FEEDBACK TO ADDRESS: " + "; ".join(feedback)
+
+
 def _to_devops_task_spec(task: Any) -> DevOpsTaskSpec:
     """Build a structured ``DevOpsTaskSpec`` from a coding-team ``Task``.
 
@@ -96,10 +117,19 @@ def _to_devops_task_spec(task: Any) -> DevOpsTaskSpec:
           repo_context, constraints) use the static ``_DEFAULT_*`` module
           constants, mirroring ``_build_legacy_spec``'s existing defaulting
           pattern for the same problem.
+        - When ``task.revision_feedback`` is non-empty, a rendered note is
+          appended to both ``scope.included`` and ``acceptance_criteria`` (see
+          ``_revision_feedback_scope_note``) so every Phase 2 specialist agent
+          sees it, not just whichever field each happens to read.
     """
     goal_summary = _augment_goal_summary(task)
     scope_excluded = [task.out_of_scope] if getattr(task, "out_of_scope", "") else []
+    scope_included = [task.description or task.title or task.id]
     acceptance_criteria = list(task.acceptance_criteria or []) or list(_DEFAULT_ACCEPTANCE_CRITERIA)
+    feedback_note = _revision_feedback_scope_note(task)
+    if feedback_note:
+        scope_included = scope_included + [feedback_note]
+        acceptance_criteria = acceptance_criteria + [feedback_note]
     return DevOpsTaskSpec(
         task_id=task.id,
         title=task.title or task.id,
@@ -111,9 +141,7 @@ def _to_devops_task_spec(task: Any) -> DevOpsTaskSpec:
             pipeline_repo=_DEFAULT_APP_REPO,
         ),
         goal=TaskGoal(summary=goal_summary),
-        scope=TaskScope(
-            included=[task.description or task.title or task.id], excluded=scope_excluded
-        ),
+        scope=TaskScope(included=scope_included, excluded=scope_excluded),
         constraints=DevOpsConstraints(secrets=SecretsConstraints(source=_DEFAULT_SECRETS_SOURCE)),
         acceptance_criteria=acceptance_criteria,
         dependencies=list(task.dependencies or []),
