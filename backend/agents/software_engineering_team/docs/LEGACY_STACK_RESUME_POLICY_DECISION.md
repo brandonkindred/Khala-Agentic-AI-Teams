@@ -179,11 +179,21 @@ The query is a point-in-time snapshot, not a standing guarantee: a
 today but can still be planned by the still-running pre-cleanup code
 afterward — e.g. a Tech Lead LLM-call failure produces the
 `{"name": "default", ...}` fallback stack — and reach `waiting_for_user`
-before the deploy actually lands. Treat zero rows as safe only for a
-query run immediately before the deploy, with new `coding_team`/`run_team`
-job submissions paused (or otherwise frozen) from that point until the
-repair-code-removal build is live; re-run the query right before
-un-pausing submissions if the deploy window is longer than a few minutes.
+before the deploy actually lands. Pausing new submissions is not
+sufficient by itself: an already-created `pending`/`running` job's
+pre-cleanup worker is still free to write a legacy shape into it after
+the query returns zero. Treat zero rows as safe only when, from the
+moment the query is run until the repair-code-removal build is live:
+
+1. New `coding_team`/`run_team` job submissions are paused (or otherwise
+   frozen), **and**
+2. Existing `pending`/`running`/`waiting_for_user` workers are drained to
+   a terminal state or stopped — not merely left running — so none of
+   them can persist a legacy `stack_specs`/`task_graph_snapshot` write
+   after the gate.
+
+Re-run the query right before un-freezing submissions/workers if the
+deploy window is longer than a few minutes.
 
 - **Zero rows:** safe to deploy.
 - **Any rows:** do not deploy the repair-code removal yet. The valid
