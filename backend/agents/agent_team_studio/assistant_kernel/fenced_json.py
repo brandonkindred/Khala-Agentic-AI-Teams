@@ -29,13 +29,14 @@ def _fenced_block_pattern(tag: str) -> re.Pattern[str]:
           names like ``"agent"``/``"process"``/``"suggestions"``).
     Postconditions:
         * The returned pattern's match starts at a literal ```` ```{tag} ````
-          fence and requires a non-word character (or end of the fence line)
-          immediately after ``tag`` — via the ``(?!\\w)`` lookahead — so a
-          shorter tag never matches as a prefix of a longer one (``"agent"``
-          must not match a ```` ```agents ```` block). Group 1 captures the
-          block body.
+          fence and requires the character immediately after ``tag`` to be
+          whitespace or the fence's closing backtick — via the ``(?=\\s|`)``
+          lookahead — so a shorter tag never matches as a prefix of a longer
+          one, whether the longer tag extends it with a word character
+          (``"agent"`` vs. ```` ```agents ````) or punctuation (``"agent"``
+          vs. ```` ```agent-v2 ````). Group 1 captures the block body.
     """
-    return re.compile(r"```" + re.escape(tag) + r"(?!\w)\s*\n?(.*?)```", re.DOTALL)
+    return re.compile(r"```" + re.escape(tag) + r"(?=\s|`)\s*\n?(.*?)```", re.DOTALL)
 
 
 def parse_fenced_json(
@@ -49,7 +50,12 @@ def parse_fenced_json(
         * Returns the parsed JSON value when a block is found, its body is
           valid JSON, and the parsed value is an instance of
           ``expected_type``. Returns ``None`` otherwise — missing block,
-          malformed JSON, or a value of the wrong top-level type — and never
+          malformed JSON (``json.JSONDecodeError``, a ``ValueError``
+          subclass), or JSON that's syntactically valid but pathological in
+          a way ``json.loads`` itself rejects (e.g. an integer literal so
+          large it exceeds Python's int-string conversion limit, raising a
+          plain ``ValueError``; or excessive nesting, raising
+          ``RecursionError``) — or a value of the wrong top-level type. Never
           raises, so a pathological model output degrades to "no parseable
           update" rather than propagating an exception.
         * When ``text`` contains more than one ``{tag}`` block, only the
@@ -62,7 +68,7 @@ def parse_fenced_json(
         return None
     try:
         data = json.loads(match.group(1).strip())
-    except json.JSONDecodeError:
+    except (ValueError, RecursionError):
         return None
     return data if isinstance(data, expected_type) else None
 
@@ -77,8 +83,9 @@ def strip_fenced_blocks(text: str, tags: list[str]) -> str:
           the result stripped of leading/trailing whitespace. A tag with no
           matching block in ``text`` is a no-op for that tag — including when
           ``text`` only contains a block for a longer tag sharing ``tag`` as
-          a prefix (e.g. stripping ``"agent"`` leaves a ```` ```agents ````
-          block untouched).
+          a prefix, whether word-extended (stripping ``"agent"`` leaves a
+          ```` ```agents ```` block untouched) or punctuation-extended
+          (leaves a ```` ```agent-v2 ```` block untouched too).
     """
     for tag in tags:
         text = _fenced_block_pattern(tag).sub("", text)

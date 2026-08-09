@@ -70,6 +70,35 @@ def test_parse_distinguishes_similarly_named_tags() -> None:
     assert parse_fenced_json(text, "agents", expected_type=list) == [{"agent_name": "A"}]
 
 
+def test_parse_distinguishes_punctuation_suffixed_tags() -> None:
+    # "agent-v2" extends "agent" with punctuation, not a word character —
+    # still a different tag, not a prefix match.
+    text = '```agent-v2\n{"x": 1}\n```'
+    assert parse_fenced_json(text, "agent") is None
+    assert parse_fenced_json(text, "agent-v2") == {"x": 1}
+
+
+def test_parse_handles_immediately_closed_empty_block() -> None:
+    # The tag-boundary check also accepts the fence's closing backtick
+    # directly after the tag (an empty body, itself invalid JSON -> None).
+    assert parse_fenced_json("```agent```", "agent") is None
+
+
+def test_parse_none_on_oversized_integer() -> None:
+    # json.loads raises a plain ValueError (not JSONDecodeError) once an
+    # integer literal exceeds Python's int-string conversion limit.
+    text = "```agent\n" + "1" * 5000 + "\n```"
+    assert parse_fenced_json(text, "agent") is None
+
+
+def test_parse_none_on_excessive_nesting() -> None:
+    # Deeply nested JSON can blow the interpreter's recursion limit inside
+    # json.loads, raising RecursionError rather than JSONDecodeError.
+    body = "[" * 3000 + "]" * 3000
+    text = f"```agent\n{body}\n```"
+    assert parse_fenced_json(text, "agent", expected_type=list) is None
+
+
 # ---------------------------------------------------------------------------
 # strip_fenced_blocks
 # ---------------------------------------------------------------------------
@@ -94,6 +123,11 @@ def test_strip_does_not_consume_a_longer_tags_block() -> None:
     # Stripping "agent" must not also remove an unlisted ```agents``` block —
     # "agent" is a prefix of "agents", not the same tag.
     text = 'keep this\n\n```agents\n[{"agent_name": "A"}]\n```'
+    assert strip_fenced_blocks(text, ["agent"]) == text
+
+
+def test_strip_does_not_consume_a_punctuation_suffixed_tags_block() -> None:
+    text = 'keep this\n\n```agent-v2\n{"x": 1}\n```'
     assert strip_fenced_blocks(text, ["agent"]) == text
 
 

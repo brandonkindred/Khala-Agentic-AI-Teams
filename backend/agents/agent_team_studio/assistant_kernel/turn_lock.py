@@ -20,9 +20,13 @@ This module extracts the store-agnostic pieces of that protocol:
 * :class:`InMemoryTurnLocks` — a reusable keyed lock table implementing the
   acquire -> snapshot -> yield -> rollback-on-exception -> release dance, so
   a future in-memory store doesn't re-derive it from scratch.
-* :class:`TurnStore` — a ``Protocol`` documenting the shape both existing
-  stores already satisfy structurally, as a contract to code against rather
-  than a base class either store must inherit.
+* :class:`TurnStore` — a ``Protocol`` documenting the target turn-lock shape
+  both existing stores' locking mechanics are modeled on. Neither store is a
+  structural match *yet*: both still yield their own local
+  ``agent_studio.store.ConversationTurn`` (``definition``/``set_definition``)
+  from ``turn()`` rather than this module's :class:`ConversationTurn`
+  (``draft``/``set_draft``) — becoming ``TurnStore``-conformant is part of
+  the migration, not this extraction.
 
 Nothing here is wired into either existing store yet; that migration is a
 follow-up.
@@ -210,16 +214,21 @@ class InMemoryTurnLocks(Generic[D]):
 
 
 class TurnStore(Protocol[D]):
-    """The turn-lock contract both existing conversation stores already satisfy.
+    """The target turn-lock contract for conversation stores.
 
-    Documents the shape shared by ``agent_studio.store.AgentStudioConversationStore``
+    Modeled on the locking mechanics ``agent_studio.store.AgentStudioConversationStore``
     (in-memory ``threading.Lock``) and
     ``agent_studio.pg_store.PostgresAgentStudioConversationStore`` (Postgres
-    ``SELECT ... FOR UPDATE``) — a structural contract to code against, not a
-    base class either store must inherit. ``create`` / ``get`` are
-    intentionally excluded: their signatures are store-specific (e.g. what a
-    fresh draft is seeded from) and aren't part of the turn-lock protocol
-    itself.
+    ``SELECT ... FOR UPDATE``) already implement — but neither store
+    structurally satisfies this protocol *today*: both still yield their own
+    local ``agent_studio.store.ConversationTurn`` (``definition`` /
+    ``set_definition``) from ``turn()``, not this module's
+    :class:`ConversationTurn` (``draft`` / ``set_draft``). A store becomes
+    ``TurnStore``-conformant once it's migrated to yield this module's
+    ``ConversationTurn`` — that migration is a follow-up, not done here.
+    ``create`` / ``get`` are intentionally excluded from the protocol: their
+    signatures are store-specific (e.g. what a fresh draft is seeded from)
+    and aren't part of the turn-lock protocol itself.
     """
 
     def turn(self, conversation_id: str) -> AbstractContextManager[ConversationTurn[D]]:
