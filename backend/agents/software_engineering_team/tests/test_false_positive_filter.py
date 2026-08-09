@@ -994,7 +994,8 @@ def test_build_tools_delegate_to_index() -> None:
         "search_codebase",
         "find_function_at_line",
     }
-    assert read_file("app/main.py") == "def foo(): pass\n"
+    read_result = read_file("app/main.py")
+    assert read_result == {"status": "success", "content": [{"text": "def foo(): pass\n"}]}
     listed = list_files()
     assert "app/main.py" in listed and CodebaseIndex.EXISTING_CODEBASE_PATH in listed
     assert "app/main.py:1: def foo(): pass" in search_codebase("foo")
@@ -1027,7 +1028,7 @@ def test_build_tools_never_raise_on_index_errors(monkeypatch) -> None:
     idx = CodebaseIndex(files={"a.py": "x"})
     read_file, read_lines, read_function, list_files, search_codebase, _find = _build_tools(idx)
 
-    def _boom_read(_self: CodebaseIndex, path: str) -> str:
+    def _boom_read(_self: CodebaseIndex, path: str):
         raise RuntimeError("index boom")
 
     def _boom_read_lines(_self: CodebaseIndex, path: str, start: int, end: int) -> str:
@@ -1045,14 +1046,16 @@ def test_build_tools_never_raise_on_index_errors(monkeypatch) -> None:
     def _boom_search(_self: CodebaseIndex, query: str, max_matches: int = 60):
         raise RuntimeError("index boom")
 
-    monkeypatch.setattr(CodebaseIndex, "read_file", _boom_read)
+    monkeypatch.setattr(CodebaseIndex, "_read", _boom_read)
     monkeypatch.setattr(CodebaseIndex, "read_lines", _boom_read_lines)
     monkeypatch.setattr(CodebaseIndex, "read_function", _boom_read_function)
     monkeypatch.setattr(CodebaseIndex, "read_function_by_name", _boom_read_function_by_name)
     monkeypatch.setattr(CodebaseIndex, "list_files", _boom_list)
     monkeypatch.setattr(CodebaseIndex, "search", _boom_search)
 
-    assert read_file("a.py").startswith("Error:")
+    read_result = read_file("a.py")
+    assert read_result["status"] == "error"
+    assert read_result["content"][0]["text"].startswith("Error:")
     assert read_lines("a.py", 1, 1).startswith("Error:")
     assert read_function("a.py", 1).startswith("Error:")
     assert read_function("a.py", "f").startswith("Error:")
@@ -2260,18 +2263,59 @@ def test_agent_read_the_cited_file_true_when_real_content_starts_with_error() ->
     assert _agent_read_the_cited_file(agent, idx, "tests/fixtures/log_sample.txt") is True
 
 
-def test_agent_read_the_cited_file_false_when_cited_path_is_not_readable() -> None:
-    """Defensive check: if ``file_path`` itself is not genuinely readable via
-    ``index`` (violating the precondition that the caller already resolved
-    it), this returns False rather than trusting a toolResult's status alone."""
+def test_agent_read_the_cited_file_trusts_status_over_an_independent_index_probe() -> None:
+    """Grounding is judged ENTIRELY from the specific invocation's own recorded
+    toolResult, never from a fresh, independent ``index`` re-read: even when
+    ``index`` itself cannot read ``file_path`` (e.g. a repo-reader-backed file
+    whose transient failure has since cleared, or one that fails now after
+    having succeeded during the model's actual call), a toolResult the run
+    actually received with ``status="success"`` is still honored -- and,
+    conversely, is never invented from ``index`` alone without a matching
+    toolResult (see ``test_agent_read_the_cited_file_false_with_no_tool_call``).
+    This is what makes the check immune to a flaky reader disagreeing with
+    what the model was actually shown."""
     idx = CodebaseIndex(files={"app/main.py": "x = 1\n"})
     agent = _fake_agent(
         [
             _tool_use_message("assistant", "t1", "read_file", path="app/missing.py"),
-            _tool_result_message("t1", "Error: file not found: app/missing.py."),
+            _tool_result_message("t1", "class M:\n    pass\n", status="success"),
         ]
     )
-    assert _agent_read_the_cited_file(agent, idx, "app/missing.py") is False
+    # index has no knowledge of "app/missing.py" at all -- yet the actual
+    # recorded tool call succeeded, so it is trusted.
+    assert _agent_read_the_cited_file(agent, idx, "app/missing.py") is True
+
+
+def test_agent_read_the_cited_file_true_with_a_reasoning_block_before_the_tool_use() -> None:
+    """A thinking-enabled model's turn can prepend a ``reasoningContent``
+    block before its ``toolUse`` (``strands_adapter.py`` lines 564-570), so
+    the toolUse is not necessarily at content index 0 -- and Strands appends
+    only toolResult blocks in the following message (no reasoning echoed
+    back), so a bare same-index positional match would look at the wrong
+    block and miss a real success. Matching by toolUseId within the next
+    message (rather than raw index) finds it regardless of where in either
+    message's content list it sits."""
+    idx = CodebaseIndex(files={"app/main.py": "x = 1\n"})
+    agent = _fake_agent(
+        [
+            {"role": "user", "content": [{"text": "hi"}]},
+            {
+                "role": "assistant",
+                "content": [
+                    {"reasoningContent": {"text": "I should read the cited file first."}},
+                    {
+                        "toolUse": {
+                            "toolUseId": "t1",
+                            "name": "read_file",
+                            "input": {"path": "app/main.py"},
+                        }
+                    },
+                ],
+            },
+            _tool_result_message("t1", "x = 1\n"),
+        ]
+    )
+    assert _agent_read_the_cited_file(agent, idx, "app/main.py") is True
 
 
 def test_agent_read_the_cited_file_false_for_a_different_file() -> None:

@@ -55,7 +55,7 @@ import os
 import re
 from collections import OrderedDict
 from dataclasses import dataclass
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from strands import Agent, tool
 from strands.models.model import Model as _StrandsModel
@@ -1193,13 +1193,22 @@ def _build_tools(index: CodebaseIndex) -> List[Callable[..., str]]:
     Postconditions:
         - Returns six tools (``read_file``, ``read_lines``, ``read_function``,
           ``list_files``, ``search_codebase``, ``find_function_at_line``) that
-          delegate to ``index``; each returns a string and never raises, so a
-          bad model-supplied argument becomes a tool message rather than an
-          error that aborts the agent loop.
+          delegate to ``index`` and never raise, so a bad model-supplied
+          argument becomes a self-correcting tool message rather than an
+          error that aborts the agent loop. Every tool but ``read_file``
+          returns a plain string. ``read_file`` returns a Strands
+          ``ToolResult``-shaped dict (``{"status": ..., "content": [...]}``)
+          instead: unlike the others, its result is inspected after the run
+          by ``_agent_read_the_cited_file`` to decide whether a false-positive
+          verdict is grounded, so it needs an accurate ``status`` -- a plain
+          string return is always wrapped by Strands as ``status="success"``
+          regardless of content, which cannot be told apart from a genuine
+          read failure reported as an "Error: ..." string (see
+          ``_agent_read_the_cited_file`` for why that distinction matters).
     """
 
     @tool
-    def read_file(path: str) -> str:
+    def read_file(path: str) -> Dict[str, Any]:
         """Read the full contents of a file in the code under review.
 
         Use this to inspect the real code a finding refers to (and any related
@@ -1211,13 +1220,25 @@ def _build_tools(index: CodebaseIndex) -> List[Callable[..., str]]:
                 "<existing codebase>" returns the pre-existing-code excerpt.
 
         Returns:
-            The file's full text, or an "Error: ..." message if the path is
-            unknown or ambiguous.
+            A Strands ``ToolResult``-shaped dict: ``status="success"`` with
+            the file's full text, or ``status="error"`` with an
+            "Error: ..." message if the path is unknown or ambiguous. Never
+            raises (returning ``status="error"`` instead of raising keeps a
+            bad path a self-correcting tool message rather than an error that
+            aborts the agent loop).
         """
         try:
-            return index.read_file(path)
+            content, error = index._read(path)
         except Exception as exc:
-            return f"Error: could not read {path!r}: {type(exc).__name__}: {exc}"
+            return {
+                "status": "error",
+                "content": [
+                    {"text": f"Error: could not read {path!r}: {type(exc).__name__}: {exc}"}
+                ],
+            }
+        if content is not None:
+            return {"status": "success", "content": [{"text": content}]}
+        return {"status": "error", "content": [{"text": error}]}
 
     @tool
     def read_lines(path: str, start: int, end: int) -> str:
@@ -1665,19 +1686,38 @@ def _agent_read_the_cited_file(agent: Agent, index: CodebaseIndex, file_path: st
     full, via ``read_file`` specifically (not a partial ``read_lines``/
     ``read_function`` slice, which does not cover findings outside that slice).
 
-    "Success" is determined from ``index`` and Strands' own ``toolResult``
-    ``status`` field, never by sniffing the tool's returned text: the
-    ``read_file`` *tool* wrapper (``_build_tools``) collapses ``CodebaseIndex``'s
-    internal ``(content, error)`` distinction into a single string, prefixing
-    failures with ``"Error: ..."`` -- but real file content can legitimately
-    start with that same text (a checked-in log fixture, diagnostic output),
-    which a text-prefix check would misclassify as a failed read and wrongly
-    discard every otherwise-valid drop in the batch. Asking ``index`` directly
-    (which never confuses a real file's content with its own error sentinel;
-    see ``CodebaseIndex._read``) sidesteps that ambiguity entirely, and
-    checking ``toolResult.status`` additionally catches a framework-level tool
-    failure that never reaches ``CodebaseIndex`` at all (unlike a bare text
-    check, which only recognizes this module's own ``"Error:"`` convention).
+    "Success" is read directly off ``read_file``'s own ``toolResult.status``
+    -- never by sniffing the returned text, and never by an independent
+    ``index`` re-read. The ``read_file`` *tool* itself (``_build_tools``) sets
+    ``status`` accurately from ``CodebaseIndex._read``'s ``(content, error)``
+    outcome for THIS call, so status alone is trustworthy: it cannot mistake
+    real content that happens to start with "Error: ..." (a checked-in log
+    fixture, diagnostic output) for a failed read, and it does not depend on
+    an independent, later ``index`` probe that could disagree with what THIS
+    call actually returned -- e.g. a repo-reader backed by a network call
+    that fails transiently during the model's tool call but happens to
+    succeed on a later, separate check. Only the specific invocation's own
+    recorded result counts.
+
+    Correlating a toolUse with its toolResult is done by matching
+    ``toolUseId``, but scoped to the very next message only (never a global
+    search across the whole conversation): when a backend omits real
+    tool-call IDs, the Strands adapter synthesizes a fallback
+    (``strands_adapter.py``, ``f"{tool_name}_{idx}"`` where ``idx`` resets to
+    0 each turn) that is only unique *within* one turn -- a
+    single-tool-call-per-turn conversation (the common case) reuses the
+    identical fallback ID on every turn. A *global* ID search would then
+    credit a *later, unrelated* call's success (e.g. a successful read of a
+    different file two turns later) to an *earlier* failed read of the cited
+    file, since both calls share the same ID string; scoping the search to
+    "the message immediately following this toolUse's own message" avoids
+    that collision (Strands never assigns the same id to two calls that
+    round-trip together) while still tolerating non-toolUse content
+    interleaved in either message -- e.g. the ``reasoningContent`` block a
+    thinking-enabled model emits alongside its tool call
+    (``strands_adapter.py`` lines 564-570), which would misalign a bare
+    same-index positional match, since the following toolResult message
+    contains only toolResult blocks.
 
     Preconditions:
         - ``agent`` has already completed a run (``agent(prompt)`` returned),
@@ -1686,41 +1726,24 @@ def _agent_read_the_cited_file(agent: Agent, index: CodebaseIndex, file_path: st
           given (already resolved by the caller); ``index`` is the same
           index the run's tools were bound to.
 
-    Correlating a toolUse with its toolResult is done by *position*
-    (the toolResult block at the same index in the very next message), not by
-    matching ``toolUseId``: when a backend omits real tool-call IDs, the
-    Strands adapter synthesizes a fallback (``strands_adapter.py``,
-    ``f"{tool_name}_{idx}"`` where ``idx`` resets to 0 each turn) that is only
-    unique *within* one turn -- a single-tool-call-per-turn conversation (the
-    common case) reuses the identical fallback ID on every turn. Matching by
-    ID alone would then credit a *later, unrelated* call's success (e.g. a
-    successful read of a different file two turns later) to an *earlier*
-    failed read of the cited file, since both calls share the same ID string.
-    Position is unambiguous regardless of ID reuse.
-
     Postconditions:
-        - Returns ``True`` iff ``index.read_file_or_none(file_path)`` is not
-          ``None`` (``file_path`` is genuinely readable) AND some ``read_file``
-          toolUse (at message index ``i``, block index ``k``) whose input path
-          equals ``file_path`` (or resolves to it via ``index.resolve_path``,
-          covering a near-miss the model typed instead of the exact quoted
-          path) has, at the same block index ``k`` in the message at index
-          ``i + 1``, a toolResult with ``status == "success"``. A genuinely
-          empty result (a real zero-byte file, e.g. an unchanged
-          ``__init__.py``) still counts, since readability is judged by
-          ``index``, not by the result text's length or content. Never
-          raises: a malformed/empty message list, a toolUse with no following
-          message, or an unreadable ``file_path``, all yield ``False``
+        - Returns ``True`` iff some ``read_file`` toolUse (at message index
+          ``i``) whose input path equals ``file_path`` (or resolves to it via
+          ``index.resolve_path``, covering a near-miss the model typed instead
+          of the exact quoted path) has a toolResult with a matching
+          ``toolUseId`` in the message at index ``i + 1``, with
+          ``status == "success"``. A genuinely empty result (a real zero-byte
+          file, e.g. an unchanged ``__init__.py``) still counts, since
+          ``status`` -- not the result text's length or content -- is what is
+          checked. Never raises: a malformed/empty message list, or a toolUse
+          with no following message or no matching result, yields ``False``
           (fail-safe: treated as "not grounded", so the caller keeps rather
           than drops on ambiguity).
     """
     try:
-        if index.read_file_or_none(file_path) is None:
-            return False
         messages = agent.messages
         for i, message in enumerate(messages):
-            content = message.get("content") or []
-            for k, block in enumerate(content):
+            for block in message.get("content") or []:
                 if not isinstance(block, dict):
                     continue
                 tool_use = block.get("toolUse")
@@ -1731,14 +1754,19 @@ def _agent_read_the_cited_file(agent: Agent, index: CodebaseIndex, file_path: st
                     continue
                 if candidate != file_path and index.resolve_path(candidate) != file_path:
                     continue
-                if i + 1 >= len(messages):
+                tool_use_id = tool_use.get("toolUseId")
+                if tool_use_id is None or i + 1 >= len(messages):
                     continue
-                next_content = messages[i + 1].get("content") or []
-                if k >= len(next_content) or not isinstance(next_content[k], dict):
-                    continue
-                result = next_content[k].get("toolResult")
-                if isinstance(result, dict) and result.get("status") == "success":
-                    return True
+                for result_block in messages[i + 1].get("content") or []:
+                    if not isinstance(result_block, dict):
+                        continue
+                    result = result_block.get("toolResult")
+                    if (
+                        isinstance(result, dict)
+                        and result.get("toolUseId") == tool_use_id
+                        and result.get("status") == "success"
+                    ):
+                        return True
         return False
     except Exception:
         return False
