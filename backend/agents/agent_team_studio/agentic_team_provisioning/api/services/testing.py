@@ -117,9 +117,10 @@ def get_test_chat_session(team_id: str, session_id: str):
         (only generated when the session has no messages yet); ``404`` if the
         session doesn't exist or belongs to a different team. If starter-prompt
         generation raises a 404 because the session's agent isn't on the
-        roster, the prompts list is empty rather than failing the request; any
-        other failure (e.g. a registry outage) propagates instead of being
-        swallowed.
+        roster, or ``LookupError`` because the linked Manifest is missing
+        (orphan ``manifest_id``), the prompts list is empty rather than failing
+        the request; any other failure (e.g. a registry 500) propagates instead
+        of being swallowed.
     """
     from agent_team_studio.agentic_team_provisioning.api import main as _main
 
@@ -134,13 +135,27 @@ def get_test_chat_session(team_id: str, session_id: str):
     if not messages:
         try:
             agent_def = _main._find_agent_in_roster(team_id, session.agent_name)
+            persona = _main.resolve_persona(agent_def.manifest_id)
             prompts = generate_starter_prompts(
-                agent_def.agent_name, agent_def.role, agent_def.skills, agent_def.expertise
+                agent_def.agent_name, persona.role, persona.skills, persona.expertise
+            )
+        except LookupError as exc:
+            # Orphan manifest_id: soft-fail like list enrichment — empty prompts,
+            # not a 500 on an otherwise-valid session GET.
+            # Log via main's logger so hub-scoped warning assertions keep working.
+            _main.logger.warning(
+                "Could not generate starter prompts for session %s (agent=%s): %s",
+                session_id,
+                session.agent_name,
+                exc,
             )
         except HTTPException as exc:
+            # Only the genuine "agent not on roster" case falls back to an empty
+            # prompt list. Anything else (e.g. a registry 500) is a real failure
+            # worth surfacing to the caller, not silently swallowing.
             if exc.status_code != 404:
                 raise
-            logger.warning(
+            _main.logger.warning(
                 "Could not generate starter prompts for session %s (agent=%s): %s",
                 session_id,
                 session.agent_name,
@@ -222,14 +237,20 @@ def send_test_chat_message(team_id: str, session_id: str, req: SendTestChatMessa
     context_parts.append(f"User: {req.content}")
     full_context = "\n\n".join(context_parts)
 
+    # Build and invoke the agent. This local test-chat path has no cognition
+    # injector (no proxy / open side channel) and no idempotency ledger, so it
+    # uses the plain runtime rather than the cognition-aware wrapper — advisory
+    # rules + memory digest are rendered on the gated sandbox invoke path, where
+    # the shim opens the channel.
     try:
+        persona = _main.resolve_persona(agent_def.manifest_id)
         agent_instance = _main._build_test_agent(
             agent_def.agent_name,
-            agent_def.role,
-            agent_def.skills,
-            agent_def.capabilities,
-            agent_def.tools,
-            agent_def.expertise,
+            persona.role,
+            persona.skills,
+            persona.capabilities,
+            persona.tools,
+            persona.expertise,
         )
         response_text = _main._call_test_agent(agent_instance, full_context)
     except Exception as exc:

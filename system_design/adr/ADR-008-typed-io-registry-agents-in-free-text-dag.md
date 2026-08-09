@@ -22,8 +22,9 @@ Agent Studio lets a roster **mix** two kinds of agent:
   (`backend/agents/agent_registry/models.py`) that declare **typed** input/output schemas. The types are
   carried as lazy dotted pointers (`IOSchema.schema_ref`, resolved via
   `agent_registry/schema_resolver.py`), not inline schemas.
-- **Generated agents** — LLM-authored roster descriptors (`AgenticTeamAgent`) with free-text persona
-  fields (`role`, `skills`, `capabilities`, `tools`, `expertise`).
+- **Generated agents** — thin roster refs (`AgenticTeamAgent`: `agent_name`, `source`,
+  `manifest_id`) whose persona is stored on an in-process `AgentManifest` registered via
+  `register_team_manifests` (LLM ``role`` → manifest ``summary``).
 
 The runtime that executes a team is a **single linear DAG**, not a typed dataflow. The pipeline runner
 (`backend/agents/agentic_team_provisioning/runtime/pipeline_runner.py`) walks a `ProcessDefinition` in
@@ -40,15 +41,16 @@ endpoints exist (`backend/agents/agentic_team_provisioning/api/main.py`,
 `tests/test_registry_roster.py`). But the bridge only lets a registry agent **sit on** a roster — it does
 not make the DAG honor its typed IO. Two current-code sites make that concrete:
 
-- **Projection drops the types.** `_roster_agent_from_manifest`
-  (`agentic_team_provisioning/api/main.py`) maps a manifest into a roster entry — `manifest.tags →
-  skills`, `manifest.cognition.tools → tools`, `manifest.summary → role`, `manifest.team → expertise` —
-  and **discards `manifest.inputs` / `manifest.outputs` entirely**. The projection exists to satisfy
-  `roster_validation.py`'s depth check, not to preserve typed IO.
-- **The runner ignores provenance.** `_run_agent` (`pipeline_runner.py`) builds **every** roster agent
-  from its free-text descriptor fields and does a blocking LLM call — there is **no `source == "registry"`
-  branch** and no schema marshalling. A registry-sourced entry executes identically to a generated LLM
-  persona.
+- **Persona is join-at-read, not stored on roster.** `_roster_agent_from_manifest`
+  (`agentic_team_provisioning/api/main.py`) persists only a thin ref (`agent_name`,
+  `source`, `manifest_id`). Persona for API responses and validation comes from
+  `resolve_persona` / `persona_from_manifest` (`roster_resolve.py`), which maps
+  `manifest.tags → skills`, `manifest.cognition.tools → tools`, `manifest.summary → role`,
+  etc. Typed `manifest.inputs` / `manifest.outputs` are still not marshalled through the DAG.
+- **The runner resolves persona at invoke time.** `_run_agent` (`pipeline_runner.py`) calls
+  `resolve_persona(agent_def.manifest_id)` for every roster agent and builds a free-text LLM
+  persona — there is **no `source == "registry"` branch** and no schema marshalling. A
+  registry-sourced entry executes identically to a generated agent on that path.
 
 So the impedance mismatch is not just a design risk; a lossy free-text projection is the *current*
 behavior. The open question is whether — and how — a later phase should make the DAG execute a registry
@@ -68,8 +70,8 @@ of scope for v1.**
 Concretely, for v1:
 
 - A roster **may contain** registry agents (via the shipped bridge), but at run time a registry-sourced
-  entry executes as a **free-text LLM persona** built from its projected `role` / `skills` / `tools`
-  fields — the same path a generated agent takes.
+  entry executes as a **free-text LLM persona** built from its linked manifest via `resolve_persona`
+  — the same path a generated agent takes.
 - The manifest's typed `inputs` / `outputs` (`schema_ref`s) are **advertised in the catalog but not
   marshalled through the DAG**. No step validates, coerces, or type-checks the free text it receives or
   emits against a manifest schema.

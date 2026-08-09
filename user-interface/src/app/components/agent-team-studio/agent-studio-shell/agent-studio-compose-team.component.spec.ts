@@ -44,13 +44,13 @@ const process = (overrides: Partial<ProcessDefinition> = {}): ProcessDefinition 
 
 const agent = (overrides: Partial<AgenticTeamAgent> = {}): AgenticTeamAgent => ({
   agent_name: 'Planner',
+  source: 'registry',
+  manifest_id: 'blogging.planner',
   role: 'Plans',
   skills: [],
   capabilities: [],
   tools: [],
   expertise: [],
-  source: 'registry',
-  manifest_id: 'blogging.planner',
   ...overrides,
 });
 

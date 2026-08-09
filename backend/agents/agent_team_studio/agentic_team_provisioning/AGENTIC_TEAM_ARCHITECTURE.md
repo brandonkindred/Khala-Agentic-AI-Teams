@@ -42,16 +42,15 @@ The orchestrator is the **single point of control** for the team. No agent or pr
 
 ## 3. Roster / Agents pool (Agent 1 … Agent N)
 
-Each agentic team maintains a **Roster** — a named pool of agents. The roster is the single source of truth for who is on the team and what they bring. Each agent declares:
+Each agentic team maintains a **Roster** — a named pool of agents. The roster is the single source of truth for **who is on the team** (membership and slot assignment). Each roster row is a **thin ref** to a registry `AgentManifest`:
 
 | Field | Purpose |
 |-------|---------|
-| **agent_name** | Stable, unique within the team; used for provisioning and step assignment |
-| **role** | Primary role on the team |
-| **skills** | Specific skills (e.g. "data analysis", "copywriting") |
-| **capabilities** | Functional capabilities (e.g. "code generation", "web search") |
-| **tools** | Tools or integrations the agent can use (e.g. "Git", "Slack API") |
-| **expertise** | Domain expertise areas (e.g. "customer support", "HIPAA compliance") |
+| **agent_name** | Stable, unique slot key within the team; used for provisioning and step assignment |
+| **source** | Provenance: `"generated"` (team-local manifest) or `"registry"` (shared catalog manifest) |
+| **manifest_id** | Join key to the linked `AgentManifest` in the agent registry |
+
+**Persona fields** (`role`, `skills`, `capabilities`, `tools`, `expertise`) are **not** stored on the roster. The linked **`AgentManifest` is the source of truth** for persona. API responses and validation **join at read time** via `resolve_persona` / `enrich_roster_agent`, returning an **`EnrichedRosterAgent`** (thin ref plus flattened persona fields projected from the manifest). To change persona, edit the manifest — roster PUT does not accept persona-field writes.
 
 ### Roster validation
 
@@ -60,7 +59,7 @@ The roster is validated automatically to ensure the team is **fully staffed**. V
 1. **Unrostered agents** — every agent referenced in a process step must exist on the roster.
 2. **Unused agents** — every rostered agent should be assigned to at least one process step.
 3. **Unstaffed steps** — every process step must have at least one assigned agent.
-4. **Incomplete profiles** — agents missing skills, capabilities, tools, or expertise are flagged so coverage cannot be assumed.
+4. **Incomplete profiles** — agents whose linked manifest resolves to missing skills, capabilities, tools, or expertise are flagged so coverage cannot be assumed.
 
 A team is considered fully staffed only when all checks pass. The validation endpoint is `GET /teams/{team_id}/roster/validation`.
 
@@ -95,7 +94,7 @@ Processes reference agents **by name** — every agent mentioned in a step must 
 Before a team definition is considered valid:
 
 - [ ] **Orchestrator Agent** role is implied (the service itself acts as orchestrator).
-- [ ] **Roster** is explicitly defined — every agent has a name, role, skills, capabilities, tools, and expertise.
+- [ ] **Roster** is explicitly defined — every agent has a thin ref (`agent_name`, `source`, `manifest_id`) and the linked manifest supplies complete persona fields (visible via `EnrichedRosterAgent` on GET).
 - [ ] **Roster validation** passes (`GET /teams/{team_id}/roster/validation` returns `is_fully_staffed: true`).
 - [ ] **Processes** reference only agents that exist on the roster.
 - [ ] **Each process** has a trigger, at least one step, and an output.

@@ -34,6 +34,7 @@ from agent_team_studio.agentic_team_provisioning.models import (
     ProcessStep,
     StepType,
 )
+from agent_team_studio.agentic_team_provisioning.roster_resolve import resolve_persona
 from agent_team_studio.agentic_team_provisioning.runtime.agent_builder import (
     build_agent,
     call_agent,
@@ -268,21 +269,27 @@ class PipelineRunner:
     def _run_agent(agent_def: AgenticTeamAgent, prompt: str) -> str:
         """Build and invoke an agent for a single prompt (blocking LLM call).
 
-        v1 scope boundary: every roster agent runs this way — including a
-        ``source == "registry"`` entry, which executes as a free-text LLM persona built from its
-        projected ``role`` / ``skills`` / ``tools`` fields. There is deliberately **no**
-        ``source == "registry"`` branch: a registry agent's declared typed input/output schema is
-        not marshalled through the DAG in v1. Real typed-IO registry-agent invocation is deferred —
-        see ``system_design/adr/ADR-008-typed-io-registry-agents-in-free-text-dag.md``. Do not add a
-        registry-execution branch here without first resolving that spike.
+        Persona is join-at-read: ``resolve_persona(agent_def.manifest_id)`` supplies
+        ``role`` / ``skills`` / ``tools`` from the linked ``AgentManifest``. v1 scope
+        boundary: every roster agent — including ``source == "registry"`` — runs as a
+        free-text LLM persona on that path. There is deliberately **no**
+        ``source == "registry"`` branch: a registry agent's declared typed input/output
+        schema is not marshalled through the DAG in v1. Real typed-IO registry-agent
+        invocation is deferred — see
+        ``system_design/adr/ADR-008-typed-io-registry-agents-in-free-text-dag.md``.
+        Do not add a registry-execution branch here without first resolving that spike.
+
+        Preconditions: ``agent_def.manifest_id`` is non-empty and resolves in the registry.
+        Postconditions: returns the agent's free-text LLM response for ``prompt``.
         """
+        persona = resolve_persona(agent_def.manifest_id)
         agent_instance = build_agent(
             agent_def.agent_name,
-            agent_def.role,
-            agent_def.skills,
-            agent_def.capabilities,
-            agent_def.tools,
-            agent_def.expertise,
+            persona.role,
+            persona.skills,
+            persona.capabilities,
+            persona.tools,
+            persona.expertise,
         )
         return call_agent(agent_instance, prompt)
 
