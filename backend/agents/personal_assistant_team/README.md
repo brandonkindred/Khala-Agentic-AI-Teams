@@ -170,7 +170,7 @@ curl "http://127.0.0.1:8015/users/user123/tasks/lists"
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `LLM_PROVIDER` | LLM provider (ollama, dummy) | ollama |
-| `LLM_MODEL` | LLM model name | llama3.2 |
+| `LLM_MODEL` | LLM model name | deepseek-v4-flash:cloud |
 | `LLM_BASE_URL` | Ollama base URL | http://127.0.0.1:11434 |
 | `PA_HOST` | API server host | 0.0.0.0 |
 | `PA_PORT` | API server port | 8015 |

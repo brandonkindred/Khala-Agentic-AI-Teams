@@ -24,12 +24,12 @@ from dataclasses import dataclass
 from typing import Any, Callable, Dict, Generic, List, Optional, TypeVar
 
 from llm_service import LLMClient
+from shared.dev_models.models import ReviewContext, Task
 from software_engineering_team.shared.context_sizing import (
     compute_code_review_arch_overview_chars,
     compute_code_review_spec_excerpt_chars,
 )
 from software_engineering_team.shared.issue_grounding import drop_ungrounded_issues
-from software_engineering_team.shared.models import ReviewContext, Task
 
 logger = logging.getLogger(__name__)
 

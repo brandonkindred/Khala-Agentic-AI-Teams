@@ -21,7 +21,7 @@ def _assert_raw_source(codes: list[str]) -> None:
 
 
 def _task(**overrides):
-    from software_engineering_team.shared.models import Task, TaskType
+    from shared.dev_models.models import Task, TaskType
 
     base = dict(
         id="t1",
@@ -140,10 +140,10 @@ def test_run_llm_review_forwards_review_context(monkeypatch):
     configured, or it fails) also sees architecture/spec_content -- previously
     only the external agent path received this context, so a deployment
     relying on the fallback never saw it despite callers passing review_context."""
+    from shared.dev_models.models import ReviewContext, SystemArchitecture
     from software_engineering_team.backend_code_v2_team.phases import review as review_mod
     from software_engineering_team.backend_code_v2_team.phases.review import _run_llm_review
     from software_engineering_team.code_review_agent.models import CodeReviewOutput
-    from software_engineering_team.shared.models import ReviewContext, SystemArchitecture
 
     captured: dict = {}
 
@@ -739,8 +739,8 @@ def test_run_review_passes_files_dict_unmodified(monkeypatch, tmp_path: Path):
 def test_run_review_forwards_architecture_and_spec_content(monkeypatch, tmp_path: Path):
     """``run_review``'s ``architecture``/``spec_content`` reach the code-review
     agent's input, and default to ``None``/``""`` when omitted."""
+    from shared.dev_models.models import ReviewContext, SystemArchitecture
     from software_engineering_team.backend_code_v2_team.phases.review import run_review
-    from software_engineering_team.shared.models import ReviewContext, SystemArchitecture
 
     _stub_coordinator(monkeypatch)
 

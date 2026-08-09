@@ -1676,7 +1676,7 @@ orchestrator thread (e.g. server restart) is recovered via
 
 ### GIT_COMMIT_USER_NAME
 Author/committer name for every git commit platform code makes (SE pipeline, coding team, agent git
-tools — all routed through `software_engineering_team/shared/git_utils.py`). Default `Khala`. Blank
+tools — all routed through `backend/shared/git/git_utils.py`). Default `Khala`. Blank
 values fall back to the default; natively-exported `GIT_AUTHOR_*`/`GIT_COMMITTER_*` env vars win over
 this setting.
 

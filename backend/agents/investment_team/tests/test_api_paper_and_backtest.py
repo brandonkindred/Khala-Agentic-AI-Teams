@@ -9,6 +9,9 @@ Targets:
   terminal-reason → FAILED mapping (when INVESTMENT_LIVE_PAPER_ENABLED=true).
 * ``stop_live_paper_trading`` 404 + happy paths.
 * ``run_paper_trading`` live-mode concurrency guard (409).
+* ``_fail_paper_trading_session`` delegates to the shared
+  ``_apply_paper_trading_failure`` helper instead of re-implementing its
+  field updates.
 """
 
 from __future__ import annotations
@@ -779,6 +782,32 @@ def test_stop_live_paper_trading_404_when_session_missing(
     assert resp.status_code == 404
 
 
+def test_stop_live_paper_trading_404_when_session_corrupted(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """A persisted record that fails ``PaperTradingSession.parse_persisted``
+    must surface as a clean 404, not an unhandled 500 -- and must not be
+    signaled (there's no valid session to check the status of)."""
+    from investment_team.api import main as api_main
+
+    monkeypatch.setenv("INVESTMENT_LIVE_PAPER_ENABLED", "true")
+    api_main._paper_trading_sessions["pt-corrupt-stop"] = {"session_id": "pt-corrupt-stop"}
+
+    def _fail_if_signaled(session_id):
+        raise AssertionError("must not signal a session that failed to parse")
+
+    monkeypatch.setattr(api_main, "_signal_paper_trading_stop", _fail_if_signaled)
+
+    resp = api_client.post("/strategy-lab/paper-trade/pt-corrupt-stop/stop")
+
+    assert resp.status_code == 404
+    assert "pt-corrupt-stop" in resp.json()["detail"]
+    # Left untouched: the corrupt record could not be re-parsed.
+    assert api_main._paper_trading_sessions.get("pt-corrupt-stop") == {
+        "session_id": "pt-corrupt-stop"
+    }
+
+
 def test_stop_live_paper_trading_happy_path(monkeypatch: pytest.MonkeyPatch, api_client) -> None:
     """Stop endpoint must invoke the StopController and stamp the session."""
     from investment_team.api import main as api_main
@@ -1436,6 +1465,47 @@ def test_fail_paper_trading_session_never_raises_on_store_write_failure(monkeypa
 
     # Must not raise.
     api_main._fail_paper_trading_session("pt-broken-store", "dispatch failed")
+
+
+def test_fail_paper_trading_session_delegates_to_apply_paper_trading_failure(monkeypatch) -> None:
+    """Regression test for #5136: `_fail_paper_trading_session` must delegate
+    to the shared `_apply_paper_trading_failure` helper rather than mutating
+    status/error/completed_at itself, and — unlike the batch recovery path —
+    must not pass any recovery-specific fields. This would fail against the
+    pre-fix implementation, which had no such helper to delegate to.
+    """
+    from investment_team.api import main as api_main
+    from investment_team.models import PaperTradingStatus, StrategySpec
+
+    strategy = StrategySpec(
+        strategy_id="s",
+        authored_by="x",
+        asset_class="equities",
+        hypothesis="h",
+        signal_definition="s",
+        timeframe="1d",
+        strategy_code="def x(): pass",
+    )
+    live = _live_session("pt-delegates", strategy, PaperTradingStatus.LIVE)
+    store = {"pt-delegates": live}
+    monkeypatch.setattr(api_main, "_paper_trading_sessions", store)
+
+    real_apply = api_main._apply_paper_trading_failure
+    calls = []
+
+    def _spy(session, error, **kwargs):
+        calls.append((session, error, kwargs))
+        return real_apply(session, error, **kwargs)
+
+    monkeypatch.setattr(api_main, "_apply_paper_trading_failure", _spy)
+
+    api_main._fail_paper_trading_session("pt-delegates", "dispatch failed")
+
+    assert len(calls) == 1
+    session_arg, error_arg, kwargs = calls[0]
+    assert session_arg.session_id == "pt-delegates"
+    assert error_arg == "dispatch failed"
+    assert kwargs == {}
 
 
 # ---------------------------------------------------------------------------
@@ -2233,7 +2303,8 @@ def test_run_paper_trading_background_guards_non_terminal_agent_result(
     assert persisted is not None
     assert persisted.status == PaperTradingStatus.FAILED
     assert persisted.completed_at
-    assert "non-terminal status" in (persisted.error or "")
+    # The guard's raw ValueError text must not leak into the user-facing field.
+    assert persisted.error == "Paper trading crashed due to an internal error."
 
 
 def test_run_paper_trading_background_guards_terminal_status_missing_completed_at(
@@ -2306,4 +2377,5 @@ def test_run_paper_trading_background_guards_terminal_status_missing_completed_a
     assert persisted is not None
     assert persisted.status == PaperTradingStatus.FAILED
     assert persisted.completed_at
-    assert "no completed_at" in (persisted.error or "")
+    # The guard's raw ValueError text must not leak into the user-facing field.
+    assert persisted.error == "Paper trading crashed due to an internal error."

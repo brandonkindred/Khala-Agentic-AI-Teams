@@ -115,21 +115,21 @@ def test_build_agent_feedback_empty_returns_empty_or_string():
 
 
 def test_task_status_enum_values_present():
-    from software_engineering_team.shared.models import TaskStatus
+    from shared.dev_models.models import TaskStatus
 
     # Some expected enum members
     assert TaskStatus.PENDING.value in ("pending",)
 
 
 def test_task_type_enum_values_present():
-    from software_engineering_team.shared.models import TaskType
+    from shared.dev_models.models import TaskType
 
     # Some expected enum members
     assert TaskType.BACKEND.value in ("backend",)
 
 
 def test_task_round_trip_dict():
-    from software_engineering_team.shared.models import Task, TaskStatus, TaskType
+    from shared.dev_models.models import Task, TaskStatus, TaskType
 
     t = Task(
         id="t1",

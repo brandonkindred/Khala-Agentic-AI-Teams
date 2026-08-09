@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from software_engineering_team.shared import branch_utils
+from shared.git import branch_utils
 
 
 def test_make_slug_sanitizes_and_bounds() -> None:
