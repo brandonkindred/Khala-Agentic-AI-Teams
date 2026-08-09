@@ -1,45 +1,65 @@
 """Agent Studio Stage-1 build-flow API (mounted at ``/api/agent-studio``).
 
-Thin HTTP surface over the Agent Studio Temporal workflows:
+Conversation / agent handlers are a thin HTTP surface over Temporal workflows:
 
     POST /api/agent-studio/conversations                       — start an authoring chat (new | refine)
     POST /api/agent-studio/conversations/{id}/messages         — send a message; assistant updates the draft
     POST /api/agent-studio/agents/from-registry/{agent_id}     — clone a registry agent into a refine draft
     POST /api/agent-studio/agents                              — save + register a finished definition
 
-Agent Studio is **Temporal-only**: every handler dispatches its operation as a
-durable workflow → activity via :mod:`agent_team_studio.agent_studio.temporal.dispatch` and blocks for
-the result. There is no non-Temporal fallback — the activity does the real work by
-delegating to the process-wide :class:`~agent_team_studio.agent_studio.service.AgentStudioService`
-singleton (:func:`agent_team_studio.agent_studio.runtime.get_studio_service`). The worker runs
+Those Temporal handlers dispatch a durable workflow → activity via
+:mod:`agent_team_studio.agent_studio.temporal.dispatch` and block for the result.
+There is no non-Temporal fallback for conversations/agents — the activity does the
+real work by delegating to the process-wide
+:class:`~agent_team_studio.agent_studio.service.AgentStudioService` singleton
+(:func:`agent_team_studio.agent_studio.runtime.get_studio_service`). The worker runs
 in-process (started from the unified-API lifespan), so those activity threads share
 that singleton's conversation store with these handlers.
 
+User-scoped Studio drafts are **sync store CRUD** (not Temporal) over
+:func:`agent_team_studio.agent_studio.drafts_runtime.get_draft_store`. Bodies are an
+opaque ``{name?, payload?}`` envelope; tenancy uses :func:`get_current_user_id`
+(overridable in tests via ``app.dependency_overrides``):
+
+    POST   /api/agent-studio/drafts              — create-only
+    PUT    /api/agent-studio/drafts/{draft_id}   — partial update (omitted fields unchanged)
+    GET    /api/agent-studio/drafts              — list summaries
+    GET    /api/agent-studio/drafts/{draft_id}   — load full draft
+    PATCH  /api/agent-studio/drafts/{draft_id}   — rename
+    DELETE /api/agent-studio/drafts/{draft_id}   — delete
+
 Tool discovery for the definition panel reuses the existing ``GET /api/llm-tools/``
 (no new route here). Handlers are synchronous ``def`` so FastAPI runs them in its
-threadpool, keeping the blocking workflow round-trip off the event loop. Errors map
-cleanly: :class:`ValueError` → 400, :class:`LookupError` → 404 — the dispatch layer
-re-raises those native exceptions from the workflow failure so this mapping is
-unchanged by the Temporal round-trip.
+threadpool (Temporal round-trips and store I/O stay off the event loop). Errors map
+cleanly: :class:`ValueError` → 400, :class:`LookupError` / missing draft → 404 —
+the Temporal dispatch layer re-raises those native exceptions from workflow failure
+so conversation/agent mapping is unchanged by the Temporal round-trip.
 
-Auth: these routes carry no per-route authentication dependency, consistent with the
+Auth: these routes carry no real authentication dependency, consistent with the
 other team routers on the Unified API. Authentication/authorization is expected to be
-enforced upstream (reverse proxy / API gateway). The ``SecurityGatewayMiddleware``
-fronting all ``/api/*`` routes is an abuse/prompt-injection scanner, **not** an
-authn/authz layer.
+enforced upstream (reverse proxy / API gateway). Drafts tenancy is currently a
+pluggable user-id dependency that defaults to ``DEFAULT_USER_ID`` until real auth is
+wired. The ``SecurityGatewayMiddleware`` fronting all ``/api/*`` routes is an
+abuse/prompt-injection scanner, **not** an authn/authz layer.
 """
 
 from __future__ import annotations
 
 import logging
+from typing import Annotated
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 
+from agent_team_studio.agent_studio.drafts_runtime import get_draft_store
 from agent_team_studio.agent_studio.models import (
     AgentDefinition,
+    AgentStudioDraft,
+    AgentStudioDraftSummary,
     ConversationStateResponse,
+    RenameDraftRequest,
     SaveAgentRequest,
     SaveAgentResponse,
+    SaveDraftRequest,
     SendMessageRequest,
     StartConversationRequest,
 )
@@ -48,6 +68,120 @@ from agent_team_studio.agent_studio.temporal import dispatch
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/agent-studio", tags=["agent-studio"])
+
+
+def get_current_user_id() -> str:
+    """Resolve the caller user id for drafts tenancy.
+
+    Postconditions:
+        * Returns a non-empty user id. Default is ``DEFAULT_USER_ID`` until real
+          auth is wired; tests override via ``app.dependency_overrides``.
+
+    Note:
+        ``DEFAULT_USER_ID`` is imported lazily so ``user_profile`` stays out of
+        ``sys.modules`` when that team is disabled at import time.
+    """
+    from user_profile.store import DEFAULT_USER_ID
+
+    return DEFAULT_USER_ID
+
+
+def _summary_from_draft(draft: AgentStudioDraft) -> AgentStudioDraftSummary:
+    return AgentStudioDraftSummary(draft_id=draft.draft_id, name=draft.name, updated_at=draft.updated_at)
+
+
+@router.post("/drafts", response_model=AgentStudioDraftSummary)
+def create_draft(
+    req: SaveDraftRequest,
+    user_id: Annotated[str, Depends(get_current_user_id)],
+) -> AgentStudioDraftSummary:
+    """Create a new Studio draft owned by the current user.
+
+    Preconditions:
+        * ``req`` is FastAPI-validated; ``user_id`` is non-empty from the dependency.
+    Postconditions:
+        * Returns a summary for the new draft. ``ValueError`` → 400.
+    """
+    try:
+        draft = get_draft_store().create(user_id, name=req.name, payload=req.payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return _summary_from_draft(draft)
+
+
+@router.put("/drafts/{draft_id}", response_model=AgentStudioDraftSummary)
+def update_draft(
+    draft_id: str,
+    req: SaveDraftRequest,
+    user_id: Annotated[str, Depends(get_current_user_id)],
+) -> AgentStudioDraftSummary:
+    """Partially update an owned draft; omitted ``name``/``payload`` stay unchanged.
+
+    Postconditions:
+        * Returns updated summary, or 404 when missing/wrong user. ``ValueError`` → 400.
+        * Fields left ``None`` in ``req`` are not cleared — send ``payload: {}`` to
+          replace the payload with an empty object.
+    """
+    try:
+        draft = get_draft_store().update(user_id, draft_id, name=req.name, payload=req.payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if draft is None:
+        raise HTTPException(status_code=404, detail="Draft not found")
+    return _summary_from_draft(draft)
+
+
+@router.get("/drafts", response_model=list[AgentStudioDraftSummary])
+def list_drafts(
+    user_id: Annotated[str, Depends(get_current_user_id)],
+    limit: int = Query(50, ge=1),
+    offset: int = Query(0, ge=0),
+) -> list[AgentStudioDraftSummary]:
+    """List draft summaries for the current user (most recent first).
+
+    Postconditions:
+        * Returns summaries only; store clamps ``limit`` to max 100.
+    """
+    return get_draft_store().list_summaries(user_id, limit=limit, offset=offset)
+
+
+@router.get("/drafts/{draft_id}", response_model=AgentStudioDraft)
+def get_draft(
+    draft_id: str,
+    user_id: Annotated[str, Depends(get_current_user_id)],
+) -> AgentStudioDraft:
+    """Load the full draft payload for the current user."""
+    draft = get_draft_store().get(user_id, draft_id)
+    if draft is None:
+        raise HTTPException(status_code=404, detail="Draft not found")
+    return draft
+
+
+@router.patch("/drafts/{draft_id}", response_model=AgentStudioDraftSummary)
+def rename_draft(
+    draft_id: str,
+    req: RenameDraftRequest,
+    user_id: Annotated[str, Depends(get_current_user_id)],
+) -> AgentStudioDraftSummary:
+    """Rename an owned draft."""
+    try:
+        summary = get_draft_store().rename(user_id, draft_id, req.name)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if summary is None:
+        raise HTTPException(status_code=404, detail="Draft not found")
+    return summary
+
+
+@router.delete("/drafts/{draft_id}")
+def delete_draft(
+    draft_id: str,
+    user_id: Annotated[str, Depends(get_current_user_id)],
+) -> dict[str, str]:
+    """Delete an owned draft."""
+    if not get_draft_store().delete(user_id, draft_id):
+        raise HTTPException(status_code=404, detail="Draft not found")
+    return {"draft_id": draft_id, "status": "deleted"}
 
 
 @router.post("/conversations", response_model=ConversationStateResponse)

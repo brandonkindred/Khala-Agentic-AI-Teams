@@ -68,7 +68,7 @@ from .util import _flatten_system_prompt_content
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["LLMClientConfig", "LLMClientModel", "get_strands_model", "run_json_via_strands"]
+__all__ = ["LLMClientConfig", "LLMClientModel", "run_json_via_strands"]
 
 
 ResponseFormat = Literal["json", "text"]
@@ -675,7 +675,7 @@ class LLMClientModel(Model):
 # ---------------------------------------------------------------------------
 
 
-def get_strands_model(
+def _get_strands_model(
     agent_key: Optional[str] = None,
     *,
     temperature: float = 0.0,
@@ -685,11 +685,17 @@ def get_strands_model(
     client: Optional[LLMClient] = None,
     response_format: str = "json",
 ) -> LLMClientModel:
-    """Return a Strands-compatible ``Model`` wired to the Khala LLM service.
+    """Construct a Strands-compatible ``Model`` wired to a raw ``LLMClient``.
 
-    This is the canonical entry point for constructing a Strands ``Agent``
-    that should use the project's LLM stack. Under the hood it calls
-    :func:`llm_service.get_client` (respecting ``LLM_PROVIDER``,
+    This is a low-level, package-private helper: the canonical public entry
+    point for constructing a Strands ``Agent`` that should use the project's
+    LLM stack is :func:`llm_service.get_strands_model` (backed by
+    ``strands_provider``), which adds provider resolution, model caching, and
+    API-key-fingerprint cache invalidation on top of a directly-built
+    :class:`LLMClientModel`. This function is used directly, and intentionally,
+    only by ``strategy_lab.model_factory`` where the caller needs to inject
+    its own timeout-scoped client and bypass the provider cache. Under the
+    hood it calls :func:`llm_service.get_client` (respecting ``LLM_PROVIDER``,
     ``LLM_MODEL_<agent_key>``, and the rest of the env contract) and wraps
     the result in :class:`LLMClientModel`.
 

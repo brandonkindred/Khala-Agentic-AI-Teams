@@ -11,10 +11,11 @@ Preconditions:
     Callers import named helpers from this module (prefer lazy import inside
     Temporal activities so ``api.main`` is not loaded at worker import time).
 Postconditions:
-    Run-state I/O helpers are defined directly in this module. Deferred names
-    resolve to the same callable currently defined on ``investment_team.api.main``
-    via lazy attribute lookup. Behavior is unchanged from importing those
-    symbols directly from ``api.main``.
+    Run-state I/O helpers, including ``_snapshot_prior_records``, are defined
+    directly in this module. Deferred names resolve to the same callable
+    currently defined on ``investment_team.api.main`` via lazy attribute
+    lookup. Behavior is unchanged from importing those symbols directly from
+    ``api.main``.
 Invariants:
     ``__all__`` is the complete public helper surface for this module; adding
     a name requires updating the boundaries note.
@@ -32,6 +33,10 @@ import httpx
 from fastapi import HTTPException
 from pydantic import ValidationError
 
+from investment_team.models import StrategyLabRecord
+from investment_team.strategy_lab.run_state import (
+    DEFAULT_FENCING_GENERATION,
+)
 from investment_team.strategy_lab.run_state import (
     acquire_run_transition_lock as _acquire_run_transition_lock,
 )
@@ -40,6 +45,9 @@ from investment_team.strategy_lab.run_state import (
 )
 from investment_team.strategy_lab.run_state import (
     get_lab_run_job_client as _get_lab_run_job_client,
+)
+from investment_team.strategy_lab.run_state import (
+    get_run_generation_strict as _get_run_generation_strict,
 )
 from investment_team.strategy_lab.run_state import (
     lock as _lock,
@@ -54,15 +62,40 @@ if TYPE_CHECKING:
         _compute_signal_brief_snapshot,
         _finalize_strategy_lab_cycle_record,
         _is_strategy_lab_run_externally_stopped,
-        _snapshot_prior_records,
         _strategy_lab_external_terminal_status,
     )
+
+
+def _snapshot_prior_records(*, reverse: bool = False) -> list[StrategyLabRecord]:
+    """Locked read of the strategy-lab store, parsed and sorted by created_at.
+
+    Preconditions:
+        None — safe to call against an empty store.
+    Postconditions:
+        Returns a freshly parsed list of StrategyLabRecord, sorted by
+        ``created_at`` ascending (oldest-first) by default, or descending
+        (newest-first) when ``reverse=True``. Never returns None.
+    """
+    # Import the store lazily and outside the lock so loading ``api.main``
+    # never contends with callers that already hold ``_lock``.
+    from investment_team.api.main import _strategy_lab_records
+
+    with _lock:
+        raw = list(_strategy_lab_records.values())
+    records = [StrategyLabRecord.parse_persisted(r) for r in raw]
+    records.sort(key=lambda r: r.created_at, reverse=reverse)
+    return records
 
 logger = logging.getLogger(__name__)
 
 STRATEGY_LAB_TERMINAL_STATUSES: frozenset[str] = frozenset(
     {"completed", "completed_with_errors", "failed", "cancelled", "interrupted"}
 )
+
+# Passed as `_persist_run_state`'s `exclude_fields` by writes that must never
+# regress the durable fencing high-water mark from a possibly-stale in-memory
+# snapshot. Generation is only advanced via `apply_and_get`'s atomic increment.
+_GENERATION_EXCLUDE_FIELDS = frozenset({"generation"})
 
 
 def _run_state_to_response(state: Dict[str, Any]) -> "StrategyLabRunStatusResponse":
@@ -81,7 +114,7 @@ def _run_state_to_response(state: Dict[str, Any]) -> "StrategyLabRunStatusRespon
         Returns a ``StrategyLabRunStatusResponse`` mirroring ``state`` field for
         field, defaulting each absent field to its response default
         (``"unknown"`` status, ``""`` started_at, ``0`` numeric fields/empty
-        lists — including ``tracker_merge_error_count`` (``0`` when absent)) —
+        lists — including ``tracker_merge_error_count`` (``0`` when absent) and ``generation`` (``DEFAULT_FENCING_GENERATION`` when absent, null, empty, non-positive, or unparseable — matching ``get_run_generation_strict``'s uninitialized contract)) —
         and mapping a present ``current_cycle`` dict to a
         ``StrategyLabCycleProgress`` (``None`` when absent). ``batch_size`` is
         the one field that deliberately does NOT fall back to the model's
@@ -94,6 +127,10 @@ def _run_state_to_response(state: Dict[str, Any]) -> "StrategyLabRunStatusRespon
         validation, degrades to ``None`` instead of raising -- ``state`` can
         be job-service data reconciled with no shape check (see
         ``_reconcile_run_progress``), so it is not assumed well-formed.
+        ``generation`` follows the same uninitialized contract as
+        ``get_run_generation_strict``: absent / ``None`` / empty / non-positive
+        / unparseable values degrade to ``DEFAULT_FENCING_GENERATION`` rather
+        than raising ``ValidationError`` out of a status/list route.
     """
     from investment_team.api.main import StrategyLabCycleProgress, StrategyLabRunStatusResponse
 
@@ -104,6 +141,18 @@ def _run_state_to_response(state: Dict[str, Any]) -> "StrategyLabRunStatusRespon
             current_cycle = StrategyLabCycleProgress(**cc)
         except ValidationError:
             current_cycle = None
+
+    raw_generation = state.get("generation", DEFAULT_FENCING_GENERATION)
+    if raw_generation is None or raw_generation == "":
+        generation = DEFAULT_FENCING_GENERATION
+    elif isinstance(raw_generation, bool) or isinstance(raw_generation, float):
+        generation = DEFAULT_FENCING_GENERATION
+    else:
+        try:
+            generation = max(DEFAULT_FENCING_GENERATION, int(raw_generation))
+        except (TypeError, ValueError):
+            generation = DEFAULT_FENCING_GENERATION
+
     return StrategyLabRunStatusResponse(
         run_id=state.get("run_id", ""),
         status=state.get("status", "unknown"),
@@ -121,14 +170,23 @@ def _run_state_to_response(state: Dict[str, Any]) -> "StrategyLabRunStatusRespon
         batch_count=state.get("batch_count", 1),
         completed_batches=state.get("completed_batches", 0),
         current_batch=state.get("current_batch"),
+        generation=generation,
     )
 
 
-def _persist_run_state(run_id: str, state: Dict[str, Any], *, create: bool = False) -> None:
+def _persist_run_state(
+    run_id: str,
+    state: Dict[str, Any],
+    *,
+    create: bool = False,
+    exclude_fields: frozenset = frozenset(),
+) -> None:
     """Write the run state to the job service so it survives restarts.
 
     Preconditions:
         - ``run_id`` is a non-empty ``str``.
+        - ``exclude_fields`` names keys of ``state`` to omit from the write
+          entirely (beyond the always-omitted ``run_id``/``status``).
 
     Postconditions:
         - ``create=True``: creates the job via ``client.create_job(...)``,
@@ -150,7 +208,19 @@ def _persist_run_state(run_id: str, state: Dict[str, Any], *, create: bool = Fal
           restart/resume/cancel had already persisted with a routine
           progress-only write.
         - Every key in ``state`` other than ``run_id``/``status`` is persisted
-          as a field.
+          as a field, except any named in ``exclude_fields``.
+        - ``update_job``/``create_job`` merge the written fields into the
+          job's durable data (a partial merge, not a full replace — see
+          ``job_service.db.update_job``): any field named in
+          ``exclude_fields`` is therefore left at whatever value the durable
+          store already holds, not overwritten with this call's (possibly
+          stale) snapshot. ``resume_strategy_lab_run`` relies on this for
+          ``generation``: it already read the current durable value before
+          calling this, but a concurrent restart on another process/replica
+          could mint a newer one in the gap between that read and this
+          write; omitting ``generation`` here means such a write can never
+          regress the durable high-water mark back down, without needing an
+          atomic conditional-write primitive the job service doesn't expose.
 
     Raises:
         - Whatever ``create_job``/``update_job`` raises (transport errors,
@@ -170,7 +240,9 @@ def _persist_run_state(run_id: str, state: Dict[str, Any], *, create: bool = Fal
           of relying on this helper to swallow the error.
     """
     client = _get_lab_run_job_client()
-    fields = {k: v for k, v in state.items() if k not in ("run_id", "status")}
+    fields = {
+        k: v for k, v in state.items() if k not in ("run_id", "status") and k not in exclude_fields
+    }
     if create:
         client.create_job(run_id, status=state.get("status", "running"), **fields)
     elif "status" in state:
@@ -179,6 +251,15 @@ def _persist_run_state(run_id: str, state: Dict[str, Any], *, create: bool = Fal
         client.update_job(run_id, **fields)
 
 
+# Fields the Temporal workflow's persist-state activity writes as partial
+# deltas over a run's lifetime (see strategy_lab/temporal/workflows.py
+# _persist_state call sites): per-batch-start (current_batch), per-wave
+# (completed_cycles, contiguous_cycles, completed_record_ids, errored_cycles,
+# skipped_cycles, errored_details, tracker_merge_error_count),
+# per-batch-complete (completed_batches). current_cycle is included
+# defensively even though no persist point currently sets it -- the ``if
+# field in data`` guard in ``_reconcile_run_progress`` makes it inert until,
+# and unless, that changes.
 _STRATEGY_LAB_PROGRESS_FIELDS: tuple[str, ...] = (
     "completed_cycles",
     "skipped_cycles",
@@ -295,6 +376,7 @@ def _build_run_state(
     tracker_merge_error_count: int = 0,
     completed_record_ids: Optional[List[Any]] = None,
     completed_batches: int = 0,
+    generation: int = DEFAULT_FENCING_GENERATION,
 ) -> Dict[str, Any]:
     """Build a strategy-lab run-state dict, shared by run/resume/restart.
 
@@ -307,9 +389,13 @@ def _build_run_state(
     Postconditions:
         - Returns a new dict with ``status == "running"``. The ``contiguous_cycles``
           key is present iff ``contiguous_cycles`` is not ``None`` (the initial run
-          omits it; resume sets the offset; restart resets it to ``0``). Mutable
-          defaults (``errored_details``, ``completed_record_ids``) become fresh lists
-          when not supplied. Does not mutate its arguments.
+          omits it; resume sets the offset; restart resets it to ``0``). ``generation``
+          is always present (default ``1`` for a fresh run; resume carries the prior
+          value forward unchanged; restart passes a freshly minted value) — it fences
+          stale writes from a terminated incarnation's still-in-flight activities, see
+          ``shared.fencing.check_fencing_token``. Mutable defaults (``errored_details``,
+          ``completed_record_ids``) become fresh lists when not supplied. Does not
+          mutate its arguments.
     """
     state: Dict[str, Any] = {
         "run_id": run_id,
@@ -329,27 +415,38 @@ def _build_run_state(
         "batch_count": batch_count,
         "completed_batches": completed_batches,
         "current_batch": None,
+        "generation": generation,
     }
     if contiguous_cycles is not None:
         state["contiguous_cycles"] = contiguous_cycles
     return state
 
 
-def _job_progress_percent(completed: int, total: int) -> int:
-    """Compute a job's completion percentage, tolerating a non-positive total.
+def _job_progress_percent(completed: object, total: object) -> int:
+    """Compute a job's completion percentage, tolerating malformed state.
 
     Preconditions:
-        - ``completed`` and ``total`` are integers (possibly 0 or negative,
-          e.g. from malformed persisted state).
+        - None. ``completed``/``total`` are typically integers (possibly 0
+          or negative), but callers pass values read from in-memory or
+          durably-persisted run state without a prior type check, so a
+          malformed record (e.g. a non-numeric string) must not crash this
+          function or its callers.
 
     Postconditions:
-        - Returns ``0`` when ``total <= 0`` (never divides by a non-positive
-          total, so this can never raise ``ZeroDivisionError``).
+        - Returns ``0`` when either value can't be coerced to an ``int``
+          (e.g. a non-numeric string, ``None``, a list/dict), or when the
+          coerced ``total <= 0`` -- never divides by a non-positive total,
+          so this can never raise ``ZeroDivisionError`` or ``TypeError``.
         - Otherwise returns ``int((completed / total) * 100)``, clamped to
           ``0..100`` -- ``completed`` exceeding ``total`` or being negative
           (both possible from malformed persisted state) can never produce
           an out-of-range percentage.
     """
+    try:
+        completed = int(completed)
+        total = int(total)
+    except (TypeError, ValueError):
+        return 0
     if total <= 0:
         return 0
     return max(0, min(100, int((completed / total) * 100)))
@@ -560,6 +657,9 @@ def _purge_strategy_lab_job_storage() -> dict[str, Optional[int]]:
         pool.shutdown(wait=False, cancel_futures=True)
 
 
+
+STRATEGY_LAB_FAILED_RUN_CLEANUP_DELAY_SECONDS = 900.0
+
 def _fail_strategy_lab_run(run_id: str, error: str) -> None:
     """Mark a strategy-lab run "failed" (best-effort, idempotent).
 
@@ -568,19 +668,86 @@ def _fail_strategy_lab_run(run_id: str, error: str) -> None:
     Postconditions:
         - If the run exists and isn't already in
           ``STRATEGY_LAB_TERMINAL_STATUSES``, its status becomes ``"failed"``
-          with ``error`` recorded, the new state persisted, and a delayed
-          cleanup of the ``_active_runs`` entry scheduled 900s out — so a
+          with ``error`` recorded, ``current_cycle`` reset to ``None`` to
+          indicate the run is no longer advancing, the new state persisted,
+          and a delayed cleanup of the ``_active_runs`` entry scheduled
+          ``STRATEGY_LAB_FAILED_RUN_CLEANUP_DELAY_SECONDS`` out — so a
           dispatch failure (e.g. a Temporal outage) doesn't leak the entry
           forever. That cleanup is a no-op if
           ``run_id`` gets resumed (and thus a new state object installed)
           before the delay elapses, so it never tears down a live resumed
           run. A missing run and an already-terminal run are both no-ops.
           Never raises.
+        - The durable write excludes ``"generation"``: this function's
+          in-memory ``state`` snapshot may be older than the durable value
+          — e.g. a resume/restart on another process/replica minted a newer
+          generation, whose freshly dispatched workflow is already relying
+          on it, in the gap before this call runs. Marking a run "failed" is
+          purely a status/error update; it must never regress the durable
+          fencing generation and re-enable an incarnation that generation
+          fencing has since superseded.
+        - Skips the write entirely (a no-op, not an error) when the durable
+          generation has already advanced past this ``state`` snapshot's
+          generation — a stale write from this call could otherwise mark a
+          legitimately newer, already-dispatched incarnation "failed" out
+          from under it, which a still-running workflow would observe (via
+          ``strategy_lab_external_terminal_status``) and abort itself over.
+          Otherwise (the durable generation has NOT advanced), the write
+          proceeds: ``status``/``error``/``current_cycle`` are written
+          unconditionally, while ``"generation"`` itself is excluded from
+          the write to protect the fencing token (see the bullet above). A
+          durable-read failure while checking for a newer generation is
+          treated as "can't confirm a newer generation exists" and does not
+          block the write (this function is documented never to raise; the
+          write it guards is itself best-effort).
+        - Also skips the write (a no-op) if, after re-acquiring the lock to
+          perform the write, the run's in-memory generation no longer
+          matches the generation observed at the start of this call: a
+          concurrent resume/restart replaced ``_active_runs[run_id]`` with a
+          newer incarnation while this call was checking the durable
+          generation, and that newer incarnation must not be marked
+          "failed" out from under it.
     """
     try:
         with _lock:
             state = _active_runs.get(run_id)
             if state is None or state.get("status") in STRATEGY_LAB_TERMINAL_STATUSES:
+                return
+            request_generation = state.get("generation", DEFAULT_FENCING_GENERATION)
+        try:
+            durable_generation = _get_run_generation_strict(run_id, client=_get_lab_run_job_client())
+        except Exception:
+            durable_generation = None
+        if durable_generation is not None and durable_generation > int(
+            request_generation or DEFAULT_FENCING_GENERATION
+        ):
+            logger.warning(
+                "Skipping fail write for strategy-lab run %s: durable generation %s "
+                "is newer than this request's generation %s.",
+                run_id,
+                durable_generation,
+                request_generation,
+            )
+            return
+        with _lock:
+            state = _active_runs.get(run_id)
+            if state is None or state.get("status") in STRATEGY_LAB_TERMINAL_STATUSES:
+                return
+            if state.get("generation", DEFAULT_FENCING_GENERATION) != request_generation:
+                # A resume/restart replaced this run's in-memory entry with a
+                # newer incarnation while this call was between its two lock
+                # acquisitions (e.g. during the durable-generation read
+                # above). Writing "failed" here would land on that newer,
+                # already-dispatched incarnation instead of the one this
+                # call was checking against.
+                logger.warning(
+                    "Skipping fail write for strategy-lab run %s: in-memory generation %s "
+                    "no longer matches this request's generation %s (run was resumed/restarted "
+                    "concurrently).",
+                    run_id,
+                    state.get("generation", DEFAULT_FENCING_GENERATION),
+                    request_generation,
+                )
                 return
             state["status"] = "failed"
             state["error"] = error
@@ -594,7 +761,7 @@ def _fail_strategy_lab_run(run_id: str, error: str) -> None:
             # protects the persisted snapshot from a concurrent mutator of
             # this same dict object racing the now-unlocked persist call.
             persisted_state = dict(state)
-        _persist_run_state(run_id, persisted_state)
+        _persist_run_state(run_id, persisted_state, exclude_fields=_GENERATION_EXCLUDE_FIELDS)
 
         from investment_team.api.job_event_bus import cleanup_job
 
@@ -617,13 +784,9 @@ def _fail_strategy_lab_run(run_id: str, error: str) -> None:
                     _active_runs.pop(run_id, None)
                 cleanup_job(run_id)
             except Exception:
-                logger.warning(
-                    "Failed to clean up strategy-lab run %s after failure timeout",
-                    run_id,
-                    exc_info=True,
-                )
+                logger.warning("Failed to clean up strategy-lab run %s after failure timeout", run_id, exc_info=True)
 
-        timer = threading.Timer(900.0, _cleanup)
+        timer = threading.Timer(STRATEGY_LAB_FAILED_RUN_CLEANUP_DELAY_SECONDS, _cleanup)
         timer.daemon = True
         timer.start()
     except Exception:
@@ -633,13 +796,24 @@ def _fail_strategy_lab_run(run_id: str, error: str) -> None:
 
 
 def _dispatch_strategy_lab_run(
-    run_id: str, request: "RunStrategyLabRequest", *, allow_already_started: bool = True
+    run_id: str,
+    request: "RunStrategyLabRequest",
+    *,
+    generation: int,
+    allow_already_started: bool = True,
 ) -> None:
     """Dispatch a strategy-lab run (initial / resume / restart) through Temporal (Temporal-only).
 
     Preconditions:
         - ``run_id``'s state is already registered in ``_active_runs`` and
           persisted (the activity reads its resume offset from that state).
+        - ``generation`` is the caller's own already-known/just-minted
+          fencing generation for this dispatch — the exact value written to
+          ``_active_runs[run_id]``/the durable store moments earlier by
+          ``_build_run_state``. Passed through explicitly (not re-derived by
+          a fresh read at dispatch time) so a transient durable-read failure
+          can never cause the newly dispatched workflow to be tagged with a
+          stale/wrong generation and immediately self-fence.
 
     Postconditions:
         - The durable workflow is started. A collision with an already-running
@@ -657,22 +831,24 @@ def _dispatch_strategy_lab_run(
             abort itself.
           On any other failure (Temporal disabled/unavailable, or the start
           RPC raising for any other reason), ``run_id`` is marked ``"failed"``
-          via ``_fail_strategy_lab_run`` (which schedules a delayed cleanup
-          timer), and then: if ``exc`` is already an ``HTTPException`` (e.g.
-          ``_require_temporal()``'s own 503, or one the dispatch RPC itself
-          raised), it is re-raised unchanged, preserving its original status
-          code and detail; otherwise it is wrapped in a fresh
-          ``HTTPException(503)``.
+          via ``_fail_strategy_lab_run``. A non-``HTTPException`` failure is
+          wrapped and raised as ``HTTPException(503)``; an ``HTTPException``
+          raised from inside this function's own try block (today, only
+          ``_require_temporal()`` can do so, and it only ever raises 503) is
+          re-raised unchanged rather than re-wrapped, so its original detail
+          message is preserved. Note ``_fail_strategy_lab_run`` itself
+          schedules a best-effort delayed ``_active_runs`` cleanup via a
+          daemon ``threading.Timer`` (see its own docstring) — this failure
+          path is not thread-free, only free of any *new* Temporal dispatch.
     """
     try:
         from temporalio.exceptions import WorkflowAlreadyStartedError
-    except ImportError:  # pragma: no cover - temporalio always installed
-        # Import outside the dispatch try/except below (not inside its
-        # `except Exception`) so a hypothetical ImportError here can't mask
-        # the dispatch failure that block is meant to translate into a 503.
-        # `()` as an isinstance target always resolves False, so the
-        # WorkflowAlreadyStartedError branch below simply never matches --
-        # every dispatch failure then falls through to the generic 503 path.
+    except ImportError:
+        # If temporalio itself is missing, ``_require_temporal()``/the dispatch
+        # below will fail anyway; this bare `()` just ensures the isinstance
+        # check further down can never itself raise mid-exception-handling and
+        # mask the real failure behind an unwrapped ImportError instead of the
+        # documented HTTPException(503).
         WorkflowAlreadyStartedError = ()  # type: ignore[assignment]
 
     try:
@@ -683,7 +859,7 @@ def _dispatch_strategy_lab_run(
             start_strategy_lab_batch_workflow,
         )
 
-        start_strategy_lab_batch_workflow(run_id, request)
+        start_strategy_lab_batch_workflow(run_id, request, generation)
     except Exception as exc:
         if isinstance(exc, WorkflowAlreadyStartedError):
             if allow_already_started:
@@ -723,7 +899,6 @@ def _dispatch_strategy_lab_run(
             status_code=503,
             detail="Failed to start the strategy-lab workflow; Temporal worker unavailable.",
         ) from exc
-
 
 def _no_active_run_locked() -> None:
     """Raise 409 if any strategy-lab run is currently running.
@@ -827,7 +1002,6 @@ __all__ = [
 
 _DEFERRED_EXPORTS = frozenset(
     {
-        "_snapshot_prior_records",
         "_compute_signal_brief_snapshot",
         "_is_strategy_lab_run_externally_stopped",
         "_strategy_lab_external_terminal_status",

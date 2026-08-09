@@ -23,12 +23,13 @@ psycopg_pool>=3.3,<4.0
 # Knowledge-graph layer over Agent Cognition (shared.neo4j + agent_cognition.graph)
 neo4j>=5.26,<6.0
 graphiti-core>=0.29,<0.30
+# Shared review/compaction cache (shared.cache Redis backend)
+redis>=7.4,<8.0
 temporalio>=1.25,<2.0
 APScheduler>=3.11,<4.0
 pytz>=2026.1
 strands-agents>=1.35,<2.0
 strands-agents-tools>=0.4,<1.0
-ollama>=0.6,<1.0
 # Official Anthropic SDK for the Claude LLM provider (LLM_PROVIDER=claude)
 anthropic>=0.69,<1.0
 # Observability: exposes /metrics on the unified API for Prometheus scraping

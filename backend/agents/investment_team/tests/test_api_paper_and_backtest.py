@@ -9,6 +9,9 @@ Targets:
   terminal-reason → FAILED mapping (when INVESTMENT_LIVE_PAPER_ENABLED=true).
 * ``stop_live_paper_trading`` 404 + happy paths.
 * ``run_paper_trading`` live-mode concurrency guard (409).
+* ``_fail_paper_trading_session`` delegates to the shared
+  ``_apply_paper_trading_failure`` helper instead of re-implementing its
+  field updates.
 """
 
 from __future__ import annotations
@@ -282,8 +285,13 @@ def test_run_paper_trading_background_marks_failed_on_empty_market_data(
     # Worker updated the session to FAILED.
     updated = api_main._paper_trading_sessions.get("pt-empty")
     assert updated.status == PaperTradingStatus.FAILED
-    assert "Failed to fetch market data" in (updated.divergence_analysis or "")
-    assert "Failed to fetch market data" in (updated.error or "")
+    # Exact match (not just substring): this path must stay a fixed safe
+    # literal rather than an f-string that could later interpolate exception
+    # details and leak internal paths or dependency names to API consumers.
+    assert updated.error == "Failed to fetch market data from external sources."
+    # _fail_paper_trading_session() never sets divergence_analysis (unlike
+    # the old inline branch, which mirrored the error message into it).
+    assert updated.divergence_analysis is None
 
 
 def _tripwire_market_data_service(monkeypatch: pytest.MonkeyPatch) -> List[bool]:
@@ -413,7 +421,18 @@ def test_run_paper_trading_background_returns_early_when_session_unparseable(
 def test_run_paper_trading_background_crashes_into_failed(
     monkeypatch: pytest.MonkeyPatch, api_client
 ) -> None:
-    """An exception inside the worker is caught and persisted as FAILED."""
+    """An exception inside the worker is caught and persisted as FAILED.
+
+    Regression coverage: the crash handler must not leak the raw exception
+    text (which can contain internal paths or dependency names, e.g. from a
+    lazily-imported dependency) into the user-facing ``error``/
+    ``divergence_analysis`` fields returned by
+    ``GET /strategy-lab/paper-trade/{session_id}``. A handler that did
+    ``session.error = f"Paper trading crashed: {exc}"`` would embed the
+    internal-looking string below verbatim. The negative assertions here
+    fail against that behavior and pass against the current fixed, generic
+    message.
+    """
     from investment_team.api import main as api_main
     from investment_team.models import (
         BacktestConfig,
@@ -474,9 +493,14 @@ def test_run_paper_trading_background_crashes_into_failed(
 
     import investment_team.market_data_service as mds
 
+    sensitive_detail = (
+        "/opt/venv/lib/python3.11/site-packages/investment_team/market_data_service.py: "
+        "connection refused to db-primary-07.internal"
+    )
+
     class _Broken:
         def resolve_strategy_symbols(self, s):
-            raise RuntimeError("boom in resolve")
+            raise RuntimeError(sensitive_detail)
 
     monkeypatch.setattr(mds, "MarketDataService", lambda: _Broken())
 
@@ -493,8 +517,210 @@ def test_run_paper_trading_background_crashes_into_failed(
     )
     updated = api_main._paper_trading_sessions.get("pt-crash")
     assert updated.status == PaperTradingStatus.FAILED
-    assert "Paper trading crashed" in (updated.divergence_analysis or "")
-    assert "Paper trading crashed" in (updated.error or "")
+    # Exact match: the fields must carry only the generic operator-facing
+    # message, not an f-string embedding the raw exception.
+    assert updated.error == "Paper trading crashed due to an internal error."
+    assert updated.divergence_analysis == "Paper trading crashed due to an internal error."
+    # Negative assertions — the actual regression check: the internal path
+    # and hostname from the raw exception must never reach a user-facing field.
+    assert "db-primary-07.internal" not in (updated.error or "")
+    assert "db-primary-07.internal" not in (updated.divergence_analysis or "")
+    assert sensitive_detail not in (updated.error or "")
+    assert sensitive_detail not in (updated.divergence_analysis or "")
+
+
+def test_run_paper_trading_background_crash_result_not_leaked_via_get_endpoint(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """End-to-end regression for the crash-handler leak vector: a crashed
+    session's ``error``/``divergence_analysis`` are returned verbatim by
+    ``GET /strategy-lab/paper-trade/{session_id}`` to API consumers. Confirm
+    the response body carries only the generic message, never the raw
+    exception text a lazily-imported dependency might have raised.
+    """
+    from investment_team.api import main as api_main
+    from investment_team.models import (
+        BacktestConfig,
+        BacktestRecord,
+        BacktestResult,
+        PaperTradingSession,
+        PaperTradingStatus,
+        StrategySpec,
+    )
+
+    strategy = StrategySpec(
+        strategy_id="s",
+        authored_by="x",
+        asset_class="equities",
+        hypothesis="h",
+        signal_definition="s",
+        timeframe="1d",
+        strategy_code="def x(): pass",
+    )
+    bt = BacktestRecord(
+        backtest_id="bt-p",
+        strategy_id="s",
+        strategy=strategy,
+        config=BacktestConfig(
+            start_date="2024-01-01", end_date="2024-02-01", initial_capital=100_000.0
+        ),
+        submitted_by="x",
+        submitted_at="2024-01-01T00:00:00Z",
+        completed_at="2024-01-01T01:00:00Z",
+        result=BacktestResult(
+            total_return_pct=10.0,
+            annualized_return_pct=20.0,
+            volatility_pct=10.0,
+            sharpe_ratio=1.0,
+            max_drawdown_pct=5.0,
+            win_rate_pct=60.0,
+            profit_factor=2.0,
+            calmar_ratio=0.0,
+            deflated_sharpe=0.0,
+            sortino_ratio=0.0,
+        ),
+        trades=[],
+    )
+    running = PaperTradingSession(
+        session_id="pt-crash-get",
+        lab_record_id="lab-w",
+        strategy=strategy,
+        status=PaperTradingStatus.RUNNING,
+        initial_capital=100_000.0,
+        current_capital=100_000.0,
+        symbols_traded=[],
+        data_source="yahoo_finance",
+        data_period_start="",
+        data_period_end="",
+        started_at="2024-01-01T00:00:00Z",
+    )
+    api_main._paper_trading_sessions["pt-crash-get"] = running
+
+    import investment_team.market_data_service as mds
+
+    sensitive_detail = (
+        "/opt/venv/lib/python3.11/site-packages/investment_team/market_data_service.py: "
+        "connection refused to db-primary-07.internal"
+    )
+
+    class _Broken:
+        def resolve_strategy_symbols(self, s):
+            raise RuntimeError(sensitive_detail)
+
+    monkeypatch.setattr(mds, "MarketDataService", lambda: _Broken())
+
+    api_main._run_paper_trading_background(
+        "pt-crash-get",
+        "lab-w",
+        strategy,
+        "def x(): pass",
+        bt,
+        lookback_days=30,
+        initial_capital=100_000.0,
+        transaction_cost_bps=5.0,
+        slippage_bps=2.0,
+    )
+
+    resp = api_client.get("/strategy-lab/paper-trade/pt-crash-get")
+    assert resp.status_code == 200
+    session_body = resp.json()["session"]
+    assert session_body["status"] == "failed"
+    assert session_body["error"] == "Paper trading crashed due to an internal error."
+    assert session_body["divergence_analysis"] == "Paper trading crashed due to an internal error."
+    assert "db-primary-07.internal" not in resp.text
+    assert sensitive_detail not in resp.text
+
+
+@pytest.mark.parametrize("interrupt_cls", [KeyboardInterrupt, SystemExit])
+def test_run_paper_trading_background_lets_interrupts_propagate(
+    interrupt_cls: type[BaseException], monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """``KeyboardInterrupt``/``SystemExit`` are ``BaseException``, not ``Exception`` —
+    the worker's crash handler must not swallow them into a FAILED session; they
+    must propagate to the caller, and the RUNNING session must be left untouched
+    for a caller/orphan-sweep to reconcile."""
+    from investment_team.api import main as api_main
+    from investment_team.models import (
+        BacktestConfig,
+        BacktestRecord,
+        BacktestResult,
+        PaperTradingSession,
+        PaperTradingStatus,
+        StrategySpec,
+    )
+
+    strategy = StrategySpec(
+        strategy_id="s",
+        authored_by="x",
+        asset_class="equities",
+        hypothesis="h",
+        signal_definition="s",
+        timeframe="1d",
+        strategy_code="def x(): pass",
+    )
+    bt = BacktestRecord(
+        backtest_id="bt-p",
+        strategy_id="s",
+        strategy=strategy,
+        config=BacktestConfig(
+            start_date="2024-01-01", end_date="2024-02-01", initial_capital=100_000.0
+        ),
+        submitted_by="x",
+        submitted_at="2024-01-01T00:00:00Z",
+        completed_at="2024-01-01T01:00:00Z",
+        result=BacktestResult(
+            total_return_pct=10.0,
+            annualized_return_pct=20.0,
+            volatility_pct=10.0,
+            sharpe_ratio=1.0,
+            max_drawdown_pct=5.0,
+            win_rate_pct=60.0,
+            profit_factor=2.0,
+            calmar_ratio=0.0,
+            deflated_sharpe=0.0,
+            sortino_ratio=0.0,
+        ),
+        trades=[],
+    )
+    running = PaperTradingSession(
+        session_id="pt-interrupt",
+        lab_record_id="lab-w",
+        strategy=strategy,
+        status=PaperTradingStatus.RUNNING,
+        initial_capital=100_000.0,
+        current_capital=100_000.0,
+        symbols_traded=[],
+        data_source="yahoo_finance",
+        data_period_start="",
+        data_period_end="",
+        started_at="2024-01-01T00:00:00Z",
+    )
+    api_main._paper_trading_sessions["pt-interrupt"] = running
+
+    import investment_team.market_data_service as mds
+
+    class _Interrupted:
+        def resolve_strategy_symbols(self, s):
+            raise interrupt_cls()
+
+    monkeypatch.setattr(mds, "MarketDataService", lambda: _Interrupted())
+
+    with pytest.raises(interrupt_cls):
+        api_main._run_paper_trading_background(
+            "pt-interrupt",
+            "lab-w",
+            strategy,
+            "def x(): pass",
+            bt,
+            lookback_days=30,
+            initial_capital=100_000.0,
+            transaction_cost_bps=5.0,
+            slippage_bps=2.0,
+        )
+
+    untouched = api_main._paper_trading_sessions.get("pt-interrupt")
+    assert untouched.status == PaperTradingStatus.RUNNING
+    assert untouched is running
 
 
 def test_run_paper_trading_background_unparseable_record_does_not_escape_crash_handler(
@@ -668,8 +894,14 @@ def test_run_paper_trading_background_import_failure_marks_failed(
     updated = api_main._paper_trading_sessions.get("pt-import-fail")
     assert updated.status == PaperTradingStatus.FAILED
     assert updated.completed_at
-    assert "Paper trading crashed" in (updated.divergence_analysis or "")
-    assert "Paper trading crashed" in (updated.error or "")
+    # Exact match: same generic message as any other in-worker crash.
+    assert updated.error == "Paper trading crashed due to an internal error."
+    assert updated.divergence_analysis == "Paper trading crashed due to an internal error."
+    # Python's ModuleNotFoundError text for this failure mode would otherwise
+    # embed the dotted module path — that must not leak into the user-facing
+    # fields.
+    assert "investment_team.market_data_service" not in (updated.error or "")
+    assert "investment_team.market_data_service" not in (updated.divergence_analysis or "")
 
 
 # ---------------------------------------------------------------------------
@@ -683,6 +915,32 @@ def test_stop_live_paper_trading_404_when_session_missing(
     monkeypatch.setenv("INVESTMENT_LIVE_PAPER_ENABLED", "true")
     resp = api_client.post("/strategy-lab/paper-trade/no-session/stop")
     assert resp.status_code == 404
+
+
+def test_stop_live_paper_trading_404_when_session_corrupted(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """A persisted record that fails ``PaperTradingSession.parse_persisted``
+    must surface as a clean 404, not an unhandled 500 -- and must not be
+    signaled (there's no valid session to check the status of)."""
+    from investment_team.api import main as api_main
+
+    monkeypatch.setenv("INVESTMENT_LIVE_PAPER_ENABLED", "true")
+    api_main._paper_trading_sessions["pt-corrupt-stop"] = {"session_id": "pt-corrupt-stop"}
+
+    def _fail_if_signaled(session_id):
+        raise AssertionError("must not signal a session that failed to parse")
+
+    monkeypatch.setattr(api_main, "_signal_paper_trading_stop", _fail_if_signaled)
+
+    resp = api_client.post("/strategy-lab/paper-trade/pt-corrupt-stop/stop")
+
+    assert resp.status_code == 404
+    assert "pt-corrupt-stop" in resp.json()["detail"]
+    # Left untouched: the corrupt record could not be re-parsed.
+    assert api_main._paper_trading_sessions.get("pt-corrupt-stop") == {
+        "session_id": "pt-corrupt-stop"
+    }
 
 
 def test_stop_live_paper_trading_happy_path(monkeypatch: pytest.MonkeyPatch, api_client) -> None:
@@ -1120,6 +1378,95 @@ def test_run_paper_trading_wraps_runtime_dispatch_error_as_503(
     assert sessions and all(s.status == PaperTradingStatus.FAILED for s in sessions)
 
 
+def test_run_paper_trading_unexpected_dispatch_error_returns_500(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """A non-dispatch exception from ``_start_paper_trading`` (a real bug, bad
+    payload, etc.) must surface as its own 500, not be misreported as the
+    dispatch-failure 503 'Temporal worker unavailable' — regression test for
+    the fix narrowing the ``except Exception`` block to only the documented
+    dispatch/worker failure modes (HTTPException, RuntimeError, TimeoutError,
+    RPCError)."""
+    from investment_team.api import main as api_main
+    from investment_team.models import PaperTradingSession, PaperTradingStatus
+
+    monkeypatch.setenv("INVESTMENT_LIVE_PAPER_ENABLED", "true")
+    api_main._strategy_lab_records["lab-w"] = _winning_record()
+
+    def _boom(session_id, payload):
+        raise ValueError("boom")
+
+    monkeypatch.setattr(api_main, "_start_paper_trading", _boom)
+
+    resp = api_client.post("/strategy-lab/paper-trade", json={"lab_record_id": "lab-w"})
+
+    assert resp.status_code == 500
+    assert resp.json()["detail"] == "Unexpected error starting the paper-trading workflow."
+    sessions = [
+        PaperTradingSession.parse_persisted(s) for s in api_main._paper_trading_sessions.values()
+    ]
+    assert sessions and all(s.status == PaperTradingStatus.FAILED for s in sessions)
+    assert all(s.error == "Unexpected error starting the paper-trading workflow." for s in sessions)
+    assert all("Temporal unavailable" not in (s.error or "") for s in sessions)
+
+
+def test_run_paper_trading_timeout_dispatch_error_returns_503(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """``TimeoutError`` (the start-ack wait timing out) stays in the documented
+    dispatch-failure set and must still map to 503, not the unexpected-error
+    500 path."""
+    from investment_team.api import main as api_main
+    from investment_team.models import PaperTradingSession, PaperTradingStatus
+
+    monkeypatch.setenv("INVESTMENT_LIVE_PAPER_ENABLED", "true")
+    api_main._strategy_lab_records["lab-w"] = _winning_record()
+
+    def _boom(session_id, payload):
+        raise TimeoutError("start ack timed out")
+
+    monkeypatch.setattr(api_main, "_start_paper_trading", _boom)
+
+    resp = api_client.post("/strategy-lab/paper-trade", json={"lab_record_id": "lab-w"})
+
+    assert resp.status_code == 503
+    assert "Temporal worker unavailable" in resp.json()["detail"]
+    sessions = [
+        PaperTradingSession.parse_persisted(s) for s in api_main._paper_trading_sessions.values()
+    ]
+    assert sessions and all(s.status == PaperTradingStatus.FAILED for s in sessions)
+    assert all("Temporal unavailable" in (s.error or "") for s in sessions)
+
+
+def test_run_paper_trading_rpc_dispatch_error_returns_503(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """``temporalio.service.RPCError`` (the dispatch RPC itself failing) stays in
+    the documented dispatch-failure set and must still map to 503."""
+    from temporalio.service import RPCError, RPCStatusCode
+
+    from investment_team.api import main as api_main
+    from investment_team.models import PaperTradingSession, PaperTradingStatus
+
+    monkeypatch.setenv("INVESTMENT_LIVE_PAPER_ENABLED", "true")
+    api_main._strategy_lab_records["lab-w"] = _winning_record()
+
+    def _boom(session_id, payload):
+        raise RPCError("unavailable", RPCStatusCode.UNAVAILABLE, b"")
+
+    monkeypatch.setattr(api_main, "_start_paper_trading", _boom)
+
+    resp = api_client.post("/strategy-lab/paper-trade", json={"lab_record_id": "lab-w"})
+
+    assert resp.status_code == 503
+    assert "Temporal worker unavailable" in resp.json()["detail"]
+    sessions = [
+        PaperTradingSession.parse_persisted(s) for s in api_main._paper_trading_sessions.values()
+    ]
+    assert sessions and all(s.status == PaperTradingStatus.FAILED for s in sessions)
+    assert all("Temporal unavailable" in (s.error or "") for s in sessions)
+
+
 def test_run_paper_trading_dispatch_failure_attempts_best_effort_stop_signal(
     monkeypatch: pytest.MonkeyPatch, api_client
 ) -> None:
@@ -1277,6 +1624,8 @@ def test_fail_paper_trading_session_is_idempotent_on_completed(monkeypatch) -> N
 
 
 def test_fail_paper_trading_session_marks_active_session_failed(monkeypatch) -> None:
+    """An active paper-trading session must be marked FAILED, with the error
+    message recorded, when explicitly failed via _fail_paper_trading_session."""
     from investment_team.api import main as api_main
     from investment_team.models import PaperTradingSession, PaperTradingStatus, StrategySpec
 
@@ -1342,6 +1691,47 @@ def test_fail_paper_trading_session_never_raises_on_store_write_failure(monkeypa
     api_main._fail_paper_trading_session("pt-broken-store", "dispatch failed")
 
 
+def test_fail_paper_trading_session_delegates_to_apply_paper_trading_failure(monkeypatch) -> None:
+    """Regression test for #5136: `_fail_paper_trading_session` must delegate
+    to the shared `_apply_paper_trading_failure` helper rather than mutating
+    status/error/completed_at itself, and — unlike the batch recovery path —
+    must not pass any recovery-specific fields. This would fail against the
+    pre-fix implementation, which had no such helper to delegate to.
+    """
+    from investment_team.api import main as api_main
+    from investment_team.models import PaperTradingStatus, StrategySpec
+
+    strategy = StrategySpec(
+        strategy_id="s",
+        authored_by="x",
+        asset_class="equities",
+        hypothesis="h",
+        signal_definition="s",
+        timeframe="1d",
+        strategy_code="def x(): pass",
+    )
+    live = _live_session("pt-delegates", strategy, PaperTradingStatus.LIVE)
+    store = {"pt-delegates": live}
+    monkeypatch.setattr(api_main, "_paper_trading_sessions", store)
+
+    real_apply = api_main._apply_paper_trading_failure
+    calls = []
+
+    def _spy(session, error, **kwargs):
+        calls.append((session, error, kwargs))
+        return real_apply(session, error, **kwargs)
+
+    monkeypatch.setattr(api_main, "_apply_paper_trading_failure", _spy)
+
+    api_main._fail_paper_trading_session("pt-delegates", "dispatch failed")
+
+    assert len(calls) == 1
+    session_arg, error_arg, kwargs = calls[0]
+    assert session_arg.session_id == "pt-delegates"
+    assert error_arg == "dispatch failed"
+    assert kwargs == {}
+
+
 # ---------------------------------------------------------------------------
 # run_paper_trading concurrency guard (live mode)
 # ---------------------------------------------------------------------------
@@ -1350,6 +1740,8 @@ def test_fail_paper_trading_session_never_raises_on_store_write_failure(monkeypa
 def test_run_paper_trading_409_when_live_session_already_active(
     monkeypatch: pytest.MonkeyPatch, api_client
 ) -> None:
+    """Starting a new live paper-trading session for a strategy that already
+    has an active session must return 409 rather than starting a duplicate."""
     from investment_team.api import main as api_main
     from investment_team.models import (
         PaperTradingSession,
@@ -2135,7 +2527,8 @@ def test_run_paper_trading_background_guards_non_terminal_agent_result(
     assert persisted is not None
     assert persisted.status == PaperTradingStatus.FAILED
     assert persisted.completed_at
-    assert "non-terminal status" in (persisted.error or "")
+    # The guard's raw ValueError text must not leak into the user-facing field.
+    assert persisted.error == "Paper trading crashed due to an internal error."
 
 
 def test_run_paper_trading_background_guards_terminal_status_missing_completed_at(
@@ -2208,4 +2601,5 @@ def test_run_paper_trading_background_guards_terminal_status_missing_completed_a
     assert persisted is not None
     assert persisted.status == PaperTradingStatus.FAILED
     assert persisted.completed_at
-    assert "no completed_at" in (persisted.error or "")
+    # The guard's raw ValueError text must not leak into the user-facing field.
+    assert persisted.error == "Paper trading crashed due to an internal error."

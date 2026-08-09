@@ -134,12 +134,12 @@ def test_write_features_and_functionality_empty(tmp_path: Path) -> None:
 
 
 def test_write_architecture_plan_full(tmp_path: Path) -> None:
-    from software_engineering_team.shared.development_plan_writer import (
-        write_architecture_plan,
-    )
-    from software_engineering_team.shared.models import (
+    from shared.dev_models.models import (
         ArchitectureComponent,
         SystemArchitecture,
+    )
+    from software_engineering_team.shared.development_plan_writer import (
+        write_architecture_plan,
     )
 
     arch = SystemArchitecture(
@@ -181,10 +181,10 @@ def test_write_architecture_plan_full(tmp_path: Path) -> None:
 
 
 def test_write_architecture_plan_minimal(tmp_path: Path) -> None:
+    from shared.dev_models.models import SystemArchitecture
     from software_engineering_team.shared.development_plan_writer import (
         write_architecture_plan,
     )
-    from software_engineering_team.shared.models import SystemArchitecture
 
     arch = SystemArchitecture(overview="")
     out = write_architecture_plan(tmp_path, arch)
@@ -193,8 +193,8 @@ def test_write_architecture_plan_minimal(tmp_path: Path) -> None:
 
 
 def test_write_tech_lead_plan(tmp_path: Path) -> None:
+    from shared.dev_models.models import Task, TaskAssignment, TaskType
     from software_engineering_team.shared.development_plan_writer import write_tech_lead_plan
-    from software_engineering_team.shared.models import Task, TaskAssignment, TaskType
 
     tasks = [
         Task(
@@ -246,8 +246,8 @@ def test_write_tech_lead_plan(tmp_path: Path) -> None:
 
 
 def test_write_tech_lead_plan_minimal(tmp_path: Path) -> None:
+    from shared.dev_models.models import Task, TaskAssignment, TaskType
     from software_engineering_team.shared.development_plan_writer import write_tech_lead_plan
-    from software_engineering_team.shared.models import Task, TaskAssignment, TaskType
 
     assignment = TaskAssignment(
         tasks=[Task(id="t1", type=TaskType.BACKEND, assignee="be")],

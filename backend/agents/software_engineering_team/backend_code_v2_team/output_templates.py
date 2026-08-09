@@ -23,7 +23,6 @@ from software_engineering_team.shared.v2_output_templates import (
 # Re-exported for callers that import these names from this module.
 __all__ = [
     "parse_files_and_summary_template",
-    "parse_files_with_validation",
     "parse_planning_template",
     "parse_review_template",
     "parse_problem_solving_template",
@@ -42,7 +41,6 @@ _templates = make_output_templates(
 )
 
 parse_files_and_summary_template = _templates.parse_files_and_summary_template
-parse_files_with_validation = _templates.parse_files_with_validation
 parse_planning_template = _templates.parse_planning_template
 parse_review_template = _templates.parse_review_template
 parse_problem_solving_template = _templates.parse_problem_solving_template

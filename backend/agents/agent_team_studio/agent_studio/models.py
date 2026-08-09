@@ -172,3 +172,54 @@ class SaveAgentResponse(BaseModel):
             "(derived from the name) was updated in place. Lets the UI warn before a same-name overwrite."
         ),
     )
+
+
+class AgentStudioDraftSummary(BaseModel):
+    """Lightweight draft row for list endpoints (no payload).
+
+    Invariants:
+        * ``draft_id``, ``name``, and ``updated_at`` are always present on a
+          persisted summary; the store owns id + timestamp assignment.
+    """
+
+    draft_id: str
+    name: str
+    updated_at: str = Field(..., description="ISO-8601 timestamp; server-managed.")
+
+
+class AgentStudioDraft(BaseModel):
+    """Full draft record: identity + opaque stage/handoff payload.
+
+    The store persists ``payload`` verbatim and does not interpret stage fields
+    (handoff ids, ``stage1AgentDraft``, etc.). Routes may validate shape later.
+
+    Invariants:
+        * ``payload`` is always a JSON object (``dict``), never a list/scalar.
+    """
+
+    draft_id: str
+    name: str
+    created_at: str = Field(..., description="ISO-8601 timestamp; server-managed.")
+    updated_at: str = Field(..., description="ISO-8601 timestamp; server-managed.")
+    payload: dict[str, Any] = Field(default_factory=dict)
+
+
+class SaveDraftRequest(BaseModel):
+    """Create/update body: optional label + opaque stage/handoff payload.
+
+    On ``PUT``, omitted fields (``None``) leave the stored value unchanged; send
+    an explicit ``payload`` object (including ``{}``) to replace it.
+
+    Invariants:
+        * ``payload``, when provided, is a JSON object (``dict``); the store
+          rejects non-dicts with ``ValueError``.
+    """
+
+    name: str | None = None
+    payload: dict[str, Any] | None = None
+
+
+class RenameDraftRequest(BaseModel):
+    """Rename body for ``PATCH /drafts/{draft_id}``."""
+
+    name: str = Field(..., min_length=1)

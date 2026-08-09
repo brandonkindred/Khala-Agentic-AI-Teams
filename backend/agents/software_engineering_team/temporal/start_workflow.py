@@ -10,7 +10,7 @@ import asyncio
 import logging
 from typing import Any, Dict, List, Optional
 
-from software_engineering_team.temporal.client import (
+from shared.temporal.client import (
     get_temporal_client,
     get_temporal_loop,
 )
@@ -44,10 +44,18 @@ def _run_async(coro: Any) -> Any:
 
 
 def is_workflow_v2_enabled() -> bool:
-    """Whether ``SE_WORKFLOW_V2`` selects ``RunTeamWorkflowV2`` for ``start_run_team_workflow``."""
+    """Whether SE team starts select ``RunTeamWorkflowV2`` (the default) or fall back to
+    ``RunTeamWorkflow`` (V1, kept only for draining in-flight/legacy jobs).
+
+    Preconditions: none.
+    Postconditions: returns False only when ``SE_WORKFLOW_V2`` is explicitly set to a
+        recognized falsy value ("0"/"false"/"no", case-insensitive, surrounding
+        whitespace ignored); returns True for unset, blank, or any other value.
+    """
     import os
 
-    return os.environ.get("SE_WORKFLOW_V2", "").lower() in ("1", "true", "yes")
+    raw = os.environ.get("SE_WORKFLOW_V2", "").strip().lower()
+    return raw not in ("0", "false", "no")
 
 
 def start_run_team_workflow(
@@ -58,10 +66,12 @@ def start_run_team_workflow(
     planning_only: bool = False,
     sprint_id: Optional[str] = None,
 ) -> None:
-    """Start RunTeamWorkflow (V1 or V2). Idempotent for same workflow_id.
+    """Start RunTeamWorkflow. Idempotent for same workflow_id.
 
-    ``sprint_id`` is forwarded on both paths — ``RunTeamWorkflow`` and
-    ``RunTeamWorkflowV2`` both accept it as their trailing positional arg.
+    ``RunTeamWorkflowV2`` is the default; set ``SE_WORKFLOW_V2`` to a falsy value
+    ("0"/"false"/"no") to select the legacy ``RunTeamWorkflow`` (V1) for draining
+    in-flight/legacy jobs. ``sprint_id`` is forwarded on both paths — ``RunTeamWorkflow``
+    and ``RunTeamWorkflowV2`` both accept it as their trailing positional arg.
     """
     workflow_id = f"{WORKFLOW_ID_PREFIX_RUN_TEAM}{job_id}"
     client = get_temporal_client()

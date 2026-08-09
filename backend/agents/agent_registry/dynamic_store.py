@@ -194,16 +194,17 @@ def clear_cache() -> None:
         _all_cache_at = 0.0
 
 
-def upsert(manifest: AgentManifest) -> None:
+def upsert(manifest: AgentManifest, *, conn: Any | None = None) -> None:
     """Insert or replace a dynamic manifest by id.
 
     Preconditions:
         * ``manifest.id`` is a non-empty string (enforced; raises ``ValueError``).
     Postconditions:
-        * ``get(manifest.id)`` returns an equal manifest from any worker. A single
-          transient failure is retried once (see :func:`_with_retry`) before
-          propagating, narrowing the window in which the caller's best-effort
-          degrade-to-local-only path is needed.
+        * ``get(manifest.id)`` returns an equal manifest from any worker when
+          ``conn`` is ``None`` (standalone commit). When ``conn`` is provided,
+          the upsert joins the caller's open transaction (no nested
+          ``get_conn()``) until the caller commits.
+        * Standalone path retries once on transient failure.
     """
     from shared.postgres import Json, get_conn
     from shared.postgres.metrics import timed_query
@@ -211,10 +212,16 @@ def upsert(manifest: AgentManifest) -> None:
     if not manifest.id:
         raise ValueError("upsert: manifest.id must be non-empty")
 
+    if conn is not None:
+        # Shared-conn path: join caller's txn; never open a nested pool checkout
+        # (deadlock under POSTGRES_POOL_MAX_SIZE=1 while holding a roster conn).
+        replace_manifests([manifest], [], conn=conn)
+        return
+
     @timed_query(store=_STORE, op="upsert")
     def _do() -> None:
         payload = manifest.model_dump(mode="json")
-        with get_conn() as conn, conn.cursor() as cur:
+        with get_conn() as owned, owned.cursor() as cur:
             cur.execute(
                 f"INSERT INTO {_TABLE} (id, team, tags, manifest, updated_at) "
                 "VALUES (%s, %s, %s, %s, NOW()) "
@@ -337,7 +344,7 @@ def replace_manifests(
     clear_cache()
 
 
-def get(agent_id: str) -> AgentManifest | None:
+def get(agent_id: str, *, conn: Any | None = None) -> AgentManifest | None:
     """Return the dynamic manifest for ``agent_id``, or ``None`` if unknown.
 
     Preconditions:
@@ -347,18 +354,28 @@ def get(agent_id: str) -> AgentManifest | None:
           exists, else ``None``. Never cached — this is the exact, immediate read
           the invoke / provision path depends on for cross-worker save→invoke
           coherence.
+        * When ``conn`` is provided, the SELECT runs on that connection (no nested
+          ``get_conn()``) so callers already holding a roster pool checkout cannot
+          deadlock under ``POSTGRES_POOL_MAX_SIZE=1``.
     """
     from shared.postgres import dict_row, get_conn
     from shared.postgres.metrics import timed_query
 
-    @timed_query(store=_STORE, op="get")
-    def _do() -> AgentManifest | None:
-        with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
-            cur.execute(f"SELECT manifest FROM {_TABLE} WHERE id = %s", (agent_id,))
-            row = cur.fetchone()
+    def _read(cur) -> AgentManifest | None:
+        cur.execute(f"SELECT manifest FROM {_TABLE} WHERE id = %s", (agent_id,))
+        row = cur.fetchone()
         if row is None:
             return None
         return AgentManifest.model_validate(row["manifest"])
+
+    if conn is not None:
+        with conn.cursor(row_factory=dict_row) as cur:
+            return _read(cur)
+
+    @timed_query(store=_STORE, op="get")
+    def _do() -> AgentManifest | None:
+        with get_conn() as owned, owned.cursor(row_factory=dict_row) as cur:
+            return _read(cur)
 
     return _do()
 

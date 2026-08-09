@@ -20,7 +20,9 @@ if TYPE_CHECKING:
     from investment_team.api.main import RunStrategyLabRequest
 
 
-def build_strategy_lab_batch_input(run_id: str, request: RunStrategyLabRequest) -> Dict[str, Any]:
+def build_strategy_lab_batch_input(
+    run_id: str, request: RunStrategyLabRequest, generation: int
+) -> Dict[str, Any]:
     """Translate a ``RunStrategyLabRequest`` into ``StrategyLabBatchWorkflow`` input.
 
     Builds the ``BacktestConfig`` (forcing ``cost_stress=True``), applies the
@@ -29,20 +31,26 @@ def build_strategy_lab_batch_input(run_id: str, request: RunStrategyLabRequest) 
     resume offset/seed counters for the batch workflow to consume.
 
     Preconditions:
-        ``request`` is a ``RunStrategyLabRequest``.
+        ``request`` is a ``RunStrategyLabRequest``. ``generation`` is the
+        caller's own already-known fencing generation for this dispatch —
+        NOT independently re-derived here by reading the durable store: a
+        transient read failure at dispatch time must never cause the
+        dispatched workflow to be tagged with a stale/wrong generation and
+        immediately self-fence its own, legitimate writes. See
+        ``_dispatch_strategy_lab_run``'s matching precondition.
     Postconditions:
         Returns a JSON-shaped ``batch_input`` dict with every key
         ``StrategyLabBatchWorkflow.run`` reads (``run_id``, ``config``,
         ``batch_size``/``batch_count``/``max_parallel``, ``benchmark_symbol``,
         ``exclude_asset_classes``, paper-trading flags, ``start_cycle_offset``,
-        and the resume-seed counters ``skipped_cycles``/``errored_cycles``/
-        ``errored_details``/``tracker_merge_error_count``/
-        ``completed_record_ids``).
+        ``generation`` (passed through verbatim), and the resume-seed counters
+        ``skipped_cycles``/``errored_cycles``/``errored_details``/
+        ``tracker_merge_error_count``/``completed_record_ids``).
     """
     # ``clamp_max_parallel``/``rehydrate_active_run_offset``/
     # ``get_resume_seed_counters`` live in the shared ``strategy_lab.config``/
-    # ``strategy_lab.run_state`` modules (also imported by ``api.main``) so this
-    # reads the same offset/clamp/counters state without reaching into
+    # ``strategy_lab.run_state`` modules (also imported by ``api.main``) so
+    # this reads the same offset/clamp/counters state without reaching into
     # api.main's private module state.
     from investment_team.models import BacktestConfig
     from investment_team.strategy_lab.config import clamp_max_parallel
@@ -78,15 +86,25 @@ def build_strategy_lab_batch_input(run_id: str, request: RunStrategyLabRequest) 
         "paper_trading_lookback_days": request.paper_trading_lookback_days,
         "start_cycle_offset": rehydrate_active_run_offset(run_id),
         **get_resume_seed_counters(run_id),
+        # Ordered after the counters unpack so the caller-provided fencing
+        # generation always wins even if get_resume_seed_counters' return
+        # shape ever grows a "generation" key -- silently losing this value
+        # to an unpacked counter would break the fencing contract and cause
+        # the freshly-dispatched workflow to self-fence its own writes.
+        "generation": generation,
     }
 
 
-def start_strategy_lab_batch_workflow(run_id: str, request: RunStrategyLabRequest) -> None:
+def start_strategy_lab_batch_workflow(
+    run_id: str, request: RunStrategyLabRequest, generation: int
+) -> None:
     """Start ``StrategyLabBatchWorkflow`` on ``strategy-lab-queue`` for a run.
 
     Preconditions:
         Temporal is enabled and a worker is serving ``strategy-lab-queue``;
-        ``run_id`` is unique for this run.
+        ``run_id`` is unique for this run. ``generation`` is the caller's own
+        already-known fencing generation — see
+        ``build_strategy_lab_batch_input``'s matching precondition.
     Postconditions:
         Submits the batch workflow with a deterministic ``strategy-lab-{run_id}``
         workflow id and returns once it is started (delegates to
@@ -99,7 +117,7 @@ def start_strategy_lab_batch_workflow(run_id: str, request: RunStrategyLabReques
 
     start_workflow_sync(
         StrategyLabBatchWorkflow.run,
-        build_strategy_lab_batch_input(run_id, request),
+        build_strategy_lab_batch_input(run_id, request, generation),
         workflow_id=f"{WORKFLOW_ID_PREFIX}{run_id}",
         task_queue=TASK_QUEUE,
     )

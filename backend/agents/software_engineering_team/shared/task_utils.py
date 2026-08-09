@@ -11,7 +11,7 @@ import logging
 from pathlib import Path
 from typing import List
 
-from software_engineering_team.shared.models import Task
+from shared.dev_models.models import Task
 
 logger = logging.getLogger(__name__)
 

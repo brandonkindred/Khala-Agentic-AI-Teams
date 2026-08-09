@@ -3260,7 +3260,59 @@ class TestWholeFileReview:
             )
         assert out == {f"f{i}.py": f"WHOLE-f{i}.py\n" for i in range(num_files)}
 
-    def test_endpoint_uses_whole_files_and_passes_reader(self, review_app, monkeypatch) -> None:
+    def test_endpoint_uses_change_surface_as_primary_when_reviewable(
+        self, review_app, monkeypatch
+    ) -> None:
+        """Happy path: with a real (unmocked) change-surface builder and normal
+        head content, the endpoint dispatches the change surface as the
+        PRIMARY reviewer input -- not the whole-file dict -- even though the
+        whole-file fetch itself succeeds. Surface-first is the default;
+        whole-file is only a fallback (see
+        test_endpoint_falls_back_to_whole_files_when_surface_is_empty below)."""
+        from software_engineering_team.code_review_agent.change_surface import (
+            build_change_surface_from_patches,
+        )
+        from software_engineering_team.github_source import GitHubRepoReader
+
+        gh = review_app["github"]["client"]
+        head_content = "def a():\n    return 1\n"
+        gh.get_file_contents = lambda o, r, path, ref: head_content
+        gh.get_repository_tree = lambda o, r, ref, recursive=True: ["a.py"]
+
+        captured: dict[str, Any] = {}
+
+        class _CapProvider:
+            def run_pr_code_review(self, **kw: Any) -> Any:
+                captured.update(kw)
+                return _FakeOutput(issues=[])
+
+        monkeypatch.setattr("software_engineering_team.engine_provider._provider", _CapProvider())
+
+        resp = review_app["client"].post("/review-pr", json=_review_body())
+        assert resp.status_code == 200
+
+        expected_surface = build_change_surface_from_patches(
+            {"a.py": gh.files[0].patch}, new_contents={"a.py": head_content}
+        )
+        assert not expected_surface.is_empty, "test setup must produce a non-empty surface"
+
+        # Surface-first: pre-numbered files= dict, even though the whole-file
+        # fetch (head_content above) succeeded.
+        assert captured["pre_numbered"] is True
+        assert captured["files"] == dict(expected_surface.blocks)
+        assert "code" not in captured or not captured.get("code")
+        # repo_reader is still attached regardless of which mode dispatched.
+        assert isinstance(captured["repo_reader"], GitHubRepoReader)
+
+    def test_endpoint_falls_back_to_whole_files_when_surface_is_empty(
+        self, review_app, monkeypatch
+    ) -> None:
+        """Fallback path: when the change surface comes back empty (e.g. the
+        builder cannot produce reviewable content for any fetched file), the
+        endpoint falls back to the whole-file dict. Forced here via monkeypatch
+        since a real empty surface with real head content is otherwise hard to
+        arrange; see test_endpoint_uses_change_surface_as_primary_when_reviewable
+        above for the surface-first happy path this is a degradation from."""
         from software_engineering_team.api import pr_review
         from software_engineering_team.code_review_agent.change_surface import ChangeSurface
         from software_engineering_team.github_source import GitHubRepoReader
@@ -3292,9 +3344,87 @@ class TestWholeFileReview:
         assert isinstance(captured["repo_reader"], GitHubRepoReader)
         assert "code" not in captured or not captured.get("code")
 
+    def test_endpoint_falls_back_to_whole_file_when_no_file_produces_a_usable_surface(
+        self, review_app, monkeypatch
+    ) -> None:
+        """Real (non-monkeypatched) fallback-only trigger: the single
+        reviewable file's fetch succeeds, but its patch is a genuine
+        pure-deletion diff (no added lines), so the REAL change-surface
+        builder legitimately comes back empty -- unlike the forced-empty
+        variant above, no collaborator is mocked away here."""
+        gh = review_app["github"]["client"]
+        gh.files = [
+            PullRequestFile(
+                "a.py", "modified", "@@ -1,3 +1,2 @@\n line1\n-line2\n line3", 0, 1, None
+            ),
+        ]
+        gh.get_file_contents = lambda o, r, path, ref: "line1\nline3\n"
+        gh.get_repository_tree = lambda o, r, ref, recursive=True: ["a.py"]
+
+        captured: dict[str, Any] = {}
+
+        class _CapProvider:
+            def run_pr_code_review(self, **kw: Any) -> Any:
+                captured.update(kw)
+                return _FakeOutput(issues=[])
+
+        monkeypatch.setattr("software_engineering_team.engine_provider._provider", _CapProvider())
+
+        resp = review_app["client"].post("/review-pr", json=_review_body())
+        assert resp.status_code == 200
+        assert captured["files"] == {"a.py": "line1\nline3\n"}
+        assert captured["pre_numbered"] is False
+        assert "code" not in captured or not captured.get("code")
+
+    def test_endpoint_reviews_every_file_when_surface_only_partially_covers_fetched_files(
+        self, review_app, monkeypatch
+    ) -> None:
+        """Mixed mode where BOTH files' fetch succeeds, but only one produces a
+        usable change surface. Regression test for the endpoint-level version
+        of the drop bug fixed in _decide_review_mode: before the fix, the
+        second file (fetched but not surfaced) never reached the reviewer at
+        all -- neither via the surface, the (bypassed) whole-file dict, nor
+        the hunk fallback (which only covered fetch *failures*)."""
+        gh = review_app["github"]["client"]
+        gh.files = [
+            PullRequestFile("a.py", "modified", "@@ -1,2 +1,3 @@\n ctx\n+added\n more", 1, 0, None),
+            PullRequestFile(
+                "b.py", "modified", "@@ -1,3 +1,2 @@\n line1\n-line2\n line3", 0, 1, None
+            ),
+        ]
+        gh.get_file_contents = lambda o, r, path, ref: {
+            "a.py": "ctx\nadded\nmore\n",
+            "b.py": "line1\nline3\n",
+        }[path]
+        gh.get_repository_tree = lambda o, r, ref, recursive=True: []
+
+        calls: list[dict[str, Any]] = []
+
+        class _CapProvider:
+            def run_pr_code_review(self, **kw: Any) -> Any:
+                calls.append(dict(kw))
+                return _FakeOutput(issues=[])
+
+        monkeypatch.setattr("software_engineering_team.engine_provider._provider", _CapProvider())
+        resp = review_app["client"].post("/review-pr", json=_review_body())
+        assert resp.status_code == 200
+
+        # a.py went through the surface; b.py -- fetched but not surfaced --
+        # must still be reviewed via hunk fallback, not dropped.
+        assert len(calls) == 2
+        assert all(c.get("files") for c in calls)
+        assert all(c["pre_numbered"] is True for c in calls)
+        surface_call = next(c for c in calls if "a.py" in c["files"] and "b.py" not in c["files"])
+        hunk_call = next(c for c in calls if "b.py" in c["files"] and "a.py" not in c["files"])
+        assert surface_call is not hunk_call
+
+        job = review_app["jobs"].get_job(resp.json()["job_id"])
+        assert job["status"] == "completed"
+        assert job["review_summary"]["files_reviewed"] == 2
+
     def test_endpoint_falls_back_to_hunks_when_no_head_files(self, review_app, monkeypatch) -> None:
         gh = review_app["github"]["client"]
-        # Head fetch yields nothing -> hunk fallback (pre_numbered code blob).
+        # Head fetch yields nothing -> hunk fallback (pre_numbered files dict).
         gh.get_file_contents = lambda o, r, path, ref: None
 
         captured: dict[str, Any] = {}
@@ -3308,9 +3438,8 @@ class TestWholeFileReview:
 
         resp = review_app["client"].post("/review-pr", json=_review_body())
         assert resp.status_code == 200
-        assert captured.get("files") is None
         assert captured["pre_numbered"] is True
-        assert captured["code"]  # the hunk-rendered blob
+        assert captured["files"]  # the hunk-rendered per-file dict
         # Hunk mode carries the same diff-first focus note as whole-file mode.
         from software_engineering_team.api.pr_review import REVIEW_FOCUS_NOTE_PREFIX
 
@@ -3374,16 +3503,12 @@ class TestWholeFileReview:
         resp = review_app["client"].post("/review-pr", json=_review_body())
         assert resp.status_code == 200
         # a.py covered by change surface; b.py falls back to hunks only.
-        # Both attempts are pre-numbered code= (no files=).
+        # Both attempts are pre-numbered files= (per-file dicts, disjoint paths).
         assert len(calls) == 2
-        assert all("files" not in c for c in calls)
+        assert all(c.get("files") for c in calls)
         assert all(c["pre_numbered"] is True for c in calls)
-        surface_call = next(
-            c for c in calls if c.get("code") and "a.py" in c["code"] and "b.py" not in c["code"]
-        )
-        hunk_call = next(
-            c for c in calls if c.get("code") and "b.py" in c["code"] and "a.py" not in c["code"]
-        )
+        surface_call = next(c for c in calls if "a.py" in c["files"] and "b.py" not in c["files"])
+        hunk_call = next(c for c in calls if "b.py" in c["files"] and "a.py" not in c["files"])
 
         from software_engineering_team.api.pr_review import (
             REVIEW_FOCUS_NOTE_PREFIX,
@@ -3393,10 +3518,9 @@ class TestWholeFileReview:
         assert "pre_existing" in surface_call["task_requirements"]
         assert "Architectural standards" in surface_call["task_requirements"]
         assert "diff-first" in surface_call["task_requirements"].lower()
-        assert not hunk_call.get("files")
         assert hunk_call["pre_numbered"] is True
-        assert "b.py" in hunk_call["code"]
-        assert "a.py" not in hunk_call["code"]
+        assert "b.py" in hunk_call["files"]
+        assert "a.py" not in hunk_call["files"]
         # Both calls share the same diff-first focus note (input shape differs).
         assert REVIEW_FOCUS_NOTE_PREFIX in hunk_call["task_requirements"]
         assert "pre_existing" in hunk_call["task_requirements"]
@@ -3420,8 +3544,7 @@ class TestWholeFileReview:
 
         class _SplitProvider:
             def run_pr_code_review(self, **kw: Any) -> Any:
-                code = kw.get("code") or ""
-                if "### a.py ###" in code:
+                if "a.py" in (kw.get("files") or {}):
                     return _FakeOutput(
                         issues=[
                             _FakeReviewIssue(
@@ -4604,7 +4727,7 @@ class TestDecideReviewModeUnit:
             _file_contents_client(_contents), "job1", "o", "r", 7, _mode_pr(), files
         )
         assert result is not None
-        assert result.code == ""
+        assert result.hunk_files == {}
         assert result.files_reviewed == 2
         assert set(result.head_files) == {"a.py", "b.py"}
         assert set(result.valid_by_path["a.py"]) == {1}
@@ -4632,7 +4755,11 @@ class TestDecideReviewModeUnit:
         assert result is not None
         assert not result.change_surface.is_empty
         assert "mod.py" in result.change_surface.blocks
-        assert result.code == ""  # whole-file fetch still primary for dispatch this leaf
+        # hunk_files is empty because the whole-file fetch fully
+        # succeeded, so nothing needs hunk rendering. Which of change_surface
+        # vs head_files actually gets dispatched to the reviewer is decided in
+        # _run_reviewer (surface-first), not here.
+        assert result.hunk_files == {}
 
     def test_partial_fetch_falls_back_to_hunks_for_the_missing_subset(self) -> None:
         from software_engineering_team.api import pr_review
@@ -4653,10 +4780,52 @@ class TestDecideReviewModeUnit:
         )
         assert result is not None
         assert set(result.head_files) == {"a.py"}
-        assert "b.py" in result.code  # missing file's hunk was rendered
-        assert "a.py" not in result.code  # fetched file's hunk was NOT rendered
+        assert "b.py" in result.hunk_files  # missing file's hunk was rendered
+        assert "a.py" not in result.hunk_files  # fetched file's hunk was NOT rendered
         assert result.files_reviewed == 2  # 1 whole + 1 hunk
         assert "b.py" not in result.change_surface.blocks
+
+    def test_surface_partially_covers_fetched_files_falls_back_to_hunks_for_the_rest(
+        self,
+    ) -> None:
+        """Mixed mode where BOTH files' fetch succeeds, but only one produces a
+        usable change-surface body (b.py's patch has no added lines, so the
+        surface builder legitimately omits it). Regression test: before the
+        fix, b.py was silently dropped from review entirely -- not surfaced,
+        not hunk-rendered -- because _run_reviewer bypasses head_files
+        wholesale once change_surface is non-empty."""
+        from software_engineering_team.api import pr_review
+
+        files = [
+            PullRequestFile("a.py", "modified", "@@ -1,2 +1,3 @@\n ctx\n+added\n more", 1, 0, None),
+            PullRequestFile(
+                "b.py", "modified", "@@ -1,3 +1,2 @@\n line1\n-line2\n line3", 0, 1, None
+            ),
+        ]
+
+        result = pr_review._decide_review_mode(
+            _file_contents_client(
+                lambda o, r, path, ref: {"a.py": "ctx\nadded\nmore\n", "b.py": "line1\nline3\n"}[
+                    path
+                ]
+            ),
+            "job1",
+            "o",
+            "r",
+            7,
+            _mode_pr(),
+            files,
+        )
+        assert result is not None
+        # Both files fetched whole -- b.py's absence from the surface is NOT
+        # a fetch failure.
+        assert set(result.head_files) == {"a.py", "b.py"}
+        assert "a.py" in result.change_surface.blocks
+        assert "b.py" not in result.change_surface.blocks
+        # b.py falls back to hunk rendering instead of being dropped.
+        assert "b.py" in result.hunk_files
+        assert "a.py" not in result.hunk_files  # surfaced file not double-rendered
+        assert result.files_reviewed == 2  # 1 surfaced + 1 hunk
 
     def test_total_fetch_failure_renders_every_files_hunks(self) -> None:
         from software_engineering_team.api import pr_review
@@ -4674,7 +4843,7 @@ class TestDecideReviewModeUnit:
         )
         assert result is not None
         assert result.head_files == {}
-        assert result.code
+        assert result.hunk_files
         assert result.files_reviewed == 1
         assert result.change_surface.is_empty
 
@@ -4712,6 +4881,217 @@ class TestDecideReviewModeUnit:
                 "status_text": "No reviewable file content",
             }
         ]
+
+
+class TestRunReviewerSurfaceFirstDefault:
+    """Epic-level regression guard: PR review must default to the change
+    surface (diff), not the whole file, whenever a usable surface exists.
+
+    ``_decide_review_mode`` attaches both ``change_surface`` and
+    ``head_files`` whenever the whole-file fetch fully succeeds (see
+    ``test_decide_review_mode_attaches_head_backed_change_surface`` above,
+    whose own comment defers this exact question to ``_run_reviewer``). This
+    class exercises ``_run_reviewer`` directly -- the one place that decision
+    is actually made -- so a future change to its
+    ``if surface... elif head_files...`` dispatch can't quietly widen back
+    into whole-file-first without a test catching it here, independent of
+    ``_decide_review_mode``/endpoint wiring (see
+    ``test_endpoint_uses_change_surface_as_primary_when_reviewable`` for the
+    complementary end-to-end happy-path coverage)."""
+
+    def test_dispatches_surface_only_and_ignores_head_files_when_both_are_supplied(
+        self,
+    ) -> None:
+        from software_engineering_team.api import pr_review
+        from software_engineering_team.code_review_agent.change_surface import (
+            ChangeSurface,
+        )
+
+        surface_body = "1: def a():\n2:     return 1\n"
+        whole_file_body = "def a():\n    return 1\n"
+        change_surface = ChangeSurface(blocks={"a.py": surface_body})
+        head_files = {"a.py": whole_file_body}
+        files = [PullRequestFile("a.py", "modified", "@@ -1 +1 @@\n+return 1", 1, 0, None)]
+
+        calls: list[dict[str, Any]] = []
+
+        class _CapProvider:
+            def run_pr_code_review(self, **kw: Any) -> Any:
+                calls.append(dict(kw))
+                return _FakeOutput(issues=[])
+
+        result = pr_review._run_reviewer(
+            _CapProvider(),
+            object(),
+            "o",
+            "r",
+            7,
+            "job1",
+            _mode_pr(),
+            files,
+            hunk_files={},
+            head_files=head_files,
+            change_surface=change_surface,
+        )
+
+        assert result is not None
+        # Surface-first: exactly one reviewer call, not one per source --
+        # head_files must be replaced, not merged in alongside the surface.
+        assert len(calls) == 1
+        assert calls[0]["files"] == dict(change_surface.blocks)
+        assert calls[0]["pre_numbered"] is True
+        # Belt-and-suspenders: the whole-file body must never reach the
+        # reviewer through any captured kwarg.
+        assert whole_file_body not in calls[0]["files"].values()
+        assert all(whole_file_body != v for v in calls[0].values() if isinstance(v, str))
+
+
+class TestRunReviewerFallbackAndMixedMode:
+    """Epic-level regression guard: the two ``_run_reviewer`` dispatch
+    branches ``TestRunReviewerSurfaceFirstDefault`` doesn't cover --
+    whole-file-only fallback (no usable change surface) and mixed mode (a
+    surfaced subset of files plus a hunk-fallback subset dispatched and
+    merged as two calls). Complements the ``_decide_review_mode``-level
+    input-construction coverage in ``TestDecideReviewModeUnit`` and the
+    endpoint-level coverage in ``TestWholeFileReview`` by exercising the
+    actual dispatch decision in ``_run_reviewer`` directly, so a future edit
+    to its ``if surface... elif head_files...`` / ``if hunk_files...``
+    branches can't silently regress without a test catching it here."""
+
+    def test_dispatches_whole_file_only_when_change_surface_is_absent(self) -> None:
+        from software_engineering_team.api import pr_review
+
+        head_files = {"a.py": "def a():\n    return 1\n"}
+        files = [PullRequestFile("a.py", "modified", "@@ -1 +1 @@\n+return 1", 1, 0, None)]
+
+        calls: list[dict[str, Any]] = []
+
+        class _CapProvider:
+            def run_pr_code_review(self, **kw: Any) -> Any:
+                calls.append(dict(kw))
+                return _FakeOutput(issues=[])
+
+        result = pr_review._run_reviewer(
+            _CapProvider(),
+            object(),
+            "o",
+            "r",
+            7,
+            "job1",
+            _mode_pr(),
+            files,
+            hunk_files={},
+            head_files=head_files,
+            change_surface=None,
+        )
+
+        assert result is not None
+        assert len(calls) == 1
+        assert calls[0]["files"] == head_files
+        assert calls[0]["pre_numbered"] is False
+
+    def test_dispatches_whole_file_only_when_change_surface_is_empty(self) -> None:
+        from software_engineering_team.api import pr_review
+        from software_engineering_team.code_review_agent.change_surface import (
+            ChangeSurface,
+        )
+
+        head_files = {"a.py": "def a():\n    return 1\n"}
+        files = [PullRequestFile("a.py", "modified", "@@ -1 +1 @@\n+return 1", 1, 0, None)]
+
+        calls: list[dict[str, Any]] = []
+
+        class _CapProvider:
+            def run_pr_code_review(self, **kw: Any) -> Any:
+                calls.append(dict(kw))
+                return _FakeOutput(issues=[])
+
+        result = pr_review._run_reviewer(
+            _CapProvider(),
+            object(),
+            "o",
+            "r",
+            7,
+            "job1",
+            _mode_pr(),
+            files,
+            hunk_files={},
+            head_files=head_files,
+            change_surface=ChangeSurface(blocks={}),
+        )
+
+        assert result is not None
+        assert len(calls) == 1
+        assert calls[0]["files"] == head_files
+        assert calls[0]["pre_numbered"] is False
+
+    def test_dispatches_surface_and_hunk_attempts_for_disjoint_files_and_merges_output(
+        self,
+    ) -> None:
+        """Mixed mode: change_surface covers a.py, hunk_files covers the
+        disjoint b.py (the shape _decide_review_mode produces on a partial
+        fetch/partial-surface-coverage PR). Both attempts must run and their
+        outputs must merge -- neither file's findings may be dropped, and
+        neither call's files may bleed into the other's."""
+        from software_engineering_team.api import pr_review
+        from software_engineering_team.code_review_agent.change_surface import (
+            ChangeSurface,
+        )
+
+        surface_body = "1: def a():\n2:     return 1\n"
+        hunk_body = "1: def b():\n2:     return 2\n"
+        change_surface = ChangeSurface(blocks={"a.py": surface_body})
+        hunk_files = {"b.py": hunk_body}
+        files = [
+            PullRequestFile("a.py", "modified", "@@ -1 +1 @@\n+return 1", 1, 0, None),
+            PullRequestFile("b.py", "modified", "@@ -1 +1 @@\n+return 2", 1, 0, None),
+        ]
+
+        surface_issue = _FakeReviewIssue("high", 1, file_path="a.py")
+        hunk_issue = _FakeReviewIssue("high", 1, file_path="b.py")
+        outputs = [
+            _FakeOutput(issues=[surface_issue], summary="surface summary", spec="surface spec"),
+            _FakeOutput(issues=[hunk_issue], summary="hunk summary", spec="hunk spec"),
+        ]
+
+        calls: list[dict[str, Any]] = []
+
+        class _CapProvider:
+            def run_pr_code_review(self, **kw: Any) -> Any:
+                calls.append(dict(kw))
+                return outputs[len(calls) - 1]
+
+        result = pr_review._run_reviewer(
+            _CapProvider(),
+            object(),
+            "o",
+            "r",
+            7,
+            "job1",
+            _mode_pr(),
+            files,
+            hunk_files=hunk_files,
+            head_files=None,
+            change_surface=change_surface,
+        )
+
+        assert result is not None
+        assert len(calls) == 2
+        # Surface attempt dispatches first, covering only a.py.
+        assert calls[0]["files"] == {"a.py": surface_body}
+        assert calls[0]["pre_numbered"] is True
+        # Hunk attempt dispatches second, covering only b.py -- disjoint from
+        # the surface attempt's files.
+        assert calls[1]["files"] == hunk_files
+        assert calls[1]["pre_numbered"] is True
+        # Merged output: surface issues before hunk issues, per
+        # _MergedReviewerOutput's documented contract; neither call's
+        # narrative text is dropped.
+        assert result.issues == [surface_issue, hunk_issue]
+        assert "surface summary" in result.summary
+        assert "hunk summary" in result.summary
+        assert "surface spec" in result.spec_compliance_notes
+        assert "hunk spec" in result.spec_compliance_notes
 
 
 class TestPartitionReviewIssuesUnit:

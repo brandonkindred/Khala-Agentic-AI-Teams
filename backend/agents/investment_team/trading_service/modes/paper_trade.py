@@ -24,6 +24,7 @@ import math
 import threading
 import time
 from dataclasses import dataclass, field, replace
+from enum import Enum
 from typing import Callable, Dict, Iterator, List, Optional
 
 from ...execution.data_quality import LiveGapMonitor, validate_market_data
@@ -51,6 +52,25 @@ from ..service import TradingService, TradingServiceResult
 from ..strategy.contract import UnfilledPolicy
 
 logger = logging.getLogger(__name__)
+
+
+class PaperTradeTerminatedReason(str, Enum):
+    """Every value :class:`PaperTradeRunResult.terminated_reason` can take.
+
+    ``PaperTradeRunResult.terminated_reason`` itself stays a plain ``str``
+    (see below) — this enum exists so callers outside this module (e.g. the
+    API layer's FAILED-classification check) reference these values by name
+    instead of duplicating the literals.
+    """
+
+    NO_PROVIDER = "no_provider"
+    USER_STOP = "user_stop"
+    FILL_TARGET_REACHED = "fill_target_reached"
+    MAX_HOURS = "max_hours"
+    REGION_BLOCKED = "region_blocked"
+    LOOKAHEAD_VIOLATION = "lookahead_violation"
+    PROVIDER_ERROR = "provider_error"
+    PROVIDER_END = "provider_end"
 
 
 # ---------------------------------------------------------------------------

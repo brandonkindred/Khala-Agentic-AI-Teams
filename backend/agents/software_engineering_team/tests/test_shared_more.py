@@ -196,22 +196,6 @@ def test_complete_text_with_continuation(monkeypatch) -> None:
     assert out == "hello world"
 
 
-def test_complete_with_continuation_delegates(monkeypatch) -> None:
-    """complete_with_continuation delegates to complete_text_with_continuation, forwarding the agent_name."""
-    from software_engineering_team.shared import json_utils
-
-    called = {}
-
-    def fake_text(llm, prompt, *, agent_name, max_continuation_cycles):
-        called["agent"] = agent_name
-        return "text!"
-
-    monkeypatch.setattr(json_utils, "complete_text_with_continuation", fake_text)
-    out = json_utils.complete_with_continuation(MagicMock(), "prompt", agent_name="X")
-    assert out == "text!"
-    assert called["agent"] == "X"
-
-
 def test_parse_json_with_recovery_no_chunks_path(monkeypatch) -> None:
     """parse_json_with_recovery returns the single-call result when no decomposition is supplied."""
     from software_engineering_team.shared import json_utils

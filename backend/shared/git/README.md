@@ -24,8 +24,8 @@ from shared.git import branch_utils
 
 ## Compatibility
 
-`software_engineering_team/shared/git_utils.py` and `.../branch_utils.py` remain
-as thin `sys.modules` alias shims onto this package, so the many existing SE
-importers — and the tests that `@patch("software_engineering_team.shared.git_utils.…")`
-— keep working unchanged (the shim IS the same module object). coding_team and
-`shared.command_runner` import `shared.git` directly.
+The `software_engineering_team/shared/git_utils.py` and `.../branch_utils.py`
+compatibility shims have been removed. All SE, coding_team, and
+`shared.command_runner` importers now import `shared.git` /
+`shared.git.git_utils` / `shared.git.branch_utils` directly, and tests patch
+`shared.git.git_utils.…` accordingly.

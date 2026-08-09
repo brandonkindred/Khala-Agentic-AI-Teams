@@ -48,12 +48,13 @@ This directory defines a **Docker Compose stack** that runs:
 ## Required environment variables
 
 - **OLLAMA_API_KEY** – Create at [ollama.com/settings/keys](https://ollama.com/settings/keys). Required for Ollama Cloud (Option A). Passed into the agents container so the LLM client can call `https://ollama.com` with `Authorization: Bearer <key>`.
+- **POSTGRES_USER**, **POSTGRES_PASSWORD** – credentials for the default Postgres superuser; init scripts create `temporal` and `khala` DBs and users from these. `docker-compose.yml` has no fallback default for either — `docker compose up`/`config` fails fast with an `is required` error if they're unset, so they must be set explicitly (e.g. via `docker/.env`).
 
 Optional (defaults in compose / `docker/.env.example`; copy to `docker/.env` and set as needed):
 
 - **LLM_BASE_URL** – default is `https://ollama.com` (Ollama Cloud). Set to `http://ollama:11434` to use the local Ollama container instead.
 - **LLM_MODEL** – default `deepseek-v4-pro:cloud`
-- **POSTGRES_USER**, **POSTGRES_PASSWORD**, **POSTGRES_DB** – used for the default Postgres superuser; init scripts create `temporal` and `khala` DBs and users.
+- **POSTGRES_DB** – default `postgres`; the database name for the default Postgres superuser.
 - **NEO4J_BOLT_URL** – unset on `khala` by default (no Graphiti sync in the reverse proxy). Set to `bolt://neo4j:7687` to opt that process into graph sync; see `docs/ENV_VARS.md`. **NEO4J_PASSWORD** (and related Neo4j vars) configure the always-on Neo4j container for agents.
 
 Personal Assistant credential encryption uses a key generated at **Docker image build time** (stored in the image), so credentials persist across container restarts without setting any env var.
@@ -211,6 +212,15 @@ memory (`mem_limit`/`deploy.resources.limits.memory` on the `tempo` service in
 spans in-process. Grafana queries Tempo via the pre-provisioned "Tempo"
 datasource (`docker/grafana/provisioning/datasources/tempo.yml`, uid
 `khala-tempo`).
+
+Tempo is a Go binary, and the Go garbage collector doesn't know about cgroup
+memory limits — by default (`GOGC=100`) the heap can roughly double before a
+collection runs, which produces RSS spikes that can blow past the 1G cap even
+when average usage is fine. The `tempo` service sets `GOMEMLIMIT=800MiB` (a
+soft heap target the runtime actively collects toward, kept below the 1G cap
+to leave headroom for non-Go-heap memory like mmap'd WAL segments) and
+`GOGC=50` (collects more eagerly than the Go default) so peak RSS stays
+smoothed under the cgroup cap instead of sawtoothing past it.
 
 Query-path memory is bounded by three cooperating caps in `tempo.yaml`:
 

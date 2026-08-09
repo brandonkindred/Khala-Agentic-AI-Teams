@@ -13,7 +13,7 @@ from unittest.mock import MagicMock, create_autospec
 
 
 def _task(**overrides):
-    from software_engineering_team.shared.models import Task, TaskType
+    from shared.dev_models.models import Task, TaskType
 
     base = dict(
         id="t1",
@@ -351,9 +351,9 @@ def test_fe_deliver_tool_agents_empty_files_skip_git_agent_merge(
     tmp_path: Path, monkeypatch
 ) -> None:
     """Empty tool-agent delivery skips Git agent work in merge mode."""
+    from shared.git import git_utils
     from software_engineering_team.frontend_code_v2_team.models import ToolAgentKind
     from software_engineering_team.frontend_code_v2_team.orchestrator import run_deliver
-    from software_engineering_team.shared import git_utils
 
     class _DocsAgent:
         def deliver(self, inp):
@@ -391,9 +391,10 @@ def test_fe_deliver_tool_agents_empty_files_skip_git_agent_merge(
 
 
 def test_fe_deliver_git_agent_failure_falls_through_to_inline(tmp_path: Path, monkeypatch) -> None:
+    from shared.git import git_utils
     from software_engineering_team.frontend_code_v2_team.models import ToolAgentKind
     from software_engineering_team.frontend_code_v2_team.orchestrator import run_deliver
-    from software_engineering_team.shared import git_utils, repo_writer
+    from software_engineering_team.shared import repo_writer
 
     class _BadGit:
         def deliver(self, inp):
@@ -419,8 +420,8 @@ def test_fe_deliver_git_agent_failure_falls_through_to_inline(tmp_path: Path, mo
 
 def test_fe_deliver_inline_create_branch_fails(tmp_path: Path, monkeypatch) -> None:
     """Frontend inline delivery reports feature-branch creation failures."""
+    from shared.git import git_utils
     from software_engineering_team.frontend_code_v2_team.orchestrator import run_deliver
-    from software_engineering_team.shared import git_utils
 
     _patch_autospec(monkeypatch, git_utils, "create_feature_branch", return_value=(False, "no perms"))
     _patch_autospec(monkeypatch, git_utils, "checkout_branch", return_value=(True, ""))
@@ -432,8 +433,9 @@ def test_fe_deliver_inline_create_branch_fails(tmp_path: Path, monkeypatch) -> N
 
 def test_fe_deliver_inline_write_fails(tmp_path: Path, monkeypatch) -> None:
     """Frontend inline delivery reports write failures after branch creation."""
+    from shared.git import git_utils
     from software_engineering_team.frontend_code_v2_team.orchestrator import run_deliver
-    from software_engineering_team.shared import git_utils, repo_writer
+    from software_engineering_team.shared import repo_writer
 
     _patch_autospec(monkeypatch, git_utils, "create_feature_branch", return_value=(True, "feature/x"))
     _patch_autospec(monkeypatch, repo_writer, "write_agent_output", return_value=(False, "write err"))
@@ -446,8 +448,9 @@ def test_fe_deliver_inline_write_fails(tmp_path: Path, monkeypatch) -> None:
 
 def test_fe_deliver_inline_merge_fails(tmp_path: Path, monkeypatch) -> None:
     """Frontend inline delivery aborts and reports merge failures."""
+    from shared.git import git_utils
     from software_engineering_team.frontend_code_v2_team.orchestrator import run_deliver
-    from software_engineering_team.shared import git_utils, repo_writer
+    from software_engineering_team.shared import repo_writer
 
     _patch_autospec(monkeypatch, git_utils, "create_feature_branch", return_value=(True, "feature/x"))
     _patch_autospec(monkeypatch, repo_writer, "write_agent_output", return_value=(True, ""))
@@ -460,10 +463,97 @@ def test_fe_deliver_inline_merge_fails(tmp_path: Path, monkeypatch) -> None:
     assert "Merge failed" in result.summary
 
 
+def test_fe_deliver_inline_quality_gate_blocks_merge(tmp_path: Path, monkeypatch) -> None:
+    """Regression: the pre-merge quality gate must skip the merge when a build
+    verifier fails -- before this gate existed, the merge always proceeded
+    once the commit succeeded."""
+    from shared.git import git_utils
+    from software_engineering_team.frontend_code_v2_team.orchestrator import run_deliver
+    from software_engineering_team.shared import repo_writer
+
+    _patch_autospec(monkeypatch, git_utils, "create_feature_branch", return_value=(True, "feature/x"))
+    _patch_autospec(monkeypatch, repo_writer, "write_agent_output", return_value=(True, ""))
+    merge_mock = _patch_autospec(monkeypatch, git_utils, "merge_branch", return_value=(True, ""))
+    _patch_autospec(monkeypatch, git_utils, "checkout_branch", return_value=(True, ""))
+
+    result = run_deliver(
+        task_id="t1",
+        repo_path=tmp_path,
+        files={"a.ts": "x"},
+        summary="",
+        build_verifier=lambda repo_path, label, task_id: (False, "build broke"),
+        build_verify_label="frontend",
+    )
+
+    assert result.merged is False
+    assert result.summary == "Pre-merge quality gate failed: Build failed: build broke"
+    merge_mock.assert_not_called()
+
+
+def test_fe_deliver_dispatches_real_git_agent_with_quality_gate_fields(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Regression: run_deliver must construct the real (Pydantic)
+    ToolAgentPhaseInput with the quality-gate fields and route them through the
+    real GitBranchManagementToolAgent. The other gate tests either bypass the
+    inline-fallback path entirely (no tool_agents supplied) or drive the Git
+    agent with a bare SimpleNamespace, which skips Pydantic validation -- a
+    renamed/removed field on the team model would stay green in both while
+    silently dropping gate configuration in production. This test would fail
+    if build_verifier/build_verify_label/linting_tool_agent/lint_agent_type
+    were removed from frontend_code_v2_team.models.ToolAgentPhaseInput.
+    """
+    from software_engineering_team.frontend_code_v2_team.models import ToolAgentKind
+    from software_engineering_team.frontend_code_v2_team.orchestrator import run_deliver
+    from software_engineering_team.shared import tool_agent_git_branch as tab_mod
+    from software_engineering_team.shared.tool_agent_git_branch import (
+        GitBranchManagementToolAgent,
+    )
+
+    (tmp_path / ".git").mkdir()
+    monkeypatch.setattr(tab_mod, "commit_working_tree", lambda *a, **k: (True, ""))
+    monkeypatch.setattr(tab_mod, "merge_branch", lambda *a, **k: (True, ""))
+    monkeypatch.setattr(tab_mod, "delete_branch", lambda *a, **k: (True, ""))
+    monkeypatch.setattr(tab_mod, "checkout_branch", lambda *a, **k: (True, ""))
+
+    build_calls: list[tuple[str, str]] = []
+
+    def _build_verifier(repo_path, label, task_id):
+        build_calls.append((label, task_id))
+        return True, ""
+
+    lint_calls: list = []
+
+    class _LintAgent:
+        def run(self, inp):
+            lint_calls.append(inp)
+            return SimpleNamespace(execution_result=SimpleNamespace(success=True), passed=True)
+
+    result = run_deliver(
+        task_id="t1",
+        repo_path=tmp_path,
+        files={"a.ts": "x"},
+        summary="ok",
+        feature_branch_name="feature/x",
+        tool_agents={ToolAgentKind.GIT_BRANCH_MANAGEMENT: GitBranchManagementToolAgent()},
+        build_verifier=_build_verifier,
+        build_verify_label="frontend",
+        linting_tool_agent=_LintAgent(),
+        lint_agent_type="frontend",
+    )
+
+    assert result.merged is True
+    assert build_calls == [("frontend", "t1")]
+    assert len(lint_calls) == 1
+    assert lint_calls[0].agent_type == "frontend"
+    assert lint_calls[0].task_id == "t1"
+
+
 def test_fe_deliver_inline_happy_path(tmp_path: Path, monkeypatch) -> None:
     """Frontend inline delivery exercises branch creation, write, merge, and cleanup."""
+    from shared.git import git_utils
     from software_engineering_team.frontend_code_v2_team.orchestrator import run_deliver
-    from software_engineering_team.shared import git_utils, repo_writer
+    from software_engineering_team.shared import repo_writer
 
     create_mock = _patch_autospec(
         monkeypatch, git_utils, "create_feature_branch", return_value=(True, "feature/x")
@@ -490,8 +580,9 @@ def test_fe_deliver_inline_happy_path(tmp_path: Path, monkeypatch) -> None:
 
 def test_fe_deliver_handoff_branch_does_not_merge(tmp_path: Path, monkeypatch) -> None:
     """merge_to_development=False prepares a branch for external Tech Lead review."""
+    from shared.git import git_utils
     from software_engineering_team.frontend_code_v2_team.orchestrator import run_deliver
-    from software_engineering_team.shared import git_utils, repo_writer
+    from software_engineering_team.shared import repo_writer
 
     _patch_autospec(monkeypatch, git_utils, "create_feature_branch", return_value=(True, "feature/x"))
     _patch_autospec(monkeypatch, repo_writer, "write_agent_output", return_value=(True, ""))
@@ -522,8 +613,9 @@ def test_fe_deliver_handoff_branch_does_not_merge(tmp_path: Path, monkeypatch) -
 
 def test_fe_deliver_sanitizes_task_id_for_branch_names(tmp_path: Path, monkeypatch) -> None:
     """Task IDs with invalid git characters are slugified before branch creation."""
+    from shared.git import git_utils
     from software_engineering_team.frontend_code_v2_team.orchestrator import run_deliver
-    from software_engineering_team.shared import git_utils, repo_writer
+    from software_engineering_team.shared import repo_writer
 
     create_mock = _patch_autospec(
         monkeypatch, git_utils, "create_feature_branch", return_value=(True, "feature/safe")
@@ -550,9 +642,10 @@ def test_fe_deliver_sanitizes_task_id_for_branch_names(tmp_path: Path, monkeypat
 
 def test_fe_deliver_handoff_with_tool_agent_appends_files(tmp_path: Path, monkeypatch) -> None:
     """Tool-agent output is included when handoff mode bypasses the Git agent."""
+    from shared.git import git_utils
     from software_engineering_team.frontend_code_v2_team.models import ToolAgentKind
     from software_engineering_team.frontend_code_v2_team.orchestrator import run_deliver
-    from software_engineering_team.shared import git_utils, repo_writer
+    from software_engineering_team.shared import repo_writer
 
     class _DocsAgent:
         def __init__(self) -> None:
@@ -603,9 +696,9 @@ def test_fe_deliver_handoff_with_tool_agent_appends_files(tmp_path: Path, monkey
 def test_fe_deliver_handoff_with_tool_agents_no_files_skips_branch(
     tmp_path: Path, monkeypatch
 ) -> None:
+    from shared.git import git_utils
     from software_engineering_team.frontend_code_v2_team.models import ToolAgentKind
     from software_engineering_team.frontend_code_v2_team.orchestrator import run_deliver
-    from software_engineering_team.shared import git_utils
 
     class _DocsAgent:
         def deliver(self, inp):
@@ -631,8 +724,8 @@ def test_fe_deliver_handoff_with_tool_agents_no_files_skips_branch(
 
 
 def test_fe_deliver_handoff_create_branch_fails(tmp_path: Path, monkeypatch) -> None:
+    from shared.git import git_utils
     from software_engineering_team.frontend_code_v2_team.orchestrator import run_deliver
-    from software_engineering_team.shared import git_utils
 
     _patch_autospec(monkeypatch, git_utils, "create_feature_branch", return_value=(False, "no perms"))
     checkout_mock = _patch_autospec(
@@ -653,8 +746,9 @@ def test_fe_deliver_handoff_create_branch_fails(tmp_path: Path, monkeypatch) -> 
 
 
 def test_fe_deliver_handoff_commit_fails_cleans_created_branch(tmp_path: Path, monkeypatch) -> None:
+    from shared.git import git_utils
     from software_engineering_team.frontend_code_v2_team.orchestrator import run_deliver
-    from software_engineering_team.shared import git_utils, repo_writer
+    from software_engineering_team.shared import repo_writer
 
     _patch_autospec(monkeypatch, git_utils, "create_feature_branch", return_value=(True, "feature/x"))
     _patch_autospec(monkeypatch, repo_writer, "write_agent_output", return_value=(True, ""))
@@ -719,8 +813,9 @@ def _assert_restores_development_on_existing_branch_checkout_failure(
 def test_be_deliver_handoff_restores_development_on_checkout_failure(
     tmp_path: Path, monkeypatch, caplog
 ) -> None:
+    from shared.git import git_utils
     from software_engineering_team.backend_code_v2_team.orchestrator import run_deliver
-    from software_engineering_team.shared import git_utils, repo_writer
+    from software_engineering_team.shared import repo_writer
 
     _assert_restores_development_on_existing_branch_checkout_failure(
         run_deliver, git_utils, repo_writer, tmp_path, monkeypatch, caplog
@@ -730,8 +825,9 @@ def test_be_deliver_handoff_restores_development_on_checkout_failure(
 def test_fe_deliver_handoff_restores_development_on_checkout_failure(
     tmp_path: Path, monkeypatch, caplog
 ) -> None:
+    from shared.git import git_utils
     from software_engineering_team.frontend_code_v2_team.orchestrator import run_deliver
-    from software_engineering_team.shared import git_utils, repo_writer
+    from software_engineering_team.shared import repo_writer
 
     _assert_restores_development_on_existing_branch_checkout_failure(
         run_deliver, git_utils, repo_writer, tmp_path, monkeypatch, caplog
@@ -740,8 +836,9 @@ def test_fe_deliver_handoff_restores_development_on_checkout_failure(
 
 def test_be_deliver_inline_happy_path(tmp_path: Path, monkeypatch) -> None:
     """Backend inline delivery exercises branch creation, write, merge, and cleanup."""
+    from shared.git import git_utils
     from software_engineering_team.backend_code_v2_team.orchestrator import run_deliver
-    from software_engineering_team.shared import git_utils, repo_writer
+    from software_engineering_team.shared import repo_writer
 
     create_mock = _patch_autospec(
         monkeypatch, git_utils, "create_feature_branch", return_value=(True, "feature/x")
@@ -766,10 +863,69 @@ def test_be_deliver_inline_happy_path(tmp_path: Path, monkeypatch) -> None:
     checkout_mock.assert_called_once_with(tmp_path, git_utils.DEVELOPMENT_BRANCH)
 
 
+def test_be_deliver_dispatches_real_git_agent_with_quality_gate_fields(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Backend counterpart of the frontend real-model regression test above.
+
+    ``backend_code_v2_team.models.ToolAgentPhaseInput`` is a separate Pydantic
+    declaration from the frontend one -- a renamed/removed quality-gate field
+    on just the backend model would stay green in every other test in this
+    suite (frontend real-model test, shared SimpleNamespace-based Git-agent
+    tests, forwarding tests that replace ``run_deliver`` entirely), so it
+    needs its own direct coverage.
+    """
+    from software_engineering_team.backend_code_v2_team.models import ToolAgentKind
+    from software_engineering_team.backend_code_v2_team.orchestrator import run_deliver
+    from software_engineering_team.shared import tool_agent_git_branch as tab_mod
+    from software_engineering_team.shared.tool_agent_git_branch import (
+        GitBranchManagementToolAgent,
+    )
+
+    (tmp_path / ".git").mkdir()
+    monkeypatch.setattr(tab_mod, "commit_working_tree", lambda *a, **k: (True, ""))
+    monkeypatch.setattr(tab_mod, "merge_branch", lambda *a, **k: (True, ""))
+    monkeypatch.setattr(tab_mod, "delete_branch", lambda *a, **k: (True, ""))
+    monkeypatch.setattr(tab_mod, "checkout_branch", lambda *a, **k: (True, ""))
+
+    build_calls: list[tuple[str, str]] = []
+
+    def _build_verifier(repo_path, label, task_id):
+        build_calls.append((label, task_id))
+        return True, ""
+
+    lint_calls: list = []
+
+    class _LintAgent:
+        def run(self, inp):
+            lint_calls.append(inp)
+            return SimpleNamespace(execution_result=SimpleNamespace(success=True), passed=True)
+
+    result = run_deliver(
+        task_id="t1",
+        repo_path=tmp_path,
+        files={"a.py": "x"},
+        summary="ok",
+        feature_branch_name="feature/x",
+        tool_agents={ToolAgentKind.GIT_BRANCH_MANAGEMENT: GitBranchManagementToolAgent()},
+        build_verifier=_build_verifier,
+        build_verify_label="backend",
+        linting_tool_agent=_LintAgent(),
+        lint_agent_type="backend",
+    )
+
+    assert result.merged is True
+    assert build_calls == [("backend", "t1")]
+    assert len(lint_calls) == 1
+    assert lint_calls[0].agent_type == "backend"
+    assert lint_calls[0].task_id == "t1"
+
+
 def test_be_deliver_sanitizes_task_id_for_branch_names(tmp_path: Path, monkeypatch) -> None:
     """Backend delivery uses the same branch-safe task-id slug as frontend."""
+    from shared.git import git_utils
     from software_engineering_team.backend_code_v2_team.orchestrator import run_deliver
-    from software_engineering_team.shared import git_utils, repo_writer
+    from software_engineering_team.shared import repo_writer
 
     create_mock = _patch_autospec(
         monkeypatch, git_utils, "create_feature_branch", return_value=(True, "feature/api")
@@ -796,8 +952,9 @@ def test_be_deliver_sanitizes_task_id_for_branch_names(tmp_path: Path, monkeypat
 
 def test_be_deliver_handoff_branch_does_not_merge(tmp_path: Path, monkeypatch) -> None:
     """Backend deliver supports the same branch handoff mode."""
+    from shared.git import git_utils
     from software_engineering_team.backend_code_v2_team.orchestrator import run_deliver
-    from software_engineering_team.shared import git_utils, repo_writer
+    from software_engineering_team.shared import repo_writer
 
     _patch_autospec(
         monkeypatch, git_utils, "create_feature_branch", return_value=(True, "feature/api")
@@ -831,9 +988,9 @@ def test_be_deliver_handoff_branch_does_not_merge(tmp_path: Path, monkeypatch) -
 def test_be_deliver_handoff_with_tool_agents_no_files_skips_branch(
     tmp_path: Path, monkeypatch
 ) -> None:
+    from shared.git import git_utils
     from software_engineering_team.backend_code_v2_team.models import ToolAgentKind
     from software_engineering_team.backend_code_v2_team.orchestrator import run_deliver
-    from software_engineering_team.shared import git_utils
 
     class _DocsAgent:
         def deliver(self, inp):
@@ -862,9 +1019,9 @@ def test_be_deliver_tool_agents_empty_files_skip_git_agent_merge(
     tmp_path: Path, monkeypatch
 ) -> None:
     """Backend merge mode does not call the Git agent when tool agents produce no files."""
+    from shared.git import git_utils
     from software_engineering_team.backend_code_v2_team.models import ToolAgentKind
     from software_engineering_team.backend_code_v2_team.orchestrator import run_deliver
-    from software_engineering_team.shared import git_utils
 
     class _DocsAgent:
         def deliver(self, inp):
@@ -903,8 +1060,9 @@ def test_be_deliver_tool_agents_empty_files_skip_git_agent_merge(
 
 def test_be_deliver_handoff_write_fails_cleans_created_branch(tmp_path: Path, monkeypatch) -> None:
     """A failed handoff write restores development and deletes the fresh branch."""
+    from shared.git import git_utils
     from software_engineering_team.backend_code_v2_team.orchestrator import run_deliver
-    from software_engineering_team.shared import git_utils, repo_writer
+    from software_engineering_team.shared import repo_writer
 
     _patch_autospec(
         monkeypatch, git_utils, "create_feature_branch", return_value=(True, "feature/api")

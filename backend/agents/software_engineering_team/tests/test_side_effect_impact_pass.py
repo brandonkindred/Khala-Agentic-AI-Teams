@@ -87,7 +87,7 @@ def _tool_by_name(tools, name: str):
 def test_build_prompt_includes_changed_files() -> None:
     """User prompt inlines submission file paths and bodies."""
     index = CodebaseIndex.from_input(_input())
-    prompt = _build_prompt(index, max_inline_chars=100_000)
+    prompt = _build_prompt(index, max_inline_chars=100_000, max_manifest_chars=100_000)
     assert "app/main.py" in prompt
     assert "def bar():" in prompt
 
@@ -96,7 +96,7 @@ def test_build_prompt_omits_files_beyond_inline_budget() -> None:
     file_a_content = "x" * 50
     files = {"a.py": file_a_content, "b.py": "y" * 50}
     index = CodebaseIndex.from_input(_input(files=files))
-    prompt = _build_prompt(index, max_inline_chars=len(file_a_content))
+    prompt = _build_prompt(index, max_inline_chars=len(file_a_content), max_manifest_chars=100_000)
     assert file_a_content in prompt  # inlined in full (fits the budget exactly)
     assert "more changed file(s) not shown above" in prompt
     assert "list_files()" in prompt
@@ -105,13 +105,13 @@ def test_build_prompt_omits_files_beyond_inline_budget() -> None:
 def test_build_prompt_notes_mid_file_truncation() -> None:
     files = {"a.py": "x" * 100}
     index = CodebaseIndex.from_input(_input(files=files))
-    prompt = _build_prompt(index, max_inline_chars=30)
+    prompt = _build_prompt(index, max_inline_chars=30, max_manifest_chars=100_000)
     assert "Only the first 30 characters of `a.py` are shown above" in prompt
 
 
 def test_build_prompt_mentions_search_repository_tool() -> None:
     index = CodebaseIndex.from_input(_input())
-    prompt = _build_prompt(index, max_inline_chars=100_000)
+    prompt = _build_prompt(index, max_inline_chars=100_000, max_manifest_chars=100_000)
     assert "search_repository" in prompt
 
 
@@ -339,6 +339,7 @@ def test_build_side_effect_tools_includes_search_repository() -> None:
         "list_files",
         "search_codebase",
         "find_function_at_line",
+        "find_references",
         "search_repository",
     }
 
@@ -657,6 +658,73 @@ def test_returns_empty_when_pre_numbered() -> None:
     assert result == []
 
 
+def test_runs_when_pre_numbered_with_full_content_supplied() -> None:
+    """A caller that supplies ``full_content`` alongside ``pre_numbered=True`` has
+    given this pass real full bodies (via ``CodebaseIndex.from_input``'s overlay) --
+    the pass must run its normal caller-impact analysis instead of treating the
+    submission as unverifiable hunk-fallback mode."""
+
+    class _FindingsClient(DummyLLMClient):
+        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+            if _SIDE_EFFECT_PASS_ANCHOR in prompt:
+                assert (
+                    "def bar():" in prompt
+                )  # full_content reached the prompt, not "1: def bar():"
+                return {
+                    "findings": [
+                        {
+                            "severity": "high",
+                            "category": "side-effects",
+                            "file_path": "app/main.py",
+                            "description": "bar() behavior changed",
+                            "suggestion": "check callers",
+                        }
+                    ]
+                }
+            return {"approved": True, "issues": [], "summary": "ok", "spec_compliance_notes": ""}
+
+    full = "def bar():\n    return 1\n"
+    result = find_side_effect_impact_issues(
+        _FindingsClient(),
+        CodeReviewInput(
+            code="### app/main.py ###\n1: def bar():\n2:     return 1\n",
+            pre_numbered=True,
+            full_content={"app/main.py": full},
+            task_description="wire up bar",
+        ),
+    )
+    assert len(result) == 1
+    assert result[0].category == "side-effects"
+
+
+def test_stays_disabled_when_full_content_covers_only_some_paths() -> None:
+    """``full_content`` that covers only SOME of the submission's changed paths
+    must NOT re-enable this pass: overlaying just the covered subset would leave
+    the rest as bounded ``N: ``-prefixed excerpts, and reasoning about those as
+    if they were complete files is exactly the "flag from a guess" failure mode
+    this pass's ``pre_numbered`` guard exists to prevent."""
+
+    class _FailIfAskedClient(DummyLLMClient):
+        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+            assert _SIDE_EFFECT_PASS_ANCHOR not in prompt, "pass should stay disabled"
+            return {"approved": True, "issues": [], "summary": "ok", "spec_compliance_notes": ""}
+
+    result = find_side_effect_impact_issues(
+        _FailIfAskedClient(),
+        CodeReviewInput(
+            code=(
+                "### app/main.py ###\n1: def bar():\n2:     return 1\n"
+                "### app/util.py ###\n1: def helper():\n2:     return 2\n"
+            ),
+            pre_numbered=True,
+            # Covers only app/main.py, not app/util.py -- partial coverage.
+            full_content={"app/main.py": "def bar():\n    return 1\n"},
+            task_description="wire up bar",
+        ),
+    )
+    assert result == []
+
+
 # --------------------------------------------------------------------------- happy path
 
 
@@ -749,6 +817,203 @@ def test_finds_caller_impact_across_the_repository() -> None:
     )
     assert len(result) == 1
     assert "TypeError" in result[0].description
+
+
+# --------------------------------------------------------------------------- batching / reactive recovery
+
+
+def test_no_extra_batching_for_small_multi_file_submission_under_budget() -> None:
+    """Several small files that together still fit the per-call budget must
+    make exactly one LLM call, not one per file -- no behavior change for
+    submissions under the budget."""
+    prompts: list = []
+
+    class _Client(DummyLLMClient):
+        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+            if _SIDE_EFFECT_PASS_ANCHOR in prompt:
+                prompts.append(prompt)
+                return {"findings": []}
+            return {"approved": True, "issues": [], "summary": "ok", "spec_compliance_notes": ""}
+
+    files = {
+        "a.py": "def a():\n    return 1\n",
+        "b.py": "def b():\n    return 2\n",
+        "c.py": "def c():\n    return 3\n",
+    }
+    find_side_effect_impact_issues(_Client(), _input(files=files))
+    assert len(prompts) == 1
+
+
+def test_splits_into_multiple_batches_for_oversized_submission(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When the changed-file set's total estimated size exceeds one call's
+    inline-code budget, the pass issues one independent LLM call per batch and
+    concatenates each batch's findings into a single list."""
+    import code_review_agent.submission_pass_runner as runner_mod
+
+    from software_engineering_team.shared.context_sizing import MergedPassBudgets
+
+    monkeypatch.setattr(
+        runner_mod,
+        "compute_code_review_merged_pass_budgets",
+        lambda *a, **k: MergedPassBudgets(
+            max_architecture_chars=0,
+            max_inline_code_chars=200,
+            max_manifest_chars=2_000,
+            reserved_response_tokens=4096,
+        ),
+    )
+
+    prompts: list = []
+
+    class _Client(DummyLLMClient):
+        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+            if _SIDE_EFFECT_PASS_ANCHOR in prompt:
+                prompts.append(prompt)
+                for path in ("a.py", "b.py", "c.py"):
+                    if f"### {path} ###" in prompt:
+                        return {
+                            "findings": [
+                                {
+                                    "severity": "medium",
+                                    "category": "side-effects",
+                                    "file_path": path,
+                                    "description": f"finding for {path}",
+                                    "suggestion": "n/a",
+                                }
+                            ]
+                        }
+                return {"findings": []}
+            return {"approved": True, "issues": [], "summary": "ok", "spec_compliance_notes": ""}
+
+    files = {
+        "a.py": "x = 1\n" * 10,
+        "b.py": "y = 2\n" * 10,
+        "c.py": "z = 3\n" * 10,
+    }
+    result = find_side_effect_impact_issues(_Client(), _input(files=files))
+
+    assert len(prompts) == 3
+    assert {f.description for f in result} == {
+        "finding for a.py",
+        "finding for b.py",
+        "finding for c.py",
+    }
+    # Every batch's manifest still lists all three changed files (whole-
+    # submission awareness), even though its content section shows only one.
+    for prompt in prompts:
+        manifest_section = prompt.split("**Full content of the changed files", 1)[0]
+        assert "a.py" in manifest_section
+        assert "b.py" in manifest_section
+        assert "c.py" in manifest_section
+    assert any("batch 1 of 3" in p for p in prompts)
+    assert any("batch 3 of 3" in p for p in prompts)
+
+
+def test_one_batch_failure_does_not_discard_other_batches(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A malformed reply for one batch must not wipe out findings already
+    collected from other, successful batches."""
+    import code_review_agent.submission_pass_runner as runner_mod
+
+    from software_engineering_team.shared.context_sizing import MergedPassBudgets
+
+    monkeypatch.setattr(
+        runner_mod,
+        "compute_code_review_merged_pass_budgets",
+        lambda *a, **k: MergedPassBudgets(
+            max_architecture_chars=0,
+            max_inline_code_chars=200,
+            max_manifest_chars=2_000,
+            reserved_response_tokens=4096,
+        ),
+    )
+
+    class _Client(DummyLLMClient):
+        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+            if _SIDE_EFFECT_PASS_ANCHOR in prompt:
+                if "### a.py ###" in prompt:
+                    return "not even a dict-shaped reply"  # type: ignore[return-value]
+                if "### b.py ###" in prompt:
+                    return {
+                        "findings": [
+                            {
+                                "severity": "medium",
+                                "category": "side-effects",
+                                "file_path": "b.py",
+                                "description": "finding for b.py",
+                                "suggestion": "n/a",
+                            }
+                        ]
+                    }
+                return {"findings": []}
+            return {"approved": True, "issues": [], "summary": "ok", "spec_compliance_notes": ""}
+
+    files = {
+        "a.py": "x = 1\n" * 10,
+        "b.py": "y = 2\n" * 10,
+        "c.py": "z = 3\n" * 10,
+    }
+    result = find_side_effect_impact_issues(_Client(), _input(files=files))
+    assert [f.description for f in result] == ["finding for b.py"]
+
+
+def test_reactive_recovery_bisects_overflowing_batch_through_public_entry_point(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The pass must now benefit from the shared runner's reactive bisect
+    recovery: a combined batch call that overflows mid-turn is retried as two
+    single-file calls, rather than simply skipped (the pre-runner behavior --
+    this pass had no reactive recovery of its own)."""
+    import code_review_agent.submission_pass_runner as runner_mod
+    from strands.types.exceptions import ContextWindowOverflowException
+
+    from software_engineering_team.shared.context_sizing import MergedPassBudgets
+
+    monkeypatch.setattr(
+        runner_mod,
+        "compute_code_review_merged_pass_budgets",
+        lambda *a, **k: MergedPassBudgets(
+            max_architecture_chars=0,
+            max_inline_code_chars=100_000,
+            max_manifest_chars=2_000,
+            reserved_response_tokens=4096,
+        ),
+    )
+
+    call_count = {"n": 0}
+
+    class _Client(DummyLLMClient):
+        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+            if _SIDE_EFFECT_PASS_ANCHOR in prompt:
+                call_count["n"] += 1
+                if "### a.py ###" in prompt and "### b.py ###" in prompt:
+                    raise ContextWindowOverflowException("combined batch too large")
+                for path in ("a.py", "b.py"):
+                    if f"### {path} ###" in prompt:
+                        return {
+                            "findings": [
+                                {
+                                    "severity": "medium",
+                                    "category": "side-effects",
+                                    "file_path": path,
+                                    "description": f"finding for {path}",
+                                    "suggestion": "n/a",
+                                }
+                            ]
+                        }
+                return {"findings": []}
+            return {"approved": True, "issues": [], "summary": "ok", "spec_compliance_notes": ""}
+
+    files = {"a.py": "x = 1\n", "b.py": "y = 2\n"}
+    result = find_side_effect_impact_issues(_Client(), _input(files=files))
+
+    assert {f.description for f in result} == {"finding for a.py", "finding for b.py"}
+    # More than one call proves the overflowing combined attempt was actually
+    # retried (bisected), not that the test happened to pass on the first try.
+    assert call_count["n"] > 1
 
 
 # --------------------------------------------------------------------------- coordinator integration

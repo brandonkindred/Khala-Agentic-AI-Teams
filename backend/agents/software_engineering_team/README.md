@@ -52,6 +52,11 @@ context-formatting scaffolding; see
 [`docs/PROMPT_TEMPLATE_MIGRATION_METRICS.md`](docs/PROMPT_TEMPLATE_MIGRATION_METRICS.md)
 for the before/after line-count report from that migration.
 
+Work removing the legacy stack-alias repair and legacy HITL reason parsing
+from routing, the Tech Lead, and `swarm_review` must follow the resume
+policy in
+[`docs/LEGACY_STACK_RESUME_POLICY_DECISION.md`](docs/LEGACY_STACK_RESUME_POLICY_DECISION.md).
+
 ## Sub-teams and SDLC
 
 Agents are grouped by **SDLC phase** and **who consumes whose output**. Execution is driven by **task assignee** (`backend`, `frontend`, `devops`, `git_setup`). QA and Security are **not** task assignees; they are invoked **inside** backend and frontend workflows (per task) and in a final full-codebase security pass.
@@ -364,7 +369,7 @@ software_engineering_team/
 │                          # the coding-team engine's own app-assembly hub + routers
 ├── agent_implementations/
 │   └── run_api_server.py  # HTTP API entry point (uvicorn)
-├── shared/                # LLM client, models, coding_standards, git_utils, plan_dir,
+├── shared/                # LLM client, coding_standards, plan_dir,
 │                          # phases/, deliver_utils, logging_config, ...
 │
 │  # --- Design / setup ---
@@ -462,6 +467,29 @@ Leaf agents (direct children of `software_engineering_team/`, e.g. `qa_agent/`, 
 - `prompts.py` – LLM prompt templates
 
 Sub-team orchestrators (`backend_code_v2_team/`, `frontend_code_v2_team/`, `devops_team/`, `ai_agent_development_team/`, etc.) instead use `orchestrator.py`, `phases/`, and `tool_agents/`.
+
+## Caching (shared.cache / Redis)
+
+`shared/cache/` (`get_shared_cache(namespace: str)` in `shared/cache/factory.py`) is a small Redis-backed caching abstraction with an automatic in-process fallback. In this team it backs:
+
+- **Code review agent** (`code_review_agent/mapping.py`, `coordinator.py`): the per-chunk review-outcome cache and the whole-submission short-circuit cache.
+- **LLM service compaction** (`llm_service/compaction.py`): `compact_text` memoization.
+
+**Backend selection:** if `REDIS_URL` or `REDIS_HOST` is set (non-blank), `shared.cache` attempts to build a `RedisBackend`; otherwise it uses an in-process `MemoryBackend` directly, without ever trying Redis. Any failure building or talking to Redis (bad config, missing `redis` package, connection/runtime error) is logged (messages contain `shared.cache`) and the cache **fails open** — the operation falls back to memory / a cache miss / local recompute. A Redis outage can only reduce cache hit rate; it never fails a code review or a compaction call.
+
+**Redis configuration (environment variables):**
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `REDIS_URL` | Full Redis connection URL; wins over host/port/password when set | none |
+| `REDIS_HOST` | Redis hostname (bare host, no port); with `REDIS_URL` blank, enables the Redis backend | none |
+| `REDIS_PORT` | Redis port | `6379` |
+| `REDIS_PASSWORD` | Redis auth password | none |
+| `REDIS_DB` | Redis logical DB index | `0` |
+| `REDIS_CACHE_TTL_S` | TTL (seconds) for cached values | `3600` |
+| `REDIS_KEY_PREFIX` | Prefix for all `shared.cache` Redis keys | `khala` |
+
+See [docs/ENV_VARS.md](../../../docs/ENV_VARS.md) for the complete reference, including `KHALA_CACHE_BUILD_ID` / `KHALA_BUILD_ID` (build-id namespace suffixing), single-flight lock/waiter timing (`REDIS_LOCK_TTL_S`, `REDIS_WAITER_POLL_S`, `REDIS_WAITER_TIMEOUT_S`, `REDIS_RESULT_TTL_S`), and connection/socket tuning.
 
 ## DevOps Engineering Team (`devops_team/`)
 
@@ -594,7 +622,7 @@ notes:
 
 ### Backward Compatibility
 
-The `DevOpsTeamLeadAgent` provides a `run_workflow()` method that accepts the same parameters as the earlier DevOps agent's `run_workflow()`. When called by the Tech Lead's `trigger_devops_for_backend/frontend`, it constructs a `DevOpsTaskSpec` internally (adding defaults for rollback, security, approval gates) and runs the full pipeline.
+`DevOpsTeamLeadAgent` exposes two structured entry points: `run(spec)` (skips orchestrator-managed artifact writes/branch commits, but Phase 4.5 validation/execution tools such as `terraform init` or `cdk synth` may still write under the working directory as side effects) and `run_task(spec, repo_path=...)` (writes artifacts to a real repo on a feature branch and merges them into `development`). Both take a `DevOpsTaskSpec` directly — the free-text `run_workflow(...)` adapter has been removed. No production caller currently invokes either — `DevOpsTeamLeadAgent` is registered in the SE orchestrator's agent registry but not yet wired into the Tech Lead handoff; DevOps/infrastructure work is routed to `backend_v2` today.
 
 ### Expanded Team (Phase 2, not yet implemented)
 

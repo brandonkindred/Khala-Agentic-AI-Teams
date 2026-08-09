@@ -1,7 +1,6 @@
 python-dotenv>=1.2,<2.0
 strands-agents>=1.35,<2.0
 strands-agents-tools>=0.4,<1.0
-ollama>=0.6,<1.0
 # Tolerant JSON repair for LLM output. Consumers import it lazily and swallow
 # ImportError by design (salvage must never crash), so a missing wheel silently
 # disables repair — including for the repair-dependent tests that `make install`
@@ -33,6 +32,8 @@ playwright>=1.58,<2.0
 psycopg[binary]>=3.3,<4.0
 neo4j>=5.26,<6.0
 graphiti-core>=0.29,<0.30
+# Shared review/compaction cache (shared.cache Redis backend)
+redis>=7.4,<8.0
 yfinance>=1.2,<2.0
 pandas>=3.0,<4.0
 pyarrow>=15.0,<22.0

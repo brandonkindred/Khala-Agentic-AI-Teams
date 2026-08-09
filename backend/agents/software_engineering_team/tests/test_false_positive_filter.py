@@ -17,9 +17,10 @@ from __future__ import annotations
 
 import dataclasses
 import logging
+import re
 import threading
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterable, List, Optional
 
 import pytest
 from code_review_agent.coordinator import run_coordinator
@@ -166,6 +167,88 @@ def test_index_from_files_keeps_whitespace_only() -> None:
     assert set(idx.files) == {"a.py", "b.py", "d.py"}
 
 
+def test_index_from_input_overlays_full_content_when_it_covers_every_path() -> None:
+    """A ``pre_numbered`` submission whose ``full_content`` covers EVERY path
+    the index would otherwise hold has it overlaid, and the index reports
+    ``full_content_complete=True`` -- so whole-codebase passes reading via the
+    index see complete content instead of the bounded pre-numbered excerpt."""
+    code = "### app/main.py ###\n1: def bar():\n2:     return foo()\n"
+    full = "def bar():\n    return foo()\n\ndef extra():\n    pass\n"
+    idx = CodebaseIndex.from_input(
+        CodeReviewInput(
+            code=code,
+            pre_numbered=True,
+            full_content={"app/main.py": full},
+            task_description="t",
+        )
+    )
+    assert idx.files["app/main.py"] == full
+    assert idx.full_content_complete is True
+
+
+def test_index_from_input_ignores_full_content_paths_outside_the_submission() -> None:
+    """``full_content`` covering every submission path PLUS an extra, unrelated
+    path (e.g. a caller that scoped it too broadly) must not pull that extra
+    path into the index -- a whole-codebase pass reading ``index.files`` would
+    otherwise treat it as part of this submission's changed-file set even
+    though the submission itself never included it."""
+    code = "### app/main.py ###\n1: def bar():\n2:     return foo()\n"
+    full = "def bar():\n    return foo()\n\ndef extra():\n    pass\n"
+    idx = CodebaseIndex.from_input(
+        CodeReviewInput(
+            code=code,
+            pre_numbered=True,
+            full_content={
+                "app/main.py": full,
+                "app/unrelated.py": "def untouched(): pass\n",
+            },
+            task_description="t",
+        )
+    )
+    assert idx.files["app/main.py"] == full
+    assert "app/unrelated.py" not in idx.files
+    assert idx.full_content_complete is True
+
+
+def test_index_from_input_does_not_overlay_partial_full_content() -> None:
+    """A ``full_content`` that covers only SOME of the submission's paths is not
+    applied at all (all-or-nothing) -- overlaying just the covered subset would
+    leave the rest as bounded ``N: ``-prefixed excerpts sitting alongside full
+    bodies, with no way for a downstream pass to tell them apart. Both paths
+    keep their original (pre-numbered) content, and the index reports
+    ``full_content_complete=False``."""
+    code = (
+        "### app/main.py ###\n1: def bar():\n2:     return foo()\n"
+        "### app/util.py ###\n1: def foo():\n2:     return 1\n"
+    )
+    idx = CodebaseIndex.from_input(
+        CodeReviewInput(
+            code=code,
+            pre_numbered=True,
+            # Covers only app/main.py, not app/util.py.
+            full_content={"app/main.py": "def bar():\n    return foo()\n"},
+            task_description="t",
+        )
+    )
+    assert idx.files["app/main.py"] == "1: def bar():\n2:     return foo()"
+    assert idx.files["app/util.py"] == "1: def foo():\n2:     return 1"
+    assert idx.full_content_complete is False
+
+
+def test_index_from_input_ignores_full_content_when_not_pre_numbered() -> None:
+    """``full_content`` is documented as a no-op unless ``pre_numbered=True`` --
+    a ``files=`` submission (never pre-numbered by construction) is unaffected."""
+    idx = CodebaseIndex.from_input(
+        CodeReviewInput(
+            files={"app/main.py": "def bar(): pass\n"},
+            full_content={"app/main.py": "SHOULD NOT APPEAR"},
+            task_description="t",
+        )
+    )
+    assert idx.files["app/main.py"] == "def bar(): pass\n"
+    assert idx.full_content_complete is False
+
+
 def test_verdict_invariant_rejects_low_confidence_false_positive() -> None:
     """``_Verdict`` rejects is_false_positive=True without high/medium confidence."""
     from code_review_agent.false_positive_filter import _Verdict
@@ -197,7 +280,7 @@ def test_index_from_legacy_code_parses_headers() -> None:
 
 
 def test_index_legacy_code_without_headers_has_no_readable_files() -> None:
-    """Headerless legacy code yields no path-addressable files (filter then keeps all)."""
+    """Headerless legacy code yields no path-addressable files."""
     idx = CodebaseIndex.from_input(
         CodeReviewInput(code="just some loose code", task_description="t")
     )
@@ -331,14 +414,7 @@ def test_read_lines_rejects_non_positive_bounds() -> None:
 
 def test_read_function_returns_method_in_class_body() -> None:
     """Line inside a method returns only that method's construct body."""
-    src = (
-        "class C:\n"
-        "    def m(self):\n"
-        "        return 1\n"
-        "\n"
-        "def other():\n"
-        "    return 2\n"
-    )
+    src = "class C:\n    def m(self):\n        return 1\n\ndef other():\n    return 2\n"
     idx = CodebaseIndex(files={"app/mod.py": src})
     # Line 3 is inside C.m
     result = idx.read_function("app/mod.py", 3)
@@ -375,14 +451,7 @@ def test_read_function_rejects_non_positive_line() -> None:
 
 
 def test_read_function_by_name_unique_match() -> None:
-    src = (
-        "class C:\n"
-        "    def m(self):\n"
-        "        return 1\n"
-        "\n"
-        "def other():\n"
-        "    return 2\n"
-    )
+    src = "class C:\n    def m(self):\n        return 1\n\ndef other():\n    return 2\n"
     idx = CodebaseIndex(files={"app/mod.py": src})
     by_name = idx.read_function_by_name("app/mod.py", "C.m")
     by_line = idx.read_function("app/mod.py", 3)
@@ -399,13 +468,7 @@ def test_read_function_by_name_missing_errors() -> None:
 
 def test_read_function_by_name_ambiguous_errors() -> None:
     """Two same-named top-level defs in one AST file → ambiguous exact match."""
-    src = (
-        "def twin():\n"
-        "    return 1\n"
-        "\n"
-        "def twin():\n"
-        "    return 2\n"
-    )
+    src = "def twin():\n    return 1\n\ndef twin():\n    return 2\n"
     idx = CodebaseIndex(files={"app/mod.py": src})
     msg = idx.read_function_by_name("app/mod.py", "twin")
     assert msg.startswith("Error:")
@@ -439,13 +502,7 @@ def test_read_function_by_name_property_setter_not_ambiguous() -> None:
 
 def test_read_function_by_name_ambiguous_pre_numbered_shows_original_lines() -> None:
     """Pre-numbered twin defs → ambiguous error uses original line numbers, not physical."""
-    src = (
-        "100: def twin():\n"
-        "101:     return 1\n"
-        "\n"
-        "102: def twin():\n"
-        "103:     return 2\n"
-    )
+    src = "100: def twin():\n101:     return 1\n\n102: def twin():\n103:     return 2\n"
     idx = CodebaseIndex(files={"app/mod.py": src})
     msg = idx.read_function_by_name("app/mod.py", "twin")
     assert msg.startswith("Error:")
@@ -514,12 +571,61 @@ def test_read_function_tool_rejects_bool_and_non_str_non_int() -> None:
         assert "line number or name" in msg
 
 
+def test_read_lines_missing_path_errors() -> None:
+    """A path that resolves to nothing (no repo_reader) returns a not-found error."""
+    idx = CodebaseIndex(files={"app/main.py": "a\nb\n"})
+    msg = idx.read_lines("app/missing.py", 1, 2)
+    assert msg.startswith("Error:")
+    assert "file not found: app/missing.py" in msg
+
+
+def test_read_lines_at_max_span_succeeds() -> None:
+    """A span exactly equal to _READ_LINES_MAX_SPAN succeeds (only span+1 errors)."""
+    body = "\n".join(f"line-{i}" for i in range(1, _READ_LINES_MAX_SPAN + 2)) + "\n"
+    idx = CodebaseIndex(files={"big.py": body})
+    result = idx.read_lines("big.py", 1, _READ_LINES_MAX_SPAN)
+    assert not result.startswith("Error:")
+    assert result.startswith(
+        f"big.py lines 1–{_READ_LINES_MAX_SPAN} ({_READ_LINES_MAX_SPAN} lines):"
+    )
+
+
+def test_read_function_missing_path_errors() -> None:
+    """A path that resolves to nothing (no repo_reader) returns a not-found error."""
+    idx = CodebaseIndex(files={"app/mod.py": "def f():\n    return 1\n"})
+    msg = idx.read_function("app/missing.py", 1)
+    assert msg.startswith("Error:")
+    assert "file not found: app/missing.py" in msg
+
+
+def test_read_function_by_name_missing_path_errors() -> None:
+    """A path that resolves to nothing (no repo_reader) returns a not-found error."""
+    idx = CodebaseIndex(files={"app/mod.py": "def f():\n    return 1\n"})
+    msg = idx.read_function_by_name("app/missing.py", "f")
+    assert msg.startswith("Error:")
+    assert "file not found: app/missing.py" in msg
+
+
 def test_false_positive_prompt_documents_read_function() -> None:
     """Verifier system prompt must advertise the unified read_function tool."""
     from code_review_agent.prompts import FALSE_POSITIVE_VERIFY_PROMPT
 
     assert "read_function(path, name_or_line)" in FALSE_POSITIVE_VERIFY_PROMPT
     assert "read_lines(path, start, end)" in FALSE_POSITIVE_VERIFY_PROMPT
+
+
+def test_false_positive_prompt_prefers_scoped_reads_over_whole_file() -> None:
+    """The verifier prompt must default to find_references -> read_function/read_lines,
+    not "read the entire file / never use partial ranges"."""
+    from code_review_agent.prompts import FALSE_POSITIVE_VERIFY_PROMPT
+
+    lower = FALSE_POSITIVE_VERIFY_PROMPT.lower()
+    assert "do not examine the file in a series of partial ranges" not in lower
+    assert "read_file always returns the complete file" not in lower
+    assert "find_references" in FALSE_POSITIVE_VERIFY_PROMPT
+    find_references_idx = FALSE_POSITIVE_VERIFY_PROMPT.index("find_references")
+    non_default_idx = FALSE_POSITIVE_VERIFY_PROMPT.index("Non-default")
+    assert find_references_idx < non_default_idx
 
 
 def test_list_files_appends_existing_codebase_only_when_present() -> None:
@@ -556,8 +662,26 @@ def test_search_rejects_nonpositive_max(bad_max: int) -> None:
         CodebaseIndex(files={"a.py": "x"}).search("x", max_matches=bad_max)
 
 
+_NO_REPO = "No repository access is available beyond this submission."
+
+_HIT_LOC_RE = re.compile(r"^.+:\d+$")
+
+
+def _hit_body(result: str) -> str:
+    """Strip trailing no-reader / truncation banners from a find_references result."""
+    for marker in ("\n\n(Scan truncated", f"\n\n{_NO_REPO}"):
+        if marker in result:
+            return result.split(marker, 1)[0]
+    return result
+
+
+def _hit_locs(result: str) -> list[str]:
+    """Return path:line locator lines from the hit body (ignore excerpt bodies)."""
+    return [ln for ln in _hit_body(result).splitlines() if _HIT_LOC_RE.match(ln)]
+
+
 def test_find_references_returns_capped_path_line_hits() -> None:
-    """Hits are path:line only (no line text), across files and the excerpt."""
+    """Hits include path:line locators across files and the excerpt."""
     idx = CodebaseIndex(
         files={
             "a.py": "def foo():\n    pass\n",
@@ -566,25 +690,45 @@ def test_find_references_returns_capped_path_line_hits() -> None:
         existing_codebase="legacy_foo()\n",
     )
     result = idx.find_references("foo")
-    assert result == (
-        "a.py:1\n"
-        "b.py:1\n"
-        f"{CodebaseIndex.EXISTING_CODEBASE_PATH}:1"
-    )
+    locs = _hit_locs(result)
+    assert "a.py:1" in locs
+    assert "b.py:1" in locs
+    assert f"{CodebaseIndex.EXISTING_CODEBASE_PATH}:1" in locs
+    assert _NO_REPO in result
 
 
 def test_find_references_empty_and_blank_symbol() -> None:
     """Unknown or whitespace-only symbol returns the empty-references message."""
     idx = CodebaseIndex(files={"a.py": "def foo():\n    pass\n"})
-    assert idx.find_references("zzz-not-there") == "No references for 'zzz-not-there'."
-    assert idx.find_references("   ") == "No references for '   '."
+    assert idx.find_references("zzz-not-there") == (
+        f"No references for 'zzz-not-there'.\n\n{_NO_REPO}"
+    )
+    blank = idx.find_references("   ")
+    assert blank.startswith("No references for '   '.")
+    assert _NO_REPO in blank
+    assert "not searched" not in blank  # no-reader path uses the access note only
+
+
+def test_find_references_blank_symbol_with_reader_does_not_imply_complete_scan() -> None:
+    """Blank symbol with a reader must not look like a finished empty repo search."""
+    idx = CodebaseIndex(
+        files={"a.py": "def foo():\n    pass\n"},
+        repo_reader=_FakeReader({"other.py": "foo()\n"}),
+    )
+    result = idx.find_references("   ")
+    assert "No references for '   '." in result
+    assert "not searched" in result
+    assert "does NOT prove" in result
+    assert "other.py" not in result
+    assert _NO_REPO not in result
 
 
 def test_find_references_respects_max_matches() -> None:
     """Result is capped at max_matches path:line lines."""
     idx = CodebaseIndex(files={"a.py": "x\n" * 100})
     result = idx.find_references("x", max_matches=5)
-    assert result.splitlines() == [f"a.py:{i}" for i in range(1, 6)]
+    assert _hit_locs(result) == [f"a.py:{i}" for i in range(1, 6)]
+    assert _NO_REPO in result
 
 
 @pytest.mark.parametrize("bad_max", [0, -1, -100])
@@ -601,7 +745,7 @@ def test_find_references_includes_repo_reader_hits() -> None:
         repo_reader=_FakeReader({"other/caller.py": "from changed import x\nx()\n"}),
     )
     result = idx.find_references("changed")
-    assert "other/caller.py:1" in result.splitlines()
+    assert "other/caller.py:1" in _hit_locs(result)
     assert "No references" not in result
 
 
@@ -617,10 +761,11 @@ def test_find_references_merges_submission_then_repo_under_cap() -> None:
             }
         ),
     )
-    lines = idx.find_references("needle", max_matches=3).splitlines()
-    assert lines[0] == "a.py:1"
-    assert len(lines) == 3
-    assert all(":" in line and "needle" not in line for line in lines)
+    result = idx.find_references("needle", max_matches=3)
+    locs = _hit_locs(result)
+    assert locs[0] == "a.py:1"
+    assert len(locs) == 3
+    assert "Scan truncated" in result
 
 
 def test_find_references_skips_submission_paths_in_repo_half() -> None:
@@ -634,10 +779,11 @@ def test_find_references_skips_submission_paths_in_repo_half() -> None:
             }
         ),
     )
-    lines = idx.find_references("needle", max_matches=10).splitlines()
-    assert lines.count("shared.py:1") == 1
-    assert "shared.py:2" not in lines
-    assert "only_repo.py:1" in lines
+    result = idx.find_references("needle", max_matches=10)
+    locs = _hit_locs(result)
+    assert locs.count("shared.py:1") == 1
+    assert "shared.py:2" not in locs
+    assert "only_repo.py:1" in locs
 
 
 def test_search_repo_references_respects_max_files_scanned() -> None:
@@ -648,27 +794,207 @@ def test_search_repo_references_respects_max_files_scanned() -> None:
 
     reader_files = {f"f{i}.py": "needle\n" for i in range(5)}
     idx = CodebaseIndex(files={"sub.py": "other\n"}, repo_reader=_FakeReader(reader_files))
-    hits = _search_repo_references(idx, "needle", max_matches=10, max_files_scanned=2)
+    hits, truncated = _search_repo_references(idx, "needle", max_matches=10, max_files_scanned=2)
     assert len(hits) == 2
+    assert truncated is True
     assert {path for path, _, _ in hits} <= set(reader_files)
 
 
+@pytest.mark.parametrize("raise_error", [True, False])
+def test_search_repo_references_per_file_failure_keeps_other_hits(raise_error: bool) -> None:
+    """One file's read_file failing (raise or None) skips just that file, not the scan.
+
+    Distinct from the ``_BoomReader`` case (list_files itself fails): here the
+    listing succeeds and most files read fine, so the other hits must still
+    surface, with ``truncated`` set to flag the incomplete coverage.
+    """
+    from software_engineering_team.code_review_agent.false_positive_filter import (
+        _search_repo_references,
+    )
+
+    files = {"a.py": "needle\n", "bad.py": "needle\n", "c.py": "needle\n"}
+    idx = CodebaseIndex(
+        files={"sub.py": "other\n"},
+        repo_reader=_PartialFailReader(files, fail_paths=["bad.py"], raise_error=raise_error),
+    )
+    hits, truncated = _search_repo_references(idx, "needle", max_matches=10)
+    assert {path for path, _, _ in hits} == {"a.py", "c.py"}
+    assert truncated is True
+
+
 def test_find_references_no_reader_unchanged() -> None:
-    """Without a reader, behavior stays submission-only."""
+    """Without a reader, results stay submission-only and note that explicitly."""
     idx = CodebaseIndex(files={"a.py": "def foo():\n    pass\n"})
-    assert idx.find_references("foo") == "a.py:1"
-    assert idx.find_references("zzz") == "No references for 'zzz'."
+    result = idx.find_references("foo")
+    assert "a.py:1" in _hit_locs(result)
+    assert "function foo" in result
+    assert _NO_REPO in result
+    assert idx.find_references("zzz") == f"No references for 'zzz'.\n\n{_NO_REPO}"
+
+
+def test_find_references_no_reader_note_on_hits() -> None:
+    idx = CodebaseIndex(files={"a.py": "foo\n"})
+    result = idx.find_references("foo")
+    assert "a.py:1" in _hit_locs(result)
+    assert _NO_REPO in result
+
+
+def test_find_references_truncated_banner_when_match_cap_skips_repo() -> None:
+    """Submission fills max_matches with a reader present → truncated (repo not searched)."""
+    idx = CodebaseIndex(
+        files={"a.py": "x\nx\nx\n"},
+        repo_reader=_FakeReader({"r.py": "x\n"}),
+    )
+    result = idx.find_references("x", max_matches=2)
+    assert _hit_locs(result) == ["a.py:1", "a.py:2"]
+    assert "Scan truncated" in result
+    assert "more matches" in result
+
+
+def test_find_references_truncated_empty_message(monkeypatch) -> None:
+    """Repo scan hits file-scan cap with no matches → empty-truncated wording."""
+    import code_review_agent.false_positive_filter as fpf
+
+    monkeypatch.setattr(fpf, "_REPO_SEARCH_FILE_SCAN_LIMIT", 2)
+    idx = CodebaseIndex(
+        files={"sub.py": "other\n"},
+        repo_reader=_FakeReader({f"f{i}.py": "zzz\n" for i in range(5)}),
+    )
+    result = idx.find_references("needle")
+    assert "No references for 'needle'" in result
+    assert "truncated" in result
+    assert "does NOT prove" in result
+
+
+def test_find_references_list_files_failure_is_empty_truncated() -> None:
+    """Reader list_files failure must surface as empty-truncated, not a complete miss."""
+    idx = CodebaseIndex(
+        files={"sub.py": "other\n"},
+        repo_reader=_BoomReader(),
+    )
+    result = idx.find_references("needle")
+    assert "No references for 'needle'" in result
+    assert "truncated" in result
+    assert "does NOT prove" in result
+
+
+def test_find_references_attaches_enclosing_construct_excerpt() -> None:
+    """A hit inside a Python function includes the construct slice."""
+    src = "def outer():\n    return 1\n\ndef caller():\n    return outer()\n"
+    idx = CodebaseIndex(files={"mod.py": src})
+    result = idx.find_references("outer")
+    assert "mod.py:5" in _hit_locs(result)
+    assert "function caller" in result
+    assert "return outer()" in result
+    assert "def outer():" in result  # definition hit may also appear
+    assert _NO_REPO in result
+
+
+def test_find_references_repo_hit_unreadable_at_format_time_returns_locator_only() -> None:
+    """A repo hit found during the scan but unreadable on the second, format-time read
+    degrades to a bare path:line locator instead of raising or dropping the hit."""
+    idx = CodebaseIndex(
+        files={"sub.py": "other\n"},
+        repo_reader=_FlakyReader({"caller.py": "def caller():\n    return needle()\n"}),
+    )
+    result = idx.find_references("needle")
+    assert result == "caller.py:2"
+    assert "function caller" not in result
+    assert "def caller" not in result
+
+
+def test_find_references_module_level_hit_gets_line_window_fallback() -> None:
+    """Module-level hits (no enclosing construct) get a bounded raw-line window."""
+    src = "A = 1\nB = 2\nNEEDLE = 3\nC = 4\nD = 5\n"
+    idx = CodebaseIndex(files={"mod.py": src})
+    result = idx.find_references("NEEDLE")
+    assert _hit_locs(result) == ["mod.py:3"]
+    body = _hit_body(result)
+    assert "function" not in body
+    assert "class" not in body
+    assert "window" in body
+    assert "NEEDLE = 3" in body
+    assert _NO_REPO in result
+
+
+def test_find_references_unparsable_python_file_gets_line_window() -> None:
+    """A .py file that fails to parse still gets a bounded window, not just a locator."""
+    src = "def broken(:\n    NEEDLE = 1\n"
+    idx = CodebaseIndex(files={"broken.py": src})
+    result = idx.find_references("NEEDLE")
+    assert _hit_locs(result) == ["broken.py:2"]
+    body = _hit_body(result)
+    assert "window" in body
+    assert "NEEDLE = 1" in body
+
+
+def test_find_references_non_python_file_gets_line_window() -> None:
+    """Non-Python files get a bounded raw-line window instead of an empty excerpt."""
+    src = "line one\nline two\nNEEDLE here\nline four\n"
+    idx = CodebaseIndex(files={"notes.md": src})
+    result = idx.find_references("NEEDLE")
+    assert _hit_locs(result) == ["notes.md:3"]
+    body = _hit_body(result)
+    assert "window" in body
+    assert "NEEDLE here" in body
+
+
+def test_find_references_line_window_clamps_to_file_bounds() -> None:
+    """A window near a small file's edges doesn't request out-of-range lines."""
+    src = "NEEDLE = 1\nB = 2\nC = 3\n"
+    idx = CodebaseIndex(files={"mod.py": src})
+    result = idx.find_references("NEEDLE")
+    body = _hit_body(result)
+    assert "NEEDLE = 1" in body
+    assert "of 3 lines" in body
+
+
+def test_find_references_construct_exceeding_cap_uses_window(monkeypatch) -> None:
+    """A construct bigger than the excerpt cap is windowed, not dumped in full."""
+    import code_review_agent.false_positive_filter as fpf
+
+    monkeypatch.setattr(fpf, "_EXCERPT_MAX_LINES", 3)
+    monkeypatch.setattr(fpf, "_EXCERPT_WINDOW_LINES", 3)
+    lines = ["def big():"] + [f"    x{i} = {i}" for i in range(20)] + ["    return NEEDLE"]
+    src = "\n".join(lines) + "\n"
+    idx = CodebaseIndex(files={"mod.py": src})
+    result = idx.find_references("NEEDLE")
+    hit_line = len(lines)
+    assert f"mod.py:{hit_line}" in _hit_locs(result)
+    body = _hit_body(result)
+    assert "return NEEDLE" in body
+    assert "window" in body
+    assert "x0 = 0" not in body
+    assert "function big" not in body
+
+
+def test_find_references_pre_numbered_uses_original_line_and_correct_excerpt() -> None:
+    """Annotated hunk hits remap storage indices to original lines and the right construct."""
+    src = "100: def earlier():\n101:     pass\n102: \n103: def later():\n104:     return NEEDLE\n"
+    idx = CodebaseIndex(files={"mod.py": src})
+    result = idx.find_references("NEEDLE")
+    assert _hit_locs(result) == ["mod.py:104"]
+    assert "function later" in result
+    assert "return NEEDLE" in result
+    assert "function earlier" not in result
+    assert _NO_REPO in result
 
 
 # --------------------------------------------------------------------------- tools
 
 
 def test_build_tools_delegate_to_index() -> None:
-    """``_build_tools`` returns six tools that delegate to the index."""
+    """``_build_tools`` returns seven tools that delegate to the index."""
     idx = CodebaseIndex(files={"app/main.py": "def foo(): pass\n"}, existing_codebase="old")
-    read_file, read_lines, read_function, list_files, search_codebase, find_function_at_line = _build_tools(
-        idx
-    )
+    (
+        read_file,
+        read_lines,
+        read_function,
+        list_files,
+        search_codebase,
+        find_function_at_line,
+        find_references,
+    ) = _build_tools(idx)
     assert {
         read_file.tool_name,
         read_lines.tool_name,
@@ -676,6 +1002,7 @@ def test_build_tools_delegate_to_index() -> None:
         list_files.tool_name,
         search_codebase.tool_name,
         find_function_at_line.tool_name,
+        find_references.tool_name,
     } == {
         "read_file",
         "read_lines",
@@ -683,6 +1010,7 @@ def test_build_tools_delegate_to_index() -> None:
         "list_files",
         "search_codebase",
         "find_function_at_line",
+        "find_references",
     }
     assert read_file("app/main.py") == "def foo(): pass\n"
     listed = list_files()
@@ -692,11 +1020,29 @@ def test_build_tools_delegate_to_index() -> None:
     slice_text = read_lines("app/main.py", 1, 1)
     assert slice_text.startswith("app/main.py lines 1–1 (1 lines):")
     assert "1| def foo(): pass" in slice_text
+    assert "app/main.py:1" in find_references("foo")
+    assert "No references" in find_references("zzz-not-there")
+
+
+def test_build_tools_includes_find_references() -> None:
+    """``_build_tools`` exposes find_references alongside the existing six tools."""
+    idx = CodebaseIndex(files={"app/main.py": "def foo(): pass\n"})
+    tools = _build_tools(idx)
+    names = {t.tool_name for t in tools}
+    assert names == {
+        "read_file",
+        "read_lines",
+        "read_function",
+        "list_files",
+        "search_codebase",
+        "find_function_at_line",
+        "find_references",
+    }
 
 
 def test_list_files_tool_handles_empty_index() -> None:
     """The list_files tool returns a placeholder string for an empty index."""
-    _, _, _, list_files, _, _ = _build_tools(CodebaseIndex(files={}))
+    _, _, _, list_files, _, _, _ = _build_tools(CodebaseIndex(files={}))
     assert list_files() == "(no files available)"
 
 
@@ -715,7 +1061,9 @@ def test_truncate_for_log_caps_length() -> None:
 def test_build_tools_never_raise_on_index_errors(monkeypatch) -> None:
     """Index-backed tools return Error strings when the underlying index raises."""
     idx = CodebaseIndex(files={"a.py": "x"})
-    read_file, read_lines, read_function, list_files, search_codebase, _find = _build_tools(idx)
+    read_file, read_lines, read_function, list_files, search_codebase, _find, find_references = (
+        _build_tools(idx)
+    )
 
     def _boom_read(_self: CodebaseIndex, path: str) -> str:
         raise RuntimeError("index boom")
@@ -748,13 +1096,14 @@ def test_build_tools_never_raise_on_index_errors(monkeypatch) -> None:
     assert read_function("a.py", "f").startswith("Error:")
     assert list_files().startswith("Error:")
     assert search_codebase("x").startswith("Error:")
+    assert find_references("x").startswith("Error:")
 
 
 def test_read_lines_tool_enforces_max_span() -> None:
     """The read_lines tool surfaces the oversize-span error from the index."""
     body = "\n".join(f"L{i}" for i in range(1, 450)) + "\n"
     idx = CodebaseIndex(files={"big.py": body})
-    _, read_lines, _, _, _, _ = _build_tools(idx)
+    _, read_lines, _, _, _, _, _ = _build_tools(idx)
     msg = read_lines("big.py", 1, _READ_LINES_MAX_SPAN + 1)
     assert msg.startswith("Error:")
     assert f"maximum is {_READ_LINES_MAX_SPAN}" in msg
@@ -767,7 +1116,7 @@ def test_find_function_at_line_python_top_level() -> None:
     """Tool returns the enclosing top-level function for a Python file."""
     code = "def alpha():\n    x = 1\n    return x\n\ndef beta():\n    pass\n"
     idx = CodebaseIndex(files={"app/main.py": code})
-    _, _, _, _, _, find_function_at_line = _build_tools(idx)
+    _, _, _, _, _, find_function_at_line, _ = _build_tools(idx)
     result = find_function_at_line("app/main.py", 2)
     assert "alpha" in result
     assert "beta" not in result
@@ -777,7 +1126,7 @@ def test_find_function_at_line_line_one_is_one_based() -> None:
     """``line_number=1`` resolves the construct starting on the first line (1-based contract)."""
     code = "def alpha():\n    return 1\n"
     idx = CodebaseIndex(files={"app/main.py": code})
-    _, _, _, _, _, find_function_at_line = _build_tools(idx)
+    _, _, _, _, _, find_function_at_line, _ = _build_tools(idx)
     result = find_function_at_line("app/main.py", 1)
     assert "alpha" in result
     assert not result.startswith("Error:")
@@ -793,7 +1142,7 @@ def test_find_function_at_line_python_nested() -> None:
         "\n"  # line 5
     )
     idx = CodebaseIndex(files={"svc.py": code})
-    _, _, _, _, _, find_function_at_line = _build_tools(idx)
+    _, _, _, _, _, find_function_at_line, _ = _build_tools(idx)
     result = find_function_at_line("svc.py", 4)
     assert "inner" in result
     assert "outer" not in result
@@ -807,7 +1156,7 @@ def test_find_function_at_line_python_class_method() -> None:
         "        return 42\n"  # line 3
     )
     idx = CodebaseIndex(files={"models.py": code})
-    _, _, _, _, _, find_function_at_line = _build_tools(idx)
+    _, _, _, _, _, find_function_at_line, _ = _build_tools(idx)
     result = find_function_at_line("models.py", 3)
     assert "bar" in result
     assert "Foo" in result
@@ -817,7 +1166,7 @@ def test_find_function_at_line_python_module_level() -> None:
     """Tool reports 'module level' when the line is not inside any construct."""
     code = "X = 1\nY = 2\n"
     idx = CodebaseIndex(files={"config.py": code})
-    _, _, _, _, _, find_function_at_line = _build_tools(idx)
+    _, _, _, _, _, find_function_at_line, _ = _build_tools(idx)
     result = find_function_at_line("config.py", 1)
     assert "module level" in result
 
@@ -826,7 +1175,7 @@ def test_find_function_at_line_non_python_heuristic() -> None:
     """Tool falls back to the column-0 heuristic for non-Python files."""
     code = "function doWork() {\n  const x = 1;\n  return x;\n}\n"
     idx = CodebaseIndex(files={"app.ts": code})
-    _, _, _, _, _, find_function_at_line = _build_tools(idx)
+    _, _, _, _, _, find_function_at_line, _ = _build_tools(idx)
     result = find_function_at_line("app.ts", 2)
     # Heuristic returns the start line of the enclosing construct.
     assert "starting at line 1" in result
@@ -835,7 +1184,7 @@ def test_find_function_at_line_non_python_heuristic() -> None:
 def test_find_function_at_line_unknown_path() -> None:
     """Tool returns an error string for a path not in the index."""
     idx = CodebaseIndex(files={"app/main.py": "x = 1\n"})
-    _, _, _, _, _, find_function_at_line = _build_tools(idx)
+    _, _, _, _, _, find_function_at_line, _ = _build_tools(idx)
     result = find_function_at_line("does/not/exist.py", 5)
     assert result.startswith("Error")
 
@@ -847,7 +1196,7 @@ def test_find_function_at_line_content_literally_starting_with_error() -> None:
     # Contract under test: content beginning with ``Error:`` is still readable.
     assert idx.read_file_or_none("fixtures/log_sample.py") == code
     assert code.startswith("Error:")
-    _, _, _, _, _, find_function_at_line = _build_tools(idx)
+    _, _, _, _, _, find_function_at_line, _ = _build_tools(idx)
     result = find_function_at_line("fixtures/log_sample.py", 2)
     # Must not treat the content as a read-failure sentinel.
     assert "is not a readable path" not in result
@@ -861,7 +1210,7 @@ def test_find_function_at_line_python_syntax_error() -> None:
     """Tool returns a parse-error message for a Python file with invalid syntax."""
     code = "def foo(:\n    pass\n"  # SyntaxError: missing closing paren
     idx = CodebaseIndex(files={"broken.py": code})
-    _, _, _, _, _, find_function_at_line = _build_tools(idx)
+    _, _, _, _, _, find_function_at_line, _ = _build_tools(idx)
     result = find_function_at_line("broken.py", 2)
     assert "Could not parse" in result
 
@@ -870,7 +1219,7 @@ def test_find_function_at_line_python_async_def() -> None:
     """Tool correctly identifies an async function as the enclosing construct."""
     code = "async def fetch():\n    return await something()\n"
     idx = CodebaseIndex(files={"service.py": code})
-    _, _, _, _, _, find_function_at_line = _build_tools(idx)
+    _, _, _, _, _, find_function_at_line, _ = _build_tools(idx)
     result = find_function_at_line("service.py", 2)
     assert "fetch" in result
 
@@ -883,7 +1232,7 @@ def test_find_function_at_line_python_decorated() -> None:
         "    return 'hi'\n"  # line 3
     )
     idx = CodebaseIndex(files={"views.py": code})
-    _, _, _, _, _, find_function_at_line = _build_tools(idx)
+    _, _, _, _, _, find_function_at_line, _ = _build_tools(idx)
     result = find_function_at_line("views.py", 3)
     assert "greet" in result
     assert "lines 1" in result  # decorator line is the reported start
@@ -893,7 +1242,7 @@ def test_find_function_at_line_non_python_no_construct() -> None:
     """Tool returns 'Could not identify' when no column-0 declaration precedes the target line."""
     code = "  const x = 1;\n  return x;\n"  # every line is indented
     idx = CodebaseIndex(files={"snippet.ts": code})
-    _, _, _, _, _, find_function_at_line = _build_tools(idx)
+    _, _, _, _, _, find_function_at_line, _ = _build_tools(idx)
     result = find_function_at_line("snippet.ts", 1)
     assert "Could not identify" in result
 
@@ -914,7 +1263,7 @@ def test_find_function_at_line_never_raises(monkeypatch: pytest.MonkeyPatch) -> 
 
     # Patch on the class: CodebaseIndex is frozen, so instance setattr fails.
     monkeypatch.setattr(CodebaseIndex, "resolve_path", _boom)
-    _, _, _, _, _, find_function_at_line = _build_tools(idx)
+    _, _, _, _, _, find_function_at_line, _ = _build_tools(idx)
     result = find_function_at_line("app/main.py", 1)
     assert result.startswith("Error")
     assert "boom" in result
@@ -967,7 +1316,7 @@ def test_strip_numbered_prefixes_empty_content() -> None:
 def test_find_function_at_line_rejects_nonpositive_line() -> None:
     """Tool returns an error string for invalid line numbers instead of guessing or raising."""
     idx = CodebaseIndex(files={"app/main.py": "def f():\n    return 1\n"})
-    _, _, _, _, _, find_fn = _build_tools(idx)
+    _, _, _, _, _, find_fn, _ = _build_tools(idx)
     for bad in (0, -1, -3, True, False, "5"):
         msg = find_fn("app/main.py", bad)  # type: ignore[arg-type]
         assert msg.startswith("Error:"), bad
@@ -997,7 +1346,7 @@ def test_find_heuristic_beyond_eof() -> None:
 def test_find_function_at_line_python_beyond_eof() -> None:
     """Python AST finder returns an explicit beyond-EOF message for out-of-range lines."""
     idx = CodebaseIndex(files={"app/main.py": "def alpha():\n    return 1\n"})
-    _, _, _, _, _, find_fn = _build_tools(idx)
+    _, _, _, _, _, find_fn, _ = _build_tools(idx)
     msg = find_fn("app/main.py", 99)
     assert "beyond the end" in msg.lower()
     assert "file has" in msg.lower()
@@ -1008,7 +1357,7 @@ def test_find_function_at_line_pre_numbered_python() -> None:
     # Simulate a hunk starting at original line 100. The def is at original line 101.
     content = "100: x = setup()\n101: def process(data):\n102:     return data * 2\n"
     idx = CodebaseIndex(files={"worker.py": content})
-    _, _, _, _, _, find_function_at_line = _build_tools(idx)
+    _, _, _, _, _, find_function_at_line, _ = _build_tools(idx)
     # Ask for original line 102, which is inside 'process'.
     result = find_function_at_line("worker.py", 102)
     assert "process" in result
@@ -1028,7 +1377,7 @@ def test_find_function_at_line_pre_numbered_non_python() -> None:
         "4243:     return this.data;\n"
     )
     idx = CodebaseIndex(files={"service.ts": content})
-    _, _, _, _, _, find_function_at_line = _build_tools(idx)
+    _, _, _, _, _, find_function_at_line, _ = _build_tools(idx)
     # Ask for original line 4243.
     result = find_function_at_line("service.ts", 4243)
     # Should report the original line number, not the physical line 1.
@@ -1045,7 +1394,7 @@ def test_find_function_at_line_pre_numbered_large_line_number() -> None:
         "4240: const a = 1;\n4241: const b = 2;\n4242: function getResult() { return a + b; }\n"
     )
     idx = CodebaseIndex(files={"util.js": content})
-    _, _, _, _, _, find_function_at_line = _build_tools(idx)
+    _, _, _, _, _, find_function_at_line, _ = _build_tools(idx)
     result = find_function_at_line("util.js", 4242)
     # Must report original line 4242 (the function line), not physical line 3.
     assert "4242" in result
@@ -1064,7 +1413,7 @@ def test_find_function_at_line_hunk_separator_not_treated_as_construct() -> None
         "51:   return a;\n"
     )
     idx = CodebaseIndex(files={"util.js": content})
-    _, _, _, _, _, find_function_at_line = _build_tools(idx)
+    _, _, _, _, _, find_function_at_line, _ = _build_tools(idx)
     result = find_function_at_line("util.js", 51)
     # The construct start must be the "doWork" line (original 50), not the separator.
     assert "50" in result
@@ -1081,7 +1430,7 @@ def test_find_function_at_line_module_level_hunk_not_broken_by_sibling_hunk() ->
     # (module-level line 2 of hunk B) as unparseable.
     content = "10: def first():\n11:     return 1\n...\n20: x = 1\n...\n30:     changed()\n"
     idx = CodebaseIndex(files={"worker.py": content})
-    _, _, _, _, _, find_function_at_line = _build_tools(idx)
+    _, _, _, _, _, find_function_at_line, _ = _build_tools(idx)
     result = find_function_at_line("worker.py", 20)
     assert "module level" in result.lower()
     assert "could not parse" not in result.lower()
@@ -1821,6 +2170,60 @@ class _BoomReader:
 
     def read_file(self, path: str) -> Optional[str]:
         raise RuntimeError("read boom")
+
+
+class _PartialFailReader:
+    """A reader whose read_file fails for specific paths, succeeds for the rest.
+
+    Models one file's fetch failing mid-scan (e.g. a GitHub-backed reader
+    erroring on a single path) without aborting the whole repo half of
+    ``find_references`` -- distinct from ``_BoomReader``'s total ``list_files``
+    failure, which never gets far enough to scan any file.
+    """
+
+    def __init__(
+        self, files: Dict[str, str], fail_paths: Iterable[str], *, raise_error: bool = True
+    ):
+        self._files = files
+        self._fail_paths = set(fail_paths)
+        self._raise_error = raise_error
+
+    def list_files(self) -> List[str]:
+        return list(self._files)
+
+    def read_file(self, path: str) -> Optional[str]:
+        key = (path or "").strip()
+        if key in self._fail_paths:
+            if self._raise_error:
+                raise RuntimeError(f"read boom: {key}")
+            return None
+        return self._files.get(key)
+
+
+class _FlakyReader:
+    """A reader whose read_file returns ``None`` after the first successful read per path.
+
+    ``find_references`` reads a matched repo file twice: once in
+    ``_search_repo_references`` to find the hit, and again in
+    ``_format_reference_hit`` (via ``CodebaseIndex._read``) to build the
+    excerpt. This models a reader that can serve a file once but not again
+    (e.g. a transient or rate-limited fetch), exercising the locator-only
+    fallback when that second read fails.
+    """
+
+    def __init__(self, files: Dict[str, str]):
+        self._files = files
+        self._served: set = set()
+
+    def list_files(self) -> List[str]:
+        return list(self._files)
+
+    def read_file(self, path: str) -> Optional[str]:
+        key = (path or "").strip()
+        if key in self._served:
+            return None
+        self._served.add(key)
+        return self._files.get(key)
 
 
 def test_index_list_files_appends_reader_paths_deduped() -> None:

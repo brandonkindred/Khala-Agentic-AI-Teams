@@ -40,7 +40,8 @@ class _FakeStore:
     def _store_active(self) -> bool:
         return self.active
 
-    def get(self, agent_id: str):
+    def get(self, agent_id: str, *, conn=None):
+        del conn
         self._maybe_raise("get")
         return self.rows.get(agent_id)
 
@@ -48,7 +49,8 @@ class _FakeStore:
         self._maybe_raise("all")
         return list(self.rows.values())
 
-    def upsert(self, manifest: AgentManifest) -> None:
+    def upsert(self, manifest: AgentManifest, *, conn=None) -> None:
+        del conn
         self._maybe_raise("upsert")
         self.rows[manifest.id] = manifest
 
@@ -227,7 +229,8 @@ def test_register_require_persist_rollback_preserves_concurrent_install(
     failing = _manifest("agent_team_studio.agent_studio.race-1", name="Failing")
     concurrent = _manifest("agent_team_studio.agent_studio.race-1", name="Concurrent")
 
-    def _upsert_then_race(manifest):
+    def _upsert_then_race(manifest, *, conn=None):
+        del conn
         # Simulate another thread installing a newer entry while our store call runs
         # (lock is released around the upsert).
         with reg._lock:

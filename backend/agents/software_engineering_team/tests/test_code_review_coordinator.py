@@ -10,18 +10,21 @@ through ``complete_validated`` and validates responses against
 from __future__ import annotations
 
 import json
+import math
 import threading
 import time
 from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
+from code_review_agent import mapping
 from code_review_agent.chunk_reviewer import CHUNK_REVIEW_NOTE, CODE_TO_REVIEW_HEADER
 from code_review_agent.chunking import _bisect_segment
 from code_review_agent.coordinator import (
     MAX_CODE_REVIEW_ISSUES,
     MIN_SPLIT_SEGMENT_CHARS,
     _cap_issues,
+    _is_content_failure,
     _issues_from_chunk_output,
     _map_parallelism,
     _reconcile_approval,
@@ -187,6 +190,20 @@ def test_reconcile_approval_mixed_case_non_blocking_still_auto_approves(
     approved, out = _reconcile_approval(False, [_issue(severity, "nit")])
     assert approved is True
     assert len(out) == 1
+
+
+def test_reconcile_approval_override_log_names_non_critical_high(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The auto-approve override log must describe the overridden severities
+    accurately: medium/low/info are 'non-critical/high', not 'minor/nit'.
+    """
+    with caplog.at_level("INFO"):
+        approved, out = _reconcile_approval(False, [_issue("medium", "m"), _issue("low", "l")])
+    assert approved is True
+    assert len(out) == 2
+    assert "2 non-critical/high issues, no critical/high" in caplog.text
+    assert "minor/nit" not in caplog.text
 
 
 def test_parse_code_into_file_blocks_single_file() -> None:
@@ -377,7 +394,7 @@ def test_shared_context_compaction_is_memoized_across_runs() -> None:
     """The oversized spec/architecture/existing-codebase are compacted once and
     reused on the next coordinator run (the review→fix→re-review loop passes the
     same shared context each cycle)."""
-    from software_engineering_team.shared.models import SystemArchitecture
+    from shared.dev_models.models import SystemArchitecture
 
     over_budget = "specification detail line. " * 4000  # well over any budget
     arch = SystemArchitecture(
@@ -413,7 +430,7 @@ def test_render_architecture_context_folds_in_components_and_decisions() -> None
     """The architecture excerpt built for the reviewer includes not just the
     overview prose but component responsibilities and architecture decisions
     (ADRs) -- the concrete signal an architecture-consistency check needs."""
-    from software_engineering_team.shared.models import ArchitectureComponent, SystemArchitecture
+    from shared.dev_models.models import ArchitectureComponent, SystemArchitecture
 
     arch = SystemArchitecture(
         overview="Layered service architecture.",
@@ -440,7 +457,7 @@ def test_render_architecture_context_handles_missing_and_malformed_fields() -> N
     """
     from types import SimpleNamespace
 
-    from software_engineering_team.shared.models import SystemArchitecture
+    from shared.dev_models.models import SystemArchitecture
 
     bare = SystemArchitecture(overview="Just an overview.")
     rendered_bare = _render_architecture_context(bare)
@@ -454,7 +471,7 @@ def test_render_architecture_context_handles_missing_and_malformed_fields() -> N
 def test_chunk_prompt_includes_component_and_decision_text() -> None:
     """End-to-end: a submission reviewed with a component/decision-bearing
     architecture renders that content into the chunk reviewer's prompt."""
-    from software_engineering_team.shared.models import ArchitectureComponent, SystemArchitecture
+    from shared.dev_models.models import ArchitectureComponent, SystemArchitecture
 
     class _PromptCapturingClient(DummyLLMClient):
         """Records prompts; lock-guarded for parallel map/tail callers."""
@@ -642,7 +659,7 @@ def test_code_review_agent_uses_coordinator_when_code_exceeds_limit() -> None:
     code = "### app/main.py ###\n" + "".join(f"x{i} = {i}\n" for i in range(4000))
 
     client = _MapCounter()
-    agent = CodeReviewAgent(llm_client=client)
+    agent = CodeReviewAgent(llm_client=client, force_in_process=True)
     result = agent.run(
         CodeReviewInput(
             code=code,
@@ -675,26 +692,48 @@ def _failme_content_in_bisect_window(budget: int) -> str:
     Postconditions:
         - Returned content length L satisfies 2 * MIN_SPLIT_SEGMENT_CHARS <= L < budget.
         - Every line is 40 chars and contains the FAILME marker.
+    Raises:
+        ValueError: if budget is too tight for any whole number of lines to land in
+            [2 * MIN_SPLIT_SEGMENT_CHARS, budget) — this helper can only produce content
+            lengths that are multiples of the line stride (line_body_width + 1 chars),
+            so some tight budgets admit no valid line count at all.
     """
     line_body_width = 40
-    target = (2 * MIN_SPLIT_SEGMENT_CHARS + budget) // 2
-    # Joined length of n 40-char lines is 41*n - 1; use 41 as the stride estimate.
-    n_lines = max(1, (target + 1) // (line_body_width + 1))
+    stride = line_body_width + 1  # joined length of n lines is stride*n - 1
+    n_lines = max(1, math.ceil(2 * MIN_SPLIT_SEGMENT_CHARS / stride))
     content = "\n".join(
         f"FAILME {i:05d}".ljust(line_body_width, "x") for i in range(1, n_lines + 1)
     )
-    while len(content) >= budget and n_lines > 1:
+    if len(content) >= budget and n_lines > 1:
         n_lines -= 1
         content = "\n".join(
             f"FAILME {i:05d}".ljust(line_body_width, "x") for i in range(1, n_lines + 1)
         )
-    while len(content) < 2 * MIN_SPLIT_SEGMENT_CHARS:
-        n_lines += 1
-        content = "\n".join(
-            f"FAILME {i:05d}".ljust(line_body_width, "x") for i in range(1, n_lines + 1)
+    if not (2 * MIN_SPLIT_SEGMENT_CHARS <= len(content) < budget):
+        raise ValueError(
+            f"budget={budget} admits no line count landing content in "
+            f"[{2 * MIN_SPLIT_SEGMENT_CHARS}, budget) at this helper's {stride}-char "
+            "line granularity"
         )
-    assert 2 * MIN_SPLIT_SEGMENT_CHARS <= len(content) < budget
     return content
+
+
+def test_failme_content_in_bisect_window_raises_for_unsatisfiable_tight_budget() -> None:
+    """A budget within one line-stride of 2*MIN_SPLIT_SEGMENT_CHARS admits no valid
+    line count (this helper's line lengths are quantized to 41-char strides), so the
+    helper must raise a clear ValueError instead of silently violating its documented
+    postcondition (regression for the bisect-window helper)."""
+    budget = 2 * MIN_SPLIT_SEGMENT_CHARS + 1
+    with pytest.raises(ValueError, match="admits no line count"):
+        _failme_content_in_bisect_window(budget)
+
+
+def test_failme_content_in_bisect_window_satisfies_postcondition_at_min_feasible_budget() -> None:
+    """The smallest budget admitting a valid line count (one stride past the lower
+    bound) must still satisfy the documented postcondition exactly."""
+    budget = 2 * MIN_SPLIT_SEGMENT_CHARS + 41 + 1
+    content = _failme_content_in_bisect_window(budget)
+    assert 2 * MIN_SPLIT_SEGMENT_CHARS <= len(content) < budget
 
 
 def test_split_within_budget_returns_single_whole_segment() -> None:
@@ -1452,12 +1491,15 @@ def test_transient_failure_in_bisected_child_recovers() -> None:
         ),
     )
     assert result.approved is True
-    # combined fail + a fail + a retry success + b success
-    # + 1 reduce-phase synthesis pass (two recovered sub-reviews)
-    # + 1 merged architecture/side-effect pass call (its single prompt also inlines
-    # both files together, so it hits the same combined-fail branch and fails
-    # safe).
-    assert client.calls == 6
+    # Map phase: combined fail + a fail + a retry success + b success (4 calls).
+    # + 1 reduce-phase synthesis pass (two recovered sub-reviews).
+    # + Merged architecture/side-effect pass (now on the shared submission-pass
+    # runner, which reactively bisects on overflow rather than failing safe):
+    # its single combined prompt also inlines both files together, so it hits
+    # the same combined-fail branch and bisects into an a.py call (a_failures
+    # is already consumed by the map phase's retry, so this succeeds
+    # immediately) and a b.py call (3 calls).
+    assert client.calls == 8
 
 
 def test_bisect_halves_run_sequentially_detects_dummy_and_wrapped_dummy() -> None:
@@ -1898,8 +1940,6 @@ def test_is_content_failure_classifies_model_output_errors_only() -> None:
     ``LLMSemanticExhaustionError``, ``LLMTruncatedError``, and
     ``LLMSchemaValidationError``) are recoverable content failures;
     reviewer-code bugs are not."""
-    from code_review_agent.coordinator import _is_content_failure
-
     assert _is_content_failure(LLMJsonParseError("bad")) is True
     assert _is_content_failure(LLMSemanticExhaustionError("empty")) is True
     assert _is_content_failure(json.JSONDecodeError("Expecting value", "not json", 0)) is True
@@ -2146,8 +2186,6 @@ def test_thinking_off_retry_recovers_semantic_exhaustion(monkeypatch) -> None:
     by the last-resort thinking-off retry, producing a real review (no
     not-reviewed range). The retry is normally skipped for injected strands
     models, so force the production-path gate on to exercise it."""
-    from code_review_agent import mapping
-
     monkeypatch.setenv("CODE_REVIEW_THINKING_OFF_RETRY", "true")
     monkeypatch.setattr(mapping, "thinking_override_supported", lambda llm: True)
 
@@ -2166,8 +2204,6 @@ def test_thinking_off_retry_recovers_semantic_exhaustion(monkeypatch) -> None:
 def test_thinking_off_retry_that_also_fails_degrades(monkeypatch) -> None:
     """When the thinking-off retry ALSO returns a content failure, the chunk
     degrades to a not-reviewed outcome rather than raising."""
-    from code_review_agent import mapping
-
     monkeypatch.setenv("CODE_REVIEW_THINKING_OFF_RETRY", "true")
     monkeypatch.setattr(mapping, "thinking_override_supported", lambda llm: True)
     reviewer = _ThinkAwareReviewer(
@@ -2732,8 +2768,9 @@ def test_unrecognized_category_is_clamped_to_general() -> None:
 
 def test_side_effects_category_survives_chunk_output_validation() -> None:
     """Regression test: the "side-effects" category (advertised to the chunk
-    reviewer by profiles.py's checklist item 12 / output contract) must be
-    accepted by the same validator as every other documented category -- it
+    reviewer by profiles.py's "Caller Side Effects" criterion, item 3, /
+    output contract) must be accepted by the same validator as every other
+    documented category -- it
     was previously missing from _VALID_CATEGORIES, silently clamping every
     chunk-level side-effects finding to "general" and losing its
     classification for rendering/grouping/dedup."""
@@ -2748,8 +2785,8 @@ def test_side_effects_category_survives_chunk_output_validation() -> None:
 
 def test_documentation_category_survives_chunk_output_validation() -> None:
     """The "documentation" category (advertised to the chunk reviewer by
-    profiles.py's Documentation criterion / output contract, and used for a
-    docstring-vs-implementation mismatch) must be accepted by the same
+    profiles.py's "Contracts" criterion, item 2, / output contract, and used
+    for a docstring-vs-implementation mismatch) must be accepted by the same
     validator as every other documented category rather than clamped to
     "general" -- mirrors the side-effects regression above."""
     seg = FileSegment(path="a.py", content="x = 1", total_lines=1)
@@ -3276,7 +3313,7 @@ def test_large_synthetic_input_is_fully_covered_with_bounded_prompts() -> None:
     cap = compute_code_review_map_chunk_chars(client)
     files = {f"app/mod_{i}.py": _numbered_file(2_500) for i in range(5)}  # ~500K chars total
 
-    agent = CodeReviewAgent(llm_client=client)
+    agent = CodeReviewAgent(llm_client=client, force_in_process=True)
     result = agent.run(CodeReviewInput(files=files, task_description="t", language="python"))
 
     assert isinstance(result, CodeReviewOutput)

@@ -132,7 +132,7 @@ class TestBackendCodeV2RunEndpoint:
         import software_engineering_team.temporal.start_workflow as start_workflow
         from software_engineering_team.temporal.constants import STANDALONE_TYPE_BACKEND
 
-        monkeypatch.setattr("software_engineering_team.temporal.client.is_temporal_enabled", lambda: False)
+        monkeypatch.setattr("shared.temporal.client.is_temporal_enabled", lambda: False)
         dispatched: dict = {}
         monkeypatch.setattr(
             start_workflow,

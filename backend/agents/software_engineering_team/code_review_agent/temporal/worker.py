@@ -58,8 +58,9 @@ def start_code_review_temporal_worker_thread() -> bool:
     """Start the code review Temporal worker (no-op when disabled).
 
     Postconditions:
-        - Returns ``False`` when code-review Temporal is disabled (sentinel /
-          ``dummy`` / under pytest) and starts nothing.
+        - Returns ``False`` when code-review Temporal is disabled (address
+          disable sentinel — empty / ``disabled`` / ``none`` / ``off`` / etc.)
+          and starts nothing.
         - Otherwise ensures the shared client has an address to connect to
           (defaulting ``TEMPORAL_ADDRESS`` to the deployed container only when it
           is unset — never overwriting an operator's value) and starts the worker

@@ -26,7 +26,68 @@ from shared.temporal.client import (
 logger = logging.getLogger(__name__)
 
 _worker_threads: dict[str, threading.Thread] = {}
+_worker_ready: dict[str, threading.Event] = {}
 _activity_executors: dict[str, ThreadPoolExecutor] = {}
+
+
+def is_team_worker_alive(team: str) -> bool:
+    """Return whether ``team`` has a live Temporal worker daemon thread.
+
+    Preconditions:
+        - ``team`` is a non-empty team key previously passed to
+          :func:`start_team_worker` (unknown teams simply report False).
+
+    Postconditions:
+        - Returns True iff a registered thread for ``team`` exists and
+          ``is_alive()`` is True.
+    """
+    thread = _worker_threads.get(team)
+    return thread is not None and thread.is_alive()
+
+
+def wait_for_team_worker_ready(team: str, timeout_s: float | None = None) -> None:
+    """Block until ``team``'s worker has connected (ready event set).
+
+    ``start_team_worker`` returns True as soon as the daemon thread is
+    spawned; connect happens asynchronously. This wait is the public signal
+    that the worker finished connecting and is about to run.
+
+    Preconditions:
+        - ``start_team_worker(team, ...)`` has already been called successfully
+          for this process (a ready ``Event`` is registered for ``team``).
+        - ``timeout_s`` is ``None`` (use ``CLIENT_READY_TIMEOUT_S``) or >= 0.
+
+    Postconditions:
+        - Returns once the team's ready event is set and the worker thread is
+          still alive.
+        - Raises ``RuntimeError`` if the worker was never started, the thread
+          exits before becoming ready, or the timeout elapses first.
+    """
+    from shared.temporal.runner import CLIENT_READY_TIMEOUT_S
+
+    if timeout_s is None:
+        timeout_s = CLIENT_READY_TIMEOUT_S
+    event = _worker_ready.get(team)
+    if event is None:
+        raise RuntimeError(
+            f"{team} Temporal worker was not started; refusing to serve without a worker"
+        )
+    if event.wait(timeout=timeout_s):
+        if not is_team_worker_alive(team):
+            raise RuntimeError(
+                f"{team} Temporal worker thread exited after start; "
+                "refusing to serve without a worker"
+            )
+        return
+    if not is_team_worker_alive(team):
+        raise RuntimeError(
+            f"{team} Temporal worker thread exited after start; "
+            "refusing to serve without a worker"
+        )
+    raise RuntimeError(
+        f"{team} Temporal worker thread never became ready; "
+        "refusing to serve without a worker"
+    )
 
 
 def _build_workflow_runner() -> Any:
@@ -83,6 +144,17 @@ def _build_workflow_runner() -> Any:
         # exclusively in activity code.
         "numpy",
         "pandas",
+        # StrategyLabCycleWorkflow.run() calls dto.convergence_tracker_from_wire,
+        # which imports quality_gates.ConvergenceTracker; quality_gates/__init__.py
+        # eagerly imports every quality gate (including backtest_anomaly.py,
+        # spec_readiness.py), and those import investment_team.market_data_service
+        # for a type/helper reference. market_data_service reads
+        # ALPHA_VANTAGE_API_KEY via `os.environ.get(...)` at module scope, which
+        # the sandbox's re-import forbids (`RestrictedWorkflowAccessError`).
+        # Passing the module through is safe on the same grounds as numpy/pandas
+        # above: workflow run() bodies never call into market_data_service
+        # themselves, only reach it as a side effect of this import chain.
+        "investment_team.market_data_service",
     )
     return SandboxedWorkflowRunner(restrictions=restrictions)
 
@@ -119,6 +191,9 @@ async def _run_worker_async(
         max_concurrent_activities=max_concurrent_activities,
         workflow_runner=_build_workflow_runner(),
     )
+    ready = _worker_ready.get(team)
+    if ready is not None:
+        ready.set()
     logger.info("Temporal worker starting: team=%s task_queue=%s", team, task_queue)
     await worker.run()
 
@@ -143,6 +218,8 @@ def start_team_worker(
         return True
 
     queue = task_queue or get_default_task_queue()
+    ready = threading.Event()
+    _worker_ready[team] = ready
 
     def _target() -> None:
         loop = asyncio.new_event_loop()
@@ -156,6 +233,7 @@ def start_team_worker(
         except Exception as e:
             logger.exception("Temporal worker failed for team=%s: %s", team, e)
         finally:
+            ready.clear()
             # _run_worker_async populates the shared client/loop slots with THIS
             # loop before running. Now that the loop is about to close, release
             # those slots so a later start_workflow_sync waits for a live worker

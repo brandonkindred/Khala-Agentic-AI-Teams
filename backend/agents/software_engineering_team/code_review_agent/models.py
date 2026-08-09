@@ -6,7 +6,7 @@ from typing import Any, Callable, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field, StrictBool, model_validator
 
-from software_engineering_team.shared.models import SystemArchitecture
+from shared.dev_models.models import SystemArchitecture
 
 from .profiles import ReviewProfile
 
@@ -817,6 +817,21 @@ class CodeReviewInput(BaseModel):
         description="True when every content line already carries its original line number "
         "as an 'N: ' prefix (the coding team's PR-diff hunks); issue lines are then "
         "reported verbatim instead of re-anchored.",
+    )
+    full_content: Optional[Dict[str, str]] = Field(
+        default=None,
+        description="Optional full (non-numbered) content for some or all of the changed paths, "
+        "supplied alongside a bounded ``pre_numbered=True`` ``code=`` submission. Overlaid onto "
+        "``CodebaseIndex.files`` (see ``CodebaseIndex.from_input``) so whole-codebase passes that "
+        "need complete file bodies -- the side-effect/blast-radius pass, and the merged "
+        "architecture/side-effect pass's side-effect half -- can still run their full analysis "
+        "even though the chunk reviewer itself only sees the bounded diff surface. Those passes' "
+        "``pre_numbered`` skip guard checks ``pre_numbered and not full_content``, so supplying "
+        "this re-enables them without changing what the chunk reviewer is bounded to. ``None`` "
+        "(the default) preserves today's behavior for every existing ``pre_numbered=True`` "
+        "caller (PR-review hunk fallback has no fuller content to offer). Ignored when "
+        "``pre_numbered`` is False (those passes already read full content from ``files``/"
+        "``code`` directly).",
     )
     spec_content: str = Field(
         default="",

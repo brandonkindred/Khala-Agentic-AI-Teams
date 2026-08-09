@@ -404,7 +404,7 @@ class AgentRegistry:
             self._drop_tombstoned(merged)
         return list(merged.values())
 
-    def get(self, agent_id: str) -> AgentManifest | None:
+    def get(self, agent_id: str, *, conn: Any | None = None) -> AgentManifest | None:
         """Resolve a manifest by id, consulting the dynamic store for non-static ids.
 
         Preconditions:
@@ -432,6 +432,9 @@ class AgentRegistry:
               Postgres hit (its best-effort delete may have failed) — see
               :meth:`_is_tombstoned`.
             * Returns ``None`` iff no static, dynamic-store, or local entry exists.
+            * When ``conn`` is provided, the dynamic-store lookup joins that
+              connection (no nested pool checkout) so callers holding a roster
+              ``get_conn()`` cannot deadlock under ``POSTGRES_POOL_MAX_SIZE=1``.
         """
         with self._lock:
             if agent_id in self._static_ids:
@@ -443,7 +446,7 @@ class AgentRegistry:
         if store is None:
             return local_fallback
         try:
-            found = store.get(agent_id)
+            found = store.get(agent_id, conn=conn)
         except Exception:
             # Store *error* (not a miss): true state unknown → degrade to the local
             # copy rather than spuriously 404 a live agent.
@@ -476,6 +479,7 @@ class AgentRegistry:
         source_path: Path | None = None,
         *,
         require_persist: bool = False,
+        conn: Any | None = None,
     ) -> None:
         """Install a manifest into the live registry (for dynamically generated agents).
 
@@ -499,6 +503,9 @@ class AgentRegistry:
               re-raises so fail-closed callers (e.g. generated roster chat-save)
               can roll back their DB write. When no store is active, local-only
               registration still succeeds — there is nothing to persist.
+            * When ``conn`` is provided, the dynamic-store upsert joins that
+              connection (no nested pool checkout) so callers holding a roster
+              ``get_conn()`` cannot deadlock under ``POSTGRES_POOL_MAX_SIZE=1``.
         """
         assert manifest.id, "register: manifest.id must be non-empty"
         with self._lock:
@@ -526,7 +533,7 @@ class AgentRegistry:
                     self._unconfirmed.add(manifest.id)
                 return
             try:
-                store.upsert(manifest)
+                store.upsert(manifest, conn=conn)
             except Exception:
                 if require_persist:
                     # Undo the in-memory install so fail-closed callers do not leave

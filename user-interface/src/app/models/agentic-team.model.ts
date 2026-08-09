@@ -44,30 +44,22 @@ export interface ProcessDefinition {
 /** Provenance of a roster entry (Agent Studio §3, Stage 3). */
 export type AgenticTeamAgentSource = 'generated' | 'registry';
 
-/** Named agent in the team's roster (per agentic team architecture). */
+/** Named agent in the team's roster (thin ref; persona enriched on GET team / list). */
 export interface AgenticTeamAgent {
   agent_name: string;
-  role: string;
-  skills: string[];
-  capabilities: string[];
-  tools: string[];
-  expertise: string[];
   source: AgenticTeamAgentSource;
-  manifest_id: string | null;
-}
-
-/** Request body for `POST /teams/{id}/agents/from-registry`. */
-export interface AddAgentFromRegistryRequest {
   manifest_id: string;
-}
-
-/** Request body for `PUT /teams/{id}/agents/{agent_name}` — every field optional. */
-export interface UpdateAgentRequest {
+  /** Enriched from linked AgentManifest — present on GET team and list responses. */
   role?: string;
   skills?: string[];
   capabilities?: string[];
   tools?: string[];
   expertise?: string[];
+}
+
+/** Request body for `POST /teams/{id}/agents/from-registry`. */
+export interface AddAgentFromRegistryRequest {
+  manifest_id: string;
 }
 
 export interface RosterGap {

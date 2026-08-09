@@ -1,17 +1,22 @@
-"""Regression tests for ``_run_real_data_backtest`` (PR 3).
+"""Regression tests for ``_run_real_data_backtest``.
 
 Trade decisions can only come from a Strategy-Lab-generated Python script.
-With PR 3 the subprocess SandboxRunner + user-supplied raw-trade dicts are
-gone; execution now flows through the unified ``run_backtest`` event loop
+The subprocess SandboxRunner + user-supplied raw-trade dicts are gone;
+execution now flows through the unified ``run_backtest`` event loop
 that turns strategy ``submit_order`` calls into ``TradeRecord`` objects via
 ``FillSimulator``. These tests lock in the current public behaviour:
 
-* Missing ``strategy_code`` → ``BacktestExecutionError`` (422) fast-fail.
+* Missing ``strategy_code`` → ``MissingStrategyCodeError`` fast-fail.
+* No market data for the requested symbols/range → ``MarketDataUnavailableError``.
 * A strategy that fails to import (no ``Strategy`` subclass / bad module)
-  surfaces as a 422 ``BacktestExecutionError`` from the subprocess harness error.
-* A strategy that reads a non-existent forward field triggers a
-  look-ahead-violation-classified 422.
+  surfaces as ``StrategyExecutionError`` from the subprocess harness error.
+* A strategy that reads a non-existent forward field raises
+  ``LookaheadViolationError``.
 * A well-formed strategy produces metrics + trades.
+
+``_run_real_data_backtest`` raises these domain exceptions (defined in
+``investment_team.exceptions``) rather than ``HTTPException`` so it stays
+usable from non-HTTP callers; HTTP-facing callers translate them.
 """
 
 from __future__ import annotations
@@ -21,6 +26,12 @@ from typing import Dict, List
 
 import pytest
 
+from investment_team.exceptions import (
+    LookaheadViolationError,
+    MarketDataUnavailableError,
+    MissingStrategyCodeError,
+    StrategyExecutionError,
+)
 from investment_team.market_data_service import OHLCVBar
 from investment_team.models import (
     BacktestConfig,
@@ -35,11 +46,12 @@ from investment_team.strategy_lab.spec_dsl import (
 )
 
 # ---------------------------------------------------------------------------
-# Fixtures
+# Test helpers
 # ---------------------------------------------------------------------------
 
 
 def _sample_strategy(*, code: str | None) -> StrategySpec:
+    """Return a minimal StrategySpec; ``code=None`` exercises the missing-strategy-code path."""
     return StrategySpec(
         strategy_id="strat-test-1",
         authored_by="ideation",
@@ -59,6 +71,7 @@ def _sample_strategy(*, code: str | None) -> StrategySpec:
 
 
 def _sample_config() -> BacktestConfig:
+    """Return a one-month BacktestConfig with zero cost/slippage, for deterministic assertions."""
     return BacktestConfig(
         start_date="2024-01-01",
         end_date="2024-02-01",
@@ -69,8 +82,8 @@ def _sample_config() -> BacktestConfig:
 
 
 def _sample_bars() -> List[OHLCVBar]:
-    # 8 bars with a clear uptrend then exit — enough for a simple strategy
-    # to enter once and be force-closed at end-of-data.
+    """Return 8 synthetic OHLCV bars with a clear uptrend then exit — enough
+    for a simple strategy to enter once and be force-closed at end-of-data."""
     closes = [100.0, 101.0, 102.0, 103.0, 104.0, 105.0, 104.0, 103.0]
     return [
         OHLCVBar(
@@ -92,11 +105,13 @@ class _FakeMarketDataService:
         self._market_data = market_data
 
     def get_symbols_for_strategy(self, strategy: StrategySpec) -> List[str]:
+        """Return every symbol this fake has canned data for, ignoring ``strategy``."""
         return list(self._market_data.keys())
 
     def resolve_strategy_symbols(self, strategy: StrategySpec) -> List[str]:
-        # Issue #523 — mirror the real ``MarketDataService.resolve_strategy_symbols``
-        # so endpoint tests honour ``spec.target_symbols`` when set.
+        """Mirror the real ``MarketDataService.resolve_strategy_symbols``: honour
+        ``strategy.target_symbols`` when set, else fall back to the first 5
+        canned symbols."""
         if strategy.target_symbols:
             return list(strategy.target_symbols)
         return self.get_symbols_for_strategy(strategy)[:5]
@@ -104,10 +119,12 @@ class _FakeMarketDataService:
     def fetch_multi_symbol_range(
         self, symbols: List[str], asset_class: str, start: str, end: str
     ) -> Dict[str, List[OHLCVBar]]:
+        """Return the canned bars for each requested symbol that has data (others are omitted)."""
         return {s: self._market_data[s] for s in symbols if s in self._market_data}
 
 
 def _install_fake_market_service(monkeypatch, market_data: Dict[str, List[OHLCVBar]]) -> None:
+    """Patch ``MarketDataService`` so ``_run_real_data_backtest`` reads from ``market_data``."""
     import investment_team.market_data_service as mds
 
     monkeypatch.setattr(mds, "MarketDataService", lambda: _FakeMarketDataService(market_data))
@@ -119,8 +136,9 @@ def _install_fake_market_service(monkeypatch, market_data: Dict[str, List[OHLCVB
 
 
 _BUY_AND_HOLD_CODE = textwrap.dedent('''\
-    """Enter LONG on the first bar, never exit. TradingService force-closes
-    the open position at end-of-data so we still get a TradeRecord."""
+    """Enter LONG on the first bar, never exit. The open position is
+    force-closed at end-of-data; the test only verifies that execution
+    completes cleanly and returns type-correct result objects."""
     from contract import OrderSide, OrderType, Strategy
 
 
@@ -139,7 +157,7 @@ _BUY_AND_HOLD_CODE = textwrap.dedent('''\
 
 _NO_STRATEGY_CLASS_CODE = textwrap.dedent("""\
     # Deliberately does NOT subclass Strategy — the subprocess harness
-    # should raise and surface as a 422.
+    # should raise and surface as StrategyExecutionError.
     def run_strategy(data, config):
         return []
 """)
@@ -163,8 +181,8 @@ _LOOKAHEAD_CODE = textwrap.dedent('''\
 # ---------------------------------------------------------------------------
 
 
-def test_run_real_data_backtest_returns_422_when_no_strategy_code() -> None:
-    """Strategies without ``strategy_code`` must raise a 422-flavored error.
+def test_run_real_data_backtest_raises_missing_strategy_code_error_when_no_strategy_code() -> None:
+    """Strategies without ``strategy_code`` must raise ``MissingStrategyCodeError``.
 
     The LLM-per-bar fallback was removed in PR 1; only Strategy-Lab-generated
     Python scripts may produce trades.
@@ -174,15 +192,31 @@ def test_run_real_data_backtest_returns_422_when_no_strategy_code() -> None:
     strategy = _sample_strategy(code=None)
     config = _sample_config()
 
-    with pytest.raises(api_main.BacktestExecutionError) as excinfo:
+    with pytest.raises(MissingStrategyCodeError) as excinfo:
         api_main._run_real_data_backtest(strategy, config)
 
-    assert excinfo.value.status_code == 422
-    assert "strategy_code is required" in excinfo.value.detail
+    assert "strategy_code is required" in str(excinfo.value)
+
+
+def test_run_real_data_backtest_raises_when_no_market_data(monkeypatch) -> None:
+    """An empty market-data fetch must raise ``MarketDataUnavailableError``."""
+    from investment_team.api import main as api_main
+
+    _install_fake_market_service(monkeypatch, {})
+
+    strategy = _sample_strategy(code=_BUY_AND_HOLD_CODE)
+    config = _sample_config()
+
+    with pytest.raises(MarketDataUnavailableError) as excinfo:
+        api_main._run_real_data_backtest(strategy, config)
+
+    assert "Failed to fetch historical market data" in str(excinfo.value)
 
 
 def test_run_real_data_backtest_succeeds_with_well_formed_strategy(monkeypatch) -> None:
-    """A valid strategy produces metrics + at least one TradeRecord."""
+    """A valid strategy completes cleanly and returns a BacktestResult plus a
+    list of TradeRecord objects (which may be empty when the position is
+    force-closed at end-of-data)."""
     from investment_team.api import main as api_main
 
     market_data = {"AAA": _sample_bars()}
@@ -202,8 +236,10 @@ def test_run_real_data_backtest_succeeds_with_well_formed_strategy(monkeypatch) 
         assert isinstance(t, TradeRecord)
 
 
-def test_run_real_data_backtest_422_on_malformed_strategy_module(monkeypatch) -> None:
-    """Code that doesn't define a Strategy subclass surfaces as HTTP 422."""
+def test_run_real_data_backtest_raises_strategy_execution_error_on_malformed_strategy_module(
+    monkeypatch,
+) -> None:
+    """Code that doesn't define a Strategy subclass raises ``StrategyExecutionError``."""
     from investment_team.api import main as api_main
 
     market_data = {"AAA": _sample_bars()}
@@ -212,14 +248,15 @@ def test_run_real_data_backtest_422_on_malformed_strategy_module(monkeypatch) ->
     strategy = _sample_strategy(code=_NO_STRATEGY_CLASS_CODE)
     config = _sample_config()
 
-    with pytest.raises(api_main.BacktestExecutionError) as excinfo:
+    with pytest.raises(StrategyExecutionError) as excinfo:
         api_main._run_real_data_backtest(strategy, config)
-    assert excinfo.value.status_code == 422
-    assert "execution failed" in excinfo.value.detail.lower()
+    assert "execution failed" in str(excinfo.value).lower()
 
 
-def test_run_real_data_backtest_422_on_lookahead_violation(monkeypatch) -> None:
-    """A strategy that touches a non-existent forward field triggers 422."""
+def test_run_real_data_backtest_raises_lookahead_violation_error_on_forward_field_access(
+    monkeypatch,
+) -> None:
+    """A strategy that touches a non-existent forward field raises ``LookaheadViolationError``."""
     from investment_team.api import main as api_main
 
     market_data = {"AAA": _sample_bars()}
@@ -228,7 +265,15 @@ def test_run_real_data_backtest_422_on_lookahead_violation(monkeypatch) -> None:
     strategy = _sample_strategy(code=_LOOKAHEAD_CODE)
     config = _sample_config()
 
-    with pytest.raises(api_main.BacktestExecutionError) as excinfo:
+    with pytest.raises(LookaheadViolationError) as excinfo:
         api_main._run_real_data_backtest(strategy, config)
-    assert excinfo.value.status_code == 422
-    assert "look-ahead" in excinfo.value.detail.lower()
+    assert "look-ahead" in str(excinfo.value).lower()
+
+
+def test_investment_backtest_error_rejects_empty_message() -> None:
+    """The str(exc)-carries-a-message postcondition is enforced at construction,
+    not just documented — an empty message must raise, not silently succeed."""
+    from investment_team.exceptions import InvestmentBacktestError
+
+    with pytest.raises(ValueError):
+        InvestmentBacktestError("")

@@ -12,7 +12,7 @@ from __future__ import annotations
 from typing import Any, Dict, Optional
 
 import pytest
-from code_review_agent.chunk_reviewer import ChunkReviewAgent, review_chunk
+from code_review_agent.chunk_reviewer import ChunkReviewAgent
 from code_review_agent.models import ChunkReviewInput, ChunkReviewOutput
 
 from llm_service import LLMJsonParseError, LLMSchemaValidationError
@@ -108,83 +108,6 @@ def test_chunk_review_raises_llm_schema_validation_error_on_non_object_json_resp
         agent.run(_chunk_input())
 
 
-def test_review_chunk_legacy_wrapper_returns_dict_with_expected_keys() -> None:
-    """Legacy ``review_chunk`` helper delegates to ChunkReviewAgent but
-    still returns a plain dict for backward compat."""
-    result = review_chunk(
-        llm=DummyLLMClient(),
-        code_chunk="### app/main.py ###\ndef foo(): pass",
-        file_paths_label="app/main.py",
-        task_description="Add endpoint",
-        task_requirements="",
-        acceptance_criteria=[],
-        spec_excerpt="",
-        architecture_overview="",
-        existing_codebase_excerpt=None,
-    )
-    assert isinstance(result, dict)
-    # Dummy stub returns approved=True with no issues.
-    assert result["approved"] is True
-    assert result["issues"] == []
-    assert "summary" in result
-    assert "spec_compliance_notes" in result
-
-
-class _KwargRecorderClient(DummyLLMClient):
-    """Delegates to Dummy but records the prompt and every kwarg passed to
-    ``complete_json`` (notably ``system_prompt`` and ``think``), so a test can
-    assert on what ``complete_validated`` forwarded."""
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.prompts: list = []
-        self.kwargs: list = []
-
-    def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
-        self.prompts.append(prompt)
-        self.kwargs.append(kwargs)
-        return super().complete_json(prompt, **kwargs)
-
-
-def test_review_chunk_legacy_wrapper_forwards_profile_language_and_context_fields() -> None:
-    """``review_chunk`` must forward ``profile``, ``language``, ``segment_note``,
-    ``user_decisions``, ``sibling_surface``, and ``think`` into the underlying
-    ``ChunkReviewInput``/``_run_chunk_review`` call, not silently drop them to
-    defaults -- this was the gap the legacy wrapper had before it grew these
-    keyword-only parameters."""
-    from code_review_agent.profiles import ReviewProfile
-
-    client = _KwargRecorderClient()
-    review_chunk(
-        llm=client,
-        code_chunk="### app/main.py ###\ndef foo(): pass",
-        file_paths_label="app/main.py",
-        task_description="Add endpoint",
-        task_requirements="",
-        acceptance_criteria=[],
-        spec_excerpt="",
-        architecture_overview="",
-        existing_codebase_excerpt=None,
-        profile=ReviewProfile.SENIOR_ARCHITECTURE,
-        language="python",
-        segment_note="Shown from line 1 to 50 of 200.",
-        user_decisions=["Which auth? → OAuth2 (Google)"],
-        sibling_surface="app/other.py: helper_fn, HelperClass",
-        think=True,
-    )
-    assert len(client.prompts) == 1
-    prompt = client.prompts[0]
-    assert "Shown from line 1 to 50 of 200." in prompt
-    assert "Which auth? → OAuth2 (Google)" in prompt
-    assert "app/other.py: helper_fn, HelperClass" in prompt
-    assert "**Language:** python" in prompt
-
-    system_prompt = client.kwargs[0]["system_prompt"]
-    assert "Senior Software Architect" in system_prompt  # SENIOR_ARCHITECTURE role_line
-
-    assert client.kwargs[0]["think"] is True
-
-
 def test_chunk_review_agent_run_returns_chunk_review_output() -> None:
     """``ChunkReviewAgent.run`` returns a ``ChunkReviewOutput`` — approved with no
     issues — when backed by the default ``DummyLLMClient``."""
@@ -263,8 +186,9 @@ def test_no_segment_note_means_no_segment_section() -> None:
 
 def test_review_guardrails_note_is_in_every_prompt() -> None:
     """The anti-false-positive guardrails (no phantom truncation, don't flag
-    existing files as missing, relative imports are conventional) are injected
-    into the per-chunk user prompt (not the byte-locked system prompt).
+    existing files as missing, defer cross-caller checks to the side-effect
+    pass, relative imports are conventional) are injected into the per-chunk
+    user prompt (not the byte-locked system prompt).
 
     Precondition: a ChunkReviewAgent is instantiated and run once, so exactly one
     prompt is recorded for inspection.
@@ -276,8 +200,12 @@ def test_review_guardrails_note_is_in_every_prompt() -> None:
     assert "**Review guardrails" in prompt
     # Full sentences, not bare substrings, so a stray unrelated occurrence of
     # "COMPLETE" or "does not exist" elsewhere in the prompt can't false-pass.
-    assert "The code shown below is COMPLETE." in prompt
+    assert "Surface-first: the code shown below is COMPLETE" in prompt
     assert "Do NOT claim that a file, module, or symbol referenced here 'does not exist'" in prompt
+    assert "SOLELY because it is off-chunk" in prompt
+    assert (
+        "Defer that cross-caller check to the dedicated side-effect / blast-radius pass" in prompt
+    )
     assert "from .models import" in prompt  # relative imports are conventional
 
 

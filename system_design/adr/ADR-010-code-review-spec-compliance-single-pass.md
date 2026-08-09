@@ -5,10 +5,11 @@
 - **Date**: 2026-08-05
 - **Owner**: Software Engineering Team / Code Review
 - **Related**:
-  - Reduces redundant per-chunk spec/architecture context in the code-review map phase; this ADR is
-    the design-decision deliverable that gates that work's implementation sub-issues. It authorizes
-    no code change to `chunk_reviewer.py`, `coordinator.py`, or `synthesis.py` by itself — a future
-    implementation PR is gated on this ADR existing.
+  - Reduces redundant per-chunk spec/architecture context in the code-review map phase; this ADR was
+    the design-decision deliverable that gated that work's implementation sub-issues. Implemented by
+    #5065, which gates per-chunk spec/acceptance-criteria inclusion behind
+    `CODE_REVIEW_SPEC_COMPLIANCE_PASS` in `chunk_reviewer.py`, `coordinator.py`, and related modules,
+    with the deviation from the original Decision documented in the Amendment section below.
   - `backend/agents/software_engineering_team/code_review_agent/merged_architecture_side_effect_pass.py`
     — the existing once-per-submission tail-pass pattern this ADR's new pass is structurally modeled
     on.
