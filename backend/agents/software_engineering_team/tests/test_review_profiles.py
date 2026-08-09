@@ -265,6 +265,77 @@ def test_engine_threads_profile_to_chunk_reviewer(profile: ReviewProfile, anchor
     assert any(anchor in sp for sp in probe.system_prompts)
 
 
+# ---------------------------------------------------------------------------
+# Epic-level prompt contract regression net (#5418).
+#
+# The tests above pin the eight criteria and the retired thoroughness mandate
+# against the builder function and its private ``_SHARED_OUTPUT_SECTION``
+# constant directly. Neither production caller of the review engine
+# (``api/pr_review.py``'s ``_run_reviewer`` nor ``shared/v2_review.py``) ever
+# passes ``profile=`` -- both rely entirely on ``CodeReviewInput``'s implicit
+# default (``ReviewProfile.CODE_REVIEW``). These tests close that gap: they
+# assert the same eight-criteria / no-retired-mandate contract holds when the
+# profile is left unset (the real production path) and when the prompt is
+# read only through the public surface (``CODE_REVIEW_PROMPT`` /
+# ``build_review_system_prompt``), not the private module constants.
+# ---------------------------------------------------------------------------
+
+_EIGHT_CRITERIA_HEADERS = (
+    "1. **Correctness**",
+    "2. **Contracts**",
+    "3. **Caller Side Effects**",
+    "4. **Architecture**",
+    "5. **Best Practices**",
+    "6. **New Issues**",
+    "7. **Ticket/Spec Fit**",
+    "8. **Style**",
+)
+
+_RETIRED_THOROUGHNESS_PHRASES = (
+    "EVERY file",
+    "EVERY function, method, and class",
+    "MUST review EVERY file",
+    "Do NOT skip files because they",
+)
+
+
+def _assert_eight_criteria_present_and_retired_mandate_absent(prompt: str) -> None:
+    for header in _EIGHT_CRITERIA_HEADERS:
+        assert header in prompt, f"missing criterion header: {header}"
+    for phrase in _RETIRED_THOROUGHNESS_PHRASES:
+        assert phrase not in prompt, f"retired thoroughness phrase reappeared: {phrase}"
+    assert "review every function" not in prompt.lower()
+    assert (
+        "Your thoroughness obligation is everything in the code you were given to review" in prompt
+    )
+
+
+def test_public_default_profile_prompt_covers_eight_criteria_and_drops_retired_mandate() -> None:
+    """The public ``CODE_REVIEW_PROMPT`` alias and ``build_review_system_prompt``
+    output -- not the private ``_SHARED_OUTPUT_SECTION``/``_CODE_REVIEW_CRITERIA``
+    constants the local unit tests above pin directly -- still carry all eight
+    criteria and lack the retired whole-codebase thoroughness mandate."""
+    _assert_eight_criteria_present_and_retired_mandate_absent(CODE_REVIEW_PROMPT)
+    _assert_eight_criteria_present_and_retired_mandate_absent(
+        build_review_system_prompt(ReviewProfile.CODE_REVIEW)
+    )
+
+
+def test_default_dispatch_prompt_covers_eight_criteria_and_drops_retired_mandate() -> None:
+    """Running the engine WITHOUT an explicit ``profile=`` kwarg -- the exact
+    path every production caller (PR review, SE v2_review) takes -- still
+    delivers a system prompt carrying all eight criteria and none of the
+    retired every-file/every-function thoroughness mandate. Offline only: no
+    live LLM, ``_SystemPromptProbe`` is a scripted ``DummyLLMClient``."""
+    probe = _SystemPromptProbe()
+    CodeReviewAgent(probe, force_in_process=True).run(
+        CodeReviewInput(code="def f():\n    return 1")
+    )
+    assert probe.system_prompts, "expected at least one chunk-review call"
+    for prompt in probe.system_prompts:
+        _assert_eight_criteria_present_and_retired_mandate_absent(prompt)
+
+
 def test_skip_false_positive_filter_field_default_off() -> None:
     """The skip_false_positive_filter input field defaults to False and is settable."""
     assert CodeReviewInput(code="x").skip_false_positive_filter is False
