@@ -57,17 +57,23 @@ same shape:
   `run_coding_team_orchestrator`), but with `update_job_fn`/`get_job_fn`
   bound to the *SE* job store, so the coding-team snapshot is persisted
   under the SE job's own record instead of a separate `coding_team` row.
-  This namespace has **two** resume paths, not one: `POST
+  This namespace has **three** resume paths, not one: `POST
   /run-team/{job_id}/resume` (status in `RESUMABLE_STATUSES` — `pending`,
-  `running`, `agent_crash`, `failed`, `waiting_for_user`) and `POST
+  `running`, `agent_crash`, `failed`, `waiting_for_user`); `POST
   /run-team/{job_id}/retry-failed`, which has no status gate beyond
   rejecting `running` and instead only requires a non-empty
   `failed_tasks` list — so a `completed` or `cancelled` SE job that ended
   with lingering `failed_tasks` remains retry-eligible indefinitely, not
-  just while non-terminal. (`POST /run-team/{job_id}/restart` is not a
-  resume path for this purpose: `reset_job` fully replaces the job
-  record with a clean payload that carries no `task_graph_snapshot` /
-  `stack_specs`, so a restarted job cannot carry forward a legacy shape.)
+  just while non-terminal; and `POST
+  /run-team/{job_id}/resume-after-llm-check`, gated only on `status ==
+  "paused_llm_connectivity"` (no `failed_tasks` requirement). (`POST
+  /run-team/{job_id}/restart` is not a resume path for this purpose:
+  `reset_job` fully replaces the job record with a clean payload that
+  carries no `task_graph_snapshot`/`stack_specs`, so a restarted job
+  cannot carry forward a legacy shape — but it is only reachable once a
+  job's status is in `RESTARTABLE_STATUSES`, which `completed_with_failures`
+  is not, so cancel-then-restart is sometimes the path to it; see the
+  pre-deploy check below.)
 
 ## Decision
 
@@ -126,10 +132,12 @@ rows that namespace's own API can still resume:
 - `coding_team`: `status IN ('pending', 'running', 'waiting_for_user')` —
   its only resume path is the HITL signal on a non-terminal job.
 - `software_engineering_team`: the `/resume`-eligible statuses
-  (`pending`, `running`, `agent_crash`, `failed`, `waiting_for_user`)
-  **or** any status with a non-empty `failed_tasks` array (the
-  `/retry-failed` path, which is not gated by status beyond excluding
-  `running`).
+  (`pending`, `running`, `agent_crash`, `failed`, `waiting_for_user`),
+  **or** `paused_llm_connectivity` (resumable via `POST
+  /run-team/{job_id}/resume-after-llm-check`, which only checks the
+  status — not `failed_tasks` — before retrying), **or** any status with
+  a non-empty `failed_tasks` array (the `/retry-failed` path, which is
+  not gated by status beyond excluding `running`).
 
 ```sql
 SELECT team, job_id, status
@@ -137,7 +145,8 @@ FROM jobs
 WHERE (
     (team = 'coding_team' AND status IN ('pending', 'running', 'waiting_for_user'))
     OR (team = 'software_engineering_team' AND (
-      status IN ('pending', 'running', 'agent_crash', 'failed', 'waiting_for_user')
+      status IN ('pending', 'running', 'agent_crash', 'failed',
+                 'waiting_for_user', 'paused_llm_connectivity')
       OR jsonb_array_length(COALESCE(data->'failed_tasks', '[]'::jsonb)) > 0
     ))
   )
@@ -212,10 +221,17 @@ deploy window is longer than a few minutes.
     restartable/resumable as-is.
   - `software_engineering_team` rows sitting in `completed_with_failures`
     (the normal result when some coding-team tasks fail) are **not**
-    restartable — `restart` 400s outside `RESTARTABLE_STATUSES`. The only
-    valid recovery is to run `POST /run-team/{job_id}/retry-failed` under
-    the current, pre-cleanup code until `failed_tasks` is empty and the
-    job reaches a true dead-end (`completed` with nothing left to retry).
+    directly restartable — `restart` 400s outside `RESTARTABLE_STATUSES`.
+    Two valid recoveries: run `POST /run-team/{job_id}/retry-failed`
+    under the current, pre-cleanup code until `failed_tasks` is empty; or,
+    if a task fails deterministically and retry-failed can never clear
+    it, `POST /run-team/{job_id}/cancel` — `completed_with_failures` is
+    not in `request_cancel`'s terminal-status check either, so cancel
+    succeeds and moves the job to `cancelled`, after which `restart` is
+    valid and drops the legacy snapshot.
+  - `software_engineering_team` rows in `paused_llm_connectivity`: call
+    `POST /run-team/{job_id}/resume-after-llm-check` under the current,
+    pre-cleanup code (or cancel-then-restart, same as above).
 
   Re-run the check before deploying.
 
