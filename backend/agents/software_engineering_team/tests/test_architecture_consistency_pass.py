@@ -830,3 +830,35 @@ def test_run_pass_inlines_full_arch_doc_without_shrinking_code_budget(
     find_architecture_and_redundancy_issues(_EmptyClient(), _input(architecture=arch))
 
     assert captured["max_inline_chars"] == 20_000
+
+
+def test_run_pass_wires_scoped_tools_into_agent(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The architecture-consistency agent is built with the full shared tool
+    set, including the scoped read_lines/read_function/find_references tools
+    the module docstring previously omitted."""
+    import code_review_agent.architecture_consistency_pass as pass_mod
+
+    captured: Dict[str, Any] = {}
+    original_agent = pass_mod.Agent
+
+    def _spy_agent(*, model, system_prompt, tools):
+        captured["tool_names"] = {t.tool_name for t in tools}
+        return original_agent(model=model, system_prompt=system_prompt, tools=tools)
+
+    monkeypatch.setattr(pass_mod, "Agent", _spy_agent)
+
+    class _EmptyClient(DummyLLMClient):
+        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+            return {"findings": []}
+
+    find_architecture_and_redundancy_issues(_EmptyClient(), _input(architecture=_arch()))
+
+    assert captured["tool_names"] == {
+        "read_file",
+        "read_lines",
+        "read_function",
+        "list_files",
+        "search_codebase",
+        "find_function_at_line",
+        "find_references",
+    }

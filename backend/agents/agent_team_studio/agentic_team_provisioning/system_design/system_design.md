@@ -12,7 +12,9 @@
 
 ```mermaid
 graph LR
-    main["api/main.py<br/>(FastAPI app, 27 endpoints, 933 lines)"]
+    main["api/main.py<br/>(app-assembly hub: factory + include_router; /health only)"]
+    routes["api/routes/*<br/>(teams, conversations, testing, processes, jobs, questions, assets, forms)"]
+    services["api/services/*<br/>(matching business-logic modules, dereference main's singletons at call time)"]
 
     %% Orchestrator internals
     agent["assistant/agent.py<br/>(ProcessDesignerAgent — LLM chat)"]
@@ -35,18 +37,25 @@ graph LR
     jsc["job_service_client"]
     apt["agent_provisioning_team"]
 
-    main --> agent
     main --> store
-    main --> runner
-    main --> builder
-    main --> roster
-    main --> envprov
-    main --> infra
-    main --> models
+    main --> agent
     main --> test_store
+    main --> runner
     main --> pg
     main --> shared_obs
     main --> shared_pg
+    main --> routes
+    routes --> services
+    services -.->|dereference main's singletons at call time| main
+    services --> agent
+    services --> store
+    services --> runner
+    services --> builder
+    services --> roster
+    services --> envprov
+    services --> infra
+    services --> models
+    services --> test_store
 
     agent --> llm
     agent --> models
@@ -67,7 +76,7 @@ graph LR
 
     classDef orchestrator fill:#fff4e5,stroke:#e8710a
     classDef external fill:#f1f3f4,stroke:#5f6368,stroke-dasharray: 3 3
-    class main,agent,store,runner,builder,roster,envprov,infra,models,test_store,pg,tmp orchestrator
+    class main,routes,services,agent,store,runner,builder,roster,envprov,infra,models,test_store,pg,tmp orchestrator
     class llm,shared_pg,shared_tmp,shared_obs,jsc,apt external
 ```
 
@@ -75,7 +84,9 @@ graph LR
 
 | File | Lines | Purpose |
 |---|---|---|
-| [`../api/main.py`](../api/main.py) | ~933 | FastAPI app; all 27 endpoints; orchestrator entry; retroactive `provision_team` on startup (`api/main.py:108-113`) |
+| [`../api/main.py`](../api/main.py) | ~440 | App-assembly hub: builds the app, owns module-level singletons (`_store`, `_agent`, `_test_store`, `_pipeline_runner`) and cross-domain collaborators, mounts every extracted router via `include_router`; only the `/health` liveness probe is still defined here; retroactive `provision_team` on startup (`api/main.py:108-113`) |
+| [`../api/routes/`](../api/routes/) | ~530 total | Thin `APIRouter`s, one per domain (`teams`, `conversations`, `testing`, `processes`, `jobs`, `questions`, `assets`, `forms`); each handler is a one-line delegate into the matching `api/services/*` function |
+| [`../api/services/`](../api/services/) | ~1,840 total | Domain business logic extracted from the former monolithic `api/main.py`; each function reads its collaborators (`_store`, `_get_infra_or_404`, …) off `api.main` at call time so `monkeypatch.setattr(main, …)` in tests is honored |
 | [`../models.py`](../models.py) | ~460 | Pydantic enums + models: `TriggerType`, `StepType`, `ProcessStatus`, `TeamMode`, `MessageRating`, `PipelineRunStatus`, `AgenticTeam`, `AgenticTeamAgent`, `ProcessDefinition`, `ProcessStep`, `RosterValidationResult`, `ConversationStateResponse`, `TestPipelineRun`, … |
 | [`../assistant/store.py`](../assistant/store.py) | ~440 | Shared SQLite store; conversation + team + process + roster + agent-env provisions |
 | [`../assistant/agent.py`](../assistant/agent.py) | ~364 | `ProcessDesignerAgent` — system prompt, LLM call, JSON block parser |

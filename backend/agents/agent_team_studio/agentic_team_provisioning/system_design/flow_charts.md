@@ -71,7 +71,7 @@ sequenceDiagram
     end
 ```
 
-Source: [`agent_env_provisioning.py:53-129`](../agent_env_provisioning.py), [`api/main.py:464-471`](../api/main.py) (status read path).
+Source: [`agent_env_provisioning.py:53-129`](../agent_env_provisioning.py), [`api/services/processes.py`](../api/services/processes.py) `list_team_agent_environments` (status read path).
 
 ## 3. Sequence — Asset upload (animates the `Assets → File System` edge from PNG #2)
 
@@ -98,7 +98,7 @@ sequenceDiagram
 
 Note: `FS` is rooted at `$AGENT_CACHE/provisioned_teams/{team_id}/assets/` (see `infrastructure.py`).
 
-Source: [`api/main.py:559-612`](../api/main.py), [`infrastructure.py`](../infrastructure.py).
+Source: [`api/routes/assets.py`](../api/routes/assets.py), [`api/services/assets.py`](../api/services/assets.py), [`infrastructure.py`](../infrastructure.py).
 
 ## 4. Sequence — Form record write (animates the `Form Information → Database` edge from PNG #2)
 
@@ -126,7 +126,7 @@ sequenceDiagram
 
 Note: `FormStore` is `TeamFormStore` from `infrastructure.py`; `DB` is the per-team SQLite at `$AGENT_CACHE/provisioned_teams/{team_id}/team.db` in WAL mode.
 
-Source: [`api/main.py:635-640`](../api/main.py), [`infrastructure.py:30-80`](../infrastructure.py).
+Source: [`api/routes/forms.py`](../api/routes/forms.py), [`api/services/forms.py`](../api/services/forms.py), [`infrastructure.py:30-80`](../infrastructure.py).
 
 ## 5. Flowchart — Roster validation (animates UC2)
 
