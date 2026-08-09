@@ -76,7 +76,7 @@ logger = logging.getLogger(__name__)
 
 
 def _startup() -> None:
-    """Start the Temporal worker backstop (best-effort).
+    """Start the Temporal worker backstop, then run one-time service initialization.
 
     The team_service entrypoint normally starts the worker via
     ``TEAM_TEMPORAL_WORKER_MODULE`` before uvicorn accepts requests; this backstop
@@ -89,6 +89,9 @@ def _startup() -> None:
         - Starts the worker thread when Temporal is enabled; a no-op when
           ``TEMPORAL_ADDRESS`` is unset. Never raises — any failure is logged as a
           warning so it cannot abort app boot (this runs as an ``on_startup`` hook).
+        - Calls :func:`initialize_service`, which performs retroactive team
+          provisioning/registry registration and orphaned pipeline-run reaping.
+          Also never raises (see its own contract).
     """
     try:
         from agent_team_studio.agentic_team_provisioning.temporal.worker import (
@@ -101,6 +104,7 @@ def _startup() -> None:
             "agentic_team_provisioning Temporal worker start (lifespan backstop) failed",
             exc_info=True,
         )
+    initialize_service()
 
 
 app = create_team_app(
@@ -120,42 +124,67 @@ _agent = ProcessDesignerAgent()
 _test_store = get_test_store()
 _pipeline_runner = get_pipeline_runner(_test_store)
 
-# Retroactive provisioning: ensure all existing teams have infrastructure and
-# that their generated agents are registered in the live registry (rosters are
-# Postgres-backed, so this re-registers them after a process restart). Each team
-# is isolated, and within a team infrastructure recovery and registry restoration
-# are decoupled — a transient infrastructure failure must not hide an otherwise
-# usable roster from the registry for the lifetime of the process.
-try:
-    _existing_teams = _store.list_teams()
-except Exception as _e:
-    logger.warning("Could not list existing teams for retroactive provisioning: %s", _e)
-    _existing_teams = []
 
-for _team_row in _existing_teams:
-    _tid = _team_row["team_id"]
-    try:
-        get_team_infrastructure(_tid)
-    except Exception as _e:
-        logger.warning("Could not retroactively provision infrastructure for team %s: %s", _tid, _e)
-    try:
-        _team = _store.get_team(_tid)
-        if _team is not None and _team.agents:
-            register_team_manifests(_tid, _team.agents)
-    except Exception as _e:
-        logger.warning("Could not register generated manifests for team %s: %s", _tid, _e)
+def initialize_service() -> None:
+    """Retroactive team provisioning/registry registration + orphaned-run reaping.
 
-# Restart cleanup: a pipeline test run whose worker thread died (restart or crash)
-# leaves its DB row stuck in an active state with no live waiter. Reap orphans whose
-# heartbeat has gone stale so they fail cleanly instead of stranding forever. Safe with
-# multiple workers (advisory-locked, heartbeat-based) — a live sibling worker's run is
-# never touched. Best-effort so a reaper hiccup can't break module import.
-try:
-    _reaped = _pipeline_runner.reap_orphaned_runs()
-    if _reaped:
-        logger.warning("Reaped %d orphaned pipeline run(s) on startup", _reaped)
-except Exception as _e:
-    logger.warning("Could not reap orphaned pipeline runs on startup: %s", _e)
+    Runs once at app startup (called from ``_startup``, the lifespan's
+    ``on_startup`` hook) rather than at import time, so importing this module —
+    e.g. for tests or tooling — never performs real database queries,
+    infrastructure provisioning, or registry writes.
+
+    Retroactive provisioning ensures all existing teams have infrastructure and
+    that their generated agents are registered in the live registry (rosters are
+    Postgres-backed, so this re-registers them after a process restart). Each team
+    is isolated, and within a team infrastructure recovery and registry restoration
+    are decoupled — a transient infrastructure failure must not hide an otherwise
+    usable roster from the registry for the lifetime of the process.
+
+    Restart cleanup: a pipeline test run whose worker thread died (restart or
+    crash) leaves its DB row stuck in an active state with no live waiter. Reap
+    orphans whose heartbeat has gone stale so they fail cleanly instead of
+    stranding forever. Safe with multiple workers (advisory-locked,
+    heartbeat-based) — a live sibling worker's run is never touched.
+
+    Preconditions:
+        - ``_store`` and ``_pipeline_runner`` are already constructed (they are
+          module-level singletons, assigned above unconditionally).
+
+    Postconditions:
+        - Never raises: every failure mode (listing teams, provisioning a given
+          team's infrastructure, registering its manifests, reaping orphaned
+          runs) is caught and logged individually, so one team's or one step's
+          failure cannot stop the others, and this function is safe to call as a
+          best-effort startup backstop.
+    """
+    try:
+        existing_teams = _store.list_teams()
+    except Exception as exc:
+        logger.warning("Could not list existing teams for retroactive provisioning: %s", exc)
+        existing_teams = []
+
+    for team_row in existing_teams:
+        team_id = team_row["team_id"]
+        try:
+            get_team_infrastructure(team_id)
+        except Exception as exc:
+            logger.warning(
+                "Could not retroactively provision infrastructure for team %s: %s", team_id, exc
+            )
+        try:
+            team = _store.get_team(team_id)
+            if team is not None and team.agents:
+                register_team_manifests(team_id, team.agents)
+        except Exception as exc:
+            logger.warning("Could not register generated manifests for team %s: %s", team_id, exc)
+
+    try:
+        reaped = _pipeline_runner.reap_orphaned_runs()
+        if reaped:
+            logger.warning("Reaped %d orphaned pipeline run(s) on startup", reaped)
+    except Exception as exc:
+        logger.warning("Could not reap orphaned pipeline runs on startup: %s", exc)
+
 
 GREETING = (
     "Hello! I'm your Process Designer assistant. I'll help you design an agentic "

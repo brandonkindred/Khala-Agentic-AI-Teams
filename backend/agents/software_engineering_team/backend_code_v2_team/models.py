@@ -11,7 +11,7 @@ the backend ``Microtask``, a backend language default, or backend-specific
 from __future__ import annotations
 
 from enum import Enum
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field
 
@@ -203,6 +203,14 @@ class ToolAgentPhaseInput(BaseModel):
     task_id: str = Field(default="")
     feature_branch_name: Optional[str] = Field(default=None)
     spec_context: str = Field(default="", description="Optional spec/context for LLM prompts")
+    build_verifier: Optional[Any] = Field(
+        default=None, description="Pre-merge quality gate: build verifier callable"
+    )
+    build_verify_label: str = Field(default="", description="Pre-merge quality gate: build label")
+    linting_tool_agent: Optional[Any] = Field(
+        default=None, description="Pre-merge quality gate: linting tool agent"
+    )
+    lint_agent_type: str = Field(default="", description="Pre-merge quality gate: lint agent_type")
 
 
 # ---------------------------------------------------------------------------
