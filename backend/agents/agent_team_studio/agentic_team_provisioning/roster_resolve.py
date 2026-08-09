@@ -125,8 +125,35 @@ def persona_tags_from_fat_raw(raw: dict) -> list[str]:
     return tags
 
 
+def llm_persona_lists_explicitly_empty(raw: dict) -> bool:
+    """Return True when the LLM roster dict explicitly clears persona lists.
+
+    Distinguishes ``"skills": []`` (clear) from an omitted key or a
+    whitespace-only list (preserve prior Manifest tags). Malformed non-list
+    values are treated as absent.
+
+    Preconditions: ``raw`` is a mapping.
+    Postconditions: True iff at least one of ``skills`` / ``tools`` /
+        ``capabilities`` / ``expertise`` is present as a list, every such
+        present list is literally empty (``[]``), and
+        :func:`persona_tags_from_fat_raw` yields no non-blank tags.
+    """
+    present_lists: list[list] = []
+    for key in ("skills", "tools", "capabilities", "expertise"):
+        if key not in raw:
+            continue
+        value = raw[key]
+        if not isinstance(value, list):
+            continue
+        present_lists.append(value)
+    if not present_lists:
+        return False
+    return all(len(v) == 0 for v in present_lists) and not persona_tags_from_fat_raw(raw)
+
+
 # Back-compat alias for callers/tests that imported the private name.
 _persona_tags_from_fat_raw = persona_tags_from_fat_raw
+_llm_persona_lists_explicitly_empty = llm_persona_lists_explicitly_empty
 
 
 def _ensure_generated_manifest_from_fat(
@@ -135,6 +162,8 @@ def _ensure_generated_manifest_from_fat(
     manifest_id: str,
     raw: dict,
     registry,
+    *,
+    conn: object | None = None,
 ) -> None:
     """Register or update a generated Manifest from legacy fat persona fields.
 
@@ -148,11 +177,13 @@ def _ensure_generated_manifest_from_fat(
         * Does not clear existing skill tags when those fat lists are empty/absent.
         * Registration uses ``require_persist=True`` so a dynamic-store upsert
           failure raises and callers can leave the fat roster row unstripped.
+        * When ``conn`` is provided, registry get/register join that connection
+          (no nested pool checkout while the caller holds a roster ``get_conn()``).
     """
     fat_skills = persona_tags_from_fat_raw(raw)
     role = raw.get("role")
     role_summary = str(role).strip() if role is not None and str(role).strip() else None
-    existing = registry.get(manifest_id)
+    existing = registry.get(manifest_id, conn=conn)
     if existing is None:
         registry.register(
             build_agent_manifest(
@@ -162,6 +193,7 @@ def _ensure_generated_manifest_from_fat(
                 skill_tags=fat_skills or None,
             ),
             require_persist=True,
+            conn=conn,
         )
         return
 
@@ -180,10 +212,13 @@ def _ensure_generated_manifest_from_fat(
             skill_tags=merged_skills,
         ),
         require_persist=True,
+        conn=conn,
     )
 
 
-def migrate_roster_row(team_id: str, raw: dict) -> tuple[AgenticTeamAgent, bool]:
+def migrate_roster_row(
+    team_id: str, raw: dict, *, conn: object | None = None
+) -> tuple[AgenticTeamAgent, bool]:
     """Eagerly migrate one legacy fat roster row to a thin ref + stamped ``manifest_id``.
 
     Preconditions:
@@ -203,6 +238,7 @@ def migrate_roster_row(team_id: str, raw: dict) -> tuple[AgenticTeamAgent, bool]
           (merging with any already on the Manifest). Manifest
           registration is fail-closed (``require_persist=True``) so a store
           upsert failure aborts before callers strip the fat roster row.
+        * When ``conn`` is provided, Manifest get/register join that connection.
     Raises:
         * ``ValueError`` when ``source == "registry"`` and ``manifest_id`` is missing.
     """
@@ -226,7 +262,9 @@ def migrate_roster_row(team_id: str, raw: dict) -> tuple[AgenticTeamAgent, bool]
         if source == SOURCE_GENERATED and _raw_has_fat_keys(raw):
             from agent_registry import get_registry
 
-            _ensure_generated_manifest_from_fat(team_id, agent_name, mid, raw, get_registry())
+            _ensure_generated_manifest_from_fat(
+                team_id, agent_name, mid, raw, get_registry(), conn=conn
+            )
         return (
             _thin_agent(agent_name=agent_name, source=source, manifest_id=mid),
             _raw_has_fat_keys(raw),
@@ -235,11 +273,13 @@ def migrate_roster_row(team_id: str, raw: dict) -> tuple[AgenticTeamAgent, bool]
     mid = manifest_agent_id(team_id, agent_name)
     from agent_registry import get_registry
 
-    _ensure_generated_manifest_from_fat(team_id, agent_name, mid, raw, get_registry())
+    _ensure_generated_manifest_from_fat(
+        team_id, agent_name, mid, raw, get_registry(), conn=conn
+    )
     return _thin_agent(agent_name=agent_name, source=source, manifest_id=mid), True
 
 
-def coerce_roster_agent(team_id: str, raw: dict) -> AgenticTeamAgent:
+def coerce_roster_agent(team_id: str, raw: dict, *, conn: object | None = None) -> AgenticTeamAgent:
     """Normalize a legacy or thin roster dict into a validated thin ``AgenticTeamAgent``.
 
     Used by Temporal activities (workflow history may still carry fat rows) and any
@@ -254,5 +294,5 @@ def coerce_roster_agent(team_id: str, raw: dict) -> AgenticTeamAgent:
           ``source``, ``manifest_id`` only). May register a generated Manifest when
           migrating a fat generated row that lacked ``manifest_id``.
     """
-    agent, _changed = migrate_roster_row(team_id, raw)
+    agent, _changed = migrate_roster_row(team_id, raw, conn=conn)
     return AgenticTeamAgent.model_validate(agent.model_dump(mode="json"))

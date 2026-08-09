@@ -30,7 +30,7 @@ def _orphan_agent(name: str = "orphan.agent") -> AgenticTeamAgent:
 
 
 class _EmptyRegistry:
-    def get(self, agent_id: str) -> None:
+    def get(self, agent_id: str, *, conn=None) -> None:
         return None
 
 

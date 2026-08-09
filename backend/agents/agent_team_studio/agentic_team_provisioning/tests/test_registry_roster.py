@@ -50,7 +50,8 @@ class _FakeRegistry:
     def __init__(self, manifests: list[AgentManifest]) -> None:
         self._by_id = {m.id: m for m in manifests}
 
-    def get(self, agent_id: str) -> AgentManifest | None:
+    def get(self, agent_id: str, *, conn=None) -> AgentManifest | None:
+        del conn  # fake has no Postgres connection to join
         return self._by_id.get(agent_id)
 
     def manifests_with_id_prefix(
@@ -63,9 +64,14 @@ class _FakeRegistry:
         return [m for m in self._by_id.values() if m.id.startswith(prefix)]
 
     def register(
-        self, manifest: AgentManifest, source_path=None, *, require_persist: bool = False
+        self,
+        manifest: AgentManifest,
+        source_path=None,
+        *,
+        require_persist: bool = False,
+        conn=None,
     ) -> None:
-        del source_path, require_persist  # fake has no dynamic store to persist
+        del source_path, require_persist, conn  # fake has no dynamic store to persist
         self._by_id[manifest.id] = manifest
 
     def unregister(self, agent_id: str) -> bool:
@@ -634,6 +640,33 @@ def test_llm_save_whitespace_only_skills_preserve_prior_tags(
     roster = client.get(f"/teams/{team_id}/agents").json()
     assert "seo" in roster[0]["skills"]
     assert "generated" not in roster[0]["skills"]
+
+
+def test_llm_save_explicit_empty_skills_clears_prior_tags(
+    client: TestClient, registry: _FakeRegistry
+) -> None:
+    """Explicit ``\"skills\": []`` must clear prior Manifest skill tags (not preserve)."""
+    from agent_team_studio.agentic_team_provisioning.api.main import _save_agents_from_llm
+    from agent_team_studio.agentic_team_provisioning.manifest_generation import (
+        manifest_agent_id,
+        skill_tags_from_manifest,
+    )
+
+    team_id = _new_team()
+    _save_agents_from_llm(
+        team_id,
+        [{"agent_name": "Writer", "role": "Writes copy", "skills": ["seo", "copy"]}],
+    )
+    mid = manifest_agent_id(team_id, "Writer")
+    assert skill_tags_from_manifest(registry.get(mid)) == ["seo", "copy"]
+
+    _save_agents_from_llm(
+        team_id,
+        [{"agent_name": "Writer", "role": "Writes copy", "skills": []}],
+    )
+    assert skill_tags_from_manifest(registry.get(mid)) == []
+    roster = client.get(f"/teams/{team_id}/agents").json()
+    assert roster[0]["skills"] == []
 
 
 def test_llm_save_whitespace_only_role_preserves_prior_summary(

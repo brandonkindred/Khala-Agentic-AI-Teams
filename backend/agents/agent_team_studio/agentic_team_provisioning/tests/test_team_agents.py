@@ -68,10 +68,10 @@ def test_list_team_agents_migrates_fat_row(fake_pg: dict, monkeypatch: pytest.Mo
         def __init__(self) -> None:
             self._m: dict = {}
 
-        def get(self, agent_id: str):
+        def get(self, agent_id: str, *, conn=None):
             return self._m.get(agent_id)
 
-        def register(self, manifest, source_path=None, *, require_persist: bool = False):
+        def register(self, manifest, source_path=None, *, require_persist: bool = False, conn=None):
             self._m[manifest.id] = manifest
 
     reg = _Reg()
@@ -125,10 +125,10 @@ def test_delete_team_agent_migrates_fat_returning(
         def __init__(self) -> None:
             self._m: dict = {}
 
-        def get(self, agent_id: str):
+        def get(self, agent_id: str, *, conn=None):
             return self._m.get(agent_id)
 
-        def register(self, manifest, source_path=None, *, require_persist: bool = False):
+        def register(self, manifest, source_path=None, *, require_persist: bool = False, conn=None):
             self._m[manifest.id] = manifest
 
     reg = _Reg()
@@ -172,10 +172,10 @@ def test_list_team_agents_keeps_fat_row_when_manifest_persist_fails(
     }
 
     class _Reg:
-        def get(self, agent_id: str):
+        def get(self, agent_id: str, *, conn=None):
             return None
 
-        def register(self, manifest, source_path=None, *, require_persist: bool = False):
+        def register(self, manifest, source_path=None, *, require_persist: bool = False, conn=None):
             assert require_persist is True
             raise RuntimeError("boom:upsert")
 

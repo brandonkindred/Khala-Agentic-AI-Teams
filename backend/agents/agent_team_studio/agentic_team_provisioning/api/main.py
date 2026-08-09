@@ -69,6 +69,7 @@ from agent_team_studio.agentic_team_provisioning.models import (
 from agent_team_studio.agentic_team_provisioning.postgres import SCHEMA as AGENTIC_POSTGRES_SCHEMA
 from agent_team_studio.agentic_team_provisioning.roster_resolve import (
     EMPTY_ROSTER_PERSONA,
+    llm_persona_lists_explicitly_empty,
     persona_tags_from_fat_raw,
     resolve_persona,
 )
@@ -263,6 +264,8 @@ def _save_agents_from_llm(team_id: str, agents_data: list[dict[str, Any]] | None
     persona is written to the registry via ``register_team_manifests`` (summary from
     the LLM ``role`` field; free-text ``skills`` / ``tools`` / ``capabilities`` /
     ``expertise`` folded into Manifest skill tags — same mapping as legacy migrate).
+    Explicit empty persona lists (e.g. ``"skills": []``) replace prior tags;
+    omitted or whitespace-only lists preserve them.
 
     Concurrency: the read-merge-write is delegated to ``merge_generated_agents``,
     which runs it in a single transaction under a ``SELECT ... FOR UPDATE`` lock on
@@ -286,12 +289,17 @@ def _save_agents_from_llm(team_id: str, agents_data: list[dict[str, Any]] | None
         if role:
             summaries[name] = role
         # Fold skills/tools/capabilities/expertise into tags (migrate parity).
-        # Only stamp when at least one non-blank tag remains; whitespace-only /
-        # empty lists must omit the key so register_team_manifests preserves
-        # prior Manifest tags.
-        folded = persona_tags_from_fat_raw(a if isinstance(a, dict) else {})
+        # Non-blank tags replace prior Manifest tags. An explicitly empty list
+        # (e.g. ``"skills": []`` with no non-blank persona tags) clears prior
+        # tags. Absent / malformed persona keys, or whitespace-only values,
+        # omit the skill_tags entry so register_team_manifests preserves prior
+        # Manifest tags.
+        raw = a if isinstance(a, dict) else {}
+        folded = persona_tags_from_fat_raw(raw)
         if folded:
             skill_tags[name] = folded
+        elif llm_persona_lists_explicitly_empty(raw):
+            skill_tags[name] = []
         generated.append(
             AgenticTeamAgent(
                 agent_name=name,

@@ -87,10 +87,10 @@ def test_coerce_roster_agent_accepts_fat_history_with_null_manifest_id(
         def __init__(self) -> None:
             self._m: dict = {}
 
-        def get(self, agent_id: str):
+        def get(self, agent_id: str, *, conn=None):
             return self._m.get(agent_id)
 
-        def register(self, manifest, source_path=None, *, require_persist: bool = False):
+        def register(self, manifest, source_path=None, *, require_persist: bool = False, conn=None):
             self._m[manifest.id] = manifest
 
     reg = _Reg()
@@ -112,7 +112,7 @@ def test_resolve_persona_looks_up_registry(monkeypatch: pytest.MonkeyPatch) -> N
     m = _manifest()
 
     class _Reg:
-        def get(self, agent_id: str):
+        def get(self, agent_id: str, *, conn=None):
             return m if agent_id == m.id else None
 
     monkeypatch.setattr("agent_registry.get_registry", lambda: _Reg())
@@ -121,7 +121,7 @@ def test_resolve_persona_looks_up_registry(monkeypatch: pytest.MonkeyPatch) -> N
 
 def test_resolve_persona_missing_raises(monkeypatch: pytest.MonkeyPatch) -> None:
     class _Reg:
-        def get(self, agent_id: str):
+        def get(self, agent_id: str, *, conn=None):
             return None
 
     monkeypatch.setattr("agent_registry.get_registry", lambda: _Reg())
@@ -149,10 +149,10 @@ def test_migrate_generated_stamps_manifest_id_and_strips_fat(
         def __init__(self) -> None:
             self._m: dict = {}
 
-        def get(self, agent_id: str):
+        def get(self, agent_id: str, *, conn=None):
             return self._m.get(agent_id)
 
-        def register(self, manifest, source_path=None, *, require_persist: bool = False):
+        def register(self, manifest, source_path=None, *, require_persist: bool = False, conn=None):
             self._m[manifest.id] = manifest
 
     reg = _Reg()
@@ -191,10 +191,10 @@ def test_migrate_folds_fat_tools_capabilities_expertise_into_tags(
         def __init__(self) -> None:
             self._m: dict = {}
 
-        def get(self, agent_id: str):
+        def get(self, agent_id: str, *, conn=None):
             return self._m.get(agent_id)
 
-        def register(self, manifest, source_path=None, *, require_persist: bool = False):
+        def register(self, manifest, source_path=None, *, require_persist: bool = False, conn=None):
             self._m[manifest.id] = manifest
 
     reg = _Reg()
@@ -230,10 +230,10 @@ def test_migrate_with_manifest_id_merges_fat_skills(monkeypatch: pytest.MonkeyPa
         def __init__(self) -> None:
             self._m = {mid: prior}
 
-        def get(self, agent_id: str):
+        def get(self, agent_id: str, *, conn=None):
             return self._m.get(agent_id)
 
-        def register(self, manifest, source_path=None, *, require_persist: bool = False):
+        def register(self, manifest, source_path=None, *, require_persist: bool = False, conn=None):
             self._m[manifest.id] = manifest
 
     reg = _Reg()
@@ -263,10 +263,10 @@ def test_migrate_persist_failure_raises_before_thin_return(
     }
 
     class _Reg:
-        def get(self, agent_id: str):
+        def get(self, agent_id: str, *, conn=None):
             return None
 
-        def register(self, manifest, source_path=None, *, require_persist: bool = False):
+        def register(self, manifest, source_path=None, *, require_persist: bool = False, conn=None):
             assert require_persist is True
             raise RuntimeError("boom:upsert")
 
@@ -311,10 +311,10 @@ def test_migrate_with_manifest_id_and_fat_keys_changed(monkeypatch: pytest.Monke
         def __init__(self) -> None:
             self._m = {manifest_id: prior}
 
-        def get(self, agent_id: str):
+        def get(self, agent_id: str, *, conn=None):
             return self._m.get(agent_id)
 
-        def register(self, manifest, source_path=None, *, require_persist: bool = False):
+        def register(self, manifest, source_path=None, *, require_persist: bool = False, conn=None):
             self._m[manifest.id] = manifest
 
     reg = _Reg()

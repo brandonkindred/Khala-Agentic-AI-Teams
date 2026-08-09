@@ -27,10 +27,10 @@ class _FakeRegistry:
     def __init__(self) -> None:
         self._by_id: dict[str, AgentManifest] = {}
 
-    def get(self, agent_id: str) -> AgentManifest | None:
+    def get(self, agent_id: str, *, conn=None) -> AgentManifest | None:
         return self._by_id.get(agent_id)
 
-    def register(self, manifest: AgentManifest, source_path=None, *, require_persist: bool = False) -> None:
+    def register(self, manifest: AgentManifest, source_path=None, *, require_persist: bool = False, conn=None) -> None:
         del source_path, require_persist
         self._by_id[manifest.id] = manifest
 

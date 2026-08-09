@@ -298,7 +298,7 @@ def register_team_manifests(
     skill_tags_map = skill_tags if skill_tags is not None else {}
     manifests: list[AgentManifest] = []
     for a in agents:
-        existing = registry.get(a.manifest_id) if a.manifest_id else None
+        existing = registry.get(a.manifest_id, conn=conn) if a.manifest_id else None
         summary = summary_map.get(a.agent_name)
         if summary is None and existing is not None:
             summary = existing.summary
