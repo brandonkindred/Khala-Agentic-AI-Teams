@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from agent_team_studio.assistant_kernel import fenced_json as fenced_json_module
@@ -79,10 +81,22 @@ def test_parse_distinguishes_punctuation_suffixed_tags() -> None:
     assert parse_fenced_json(text, "agent-v2") == {"x": 1}
 
 
-def test_parse_handles_immediately_closed_empty_block() -> None:
-    # The tag-boundary check also accepts the fence's closing backtick
-    # directly after the tag (an empty body, itself invalid JSON -> None).
+def test_parse_none_when_tag_immediately_closed_with_no_body() -> None:
+    # A closing fence must be on its own line (see the embedded-backtick
+    # tests below), so a tag closed on the same line with no body at all
+    # doesn't match — no fenced block, not just an empty/invalid one.
     assert parse_fenced_json("```agent```", "agent") is None
+
+
+def test_parse_body_containing_embedded_backticks() -> None:
+    # A JSON string value (e.g. a system_prompt) may legitimately contain a
+    # literal ``` sequence, such as a markdown code example. The closing
+    # fence detection must not stop at that embedded run — only a ``` that
+    # starts its own line closes the block.
+    inner = "Show an example like ```python\nprint(1)\n``` when relevant."
+    payload = json.dumps({"name": "x", "system_prompt": inner})
+    text = f"```agent\n{payload}\n```"
+    assert parse_fenced_json(text, "agent") == {"name": "x", "system_prompt": inner}
 
 
 def test_parse_none_on_oversized_integer() -> None:
@@ -139,6 +153,19 @@ def test_strip_does_not_consume_a_longer_tags_block() -> None:
 def test_strip_does_not_consume_a_punctuation_suffixed_tags_block() -> None:
     text = 'keep this\n\n```agent-v2\n{"x": 1}\n```'
     assert strip_fenced_blocks(text, ["agent"]) == text
+
+
+def test_strip_removes_the_whole_block_despite_embedded_backticks() -> None:
+    # Mirrors test_parse_body_containing_embedded_backticks: the embedded
+    # ``` run must not truncate what gets stripped, leaking the remainder
+    # of the JSON body into the visible reply.
+    inner = "Show an example like ```python\nprint(1)\n``` when relevant."
+    payload = json.dumps({"name": "x", "system_prompt": inner})
+    text = f"prose before\n\n```agent\n{payload}\n```\n\nprose after"
+    stripped = strip_fenced_blocks(text, ["agent"])
+    assert stripped == "prose before\n\n\n\nprose after"
+    assert "system_prompt" not in stripped
+    assert "```" not in stripped
 
 
 # ---------------------------------------------------------------------------

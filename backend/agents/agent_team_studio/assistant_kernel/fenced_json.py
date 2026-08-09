@@ -34,9 +34,15 @@ def _fenced_block_pattern(tag: str) -> re.Pattern[str]:
           lookahead — so a shorter tag never matches as a prefix of a longer
           one, whether the longer tag extends it with a word character
           (``"agent"`` vs. ```` ```agents ````) or punctuation (``"agent"``
-          vs. ```` ```agent-v2 ````). Group 1 captures the block body.
+          vs. ```` ```agent-v2 ````).
+        * The closing ```` ``` ```` must be on its own line — preceded by a
+          newline and followed by a newline or end of string — so a literal
+          backtick run embedded inside the JSON body (e.g. a
+          ``system_prompt`` string containing a markdown code example like
+          ```` ```python ... ``` ````) is never mistaken for the block's
+          real closing fence. Group 1 captures the block body.
     """
-    return re.compile(r"```" + re.escape(tag) + r"(?=\s|`)\s*\n?(.*?)```", re.DOTALL)
+    return re.compile(r"```" + re.escape(tag) + r"(?=\s|`)[^\n]*\n(.*?)\n```(?=\n|$)", re.DOTALL)
 
 
 def parse_fenced_json(
