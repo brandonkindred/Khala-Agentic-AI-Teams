@@ -28,6 +28,7 @@ import inspect
 from typing import Any
 
 import pytest
+from unified_api.tests._route_gating import yield_leaf_routes
 
 from agent_team_studio.agentic_team_provisioning.models import (
     PipelineRunStatus,
@@ -289,28 +290,6 @@ def provisioning_app(monkeypatch):
     return app
 
 
-def _leaf_route_objects(route):
-    """Yield the leaf route-like object(s) ``route`` resolves to.
-
-    FastAPI 0.137+ wraps every ``include_router(...)`` target in a private
-    ``fastapi.routing._IncludedRouter`` that has no ``.path``/``.methods`` of
-    its own, so reading those attributes directly off an ``app.routes`` entry
-    silently yields nothing for a mounted sub-router. Recurses through
-    ``effective_route_contexts()`` — FastAPI's own mechanism for resolving a
-    route's final absolute path/methods/response_model through arbitrarily
-    many levels of nested ``include_router(...)`` calls, used internally for
-    OpenAPI generation — to reach the real leaf routes. Falls back to the
-    route itself for route types ``effective_route_contexts`` never touches
-    (a plain, unwrapped route), which already carries ``.path``/``.methods``
-    directly.
-    """
-    effective_route_contexts = getattr(route, "effective_route_contexts", None)
-    if effective_route_contexts is not None:
-        yield from effective_route_contexts()
-    else:
-        yield route
-
-
 def _pipeline_routes(app):
     """Return the (create, poll, submit) route objects the adapter calls.
 
@@ -320,7 +299,7 @@ def _pipeline_routes(app):
     routes = {
         (method, leaf.path): leaf
         for route in app.routes
-        for leaf in _leaf_route_objects(route)
+        for leaf in yield_leaf_routes(route)
         for method in (getattr(leaf, "methods", None) or ())
     }
     create = routes.get(("POST", "/teams/{team_id}/test-pipeline/runs"))

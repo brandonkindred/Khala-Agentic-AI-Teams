@@ -87,9 +87,10 @@ def get_conn() -> Generator[Connection, None, None]:
 
 def close_pool() -> None:
     global _pool
-    if _pool and not _pool.closed:
-        _pool.close()
-        _pool = None
+    with _pool_lock:
+        if _pool and not _pool.closed:
+            _pool.close()
+            _pool = None
 
 
 # ---------------------------------------------------------------------------

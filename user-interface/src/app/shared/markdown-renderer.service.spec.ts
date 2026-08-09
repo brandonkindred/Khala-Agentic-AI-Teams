@@ -51,6 +51,12 @@ describe('MarkdownRendererService', () => {
       expect(html).toContain('alert(1)');
     });
 
+    it('escapes ampersands via escapeHtml in the fallback <pre>', () => {
+      const html = unwrap(service.renderToSafeHtml('<script>a & b</script>'));
+      expect(html).toContain('&amp;');
+      expect(html).not.toContain('<script');
+    });
+
     it('applies fallbackClass to the fallback <pre>', () => {
       const html = unwrap(service.renderToSafeHtml('<script>alert(1)</script>', 'markdown-fallback'));
       expect(html).toContain('markdown-fallback');
