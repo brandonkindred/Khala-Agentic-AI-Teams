@@ -110,11 +110,15 @@ def test_deliver_existing_branch_gate_blocks_merge(tmp_path, monkeypatch):
 
 
 def test_deliver_existing_branch_gate_passes_autofix_commit_before_merge(tmp_path, monkeypatch):
-    """A passing gate sweeps up any autofix commit before the merge proceeds.
+    """A passing gate inspects the finalized files and sweeps up any autofix
+    commit before the merge proceeds.
 
-    Both operations are recorded into one shared, call-ordered list so the
-    assertion actually verifies ordering -- separate per-op lists would pass
-    even if an implementation merged before sweeping up the autofix commit.
+    All four operations (finalize commit, gate's build verifier, gate's
+    linter, autofix commit, merge) are recorded into one shared, call-ordered
+    list so the assertion actually verifies ordering -- separate per-op lists
+    would pass even if an implementation ran the gate before the finalize
+    commit (inspecting stale files) or after the autofix sweep (leaving its
+    own fixes uncommitted), or merged before sweeping up the autofix commit.
     """
     _git_dir(tmp_path)
     calls: list[tuple[str, str]] = []
@@ -130,18 +134,30 @@ def test_deliver_existing_branch_gate_passes_autofix_commit_before_merge(tmp_pat
     )
     monkeypatch.setattr(mod, "delete_branch", lambda *a, **k: (True, ""))
     monkeypatch.setattr(mod, "checkout_branch", lambda *a, **k: (True, ""))
+
+    def _build_verifier(repo_path, label, task_id):
+        calls.append(("build_verifier", ""))
+        return True, ""
+
+    class _TracedLintAgent:
+        def run(self, inp):
+            calls.append(("linting_tool_agent.run", ""))
+            return MagicMock(execution_result=MagicMock(success=True), passed=True, linter_issues=[])
+
     out = _agent().deliver(
         _inp(
             repo_path=str(tmp_path),
             feature_branch_name="feature/x",
-            build_verifier=lambda repo_path, label, task_id: (True, ""),
-            linting_tool_agent=_passing_lint_agent(),
+            build_verifier=_build_verifier,
+            linting_tool_agent=_TracedLintAgent(),
             lint_agent_type="backend",
         )
     )
     assert out.success is True
     assert calls == [
         ("commit_working_tree", "chore: finalize before merge"),
+        ("build_verifier", ""),
+        ("linting_tool_agent.run", ""),
         ("commit_working_tree", "chore: pre-merge quality gate autofix"),
         ("merge_branch", ""),
     ]
@@ -226,6 +242,70 @@ def test_deliver_fallback_gate_blocks_merge(tmp_path, monkeypatch):
     assert out.summary == "Pre-merge quality gate failed: Lint failed."
     assert merge_calls == []
     assert checkout_calls[-1][1] == mod.DEVELOPMENT_BRANCH
+
+
+def test_deliver_fallback_gate_passes_autofix_commit_before_merge(tmp_path, monkeypatch):
+    """Passing-path trace for the fallback (newly-created-branch) path.
+
+    The failing-gate test above returns before this path's own
+    ``chore: pre-merge quality gate autofix`` commit ever runs (that code is
+    implemented separately from the existing-branch path), and
+    ``test_deliver_fallback_success`` supplies no gate at all -- so neither
+    test would catch the autofix commit being deleted or reordered relative
+    to the gate/merge on this path. Record write/gate/commit/merge into one
+    shared, call-ordered list and assert the full sequence.
+    """
+    _git_dir(tmp_path)
+    from software_engineering_team.shared import repo_writer
+
+    calls: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        mod.GitBranchManagementToolAgent,
+        "create_feature_branch",
+        lambda self, *a, **k: (True, "feature/y"),
+    )
+    monkeypatch.setattr(
+        repo_writer,
+        "write_agent_output",
+        lambda *a, **k: calls.append(("write_agent_output", "")) or (True, ""),
+    )
+    monkeypatch.setattr(
+        mod,
+        "commit_working_tree",
+        lambda *a, **k: calls.append(("commit_working_tree", a[1])) or (True, ""),
+    )
+    monkeypatch.setattr(
+        mod, "merge_branch", lambda *a, **k: calls.append(("merge_branch", "")) or (True, "")
+    )
+    monkeypatch.setattr(mod, "delete_branch", lambda *a, **k: (True, ""))
+    monkeypatch.setattr(mod, "checkout_branch", lambda *a, **k: (True, ""))
+
+    def _build_verifier(repo_path, label, task_id):
+        calls.append(("build_verifier", ""))
+        return True, ""
+
+    class _TracedLintAgent:
+        def run(self, inp):
+            calls.append(("linting_tool_agent.run", ""))
+            return MagicMock(execution_result=MagicMock(success=True), passed=True, linter_issues=[])
+
+    out = _agent().deliver(
+        _inp(
+            repo_path=str(tmp_path),
+            current_files={"a.py": "x"},
+            build_verifier=_build_verifier,
+            linting_tool_agent=_TracedLintAgent(),
+            lint_agent_type="backend",
+        )
+    )
+    assert out.success is True
+    assert calls == [
+        ("write_agent_output", ""),
+        ("build_verifier", ""),
+        ("linting_tool_agent.run", ""),
+        ("commit_working_tree", "chore: pre-merge quality gate autofix"),
+        ("merge_branch", ""),
+    ]
 
 
 def test_deliver_fallback_success(tmp_path, monkeypatch):
