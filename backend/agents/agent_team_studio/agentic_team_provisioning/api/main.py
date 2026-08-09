@@ -69,6 +69,7 @@ from agent_team_studio.agentic_team_provisioning.models import (
 from agent_team_studio.agentic_team_provisioning.postgres import SCHEMA as AGENTIC_POSTGRES_SCHEMA
 from agent_team_studio.agentic_team_provisioning.roster_resolve import (
     EMPTY_ROSTER_PERSONA,
+    persona_tags_from_fat_raw,
     resolve_persona,
 )
 from agent_team_studio.agentic_team_provisioning.runtime.agent_builder import (
@@ -231,7 +232,8 @@ def _save_agents_from_llm(team_id: str, agents_data: list[dict[str, Any]] | None
 
     Each LLM agent is stored as a thin ref (``manifest_id`` stamped) while its
     persona is written to the registry via ``register_team_manifests`` (summary from
-    the LLM ``role`` field).
+    the LLM ``role`` field; free-text ``skills`` / ``tools`` / ``capabilities`` /
+    ``expertise`` folded into Manifest skill tags — same mapping as legacy migrate).
 
     Concurrency: the read-merge-write is delegated to ``merge_generated_agents``,
     which runs it in a single transaction under a ``SELECT ... FOR UPDATE`` lock on
@@ -254,13 +256,13 @@ def _save_agents_from_llm(team_id: str, agents_data: list[dict[str, Any]] | None
         role = str(a.get("role") or "").strip()
         if role:
             summaries[name] = role
-        skills = a.get("skills") or []
-        if isinstance(skills, list) and skills:
-            cleaned = [str(s).strip() for s in skills if str(s).strip()]
-            # Only stamp when at least one non-blank skill remains; a whitespace-only
-            # list must omit the key so register_team_manifests preserves prior tags.
-            if cleaned:
-                skill_tags[name] = cleaned
+        # Fold skills/tools/capabilities/expertise into tags (migrate parity).
+        # Only stamp when at least one non-blank tag remains; whitespace-only /
+        # empty lists must omit the key so register_team_manifests preserves
+        # prior Manifest tags.
+        folded = persona_tags_from_fat_raw(a if isinstance(a, dict) else {})
+        if folded:
+            skill_tags[name] = folded
         generated.append(
             AgenticTeamAgent(
                 agent_name=name,

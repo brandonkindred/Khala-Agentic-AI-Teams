@@ -353,7 +353,7 @@ class AgenticTeamStore:
                 if on_merged is not None:
                     on_merged([], conn)
                 return []
-            existing = self._load_team_agents(cur, team_id)
+            existing = self._load_team_agents(cur, team_id, already_locked=True)
             preserved = [a for a in existing if a.source == SOURCE_REGISTRY]
             preserved_names = {a.agent_name for a in preserved}
             merged = preserved + [g for g in generated if g.agent_name not in preserved_names]
@@ -417,9 +417,13 @@ class AgenticTeamStore:
         ``apply_updates`` receives the agent row read **under the lock** and returns
         the row to persist (the caller merges its patch onto that fresh row and
         re-validates). Because the read, the merge, and the write all happen inside
-        one locked transaction, a concurrent roster write for the same agent (e.g. a
-        chat-save filling ``skills`` while the user saves a ``role`` edit) cannot be
-        clobbered by a merge over a pre-lock snapshot.
+        one locked transaction, a concurrent roster writer for the same agent
+        (e.g. a chat-save merging generated agents while another path updates the
+        same thin ref) cannot be clobbered by a merge over a pre-lock snapshot.
+
+        Note: the HTTP PUT roster endpoint rejects persona-field bodies (Manifest
+        is the persona SoT); this helper remains for thin-ref maintenance paths
+        that still need locked read-modify-write.
 
         Preconditions: ``team_id`` and ``agent_name`` are non-empty strings;
             ``apply_updates`` must not change ``agent_name`` (the row is written under
@@ -521,13 +525,24 @@ class AgenticTeamStore:
         with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
             return self._load_team_agents(cur, team_id)
 
-    def _load_team_agents(self, cur, team_id: str) -> list[AgenticTeamAgent]:
+    def _load_team_agents(
+        self, cur, team_id: str, *, already_locked: bool = False
+    ) -> list[AgenticTeamAgent]:
         """Load roster rows, eagerly migrating legacy fat JSON to thin refs.
 
-        Preconditions: ``cur`` is an open cursor in a live transaction.
+        Takes the team-row lock first (unless ``already_locked``) so migrate
+        rewrites serialize with ``merge_generated_agents`` / single-agent writers
+        (same parent→child lock order).
+
+        Preconditions: ``cur`` is an open cursor in a live transaction; when
+            ``already_locked`` is True the caller already holds the team-row
+            ``FOR UPDATE`` lock and has consumed the lock SELECT result.
         Postconditions: returns validated thin :class:`AgenticTeamAgent` rows;
             rewrites any row where :func:`migrate_roster_row` reports ``changed``.
         """
+        if not already_locked:
+            self._lock_team(cur, team_id)
+            cur.fetchone()  # consume FOR UPDATE result so the next execute is clean
         cur.execute(
             "SELECT data_json FROM agentic_team_agents WHERE team_id = %s ORDER BY agent_name",
             (team_id,),

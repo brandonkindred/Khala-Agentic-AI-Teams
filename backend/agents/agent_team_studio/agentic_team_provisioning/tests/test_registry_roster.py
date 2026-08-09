@@ -537,6 +537,80 @@ def test_llm_save_maps_skills_to_manifest_tags(
     assert manifest.tags.count("seo") == 1
 
 
+def test_llm_save_folds_tools_capabilities_expertise_into_tags(
+    client: TestClient, registry: _FakeRegistry
+) -> None:
+    """LLM tools/capabilities/expertise must fold into Manifest tags like legacy migrate."""
+    from agent_team_studio.agentic_team_provisioning.api.main import _save_agents_from_llm
+    from agent_team_studio.agentic_team_provisioning.manifest_generation import manifest_agent_id
+
+    team_id = _new_team()
+    _save_agents_from_llm(
+        team_id,
+        [
+            {
+                "agent_name": "Writer",
+                "role": "Writes copy",
+                "skills": ["seo"],
+                "capabilities": ["edit"],
+                "tools": ["Grammarly"],
+                "expertise": ["B2B"],
+            }
+        ],
+    )
+
+    mid = manifest_agent_id(team_id, "Writer")
+    manifest = registry.get(mid)
+    assert manifest is not None
+    for tag in ("seo", "edit", "Grammarly", "B2B"):
+        assert tag in manifest.tags
+
+    roster = client.get(f"/teams/{team_id}/agents").json()
+    skills = roster[0]["skills"]
+    for tag in ("seo", "edit", "Grammarly", "B2B"):
+        assert tag in skills
+    assert "generated" not in skills
+
+
+def test_llm_save_whitespace_only_persona_lists_preserve_prior_tags(
+    client: TestClient, registry: _FakeRegistry
+) -> None:
+    """Whitespace-only tools/capabilities/expertise must not wipe prior Manifest tags."""
+    from agent_team_studio.agentic_team_provisioning.api.main import _save_agents_from_llm
+    from agent_team_studio.agentic_team_provisioning.manifest_generation import manifest_agent_id
+
+    team_id = _new_team()
+    _save_agents_from_llm(
+        team_id,
+        [
+            {
+                "agent_name": "Writer",
+                "role": "Writes copy",
+                "skills": ["seo"],
+                "tools": ["Grammarly"],
+            }
+        ],
+    )
+    mid = manifest_agent_id(team_id, "Writer")
+    assert "Grammarly" in registry.get(mid).tags
+
+    _save_agents_from_llm(
+        team_id,
+        [
+            {
+                "agent_name": "Writer",
+                "role": "Writes copy",
+                "skills": ["", "  "],
+                "tools": ["  "],
+                "capabilities": [],
+                "expertise": ["   "],
+            }
+        ],
+    )
+    assert "seo" in registry.get(mid).tags
+    assert "Grammarly" in registry.get(mid).tags
+
+
 def test_llm_save_whitespace_only_skills_preserve_prior_tags(
     client: TestClient, registry: _FakeRegistry
 ) -> None:

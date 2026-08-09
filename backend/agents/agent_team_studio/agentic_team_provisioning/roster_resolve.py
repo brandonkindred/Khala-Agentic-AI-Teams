@@ -105,12 +105,17 @@ def _string_tags_from_fat_raw(raw: dict, key: str) -> list[str]:
     return tags
 
 
-def _persona_tags_from_fat_raw(raw: dict) -> list[str]:
-    """Fold legacy free-text persona lists into Manifest skill tags.
+def persona_tags_from_fat_raw(raw: dict) -> list[str]:
+    """Fold free-text persona lists into Manifest skill tags.
 
-    ``skills``, ``tools``, ``capabilities``, and ``expertise`` have no separate
-    Manifest homes for free-text labels (``cognition.tools`` is reserved for
-    resolvable tool ids). Merge them into tags so migrate does not drop labels.
+    Used by legacy migrate and LLM roster save. ``skills``, ``tools``,
+    ``capabilities``, and ``expertise`` have no separate Manifest homes for
+    free-text labels (``cognition.tools`` is reserved for resolvable tool ids).
+    Merge them into tags so labels are not dropped when persisting thin refs.
+
+    Preconditions: ``raw`` is a mapping (may omit any of the list keys).
+    Postconditions: returns deduped non-blank tags in first-seen order across
+        skills → tools → capabilities → expertise; empty when none are present.
     """
     tags: list[str] = []
     for key in ("skills", "tools", "capabilities", "expertise"):
@@ -118,6 +123,10 @@ def _persona_tags_from_fat_raw(raw: dict) -> list[str]:
             if tag not in tags:
                 tags.append(tag)
     return tags
+
+
+# Back-compat alias for callers/tests that imported the private name.
+_persona_tags_from_fat_raw = persona_tags_from_fat_raw
 
 
 def _ensure_generated_manifest_from_fat(
@@ -140,7 +149,7 @@ def _ensure_generated_manifest_from_fat(
         * Registration uses ``require_persist=True`` so a dynamic-store upsert
           failure raises and callers can leave the fat roster row unstripped.
     """
-    fat_skills = _persona_tags_from_fat_raw(raw)
+    fat_skills = persona_tags_from_fat_raw(raw)
     role = raw.get("role")
     role_summary = str(role).strip() if role is not None and str(role).strip() else None
     existing = registry.get(manifest_id)
