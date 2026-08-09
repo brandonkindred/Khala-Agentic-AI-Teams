@@ -230,11 +230,10 @@ def test_answers_accepts_other_with_text(monkeypatch):
 
 
 def test_claim_run_thread_is_exclusive():
-    api._active_run_threads.pop("claim-job", None)
-    api._starting_run_jobs.discard("claim-job")
+    api._clear_run_thread("claim-job")
     assert api._claim_run_thread("claim-job") is True  # first claim wins
     assert api._claim_run_thread("claim-job") is False  # second rejected while 'starting'
-    api._starting_run_jobs.discard("claim-job")  # cleanup
+    api._clear_run_thread("claim-job")  # cleanup
 
 
 def test_answers_success_stores_and_returns_status(monkeypatch):

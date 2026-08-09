@@ -6,7 +6,7 @@ from typing import Any, Callable, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field, StrictBool, model_validator
 
-from software_engineering_team.shared.models import SystemArchitecture
+from shared.dev_models.models import SystemArchitecture
 
 from .profiles import ReviewProfile
 

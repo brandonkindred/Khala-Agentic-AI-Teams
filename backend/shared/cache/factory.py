@@ -188,6 +188,8 @@ def get_shared_cache(namespace: str) -> SharedCache:
 def override_shared_cache_backend(backend: Optional[SharedCache]) -> None:
     """Install (or clear) a test-only backend used by every ``get_shared_cache``.
 
+    Preconditions:
+        - None.
     Postconditions:
         - When ``backend`` is not ``None``, subsequent ``get_shared_cache``
           calls return it and the per-namespace cache dict is cleared.
@@ -206,6 +208,8 @@ def override_shared_cache_backend(backend: Optional[SharedCache]) -> None:
 def reset_shared_cache_state() -> None:
     """Drop cached backends and the Redis client (tests / process teardown).
 
+    Preconditions:
+        - None.
     Postconditions:
         - Next ``get_shared_cache`` rebuilds from env. Override is cleared.
         - Any previous Redis client is closed best-effort.
@@ -231,5 +235,12 @@ def close_shared_cache() -> None:
     ``reset_shared_cache_state`` exactly: clears per-namespace backends, the
     process Redis client, *and* any test override. Prefer calling
     ``reset_shared_cache_state`` in new code; this alias exists for discoverability.
+
+    Preconditions:
+        - None.
+    Postconditions:
+        - Same as :func:`reset_shared_cache_state`: next ``get_shared_cache``
+          rebuilds from env, the override is cleared, and any previous Redis
+          client is closed best-effort.
     """
     reset_shared_cache_state()

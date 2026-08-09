@@ -10,9 +10,10 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from llm_service import LLMClient
+from llm_service.strands_model import LlmRunner
+from shared.dev_models.models import ReviewContext, SystemArchitecture, Task
 from software_engineering_team.shared.agent_review import AgentReviewCache
 from software_engineering_team.shared.code_completeness import reject_invalid_python
-from software_engineering_team.shared.models import ReviewContext, SystemArchitecture, Task
 from software_engineering_team.shared.phases.documentation_phase import _run_documentation_phase
 from software_engineering_team.shared.phases.review_cycle import (
     GateOutcome,
@@ -24,7 +25,6 @@ from software_engineering_team.shared.phases.rollback import (
     _record_prior_values,
 )
 from software_engineering_team.shared.stack_profile import PhaseModels, StackProfile
-from software_engineering_team.shared.strands_model import LlmRunner
 
 logger = logging.getLogger(__name__)
 

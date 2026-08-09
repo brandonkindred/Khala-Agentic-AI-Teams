@@ -9,11 +9,12 @@ later extraction steps do not invent ownership mid-refactor.
 Companion notes: `MIXIN_BOUNDARIES.md` (pipeline mixin family),
 `run_state.py` (already-extracted in-memory run registry + shared `lock`).
 
-**Partial body move complete (persist / reconcile / purge / dispatch).**
-Run-state I/O, purge, and dispatch/failure/concurrency-guard helper bodies now
-live in `orchestrator_api.py`; `api.main` keeps thin aliases for routes and
-tests. Five Temporal-hot helpers remain deferred via lazy `__getattr__` (see
-below). Runtime semantics are unchanged.
+**Partial body move complete (persist / reconcile / purge / snapshot /
+dispatch).** Run-state I/O, purge, prior-record snapshot, and
+dispatch/failure/concurrency-guard helper bodies now live in
+`orchestrator_api.py`; `api.main` keeps thin aliases for routes and tests.
+Four Temporal-hot helpers remain deferred via lazy `__getattr__` (see below).
+Runtime semantics are unchanged.
 
 ---
 
@@ -45,8 +46,10 @@ per-concern locks is out of scope for the API-orchestration extract.
 module under `strategy_lab/`) so both `api.main` and `orchestrator_api` import
 stores + `lock` from there. Do **not** have extracted helpers import stores
 back from `api.main` (circular-import trap once `main` imports
-`orchestrator_api`). Do **not** require a DI context object for the first
-body-move steps.
+`orchestrator_api`) — **except** the temporary lazy
+`api.main._strategy_lab_records` read inside `_snapshot_prior_records`, which
+must be removed when store extraction lands. Do **not** require a DI context
+object for the first body-move steps.
 
 `_PersistentDict` may move with the stores or remain a shared util that the
 store module imports — decide when the store extraction lands; not required
@@ -114,12 +117,12 @@ wave — do not silently duplicate it.
 
 ### Cluster 5 — Storage purge / prior-record snapshot
 
-**Owner:** purge helpers in `orchestrator_api` (aliases on `api.main`);
-`_snapshot_prior_records` still in `api.main` (deferred via façade).
+**Owner:** purge and snapshot helpers in `orchestrator_api` (aliases on
+`api.main`).
 
 | Helper | Role | Primary callers | Owner |
 |---|---|---|---|
-| `_snapshot_prior_records` | Locked parse+sort of lab records | cycles; `snapshot_prior_records_activity`; signal brief | `api.main` (deferred) |
+| `_snapshot_prior_records` | Locked parse+sort of lab records | cycles; `snapshot_prior_records_activity`; signal brief | `orchestrator_api` |
 | `_delete_jobs_concurrently` | Bounded parallel `delete_job` | purge helpers | `orchestrator_api` |
 | `_delete_paper_sessions_for_lab_record` | Delete paper jobs for one lab id | `delete_strategy_lab_record` | `orchestrator_api` |
 | `_purge_strategy_lab_job_storage` | Full lab + paper storage purge | `clear_strategy_lab_storage` | `orchestrator_api` |
@@ -147,8 +150,10 @@ activities.persist_run_state_activity
        → run_state.get_lab_run_job_client
 
 activities.snapshot_prior_records_activity
-  → orchestrator_api._snapshot_prior_records  →  api.main._snapshot_prior_records
-       → run_state.lock + _strategy_lab_records (still constructed in api.main)
+  → orchestrator_api._snapshot_prior_records
+       → run_state.lock + lazy api.main._strategy_lab_records (temporary
+         exception to the "no store reads back from api.main" rule, pending
+         store extraction; still constructed in api.main)
 
 activities.compute_signal_brief_activity
   → orchestrator_api._compute_signal_brief_snapshot  →  api.main...
@@ -197,6 +202,7 @@ activities.finalize_cycle_record_activity
 - `_delete_jobs_concurrently`
 - `_delete_paper_sessions_for_lab_record`
 - `_purge_strategy_lab_job_storage`
+- `_snapshot_prior_records`
 - `_dispatch_strategy_lab_run`
 - `_fail_strategy_lab_run`
 - `_no_active_run_locked`
@@ -213,13 +219,12 @@ Closed-over module globals (`_active_runs`, `_persist_run_state`,
 `threading.Timer`) are bound inside `orchestrator_api` / `run_state` — patch
 those on the module where the real body lives, not only on `api.main`.
 
-**Deferred via lazy `__getattr__` → `api.main` (five Temporal-hot helpers):**
+**Deferred via lazy `__getattr__` → `api.main` (four Temporal-hot helpers):**
 
-1. `_snapshot_prior_records`
-2. `_compute_signal_brief_snapshot`
-3. `_is_strategy_lab_run_externally_stopped`
-4. `_strategy_lab_external_terminal_status`
-5. `_finalize_strategy_lab_cycle_record`
+1. `_compute_signal_brief_snapshot`
+2. `_is_strategy_lab_run_externally_stopped`
+3. `_strategy_lab_external_terminal_status`
+4. `_finalize_strategy_lab_cycle_record`
 
 **Ownership regression:** `tests/test_orchestrator_api.py` asserts moved callables
 have no top-level function bodies in `api.main` (aliases only). Extend `_MOVED` /
@@ -241,18 +246,27 @@ implementation without circular imports:
 
 1. **Store extraction** — move lab `_PersistentDict` instances (and optionally
    `_PersistentDict` itself) behind `run_state` or `strategy_lab/stores.py`;
-   leave aliases on `api.main` if other teams still need them.
-2. **Remaining Temporal-hot bodies** — finalize, snapshot, signal brief, and
+   leave aliases on `api.main` if other teams still need them. Until then,
+   `_snapshot_prior_records` keeps a **lazy** import of
+   `api.main._strategy_lab_records` (import outside the lock) as a temporary
+   exception to the "do not import stores from `api.main`" rule.
+2. **Remaining Temporal-hot bodies** — finalize, signal brief, and
    external-terminal helpers (`_finalize_strategy_lab_cycle_record`,
-   `_snapshot_prior_records`, `_compute_signal_brief_snapshot`,
-   `_is_strategy_lab_run_externally_stopped`,
+   `_compute_signal_brief_snapshot`, `_is_strategy_lab_run_externally_stopped`,
    `_strategy_lab_external_terminal_status`); drop `__getattr__` indirection
-   for those five.
+   for those four.
 3. **Optional:** extract `_run_paper_trading_step` dependency cleanly if it
    still couples finalize to the paper-trading route module.
 
-Cluster 2 (dispatch / fail / transition guards) landed before finalize by
-deliberate narrow scope — not the original suggested order above.
+Cluster 2 (dispatch / fail / transition guards) and the Cluster 5
+`_snapshot_prior_records` body landed before the remaining finalize/signal-
+brief bodies by deliberate narrow scope — not the original suggested order
+above.
+
+**Test-patch note:** helpers and constants owned by `orchestrator_api` /
+`run_state` must be monkeypatched on those modules (not on `api.main`
+re-export aliases). Implementations close over their defining module's
+globals, so alias-only patches silently miss.
 
 Each step should stay behavior-preserving (verbatim move + import rewires),
 with the investment_team test suite as the gate.

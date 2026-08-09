@@ -4,6 +4,10 @@ All notable changes to this repository are documented here.
 
 ## [Unreleased]
 
+### Removed
+
+- **SE compatibility shims for LLM/temporal/git/model imports deleted.** `software_engineering_team/temporal/client.py`, `software_engineering_team/shared/{strands_model,models,branch_utils,git_utils}.py`, and the dead `get_llm_for_agent`/`get_llm_client` aliases in `software_engineering_team/shared/llm.py` are gone. All in-repo imports and test patches now target the canonical modules directly: `shared.temporal.client`, `llm_service.strands_model`, `shared.dev_models.models`, `shared.git.branch_utils`, `shared.git.git_utils`, and `llm_service.get_client`. The four `sys.modules`-aliased shims (`strands_model`, `models`, `branch_utils`, `git_utils`) were identity-preserving, so this is a pure import-path migration with no runtime behavior change; the `temporal/client.py` re-export shim required retargeting its test patches to the module attribute they actually affect.
+
 ### Changed
 
 - **LLM failover — session-limit 429s now reset after 65 minutes, not 5 hours.** When a provider's 429 body classifies as a `session` usage-limit (e.g. Ollama Cloud's "session usage limit" phrase), `_mark_entry_exhausted` (`backend/agents/llm_service/factory.py`) computes `reset_at` as the error time plus `llm_config.failover_session_window_seconds()`, whose default (`backend/agents/llm_service/config.py`'s `_DEFAULT_FAILOVER_SESSION_WINDOW_S`) was `5 * 3600` — the provider stayed marked usage-limited and out of the failover rotation for 5 hours after every session-limit 429, far longer than most providers' actual session windows. The default is now `65 * 60` (65 minutes); the `LLM_FAILOVER_SESSION_WINDOW_S` env override is unchanged. Docs (`docs/ENV_VARS.md`, `llm_service/README.md`) and tests (`test_failover_config.py`, `test_failover.py`) updated to match.

@@ -7,6 +7,7 @@ import pytest
 
 import software_engineering_team.ai_agent_development_team.phases.review as review_mod
 from llm_service import DummyLLMClient
+from shared.dev_models.models import Task, TaskType
 from software_engineering_team.ai_agent_development_team import constants as team_constants
 from software_engineering_team.ai_agent_development_team import orchestrator
 from software_engineering_team.ai_agent_development_team.constants import (
@@ -37,7 +38,6 @@ from software_engineering_team.ai_agent_development_team.prompts import (
     intake_system_prompt,
     planning_system_prompt,
 )
-from software_engineering_team.shared.models import Task, TaskType
 from software_engineering_team.shared.repo_context_cache import RepoContextCache
 from software_engineering_team.tests.conftest import _patch_fenced_response, _strands_model_double
 
