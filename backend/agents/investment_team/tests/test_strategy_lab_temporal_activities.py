@@ -286,9 +286,9 @@ def test_persist_run_state_activity_fails_closed_on_generation_lookup_failure(mo
     assert persisted == []  # the write never happened despite a legitimately fresh generation
 
 
-def test_snapshot_prior_records_activity_delegates_to_api_main(monkeypatch):
-    from investment_team.api import main as api_main
+def test_snapshot_prior_records_activity_delegates_to_orchestrator_api(monkeypatch):
     from investment_team.models import StrategyLabRecord
+    from investment_team.strategy_lab import orchestrator_api
 
     record = StrategyLabRecord(
         lab_record_id="rec-1",
@@ -308,7 +308,9 @@ def test_snapshot_prior_records_activity_delegates_to_api_main(monkeypatch):
         analysis_narrative="n",
         created_at="2023-01-01T00:00:00Z",
     )
-    monkeypatch.setattr(api_main, "_snapshot_prior_records", lambda *, reverse=False: [record])
+    monkeypatch.setattr(
+        orchestrator_api, "_snapshot_prior_records", lambda *, reverse=False: [record]
+    )
 
     result = act.snapshot_prior_records_activity()
     assert result[0]["lab_record_id"] == "rec-1"
@@ -489,6 +491,64 @@ def test_run_design_attempt_activity_maps_unexpected_error(monkeypatch):
     with pytest.raises(ApplicationError) as exc_info:
         act.run_design_attempt_activity(_run_design_attempt_params())
     assert exc_info.value.non_retryable is True
+
+
+def test_run_design_attempt_activity_raises_cancelled_between_checkpoints(monkeypatch):
+    """``activity.is_cancelled()`` flipping True at an ``emit`` checkpoint
+    (the "between steps" cancellation check) raises Temporal's
+    ``CancelledError`` and stops the attempt immediately — code past the
+    checkpoint that observed cancellation never runs."""
+    from temporalio.exceptions import CancelledError
+
+    from investment_team.strategy_lab.orchestrator import StrategyLabOrchestrator
+
+    reached_past_checkpoint = False
+
+    def _is_cancelled_after_first_call():
+        calls = {"n": 0}
+
+        def _check():
+            calls["n"] += 1
+            return calls["n"] > 1
+
+        return _check
+
+    monkeypatch.setattr(act, "is_cancelled", _is_cancelled_after_first_call())
+
+    def _fake_attempt(self, **kwargs):
+        nonlocal reached_past_checkpoint
+        kwargs["emit"]("design", {"sub_phase": "round_1"})  # not cancelled yet
+        kwargs["emit"]("design", {"sub_phase": "round_2"})  # cancellation observed here
+        reached_past_checkpoint = True
+        raise AssertionError("should not run past the cancelled checkpoint")
+
+    monkeypatch.setattr(StrategyLabOrchestrator, "_run_design_attempt", _fake_attempt)
+
+    with pytest.raises(CancelledError):
+        act.run_design_attempt_activity(_run_design_attempt_params())
+    assert reached_past_checkpoint is False
+
+
+def test_run_design_attempt_activity_unaffected_when_never_cancelled(monkeypatch):
+    """With ``is_cancelled()`` always False, ``no_thread_cancel_exception=True``
+    and the new ``BackgroundHeartbeat`` wrapping don't change the ordinary
+    (non-cancelled) outcome — regression coverage for those additions."""
+    from investment_team.strategy_lab.orchestrator import StrategyLabOrchestrator
+
+    class _FakeRecord:
+        def model_dump(self, *, mode: str = "python") -> Dict[str, Any]:
+            return {"lab_record_id": "rec-uncancelled"}
+
+    def _fake_attempt(self, **kwargs):
+        kwargs["emit"]("design", {"sub_phase": "round_1"})
+        kwargs["emit"]("coding", {"sub_phase": "completed"})
+        return _FakeRecord()
+
+    monkeypatch.setattr(StrategyLabOrchestrator, "_run_design_attempt", _fake_attempt)
+
+    out = act.run_design_attempt_activity(_run_design_attempt_params())
+    assert out["kind"] == "record"
+    assert out["record"]["lab_record_id"] == "rec-uncancelled"
 
 
 def test_run_design_attempt_activity_returns_skipped_outcome_for_502(monkeypatch):
@@ -1391,6 +1451,44 @@ def test_compute_signal_brief_snapshot_survives_provider_close_failure(monkeypat
     assert brief is None
     assert storage["skipped"] is True
     assert storage["skipped_reason"] == "expert_failed"
+
+
+def test_compute_signal_brief_snapshot_success_survives_provider_close_failure(monkeypatch):
+    """A provider.close() failure in the finally block must not replace an
+    already-successful brief with an unhandled exception -- the guard covers
+    the happy path, not just the fail-open branches."""
+    from investment_team.api import main as api_main
+
+    class _FakeProvider:
+        def fetch_context(self, request):
+            from investment_team.market_lab_data import MarketLabContext
+
+            return MarketLabContext(
+                fetched_at="2024-01-01T00:00:00Z", degraded=False, sources_used=["x"]
+            )
+
+        def close(self):
+            raise RuntimeError("close boom")
+
+    class _FakeBrief:
+        def model_dump(self, *, mode: str = "python") -> Dict[str, Any]:
+            return {"brief_version": "v1"}
+
+    class _FakeExpert:
+        def produce_signal_brief(self, prior_records, market_ctx):
+            return _FakeBrief()
+
+    monkeypatch.setattr(api_main, "_strategy_lab_records", {})
+    monkeypatch.setattr(api_main, "FreeTierMarketDataProvider", _FakeProvider)
+    monkeypatch.setattr(api_main, "SignalIntelligenceExpert", _FakeExpert)
+
+    # Must not raise despite close() failing, and must return the brief the
+    # try block already produced -- not a fail-open fallback tuple.
+    brief, storage = api_main._compute_signal_brief_snapshot("SPY")
+
+    assert isinstance(brief, _FakeBrief)
+    assert storage.get("skipped") is not True
+    assert storage["brief_version"] == "v1"
 
 
 def test_is_strategy_lab_run_externally_stopped_reads_job_status(monkeypatch):

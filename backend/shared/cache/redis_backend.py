@@ -803,6 +803,8 @@ class RedisBackend:
         Fail-open: any Redis/client error is logged at warning and swallowed so
         cache clearing never raises into callers.
 
+        Preconditions:
+            - None.
         Postconditions:
             - Returns the number of Redis keys deleted on success.
             - Returns ``None`` when a Redis/client error aborts the clear

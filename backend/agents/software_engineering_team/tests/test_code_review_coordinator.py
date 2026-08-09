@@ -10,6 +10,7 @@ through ``complete_validated`` and validates responses against
 from __future__ import annotations
 
 import json
+import math
 import threading
 import time
 from typing import Any
@@ -393,7 +394,7 @@ def test_shared_context_compaction_is_memoized_across_runs() -> None:
     """The oversized spec/architecture/existing-codebase are compacted once and
     reused on the next coordinator run (the review→fix→re-review loop passes the
     same shared context each cycle)."""
-    from software_engineering_team.shared.models import SystemArchitecture
+    from shared.dev_models.models import SystemArchitecture
 
     over_budget = "specification detail line. " * 4000  # well over any budget
     arch = SystemArchitecture(
@@ -429,7 +430,7 @@ def test_render_architecture_context_folds_in_components_and_decisions() -> None
     """The architecture excerpt built for the reviewer includes not just the
     overview prose but component responsibilities and architecture decisions
     (ADRs) -- the concrete signal an architecture-consistency check needs."""
-    from software_engineering_team.shared.models import ArchitectureComponent, SystemArchitecture
+    from shared.dev_models.models import ArchitectureComponent, SystemArchitecture
 
     arch = SystemArchitecture(
         overview="Layered service architecture.",
@@ -456,7 +457,7 @@ def test_render_architecture_context_handles_missing_and_malformed_fields() -> N
     """
     from types import SimpleNamespace
 
-    from software_engineering_team.shared.models import SystemArchitecture
+    from shared.dev_models.models import SystemArchitecture
 
     bare = SystemArchitecture(overview="Just an overview.")
     rendered_bare = _render_architecture_context(bare)
@@ -470,7 +471,7 @@ def test_render_architecture_context_handles_missing_and_malformed_fields() -> N
 def test_chunk_prompt_includes_component_and_decision_text() -> None:
     """End-to-end: a submission reviewed with a component/decision-bearing
     architecture renders that content into the chunk reviewer's prompt."""
-    from software_engineering_team.shared.models import ArchitectureComponent, SystemArchitecture
+    from shared.dev_models.models import ArchitectureComponent, SystemArchitecture
 
     class _PromptCapturingClient(DummyLLMClient):
         """Records prompts; lock-guarded for parallel map/tail callers."""
@@ -691,26 +692,48 @@ def _failme_content_in_bisect_window(budget: int) -> str:
     Postconditions:
         - Returned content length L satisfies 2 * MIN_SPLIT_SEGMENT_CHARS <= L < budget.
         - Every line is 40 chars and contains the FAILME marker.
+    Raises:
+        ValueError: if budget is too tight for any whole number of lines to land in
+            [2 * MIN_SPLIT_SEGMENT_CHARS, budget) — this helper can only produce content
+            lengths that are multiples of the line stride (line_body_width + 1 chars),
+            so some tight budgets admit no valid line count at all.
     """
     line_body_width = 40
-    target = (2 * MIN_SPLIT_SEGMENT_CHARS + budget) // 2
-    # Joined length of n 40-char lines is 41*n - 1; use 41 as the stride estimate.
-    n_lines = max(1, (target + 1) // (line_body_width + 1))
+    stride = line_body_width + 1  # joined length of n lines is stride*n - 1
+    n_lines = max(1, math.ceil(2 * MIN_SPLIT_SEGMENT_CHARS / stride))
     content = "\n".join(
         f"FAILME {i:05d}".ljust(line_body_width, "x") for i in range(1, n_lines + 1)
     )
-    while len(content) >= budget and n_lines > 1:
+    if len(content) >= budget and n_lines > 1:
         n_lines -= 1
         content = "\n".join(
             f"FAILME {i:05d}".ljust(line_body_width, "x") for i in range(1, n_lines + 1)
         )
-    while len(content) < 2 * MIN_SPLIT_SEGMENT_CHARS:
-        n_lines += 1
-        content = "\n".join(
-            f"FAILME {i:05d}".ljust(line_body_width, "x") for i in range(1, n_lines + 1)
+    if not (2 * MIN_SPLIT_SEGMENT_CHARS <= len(content) < budget):
+        raise ValueError(
+            f"budget={budget} admits no line count landing content in "
+            f"[{2 * MIN_SPLIT_SEGMENT_CHARS}, budget) at this helper's {stride}-char "
+            "line granularity"
         )
-    assert 2 * MIN_SPLIT_SEGMENT_CHARS <= len(content) < budget
     return content
+
+
+def test_failme_content_in_bisect_window_raises_for_unsatisfiable_tight_budget() -> None:
+    """A budget within one line-stride of 2*MIN_SPLIT_SEGMENT_CHARS admits no valid
+    line count (this helper's line lengths are quantized to 41-char strides), so the
+    helper must raise a clear ValueError instead of silently violating its documented
+    postcondition (regression for the bisect-window helper)."""
+    budget = 2 * MIN_SPLIT_SEGMENT_CHARS + 1
+    with pytest.raises(ValueError, match="admits no line count"):
+        _failme_content_in_bisect_window(budget)
+
+
+def test_failme_content_in_bisect_window_satisfies_postcondition_at_min_feasible_budget() -> None:
+    """The smallest budget admitting a valid line count (one stride past the lower
+    bound) must still satisfy the documented postcondition exactly."""
+    budget = 2 * MIN_SPLIT_SEGMENT_CHARS + 41 + 1
+    content = _failme_content_in_bisect_window(budget)
+    assert 2 * MIN_SPLIT_SEGMENT_CHARS <= len(content) < budget
 
 
 def test_split_within_budget_returns_single_whole_segment() -> None:

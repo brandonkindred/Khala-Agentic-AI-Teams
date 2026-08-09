@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Dict, Optional
 
 from llm_service import LLMClient
-from software_engineering_team.shared.models import Task
+from shared.dev_models.models import Task
 from software_engineering_team.shared.repo_writer import (
     UnsafeRepoPathError,
     write_repo_text_files,

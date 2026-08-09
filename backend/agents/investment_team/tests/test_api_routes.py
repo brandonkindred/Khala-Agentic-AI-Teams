@@ -248,6 +248,21 @@ def test_create_profile_duplicate_user_id_returns_409(api_client) -> None:
     assert got.json()["ips"] == first_ips
 
 
+def test_create_profile_docstring_documents_errors_not_preconditions() -> None:
+    """DbC: enum-validity/profile-existence are handled with specific HTTP
+    responses (422/409), not undefined-behavior-on-violation preconditions —
+    they belong under Raises:, not Preconditions:."""
+    from investment_team.api import main as api_main
+
+    doc = api_main.create_profile.__doc__
+    assert doc
+    assert "Preconditions:" not in doc
+    assert "Raises:" in doc
+    assert "HTTPException(422)" in doc
+    assert "HTTPException(409)" in doc
+    assert "already exists" in doc
+
+
 def test_create_profile_non_dict_goal_rejected(api_client) -> None:
     # ``CreateProfileRequest.goals`` is typed ``List[Dict[str, Any]]``, so a
     # non-dict element should already be rejected by FastAPI/Pydantic request
@@ -1127,6 +1142,207 @@ def test_promotion_decision_non_dict_escalation_does_not_mutate_audit_log(
     assert all(len(q) == 0 for q in api_main._workflow_state.queues.values())
 
 
+def test_promotion_decision_502_on_empty_escalation_queue_name(api_client, monkeypatch) -> None:
+    """A ``queue`` that is a present, non-empty-typed string but empty (``""``)
+    is falsy — the guard must check ``not queue_name``, not just the type, or
+    it falls through to the ``not in _workflow_state.queues`` membership test
+    with an empty key instead of raising 502."""
+    from investment_team.api import main as api_main
+
+    sid = _setup_promotion_ready_strategy(api_client)
+    monkeypatch.setattr(
+        api_main,
+        "_execute_advisory",
+        lambda op, payload, *, key: {
+            "decision": {
+                "strategy_id": sid,
+                "decided_by": "a1",
+                "outcome": "paper",
+                "rationale": "ok",
+            },
+            "escalation_enqueued": {
+                "queue": "",
+                "payload_id": sid,
+                "priority": "high",
+            },
+        },
+    )
+    resp = api_client.post("/promotions/decide", json=_promotion_decision_body(sid))
+    assert resp.status_code == 502
+    # Assert the specific "invalid queue name" detail, not just any 502 — an
+    # empty string would also fail the later `not in _workflow_state.queues`
+    # check with a (different) 502, which would mask a regression that
+    # dropped the `not queue_name` guard itself.
+    assert resp.json()["detail"] == "Promotion decision result has invalid escalation queue name"
+
+
+def test_promotion_decision_502_on_non_string_payload_id(api_client, monkeypatch) -> None:
+    """A ``payload_id`` of the wrong type (e.g. an int) must raise 502, not
+    propagate into ``QueueItem`` construction with a non-string id."""
+    from investment_team.api import main as api_main
+
+    sid = _setup_promotion_ready_strategy(api_client)
+    monkeypatch.setattr(
+        api_main,
+        "_execute_advisory",
+        lambda op, payload, *, key: {
+            "decision": {
+                "strategy_id": sid,
+                "decided_by": "a1",
+                "outcome": "paper",
+                "rationale": "ok",
+            },
+            "escalation_enqueued": {
+                "queue": "escalation",
+                "payload_id": 123,
+                "priority": "high",
+            },
+        },
+    )
+    resp = api_client.post("/promotions/decide", json=_promotion_decision_body(sid))
+    assert resp.status_code == 502
+    assert resp.json()["detail"]
+
+
+def test_promotion_decision_502_on_empty_payload_id(api_client, monkeypatch) -> None:
+    """A present but empty-string ``payload_id`` is falsy — the guard must
+    reject it rather than enqueue a ``QueueItem`` with no payload id."""
+    from investment_team.api import main as api_main
+
+    sid = _setup_promotion_ready_strategy(api_client)
+    monkeypatch.setattr(
+        api_main,
+        "_execute_advisory",
+        lambda op, payload, *, key: {
+            "decision": {
+                "strategy_id": sid,
+                "decided_by": "a1",
+                "outcome": "paper",
+                "rationale": "ok",
+            },
+            "escalation_enqueued": {
+                "queue": "escalation",
+                "payload_id": "",
+                "priority": "high",
+            },
+        },
+    )
+    resp = api_client.post("/promotions/decide", json=_promotion_decision_body(sid))
+    assert resp.status_code == 502
+    assert resp.json()["detail"]
+
+
+def test_promotion_decision_502_on_escalation_missing_priority(api_client, monkeypatch) -> None:
+    """A ``queue``/``payload_id``-valid escalation missing only ``priority``
+    must 502 — distinct from the existing "missing payload_id" case, which
+    never exercises the ``priority`` guard on its own."""
+    from investment_team.api import main as api_main
+
+    sid = _setup_promotion_ready_strategy(api_client)
+    monkeypatch.setattr(
+        api_main,
+        "_execute_advisory",
+        lambda op, payload, *, key: {
+            "decision": {
+                "strategy_id": sid,
+                "decided_by": "a1",
+                "outcome": "paper",
+                "rationale": "ok",
+            },
+            "escalation_enqueued": {
+                "queue": "escalation",
+                "payload_id": sid,
+            },
+        },
+    )
+    resp = api_client.post("/promotions/decide", json=_promotion_decision_body(sid))
+    assert resp.status_code == 502
+    assert resp.json()["detail"]
+
+
+def test_promotion_decision_502_on_non_string_priority(api_client, monkeypatch) -> None:
+    """A ``priority`` of the wrong type (e.g. an int) must raise 502, not
+    propagate into ``QueueItem`` construction with a non-string priority."""
+    from investment_team.api import main as api_main
+
+    sid = _setup_promotion_ready_strategy(api_client)
+    monkeypatch.setattr(
+        api_main,
+        "_execute_advisory",
+        lambda op, payload, *, key: {
+            "decision": {
+                "strategy_id": sid,
+                "decided_by": "a1",
+                "outcome": "paper",
+                "rationale": "ok",
+            },
+            "escalation_enqueued": {
+                "queue": "escalation",
+                "payload_id": sid,
+                "priority": 5,
+            },
+        },
+    )
+    resp = api_client.post("/promotions/decide", json=_promotion_decision_body(sid))
+    assert resp.status_code == 502
+    assert resp.json()["detail"]
+
+
+def test_promotion_decision_502_on_empty_priority(api_client, monkeypatch) -> None:
+    """A present but empty-string ``priority`` is falsy — the guard must
+    reject it rather than enqueue a ``QueueItem`` with no priority."""
+    from investment_team.api import main as api_main
+
+    sid = _setup_promotion_ready_strategy(api_client)
+    monkeypatch.setattr(
+        api_main,
+        "_execute_advisory",
+        lambda op, payload, *, key: {
+            "decision": {
+                "strategy_id": sid,
+                "decided_by": "a1",
+                "outcome": "paper",
+                "rationale": "ok",
+            },
+            "escalation_enqueued": {
+                "queue": "escalation",
+                "payload_id": sid,
+                "priority": "",
+            },
+        },
+    )
+    resp = api_client.post("/promotions/decide", json=_promotion_decision_body(sid))
+    assert resp.status_code == 502
+    assert resp.json()["detail"]
+
+
+def test_promotion_decision_502_on_audit_log_appended_mixed_types(api_client, monkeypatch) -> None:
+    """An ``audit_log_appended`` list containing a non-string entry alongside
+    valid strings must 502 — the guard must check every element's type, not
+    just that the container is a list, and must leave ``_workflow_state``
+    untouched since the escalation is otherwise well-formed."""
+    from investment_team.api import main as api_main
+
+    sid = _setup_promotion_ready_strategy(api_client)
+    monkeypatch.setattr(
+        api_main,
+        "_execute_advisory",
+        lambda op, payload, *, key: {
+            "decision": {
+                "strategy_id": sid,
+                "decided_by": "a1",
+                "outcome": "paper",
+                "rationale": "ok",
+            },
+            "audit_log_appended": [f"promotion:{sid}:paper", 123],
+        },
+    )
+    resp = api_client.post("/promotions/decide", json=_promotion_decision_body(sid))
+    assert resp.status_code == 502
+    assert resp.json()["detail"]
+    assert api_main._workflow_state.audit_log == []
+
+
 def test_create_memo_invalid_memo_payload_returns_500(api_client, monkeypatch) -> None:
     """A present but schema-invalid 'memo' is a server/integration fault → 500,
     matching advisor routes' handling of malformed Temporal payloads."""
@@ -1615,6 +1831,23 @@ def test_delete_strategy_lab_record_404(api_client) -> None:
     assert resp.status_code == 404
 
 
+def test_delete_strategy_lab_record_response_has_documented_contract() -> None:
+    """Regression guard: DeleteStrategyLabRecordResponse's docstring must
+    define lab_record_id and the None-vs-present semantics of the linked
+    strategy/backtest ids, not just restate the field names."""
+    from investment_team.api import main as api_main
+
+    doc = api_main.DeleteStrategyLabRecordResponse.__doc__
+    assert doc, "DeleteStrategyLabRecordResponse is missing a docstring"
+    for snippet in (
+        "lab_record_id",
+        "deleted_strategy_id",
+        "deleted_backtest_id",
+        "deleted_paper_trading_sessions",
+    ):
+        assert snippet in doc, f"DeleteStrategyLabRecordResponse docstring missing {snippet!r}"
+
+
 def test_run_paper_trading_404_when_lab_record_missing(api_client) -> None:
     resp = api_client.post(
         "/strategy-lab/paper-trade",
@@ -1709,6 +1942,29 @@ def test_delete_backtest_job_success(monkeypatch: pytest.MonkeyPatch, api_client
     assert resp.json()["deleted"] is True
 
 
+@pytest.mark.parametrize(
+    ("handler_name", "required_snippets"),
+    [
+        ("get_backtest_job_status", ["Preconditions:", "Postconditions:", "404"]),
+        ("list_backtest_jobs", ["Postconditions:", "running_only"]),
+        ("cancel_backtest_job", ["Preconditions:", "Postconditions:", "404", "409"]),
+        ("delete_backtest_job", ["Preconditions:", "Postconditions:", "404"]),
+    ],
+)
+def test_backtest_job_handler_has_documented_contract(
+    handler_name: str, required_snippets: List[str]
+) -> None:
+    """Regression guard for #5141: these handlers must document their
+    purpose, preconditions, and the status codes they can return — a bare
+    or missing docstring here is the exact defect that issue reported."""
+    from investment_team.api import main as api_main
+
+    doc = getattr(api_main, handler_name).__doc__
+    assert doc, f"{handler_name} is missing a docstring"
+    for snippet in required_snippets:
+        assert snippet in doc, f"{handler_name} docstring missing {snippet!r}"
+
+
 def test_list_backtests_empty(api_client) -> None:
     resp = api_client.get("/backtests")
     assert resp.status_code == 200
@@ -1773,9 +2029,25 @@ def test_advisor_session_404_for_missing_ids(api_client) -> None:
 
 
 def test_get_advisor_session_returns_found_false_for_missing(api_client) -> None:
+    """An unknown session_id is tolerated, not a 404: found=False pairs with
+    session=None per the endpoint's documented postconditions."""
     resp = api_client.get("/advisor/sessions/missing")
     assert resp.status_code == 200
-    assert resp.json()["found"] is False
+    body = resp.json()
+    assert body["found"] is False
+    assert body["session"] is None
+
+
+def test_get_advisor_session_docstring_documents_tolerant_precondition() -> None:
+    """The docstring must state explicitly that unknown session ids are a
+    tolerated precondition, not imply that session_id must already
+    identify a started session."""
+    from investment_team.api.main import get_advisor_session
+
+    doc = get_advisor_session.__doc__
+    assert "Preconditions:" in doc
+    assert "None. Unknown session IDs are tolerated." in doc
+    assert "must identify a previously started advisor session" not in doc
 
 
 def test_start_advisor_session_502_on_malformed_advisory_result(api_client, monkeypatch) -> None:

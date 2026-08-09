@@ -87,7 +87,7 @@ logger = logging.getLogger(__name__)
 
 
 def _startup() -> None:
-    """Start the Temporal worker backstop (best-effort).
+    """Start the Temporal worker backstop, then run one-time service initialization.
 
     The team_service entrypoint normally starts the worker via
     ``TEAM_TEMPORAL_WORKER_MODULE`` before uvicorn accepts requests; this backstop
@@ -100,6 +100,9 @@ def _startup() -> None:
         - Starts the worker thread when Temporal is enabled; a no-op when
           ``TEMPORAL_ADDRESS`` is unset. Never raises — any failure is logged as a
           warning so it cannot abort app boot (this runs as an ``on_startup`` hook).
+        - Calls :func:`initialize_service`, which performs retroactive team
+          provisioning/registry registration and orphaned pipeline-run reaping.
+          Also never raises (see its own contract).
     """
     try:
         from agent_team_studio.agentic_team_provisioning.temporal.worker import (
@@ -112,6 +115,7 @@ def _startup() -> None:
             "agentic_team_provisioning Temporal worker start (lifespan backstop) failed",
             exc_info=True,
         )
+    initialize_service()
 
 
 app = create_team_app(
@@ -131,42 +135,67 @@ _agent = ProcessDesignerAgent()
 _test_store = get_test_store()
 _pipeline_runner = get_pipeline_runner(_test_store)
 
-# Retroactive provisioning: ensure all existing teams have infrastructure and
-# that their generated agents are registered in the live registry (rosters are
-# Postgres-backed, so this re-registers them after a process restart). Each team
-# is isolated, and within a team infrastructure recovery and registry restoration
-# are decoupled — a transient infrastructure failure must not hide an otherwise
-# usable roster from the registry for the lifetime of the process.
-try:
-    _existing_teams = _store.list_teams()
-except Exception as _e:
-    logger.warning("Could not list existing teams for retroactive provisioning: %s", _e)
-    _existing_teams = []
 
-for _team_row in _existing_teams:
-    _tid = _team_row["team_id"]
-    try:
-        get_team_infrastructure(_tid)
-    except Exception as _e:
-        logger.warning("Could not retroactively provision infrastructure for team %s: %s", _tid, _e)
-    try:
-        _team = _store.get_team(_tid)
-        if _team is not None and _team.agents:
-            register_team_manifests(_tid, _team.agents)
-    except Exception as _e:
-        logger.warning("Could not register generated manifests for team %s: %s", _tid, _e)
+def initialize_service() -> None:
+    """Retroactive team provisioning/registry registration + orphaned-run reaping.
 
-# Restart cleanup: a pipeline test run whose worker thread died (restart or crash)
-# leaves its DB row stuck in an active state with no live waiter. Reap orphans whose
-# heartbeat has gone stale so they fail cleanly instead of stranding forever. Safe with
-# multiple workers (advisory-locked, heartbeat-based) — a live sibling worker's run is
-# never touched. Best-effort so a reaper hiccup can't break module import.
-try:
-    _reaped = _pipeline_runner.reap_orphaned_runs()
-    if _reaped:
-        logger.warning("Reaped %d orphaned pipeline run(s) on startup", _reaped)
-except Exception as _e:
-    logger.warning("Could not reap orphaned pipeline runs on startup: %s", _e)
+    Runs once at app startup (called from ``_startup``, the lifespan's
+    ``on_startup`` hook) rather than at import time, so importing this module —
+    e.g. for tests or tooling — never performs real database queries,
+    infrastructure provisioning, or registry writes.
+
+    Retroactive provisioning ensures all existing teams have infrastructure and
+    that their generated agents are registered in the live registry (rosters are
+    Postgres-backed, so this re-registers them after a process restart). Each team
+    is isolated, and within a team infrastructure recovery and registry restoration
+    are decoupled — a transient infrastructure failure must not hide an otherwise
+    usable roster from the registry for the lifetime of the process.
+
+    Restart cleanup: a pipeline test run whose worker thread died (restart or
+    crash) leaves its DB row stuck in an active state with no live waiter. Reap
+    orphans whose heartbeat has gone stale so they fail cleanly instead of
+    stranding forever. Safe with multiple workers (advisory-locked,
+    heartbeat-based) — a live sibling worker's run is never touched.
+
+    Preconditions:
+        - ``_store`` and ``_pipeline_runner`` are already constructed (they are
+          module-level singletons, assigned above unconditionally).
+
+    Postconditions:
+        - Never raises: every failure mode (listing teams, provisioning a given
+          team's infrastructure, registering its manifests, reaping orphaned
+          runs) is caught and logged individually, so one team's or one step's
+          failure cannot stop the others, and this function is safe to call as a
+          best-effort startup backstop.
+    """
+    try:
+        existing_teams = _store.list_teams()
+    except Exception as exc:
+        logger.warning("Could not list existing teams for retroactive provisioning: %s", exc)
+        existing_teams = []
+
+    for team_row in existing_teams:
+        team_id = team_row["team_id"]
+        try:
+            get_team_infrastructure(team_id)
+        except Exception as exc:
+            logger.warning(
+                "Could not retroactively provision infrastructure for team %s: %s", team_id, exc
+            )
+        try:
+            team = _store.get_team(team_id)
+            if team is not None and team.agents:
+                register_team_manifests(team_id, team.agents)
+        except Exception as exc:
+            logger.warning("Could not register generated manifests for team %s: %s", team_id, exc)
+
+    try:
+        reaped = _pipeline_runner.reap_orphaned_runs()
+        if reaped:
+            logger.warning("Reaped %d orphaned pipeline run(s) on startup", reaped)
+    except Exception as exc:
+        logger.warning("Could not reap orphaned pipeline runs on startup: %s", exc)
+
 
 GREETING = (
     "Hello! I'm your Process Designer assistant. I'll help you design an agentic "
@@ -397,6 +426,12 @@ def _save_agents_and_process(
 
 @app.get("/health")
 def health():
+    """Liveness probe.
+
+    Preconditions: none.
+    Postconditions: ``200`` with a static ``{"status": "ok", ...}`` body — never
+        touches the store or infra, so it can't fail on their behalf.
+    """
     return {"status": "ok", "service": "agentic-team-provisioning"}
 
 
@@ -568,7 +603,13 @@ def recommend_agents_for_step(process_id: str, step_id: str):
 
 @app.get("/teams/{team_id}/agent-environments", response_model=List[AgentEnvProvisionSummary])
 def list_team_agent_environments(team_id: str):
-    """Per-step agent provisioning status (Agent Provisioning team / sandboxed envs)."""
+    """Per-step agent provisioning status (Agent Provisioning team / sandboxed envs).
+
+    Preconditions: ``team_id`` is a non-empty string.
+    Postconditions: ``200`` with an ``AgentEnvProvisionSummary`` per recorded
+        provisioning attempt for the team (empty if none have run yet); ``404``
+        if the team is not found.
+    """
     team = _store.get_team(team_id)
     if not team:
         raise HTTPException(status_code=404, detail="Team not found")
@@ -608,7 +649,15 @@ def _get_team_or_404(team_id: str) -> AgenticTeam:
 
 @app.get("/teams/{team_id}/jobs", response_model=List[TeamJobSummary])
 def list_team_jobs(team_id: str):
-    """List all jobs for a provisioned team."""
+    """List all jobs for a provisioned team.
+
+    Preconditions: ``team_id`` is a non-empty string.
+    Postconditions: ``200`` with a ``TeamJobSummary`` per job known to the
+        team's job client (empty if none exist); ``404`` if the team is not
+        found (infrastructure is provisioned on first access via
+        ``_get_infra_or_404``, so a 404 here means the team itself is
+        unknown, not a missing/failed infra).
+    """
     infra = _get_infra_or_404(team_id)
     raw_jobs = infra.job_client.list_jobs() or []
     return [
@@ -624,7 +673,13 @@ def list_team_jobs(team_id: str):
 
 @app.get("/teams/{team_id}/jobs/{job_id}", response_model=TeamJobDetail)
 def get_team_job(team_id: str, job_id: str):
-    """Get a single job's detail."""
+    """Get a single job's detail.
+
+    Preconditions: ``team_id`` and ``job_id`` are non-empty strings.
+    Postconditions: ``200`` with a ``TeamJobDetail`` wrapping the raw job
+        record; ``404`` if the team is not found, or the team is found but
+        has no job with ``job_id``.
+    """
     infra = _get_infra_or_404(team_id)
     job = infra.job_client.get_job(job_id)
     if not job:
@@ -643,7 +698,14 @@ def get_team_job(team_id: str, job_id: str):
 
 @app.get("/teams/{team_id}/questions", response_model=List[TeamPendingQuestion])
 def list_team_questions(team_id: str):
-    """Collect pending questions from all active jobs for a team."""
+    """Collect pending questions from all active jobs for a team.
+
+    Preconditions: ``team_id`` is a non-empty string.
+    Postconditions: ``200`` with a ``TeamPendingQuestion`` per pending question
+        across every job in ``pending``/``running`` status (empty if none, or
+        if the team has no active jobs); ``404`` if the team is not found.
+        Jobs outside those two statuses are not queried.
+    """
     infra = _get_infra_or_404(team_id)
     active_jobs = infra.job_client.list_jobs(statuses=["pending", "running"]) or []
     result: List[TeamPendingQuestion] = []
@@ -656,7 +718,16 @@ def list_team_questions(team_id: str):
 
 @app.post("/teams/{team_id}/questions/{job_id}/answers")
 def submit_team_answers(team_id: str, job_id: str, req: SubmitTeamAnswersRequest):
-    """Submit answers to pending questions for a job."""
+    """Submit answers to pending questions for a job.
+
+    Preconditions: ``team_id`` and ``job_id`` are non-empty strings; ``req``
+        carries the answers to append.
+    Postconditions: ``200`` with ``{"job_id", "message"}`` and the job's
+        record updated — ``pending_questions`` cleared, ``waiting_for_answers``
+        set to ``False``, and ``req.answers`` appended to
+        ``submitted_answers`` — via an atomic update; ``404`` if the team or
+        the job is not found (job unchanged in that case).
+    """
     infra = _get_infra_or_404(team_id)
     job = infra.job_client.get_job(job_id)
     if not job:
@@ -697,7 +768,14 @@ def _safe_asset_name(name: str) -> str:
 
 @app.get("/teams/{team_id}/assets", response_model=List[AssetInfo])
 def list_team_assets(team_id: str):
-    """List files in the team's asset directory."""
+    """List files in the team's asset directory.
+
+    Preconditions: ``team_id`` is a non-empty string.
+    Postconditions: ``200`` with an ``AssetInfo`` per regular file directly in
+        ``infra.assets_dir`` (subdirectories are not walked), sorted by name;
+        empty list if the directory doesn't exist yet or has no files; ``404``
+        if the team is not found.
+    """
     infra = _get_infra_or_404(team_id)
     assets: List[AssetInfo] = []
     if infra.assets_dir.is_dir():
@@ -799,14 +877,25 @@ async def upload_team_asset(team_id: str, file: UploadFile):
 
 @app.get("/teams/{team_id}/forms", response_model=List[str])
 def list_team_form_keys(team_id: str):
-    """List distinct form keys that have records."""
+    """List distinct form keys that have records.
+
+    Preconditions: ``team_id`` is a non-empty string.
+    Postconditions: ``200`` with the distinct ``form_key`` values that have at
+        least one record (empty if none); ``404`` if the team is not found.
+    """
     infra = _get_infra_or_404(team_id)
     return infra.form_store.list_form_keys()
 
 
 @app.get("/teams/{team_id}/forms/{form_key}", response_model=List[FormRecord])
 def list_team_form_records(team_id: str, form_key: str):
-    """Get all records for a form key."""
+    """Get all records for a form key.
+
+    Preconditions: ``team_id`` and ``form_key`` are non-empty strings.
+    Postconditions: ``200`` with a ``FormRecord`` per stored record for
+        ``form_key`` (empty list, not 404, if the key has no records);
+        ``404`` if the team is not found.
+    """
     infra = _get_infra_or_404(team_id)
     rows = infra.form_store.get_records(form_key)
     return [FormRecord(**r) for r in rows]
@@ -814,7 +903,14 @@ def list_team_form_records(team_id: str, form_key: str):
 
 @app.post("/teams/{team_id}/forms/{form_key}", response_model=FormRecord, status_code=201)
 def create_team_form_record(team_id: str, form_key: str, req: CreateFormRecordRequest):
-    """Create a new form record."""
+    """Create a new form record.
+
+    Preconditions: ``team_id`` and ``form_key`` are non-empty strings; ``req``
+        carries the record's field data.
+    Postconditions: ``201`` with the newly created ``FormRecord`` (a fresh
+        ``record_id`` assigned by the store); ``404`` if the team is not
+        found (no record created).
+    """
     infra = _get_infra_or_404(team_id)
     record = infra.form_store.create_record(form_key, req.data)
     return FormRecord(**record)
@@ -824,7 +920,16 @@ def create_team_form_record(team_id: str, form_key: str, req: CreateFormRecordRe
 def update_team_form_record(
     team_id: str, form_key: str, record_id: str, req: UpdateFormRecordRequest
 ):
-    """Update an existing form record."""
+    """Update an existing form record.
+
+    Preconditions: ``team_id``, ``form_key``, and ``record_id`` are non-empty
+        strings; ``req`` carries the field data to write.
+    Postconditions: ``200`` with the updated ``FormRecord`` re-read from the
+        store; ``404`` if the team is not found, if no record with
+        ``record_id`` exists under ``form_key`` (update is a no-op in that
+        case), or in the narrow race where the record is deleted between the
+        update and the follow-up read.
+    """
     infra = _get_infra_or_404(team_id)
     if not infra.form_store.update_record(form_key, record_id, req.data):
         raise HTTPException(status_code=404, detail="Record not found")
@@ -836,7 +941,14 @@ def update_team_form_record(
 
 @app.delete("/teams/{team_id}/forms/{form_key}/{record_id}", status_code=204)
 def delete_team_form_record(team_id: str, form_key: str, record_id: str):
-    """Delete a form record."""
+    """Delete a form record.
+
+    Preconditions: ``team_id``, ``form_key``, and ``record_id`` are non-empty
+        strings.
+    Postconditions: ``204`` with the record removed when it existed under
+        ``form_key``; ``404`` if the team is not found, or no such record
+        exists (store unchanged in that case).
+    """
     infra = _get_infra_or_404(team_id)
     if not infra.form_store.delete_record(form_key, record_id):
         raise HTTPException(status_code=404, detail="Record not found")

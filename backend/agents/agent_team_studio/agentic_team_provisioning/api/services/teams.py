@@ -46,20 +46,29 @@ def create_team(req: CreateTeamRequest):
     Preconditions: ``req.name`` is a non-empty team name (enforced by
         ``CreateTeamRequest``).
     Postconditions: on success, the team row exists, infrastructure is
-        provisioned, and ``200`` is returned with the created team. On
-        provisioning failure, the team row is removed (best-effort — a
-        rollback failure is logged but never masks the ``500``) and an
-        ``HTTPException(500)`` is raised.
-    Invariants: when provisioning fails and the compensating delete succeeds,
-        no team row remains in Postgres without corresponding infrastructure.
-        The delete is best-effort, so a rollback failure is logged but the row
-        may remain — see Postconditions.
+        provisioned, and ``200`` is returned with the created team. On a
+        non-``HTTPException`` provisioning failure, the team row is removed
+        (best-effort — a rollback failure is logged but never masks the
+        ``500``) and an ``HTTPException(500)`` is raised. If provisioning
+        itself raises an ``HTTPException`` (an intentional status, not an
+        outage), it propagates unchanged with **no** rollback — the team row
+        is left in place for the caller to act on.
+    Invariants: when provisioning fails with a non-``HTTPException`` error and
+        the compensating delete succeeds, no team row remains in Postgres
+        without corresponding infrastructure. The delete is best-effort, so a
+        rollback failure is logged but the row may remain — see
+        Postconditions.
     """
     from agent_team_studio.agentic_team_provisioning.api import main as _main
 
     team = _main._store.create_team(name=req.name, description=req.description)
     try:
         _main.provision_team(team.team_id)
+    except HTTPException:
+        # An intentionally raised HTTP status from provisioning (e.g. a 409
+        # conflict) is not an infrastructure outage — propagate it unchanged
+        # rather than flattening it into a generic 500.
+        raise
     except Exception as exc:
         logger.exception(
             "Failed to provision infrastructure for team %s; rolling back team row",

@@ -865,17 +865,23 @@ waiting on is reclaimed (freeing its worker slots) at essentially the same
 moment, rather than running unbounded server-side.
 
 ### CODE_REVIEW_MIN_SPLIT_SEGMENT_CHARS
-A failing chunk smaller than twice this is retried once as-is instead of being
-bisected. Default `8000`, floor `1000`.
+Int (default `8000`, floor `1000`). A failing chunk smaller than twice this is
+retried once as-is instead of being bisected. Parsed via the shared `env_int`
+(unset/garbage → default; a parsed value below the floor is clamped up to it,
+not reset to the default).
 
 ### CODE_REVIEW_MAX_BISECT_DEPTH
-Max bisect-and-retry recursion depth for a failing review chunk before the chunk
-is treated as unreviewable and degraded (see `CODE_REVIEW_BLOCK_ON_UNREVIEWED`:
-by default its range is recorded non-blockingly in `not_reviewed_ranges`; with
-the opt-out on it becomes a blocking `high` finding). The whole run only raises
-`CodeReviewUnavailableError` when *no* chunk could be reviewed at all. Default
-`3`, floor `0` (`0` disables bisection; a chunk then gets only the single
-same-input retry, then the thinking-off retry, before degrading).
+Int (default `3`, floor `0`). Max bisect-and-retry recursion depth for a
+failing review chunk before the chunk is treated as unreviewable and degraded
+(see `CODE_REVIEW_BLOCK_ON_UNREVIEWED`: by default its range is recorded
+non-blockingly in `not_reviewed_ranges`; with the opt-out on it becomes a
+blocking `high` finding). The whole run only raises
+`CodeReviewUnavailableError` when *no* chunk could be reviewed at all. `0`
+disables bisection; a chunk then gets only the single same-input retry, then
+the thinking-off retry, before degrading. Parsed via the shared `env_int`
+(unset/garbage → default; a parsed value below `0` is clamped up to the floor
+of `0`, not reset to the default, with a warning logged only for the
+set-but-unparseable case).
 
 ### CODE_REVIEW_THINKING_OFF_RETRY
 Default-on last-resort retry for a chunk whose review could not be recovered by
@@ -954,7 +960,7 @@ abort, which remains a loud operator-facing comment.
 
 ### PR_REVIEW_DUPLICATE_THRESHOLD_WITH_LOCATION / PR_REVIEW_DUPLICATE_THRESHOLD_NO_LOCATION
 Similarity-ratio overrides (0.0–1.0) for the `/review-pr` flow's duplicate-issue
-check: before a pre-existing finding is offered to a human as a "file a new
+check: before a finding is offered to a human as a "file a new
 GitHub issue?" candidate, the reviewed repository's open issues are checked for
 one that already tracks the same bug (`difflib.SequenceMatcher` ratio between the
 finding's description headline and a candidate issue's title, casefolded). A
@@ -1670,7 +1676,7 @@ orchestrator thread (e.g. server restart) is recovered via
 
 ### GIT_COMMIT_USER_NAME
 Author/committer name for every git commit platform code makes (SE pipeline, coding team, agent git
-tools — all routed through `software_engineering_team/shared/git_utils.py`). Default `Khala`. Blank
+tools — all routed through `backend/shared/git/git_utils.py`). Default `Khala`. Blank
 values fall back to the default; natively-exported `GIT_AUTHOR_*`/`GIT_COMMITTER_*` env vars win over
 this setting.
 

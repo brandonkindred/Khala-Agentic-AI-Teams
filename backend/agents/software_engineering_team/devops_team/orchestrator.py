@@ -10,8 +10,7 @@ from typing import Any, Dict, List, Optional
 
 from llm_service import LLMClient
 from llm_service.clients.dummy import is_dummy_llm_client_wrapped
-from software_engineering_team.shared.deliver_utils import DeliverGitOps
-from software_engineering_team.shared.git_utils import (
+from shared.git.git_utils import (
     abort_merge,
     checkout_branch,
     commit_working_tree,
@@ -21,6 +20,7 @@ from software_engineering_team.shared.git_utils import (
     get_head_sha,
     merge_branch,
 )
+from software_engineering_team.shared.deliver_utils import DeliverGitOps
 from software_engineering_team.shared.repo_writer import write_agent_output
 from software_engineering_team.shared.team_lead_base import BaseTeamLead, TeamLeadSharedState
 

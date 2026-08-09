@@ -195,6 +195,17 @@ class CodebaseIndex:
           existing-codebase excerpt fail to resolve a path, which is what lets
           the verifier confirm "this file already exists" and drop the false
           positive. In-memory search (``search``) never touches it.
+        - ``full_content_complete`` is True iff ``from_input`` applied the
+          ``CodeReviewInput.full_content`` overlay (see that method) -- i.e. a
+          pre-numbered submission whose ``full_content`` covered every path this
+          index holds, so ``files`` holds real full bodies everywhere, not a mix
+          of full bodies and bounded excerpts. A partial ``full_content`` never
+          sets it (see ``from_input``'s all-or-nothing overlay rule). A
+          whole-codebase pass can gate on this flag alone -- never on
+          ``input_data.full_content`` directly -- without re-deriving path
+          coverage itself. False (the default, e.g. a directly-constructed
+          index, or ``pre_numbered=False`` where the field is inapplicable)
+          means "not verified complete."
         - The index is read-only after construction: the dataclass is frozen,
           ``files`` is shallow-copied at init, no method mutates ``files`` or
           ``existing_codebase``, and it never mutates ``repo_reader`` (whose
@@ -205,6 +216,7 @@ class CodebaseIndex:
     files: Dict[str, str]
     existing_codebase: str = ""
     repo_reader: Optional[RepoReader] = None
+    full_content_complete: bool = False
 
     EXISTING_CODEBASE_PATH = "<existing codebase>"
 
@@ -225,6 +237,26 @@ class CodebaseIndex:
               blocks via the coordinator's canonical parser; headerless blocks
               and empty-string bodies are dropped (they cannot be addressed by
               a path).
+            - When ``input_data.pre_numbered`` is True and ``input_data.full_content``
+              covers EVERY path this index would otherwise hold, each path's bounded
+              pre-numbered excerpt is replaced by its full body -- so a whole-codebase
+              pass reading via this index sees real content everywhere, while the
+              chunk reviewer (built from ``code``/``pre_numbered`` directly, not from
+              this index) is unaffected. A ``full_content`` that covers only SOME
+              paths is not applied at all (all-or-nothing): overlaying just the
+              covered subset would leave the rest as bounded excerpts sitting
+              alongside full bodies with no way for a caller to tell them apart,
+              which is worse than not overlaying anything -- a pass would read those
+              still-bounded, ``"N: "``-prefixed excerpts as if they were complete
+              files. ``full_content_complete`` on the returned index reports which
+              case occurred (see the class docstring). Ignored entirely when
+              ``pre_numbered`` is False. Only replaces content for paths already in
+              ``files`` -- an extra ``full_content`` key beyond what this submission
+              already holds is never added, so a caller that (like ``full_content_complete``
+              itself allows) supplies more paths than the submission covers can never
+              expand the index's changed-path set beyond what ``files``/``code``
+              actually determined; a whole-codebase pass reading ``index.files`` must
+              never see a path this submission did not itself include.
             - ``existing_codebase`` carries the input's full existing-codebase
               excerpt (empty string when absent); ``repo_reader`` is stored
               verbatim.
@@ -244,10 +276,24 @@ class CodebaseIndex:
             for path, content in parse_code_into_file_blocks(input_data.code or ""):
                 if path and content != "":
                     files[path] = content
+        full_content_complete = bool(
+            input_data.pre_numbered
+            and input_data.full_content
+            and set(input_data.full_content) >= set(files)
+        )
+        if full_content_complete:
+            # Intersect, never union: full_content may (per the coverage check above)
+            # legitimately carry MORE paths than this submission actually reviews --
+            # only paths files already holds are ever replaced, so an extra key can
+            # never expand the index's changed-path set.
+            files = {
+                path: input_data.full_content.get(path, content) for path, content in files.items()
+            }
         return cls(
             files=files,
             existing_codebase=input_data.existing_codebase or "",
             repo_reader=repo_reader,
+            full_content_complete=full_content_complete,
         )
 
     def _reader_read(self, path: str) -> Optional[str]:
@@ -603,23 +649,14 @@ class CodebaseIndex:
             display = path
         _, ext = os.path.splitext(display)
         if ext.lower() not in (".py", ".pyi"):
-            return (
-                f"Error: read_function by line requires a Python file (.py/.pyi); "
-                f"got {display}."
-            )
+            return f"Error: read_function by line requires a Python file (.py/.pyi); got {display}."
 
         stripped, physical, mapper = strip_numbered_prefixes(content, line)
-        construct = enclosing_construct(
-            stripped, physical, annotated_hunks=mapper is not None
-        )
+        construct = enclosing_construct(stripped, physical, annotated_hunks=mapper is not None)
         if construct is None:
-            return (
-                f"Error: no enclosing function/class for line {line} of {display}."
-            )
+            return f"Error: no enclosing function/class for line {line} of {display}."
 
-        return _format_construct_slice(
-            display, construct, stripped.splitlines(), mapper=mapper
-        )
+        return _format_construct_slice(display, construct, stripped.splitlines(), mapper=mapper)
 
     def read_function_by_name(self, path: str, name: str) -> str:
         """Return the construct body for an exact name match, or an error.
@@ -646,10 +683,7 @@ class CodebaseIndex:
             display = path
         _, ext = os.path.splitext(display)
         if ext.lower() not in (".py", ".pyi"):
-            return (
-                f"Error: read_function by name requires a Python file (.py/.pyi); "
-                f"got {display}."
-            )
+            return f"Error: read_function by name requires a Python file (.py/.pyi); got {display}."
 
         stripped, _, mapper = strip_numbered_prefixes(content, 1)
         # Pre-numbered hunk excerpts use annotated_hunks so a sibling
@@ -673,9 +707,7 @@ class CodebaseIndex:
                 f"Error: name {needle!r} is ambiguous in {display}; matches: {detail}. "
                 f"Call read_function with a line number from one of those ranges."
             )
-        return _format_construct_slice(
-            display, matches[0], stripped.splitlines(), mapper=mapper
-        )
+        return _format_construct_slice(display, matches[0], stripped.splitlines(), mapper=mapper)
 
     def search(
         self, query: str, max_matches: int = _SEARCH_MATCH_LIMIT
@@ -712,9 +744,7 @@ class CodebaseIndex:
                         return results
         return results
 
-    def find_references(
-        self, symbol: str, max_matches: int = _SEARCH_MATCH_LIMIT
-    ) -> str:
+    def find_references(self, symbol: str, max_matches: int = _SEARCH_MATCH_LIMIT) -> str:
         """Search submission (and repo_reader when present) for capped path:line hits.
 
         Submission matches come from :meth:`search` first. When a ``repo_reader``
@@ -743,9 +773,7 @@ class CodebaseIndex:
         if not (symbol or "").strip():
             body = f"No references for {symbol!r}."
             if self.repo_reader is None:
-                return (
-                    f"{body}\n\nNo repository access is available beyond this submission."
-                )
+                return f"{body}\n\nNo repository access is available beyond this submission."
             return (
                 f"{body} Blank/whitespace symbols are not searched -- this does NOT prove "
                 "the symbol is absent from the submission or repository."
@@ -755,9 +783,7 @@ class CodebaseIndex:
         truncated = False
         if self.repo_reader is None:
             body = (
-                "\n\n".join(
-                    _format_reference_hit(self, path, lineno) for path, lineno, _ in hits
-                )
+                "\n\n".join(_format_reference_hit(self, path, lineno) for path, lineno, _ in hits)
                 if hits
                 else f"No references for {symbol!r}."
             )
@@ -767,9 +793,7 @@ class CodebaseIndex:
         if remaining == 0:
             truncated = True
         elif remaining > 0:
-            repo_hits, repo_truncated = _search_repo_references(
-                self, symbol, max_matches=remaining
-            )
+            repo_hits, repo_truncated = _search_repo_references(self, symbol, max_matches=remaining)
             hits.extend(repo_hits)
             truncated = repo_truncated
 
@@ -783,9 +807,7 @@ class CodebaseIndex:
                 )
             return f"No references for {symbol!r}."
 
-        result = "\n\n".join(
-            _format_reference_hit(self, path, lineno) for path, lineno, _ in hits
-        )
+        result = "\n\n".join(_format_reference_hit(self, path, lineno) for path, lineno, _ in hits)
         if truncated:
             result += (
                 f"\n\n(Scan truncated before covering the whole repository -- there may be "
@@ -938,10 +960,7 @@ def _format_line_window(
     display_start = mapper(start) if mapper is not None else start
     display_end = mapper(end) if mapper is not None else end
     shown = end - start + 1
-    header = (
-        f"{display} lines {display_start}–{display_end} "
-        f"(window, {shown} of {span} lines):"
-    )
+    header = f"{display} lines {display_start}–{display_end} (window, {shown} of {span} lines):"
     body = "\n".join(
         f"{(mapper(i) if mapper is not None else i)}| {body_lines[i - 1]}"
         for i in range(start, end + 1)
@@ -1174,11 +1193,11 @@ def _build_tools(index: CodebaseIndex) -> List[Callable[..., str]]:
     """Build strands tools bound to ``index`` for one verification agent.
 
     Postconditions:
-        - Returns six tools (``read_file``, ``read_lines``, ``read_function``,
-          ``list_files``, ``search_codebase``, ``find_function_at_line``) that
-          delegate to ``index``; each returns a string and never raises, so a
-          bad model-supplied argument becomes a tool message rather than an
-          error that aborts the agent loop.
+        - Returns seven tools (``read_file``, ``read_lines``, ``read_function``,
+          ``list_files``, ``search_codebase``, ``find_function_at_line``,
+          ``find_references``) that delegate to ``index``; each returns a
+          string and never raises, so a bad model-supplied argument becomes a
+          tool message rather than an error that aborts the agent loop.
     """
 
     @tool
@@ -1222,8 +1241,7 @@ def _build_tools(index: CodebaseIndex) -> List[Callable[..., str]]:
             return index.read_lines(path, start, end)
         except Exception as exc:
             return (
-                f"Error: could not read_lines {path!r} [{start}:{end}]: "
-                f"{type(exc).__name__}: {exc}"
+                f"Error: could not read_lines {path!r} [{start}:{end}]: {type(exc).__name__}: {exc}"
             )
 
     @tool
@@ -1245,20 +1263,14 @@ def _build_tools(index: CodebaseIndex) -> List[Callable[..., str]]:
         """
         try:
             if isinstance(name_or_line, bool):
-                return (
-                    f"Error: name_or_line must be a line number or name, "
-                    f"got {name_or_line!r}."
-                )
+                return f"Error: name_or_line must be a line number or name, got {name_or_line!r}."
             if isinstance(name_or_line, int):
                 return index.read_function(path, name_or_line)
             if isinstance(name_or_line, str) and name_or_line.strip().isdigit():
                 return index.read_function(path, int(name_or_line.strip()))
             if isinstance(name_or_line, str):
                 return index.read_function_by_name(path, name_or_line)
-            return (
-                f"Error: name_or_line must be a line number or name, "
-                f"got {name_or_line!r}."
-            )
+            return f"Error: name_or_line must be a line number or name, got {name_or_line!r}."
         except Exception as exc:
             return (
                 f"Error: could not read_function {path!r} ({name_or_line!r}): "
@@ -1350,7 +1362,36 @@ def _build_tools(index: CodebaseIndex) -> List[Callable[..., str]]:
         except Exception as exc:
             return f"Error: could not inspect {path!r} at line {line_number}: {type(exc).__name__}: {exc}"
 
-    return [read_file, read_lines, read_function, list_files, search_codebase, find_function_at_line]
+    @tool
+    def find_references(symbol: str) -> str:
+        """Find bounded path:line references to a symbol across the submission
+        and (when attached) the wider repository, each with a short excerpt.
+
+        Use this to check whether a finding's claim about a symbol's usage
+        (e.g. "never called", "unused import") holds up, without manually
+        combining search_codebase and read_lines.
+
+        Args:
+            symbol: The function, class, or variable name to search for.
+
+        Returns:
+            Newline-separated reference blocks with excerpts, or a message
+            that nothing matched / access is limited to this submission.
+        """
+        try:
+            return index.find_references(symbol)
+        except Exception as exc:
+            return f"Error: could not find references for {symbol!r}: {type(exc).__name__}: {exc}"
+
+    return [
+        read_file,
+        read_lines,
+        read_function,
+        list_files,
+        search_codebase,
+        find_function_at_line,
+        find_references,
+    ]
 
 
 @dataclass

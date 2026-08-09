@@ -14,6 +14,7 @@ import pytest
 from pydantic import ValidationError
 
 from llm_service.clients.dummy import DummyLLMClient
+from shared.git.git_utils import initialize_new_repo
 from software_engineering_team.devops_team import (
     DevOpsTaskSpec,
     DevOpsTeamLeadAgent,
@@ -67,7 +68,6 @@ from software_engineering_team.devops_team.tool_agents import (
     TerraformExecutionOutput,
     TerraformExecutionToolAgent,
 )
-from software_engineering_team.shared.git_utils import initialize_new_repo
 from software_engineering_team.tests.conftest import (
     _patch_fenced_response,
     _strands_model_double,
@@ -409,32 +409,42 @@ class TestNestedModels:
 
 
 class TestEnvPolicy:
+    """Verify ENV_POLICY defines the expected auto-deploy, approval, and rollback rules per environment."""
+
     def test_dev_allows_auto_deploy(self) -> None:
+        """Dev allows auto-deploy and does not require approval."""
         assert ENV_POLICY["dev"]["auto_deploy_allowed"] is True
         assert ENV_POLICY["dev"]["approval_required"] is False
 
     def test_staging_requires_rollback_test(self) -> None:
+        """Staging requires a rollback test before deploy."""
         assert ENV_POLICY["staging"]["rollback_test_required"] is True
 
     def test_production_requires_approval(self) -> None:
+        """Production requires approval and disallows auto-deploy."""
         assert ENV_POLICY["production"]["approval_required"] is True
         assert ENV_POLICY["production"]["auto_deploy_allowed"] is False
 
 
 class TestEnforceEnvPolicy:
+    """Verify DevOpsTeamLeadAgent._enforce_env_policy blocks task specs that violate ENV_POLICY."""
+
     def test_blocks_prod_without_approval(self) -> None:
+        """A production-scope spec without an approval step is blocked with an approval-related reason."""
         spec = _base_task_spec(scope={"included": ["build"], "excluded": []})
         reason = DevOpsTeamLeadAgent._enforce_env_policy(spec)
         assert reason is not None
         assert "approval" in reason.lower()
 
     def test_blocks_prod_without_rollback(self) -> None:
+        """A production-scope spec without rollback requirements is blocked with a rollback-related reason."""
         spec = _base_task_spec(rollback_requirements=[])
         reason = DevOpsTeamLeadAgent._enforce_env_policy(spec)
         assert reason is not None
         assert "rollback" in reason.lower()
 
     def test_allows_dev_only(self) -> None:
+        """A dev-only spec with no rollback requirements passes the policy check."""
         spec = _base_task_spec(
             platform_scope={"environments": ["dev"]},
             rollback_requirements=[],
@@ -443,6 +453,7 @@ class TestEnforceEnvPolicy:
         assert reason is None
 
     def test_allows_full_spec(self) -> None:
+        """A fully-specified spec satisfying all environment policies passes the check."""
         spec = _base_task_spec()
         reason = DevOpsTeamLeadAgent._enforce_env_policy(spec)
         assert reason is None
@@ -637,7 +648,10 @@ class TestRepoNavigatorToolAgent:
 
 
 class TestIaCValidationToolAgent:
+    """Verify IaCValidationToolAgent skips Terraform checks when no .tf files exist."""
+
     def test_skipped_when_no_tf_files(self) -> None:
+        """When the repo contains no Terraform files, both iac_validate and iac_validate_fmt are skipped."""
         with tempfile.TemporaryDirectory() as tmp:
             out = IaCValidationToolAgent().run(IaCValidationInput(repo_path=tmp))
             assert out.checks["iac_validate"] == "skipped"
@@ -646,7 +660,10 @@ class TestIaCValidationToolAgent:
 
 
 class TestPolicyAsCodeToolAgent:
+    """Verify PolicyAsCodeToolAgent skips policy-as-code checks when checkov is unavailable."""
+
     def test_skipped_when_checkov_missing(self) -> None:
+        """When checkov is not installed, the policy_checks gate is reported as skipped."""
         with tempfile.TemporaryDirectory() as tmp:
             out = PolicyAsCodeToolAgent().run(PolicyAsCodeInput(repo_path=tmp))
             assert out.checks["policy_checks"] == "skipped"
@@ -654,7 +671,11 @@ class TestPolicyAsCodeToolAgent:
 
 
 class TestCICDLintToolAgent:
+    """Verify CICDLintPipelineValidationToolAgent lints GitHub Actions workflows for
+    structure and production-deploy safeguards."""
+
     def test_pass_valid_workflow(self) -> None:
+        """A workflow with a valid job definition passes the pipeline_lint gate."""
         with tempfile.TemporaryDirectory() as tmp:
             wf_dir = Path(tmp) / ".github" / "workflows"
             wf_dir.mkdir(parents=True)
@@ -666,6 +687,7 @@ class TestCICDLintToolAgent:
             assert out.success is True
 
     def test_fail_missing_jobs(self) -> None:
+        """A workflow missing a jobs section fails the pipeline_lint gate."""
         with tempfile.TemporaryDirectory() as tmp:
             wf_dir = Path(tmp) / ".github" / "workflows"
             wf_dir.mkdir(parents=True)
@@ -675,6 +697,7 @@ class TestCICDLintToolAgent:
             assert out.success is False
 
     def test_fail_prod_deploy_without_approval(self) -> None:
+        """A workflow that deploys to production without an approval step fails the pipeline_gate_check gate."""
         with tempfile.TemporaryDirectory() as tmp:
             wf_dir = Path(tmp) / ".github" / "workflows"
             wf_dir.mkdir(parents=True)
@@ -686,6 +709,7 @@ class TestCICDLintToolAgent:
             assert out.success is False
 
     def test_skipped_no_workflows(self) -> None:
+        """When no workflow files exist, the pipeline_lint gate is reported as skipped."""
         with tempfile.TemporaryDirectory() as tmp:
             out = CICDLintPipelineValidationToolAgent().run(CICDLintInput(repo_path=tmp))
             assert out.checks["pipeline_lint"] == "skipped"
@@ -693,11 +717,31 @@ class TestCICDLintToolAgent:
 
 
 class TestDeploymentDryRunToolAgent:
+    """Verify DeploymentDryRunPlanToolAgent skips the dry-run gate when no Helm chart is present."""
+
     def test_skipped_no_chart(self) -> None:
+        """When the repo contains no Helm chart, the deployment_dry_run gate is reported as skipped."""
         with tempfile.TemporaryDirectory() as tmp:
             out = DeploymentDryRunPlanToolAgent().run(DeploymentDryRunInput(repo_path=tmp))
             assert out.checks["deployment_dry_run"] == "skipped"
             assert out.success is True
+
+
+def test_devops_env_policy_and_tool_agent_test_classes_have_docstrings() -> None:
+    """Docstring-coverage guard for the DevOps env-policy and tool-agent test classes."""
+    target_classes = [
+        TestEnvPolicy,
+        TestEnforceEnvPolicy,
+        TestIaCValidationToolAgent,
+        TestPolicyAsCodeToolAgent,
+        TestCICDLintToolAgent,
+        TestDeploymentDryRunToolAgent,
+    ]
+    for cls in target_classes:
+        assert cls.__doc__, f"{cls.__name__} is missing a class docstring"
+        for name, member in vars(cls).items():
+            if name.startswith("test_"):
+                assert member.__doc__, f"{cls.__name__}.{name} is missing a docstring"
 
 
 # ===========================================================================

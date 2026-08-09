@@ -85,20 +85,30 @@ def find_architecture_and_side_effect_issues(
           each validated like the corresponding standalone pass; never raises.
         - When only one half is enabled, still makes the merged call but returns
           ``[]`` for the disabled half. ``pre_numbered`` forces the side-effect
-          half off (same guard as the standalone side-effect pass). Architecture
-          is forced off when there is no architecture payload and no
-          ``repo_reader`` / ``existing_codebase`` evidence.
+          half off (same guard as the standalone side-effect pass, via
+          ``side_pass._effective_pre_numbered`` -- a caller-supplied
+          ``full_content`` that covers every changed path re-enables it; one
+          that covers only some paths does not, see
+          ``CodebaseIndex.full_content_complete``). Architecture is forced off
+          when there is no architecture payload and no ``repo_reader`` /
+          ``existing_codebase`` evidence.
         - When the changed-file set's estimated inline size exceeds one call's
           budget, it is split into multiple bounded batches (see
           :func:`_split_changed_files_into_batches`); findings from every
           batch are concatenated into the same two returned lists. A
           submission under the budget still makes exactly one call.
     """
+    if index is None:
+        index = CodebaseIndex.from_input(input_data, repo_reader=repo_reader)
     arch_on = env_flag_enabled(_ARCH_ENV)
     # Mirror ``find_side_effect_impact_issues``: pre-numbered hunk mode only has
     # partial file excerpts, so caller-impact analysis must not run (architecture
-    # half may still proceed).
-    side_on = env_flag_enabled(_SIDE_ENV) and not input_data.pre_numbered
+    # half may still proceed) -- unless the caller supplied a fully-covering
+    # ``full_content``, which overlays real full bodies onto the index for every
+    # path in this submission (see ``side_pass._effective_pre_numbered``).
+    side_on = env_flag_enabled(_SIDE_ENV) and not side_pass._effective_pre_numbered(
+        input_data, index
+    )
     # Architecture half needs either a formal architecture payload or off-diff /
     # existing-codebase evidence. Without those, list_files()/read_file() only
     # see the changed submission files, so "established repository structure"
@@ -212,7 +222,7 @@ def _run_pass(
                 budgets,
                 arch_on=arch_on,
                 side_on=side_on,
-                pre_numbered=input_data.pre_numbered,
+                pre_numbered=side_pass._effective_pre_numbered(input_data, index),
                 batch_items=batch,
                 batch_index=batch_number if total_batches > 1 else None,
                 total_batches=total_batches if total_batches > 1 else None,

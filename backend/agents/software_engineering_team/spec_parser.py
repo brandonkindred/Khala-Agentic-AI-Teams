@@ -9,8 +9,8 @@ import os
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
+from shared.dev_models.models import ProductRequirements
 from software_engineering_team.shared.llm import complete_json_with_continuation
-from software_engineering_team.shared.models import ProductRequirements
 
 logger = logging.getLogger(__name__)
 

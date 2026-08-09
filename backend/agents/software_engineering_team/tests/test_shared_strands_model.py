@@ -1,4 +1,4 @@
-"""Tests for ``software_engineering_team.shared.strands_model.resolve_strands_model``.
+"""Tests for ``llm_service.strands_model.resolve_strands_model``.
 
 This helper collapses 22 duplicated copies of the same isinstance-check pattern
 across the v2 phase ``_resolve_model`` helpers and the v2 tool-agent
@@ -14,7 +14,7 @@ import pytest
 
 from llm_service import DummyLLMClient, OllamaLLMClient
 from llm_service.strands_adapter import LLMClientModel
-from software_engineering_team.shared.strands_model import resolve_strands_model
+from llm_service.strands_model import resolve_strands_model
 
 
 @pytest.fixture(autouse=True)
