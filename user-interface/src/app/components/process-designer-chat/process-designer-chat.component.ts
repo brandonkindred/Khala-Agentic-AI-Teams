@@ -170,7 +170,6 @@ export class ProcessDesignerChatComponent implements OnInit, OnChanges, AfterVie
    * destroyed component.
    */
   ngOnDestroy(): void {
-    this.detachFlowchartClickHandlers();
     this.destroy$.next();
     this.destroy$.complete();
   }
