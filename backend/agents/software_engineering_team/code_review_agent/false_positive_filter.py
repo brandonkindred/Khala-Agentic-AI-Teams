@@ -1686,49 +1686,58 @@ def _agent_read_the_cited_file(agent: Agent, index: CodebaseIndex, file_path: st
           given (already resolved by the caller); ``index`` is the same
           index the run's tools were bound to.
 
+    Correlating a toolUse with its toolResult is done by *position*
+    (the toolResult block at the same index in the very next message), not by
+    matching ``toolUseId``: when a backend omits real tool-call IDs, the
+    Strands adapter synthesizes a fallback (``strands_adapter.py``,
+    ``f"{tool_name}_{idx}"`` where ``idx`` resets to 0 each turn) that is only
+    unique *within* one turn -- a single-tool-call-per-turn conversation (the
+    common case) reuses the identical fallback ID on every turn. Matching by
+    ID alone would then credit a *later, unrelated* call's success (e.g. a
+    successful read of a different file two turns later) to an *earlier*
+    failed read of the cited file, since both calls share the same ID string.
+    Position is unambiguous regardless of ID reuse.
+
     Postconditions:
         - Returns ``True`` iff ``index.read_file_or_none(file_path)`` is not
           ``None`` (``file_path`` is genuinely readable) AND some ``read_file``
-          toolUse whose input path equals ``file_path`` (or resolves to it via
-          ``index.resolve_path``, covering a near-miss the model typed instead
-          of the exact quoted path) has a matching toolResult (by
-          ``toolUseId``) with ``status == "success"``. A genuinely empty
-          result (a real zero-byte file, e.g. an unchanged ``__init__.py``)
-          still counts, since readability is judged by ``index``, not by the
-          result text's length or content. Never raises: a malformed/empty
-          message list, or an unreadable ``file_path``, yields ``False``
+          toolUse (at message index ``i``, block index ``k``) whose input path
+          equals ``file_path`` (or resolves to it via ``index.resolve_path``,
+          covering a near-miss the model typed instead of the exact quoted
+          path) has, at the same block index ``k`` in the message at index
+          ``i + 1``, a toolResult with ``status == "success"``. A genuinely
+          empty result (a real zero-byte file, e.g. an unchanged
+          ``__init__.py``) still counts, since readability is judged by
+          ``index``, not by the result text's length or content. Never
+          raises: a malformed/empty message list, a toolUse with no following
+          message, or an unreadable ``file_path``, all yield ``False``
           (fail-safe: treated as "not grounded", so the caller keeps rather
           than drops on ambiguity).
     """
     try:
         if index.read_file_or_none(file_path) is None:
             return False
-        read_file_ids = set()
-        for message in agent.messages:
-            for block in message.get("content") or []:
+        messages = agent.messages
+        for i, message in enumerate(messages):
+            content = message.get("content") or []
+            for k, block in enumerate(content):
                 if not isinstance(block, dict):
                     continue
                 tool_use = block.get("toolUse")
                 if not isinstance(tool_use, dict) or tool_use.get("name") != "read_file":
                     continue
-                tool_use_id = tool_use.get("toolUseId")
-                if tool_use_id is None:
-                    continue
                 candidate = (tool_use.get("input") or {}).get("path")
                 if not isinstance(candidate, str):
                     continue
-                if candidate == file_path or index.resolve_path(candidate) == file_path:
-                    read_file_ids.add(tool_use_id)
-        if not read_file_ids:
-            return False
-        for message in agent.messages:
-            for block in message.get("content") or []:
-                if not isinstance(block, dict):
+                if candidate != file_path and index.resolve_path(candidate) != file_path:
                     continue
-                result = block.get("toolResult")
-                if not isinstance(result, dict) or result.get("toolUseId") not in read_file_ids:
+                if i + 1 >= len(messages):
                     continue
-                if result.get("status") == "success":
+                next_content = messages[i + 1].get("content") or []
+                if k >= len(next_content) or not isinstance(next_content[k], dict):
+                    continue
+                result = next_content[k].get("toolResult")
+                if isinstance(result, dict) and result.get("status") == "success":
                     return True
         return False
     except Exception:

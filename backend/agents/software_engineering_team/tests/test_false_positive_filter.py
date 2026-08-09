@@ -2331,15 +2331,37 @@ def test_agent_read_the_cited_file_true_for_a_resolvable_near_miss_path() -> Non
     assert _agent_read_the_cited_file(agent, idx, "app/services/main.py") is True
 
 
-def test_agent_read_the_cited_file_ignores_mismatched_tool_use_id() -> None:
-    """A toolResult for a *different* toolUseId than the cited-file toolUse is
-    not credited to it -- the match is by id, not just presence anywhere in
-    the conversation."""
+def test_agent_read_the_cited_file_ignores_a_reused_fallback_id_from_a_later_call() -> None:
+    """When a backend omits real tool-call IDs, the Strands adapter
+    synthesizes a fallback ("{tool_name}_{idx}", strands_adapter.py) that
+    resets to 0 every turn -- so a single-tool-call-per-turn conversation can
+    reuse the identical ID on every turn. A failed read_file() for the cited
+    file must not be credited with a LATER, unrelated read_file() success
+    that happens to carry the same reused ID: this checks message/block
+    POSITION (the toolResult immediately following its toolUse), not the ID,
+    so the two calls -- despite sharing an ID -- are correctly told apart."""
+    idx = CodebaseIndex(files={"cited.py": "x = 1\n", "other.py": "y = 2\n"})
+    agent = _fake_agent(
+        [
+            _tool_use_message("assistant", "read_file_0", "read_file", path="cited.py"),
+            _tool_result_message("read_file_0", "Error: boom", status="error"),
+            _tool_use_message("assistant", "read_file_0", "read_file", path="other.py"),
+            _tool_result_message("read_file_0", "y = 2\n", status="success"),
+        ]
+    )
+    assert _agent_read_the_cited_file(agent, idx, "cited.py") is False
+    # The later call's success is still correctly credited to ITS OWN file.
+    assert _agent_read_the_cited_file(agent, idx, "other.py") is True
+
+
+def test_agent_read_the_cited_file_false_when_tool_use_has_no_following_message() -> None:
+    """A read_file() toolUse for the cited file with no message after it
+    (the run ended mid-call, or the result was never appended) is not
+    grounded -- there is no toolResult to check at all."""
     idx = CodebaseIndex(files={"app/main.py": "x = 1\n"})
     agent = _fake_agent(
         [
             _tool_use_message("assistant", "t1", "read_file", path="app/main.py"),
-            _tool_result_message("some-other-id", "x = 1\n"),
         ]
     )
     assert _agent_read_the_cited_file(agent, idx, "app/main.py") is False
