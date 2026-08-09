@@ -20,7 +20,6 @@ from typing import Any, Dict, Iterable
 
 from pydantic import ValidationError
 
-from shared.env_config import env_int
 from shared.llm_recovery import extract_json_object as _shared_extract_json_object
 
 from ..spec_dsl import EntryRuleAdapter, ExitRuleAdapter, SizingRuleAdapter
@@ -50,21 +49,6 @@ def extract_json_object(text: str) -> Dict[str, Any]:
     if result is None:
         raise ValueError("No JSON object found in LLM response")
     return result
-
-
-def parse_retry_budget(env_name: str, default: int = 2) -> int:
-    """Resolve a non-negative parse-retry budget from an env var.
-
-    Reads ``env_name`` as an int (default ``default``); sub-zero values clamp
-    to ``0`` (no retry); garbage / empty values fall back to ``default`` rather
-    than raising — the surrounding LLM loop is best-effort. Shared by the
-    spec-authoring agents that re-prompt on unparseable JSON (design,
-    refinement).
-
-    Preconditions: ``env_name`` is an env var name; ``default >= 0``.
-    Postconditions: returns a non-negative int; never raises.
-    """
-    return env_int(env_name, default, floor=0)
 
 
 def coerce_strict_bool(raw: Any) -> bool:
@@ -206,6 +190,5 @@ __all__: Iterable[str] = (
     "build_json_correction_prompt",
     "coerce_strict_bool",
     "extract_json_object",
-    "parse_retry_budget",
     "validate_structured_rules",
 )

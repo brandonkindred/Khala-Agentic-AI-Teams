@@ -34,9 +34,8 @@ from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field
 
-from shared.env_config import env_int
-
 from ..alignment_findings import AlignmentFinding, NearMissVerdict
+from ..budget_config import StrategyLabBudgetConfig
 from ._agent_runner import run_single_shot_agent
 from ._parse_helpers import coerce_strict_bool
 from ._prompt_context import render_prior_attempts, spec_prompt_fields
@@ -71,7 +70,7 @@ def _alignment_max_attempts() -> int:
 
     Postconditions: returns an int ``>= 1``.
     """
-    retries = env_int("STRATEGY_LAB_ALIGNMENT_RETRIES", 2, floor=0)
+    retries = StrategyLabBudgetConfig.from_env().alignment_retries
     return retries + 1
 
 

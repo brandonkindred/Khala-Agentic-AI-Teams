@@ -35,10 +35,12 @@ Timeout semantics (layered, by design):
   endpoint, so both layers are required.
 
 This module imports only stdlib + ``llm_service`` (no ``strategy_lab`` imports),
-with one narrow carve-out: ``._llm_budget`` for ``charge_active_budget``. That
-sibling module is itself stdlib-only (a leaf), so the carve-out introduces no
-dependency on the rest of ``strategy_lab`` and cannot create an import cycle
-with the agents that consume this module.
+with two narrow carve-outs: ``._llm_budget`` for ``charge_active_budget``, and
+``..budget_config`` for ``StrategyLabBudgetConfig`` (the retry/timeout/backoff
+default resolution below). Both sibling modules are themselves leaves — neither
+imports anything else from ``strategy_lab`` — so the carve-outs introduce no
+dependency on the rest of the package and cannot create an import cycle with
+the agents that consume this module.
 """
 
 from __future__ import annotations
@@ -52,8 +54,7 @@ from typing import Any, Callable, Optional
 
 import httpx
 
-from llm_service.backoff import parse_rate_limit_retry_config, rate_limit_retry_delay
-from llm_service.config import resolve_timeout
+from llm_service.backoff import rate_limit_retry_delay
 from llm_service.interface import (
     OLLAMA_WEEKLY_LIMIT_MESSAGE,
     LLMJsonParseError,
@@ -63,8 +64,9 @@ from llm_service.interface import (
     LLMSemanticExhaustionError,
     LLMTemporaryError,
 )
-from shared.env_config import env_float, env_int
+from shared.env_config import env_float
 
+from ..budget_config import StrategyLabBudgetConfig
 from ..exceptions import StrategyLabLLMError
 from ._llm_budget import DesignBudgetExhausted, charge_active_budget
 
@@ -149,42 +151,46 @@ def _resolve_config(
     Postconditions: every field is finite and floored to a safe minimum
     (``max_attempts >= 1``, timeouts/budget ``> 0``). Never raises.
     """
+    budget_config = StrategyLabBudgetConfig.from_env()
+
     if max_attempts is None:
-        retries = env_int("STRATEGY_LAB_LLM_MAX_RETRIES", env_int("LLM_MAX_RETRIES", 2))
-        attempts = retries + 1
+        attempts = budget_config.llm_max_retries + 1
     else:
         attempts = max_attempts
     attempts = max(1, attempts)
 
     if timeout_s is None:
-        # resolve_timeout already honours LLM_TIMEOUT; the STRATEGY_LAB_*
-        # override takes precedence over it when set.
-        timeout_s = env_float("STRATEGY_LAB_LLM_TIMEOUT", resolve_timeout(agent_key))
+        timeout_s = budget_config.llm_timeout_s
     timeout_s = max(0.001, float(timeout_s))
 
     if backoff_base is None:
-        backoff_base = env_float(
-            "STRATEGY_LAB_LLM_BACKOFF_BASE", env_float("LLM_BACKOFF_BASE", 2.0)
-        )
+        backoff_base = budget_config.llm_backoff_base_s
     backoff_base = max(1.0, float(backoff_base))
 
     if backoff_max is None:
-        backoff_max = env_float("STRATEGY_LAB_LLM_BACKOFF_MAX", env_float("LLM_BACKOFF_MAX", 60.0))
+        backoff_max = budget_config.llm_backoff_max_s
     backoff_max = max(0.0, float(backoff_max))
 
+    # total_budget_s is deliberately NOT sourced from
+    # ``budget_config.llm_total_budget_s``: that field is derived from the
+    # env-resolved ``llm_max_retries``/``llm_timeout_s``, but this default must
+    # instead reflect *this call's* post-override ``attempts``/``timeout_s`` —
+    # callers routinely pass an explicit ``max_attempts`` (e.g.
+    # ``alignment.py``'s ``_alignment_max_attempts()``) or a scaled ``timeout_s``
+    # (``_structured_output.py`` doubles it for its two-call envelope) while
+    # leaving ``total_budget_s=None``, expecting the budget to scale with that
+    # override. Sourcing it from the config's own env-derived retries/timeout
+    # would silently ignore the override.
     if total_budget_s is None:
         total_budget_s = env_float("STRATEGY_LAB_LLM_TOTAL_BUDGET", attempts * timeout_s * 1.5)
     total_budget_s = max(0.001, float(total_budget_s))
 
-    # Rate-limit (429) backoff schedule. STRATEGY_LAB_LLM_RATE_LIMIT_* override the
-    # global LLM_RATE_LIMIT_* policy (whose parsed values are the defaults here).
-    _, global_rl_initial, global_rl_cap = parse_rate_limit_retry_config()
-    rl_initial = max(
-        1.0, env_float("STRATEGY_LAB_LLM_RATE_LIMIT_BACKOFF_INITIAL", global_rl_initial)
-    )
+    # Rate-limit (429) backoff schedule. Neither field has an explicit-arg
+    # override, so these are always the config's env-resolved values.
+    rl_initial = max(1.0, budget_config.llm_rate_limit_backoff_initial_s)
     # Floor the cap at the initial so rate_limit_retry_delay's precondition
     # (cap >= initial) always holds even under a misconfigured override.
-    rl_cap = max(rl_initial, env_float("STRATEGY_LAB_LLM_RATE_LIMIT_BACKOFF_MAX", global_rl_cap))
+    rl_cap = max(rl_initial, budget_config.llm_rate_limit_backoff_max_s)
 
     return _EnvelopeConfig(
         max_attempts=attempts,
