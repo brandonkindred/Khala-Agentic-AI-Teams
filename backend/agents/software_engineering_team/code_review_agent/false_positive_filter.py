@@ -55,7 +55,7 @@ import os
 import re
 from collections import OrderedDict
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 from strands import Agent, tool
 from strands.models.model import Model as _StrandsModel
@@ -1643,23 +1643,6 @@ def _build_group_prompt(
     return "\n".join(parts)
 
 
-def _tool_result_text(tool_result: Dict[str, Any]) -> str:
-    """Flatten a Strands toolResult block's content into text.
-
-    Preconditions: ``tool_result`` is a toolResult block's inner dict (may be malformed).
-    Postconditions: returns the joined text of any "text" content blocks
-        (empty string when there is none). Never raises.
-    """
-    try:
-        return "\n".join(
-            str(block["text"])
-            for block in (tool_result.get("content") or [])
-            if isinstance(block, dict) and "text" in block
-        )
-    except Exception:
-        return ""
-
-
 def _agent_read_the_cited_file(agent: Agent, index: CodebaseIndex, file_path: str) -> bool:
     """Whether ``agent``'s just-finished run obtained ``file_path``'s full
     content via a successful ``read_file`` call.
@@ -1682,6 +1665,20 @@ def _agent_read_the_cited_file(agent: Agent, index: CodebaseIndex, file_path: st
     full, via ``read_file`` specifically (not a partial ``read_lines``/
     ``read_function`` slice, which does not cover findings outside that slice).
 
+    "Success" is determined from ``index`` and Strands' own ``toolResult``
+    ``status`` field, never by sniffing the tool's returned text: the
+    ``read_file`` *tool* wrapper (``_build_tools``) collapses ``CodebaseIndex``'s
+    internal ``(content, error)`` distinction into a single string, prefixing
+    failures with ``"Error: ..."`` -- but real file content can legitimately
+    start with that same text (a checked-in log fixture, diagnostic output),
+    which a text-prefix check would misclassify as a failed read and wrongly
+    discard every otherwise-valid drop in the batch. Asking ``index`` directly
+    (which never confuses a real file's content with its own error sentinel;
+    see ``CodebaseIndex._read``) sidesteps that ambiguity entirely, and
+    checking ``toolResult.status`` additionally catches a framework-level tool
+    failure that never reaches ``CodebaseIndex`` at all (unlike a bare text
+    check, which only recognizes this module's own ``"Error:"`` convention).
+
     Preconditions:
         - ``agent`` has already completed a run (``agent(prompt)`` returned),
           so ``agent.messages`` holds the full conversation for that run.
@@ -1690,21 +1687,22 @@ def _agent_read_the_cited_file(agent: Agent, index: CodebaseIndex, file_path: st
           index the run's tools were bound to.
 
     Postconditions:
-        - Returns ``True`` iff some ``read_file`` toolUse whose input path
-          equals ``file_path`` (or resolves to it via ``index.resolve_path``,
-          covering a near-miss the model typed instead of the exact quoted
-          path) has a matching toolResult (by ``toolUseId``) whose text does
-          not start with ``"Error:"``. A genuinely empty result (a real
-          zero-byte file, e.g. an unchanged ``__init__.py`` -- ``read_file``
-          never raises, so an empty string can only mean a successful read of
-          empty content, never a missing/malformed result) still counts:
-          checking non-error is sufficient, requiring non-*empty* text would
-          wrongly discard every drop for a blank cited file. Never raises: a
-          malformed/empty message list yields ``False`` (fail-safe: treated
-          as "not grounded", so the caller keeps rather than drops on
-          ambiguity).
+        - Returns ``True`` iff ``index.read_file_or_none(file_path)`` is not
+          ``None`` (``file_path`` is genuinely readable) AND some ``read_file``
+          toolUse whose input path equals ``file_path`` (or resolves to it via
+          ``index.resolve_path``, covering a near-miss the model typed instead
+          of the exact quoted path) has a matching toolResult (by
+          ``toolUseId``) with ``status == "success"``. A genuinely empty
+          result (a real zero-byte file, e.g. an unchanged ``__init__.py``)
+          still counts, since readability is judged by ``index``, not by the
+          result text's length or content. Never raises: a malformed/empty
+          message list, or an unreadable ``file_path``, yields ``False``
+          (fail-safe: treated as "not grounded", so the caller keeps rather
+          than drops on ambiguity).
     """
     try:
+        if index.read_file_or_none(file_path) is None:
+            return False
         read_file_ids = set()
         for message in agent.messages:
             for block in message.get("content") or []:
@@ -1730,8 +1728,7 @@ def _agent_read_the_cited_file(agent: Agent, index: CodebaseIndex, file_path: st
                 result = block.get("toolResult")
                 if not isinstance(result, dict) or result.get("toolUseId") not in read_file_ids:
                     continue
-                text = _tool_result_text(result)
-                if not text.lstrip().startswith("Error:"):
+                if result.get("status") == "success":
                     return True
         return False
     except Exception:

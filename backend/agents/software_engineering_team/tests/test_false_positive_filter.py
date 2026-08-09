@@ -2079,6 +2079,23 @@ def test_filter_honors_drop_when_cited_file_is_genuinely_empty() -> None:
     assert out == []
 
 
+def test_filter_honors_drop_when_cited_file_content_starts_with_error() -> None:
+    """A drop for a cited file whose real content legitimately starts with the
+    text "Error:" (e.g. a checked-in log fixture) is still honored end to
+    end: the simulated read_file() call succeeds with that exact content, and
+    it must not be mistaken for this module's own error-sentinel convention."""
+    issue = _issue(
+        file_path="tests/fixtures/log_sample.txt", description="stray debug print left in"
+    )
+    stub = _VerdictStub(verdicts=[{"index": 0, "is_real_issue": False, "confidence": "high"}])
+    out = filter_false_positives(
+        stub,
+        _input(files={"tests/fixtures/log_sample.txt": "Error: connection refused\n"}),
+        [issue],
+    )
+    assert out == []
+
+
 def test_filter_honors_all_drops_in_a_multi_finding_batch_after_full_cited_file_read() -> None:
     """The positive mirror of the narrow-slice test above: one successful
     read_file() call for the WHOLE cited file grounds drops for EVERY finding
@@ -2168,7 +2185,7 @@ def _tool_use_message(
     }
 
 
-def _tool_result_message(tool_use_id: str, text: str) -> Dict[str, Any]:
+def _tool_result_message(tool_use_id: str, text: str, status: str = "success") -> Dict[str, Any]:
     """Build one user-style message containing a single toolResult block."""
     return {
         "role": "user",
@@ -2176,7 +2193,7 @@ def _tool_result_message(tool_use_id: str, text: str) -> Dict[str, Any]:
             {
                 "toolResult": {
                     "toolUseId": tool_use_id,
-                    "status": "success",
+                    "status": status,
                     "content": [{"text": text}],
                 }
             }
@@ -2211,18 +2228,50 @@ def test_agent_read_the_cited_file_false_for_non_read_file_tools() -> None:
         assert _agent_read_the_cited_file(agent, idx, "app/main.py") is False, tool_name
 
 
-def test_agent_read_the_cited_file_false_for_errored_read() -> None:
-    """A read_file() toolUse for the cited file whose matching toolResult text
-    starts with "Error:" is not grounded evidence -- the model attempted a
-    read but never saw real code."""
+def test_agent_read_the_cited_file_false_for_a_framework_level_tool_failure() -> None:
+    """A read_file() toolUse for the cited file whose matching toolResult has
+    status "error" (a genuine framework-level tool failure, distinct from our
+    own "Error: ..." string convention) is not grounded evidence."""
     idx = CodebaseIndex(files={"app/main.py": "x = 1\n"})
     agent = _fake_agent(
         [
             _tool_use_message("assistant", "t1", "read_file", path="app/main.py"),
-            _tool_result_message("t1", "Error: file not found: app/main.py."),
+            _tool_result_message("t1", "tool crashed", status="error"),
         ]
     )
     assert _agent_read_the_cited_file(agent, idx, "app/main.py") is False
+
+
+def test_agent_read_the_cited_file_true_when_real_content_starts_with_error() -> None:
+    """A successful read_file() whose real file content happens to start with
+    the literal text "Error:" (e.g. a checked-in log fixture or diagnostic
+    output) still counts as grounded -- success is judged from the index and
+    the toolResult's own status, never by sniffing the returned text, so this
+    can no longer be confused with this module's own "Error: ..." sentinel
+    convention (see CodebaseIndex._read)."""
+    log_fixture = "Error: connection refused\nError: retrying...\n"
+    idx = CodebaseIndex(files={"tests/fixtures/log_sample.txt": log_fixture})
+    agent = _fake_agent(
+        [
+            _tool_use_message("assistant", "t1", "read_file", path="tests/fixtures/log_sample.txt"),
+            _tool_result_message("t1", log_fixture),
+        ]
+    )
+    assert _agent_read_the_cited_file(agent, idx, "tests/fixtures/log_sample.txt") is True
+
+
+def test_agent_read_the_cited_file_false_when_cited_path_is_not_readable() -> None:
+    """Defensive check: if ``file_path`` itself is not genuinely readable via
+    ``index`` (violating the precondition that the caller already resolved
+    it), this returns False rather than trusting a toolResult's status alone."""
+    idx = CodebaseIndex(files={"app/main.py": "x = 1\n"})
+    agent = _fake_agent(
+        [
+            _tool_use_message("assistant", "t1", "read_file", path="app/missing.py"),
+            _tool_result_message("t1", "Error: file not found: app/missing.py."),
+        ]
+    )
+    assert _agent_read_the_cited_file(agent, idx, "app/missing.py") is False
 
 
 def test_agent_read_the_cited_file_false_for_a_different_file() -> None:
