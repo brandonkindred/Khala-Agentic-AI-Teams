@@ -5209,7 +5209,7 @@ def _apply_paper_trading_failure(
         session.divergence_analysis = session.error
 
 
-def _fail_paper_trading_session(session_id: str, error: str) -> None:
+def _fail_paper_trading_session(session_id: str, error: str, divergence_analysis: str = None) -> None:
     """Mark a paper-trading session ``failed`` (best-effort, idempotent).
 
     Preconditions:
