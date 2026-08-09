@@ -116,10 +116,16 @@ def _make_fake_run_design_attempt(state: Dict[str, Any]):
         ``_design_attempt_cancellation_checkpoint``) with short sleeps
         between calls -- exactly how the real phase pipeline threads
         cancellation checks between steps. Sets ``state["cancelled_at"]`` and
-        re-raises the moment ``emit`` raises (cancellation observed), or sets
+        re-raises only when ``emit`` raises the production checkpoint's own
+        ``_DesignAttemptCancelled`` sentinel (cancellation observed via the
+        checkpoint, not some other exception -- e.g. an SDK-injected
+        ``CancelledError`` racing the checkpoint, which would indicate
+        ``no_thread_cancel_exception=True`` regressed and must not be
+        mistaken for the checkpoint working), or sets
         ``state["ran_to_completion"] = True`` and raises ``RuntimeError`` if
         the loop exhausts ``_FAKE_MAX_ITERATIONS`` uncancelled.
     """
+    from investment_team.strategy_lab.temporal.activities import _DesignAttemptCancelled
 
     def _fake_run_design_attempt(self: Any, **kwargs: Any) -> Any:
         state["start_time"] = time.monotonic()
@@ -129,7 +135,7 @@ def _make_fake_run_design_attempt(state: Dict[str, Any]):
         for _ in range(_FAKE_MAX_ITERATIONS):
             try:
                 emit("test-cancellation-checkpoint", {})
-            except BaseException:
+            except _DesignAttemptCancelled:
                 state["cancelled_at"] = time.monotonic()
                 raise
             time.sleep(_FAKE_ITERATION_SLEEP_S)
