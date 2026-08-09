@@ -18,6 +18,7 @@ export const environment = {
   accessibilityApiUrl: `${apiBase}/api/accessibility-audit`,
   agentProvisioningApiUrl: `${apiBase}/api/agent-provisioning`,
   agentRegistryApiUrl: `${apiBase}/api/agents`,
+  agentStudioApiUrl: `${apiBase}/api/agent-studio`,
   aiSystemsApiUrl: `${apiBase}/api/ai-systems`,
   investmentApiUrl: `${apiBase}/api/investment`,
   integrationsApiUrl: `${apiBase}/api/integrations`,

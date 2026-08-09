@@ -7,6 +7,8 @@
  * stepper and `AgentStudioStateService` both read.
  */
 
+import type { AgentManifest } from './agent-catalog.model';
+
 /** The four top-level stages, in forward order. */
 export type StudioStageKey = 'build' | 'test' | 'compose' | 'personas';
 
@@ -77,6 +79,76 @@ export interface AgentDefinition {
   states: AgentState[];
   mode: 'new' | 'refine';
   cloned_from: string | null;
+}
+
+/**
+ * Wire shapes for the Stage-1 `/api/agent-studio` API — conversations, clone,
+ * save, and drafts. Mirrors `backend/agents/agent_team_studio/agent_studio/models.py`
+ * field-for-field (snake_case), consumed by `AgentStudioApiService`.
+ */
+export interface ConversationMessage {
+  role: 'user' | 'assistant';
+  content: string;
+}
+
+export interface StartConversationRequest {
+  mode?: 'new' | 'refine';
+  source_agent_id?: string | null;
+  initial_message?: string | null;
+}
+
+export interface SendMessageRequest {
+  message: string;
+}
+
+export interface ConversationStateResponse {
+  conversation_id: string;
+  mode: 'new' | 'refine';
+  messages: ConversationMessage[];
+  definition: AgentDefinition;
+  readiness: string[];
+  suggested_questions: string[];
+}
+
+export interface SaveAgentRequest {
+  name?: string;
+  role?: string;
+  description?: string | null;
+  tags?: string[];
+  tools?: string[];
+  system_prompt?: string;
+  input_schema?: Record<string, unknown> | null;
+  output_schema?: Record<string, unknown> | null;
+  states?: AgentState[];
+}
+
+export interface SaveAgentResponse {
+  agent_id: string;
+  manifest: AgentManifest;
+  created: boolean;
+}
+
+export interface AgentStudioDraftSummary {
+  draft_id: string;
+  name: string;
+  updated_at: string;
+}
+
+export interface AgentStudioDraft {
+  draft_id: string;
+  name: string;
+  created_at: string;
+  updated_at: string;
+  payload: Record<string, unknown>;
+}
+
+export interface SaveDraftRequest {
+  name?: string | null;
+  payload?: Record<string, unknown> | null;
+}
+
+export interface RenameDraftRequest {
+  name: string;
 }
 
 /** Progress state of a single stepper indicator. */

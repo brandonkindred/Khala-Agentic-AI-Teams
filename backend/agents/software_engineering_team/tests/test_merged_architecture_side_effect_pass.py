@@ -555,7 +555,7 @@ def test_raises_tight_output_cap_for_dual_finding_arrays(
     """When LLM_MAX_OUTPUT_TOKENS is set near a single-pass sizing (e.g. 4096), the
     production LLMClientModel path must raise the merged call to the dual-array
     floor so both finding lists can fit in one completion."""
-    import code_review_agent.merged_architecture_side_effect_pass as pass_mod
+    import code_review_agent.submission_pass_runner as runner_mod
 
     from llm_service import LLMClientModel
     from software_engineering_team.shared.context_sizing import (
@@ -583,7 +583,7 @@ def test_raises_tight_output_cap_for_dual_finding_arrays(
 
     backing = _Empty()
     base = _RecordingModel(backing, agent_key="code_review")
-    monkeypatch.setattr(pass_mod, "resolve_code_review_model", lambda _llm: base)
+    monkeypatch.setattr(runner_mod, "resolve_code_review_model", lambda _llm: base)
 
     find_architecture_and_side_effect_issues(backing, _input())
     assert clones == [{"max_tokens": CODE_REVIEW_MERGED_PASS_RESPONSE_TOKENS}]
@@ -594,7 +594,7 @@ def test_model_pin_takes_precedence_over_env_max_tokens(
 ) -> None:
     """A pinned max_tokens of 4096 must be raised even when LLM_MAX_OUTPUT_TOKENS is
     already generous — the pin is what the adapter actually sends."""
-    import code_review_agent.merged_architecture_side_effect_pass as pass_mod
+    import code_review_agent.submission_pass_runner as runner_mod
 
     from llm_service import LLMClientModel
     from software_engineering_team.shared.context_sizing import (
@@ -620,7 +620,7 @@ def test_model_pin_takes_precedence_over_env_max_tokens(
 
     backing = _Empty()
     base = _RecordingModel(backing, agent_key="code_review", max_tokens=4096)
-    monkeypatch.setattr(pass_mod, "resolve_code_review_model", lambda _llm: base)
+    monkeypatch.setattr(runner_mod, "resolve_code_review_model", lambda _llm: base)
 
     find_architecture_and_side_effect_issues(backing, _input())
     assert clones == [{"max_tokens": CODE_REVIEW_MERGED_PASS_RESPONSE_TOKENS}]
@@ -631,7 +631,7 @@ def test_clamps_oversized_cap_to_shrunk_response_reserve(
 ) -> None:
     """When the response reserve shrinks for a small context, an oversized
     LLM_MAX_OUTPUT_TOKENS must be clamped down to that reserve."""
-    import code_review_agent.merged_architecture_side_effect_pass as pass_mod
+    import code_review_agent.submission_pass_runner as runner_mod
 
     from llm_service import LLMClientModel
     from software_engineering_team.shared.context_sizing import (
@@ -660,7 +660,7 @@ def test_clamps_oversized_cap_to_shrunk_response_reserve(
 
     backing = _SmallCtx()
     base = _RecordingModel(backing, agent_key="code_review")
-    monkeypatch.setattr(pass_mod, "resolve_code_review_model", lambda _llm: base)
+    monkeypatch.setattr(runner_mod, "resolve_code_review_model", lambda _llm: base)
 
     find_architecture_and_side_effect_issues(backing, _input())
     assert len(clones) == 1
@@ -673,7 +673,7 @@ def test_clamps_oversized_cap_to_full_dual_array_reserve(
 ) -> None:
     """Even when the dual-array floor is selected, an oversized LLM_MAX_OUTPUT_TOKENS
     must still be clamped to that reserved response budget."""
-    import code_review_agent.merged_architecture_side_effect_pass as pass_mod
+    import code_review_agent.submission_pass_runner as runner_mod
 
     from llm_service import LLMClientModel
     from software_engineering_team.shared.context_sizing import (
@@ -699,7 +699,7 @@ def test_clamps_oversized_cap_to_full_dual_array_reserve(
 
     backing = _Empty()
     base = _RecordingModel(backing, agent_key="code_review")
-    monkeypatch.setattr(pass_mod, "resolve_code_review_model", lambda _llm: base)
+    monkeypatch.setattr(runner_mod, "resolve_code_review_model", lambda _llm: base)
 
     find_architecture_and_side_effect_issues(backing, _input())
     assert clones == [{"max_tokens": CODE_REVIEW_MERGED_PASS_RESPONSE_TOKENS}]
@@ -732,9 +732,10 @@ def test_render_manifest_emits_full_list_when_budget_matches_full_size() -> None
     """When max_manifest_chars equals _manifest_chars, every path must render —
     do not reserve overflow-note room that would hide paths that already fit."""
     import code_review_agent.merged_architecture_side_effect_pass as pass_mod
+    from code_review_agent.submission_pass_runner import _manifest_chars
 
     paths = ["a", "b", "c"]
-    budget = pass_mod._manifest_chars(paths)
+    budget = _manifest_chars(paths)
     rendered = pass_mod._render_manifest(paths, budget)
     text = "\n".join(rendered)
     assert "a" in text and "b" in text and "c" in text
@@ -819,48 +820,6 @@ def test_format_changed_files_page_bounds_by_char_budget() -> None:
     assert "of 50" in page
 
 
-def test_split_changed_files_into_batches_single_batch_when_under_budget() -> None:
-    from code_review_agent.merged_architecture_side_effect_pass import (
-        _split_changed_files_into_batches,
-    )
-
-    items = [("a.py", "x" * 50), ("b.py", "y" * 50)]
-    assert _split_changed_files_into_batches(items, max_chars=10_000) == [items]
-
-
-def test_split_changed_files_into_batches_empty_items() -> None:
-    from code_review_agent.merged_architecture_side_effect_pass import (
-        _split_changed_files_into_batches,
-    )
-
-    assert _split_changed_files_into_batches([], max_chars=1_000) == []
-
-
-def test_split_changed_files_into_batches_splits_when_over_budget() -> None:
-    from code_review_agent.merged_architecture_side_effect_pass import (
-        _estimated_file_block_chars,
-        _split_changed_files_into_batches,
-    )
-
-    items = [("a.py", "x" * 100), ("b.py", "y" * 100), ("c.py", "z" * 100)]
-    per_file = _estimated_file_block_chars(*items[0])
-    # Budget fits one file plus a sliver — a second file always overflows it.
-    batches = _split_changed_files_into_batches(items, max_chars=per_file + 10)
-    assert batches == [[items[0]], [items[1]], [items[2]]]
-
-
-def test_split_changed_files_into_batches_keeps_oversized_file_alone() -> None:
-    from code_review_agent.merged_architecture_side_effect_pass import (
-        _split_changed_files_into_batches,
-    )
-
-    items = [("small.py", "a" * 10), ("huge.py", "b" * 10_000)]
-    batches = _split_changed_files_into_batches(items, max_chars=500)
-    assert batches[0] == [items[0]]
-    assert batches[-1] == [items[1]]
-    assert sum(len(b) for b in batches) == len(items)
-
-
 def test_no_extra_batching_for_small_multi_file_submission_under_budget() -> None:
     """Several small files that together still fit the per-call budget must
     make exactly one LLM call, not one per file — no behavior change for
@@ -889,12 +848,12 @@ def test_splits_into_multiple_batches_for_oversized_submission(
     """When the changed-file set's total estimated size exceeds one call's
     inline-code budget, the merged pass issues one independent LLM call per
     batch and concatenates each batch's findings into the same two lists."""
-    import code_review_agent.merged_architecture_side_effect_pass as pass_mod
+    import code_review_agent.submission_pass_runner as runner_mod
 
     from software_engineering_team.shared.context_sizing import MergedPassBudgets
 
     monkeypatch.setattr(
-        pass_mod,
+        runner_mod,
         "compute_code_review_merged_pass_budgets",
         lambda *a, **k: MergedPassBudgets(
             max_architecture_chars=0,
@@ -957,12 +916,12 @@ def test_one_batch_failure_does_not_discard_other_batches(
 ) -> None:
     """A malformed reply for one batch must not wipe out findings already
     collected from other, successful batches."""
-    import code_review_agent.merged_architecture_side_effect_pass as pass_mod
+    import code_review_agent.submission_pass_runner as runner_mod
 
     from software_engineering_team.shared.context_sizing import MergedPassBudgets
 
     monkeypatch.setattr(
-        pass_mod,
+        runner_mod,
         "compute_code_review_merged_pass_budgets",
         lambda *a, **k: MergedPassBudgets(
             max_architecture_chars=0,
@@ -1001,3 +960,67 @@ def test_one_batch_failure_does_not_discard_other_batches(
     arch, side = find_architecture_and_side_effect_issues(_Client(), _input(files=files))
     assert [f.description for f in arch] == ["finding for b.py"]
     assert side == []
+
+
+def test_reactive_recovery_bisects_overflowing_batch_through_public_entry_point(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The pass must now benefit from the shared runner's reactive bisect
+    recovery: a combined batch call that overflows mid-turn should be retried
+    as two single-file calls, rather than simply skipped (the pre-runner
+    behavior — this pass had no reactive recovery of its own)."""
+    import code_review_agent.submission_pass_runner as runner_mod
+    from strands.types.exceptions import ContextWindowOverflowException
+
+    from software_engineering_team.shared.context_sizing import MergedPassBudgets
+
+    # A generous inline budget so both tiny files actually inline into the
+    # first (combined) call instead of being omitted for lack of room — the
+    # default DummyLLMClient context leaves ~0 content room once the dual-
+    # array response reserve is set aside (see test_no_extra_batching_for_
+    # small_multi_file_submission_under_budget, which never inspects prompt
+    # content for exactly this reason).
+    monkeypatch.setattr(
+        runner_mod,
+        "compute_code_review_merged_pass_budgets",
+        lambda *a, **k: MergedPassBudgets(
+            max_architecture_chars=0,
+            max_inline_code_chars=100_000,
+            max_manifest_chars=2_000,
+            reserved_response_tokens=4096,
+        ),
+    )
+
+    call_count = {"n": 0}
+
+    class _Client(DummyLLMClient):
+        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+            if _MERGED_PASS_ANCHOR in prompt:
+                call_count["n"] += 1
+                if "### a.py ###" in prompt and "### b.py ###" in prompt:
+                    raise ContextWindowOverflowException("combined batch too large")
+                for path in ("a.py", "b.py"):
+                    if f"### {path} ###" in prompt:
+                        return {
+                            "architecture_findings": [
+                                {
+                                    "severity": "medium",
+                                    "category": "architecture",
+                                    "file_path": path,
+                                    "description": f"finding for {path}",
+                                    "suggestion": "n/a",
+                                }
+                            ],
+                            "side_effect_findings": [],
+                        }
+                return {"architecture_findings": [], "side_effect_findings": []}
+            return {"approved": True, "issues": [], "summary": "ok", "spec_compliance_notes": ""}
+
+    files = {"a.py": "x = 1\n", "b.py": "y = 2\n"}
+    arch, side = find_architecture_and_side_effect_issues(_Client(), _input(files=files))
+
+    assert {f.description for f in arch} == {"finding for a.py", "finding for b.py"}
+    assert side == []
+    # More than one call proves the overflowing combined attempt was actually
+    # retried (bisected), not that the test happened to pass on the first try.
+    assert call_count["n"] > 1
