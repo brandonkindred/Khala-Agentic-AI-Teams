@@ -17,10 +17,11 @@ This pass runs ONCE PER SUBMISSION (never once per chunk), after the
 architecture-consistency pass, and is purely additive: it is given the full
 content of the changed files, with read access to the rest of the repository
 via the same tools the false-positive filter and architecture pass use
-(``read_file``, ``list_files``, ``search_codebase``,
-``find_function_at_line``), plus one new tool this pass introduces,
-``search_repository``, which searches the REST of the repository (beyond the
-submission) for a substring — the capability actually needed to find a
+(``read_file``, ``read_lines``, ``read_function``, ``list_files``,
+``search_codebase``, ``find_function_at_line``, ``find_references``), plus
+one new tool this pass introduces, ``search_repository``, which searches
+the REST of the repository (beyond the submission) for a substring — the
+capability actually needed to find a
 changed function's callers outside the diff, which no existing tool provides
 (``search_codebase`` is explicitly submission-only). It emits new findings in
 two categories:

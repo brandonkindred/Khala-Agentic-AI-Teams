@@ -789,6 +789,59 @@ def test_list_changed_files_tool_returns_submission_paths_only() -> None:
     assert "a.py" in result and "b.py" in result
 
 
+def _merged_tool_names(tools: list) -> set:
+    """Extract each tool's registered name, tolerating whichever attribute
+    the ``strands`` ``@tool`` decorator populates for a given tool object."""
+    return {
+        getattr(t, "tool_name", None) or getattr(t, "__name__", None) or getattr(t, "name", "")
+        for t in tools
+    }
+
+
+def test_build_merged_pass_tools_includes_scoped_tools_when_side_off() -> None:
+    """With the side-effect half off, the merged builder still exposes the full
+    shared scoped-tool set (read_lines/read_function/find_references) plus its
+    own list_changed_files -- but not search_repository, which only the
+    side-effect half introduces."""
+    import code_review_agent.merged_architecture_side_effect_pass as pass_mod
+    from code_review_agent.false_positive_filter import CodebaseIndex
+
+    index = CodebaseIndex.from_input(_input(files={"a.py": "a"}))
+    tools = pass_mod._build_merged_pass_tools(index, side_on=False)
+    assert _merged_tool_names(tools) == {
+        "read_file",
+        "read_lines",
+        "read_function",
+        "list_files",
+        "search_codebase",
+        "find_function_at_line",
+        "find_references",
+        "list_changed_files",
+    }
+
+
+def test_build_merged_pass_tools_includes_scoped_tools_when_side_on() -> None:
+    """With the side-effect half on, the merged builder additionally exposes
+    search_repository on top of the shared scoped-tool set and
+    list_changed_files."""
+    import code_review_agent.merged_architecture_side_effect_pass as pass_mod
+    from code_review_agent.false_positive_filter import CodebaseIndex
+
+    index = CodebaseIndex.from_input(_input(files={"a.py": "a"}))
+    tools = pass_mod._build_merged_pass_tools(index, side_on=True)
+    assert _merged_tool_names(tools) == {
+        "read_file",
+        "read_lines",
+        "read_function",
+        "list_files",
+        "search_codebase",
+        "find_function_at_line",
+        "find_references",
+        "search_repository",
+        "list_changed_files",
+    }
+
+
 def test_format_changed_files_page_paginates_and_hints_next_offset() -> None:
     from code_review_agent.merged_architecture_side_effect_pass import format_changed_files_page
 
