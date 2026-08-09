@@ -463,6 +463,33 @@ def test_fe_deliver_inline_merge_fails(tmp_path: Path, monkeypatch) -> None:
     assert "Merge failed" in result.summary
 
 
+def test_fe_deliver_inline_quality_gate_blocks_merge(tmp_path: Path, monkeypatch) -> None:
+    """Regression: the pre-merge quality gate must skip the merge when a build
+    verifier fails -- before this gate existed, the merge always proceeded
+    once the commit succeeded."""
+    from shared.git import git_utils
+    from software_engineering_team.frontend_code_v2_team.orchestrator import run_deliver
+    from software_engineering_team.shared import repo_writer
+
+    _patch_autospec(monkeypatch, git_utils, "create_feature_branch", return_value=(True, "feature/x"))
+    _patch_autospec(monkeypatch, repo_writer, "write_agent_output", return_value=(True, ""))
+    merge_mock = _patch_autospec(monkeypatch, git_utils, "merge_branch", return_value=(True, ""))
+    _patch_autospec(monkeypatch, git_utils, "checkout_branch", return_value=(True, ""))
+
+    result = run_deliver(
+        task_id="t1",
+        repo_path=tmp_path,
+        files={"a.ts": "x"},
+        summary="",
+        build_verifier=lambda repo_path, label, task_id: (False, "build broke"),
+        build_verify_label="frontend",
+    )
+
+    assert result.merged is False
+    assert result.summary == "Pre-merge quality gate failed: Build failed: build broke"
+    merge_mock.assert_not_called()
+
+
 def test_fe_deliver_inline_happy_path(tmp_path: Path, monkeypatch) -> None:
     """Frontend inline delivery exercises branch creation, write, merge, and cleanup."""
     from shared.git import git_utils
