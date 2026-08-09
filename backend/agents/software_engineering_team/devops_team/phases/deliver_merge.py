@@ -156,10 +156,13 @@ def run_phase5_deliver_merge(
       the feature branch is committed and left in place (not merged or
       deleted) for external review, and ``completion.git_operations.merge``
       is ``None`` rather than fabricated merge metadata. Before delivering,
-      untracked files are cleaned from ``repo_path`` (best-effort) so Phase
-      4's validation/execution tool side effects (e.g. a Terraform provider
-      lock file from ``terraform init``) don't get swept into the delivered
-      commit alongside ``aggregated_artifacts``.
+      untracked files are cleaned from ``repo_path`` so Phase 4's
+      validation/execution tool side effects (e.g. a Terraform provider lock
+      file from ``terraform init``) don't get swept into the delivered commit
+      alongside ``aggregated_artifacts``; if that cleanup itself fails,
+      delivery is blocked (``blocked_result`` set) rather than proceeding with
+      an unverified working tree -- a failed clean is exactly the situation
+      this exists to protect against, so it must not be treated as best-effort.
     """
     doc = doc_runbook_agent.run(
         DocumentationRunbookInput(
@@ -209,10 +212,27 @@ def run_phase5_deliver_merge(
         # security/change reviews.
         clean_ok, clean_msg = clean_untracked_files(repo_path)
         if not clean_ok:
-            logger.warning(
-                "[%s] Deliver: failed to clean untracked validation artifacts: %s",
-                task_spec.task_id,
-                clean_msg,
+            # A failed cleanup must block delivery rather than merely warn: the whole
+            # point of this call is to keep untracked validation-tool output out of the
+            # commit deliver_inline_merge/prepare_handoff_branch are about to make via
+            # `git add -A`. Continuing anyway would let exactly the leftover this exists
+            # to catch slip into the delivered commit unreviewed.
+            failure_summary = f"Failed to clean untracked validation artifacts: {clean_msg}"
+            logger.error("[%s] Deliver: %s", task_spec.task_id, failure_summary)
+            return Phase5DeliverMergeResult(
+                completion=completion,
+                blocked_result=build_team_failure_result(
+                    DevOpsTeamResult,
+                    failure_summary,
+                    completion_package=DevOpsCompletionPackage(
+                        task_id=task_spec.task_id,
+                        status="blocked",
+                        files_changed=[],
+                        quality_gates=quality_gates,
+                        git_operations=GitOperationsMetadata(),
+                        notes=[failure_summary],
+                    ),
+                ),
             )
         if merge_to_development:
             deliver_result = deliver_inline_merge(

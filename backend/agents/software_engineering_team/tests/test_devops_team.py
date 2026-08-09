@@ -2140,6 +2140,32 @@ class TestRunTaskStructuredEntrypoint:
         assert result.success
         assert "untracked.leftover" not in result.completion_package.files_changed
 
+    def test_run_task_blocks_delivery_when_untracked_cleanup_fails(self, monkeypatch) -> None:
+        """If clean_untracked_files itself fails (e.g. a permissions error), delivery
+        must block rather than merely warn and proceed: continuing into
+        deliver_inline_merge/prepare_handoff_branch would let exactly the leftover
+        this cleanup exists to catch slip into the commit via git add -A unreviewed."""
+        import software_engineering_team.devops_team.phases.deliver_merge as deliver_merge_mod
+
+        monkeypatch.setattr(
+            deliver_merge_mod,
+            "clean_untracked_files",
+            lambda repo_path: (False, "permission denied"),
+        )
+        mock_llm = _scripted_llm_for_happy_path()
+        agent = DevOpsTeamLeadAgent(mock_llm)
+        spec = _base_task_spec(task_id="devops-cleanup-fail")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp)
+            init_ok, _ = initialize_new_repo(path)
+            assert init_ok
+            result = agent.run_task(spec, repo_path=path, merge_to_development=False)
+
+        assert not result.success
+        assert result.completion_package is not None
+        assert result.completion_package.status == "blocked"
+        assert "clean" in (result.failure_reason or "").lower()
+
 
 # ===========================================================================
 # COMPATIBILITY / MIGRATION TESTS
