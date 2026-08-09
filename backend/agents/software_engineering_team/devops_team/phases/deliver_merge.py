@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from shared.git.branch_utils import make_branch_suffix
-from shared.git.git_utils import DEVELOPMENT_BRANCH, clean_untracked_files
+from shared.git.git_utils import DEVELOPMENT_BRANCH, reset_hard_to
 from software_engineering_team.shared.deliver_utils import (
     DeliverGitOps,
     deliver_inline_merge,
@@ -156,13 +156,17 @@ def run_phase5_deliver_merge(
       the feature branch is committed and left in place (not merged or
       deleted) for external review, and ``completion.git_operations.merge``
       is ``None`` rather than fabricated merge metadata. Before delivering,
-      untracked files are cleaned from ``repo_path`` so Phase 4's
-      validation/execution tool side effects (e.g. a Terraform provider lock
-      file from ``terraform init``) don't get swept into the delivered commit
-      alongside ``aggregated_artifacts``; if that cleanup itself fails,
-      delivery is blocked (``blocked_result`` set) rather than proceeding with
-      an unverified working tree -- a failed clean is exactly the situation
-      this exists to protect against, so it must not be treated as best-effort.
+      ``repo_path`` is reset to ``HEAD`` (Phase 3's -- and any Phase 4.6
+      debug-patch's -- last commit) so Phase 4's validation/execution tool
+      side effects don't get swept into the delivered commit alongside
+      ``aggregated_artifacts``: this discards both untracked additions (e.g.
+      a Terraform provider lock file from ``terraform init``) and
+      modifications to already-tracked files (e.g. that same lock file being
+      *updated* on a repo where it was already committed), neither of which
+      ``git clean`` alone would touch. If that reset itself fails, delivery
+      is blocked (``blocked_result`` set) rather than proceeding with an
+      unverified working tree -- a failed reset is exactly the situation this
+      exists to protect against, so it must not be treated as best-effort.
     """
     doc = doc_runbook_agent.run(
         DocumentationRunbookInput(
@@ -204,20 +208,24 @@ def run_phase5_deliver_merge(
     git_operations = GitOperationsMetadata()
     if write_changes and aggregated_artifacts:
         # Phase 4's validation/execution tools (e.g. `terraform init` leaving
-        # `.terraform.lock.hcl`) can leave untracked files in the working tree.
+        # `.terraform.lock.hcl`, or updating one already committed by Phase 3)
+        # can leave untracked OR modified-tracked files in the working tree.
         # deliver_inline_merge/prepare_handoff_branch both commit via
-        # `git add -A`, which would otherwise sweep those tool-created files
+        # `git add -A`, which would otherwise sweep those tool side effects
         # into the delivered commit even though they were never part of
         # aggregated_artifacts, completion.files_changed, or the internal
-        # security/change reviews.
-        clean_ok, clean_msg = clean_untracked_files(repo_path)
+        # security/change reviews. reset_hard_to (not clean_untracked_files
+        # alone) discards both cases by resetting to HEAD -- Phase 3's (and
+        # any Phase 4.6 debug-patch's) already-committed state -- without
+        # losing any of that committed history.
+        clean_ok, clean_msg = reset_hard_to(repo_path, "HEAD")
         if not clean_ok:
-            # A failed cleanup must block delivery rather than merely warn: the whole
-            # point of this call is to keep untracked validation-tool output out of the
+            # A failed reset must block delivery rather than merely warn: the whole
+            # point of this call is to keep validation-tool output out of the
             # commit deliver_inline_merge/prepare_handoff_branch are about to make via
             # `git add -A`. Continuing anyway would let exactly the leftover this exists
             # to catch slip into the delivered commit unreviewed.
-            failure_summary = f"Failed to clean untracked validation artifacts: {clean_msg}"
+            failure_summary = f"Failed to reset validation-tool side effects: {clean_msg}"
             logger.error("[%s] Deliver: %s", task_spec.task_id, failure_summary)
             return Phase5DeliverMergeResult(
                 completion=completion,

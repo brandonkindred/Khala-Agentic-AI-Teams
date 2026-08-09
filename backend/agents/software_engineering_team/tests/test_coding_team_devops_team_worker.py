@@ -639,6 +639,82 @@ def test_devops_worker_derives_environment_from_revision_feedback() -> None:
     assert spec.platform_scope.environments == ["dev", "production"]
 
 
+def test_devops_worker_newest_revision_feedback_overrides_stale_production_mention() -> None:
+    """revision_feedback is append-only, so an early round's "make this production"
+    and a later round's "actually, staging only" both persist in the list. Blending
+    every entry into one combined-text scan means the stale production mention can
+    never be overridden. The NEWEST feedback line that mentions an environment must
+    win, not every historical mention blended together."""
+    task = _base_task(
+        title="Add deployment workflow",
+        description="Set up the deploy pipeline",
+        revision_feedback=[
+            {"source": "tech_lead", "reason": "This must target production."},
+            {"source": "tech_lead", "reason": "Actually, staging is fine for now."},
+        ],
+    )
+
+    spec = _to_devops_task_spec(task)
+
+    assert spec.environment == "staging"
+    assert spec.platform_scope.environments == ["dev", "staging"]
+
+
+def test_devops_worker_falls_back_to_task_text_when_no_feedback_mentions_environment() -> None:
+    """A feedback entry that doesn't mention any environment at all (e.g. a purely
+    cosmetic revision request) must not be treated as a "no signal, default to
+    staging" override -- the original task text should still decide."""
+    task = _base_task(
+        title="Add production deployment workflow",
+        description="Deploy to production with a blue-green rollout.",
+        revision_feedback=[{"source": "tech_lead", "reason": "Please rename the workflow file."}],
+    )
+
+    spec = _to_devops_task_spec(task)
+
+    assert spec.environment == "production"
+
+
+# --------------------------------------- explicit development-only environment scope (finding O)
+
+
+def test_devops_worker_spec_excludes_staging_for_dev_only_task() -> None:
+    """A task explicitly scoped to dev-only must not also claim staging in
+    platform_scope.environments -- the CI/CD and Deployment specialists read that
+    list directly and could otherwise generate staging configuration the task
+    explicitly excluded."""
+    task = _base_task(
+        title="Add dev-only smoke test workflow",
+        description="Create a dev-only workflow; do not deploy to staging.",
+    )
+
+    spec = _to_devops_task_spec(task)
+
+    assert spec.environment == "staging"
+    assert spec.platform_scope.environments == ["dev"]
+
+
+def test_devops_worker_spec_keeps_staging_when_not_explicitly_excluded() -> None:
+    spec = _to_devops_task_spec(
+        _base_task(title="Add lint pipeline", description="Lint and test on PRs")
+    )
+    assert spec.platform_scope.environments == ["dev", "staging"]
+
+
+def test_devops_worker_spec_production_never_dev_only() -> None:
+    """A production-scoped task never claims to be dev-only, regardless of any
+    incidental "staging" phrasing -- production always gets ["dev", "production"]."""
+    task = _base_task(
+        title="Add production deployment workflow",
+        description="Deploy to production; skip the intermediate staging step.",
+    )
+
+    spec = _to_devops_task_spec(task)
+
+    assert spec.environment == "production"
+    assert spec.platform_scope.environments == ["dev", "production"]
+
+
 # ------------------------------------------------- task scope in acceptance_criteria (finding H)
 
 

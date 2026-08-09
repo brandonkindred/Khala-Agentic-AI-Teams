@@ -2122,16 +2122,17 @@ class TestRunTaskStructuredEntrypoint:
         assert "untracked.leftover" not in result.completion_package.files_changed
 
     def test_run_task_blocks_delivery_when_untracked_cleanup_fails(self, monkeypatch) -> None:
-        """If clean_untracked_files itself fails (e.g. a permissions error), delivery
-        must block rather than merely warn and proceed: continuing into
-        deliver_inline_merge/prepare_handoff_branch would let exactly the leftover
-        this cleanup exists to catch slip into the commit via git add -A unreviewed."""
+        """If the pre-delivery reset_hard_to(repo_path, "HEAD") itself fails (e.g. a
+        permissions error), delivery must block rather than merely warn and proceed:
+        continuing into deliver_inline_merge/prepare_handoff_branch would let exactly
+        the leftover this reset exists to catch slip into the commit via git add -A
+        unreviewed."""
         import software_engineering_team.devops_team.phases.deliver_merge as deliver_merge_mod
 
         monkeypatch.setattr(
             deliver_merge_mod,
-            "clean_untracked_files",
-            lambda repo_path: (False, "permission denied"),
+            "reset_hard_to",
+            lambda repo_path, ref: (False, "permission denied"),
         )
         mock_llm = _scripted_llm_for_happy_path()
         agent = DevOpsTeamLeadAgent(mock_llm)
@@ -2145,7 +2146,50 @@ class TestRunTaskStructuredEntrypoint:
         assert not result.success
         assert result.completion_package is not None
         assert result.completion_package.status == "blocked"
-        assert "clean" in (result.failure_reason or "").lower()
+        assert "reset" in (result.failure_reason or "").lower()
+
+    def test_run_task_reverts_tracked_validation_side_effects_before_delivering(
+        self, monkeypatch
+    ) -> None:
+        """A validator can MODIFY an already-tracked file (e.g. terraform init
+        updating a committed .terraform.lock.hcl after provider constraints change)
+        -- git clean alone would not touch that, only reset_hard_to would. Simulate
+        that as a Phase 4 validation-tool side effect and confirm the modification
+        never reaches the delivered branch."""
+        import software_engineering_team.devops_team.tool_dispatch as tool_dispatch_mod
+
+        real_run_validation_tools = tool_dispatch_mod.run_validation_tools
+
+        def _run_validation_tools_with_tracked_mutation(agent, repo_path):
+            tracked = Path(repo_path) / "tracked.lock"
+            if tracked.exists():
+                tracked.write_text("mutated by a validation tool", encoding="utf-8")
+            return real_run_validation_tools(agent, repo_path)
+
+        monkeypatch.setattr(
+            tool_dispatch_mod, "run_validation_tools", _run_validation_tools_with_tracked_mutation
+        )
+        mock_llm = _scripted_llm_for_happy_path()
+        agent = DevOpsTeamLeadAgent(mock_llm)
+        spec = _base_task_spec(task_id="devops-revert-tracked")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp)
+            init_ok, _ = initialize_new_repo(path)
+            assert init_ok
+            (path / "tracked.lock").write_text("committed content", encoding="utf-8")
+            subprocess.run(["git", "add", "-A"], cwd=path, capture_output=True, check=True)
+            subprocess.run(
+                ["git", "commit", "-m", "seed tracked.lock"],
+                cwd=path,
+                capture_output=True,
+                check=True,
+            )
+
+            result = agent.run_task(spec, repo_path=path, merge_to_development=False)
+
+            assert (path / "tracked.lock").read_text(encoding="utf-8") == "committed content"
+        assert result.success
+        assert "tracked.lock" not in result.completion_package.files_changed
 
 
 # ===========================================================================

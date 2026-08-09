@@ -12,6 +12,7 @@ constructed by ``worker_factory._build_implementation_worker`` when
 from __future__ import annotations
 
 import logging
+import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -31,7 +32,11 @@ from software_engineering_team.devops_team.models import (
     TaskGoal,
     TaskScope,
 )
-from software_engineering_team.devops_team.orchestrator import _legacy_environment_from_text
+from software_engineering_team.devops_team.orchestrator import (
+    _LEGACY_WORD_TOKEN,
+    _NEGATION_TOKENS,
+    _legacy_environment_from_text,
+)
 from software_engineering_team.models import StackSpec
 from software_engineering_team.v2_team_worker import (
     _changes_summary,
@@ -81,6 +86,36 @@ def _augment_goal_summary(task: Any) -> str:
     )
 
 
+_ENV_SIGNAL_TOKEN = re.compile(r"\b(?:production|prod|staging|stage)\b", re.IGNORECASE)
+
+
+def _latest_feedback_environment(task: Any) -> Optional[str]:
+    """Return the environment implied by the newest revision-feedback line that
+    mentions an environment at all, or ``None`` when no feedback line does.
+
+    ``task.revision_feedback`` is append-only, so an early round's "make this
+    production" and a later round's "actually, staging only" both persist in
+    the list. Blending every entry into one combined-text scan (the prior
+    approach) means a stale early mention of production can never be
+    overridden by a later redirect -- ``_legacy_environment_from_text``
+    returns ``"production"`` if ANY clause across the combined text implies
+    it. Scanning newest-first and stopping at the first line that mentions an
+    environment at all lets the latest instruction win instead.
+
+    Preconditions: none.
+    Postconditions:
+        - Returns ``_legacy_environment_from_text``'s verdict for the single
+          newest feedback line containing "production"/"prod"/"staging"/
+          "stage" (case-insensitive), or ``None`` if no feedback line
+          mentions any of those -- callers should fall back to the original
+          task text in that case, not assume ``"staging"``.
+    """
+    for line in reversed(_feedback_lines(list(task.revision_feedback or []))):
+        if _ENV_SIGNAL_TOKEN.search(line):
+            return _legacy_environment_from_text(line.lower())
+    return None
+
+
 def _derive_environment(task: Any) -> str:
     """Infer the target environment from the task's own text.
 
@@ -101,14 +136,13 @@ def _derive_environment(task: Any) -> str:
     consume ``acceptance_criteria`` directly -- they can produce
     production-targeting artifacts even when the description reads generically.
 
-    Also scans ``task.revision_feedback``: a Tech Lead rejection can redirect a
-    generic task toward production (e.g. "this needs to be the production
-    deploy workflow, not staging"), and that same feedback text is injected
-    into ``scope.included``/``acceptance_criteria`` for the Phase 2 specialists
-    (see ``_revision_feedback_scope_note``) -- so without also scanning it
-    here, the specialists could generate production-targeting artifacts while
-    the spec itself stayed pinned to whatever environment the ORIGINAL task
-    text implied.
+    Checks ``task.revision_feedback`` via ``_latest_feedback_environment``
+    first: a Tech Lead rejection can redirect a generic task toward production
+    (e.g. "this needs to be the production deploy workflow, not staging") --
+    or redirect a stale production mention back to staging -- and only the
+    newest such redirect should win, not every historical mention blended
+    together. Falls back to the original task text when no feedback line
+    mentions an environment at all.
 
     Preconditions: none.
     Postconditions:
@@ -121,14 +155,62 @@ def _derive_environment(task: Any) -> str:
           environment-policy gate rather than silently proceeding -- the
           same trade-off ``run_workflow`` callers already accept.
     """
-    parts = [
-        task.description or "",
-        task.title or "",
-        *(task.acceptance_criteria or []),
-        *_feedback_lines(list(task.revision_feedback or [])),
-    ]
+    latest_feedback_environment = _latest_feedback_environment(task)
+    if latest_feedback_environment is not None:
+        return latest_feedback_environment
+    parts = [task.description or "", task.title or "", *(task.acceptance_criteria or [])]
     combined_text = " ".join(parts).lower()
     return _legacy_environment_from_text(combined_text)
+
+
+_STAGING_INTERVENING_TOKENS = frozenset(
+    {"to", "in", "on", "the", "a", "an", "environment", "env", "deploy", "deployed", "deploying"}
+)
+_DEV_ONLY_PATTERN = re.compile(r"\bdev[- ]?only\b|\bdevelopment[- ]?only\b", re.IGNORECASE)
+
+
+def _excludes_staging(text: str) -> bool:
+    """Return True when ``text`` explicitly excludes staging as a target environment.
+
+    Recognizes an explicit "dev only"/"development-only" statement, or
+    "staging" governed by a preceding negation token (``no``/``not``/``non``,
+    allowing intervening fillers like "deploy to") -- the same word-adjacency
+    negation pattern ``_scope_item_mentions_approval`` already uses for
+    "approval", reused here for "staging" rather than reimplemented.
+    """
+    if _DEV_ONLY_PATTERN.search(text):
+        return True
+    tokens = _LEGACY_WORD_TOKEN.findall(text.lower())
+    for i, token in enumerate(tokens):
+        if token not in ("staging", "stage"):
+            continue
+        j = i - 1
+        while j >= 0 and tokens[j] in _STAGING_INTERVENING_TOKENS:
+            j -= 1
+        if j >= 0 and tokens[j] in _NEGATION_TOKENS:
+            return True
+    return False
+
+
+def _platform_environments(task: Any, environment: str) -> List[str]:
+    """Build the ``platform_scope.environments`` list for ``environment``.
+
+    Preconditions: ``environment`` is ``"production"`` or ``"staging"`` (the
+      only values ``_derive_environment`` returns).
+    Postconditions:
+        - ``"production"`` always returns ``["dev", "production"]`` -- a
+          production-scoped task never claims to also be dev-only.
+        - ``"staging"`` returns ``["dev"]`` alone when the task's own text
+          explicitly excludes staging (see ``_excludes_staging``, e.g. "dev
+          only; do not deploy to staging"), so the CI/CD and Deployment
+          specialists -- which read this list -- don't generate staging
+          configuration the task explicitly ruled out; otherwise returns
+          ``["dev", "staging"]`` as before.
+    """
+    if environment == "production":
+        return ["dev", "production"]
+    text = f"{task.description or ''} {task.title or ''}"
+    return ["dev"] if _excludes_staging(text) else ["dev", "staging"]
 
 
 def _task_scope_note(task: Any) -> Optional[str]:
@@ -228,6 +310,7 @@ def _to_devops_task_spec(task: Any) -> DevOpsTaskSpec:
     """
     goal_summary = _augment_goal_summary(task)
     environment = _derive_environment(task)
+    platform_environments = _platform_environments(task, environment)
     scope_excluded = [task.out_of_scope] if getattr(task, "out_of_scope", "") else []
     acceptance_criteria = list(task.acceptance_criteria or []) or list(_DEFAULT_ACCEPTANCE_CRITERIA)
     scope_note = _task_scope_note(task)
@@ -242,7 +325,7 @@ def _to_devops_task_spec(task: Any) -> DevOpsTaskSpec:
         task_id=task.id,
         title=task.title or task.id,
         priority=str(getattr(task, "priority", "") or "medium"),
-        platform_scope=PlatformScope(cloud=_DEFAULT_CLOUD, environments=["dev", environment]),
+        platform_scope=PlatformScope(cloud=_DEFAULT_CLOUD, environments=platform_environments),
         repo_context=RepoContext(
             app_repo=_DEFAULT_APP_REPO,
             infra_repo=_DEFAULT_INFRA_REPO,
