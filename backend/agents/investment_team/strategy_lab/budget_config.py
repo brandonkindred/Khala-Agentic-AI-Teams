@@ -14,13 +14,18 @@ floors the existing call sites use today, so building this object changes no
 observable behavior on its own.
 
 Every ``STRATEGY_LAB_*`` env var name and default is preserved for backward
-compatibility. Wiring individual call sites onto this object, and computing
-the worst-case per-cycle LLM-call count from it, are follow-on changes — this
-module only introduces the validated config object.
+compatibility. :meth:`StrategyLabBudgetConfig.worst_case_design_llm_calls`
+computes the design-phase worst-case LLM-call count from this object's own
+fields (the math documented in this package's ``README.md`` under
+``STRATEGY_LAB_DESIGN_MAX_LLM_CALLS``), and :meth:`from_env` logs it at
+resolution time. Wiring individual call sites onto this object is a
+follow-on change — this module only introduces the validated config object
+and its derived sizing computation.
 """
 
 from __future__ import annotations
 
+import logging
 import math
 from dataclasses import dataclass
 from typing import Optional
@@ -28,6 +33,16 @@ from typing import Optional
 from llm_service.backoff import parse_rate_limit_retry_config
 from llm_service.config import resolve_timeout
 from shared.env_config import env_float, env_int
+
+logger = logging.getLogger(__name__)
+
+# Mirrors ``orchestrator.MAX_DESIGN_REENTRIES`` (currently ``2``) — duplicated
+# rather than imported because ``orchestrator.py`` does not import this module
+# today but is expected to once call sites are migrated onto
+# ``StrategyLabBudgetConfig`` (a follow-on change), which would make an import
+# the other way a cycle. Same rationale, same pattern, as
+# ``temporal/workflows.py``'s own ``_MAX_DESIGN_REENTRIES_FALLBACK``.
+_MAX_DESIGN_REENTRIES_FALLBACK = 2
 
 # Last-resort finite fallbacks for platform helpers (`resolve_timeout`,
 # `parse_rate_limit_retry_config`) that can themselves return a non-finite
@@ -256,6 +271,37 @@ class StrategyLabBudgetConfig:
         _require_int_at_least("code_conformance_retries", self.code_conformance_retries, 0)
         _require_int_at_least("max_alignment_rounds", self.max_alignment_rounds, 1)
 
+    def worst_case_design_llm_calls(self) -> int:
+        """Compute the worst-case number of design-phase LLM calls a single
+        cycle can make, per the sizing note in this package's ``README.md``
+        under ``STRATEGY_LAB_DESIGN_MAX_LLM_CALLS``.
+
+        One design round costs at most: ``design_parse_retries + 1`` parse
+        attempts on the initial generate/revise call, 1 self-review verdict,
+        ``design_self_revision_rounds * (design_parse_retries + 1)`` parse
+        attempts across self-revision, 1 re-audit verdict, and 1
+        ``DesignReviewAgent`` round. That per-round cost repeats for up to
+        ``design_review_rounds`` rounds, across up to
+        ``orchestrator.MAX_DESIGN_REENTRIES + 1`` design attempts (mirrored
+        here as ``_MAX_DESIGN_REENTRIES_FALLBACK`` — see its module-level
+        comment for why this isn't imported directly).
+
+        At the dataclass defaults this reproduces the README's own worked
+        example: ``(2 + 1) * (1 + 1) + 2 = 8`` revise calls, ``+ 1`` review
+        round ``= 9`` calls/round, ``9 * 20 * 3 = 540``.
+
+        Preconditions:
+            None beyond this instance's own construction invariants, already
+            enforced by ``__post_init__`` regardless of construction path.
+        Postconditions:
+            Returns a positive ``int``. Purely informational — this method
+            does not enforce any cap itself; ``design_max_llm_calls`` remains
+            the actually-enforced per-cycle ceiling.
+        """
+        revise_calls = (self.design_parse_retries + 1) * (1 + self.design_self_revision_rounds) + 2
+        per_round_calls = revise_calls + 1
+        return per_round_calls * self.design_review_rounds * (_MAX_DESIGN_REENTRIES_FALLBACK + 1)
+
     @classmethod
     def from_env(cls) -> "StrategyLabBudgetConfig":
         """Resolve every field from its ``STRATEGY_LAB_*`` env var.
@@ -269,7 +315,10 @@ class StrategyLabBudgetConfig:
         would raise, and every floor here matches what the resolved value
         already satisfies today, so ``from_env()`` cannot raise in practice.
 
-        Postconditions: returns a fully validated ``StrategyLabBudgetConfig``.
+        Postconditions: returns a fully validated ``StrategyLabBudgetConfig``;
+        logs the resolved worst-case design-phase LLM-call count at ``INFO``
+        before returning, so cost exposure is visible at startup rather than
+        only in documentation.
         """
         alignment_retries = env_int("STRATEGY_LAB_ALIGNMENT_RETRIES", 2, floor=0)
 
@@ -348,7 +397,7 @@ class StrategyLabBudgetConfig:
         code_conformance_retries = env_int("STRATEGY_LAB_CODE_CONFORMANCE_RETRIES", 2, floor=0)
         max_alignment_rounds = env_int("STRATEGY_LAB_MAX_ALIGNMENT_ROUNDS", 10, floor=1)
 
-        return cls(
+        config = cls(
             alignment_retries=alignment_retries,
             llm_max_retries=llm_max_retries,
             llm_timeout_s=llm_timeout_s,
@@ -368,6 +417,17 @@ class StrategyLabBudgetConfig:
             code_conformance_retries=code_conformance_retries,
             max_alignment_rounds=max_alignment_rounds,
         )
+        logger.info(
+            "Strategy Lab worst-case design-phase LLM-call count: %d "
+            "(design_review_rounds=%d, design_parse_retries=%d, "
+            "design_self_revision_rounds=%d, design_max_llm_calls=%d)",
+            config.worst_case_design_llm_calls(),
+            config.design_review_rounds,
+            config.design_parse_retries,
+            config.design_self_revision_rounds,
+            config.design_max_llm_calls,
+        )
+        return config
 
 
 __all__ = ["StrategyLabBudgetConfig"]
