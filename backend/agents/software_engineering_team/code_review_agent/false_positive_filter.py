@@ -250,7 +250,13 @@ class CodebaseIndex:
               still-bounded, ``"N: "``-prefixed excerpts as if they were complete
               files. ``full_content_complete`` on the returned index reports which
               case occurred (see the class docstring). Ignored entirely when
-              ``pre_numbered`` is False.
+              ``pre_numbered`` is False. Only replaces content for paths already in
+              ``files`` -- an extra ``full_content`` key beyond what this submission
+              already holds is never added, so a caller that (like ``full_content_complete``
+              itself allows) supplies more paths than the submission covers can never
+              expand the index's changed-path set beyond what ``files``/``code``
+              actually determined; a whole-codebase pass reading ``index.files`` must
+              never see a path this submission did not itself include.
             - ``existing_codebase`` carries the input's full existing-codebase
               excerpt (empty string when absent); ``repo_reader`` is stored
               verbatim.
@@ -276,7 +282,13 @@ class CodebaseIndex:
             and set(input_data.full_content) >= set(files)
         )
         if full_content_complete:
-            files = {**files, **input_data.full_content}
+            # Intersect, never union: full_content may (per the coverage check above)
+            # legitimately carry MORE paths than this submission actually reviews --
+            # only paths files already holds are ever replaced, so an extra key can
+            # never expand the index's changed-path set.
+            files = {
+                path: input_data.full_content.get(path, content) for path, content in files.items()
+            }
         return cls(
             files=files,
             existing_codebase=input_data.existing_codebase or "",

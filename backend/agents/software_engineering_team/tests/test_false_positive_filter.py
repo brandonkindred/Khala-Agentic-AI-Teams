@@ -186,6 +186,30 @@ def test_index_from_input_overlays_full_content_when_it_covers_every_path() -> N
     assert idx.full_content_complete is True
 
 
+def test_index_from_input_ignores_full_content_paths_outside_the_submission() -> None:
+    """``full_content`` covering every submission path PLUS an extra, unrelated
+    path (e.g. a caller that scoped it too broadly) must not pull that extra
+    path into the index -- a whole-codebase pass reading ``index.files`` would
+    otherwise treat it as part of this submission's changed-file set even
+    though the submission itself never included it."""
+    code = "### app/main.py ###\n1: def bar():\n2:     return foo()\n"
+    full = "def bar():\n    return foo()\n\ndef extra():\n    pass\n"
+    idx = CodebaseIndex.from_input(
+        CodeReviewInput(
+            code=code,
+            pre_numbered=True,
+            full_content={
+                "app/main.py": full,
+                "app/unrelated.py": "def untouched(): pass\n",
+            },
+            task_description="t",
+        )
+    )
+    assert idx.files["app/main.py"] == full
+    assert "app/unrelated.py" not in idx.files
+    assert idx.full_content_complete is True
+
+
 def test_index_from_input_does_not_overlay_partial_full_content() -> None:
     """A ``full_content`` that covers only SOME of the submission's paths is not
     applied at all (all-or-nothing) -- overlaying just the covered subset would
