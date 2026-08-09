@@ -28,6 +28,7 @@ from shared.git.git_utils import (
 from shared.git.git_utils import (
     create_feature_branch as git_create_feature_branch,
 )
+from software_engineering_team.shared.deliver_utils import run_pre_merge_quality_gate
 from software_engineering_team.shared.v2_models import ToolAgentOutput, ToolAgentPhaseOutput
 
 logger = logging.getLogger(__name__)
@@ -145,6 +146,23 @@ class GitBranchManagementToolAgent:
         if branch_name:
             # We have been committing along the way; commit any remaining, then merge and cleanup.
             commit_working_tree(repo_path, "chore: finalize before merge")
+            gate_ok, gate_msg = run_pre_merge_quality_gate(
+                repo_path=repo_path,
+                task_id=task_id,
+                build_verifier=getattr(phase_inp, "build_verifier", None),
+                build_verify_label=getattr(phase_inp, "build_verify_label", ""),
+                linting_tool_agent=getattr(phase_inp, "linting_tool_agent", None),
+                lint_agent_type=getattr(phase_inp, "lint_agent_type", ""),
+                logger=logger,
+            )
+            if not gate_ok:
+                checkout_branch(repo_path, branch_name)
+                return ToolAgentPhaseOutput(
+                    success=False, summary=f"Pre-merge quality gate failed: {gate_msg}"
+                )
+            # The gate's build verifier may have autofixed and left uncommitted changes;
+            # sweep them up (safe no-op on a clean tree) so the merge includes them.
+            commit_working_tree(repo_path, "chore: pre-merge quality gate autofix")
             merge_ok, merge_msg = merge_branch(repo_path, branch_name, DEVELOPMENT_BRANCH)
             if not merge_ok:
                 abort_merge(repo_path)
@@ -175,6 +193,23 @@ class GitBranchManagementToolAgent:
             if not write_ok:
                 checkout_branch(repo_path, DEVELOPMENT_BRANCH)
                 return ToolAgentPhaseOutput(success=False, summary=f"Write failed: {write_msg}")
+            gate_ok, gate_msg = run_pre_merge_quality_gate(
+                repo_path=repo_path,
+                task_id=task_id,
+                build_verifier=getattr(phase_inp, "build_verifier", None),
+                build_verify_label=getattr(phase_inp, "build_verify_label", ""),
+                linting_tool_agent=getattr(phase_inp, "linting_tool_agent", None),
+                lint_agent_type=getattr(phase_inp, "lint_agent_type", ""),
+                logger=logger,
+            )
+            if not gate_ok:
+                checkout_branch(repo_path, DEVELOPMENT_BRANCH)
+                return ToolAgentPhaseOutput(
+                    success=False, summary=f"Pre-merge quality gate failed: {gate_msg}"
+                )
+            # The gate's build verifier may have autofixed and left uncommitted changes;
+            # sweep them up (safe no-op on a clean tree) so the merge includes them.
+            commit_working_tree(repo_path, "chore: pre-merge quality gate autofix")
             merge_ok, merge_msg = merge_branch(repo_path, created_branch, DEVELOPMENT_BRANCH)
             if not merge_ok:
                 abort_merge(repo_path)
