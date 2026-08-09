@@ -281,7 +281,7 @@ def test_parse_code_ignores_header_like_source_lines() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_input_without_any_code_source_raises() -> None:
+def test_input_without_files_raises() -> None:
     with pytest.raises(ValidationError):
         CodeReviewInput(task_description="t")
 
@@ -290,10 +290,6 @@ def test_input_with_empty_files_dict_raises() -> None:
     """files={} (e.g. a glob miss) is a caller bug, not an empty review."""
     with pytest.raises(ValidationError):
         CodeReviewInput(files={}, task_description="t")
-
-
-def test_input_with_explicit_empty_code_is_valid() -> None:
-    assert CodeReviewInput(code="", task_description="t").code == ""
 
 
 # ---------------------------------------------------------------------------
@@ -337,9 +333,10 @@ class _ScriptedClient(DummyLLMClient):
 
 def test_run_coordinator_with_multi_file_code_merges_chunk_summaries() -> None:
     """Multiple file blocks → multiple chunks → merged CodeReviewOutput."""
-    file1 = "### app/main.py ###\n" + ("x" * 20_000)
-    file2 = "### app/models.py ###\n" + ("y" * 20_000)
-    code = file1 + "\n\n" + file2
+    files = {
+        "app/main.py": "x" * 20_000,
+        "app/models.py": "y" * 20_000,
+    }
 
     client = _ScriptedClient(
         [
@@ -353,7 +350,7 @@ def test_run_coordinator_with_multi_file_code_merges_chunk_summaries() -> None:
     result = run_coordinator(
         client,
         CodeReviewInput(
-            code=code,
+            files=files,
             task_description="Add feature",
             language="python",
         ),
@@ -407,7 +404,7 @@ def test_shared_context_compaction_is_memoized_across_runs() -> None:
 
     def _make_input() -> CodeReviewInput:
         return CodeReviewInput(
-            code="### app/main.py ###\n" + ("x" * 500),
+            files={"app/main.py": "x" * 500},
             task_description="Add feature",
             language="python",
             spec_content=over_budget,
@@ -508,8 +505,7 @@ def test_chunk_prompt_includes_component_and_decision_text() -> None:
 def test_run_coordinator_merges_issues_and_rejects_if_critical() -> None:
     """Coordinator merges issues across chunks; a single critical issue
     propagates to ``approved=False``."""
-    file1 = "### app/main.py ###\n" + ("x" * 20_000)
-    code = file1
+    files = {"app/main.py": "x" * 20_000}
 
     client = _ScriptedClient(
         [
@@ -533,7 +529,7 @@ def test_run_coordinator_merges_issues_and_rejects_if_critical() -> None:
     result = run_coordinator(
         client,
         CodeReviewInput(
-            code=code,
+            files=files,
             task_description="Add feature",
             language="python",
         ),
@@ -554,7 +550,7 @@ def test_run_coordinator_keeps_same_description_on_different_lines() -> None:
     actionable critical/high issue -- unrelated to this test's actual subject
     (line-anchored dedup), so the fixture must satisfy it.
     """
-    code = "### app/main.py ###\n" + "\n".join(f"x{i} = {i}" for i in range(100))
+    files = {"app/main.py": "\n".join(f"x{i} = {i}" for i in range(100))}
 
     client = _ScriptedClient(
         [
@@ -586,7 +582,7 @@ def test_run_coordinator_keeps_same_description_on_different_lines() -> None:
 
     result = run_coordinator(
         client,
-        CodeReviewInput(code=code, task_description="Add feature", language="python"),
+        CodeReviewInput(files=files, task_description="Add feature", language="python"),
     )
 
     assert sorted(i.line for i in result.issues) == [10, 80]
@@ -596,7 +592,7 @@ def test_run_coordinator_drops_unanchored_twin_of_anchored_finding() -> None:
     """An unanchored (line=None) finding that duplicates an anchored one (same
     file_path + description) is dropped, so the issue is reported once (inline),
     not twice (once in the body, once inline)."""
-    code = "### app/main.py ###\n" + "\n".join(f"x{i} = {i}" for i in range(50))
+    files = {"app/main.py": "\n".join(f"x{i} = {i}" for i in range(50))}
 
     client = _ScriptedClient(
         [
@@ -627,7 +623,7 @@ def test_run_coordinator_drops_unanchored_twin_of_anchored_finding() -> None:
 
     result = run_coordinator(
         client,
-        CodeReviewInput(code=code, task_description="Add feature", language="python"),
+        CodeReviewInput(files=files, task_description="Add feature", language="python"),
     )
 
     assert len(result.issues) == 1
@@ -656,13 +652,13 @@ def test_code_review_agent_uses_coordinator_when_code_exceeds_limit() -> None:
 
     # Multi-line so the splitter can break it at line boundaries into >1 chunk
     # (a single 25k-char line would stay one un-splittable chunk).
-    code = "### app/main.py ###\n" + "".join(f"x{i} = {i}\n" for i in range(4000))
+    files = {"app/main.py": "".join(f"x{i} = {i}\n" for i in range(4000))}
 
     client = _MapCounter()
     agent = CodeReviewAgent(llm_client=client, force_in_process=True)
     result = agent.run(
         CodeReviewInput(
-            code=code,
+            files=files,
             task_description="Test",
             language="python",
         )
@@ -1141,52 +1137,6 @@ def test_review_chunk_paths_label_marks_partial_segments() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_files_dict_input_matches_code_input() -> None:
-    """`files=` must produce the same review as the equivalent `code=` blob."""
-    files = {
-        "app/main.py": "def main(): pass",
-        "app/util.py": "def util(): pass",
-    }
-    code = "\n\n".join(f"### {path} ###\n{content}" for path, content in files.items())
-    responses = [
-        {
-            "approved": False,
-            "issues": [
-                {
-                    "severity": "high",
-                    "category": "logic",
-                    "file_path": "app/main.py",
-                    "line": 1,
-                    "description": "main() is empty",
-                    "suggestion": "implement it",
-                }
-            ],
-            "summary": "Needs work.",
-            "spec_compliance_notes": "",
-        }
-    ]
-
-    via_files = run_coordinator(
-        _ScriptedClient(list(responses)),
-        CodeReviewInput(files=files, task_description="t", language="python"),
-    )
-    via_code = run_coordinator(
-        _ScriptedClient(list(responses)),
-        CodeReviewInput(code=code, task_description="t", language="python"),
-    )
-
-    assert via_files.model_dump() == via_code.model_dump()
-    assert via_files.approved is False
-    assert via_files.issues[0].line == 1
-
-
-def test_explicit_empty_code_short_circuits() -> None:
-    result = run_coordinator(DummyLLMClient(), CodeReviewInput(code="", task_description="t"))
-    assert result.approved is True
-    assert result.issues == []
-    assert result.summary == "No code to review."
-
-
 def test_blank_file_content_is_named_by_info_finding() -> None:
     """An empty/whitespace-only file is skipped from review but never silently:
     it gets a non-blocking info finding naming it."""
@@ -1202,19 +1152,6 @@ def test_blank_file_content_is_named_by_info_finding() -> None:
     info = [i for i in result.issues if i.severity == "info"]
     assert [i.file_path for i in info] == ["pkg/__init__.py"]
     assert "empty" in info[0].description
-
-
-def test_code_mode_blank_block_is_named_by_info_finding() -> None:
-    """A ``### path ###`` header whose block is blank is reported, not dropped."""
-    code = "### empty.py ###\n   \n\n### real.py ###\nx = 1"
-    result = run_coordinator(
-        _ScriptedClient(
-            [{"approved": True, "issues": [], "summary": "ok", "spec_compliance_notes": ""}]
-        ),
-        CodeReviewInput(code=code, task_description="t"),
-    )
-    info = [i for i in result.issues if i.severity == "info"]
-    assert [i.file_path for i in info] == ["empty.py"]
 
 
 def test_all_files_blank_short_circuits_with_info_findings() -> None:
@@ -2682,12 +2619,12 @@ def test_run_wide_limiter_caps_concurrent_bisection_across_top_level_chunks(monk
     assert delegate.peak >= 1  # sanity: the concurrent path (not the sequential fallback) ran
 
 
-def test_headerless_code_reviews_as_single_unnamed_block() -> None:
+def test_unnamed_path_reviews_as_single_unnamed_block() -> None:
     client = _ScriptedClient(
         [{"approved": True, "issues": [], "summary": "fine", "spec_compliance_notes": ""}]
     )
     result = run_coordinator(
-        client, CodeReviewInput(code="x = compute()\ny = x + 1", task_description="t")
+        client, CodeReviewInput(files={"": "x = compute()\ny = x + 1"}, task_description="t")
     )
     assert result.approved is True
     assert result.summary == "fine"
@@ -2983,7 +2920,7 @@ def test_zero_issue_reject_with_summary_now_fails_schema_validation() -> None:
     with pytest.raises(CodeReviewUnavailableError):
         run_coordinator(
             client,
-            CodeReviewInput(code="### a.py ###\nx = 1", task_description="t", language="python"),
+            CodeReviewInput(files={"a.py": "x = 1"}, task_description="t", language="python"),
         )
 
 
@@ -3156,9 +3093,7 @@ def test_coordinator_single_chunk_propagates_notes() -> None:
     )
     result = run_coordinator(
         client,
-        CodeReviewInput(
-            code="### a.py ###\ndef a(): pass", task_description="t", language="python"
-        ),
+        CodeReviewInput(files={"a.py": "def a(): pass"}, task_description="t", language="python"),
     )
     assert result.spec_compliance_notes == "Meets all acceptance criteria."
 
@@ -3338,9 +3273,10 @@ def test_coordinator_reports_per_chunk_progress() -> None:
     """With 2 chunks the coordinator reports one 'chunk i/2 reviewed' per
     completion (fractions inside (0.10, 0.90], non-decreasing even with
     parallel workers), then finalizing and done at 1.0."""
-    big_file_1 = "### app/main.py ###\n" + ("a" * 25_000)
-    big_file_2 = "### app/util.py ###\n" + ("b" * 25_000)
-    code = big_file_1 + "\n\n" + big_file_2
+    files = {
+        "app/main.py": "a" * 25_000,
+        "app/util.py": "b" * 25_000,
+    }
 
     calls: list = []
 
@@ -3349,7 +3285,7 @@ def test_coordinator_reports_per_chunk_progress() -> None:
 
     result = run_coordinator(
         DummyLLMClient(),
-        CodeReviewInput(code=code, task_description="Add feature", language="python"),
+        CodeReviewInput(files=files, task_description="Add feature", language="python"),
         progress_callback=_cb,
     )
     assert isinstance(result, CodeReviewOutput)
@@ -3375,7 +3311,7 @@ def test_empty_input_still_reports_done() -> None:
     calls: list = []
     result = run_coordinator(
         DummyLLMClient(),
-        CodeReviewInput(code="", task_description="t"),
+        CodeReviewInput(files={"a.py": ""}, task_description="t"),
         progress_callback=lambda s, d, f: calls.append((s, d, f)),
     )
     assert result.approved is True
@@ -3675,12 +3611,14 @@ def test_spec_compliance_single_pass_routes_note_into_synthesis(monkeypatch) -> 
         ]
     )
 
-    file1 = "### app/main.py ###\n" + ("x" * 20_000)
-    file2 = "### app/models.py ###\n" + ("y" * 20_000)
+    files = {
+        "app/main.py": "x" * 20_000,
+        "app/models.py": "y" * 20_000,
+    }
     result = run_coordinator(
         client,
         CodeReviewInput(
-            code=file1 + "\n\n" + file2,
+            files=files,
             task_description="t",
             profile=ReviewProfile.CODE_REVIEW,
             skip_tail_passes=True,

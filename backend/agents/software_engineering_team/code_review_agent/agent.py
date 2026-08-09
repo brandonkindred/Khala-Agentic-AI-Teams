@@ -173,11 +173,7 @@ class CodeReviewAgent:
                 synchronous wait for the durable workflow's result exceeds
                 ``CODE_REVIEW_EXECUTE_TIMEOUT_S`` — see ``_run_via_temporal``.
         """
-        code_size = (
-            sum(len(c) for c in input_data.files.values())
-            if input_data.files is not None
-            else len(input_data.code or "")
-        )
+        code_size = sum(len(c) for c in input_data.files.values())
         logger.info(
             "CodeReview: reviewing %s chars of %s code | task=%s | has_spec=%s | has_architecture=%s | acceptance_criteria=%s",
             code_size,

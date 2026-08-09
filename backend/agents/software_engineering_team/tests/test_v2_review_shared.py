@@ -833,15 +833,15 @@ def test_code_review_input_carries_repo_root_for_durable_reader(tmp_path: Path) 
 
 
 # ---------------------------------------------------------------------------
-# _code_review_step / CodeReviewInput code= + pre_numbered= surface wiring
+# _code_review_step / CodeReviewInput files=<surface.blocks> + pre_numbered= surface wiring
 # ---------------------------------------------------------------------------
 
 
 def test_run_review_old_contents_meaningful_diff_uses_surface_code(tmp_path: Path) -> None:
     """When ``old_contents`` yields a meaningful, purely-additive diff (no
     deleted line -- see ``_patch_has_any_removal``), the external agent's
-    ``CodeReviewInput`` carries ``code=<surface>``/``pre_numbered=True`` instead of
-    ``files=``."""
+    ``CodeReviewInput`` carries ``files=<surface.blocks>``/``pre_numbered=True``
+    instead of the whole-file ``files=files`` mapping."""
     config = _build_config()
     old_contents = {"a.py": "def f():\n    return 1\n"}
     files = {"a.py": old_contents["a.py"] + "\n\ndef g():\n    return 2\n"}
@@ -867,9 +867,8 @@ def test_run_review_old_contents_meaningful_diff_uses_surface_code(tmp_path: Pat
     cr_input = cr_agent.run.call_args.args[0]
     expected_surface = _maybe_build_change_surface_from_pairs(files, old_contents)
     assert expected_surface is not None
-    assert cr_input.code == expected_surface.code
+    assert cr_input.files == dict(expected_surface.blocks)
     assert cr_input.pre_numbered is True
-    assert cr_input.files is None
 
 
 def test_run_review_old_contents_none_default_keeps_files_behavior(tmp_path: Path) -> None:
@@ -897,7 +896,6 @@ def test_run_review_old_contents_none_default_keeps_files_behavior(tmp_path: Pat
 
     cr_input = cr_agent.run.call_args.args[0]
     assert cr_input.files == files
-    assert cr_input.code == ""
     assert cr_input.pre_numbered is False
 
 
@@ -927,7 +925,6 @@ def test_run_review_old_contents_identical_to_files_keeps_files_behavior(tmp_pat
 
     cr_input = cr_agent.run.call_args.args[0]
     assert cr_input.files == files
-    assert cr_input.code == ""
     assert cr_input.pre_numbered is False
 
 
@@ -962,9 +959,8 @@ def test_microtask_old_contents_meaningful_diff_uses_surface_code(tmp_path: Path
     cr_input = cr_agent.run.call_args.args[0]
     expected_surface = _maybe_build_change_surface_from_pairs(files, old_contents)
     assert expected_surface is not None
-    assert cr_input.code == expected_surface.code
+    assert cr_input.files == dict(expected_surface.blocks)
     assert cr_input.pre_numbered is True
-    assert cr_input.files is None
 
 
 def test_microtask_old_contents_none_default_keeps_files_behavior(tmp_path: Path) -> None:
@@ -993,7 +989,6 @@ def test_microtask_old_contents_none_default_keeps_files_behavior(tmp_path: Path
 
     cr_input = cr_agent.run.call_args.args[0]
     assert cr_input.files == files
-    assert cr_input.code == ""
     assert cr_input.pre_numbered is False
 
 
@@ -1433,7 +1428,6 @@ def test_code_review_no_git_repo_falls_back_to_files(tmp_path: Path) -> None:
     cr_input = cr_agent.run.call_args.args[0]
     assert cr_input.files == {"x.py": "code"}
     assert cr_input.pre_numbered is False
-    assert cr_input.code == ""
 
 
 def test_run_review_no_git_repo_falls_back_to_files(tmp_path: Path) -> None:
@@ -1462,7 +1456,6 @@ def test_run_review_no_git_repo_falls_back_to_files(tmp_path: Path) -> None:
     cr_input = cr_agent.run.call_args.args[0]
     assert cr_input.files == files
     assert cr_input.pre_numbered is False
-    assert cr_input.code == ""
 
 
 def test_run_review_no_git_repo_preserves_reader_language_and_context(
@@ -1499,7 +1492,6 @@ def test_run_review_no_git_repo_preserves_reader_language_and_context(
     # Fallback shape: no base resolved, so `files=` is submitted as-is.
     assert cr_input.files == files
     assert cr_input.pre_numbered is False
-    assert cr_input.code == ""
     # language / review_context preserved onto the same CodeReviewInput.
     assert cr_input.language == "python"
     assert cr_input.architecture is ctx.architecture
@@ -1537,14 +1529,14 @@ def test_code_review_empty_diff_falls_back_to_files(tmp_path: Path) -> None:
     cr_input = cr_agent.run.call_args.args[0]
     assert cr_input.files == {"x.py": "code"}
     assert cr_input.pre_numbered is False
-    assert cr_input.code == ""
 
 
 def test_code_review_purely_additive_diff_uses_change_surface(tmp_path: Path) -> None:
     """A real git base exists and the new content only APPENDS new lines --
     no existing line is touched or removed -- so the agent is submitted the
-    diff-derived change surface (``code=``, ``pre_numbered=True``) instead of
-    ``files=``, with ``full_content`` (scoped to the surface's own paths)
+    diff-derived change surface (``files=<surface.blocks>``, ``pre_numbered=True``)
+    instead of the whole-file ``files=files`` mapping, with ``full_content``
+    (scoped to the surface's own paths)
     riding along so the coordinator's whole-codebase side-effect/architecture
     passes still see real full bodies instead of being disabled by
     ``pre_numbered=True``. Any deletion at all (a replaced or removed line)
@@ -1575,10 +1567,11 @@ def test_code_review_purely_additive_diff_uses_change_surface(tmp_path: Path) ->
 
     assert cr_agent.run.called
     cr_input = cr_agent.run.call_args.args[0]
-    assert cr_input.files is None
+    expected_surface = _resolve_change_surface_for_review(files, tmp_path)
+    assert expected_surface is not None
+    assert cr_input.files == dict(expected_surface.blocks)
     assert cr_input.pre_numbered is True
-    assert "### x.py ###" in cr_input.code
-    assert "def added" in cr_input.code
+    assert "def added" in cr_input.files["x.py"]
     assert cr_input.full_content == files
 
 
@@ -1587,8 +1580,9 @@ def test_run_review_git_auto_resolved_base_uses_change_surface(tmp_path: Path) -
     ``old_contents``: a real git base exists under ``repo_path`` and the new
     content only appends -- the base is auto-resolved from ``HEAD`` (see
     ``_resolve_change_surface_for_review``) and the external agent is
-    submitted the diff-derived change surface (``code=``, ``pre_numbered=True``)
-    rather than ``files=``. Mirrors
+    submitted the diff-derived change surface (``files=<surface.blocks>``,
+    ``pre_numbered=True``) rather than the whole-file ``files=files`` mapping.
+    Mirrors
     ``test_code_review_purely_additive_diff_uses_change_surface``, which
     covers the same auto-resolve path through ``run_microtask_review``."""
     config = _build_config()
@@ -1613,10 +1607,11 @@ def test_run_review_git_auto_resolved_base_uses_change_surface(tmp_path: Path) -
 
     assert cr_agent.run.called
     cr_input = cr_agent.run.call_args.args[0]
-    assert cr_input.files is None
+    expected_surface = _resolve_change_surface_for_review(files, tmp_path)
+    assert expected_surface is not None
+    assert cr_input.files == dict(expected_surface.blocks)
     assert cr_input.pre_numbered is True
-    assert "### x.py ###" in cr_input.code
-    assert "def added" in cr_input.code
+    assert "def added" in cr_input.files["x.py"]
     assert cr_input.full_content == files
 
 
@@ -1650,7 +1645,6 @@ def test_code_review_same_line_edit_falls_back_to_files(tmp_path: Path) -> None:
     cr_input = cr_agent.run.call_args.args[0]
     assert cr_input.files == files
     assert cr_input.pre_numbered is False
-    assert cr_input.code == ""
 
 
 def test_resolve_change_surface_for_review_no_files_returns_none(tmp_path: Path) -> None:
@@ -1739,7 +1733,6 @@ def test_code_review_deletion_only_file_falls_back_to_files(tmp_path: Path) -> N
     cr_input = cr_agent.run.call_args.args[0]
     assert cr_input.files == files
     assert cr_input.pre_numbered is False
-    assert cr_input.code == ""
 
 
 # ---------------------------------------------------------------------------
@@ -1849,7 +1842,6 @@ def test_code_review_mixed_hunk_unrepresented_deletion_falls_back_to_files(
     cr_input = cr_agent.run.call_args.args[0]
     assert cr_input.files == files
     assert cr_input.pre_numbered is False
-    assert cr_input.code == ""
 
 
 # ---------------------------------------------------------------------------
@@ -1913,7 +1905,6 @@ def test_code_review_construct_swap_falls_back_to_files(tmp_path: Path) -> None:
     cr_input = cr_agent.run.call_args.args[0]
     assert cr_input.files == files
     assert cr_input.pre_numbered is False
-    assert cr_input.code == ""
 
 
 _BLANK_PATH_SCENARIO_OLD_A = "def f():\n    return 1\n"
@@ -1978,7 +1969,6 @@ def test_code_review_new_blank_path_falls_back_to_files(tmp_path: Path) -> None:
     cr_input = cr_agent.run.call_args.args[0]
     assert cr_input.files == files
     assert cr_input.pre_numbered is False
-    assert cr_input.code == ""
 
 
 def test_code_review_full_content_scoped_to_surface_paths_not_all_files(
@@ -2111,4 +2101,3 @@ def test_code_review_within_file_removal_only_hunk_falls_back_to_files(
     cr_input = cr_agent.run.call_args.args[0]
     assert cr_input.files == files
     assert cr_input.pre_numbered is False
-    assert cr_input.code == ""

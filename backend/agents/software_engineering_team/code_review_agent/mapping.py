@@ -839,7 +839,7 @@ _TS_EXPORT_RE = re.compile(
 _TS_EXPORT_LIST_RE = re.compile(r"^[ \t]*export[ \t]*\{([^}]*)\}", re.MULTILINE)
 
 # Pre-numbered content (``FileSegment.pre_numbered`` / ``ChangeSurface`` blocks,
-# e.g. a diff-first submission's ``code=``) prefixes every line with its
+# e.g. a diff-first submission's ``files=<surface.blocks>``) prefixes every line with its
 # original line number (``"42: def f():"``), which would otherwise shift every
 # line off column zero and make the anchored symbol patterns above match
 # nothing. Only a genuine ``N: `` prefix at the very start of a line matches
