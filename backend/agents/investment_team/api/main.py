@@ -4333,7 +4333,13 @@ async def stream_strategy_lab_run(run_id: str) -> StreamingResponse:
         - Otherwise the response subscribes to the per-job event bus and
           streams ``snapshot``/``progress``/``cycle_complete``/
           ``cycle_skipped`` events, terminating on ``complete``/``error``/
-          ``cancelled`` followed by a final ``done``.
+          ``cancelled`` followed by a final ``done``. Its connect-time
+          ``snapshot`` event is sourced from ``_active_runs.get(run_id)`` when
+          present, else falls back to the ``state`` loaded above -- so a
+          non-terminal run that exists only via the job-service fallback
+          (e.g. recovered after a server restart, never yet touched by
+          another endpoint) still receives its documented connect-time
+          snapshot instead of none at all.
 
     Raises:
         - ``HTTPException`` 404: ``run_id`` resolves to no state in either
@@ -4384,9 +4390,14 @@ async def stream_strategy_lab_run(run_id: str) -> StreamingResponse:
         return StreamingResponse(_terminal_gen(), media_type="text/event-stream")
 
     async def _snapshot_event() -> Optional[dict]:
-        # Skip the snapshot when there's no current in-memory state to send.
+        # Fall back to the state loaded above (e.g. from the job service) when
+        # _active_runs has no live entry for run_id -- otherwise a non-terminal
+        # run recovered only from the job-service fallback (never written into
+        # _active_runs) would silently get no connect-time snapshot at all.
         async with _async_lock:
             current = _active_runs.get(run_id, {})
+        if not current:
+            current = state
         if not current:
             return None
         return {"type": "snapshot", **_run_state_to_response(current).model_dump(mode="json")}
