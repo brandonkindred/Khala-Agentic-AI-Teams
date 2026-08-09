@@ -4847,7 +4847,7 @@ def _run_paper_trading_background(
         if not isinstance(exc, Exception):
             raise
         logger.exception("Paper trade %s: background worker crashed", session_id)
-        _fail_paper_trading_session(session_id, str(exc))
+        _fail_paper_trading_session(session_id, "Paper trading crashed due to an internal error.")
 
 
 @app.post("/strategy-lab/paper-trade", response_model=PaperTradingResponse)
