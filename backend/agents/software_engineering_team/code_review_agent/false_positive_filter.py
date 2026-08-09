@@ -1711,12 +1711,21 @@ def _build_group_prompt(
 # (keeping only the first/last 200 chars) rather than failing the call, and
 # explicitly leaves toolResult.status as "success"
 # (sliding_window_conversation_manager.py, _truncate_tool_results: "The tool
-# result status is not changed."). The spliced-in marker below is the exact
-# text that recovery path inserts between the preserved head/tail; see
-# _agent_read_the_cited_file for why checking for it (unlike sniffing for our
-# own "Error: ..." convention) is a reliable signal rather than an ambiguous
-# one.
-_STRANDS_TRUNCATION_MARKER = "... [truncated:"
+# result status is not changed."). The regex below matches the *exact*
+# structural shape that recovery path produces -- not a bare substring of its
+# marker text -- so that source content which merely contains the marker as
+# incidental text (e.g. this very module's own constant/comments) is never
+# mistaken for an actual truncated read; see _agent_read_the_cited_file for
+# the full rationale.
+_PRESERVE_CHARS = 200  # mirrors sliding_window_conversation_manager.py's _PRESERVE_CHARS
+_STRANDS_TRUNCATION_RE = re.compile(
+    r"\A.{"
+    + str(_PRESERVE_CHARS)
+    + r"}\.\.\.\n\n\.\.\. \[truncated: \d+ chars removed\] \.\.\.\n\n\.\.\..{"
+    + str(_PRESERVE_CHARS)
+    + r"}\Z",
+    re.DOTALL,
+)
 
 
 def _tool_result_text(tool_result: Dict[str, Any]) -> str:
@@ -1734,6 +1743,25 @@ def _tool_result_text(tool_result: Dict[str, Any]) -> str:
         )
     except Exception:
         return ""
+
+
+def _is_strands_truncated_result(text: str) -> bool:
+    """Whether ``text`` has the exact shape Strands' recovery path produces.
+
+    ``_STRANDS_TRUNCATION_RE`` anchors both ends of ``text`` and requires
+    precisely ``_PRESERVE_CHARS`` characters, then the literal separator (with
+    a digit run for the removed-count), then precisely ``_PRESERVE_CHARS``
+    more characters, with nothing else in the string. Real source text
+    containing the marker as incidental prose (e.g. a comment describing this
+    very check) does not additionally happen to sit at exactly this offset
+    with nothing surrounding it, so this is a reliable structural signal
+    rather than the ambiguous substring check it replaces.
+
+    Preconditions: none (``text`` may be any string, including empty).
+    Postconditions: returns True iff the whole string matches the recovery
+        path's exact output shape. Never raises.
+    """
+    return bool(_STRANDS_TRUNCATION_RE.match(text))
 
 
 def _agent_read_the_cited_file(agent: Agent, index: CodebaseIndex, file_path: str) -> bool:
@@ -1774,20 +1802,23 @@ def _agent_read_the_cited_file(agent: Agent, index: CodebaseIndex, file_path: st
     One text check remains, on top of ``status``: Strands' default
     ``SlidingWindowConversationManager`` recovers from a context-window
     overflow by truncating an oversized toolResult in place -- keeping only
-    the first/last 200 chars and splicing in a distinctive
-    ``"... [truncated: N chars removed] ..."`` marker -- while explicitly
-    leaving ``status`` as ``"success"``
+    the first/last ``_PRESERVE_CHARS`` (200) chars and splicing in a
+    distinctive ``"... [truncated: N chars removed] ..."`` separator --
+    while explicitly leaving ``status`` as ``"success"``
     (``sliding_window_conversation_manager.py``, ``_truncate_tool_results``:
-    "The tool result status is not changed."). Without checking for that
-    marker, a huge cited file could overflow context, get silently truncated
-    to ~400 chars by Strands' own recovery, and still register as a grounded
+    "The tool result status is not changed."). Without checking for that,
+    a huge cited file could overflow context, get silently truncated to
+    ~400 chars by Strands' own recovery, and still register as a grounded
     "success" read here -- letting a drop through on a sliver of the file.
-    Unlike a generic prefix such as our own tools' "Error: ..." convention
-    (deliberately not sniffed, above), this marker is Strands-authored,
-    inserted into the text only by that specific recovery path, and not
-    something real source code would plausibly contain verbatim -- so
-    checking for it is reliable rather than the kind of ambiguous heuristic
-    this function otherwise avoids.
+    The check (``_is_strands_truncated_result``) matches the *exact
+    structural shape* of that recovery path's output (200 chars, the literal
+    separator, 200 more chars, nothing else -- anchored both ends), not a
+    bare substring search for the separator text: a bare substring check
+    would misfire on real source content that happens to contain that
+    phrase incidentally (this very module's own comments/constant included),
+    permanently blocking any drop for findings that cite this file. Requiring
+    the full structural shape keeps the check reliable without that
+    self-referential false positive.
 
     Correlating a toolUse with its toolResult is done by matching
     ``toolUseId``, but scoped to the very next message only (never a global
@@ -1822,8 +1853,9 @@ def _agent_read_the_cited_file(agent: Agent, index: CodebaseIndex, file_path: st
           ``index.resolve_path``, covering a near-miss the model typed instead
           of the exact quoted path) has a toolResult with a matching
           ``toolUseId`` in the message at index ``i + 1``, with
-          ``status == "success"`` AND whose text does not contain Strands'
-          ``"... [truncated:"`` recovery marker. A genuinely empty result (a
+          ``status == "success"`` AND whose text does not structurally match
+          Strands' recovery-path truncation shape (see
+          ``_is_strands_truncated_result``). A genuinely empty result (a
           real zero-byte file, e.g. an unchanged ``__init__.py``) still
           counts. Never raises: a malformed/empty message list, or a toolUse
           with no following message or no untruncated matching success
@@ -1855,7 +1887,7 @@ def _agent_read_the_cited_file(agent: Agent, index: CodebaseIndex, file_path: st
                         continue
                     if result.get("status") != "success":
                         continue
-                    if _STRANDS_TRUNCATION_MARKER in _tool_result_text(result):
+                    if _is_strands_truncated_result(_tool_result_text(result)):
                         continue
                     return True
         return False

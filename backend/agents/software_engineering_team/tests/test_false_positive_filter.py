@@ -2451,6 +2451,28 @@ def test_agent_read_the_cited_file_true_when_content_is_large_but_untruncated() 
     assert _agent_read_the_cited_file(agent, idx, "app/main.py") is True
 
 
+def test_agent_read_the_cited_file_true_when_content_merely_contains_the_marker_text() -> None:
+    """Real, complete file content that happens to contain the literal phrase
+    "... [truncated:" as incidental prose (e.g. this very module's own
+    comments describing the truncation check) must NOT be mistaken for an
+    actual Strands-truncated read. The check matches the exact structural
+    shape Strands' recovery path produces (200 chars, the literal separator,
+    200 more chars, nothing else) -- not a bare substring search -- so an
+    untruncated read whose content merely mentions the phrase mid-file, or
+    even at the very boundary, still grounds normally."""
+    content = (
+        "def foo():\n    # explains the '... [truncated: N chars removed] ...' marker\n    pass\n"
+    )
+    idx = CodebaseIndex(files={"app/main.py": content})
+    agent = _fake_agent(
+        [
+            _tool_use_message("assistant", "t1", "read_file", path="app/main.py"),
+            _tool_result_message("t1", content, status="success"),
+        ]
+    )
+    assert _agent_read_the_cited_file(agent, idx, "app/main.py") is True
+
+
 def test_agent_read_the_cited_file_true_for_a_genuinely_empty_file() -> None:
     """A successful read_file() whose result is the empty string -- a real
     zero-byte cited file, e.g. an unchanged __init__.py -- still counts as

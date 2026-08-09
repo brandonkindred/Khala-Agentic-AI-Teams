@@ -1041,10 +1041,14 @@ slice, a successful read of only a *related* file, calling only
 `read_file` call Strands' own default conversation manager silently
 truncated after a context-window overflow (kept only the first/last 200
 chars, spliced with a `"... [truncated: ...]"` marker) while still marking
-it `status="success"` — that marker is checked for and rejected too, so an
-oversized file that overflows context can't slip through as if it had been
-read in full. A false-positive verdict from a run that never met this bar
-is discarded (the finding is kept) rather than trusted.
+it `status="success"` — the exact structural shape of that truncated output
+(200 chars, the literal separator, 200 more chars, nothing else) is detected
+and rejected too, so an oversized file that overflows context can't slip
+through as if it had been read in full. The check is structural rather than
+a bare substring search specifically so that real file content which merely
+*mentions* that phrase (this doc's own text included) is never mistaken for
+an actual truncated read. A false-positive verdict from a run that never met
+this bar is discarded (the finding is kept) rather than trusted.
 
 When the review is invoked with a repository reader (the GitHub PR-review path
 fetches whole files at the PR head and supplies a reader; the software-engineering
