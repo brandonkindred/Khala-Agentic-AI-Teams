@@ -69,6 +69,7 @@ from software_engineering_team.code_review_agent.change_surface import (
     build_change_surface_from_pairs,
     unified_diffs_from_pairs,
 )
+from software_engineering_team.code_review_agent.mapping import _symbol_surface
 from software_engineering_team.code_review_agent.previous_content import (
     resolve_previous_content,
 )
@@ -345,6 +346,44 @@ def _patch_has_unrepresented_removal(patch: str) -> bool:
     return False
 
 
+def _removes_a_symbol_that_never_reappears(old_text: str, new_text: str) -> bool:
+    """True when a top-level symbol from ``old_text`` is entirely gone from ``new_text``.
+
+    ``_patch_has_unrepresented_removal`` treats a deletion run immediately
+    followed by an addition run as a safe same-spot modification -- correct
+    for an in-place edit (``return 0`` -> ``return 1`` inside a function that
+    keeps its name), but wrong when the "modification" is actually one named
+    top-level construct (a function/class definition, or a TS/JS export
+    binding) being entirely replaced by a *different*, unrelated one at the
+    same location: ``def validate(x): ...`` deleted, ``def unrelated(): ...``
+    added in its place. The rendered surface then shows only the new
+    construct's body -- there is no added line anywhere that could anchor an
+    expansion covering the deleted construct's name, and any unchanged
+    caller elsewhere in the file that still references it (now broken) is
+    invisible too. Reusing ``mapping._symbol_surface`` (already the source of
+    truth the reviewer's own cross-file sibling-symbol awareness relies on)
+    catches exactly this: a symbol present before and absent after, whether
+    or not something else was added in its place.
+
+    Preconditions:
+        - ``old_text`` / ``new_text`` are one path's full old/new content
+          (may be blank, e.g. a brand-new or deleted file).
+
+    Postconditions:
+        - Returns True iff at least one top-level symbol name extracted from
+          ``old_text`` is absent from the symbols extracted from ``new_text``.
+        - A path with no extractable top-level symbols on either side (e.g.
+          non-code content, or a language ``_symbol_surface`` doesn't
+          recognize) never triggers -- this check adds precision on top of
+          ``_patch_has_unrepresented_removal``, it does not replace it.
+        - Never raises.
+    """
+    old_symbols = set(_symbol_surface(old_text))
+    if not old_symbols:
+        return False
+    return not old_symbols.issubset(_symbol_surface(new_text))
+
+
 def _resolve_change_surface_for_review(
     files: Mapping[str, str],
     repo_path: Path,
@@ -382,14 +421,21 @@ def _resolve_change_surface_for_review(
           identical to its new content; a path absent from ``old_map``
           (including one whose new content happens to be blank, e.g. a newly
           added empty marker file) is always genuinely new, never treated as
-          unchanged -- and either: the built surface omits that path entirely
+          unchanged -- and any of: the built surface omits that path entirely
           (a deletion-only *file*, or a blank new file, contributes no added
-          touched lines), or the path's patch deletes lines the surface
-          cannot render (see :func:`_patch_has_unrepresented_removal`).
-          Submitting a surface that omits a real change -- a whole file, or
-          part of one -- would let the reviewer approve without ever seeing
-          it, so this is treated the same as no surface at all: the caller
-          must submit ``files`` as-is rather than a subset of what changed.
+          touched lines), the path's patch deletes lines the surface cannot
+          render (see :func:`_patch_has_unrepresented_removal`), or a
+          top-level symbol (function/class/export) present in the old content
+          is entirely gone from the new content even though something else
+          was added in its place (see
+          :func:`_removes_a_symbol_that_never_reappears` -- a same-spot
+          construct swap that ``_patch_has_unrepresented_removal`` alone
+          would accept as a safe in-place edit). Submitting a surface that
+          omits a real change -- a whole file, part of one, or a removed
+          construct's identity -- would let the reviewer approve without ever
+          seeing it, so this is treated the same as no surface at all: the
+          caller must submit ``files`` as-is rather than a subset of what
+          changed.
         - Otherwise (every genuinely-changed path is fully represented)
           returns the built ``ChangeSurface``.
         - Never raises: ``resolve_previous_content`` already degrades
@@ -414,11 +460,14 @@ def _resolve_change_surface_for_review(
         return None
     patches = unified_diffs_from_pairs(files, old_map)
     for path, new_text in files.items():
-        if path in old_map and old_map[path] == new_text:
+        old_text = old_map.get(path, "")
+        if path in old_map and old_text == new_text:
             continue
         if path not in surface.blocks:
             return None
         if _patch_has_unrepresented_removal(patches.get(path, "")):
+            return None
+        if _removes_a_symbol_that_never_reappears(old_text, new_text):
             return None
     return surface
 
