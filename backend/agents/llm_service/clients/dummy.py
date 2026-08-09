@@ -18,7 +18,7 @@ import hashlib
 import json
 import re
 import sys
-from collections.abc import AsyncGenerator, AsyncIterable, Callable
+from collections.abc import AsyncGenerator, AsyncIterable
 from typing import TYPE_CHECKING, Any, Dict, Optional
 
 from ..interface import LLMClient
