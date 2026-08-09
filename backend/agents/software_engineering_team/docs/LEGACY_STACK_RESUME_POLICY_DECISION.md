@@ -210,9 +210,28 @@ deploy window is longer than a few minutes.
   /run-team/{job_id}/restart` only works for a status already in
   `RESTARTABLE_STATUSES` (`completed`, `failed`, `cancelled`,
   `agent_crash`, `already_complete`), so it is not a universal fix:
-  - `coding_team` rows (`pending`/`running`/`waiting_for_user`): let the
-    job drain (resume/complete) under the current, pre-cleanup code, or
-    cancel it via the existing job-cancel path.
+  - `coding_team` rows in `pending`/`running`: let the job drain
+    (resume/complete) under the current, pre-cleanup code, or cancel it
+    via the generic `POST /jobs/coding_team/{job_id}/cancel` job-service
+    path (safe here — no Temporal workflow is durably paused yet).
+  - `coding_team` rows in `waiting_for_user` (Temporal-native pause): the
+    generic job-cancel path above is **not sufficient** — it only patches
+    the job-service DB row's `status` column; it does not touch
+    `resume_token`/`waiting_for_answers`, and `POST /run/{job_id}/answers`
+    (`submit_pending_answers`) never checks `status`, only that the
+    submitted `resume_token` matches the stored one. A "cancelled"
+    `waiting_for_user` job is therefore still resumable by anyone holding
+    its `resume_token`, which would restore the legacy snapshot under the
+    cleanup build despite the audit re-running clean. There is no exposed
+    REST endpoint to cancel the standalone `CodingTeamWorkflow` itself
+    (`cancel_run_team_workflow` in `temporal/start_workflow.py` only
+    targets the SE `run_team` workflow prefix). The only reliable
+    remediation is to let the job drain — submit its pending answers
+    under the current, pre-cleanup code and let it reach a genuine
+    terminal state — or have an operator cancel/terminate the
+    `CodingTeamWorkflow` Temporal workflow directly (e.g. via `tctl`/the
+    Temporal CLI or an ad hoc script using the same `client.get_workflow_handle(...).cancel()`
+    primitive `cancel_run_team_workflow` uses) before re-running the audit.
   - `software_engineering_team` rows in `pending`/`running`/
     `waiting_for_user`/`agent_crash`: cancel via `POST
     /run-team/{job_id}/cancel` (allowed for these statuses), which moves
