@@ -166,10 +166,14 @@ WHERE (
         'senior_software_engineer_legacy', 'software_engineer'
       )
     )
-    -- (b) a task in the snapshot is missing target_team
+    -- (b) a task in the snapshot is missing target_team, or it's
+    -- whitespace-only: _team_key (team_routing.py) does value.strip()
+    -- before normalizing, so " " / "\t" collapse to "" and match no real
+    -- team, the same practical failure as a genuinely missing value
     OR EXISTS (
       SELECT 1 FROM jsonb_array_elements(data->'task_graph_snapshot') AS t
-      WHERE NOT (t ? 'target_team') OR t->>'target_team' IS NULL OR t->>'target_team' = ''
+      WHERE NOT (t ? 'target_team') OR t->>'target_team' IS NULL
+        OR regexp_replace(t->>'target_team', '\s+', '', 'g') = ''
     )
     -- (c) a user_decision revision_feedback entry lacks structured decisions;
     -- revision_feedback is a per-task field inside task_graph_snapshot, not a
@@ -207,12 +211,15 @@ moment the query is run until the repair-code-removal build is live:
    because of a non-empty `failed_tasks`, is idle (not actively writing)
    at audit time, but calling `POST /run-team/{job_id}/resume`, `POST
    /run-team/{job_id}/retry-failed`, `POST
-   /run-team/{job_id}/resume-after-llm-check`, or the `coding_team`
-   `POST /run/{job_id}/answers` signal on it during the freeze window
-   starts new pre-cleanup work that can write a legacy shape the
-   already-completed audit never saw. Block these endpoints (or the
-   operator actions that would call them) for the full namespace, not
-   just for the three actively-running statuses, until the deploy lands.
+   /run-team/{job_id}/resume-after-llm-check`, or, for `coding_team`,
+   either `POST /run/{job_id}/answers` or `POST /run/{job_id}/resume`
+   (`coding_team_hitl.py` — a second, separate route that also signals
+   `CodingTeamWorkflow.submit_answers` using previously-stored answers)
+   on it during the freeze window starts new pre-cleanup work that can
+   write a legacy shape the already-completed audit never saw. Block
+   these endpoints (or the operator actions that would call them) for
+   the full namespace, not just for the three actively-running statuses,
+   until the deploy lands.
 
 Re-run the query right before un-freezing submissions/workers/resume
 endpoints if the deploy window is longer than a few minutes.
@@ -269,9 +276,18 @@ endpoints if the deploy window is longer than a few minutes.
     in `pending`/`running` (`db_cancel_active_job`'s `WHERE status IN
     ('pending', 'running')` silently no-ops on `waiting_for_user`), so use
     the unconditional `PATCH /jobs/coding_team/{job_id}` (`db_update_job`,
-    no status guard) to set `status` to a terminal value for any status,
-    including `waiting_for_user` — only then does a re-run of the audit
-    stop matching the row.
+    no status guard). This PATCH must set **both** `status` to a terminal
+    value **and** `resume_token` to `null` (plus `waiting_for_answers` to
+    `false`) in the same call — not `status` alone. Re-running the audit
+    query only proves the row is outside the queried *statuses*; it
+    can't see whether the operator verified workflow closure before
+    terminalizing, or whether the pause envelope is still live. Both
+    `POST /run/{job_id}/answers` and `POST /run/{job_id}/resume` act on
+    `resume_token`/`status` from the job record regardless of *when* or
+    *how correctly* the row was terminalized, so clearing `resume_token`
+    is what actually makes the pause permanently unresumable through
+    either route — a terminal `status` alone does not (`/answers` never
+    checks `status` at all).
   - `software_engineering_team` rows in `pending`/`running`/
     `waiting_for_user`/`agent_crash`: cancel via `POST
     /run-team/{job_id}/cancel` (allowed for these statuses), which moves
