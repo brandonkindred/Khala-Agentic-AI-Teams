@@ -1693,8 +1693,13 @@ def _agent_read_the_cited_file(agent: Agent, index: CodebaseIndex, file_path: st
         - Returns ``True`` iff some ``read_file`` toolUse whose input path
           equals ``file_path`` (or resolves to it via ``index.resolve_path``,
           covering a near-miss the model typed instead of the exact quoted
-          path) has a matching toolResult (by ``toolUseId``) whose text is
-          non-empty and does not start with ``"Error:"``. Never raises: a
+          path) has a matching toolResult (by ``toolUseId``) whose text does
+          not start with ``"Error:"``. A genuinely empty result (a real
+          zero-byte file, e.g. an unchanged ``__init__.py`` -- ``read_file``
+          never raises, so an empty string can only mean a successful read of
+          empty content, never a missing/malformed result) still counts:
+          checking non-error is sufficient, requiring non-*empty* text would
+          wrongly discard every drop for a blank cited file. Never raises: a
           malformed/empty message list yields ``False`` (fail-safe: treated
           as "not grounded", so the caller keeps rather than drops on
           ambiguity).
@@ -1725,8 +1730,8 @@ def _agent_read_the_cited_file(agent: Agent, index: CodebaseIndex, file_path: st
                 result = block.get("toolResult")
                 if not isinstance(result, dict) or result.get("toolUseId") not in read_file_ids:
                     continue
-                text = _tool_result_text(result).lstrip()
-                if text and not text.startswith("Error:"):
+                text = _tool_result_text(result)
+                if not text.lstrip().startswith("Error:"):
                     return True
         return False
     except Exception:

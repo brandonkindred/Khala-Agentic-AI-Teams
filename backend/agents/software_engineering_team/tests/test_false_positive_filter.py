@@ -2056,6 +2056,29 @@ def test_filter_honors_drop_when_run_did_call_a_tool() -> None:
     assert out == []
 
 
+def test_filter_honors_drop_when_cited_file_is_genuinely_empty() -> None:
+    """A drop for a genuinely empty cited file (e.g. an unchanged, zero-byte
+    __init__.py) is still honored end to end: the simulated read_file() call
+    succeeds with empty content, and that must count as grounded (not be
+    mistaken for "never read"), so a finding wrongly claiming the file is
+    missing can still be dropped. Uses a repo_reader-backed empty file rather
+    than an empty submission ``files`` entry, since CodebaseIndex.from_input
+    drops truly-empty-string diff content (see
+    test_index_from_files_keeps_whitespace_only); an existing empty repo file
+    is a distinct, legitimately-present case (mirrors
+    test_reader_existing_empty_file_is_present)."""
+    issue = _issue(file_path="pkg/__init__.py", description="pkg/__init__.py must be created")
+    reader = _FakeReader({"pkg/__init__.py": ""})
+    stub = _VerdictStub(verdicts=[{"index": 0, "is_real_issue": False, "confidence": "high"}])
+    out = filter_false_positives(
+        stub,
+        _input(files={"app/main.py": "import pkg\n"}),
+        [issue],
+        repo_reader=reader,
+    )
+    assert out == []
+
+
 def test_filter_honors_all_drops_in_a_multi_finding_batch_after_full_cited_file_read() -> None:
     """The positive mirror of the narrow-slice test above: one successful
     read_file() call for the WHOLE cited file grounds drops for EVERY finding
@@ -2227,6 +2250,22 @@ def test_agent_read_the_cited_file_true_for_successful_read_file() -> None:
         ]
     )
     assert _agent_read_the_cited_file(agent, idx, "app/main.py") is True
+
+
+def test_agent_read_the_cited_file_true_for_a_genuinely_empty_file() -> None:
+    """A successful read_file() whose result is the empty string -- a real
+    zero-byte cited file, e.g. an unchanged __init__.py -- still counts as
+    grounded. read_file never raises, so an empty result can only mean "the
+    file genuinely has no content", never "the read failed silently"; treating
+    it as ungrounded would make every drop for a blank file impossible."""
+    idx = CodebaseIndex(files={"pkg/__init__.py": ""})
+    agent = _fake_agent(
+        [
+            _tool_use_message("assistant", "t1", "read_file", path="pkg/__init__.py"),
+            _tool_result_message("t1", ""),
+        ]
+    )
+    assert _agent_read_the_cited_file(agent, idx, "pkg/__init__.py") is True
 
 
 def test_agent_read_the_cited_file_true_for_a_resolvable_near_miss_path() -> None:
