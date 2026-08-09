@@ -4883,6 +4883,69 @@ class TestDecideReviewModeUnit:
         ]
 
 
+class TestRunReviewerSurfaceFirstDefault:
+    """Epic-level regression guard: PR review must default to the change
+    surface (diff), not the whole file, whenever a usable surface exists.
+
+    ``_decide_review_mode`` attaches both ``change_surface`` and
+    ``head_files`` whenever the whole-file fetch fully succeeds (see
+    ``test_decide_review_mode_attaches_head_backed_change_surface`` above,
+    whose own comment defers this exact question to ``_run_reviewer``). This
+    class exercises ``_run_reviewer`` directly -- the one place that decision
+    is actually made -- so a future change to its
+    ``if surface... elif head_files...`` dispatch can't quietly widen back
+    into whole-file-first without a test catching it here, independent of
+    ``_decide_review_mode``/endpoint wiring (see
+    ``test_endpoint_uses_change_surface_as_primary_when_reviewable`` for the
+    complementary end-to-end happy-path coverage)."""
+
+    def test_dispatches_surface_only_and_ignores_head_files_when_both_are_supplied(
+        self,
+    ) -> None:
+        from software_engineering_team.api import pr_review
+        from software_engineering_team.code_review_agent.change_surface import (
+            ChangeSurface,
+        )
+
+        surface_body = "1: def a():\n2:     return 1\n"
+        whole_file_body = "def a():\n    return 1\n"
+        change_surface = ChangeSurface(blocks={"a.py": surface_body})
+        head_files = {"a.py": whole_file_body}
+        files = [PullRequestFile("a.py", "modified", "@@ -1 +1 @@\n+return 1", 1, 0, None)]
+
+        calls: list[dict[str, Any]] = []
+
+        class _CapProvider:
+            def run_pr_code_review(self, **kw: Any) -> Any:
+                calls.append(dict(kw))
+                return _FakeOutput(issues=[])
+
+        result = pr_review._run_reviewer(
+            _CapProvider(),
+            object(),
+            "o",
+            "r",
+            7,
+            "job1",
+            _mode_pr(),
+            files,
+            hunk_files={},
+            head_files=head_files,
+            change_surface=change_surface,
+        )
+
+        assert result is not None
+        # Surface-first: exactly one reviewer call, not one per source --
+        # head_files must be replaced, not merged in alongside the surface.
+        assert len(calls) == 1
+        assert calls[0]["files"] == dict(change_surface.blocks)
+        assert calls[0]["pre_numbered"] is True
+        # Belt-and-suspenders: the whole-file body must never reach the
+        # reviewer through any captured kwarg.
+        assert whole_file_body not in calls[0]["files"].values()
+        assert all(whole_file_body != v for v in calls[0].values() if isinstance(v, str))
+
+
 class TestPartitionReviewIssuesUnit:
     """Direct unit tests for _partition_review_issues, extracted from
     _run_pr_review_body for exactly this reason."""
