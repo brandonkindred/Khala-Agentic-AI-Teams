@@ -40,13 +40,29 @@ _pool: ConnectionPool | None = None
 _pool_lock = threading.Lock()
 
 
+def _required_env(name: str) -> str:
+    """Read a required environment variable — no fallback default.
+
+    Preconditions: none.
+    Postconditions: returns the variable's value. Raises ``RuntimeError`` when
+        it is unset or empty: job_service's Postgres credentials must always
+        be supplied explicitly (docker-compose and CI both already do this
+        for every path that starts job_service), never silently defaulted to
+        a guessable value.
+    """
+    value = os.environ.get(name)
+    if not value:
+        raise RuntimeError(f"{name} environment variable is required (no default is set)")
+    return value
+
+
 def _dsn() -> str:
     return make_conninfo(
         host=os.environ.get("POSTGRES_HOST", "localhost"),
         port=os.environ.get("POSTGRES_PORT", "5432"),
         dbname=os.environ.get("POSTGRES_DB", "khala_jobs"),
-        user=os.environ.get("POSTGRES_USER", "khala"),
-        password=os.environ.get("POSTGRES_PASSWORD", "khala"),
+        user=_required_env("POSTGRES_USER"),
+        password=_required_env("POSTGRES_PASSWORD"),
     )
 
 
