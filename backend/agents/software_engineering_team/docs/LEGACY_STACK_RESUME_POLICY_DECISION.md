@@ -36,15 +36,38 @@ structured HITL decisions:
 
 **Persistence.** A single Postgres `jobs` table
 (`backend/job_service/postgres.py`, primary key `(team, job_id)`) stores
-all coding-team job state in a JSONB `data` column. There is no
+job state in a JSONB `data` column, namespaced by `team`. There is no
 `schema_version` field — legacy vs. current shape is only detectable by
-field presence/absence inside `data`. Job `status` values in use:
-`pending`, `running`, `waiting_for_user` (paused for HITL — still
-non-terminal/resumable, per `job_store.NON_TERMINAL_STATUSES`),
-`completed`, `failed`, `cancelled` (terminal, never resumed again). Resume happens via a
-Temporal `submit_answers` signal that re-invokes the pipeline activity,
-which re-reads the job record and restores `task_graph_snapshot`/
-`stack_specs` — exactly where the repair functions above fire today.
+field presence/absence inside `data`. The repair functions above can fire
+against records under **two different `team` keys**, both of which carry
+`task_graph_snapshot`/`stack_specs`/per-task `revision_feedback` in the
+same shape:
+
+- `team = 'coding_team'` — standalone `/api/coding-team` jobs. Resume
+  happens via a Temporal `submit_answers` signal that re-invokes the
+  pipeline activity, which re-reads the job record and restores
+  `task_graph_snapshot`/`stack_specs`. Status values in use: `pending`,
+  `running`, `waiting_for_user` (paused for HITL — still
+  non-terminal/resumable, per `job_store.NON_TERMINAL_STATUSES`),
+  `completed`, `failed`, `cancelled` (terminal — no resume/retry endpoint
+  exists for a `coding_team` job once it reaches one of these).
+- `team = 'software_engineering_team'` — the full four-phase `run_team`
+  pipeline. Its execution phase delegates to the same coding-team
+  orchestrator (`orchestrator._run_coding_and_finalize` →
+  `run_coding_team_orchestrator`), but with `update_job_fn`/`get_job_fn`
+  bound to the *SE* job store, so the coding-team snapshot is persisted
+  under the SE job's own record instead of a separate `coding_team` row.
+  This namespace has **two** resume paths, not one: `POST
+  /run-team/{job_id}/resume` (status in `RESUMABLE_STATUSES` — `pending`,
+  `running`, `agent_crash`, `failed`, `waiting_for_user`) and `POST
+  /run-team/{job_id}/retry-failed`, which has no status gate beyond
+  rejecting `running` and instead only requires a non-empty
+  `failed_tasks` list — so a `completed` or `cancelled` SE job that ended
+  with lingering `failed_tasks` remains retry-eligible indefinitely, not
+  just while non-terminal. (`POST /run-team/{job_id}/restart` is not a
+  resume path for this purpose: `reset_job` fully replaces the job
+  record with a clean payload that carries no `task_graph_snapshot` /
+  `stack_specs`, so a restarted job cannot carry forward a legacy shape.)
 
 ## Decision
 
@@ -74,13 +97,16 @@ Once the repair/fallback code above is removed:
   dedicated one-shot migration script would re-implement the same logic
   in a throwaway tool, doubling the maintenance surface this cleanup
   exists to close.
-- **Jobs are short-lived.** Plan → execute → review pipelines don't sit in
+- **Most jobs are short-lived, and the audit below is scoped to catch the
+  exception.** Plan → execute → review pipelines don't sit in
   `pending`/`running` for long, and even a `waiting_for_user` pause is
-  bounded by how long it takes an operator to answer, so a pre-deploy
-  audit for any in-flight legacy-shaped job (below) is cheap and should
-  normally find zero rows. There is no large body of long-lived legacy
-  data that would
-  justify a permanent migration path.
+  bounded by how long it takes an operator to answer — but an SE
+  `run_team` job that ended `completed`/`cancelled` with lingering
+  `failed_tasks` stays retry-eligible via `/retry-failed` indefinitely,
+  with no time bound. The pre-deploy audit below is written to include
+  that case explicitly rather than assuming all resumable jobs are
+  non-terminal; a fail-fast error still beats a permanent migration path
+  for the (expected to be rare) jobs it flags.
 - **Fail loud, not silent.** A clear, field-identifying error beats
   either silently coercing the data or silently refusing without a
   diagnostic — an operator needs to know *which* job and *which* field
@@ -94,24 +120,34 @@ Once the repair/fallback code above is removed:
 ## Pre-deploy job-store check
 
 Before deploying the repair-code removal, run a one-time audit against
-the `jobs` table for the coding team's `team` key, restricted to
-**non-terminal** rows — `status` in `job_store.NON_TERMINAL_STATUSES`,
-i.e. `pending`, `running`, or `waiting_for_user` (a paused HITL job is
-still in flight and will hit the repair/fail-fast path when it resumes,
-so it must be included, not just `pending`/`running`):
+the `jobs` table covering **both** namespaces, each restricted to the
+rows that namespace's own API can still resume:
+
+- `coding_team`: `status IN ('pending', 'running', 'waiting_for_user')` —
+  its only resume path is the HITL signal on a non-terminal job.
+- `software_engineering_team`: the `/resume`-eligible statuses
+  (`pending`, `running`, `agent_crash`, `failed`, `waiting_for_user`)
+  **or** any status with a non-empty `failed_tasks` array (the
+  `/retry-failed` path, which is not gated by status beyond excluding
+  `running`).
 
 ```sql
-SELECT job_id, status
+SELECT team, job_id, status
 FROM jobs
-WHERE team = '<coding-team-key>'
-  AND status IN ('pending', 'running', 'waiting_for_user')
+WHERE (
+    (team = 'coding_team' AND status IN ('pending', 'running', 'waiting_for_user'))
+    OR (team = 'software_engineering_team' AND (
+      status IN ('pending', 'running', 'agent_crash', 'failed', 'waiting_for_user')
+      OR jsonb_array_length(COALESCE(data->'failed_tasks', '[]'::jsonb)) > 0
+    ))
+  )
   AND (
     -- (a) a stack_specs entry uses a legacy alias name, normalized the same
-    -- way _legacy_stack_key does (lowercase, '-'/' ' -> '_') so variants like
-    -- "Senior Software Engineer" or "senior-software-engineer" are caught
+    -- way _legacy_stack_key does (strip, lowercase, '-'/' ' -> '_') so variants
+    -- like " Senior Software Engineer " or "senior-software-engineer" are caught
     EXISTS (
       SELECT 1 FROM jsonb_array_elements(data->'stack_specs') AS s
-      WHERE lower(regexp_replace(s->>'name', '[- ]', '_', 'g')) IN (
+      WHERE lower(regexp_replace(trim(s->>'name'), '[- ]', '_', 'g')) IN (
         'default', 'senior_software_engineer',
         'senior_software_engineer_legacy', 'software_engineer'
       )
@@ -134,10 +170,14 @@ WHERE team = '<coding-team-key>'
 ```
 
 - **Zero rows:** safe to deploy.
-- **Any rows:** do not deploy the repair-code removal yet. Either let the
-  matching jobs drain (resume/complete) under the current, pre-cleanup
-  code, or manually cancel them via the existing job-cancel path, then
-  re-run the check before deploying.
+- **Any rows:** do not deploy the repair-code removal yet. For
+  `coding_team` rows, let the job drain (resume/complete) under the
+  current, pre-cleanup code or cancel it via the existing job-cancel
+  path. For `software_engineering_team` rows, either let it finish
+  resuming/retrying under pre-cleanup code, or clear its retry
+  eligibility (e.g. `POST /run-team/{job_id}/restart`, which fully
+  resets the job record and drops the legacy snapshot). Re-run the check
+  before deploying.
 
 This check only needs to run once per deploy of the repair-code-removal
 work; no recurring migration job or new schema field is introduced.
