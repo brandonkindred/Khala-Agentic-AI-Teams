@@ -20,7 +20,7 @@ import logging
 import re
 import threading
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterable, List, Optional
 
 import pytest
 from code_review_agent.coordinator import run_coordinator
@@ -800,6 +800,28 @@ def test_search_repo_references_respects_max_files_scanned() -> None:
     assert {path for path, _, _ in hits} <= set(reader_files)
 
 
+@pytest.mark.parametrize("raise_error", [True, False])
+def test_search_repo_references_per_file_failure_keeps_other_hits(raise_error: bool) -> None:
+    """One file's read_file failing (raise or None) skips just that file, not the scan.
+
+    Distinct from the ``_BoomReader`` case (list_files itself fails): here the
+    listing succeeds and most files read fine, so the other hits must still
+    surface, with ``truncated`` set to flag the incomplete coverage.
+    """
+    from software_engineering_team.code_review_agent.false_positive_filter import (
+        _search_repo_references,
+    )
+
+    files = {"a.py": "needle\n", "bad.py": "needle\n", "c.py": "needle\n"}
+    idx = CodebaseIndex(
+        files={"sub.py": "other\n"},
+        repo_reader=_PartialFailReader(files, fail_paths=["bad.py"], raise_error=raise_error),
+    )
+    hits, truncated = _search_repo_references(idx, "needle", max_matches=10)
+    assert {path for path, _, _ in hits} == {"a.py", "c.py"}
+    assert truncated is True
+
+
 def test_find_references_no_reader_unchanged() -> None:
     """Without a reader, results stay submission-only and note that explicitly."""
     idx = CodebaseIndex(files={"a.py": "def foo():\n    pass\n"})
@@ -866,6 +888,19 @@ def test_find_references_attaches_enclosing_construct_excerpt() -> None:
     assert "return outer()" in result
     assert "def outer():" in result  # definition hit may also appear
     assert _NO_REPO in result
+
+
+def test_find_references_repo_hit_unreadable_at_format_time_returns_locator_only() -> None:
+    """A repo hit found during the scan but unreadable on the second, format-time read
+    degrades to a bare path:line locator instead of raising or dropping the hit."""
+    idx = CodebaseIndex(
+        files={"sub.py": "other\n"},
+        repo_reader=_FlakyReader({"caller.py": "def caller():\n    return needle()\n"}),
+    )
+    result = idx.find_references("needle")
+    assert result == "caller.py:2"
+    assert "function caller" not in result
+    assert "def caller" not in result
 
 
 def test_find_references_module_level_hit_gets_line_window_fallback() -> None:
@@ -2135,6 +2170,60 @@ class _BoomReader:
 
     def read_file(self, path: str) -> Optional[str]:
         raise RuntimeError("read boom")
+
+
+class _PartialFailReader:
+    """A reader whose read_file fails for specific paths, succeeds for the rest.
+
+    Models one file's fetch failing mid-scan (e.g. a GitHub-backed reader
+    erroring on a single path) without aborting the whole repo half of
+    ``find_references`` -- distinct from ``_BoomReader``'s total ``list_files``
+    failure, which never gets far enough to scan any file.
+    """
+
+    def __init__(
+        self, files: Dict[str, str], fail_paths: Iterable[str], *, raise_error: bool = True
+    ):
+        self._files = files
+        self._fail_paths = set(fail_paths)
+        self._raise_error = raise_error
+
+    def list_files(self) -> List[str]:
+        return list(self._files)
+
+    def read_file(self, path: str) -> Optional[str]:
+        key = (path or "").strip()
+        if key in self._fail_paths:
+            if self._raise_error:
+                raise RuntimeError(f"read boom: {key}")
+            return None
+        return self._files.get(key)
+
+
+class _FlakyReader:
+    """A reader whose read_file returns ``None`` after the first successful read per path.
+
+    ``find_references`` reads a matched repo file twice: once in
+    ``_search_repo_references`` to find the hit, and again in
+    ``_format_reference_hit`` (via ``CodebaseIndex._read``) to build the
+    excerpt. This models a reader that can serve a file once but not again
+    (e.g. a transient or rate-limited fetch), exercising the locator-only
+    fallback when that second read fails.
+    """
+
+    def __init__(self, files: Dict[str, str]):
+        self._files = files
+        self._served: set = set()
+
+    def list_files(self) -> List[str]:
+        return list(self._files)
+
+    def read_file(self, path: str) -> Optional[str]:
+        key = (path or "").strip()
+        if key in self._served:
+            return None
+        self._served.add(key)
+        return self._files.get(key)
 
 
 def test_index_list_files_appends_reader_paths_deduped() -> None:
