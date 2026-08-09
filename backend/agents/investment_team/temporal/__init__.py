@@ -1,6 +1,6 @@
 """Temporal workflows + worker wiring for the investment team.
 
-Mirrors ``user_agent_founder.temporal``: workflow/activity definitions live in
+Mirrors ``agent_team_studio.user_agent_founder.temporal``: workflow/activity definitions live in
 :mod:`workflows` (sandbox-safe), and worker startup lives in :mod:`worker`,
 invoked by the generic team_service entrypoint at boot via the
 ``TEAM_TEMPORAL_WORKER_MODULE`` / ``TEAM_TEMPORAL_WORKER_FUNC`` env vars.
@@ -28,6 +28,7 @@ from investment_team.temporal.paper_trading import (
 )
 from investment_team.temporal.workflows import (
     InvestmentBacktestWorkflow,
+    mark_backtest_job_cancelled_activity,
     run_backtest_activity,
 )
 
@@ -38,6 +39,7 @@ from investment_team.temporal.workflows import (
 WORKFLOWS = [InvestmentBacktestWorkflow, PaperTradingWorkflow]
 ACTIVITIES = [
     run_backtest_activity,
+    mark_backtest_job_cancelled_activity,
     run_paper_trading_activity,
     mark_paper_trading_stopped_activity,
 ]
@@ -55,6 +57,7 @@ __all__ = [
     "TASK_QUEUE",
     "WORKFLOWS",
     "WORKFLOW_ID_PREFIX",
+    "mark_backtest_job_cancelled_activity",
     "mark_paper_trading_stopped_activity",
     "run_backtest_activity",
     "run_paper_trading_activity",

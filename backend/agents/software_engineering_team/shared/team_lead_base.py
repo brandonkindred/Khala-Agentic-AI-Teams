@@ -37,7 +37,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, FrozenSet, Mapping, Optional, Sequence, Tuple, TypeVar
 
 from llm_service import LLMClient
-from software_engineering_team.shared.models import SystemArchitecture, Task
+from shared.dev_models.models import SystemArchitecture, Task
 from software_engineering_team.shared.repo_context_cache import RepoContextCache
 from software_engineering_team.shared.v2_models import Phase
 

@@ -38,6 +38,7 @@ from typing import Any
 
 from temporalio import workflow
 from temporalio.common import RetryPolicy
+from temporalio.exceptions import is_cancelled_exception
 
 with workflow.unsafe.imports_passed_through():
     from sales_team.models import PipelineStage
@@ -102,10 +103,18 @@ class SalesWorkflow:
               via ``sales_mark_failed``) and the error re-raises so the
               Temporal workflow fails — a real failure is never reported as a
               succeeded workflow.
+            - On workflow/activity cancellation the error re-raises without
+              scheduling ``sales_mark_failed`` (cancelled jobs must not be
+              recorded as FAILED).
         """
         try:
             return await self._pipeline(job_id, request)
         except Exception as exc:
+            # Temporal cancellation (bare CancelledError or ActivityError with
+            # a CancelledError cause) must propagate without mutating job
+            # state — matching the module docstring's cancel contract.
+            if is_cancelled_exception(exc):
+                raise
             try:
                 await workflow.execute_activity(
                     _act.mark_failed_activity,

@@ -7,9 +7,9 @@ import pytest
 from architecture_expert import ArchitectureExpertAgent, ArchitectureInput
 
 from llm_service import DummyLLMClient
+from shared.dev_models.models import ProductRequirements
 from software_engineering_team.shared import llm as llm_mod
 from software_engineering_team.shared.development_plan_writer import write_architecture_plan
-from software_engineering_team.shared.models import ProductRequirements
 from software_engineering_team.tests.conftest import _patch_fenced_response, _strands_model_double
 
 
@@ -42,7 +42,7 @@ def test_architecture_agent_produces_components(requirements: ProductRequirement
 
 def test_architecture_agent_with_existing_architecture(requirements: ProductRequirements) -> None:
     """Architecture Expert accepts existing_architecture for extension."""
-    from software_engineering_team.shared.models import SystemArchitecture
+    from shared.dev_models.models import SystemArchitecture
 
     llm = DummyLLMClient()
     agent = ArchitectureExpertAgent(llm_client=llm)

@@ -5,7 +5,7 @@ admission, review-mode decisions, partitioning, comment posting, and
 finalization thoroughly, both directly and through the ``/review-pr``
 endpoint. This file targets the handful of pure/near-pure helpers that suite
 only reaches indirectly (or not at all): heartbeat liveness, duplicate-review
-and sibling-checkout detection, language inference, the whole-file focus
+and sibling-checkout detection, language inference, the diff-first focus
 note, author resolution, and the reviewer-dispatch/merge logic in
 ``_run_reviewer``. Self-contained: no imports from other test modules.
 """
@@ -13,6 +13,7 @@ note, author resolution, and the reviewer-dispatch/merge logic in
 from __future__ import annotations
 
 import os
+import sys
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
@@ -21,6 +22,8 @@ import pytest
 import software_engineering_team.api.coding_team_main as main
 from software_engineering_team.api import pr_review
 from software_engineering_team.api.coding_team_state import _HEARTBEAT_CLOCK_SKEW_TOLERANCE_S
+from software_engineering_team.code_review_agent.change_surface import ChangeSurface
+from software_engineering_team.github_source import PullRequestFile
 
 _STALE_S = pr_review._REVIEW_GUARD_HEARTBEAT_STALE_S
 
@@ -211,11 +214,12 @@ class TestRunningSiblingOnCheckoutUnit:
         monkeypatch.setattr(main, "list_jobs", lambda active_only=True: [sibling])
         assert pr_review._running_sibling_on_checkout(str(repo_dir), "own-job") is None
 
+    @pytest.mark.skipif(sys.platform == "win32", reason="Directory symlinks require privileges on Windows")
     def test_symlinked_path_matches_canonically(self, monkeypatch, tmp_path) -> None:
         real_dir = tmp_path / "real"
         real_dir.mkdir()
         link = tmp_path / "link"
-        os.symlink(real_dir, link)
+        os.symlink(real_dir, link, target_is_directory=(sys.platform == "win32"))
         sibling = {"job_id": "sibling-1", "repo_path": str(link)}
         monkeypatch.setattr(main, "list_jobs", lambda active_only=True: [sibling])
         assert pr_review._running_sibling_on_checkout(str(real_dir), "own-job") == sibling
@@ -280,75 +284,52 @@ class TestInferReviewLanguageUnit:
 
 
 # ---------------------------------------------------------------------------
-# _whole_file_focus
+# _diff_first_focus
 # ---------------------------------------------------------------------------
 
+_EIGHT_CRITERIA_MARKERS = (
+    "Logical / syntactic correctness",
+    "Contract changes on touched functions/classes",
+    "Side effects on callers",
+    "Architectural standards",
+    "Language / library / framework best practices",
+    "New issues introduced by the change",
+    "implement/fix the ticket/spec",
+    "Project style preferences",
+)
 
-class TestWholeFileFocusUnit:
+
+class TestDiffFirstFocusUnit:
     def test_blank_body_returns_note_alone(self) -> None:
-        result = pr_review._whole_file_focus("")
+        result = pr_review._diff_first_focus("")
         assert result.startswith(pr_review.REVIEW_FOCUS_NOTE_PREFIX)
         assert "\n\n" not in result[: len(pr_review.REVIEW_FOCUS_NOTE_PREFIX) + 1]
 
     def test_whitespace_only_body_returns_note_alone(self) -> None:
-        result = pr_review._whole_file_focus("   \n")
+        result = pr_review._diff_first_focus("   \n")
         assert result.startswith(pr_review.REVIEW_FOCUS_NOTE_PREFIX)
         assert "   " not in result
 
     def test_non_blank_body_is_prefixed_to_note(self) -> None:
-        result = pr_review._whole_file_focus("Fixes the flaky retry loop.")
+        result = pr_review._diff_first_focus("Fixes the flaky retry loop.")
         assert result.startswith("Fixes the flaky retry loop.\n\n")
         assert pr_review.REVIEW_FOCUS_NOTE_PREFIX in result
 
     def test_note_instructs_pre_existing_field(self) -> None:
-        result = pr_review._whole_file_focus("body")
-        # Both directions of the tag, not just the bare field name -- a note
-        # that only ever said "do not set pre_existing" would still contain
-        # the word "pre_existing" but would fail this.
+        result = pr_review._diff_first_focus("body")
         assert "pre_existing: false" in result
         assert "pre_existing: true" in result
 
+    def test_note_lists_eight_criteria(self) -> None:
+        result = pr_review._diff_first_focus("body")
+        for marker in _EIGHT_CRITERIA_MARKERS:
+            assert marker in result, f"missing criterion marker: {marker!r}"
 
-# ---------------------------------------------------------------------------
-# _hunk_review_focus
-# ---------------------------------------------------------------------------
-
-
-class TestHunkReviewFocusUnit:
-    def test_blank_body_returns_note_alone(self) -> None:
-        result = pr_review._hunk_review_focus("")
-        assert result.startswith(pr_review.REVIEW_FOCUS_NOTE_PREFIX)
-        assert "\n\n" not in result[: len(pr_review.REVIEW_FOCUS_NOTE_PREFIX) + 1]
-
-    def test_whitespace_only_body_returns_note_alone(self) -> None:
-        result = pr_review._hunk_review_focus("   \n")
-        assert result.startswith(pr_review.REVIEW_FOCUS_NOTE_PREFIX)
-        assert "   " not in result
-
-    def test_non_blank_body_is_prefixed_to_note(self) -> None:
-        result = pr_review._hunk_review_focus("Fixes the flaky retry loop.")
-        assert result.startswith("Fixes the flaky retry loop.\n\n")
-        assert pr_review.REVIEW_FOCUS_NOTE_PREFIX in result
-
-    def test_note_instructs_pre_existing_field(self) -> None:
-        result = pr_review._hunk_review_focus("body")
-        # Both directions of the tag, not just the bare field name -- a note
-        # that only ever said "do not set pre_existing" would still contain
-        # the word "pre_existing" but would fail this.
-        assert "pre_existing: false" in result
-        assert "pre_existing: true" in result
-
-    def test_differs_from_whole_file_focus_with_hunk_specific_wording(self) -> None:
-        # Guards against _hunk_review_focus regressing into a plain alias of
-        # _whole_file_focus: the two must produce different text, and the hunk
-        # note must mention hunks specifically (not just the shared
-        # "pre_existing" tagging instructions the two modes share).
-        hunk_result = pr_review._hunk_review_focus("body")
-        whole_result = pr_review._whole_file_focus("body")
-        assert hunk_result != whole_result
-        assert "pre_existing" in hunk_result
-        assert "hunk" in hunk_result.lower()
-        assert "hunk" not in whole_result.lower()
+    def test_note_is_diff_first(self) -> None:
+        result = pr_review._diff_first_focus("")
+        lower = result.lower()
+        assert "diff-first" in lower or "what this pull request changes" in lower
+        assert "enclosing" in lower
 
 
 # ---------------------------------------------------------------------------
@@ -461,9 +442,10 @@ def _run_reviewer_kwargs(**overrides: Any) -> Dict[str, Any]:
         job_id="job-1",
         pr=_FakePR(),
         files=[_FakeFile("a.py")],
-        code="",
+        hunk_files=None,
         head_files=None,
         repo_reader=None,
+        change_surface=None,
     )
     base.update(overrides)
     return base
@@ -492,7 +474,7 @@ class TestRunReviewerUnit:
         self._patch_collaborators(monkeypatch)
         output = _FakeOutput(["issue"], "summary", "notes")
         provider = _RecordingProvider([output])
-        kwargs = _run_reviewer_kwargs(head_files={"a.py": "content"}, code="")
+        kwargs = _run_reviewer_kwargs(head_files={"a.py": "content"}, hunk_files=None)
 
         result = pr_review._run_reviewer(provider, **kwargs)
 
@@ -501,17 +483,18 @@ class TestRunReviewerUnit:
         call = provider.calls[0]
         assert call["pre_numbered"] is False
         assert call["files"] == {"a.py": "content"}
-        assert call["task_requirements"] == pr_review._whole_file_focus("PR body")
+        assert call["task_requirements"] == pr_review._diff_first_focus("PR body")
         # Content assertions so a simultaneous regression in _run_reviewer and
-        # _whole_file_focus cannot hide behind the equality check above.
+        # _diff_first_focus cannot hide behind the equality check above.
         assert "PR body" in call["task_requirements"]
         assert "pre_existing" in call["task_requirements"]
+        assert "Architectural standards" in call["task_requirements"]
 
-    def test_only_code_runs_one_hunk_call(self, monkeypatch) -> None:
+    def test_only_hunk_files_runs_one_hunk_call(self, monkeypatch) -> None:
         self._patch_collaborators(monkeypatch)
         output = _FakeOutput(["issue"], "summary", "notes")
         provider = _RecordingProvider([output])
-        kwargs = _run_reviewer_kwargs(head_files=None, code="### a.py ###\n1: x = 1")
+        kwargs = _run_reviewer_kwargs(head_files=None, hunk_files={"a.py": "1: x = 1"})
 
         result = pr_review._run_reviewer(provider, **kwargs)
 
@@ -519,25 +502,26 @@ class TestRunReviewerUnit:
         assert len(provider.calls) == 1
         call = provider.calls[0]
         assert call["pre_numbered"] is True
-        assert call["code"] == "### a.py ###\n1: x = 1"
-        # Hunk mode now appends the same "tag pre-existing findings" focus note as
-        # whole-file mode (previously it passed the PR body verbatim with no
-        # tagging instruction) -- see _hunk_review_focus.
-        assert call["task_requirements"] == pr_review._hunk_review_focus("PR body")
-        # Content assertions (not just equality with _hunk_review_focus's own
+        assert call["files"] == {"a.py": "1: x = 1"}
+        # Every attempt appends the shared diff-first focus note (previously
+        # whole-file and hunk modes used separate notes).
+        assert call["task_requirements"] == pr_review._diff_first_focus("PR body")
+        # Content assertions (not just equality with _diff_first_focus's own
         # output): guard against _run_reviewer regressing to pass the body
         # verbatim, which would make the equality check above vacuously true
-        # only if _hunk_review_focus also regressed in lockstep.
+        # only if _diff_first_focus also regressed in lockstep.
         assert "PR body" in call["task_requirements"]
         assert "pre_existing" in call["task_requirements"]
-        assert "diff hunks" in call["task_requirements"]
+        assert "Architectural standards" in call["task_requirements"]
 
     def test_both_sources_run_two_calls_and_merge(self, monkeypatch) -> None:
         self._patch_collaborators(monkeypatch)
         whole_output = _FakeOutput(["whole-issue"], "whole summary", "")
         hunk_output = _FakeOutput(["hunk-issue"], "", "hunk notes")
         provider = _RecordingProvider([whole_output, hunk_output])
-        kwargs = _run_reviewer_kwargs(head_files={"a.py": "content"}, code="### b.py ###\n1: y = 2")
+        kwargs = _run_reviewer_kwargs(
+            head_files={"a.py": "content"}, hunk_files={"b.py": "1: y = 2"}
+        )
 
         result = pr_review._run_reviewer(provider, **kwargs)
 
@@ -545,40 +529,39 @@ class TestRunReviewerUnit:
         # Whole-file attempt dispatched before the hunk attempt.
         assert provider.calls[0]["pre_numbered"] is False
         assert provider.calls[1]["pre_numbered"] is True
-        # Each attempt gets its own focus note and its own content, so a
-        # regression that swaps the whole-file/hunk wiring (or drops the
-        # hunk-mode pre_existing note) can't hide behind the flags above.
-        assert provider.calls[0]["task_requirements"] == pr_review._whole_file_focus("PR body")
+        # Each attempt gets the same diff-first focus note and its own content,
+        # so a regression that swaps the whole-file/hunk wiring (or drops the
+        # pre_existing note) can't hide behind the flags above.
+        assert provider.calls[0]["task_requirements"] == pr_review._diff_first_focus("PR body")
         assert provider.calls[0]["files"] == {"a.py": "content"}
-        assert provider.calls[1]["task_requirements"] == pr_review._hunk_review_focus("PR body")
+        assert provider.calls[1]["task_requirements"] == pr_review._diff_first_focus("PR body")
         assert "pre_existing" in provider.calls[1]["task_requirements"]
-        assert "diff hunks" in provider.calls[1]["task_requirements"]
-        assert provider.calls[1]["code"] == "### b.py ###\n1: y = 2"
+        assert "Architectural standards" in provider.calls[1]["task_requirements"]
+        assert provider.calls[1]["files"] == {"b.py": "1: y = 2"}
         assert isinstance(result, pr_review._MergedReviewerOutput)
         assert result.issues == ["whole-issue", "hunk-issue"]
 
-    def test_none_body_coerces_to_hunk_focus_note_alone(self, monkeypatch) -> None:
+    def test_none_body_coerces_to_diff_first_focus_note_alone(self, monkeypatch) -> None:
         self._patch_collaborators(monkeypatch)
         provider = _RecordingProvider([_FakeOutput([], "", "")])
         kwargs = _run_reviewer_kwargs(
-            pr=_FakePR(body=None), head_files=None, code="### a.py ###\n1: x = 1"
+            pr=_FakePR(body=None), head_files=None, hunk_files={"a.py": "1: x = 1"}
         )
 
         pr_review._run_reviewer(provider, **kwargs)
 
-        # A blank body still gets the hunk-mode focus note appended (the note
+        # A blank body still gets the diff-first focus note appended (the note
         # alone, since there is no body to prefix).
-        assert provider.calls[0]["task_requirements"] == pr_review._hunk_review_focus("")
-        # Content assertions alongside the equality check above, so a
-        # simultaneous regression in _hunk_review_focus (e.g. back to
-        # returning the body verbatim) can't hide behind both sides matching.
+        assert provider.calls[0]["task_requirements"] == pr_review._diff_first_focus("")
         assert "pre_existing" in provider.calls[0]["task_requirements"]
-        assert "diff hunks" in provider.calls[0]["task_requirements"]
+        assert "Architectural standards" in provider.calls[0]["task_requirements"]
 
     def test_first_attempt_error_records_outage_and_stops(self, monkeypatch) -> None:
         outages = self._patch_collaborators(monkeypatch)
         provider = _RecordingProvider(error=RuntimeError("boom"))
-        kwargs = _run_reviewer_kwargs(head_files={"a.py": "content"}, code="### b.py ###\n1: y = 2")
+        kwargs = _run_reviewer_kwargs(
+            head_files={"a.py": "content"}, hunk_files={"b.py": "1: y = 2"}
+        )
 
         result = pr_review._run_reviewer(provider, **kwargs)
 
@@ -597,7 +580,7 @@ class TestRunReviewerUnit:
     def test_bare_exception_falls_back_to_type_name(self, monkeypatch) -> None:
         outages = self._patch_collaborators(monkeypatch)
         provider = _RecordingProvider(error=RuntimeError())
-        kwargs = _run_reviewer_kwargs(head_files={"a.py": "content"}, code="")
+        kwargs = _run_reviewer_kwargs(head_files={"a.py": "content"}, hunk_files=None)
 
         result = pr_review._run_reviewer(provider, **kwargs)
 
@@ -607,7 +590,7 @@ class TestRunReviewerUnit:
     def test_none_output_records_outage(self, monkeypatch) -> None:
         outages = self._patch_collaborators(monkeypatch)
         provider = _RecordingProvider([None])
-        kwargs = _run_reviewer_kwargs(head_files={"a.py": "content"}, code="")
+        kwargs = _run_reviewer_kwargs(head_files={"a.py": "content"}, hunk_files=None)
 
         result = pr_review._run_reviewer(provider, **kwargs)
 
@@ -617,10 +600,70 @@ class TestRunReviewerUnit:
     def test_no_sources_raises_assertion_error(self, monkeypatch) -> None:
         self._patch_collaborators(monkeypatch)
         provider = _RecordingProvider([])
-        kwargs = _run_reviewer_kwargs(head_files=None, code="")
+        kwargs = _run_reviewer_kwargs(head_files=None, hunk_files=None)
 
         with pytest.raises(AssertionError):
             pr_review._run_reviewer(provider, **kwargs)
+
+    def test_nonempty_surface_primary_skips_whole_file(self, monkeypatch) -> None:
+        self._patch_collaborators(monkeypatch)
+        output = _FakeOutput(["issue"], "summary", "notes")
+        provider = _RecordingProvider([output])
+        surface = ChangeSurface(blocks={"mod.py": "1: def f():\n2:     return 1"})
+        kwargs = _run_reviewer_kwargs(
+            head_files={"mod.py": "def f():\n    return 1\n"},
+            hunk_files=None,
+            change_surface=surface,
+        )
+
+        result = pr_review._run_reviewer(provider, **kwargs)
+
+        assert result is output
+        assert len(provider.calls) == 1
+        call = provider.calls[0]
+        assert call["pre_numbered"] is True
+        assert call["files"] == dict(surface.blocks)
+        assert call["task_requirements"] == pr_review._diff_first_focus("PR body")
+        assert "pre_existing" in call["task_requirements"]
+
+    def test_empty_surface_keeps_whole_file(self, monkeypatch) -> None:
+        self._patch_collaborators(monkeypatch)
+        output = _FakeOutput(["issue"], "summary", "notes")
+        provider = _RecordingProvider([output])
+        kwargs = _run_reviewer_kwargs(
+            head_files={"a.py": "content"},
+            hunk_files=None,
+            change_surface=ChangeSurface(blocks={}),
+        )
+
+        result = pr_review._run_reviewer(provider, **kwargs)
+
+        assert result is output
+        assert len(provider.calls) == 1
+        assert provider.calls[0]["pre_numbered"] is False
+        assert provider.calls[0]["files"] == {"a.py": "content"}
+
+    def test_surface_plus_hunk_files_two_prenumbred_calls(self, monkeypatch) -> None:
+        self._patch_collaborators(monkeypatch)
+        surface_out = _FakeOutput(["s"], "s", "")
+        hunk_out = _FakeOutput(["h"], "", "h")
+        provider = _RecordingProvider([surface_out, hunk_out])
+        surface = ChangeSurface(blocks={"a.py": "1: a"})
+        kwargs = _run_reviewer_kwargs(
+            head_files={"a.py": "a\n"},
+            hunk_files={"b.py": "1: y = 2"},
+            change_surface=surface,
+        )
+
+        result = pr_review._run_reviewer(provider, **kwargs)
+
+        assert len(provider.calls) == 2
+        assert provider.calls[0]["pre_numbered"] is True
+        assert provider.calls[0]["files"] == dict(surface.blocks)
+        assert provider.calls[1]["pre_numbered"] is True
+        assert provider.calls[1]["files"] == {"b.py": "1: y = 2"}
+        assert isinstance(result, pr_review._MergedReviewerOutput)
+        assert result.issues == ["s", "h"]
 
 
 # ---------------------------------------------------------------------------
@@ -671,3 +714,39 @@ class TestFinalizeReviewUnit:
         assert jobs[0]["error"] == "boom"
         assert reviews[0]["completed"] is True
         assert reviews[0]["error"] == "boom"
+
+
+# ---------------------------------------------------------------------------
+# _build_change_surface_for_reviewable
+# ---------------------------------------------------------------------------
+
+
+class TestBuildChangeSurfaceForReviewable:
+    def test_head_backed_usable_patch_builds_surface(self) -> None:
+        content = "def f():\n    return 1\n"
+        patch = "@@ -1,2 +1,2 @@\n def f():\n-    return 0\n+    return 1\n"
+        files = [PullRequestFile("mod.py", "modified", patch, 1, 1, None)]
+        head = {"mod.py": content}
+        surface = pr_review._build_change_surface_for_reviewable(files, head)
+        assert not surface.is_empty
+        assert "mod.py" in surface.blocks
+        assert "### mod.py ###" in surface.code
+
+    def test_missing_head_omits_path_empty_surface(self) -> None:
+        patch = "@@ -1,2 +1,2 @@\n def f():\n-    return 0\n+    return 1\n"
+        files = [PullRequestFile("mod.py", "modified", patch, 1, 1, None)]
+        surface = pr_review._build_change_surface_for_reviewable(files, {})
+        assert surface.is_empty
+
+    def test_removed_and_no_patch_excluded(self) -> None:
+        content = "def f():\n    return 1\n"
+        patch = "@@ -1,2 +1,2 @@\n def f():\n-    return 0\n+    return 1\n"
+        files = [
+            PullRequestFile("gone.py", "removed", patch, 0, 1, None),
+            PullRequestFile("bin.png", "added", "", 0, 0, None),
+            PullRequestFile("ok.py", "modified", patch, 1, 1, None),
+        ]
+        surface = pr_review._build_change_surface_for_reviewable(
+            files, {"gone.py": content, "ok.py": content}
+        )
+        assert list(surface.blocks.keys()) == ["ok.py"]

@@ -4,6 +4,7 @@ import {
   Input,
   OnInit,
   OnChanges,
+  OnDestroy,
   Output,
   SimpleChanges,
   ViewChild,
@@ -24,6 +25,7 @@ import { MatChipsModule } from '@angular/material/chips';
 import { MatTooltipModule } from '@angular/material/tooltip';
 import { MatMenuModule } from '@angular/material/menu';
 import { MatDialog, MatDialogModule } from '@angular/material/dialog';
+import { Subject, takeUntil } from 'rxjs';
 import { AgenticTeamApiService } from '../../services/agentic-team-api.service';
 import { FlowStepEditorComponent } from '../flow-step-editor/flow-step-editor.component';
 import {
@@ -35,6 +37,8 @@ import {
   ConfirmDialogComponent,
   type ConfirmDialogData,
 } from '../../shared/confirm-dialog/confirm-dialog.component';
+import { LatestOnly } from '../../shared/latest-only';
+import { extractErrorDetail } from '../../shared/extract-error-detail';
 import type {
   AgenticTeam,
   AgenticTeamAgent,
@@ -45,7 +49,8 @@ import type {
   UpdateAgentRequest,
 } from '../../models';
 
-let _stepCounter = 0;
+/** Chat prompt seeded by the roster panel's "Suggest via chat" action. */
+const SUGGEST_AGENT_PROMPT = 'Suggest an additional agent for this team.';
 
 /** A roster agent's fields, editable via the inline "Edit" affordance. */
 interface AgentEditDraft {
@@ -77,7 +82,7 @@ interface AgentEditDraft {
   templateUrl: './process-designer-chat.component.html',
   styleUrl: './process-designer-chat.component.scss',
 })
-export class ProcessDesignerChatComponent implements OnInit, OnChanges, AfterViewChecked {
+export class ProcessDesignerChatComponent implements OnInit, OnChanges, AfterViewChecked, OnDestroy {
   @Input() team!: AgenticTeam;
 
   /**
@@ -88,12 +93,14 @@ export class ProcessDesignerChatComponent implements OnInit, OnChanges, AfterVie
   @Output() readonly rosterChanged = new EventEmitter<RosterValidationResult | null>();
 
   @ViewChild('messagesContainer') messagesContainer!: ElementRef<HTMLDivElement>;
-  @ViewChild('flowchartContainer') flowchartContainer!: ElementRef<HTMLDivElement>;
 
   private readonly api = inject(AgenticTeamApiService);
   private readonly fb = inject(FormBuilder);
   private readonly sanitizer = inject(DomSanitizer);
   private readonly dialog = inject(MatDialog);
+  // Completes on destroy; every subscription in this component is gated on it
+  // so a late response can't mutate a torn-down component.
+  private readonly destroy$ = new Subject<void>();
 
   messages = signal<AgenticConversationMessage[]>([]);
   currentProcess = signal<ProcessDefinition | null>(null);
@@ -124,13 +131,16 @@ export class ProcessDesignerChatComponent implements OnInit, OnChanges, AfterVie
    * no edit is in progress.
    */
   private readonly editOriginal = signal<AgentEditDraft | null>(null);
-  /** Monotonic stamp for `refreshRoster`; guards against out-of-order refresh results. */
-  private rosterRefreshSeq = 0;
+  /** Guards `refreshRoster` against out-of-order refresh results. */
+  private readonly rosterRefreshGuard = new LatestOnly();
 
   private conversationId: string | null = null;
+  /** Monotonic stamp for `startConversation`; guards against out-of-order createConversation results. */
+  private conversationSeq = 0;
+  private _stepCounter = 0;
 
   form = this.fb.nonNullable.group({
-    message: ['', [Validators.required, Validators.minLength(1)]],
+    message: ['', [Validators.required]],
   });
 
   ngOnInit(): void {
@@ -154,9 +164,44 @@ export class ProcessDesignerChatComponent implements OnInit, OnChanges, AfterVie
     }
   }
 
+  /** Distance (px) from the bottom within which the user is considered "at the bottom" for auto-scroll purposes. */
+  private static readonly SCROLL_BOTTOM_THRESHOLD_PX = 48;
+
+  /**
+   * Set by a message-add site (`sendMessage`, `applyState`) that determined the
+   * user was near the bottom before the mutation; consumed by the next
+   * `ngAfterViewChecked` — the point at which the newly-added message's DOM has
+   * actually been laid out — and cleared so later view-checked cycles with no
+   * new message don't force a scroll.
+   */
+  private pendingScrollToBottom = false;
+
   ngAfterViewChecked(): void {
-    this.scrollToBottom();
-    this.attachFlowchartClickHandlers();
+    if (this.pendingScrollToBottom) {
+      this.pendingScrollToBottom = false;
+      this.scrollToBottom();
+    }
+  }
+
+  /**
+   * Postconditions: completes `destroy$`, unsubscribing every
+   * `takeUntil(this.destroy$)` stream so a late response can't mutate a
+   * destroyed component.
+   */
+  ngOnDestroy(): void {
+    this.destroy$.next();
+    this.destroy$.complete();
+  }
+
+  /**
+   * Whether the messages container is scrolled at (or within threshold of) its
+   * bottom. Used to decide whether a newly-added message should auto-scroll the
+   * view, so a user who has scrolled up to read history isn't yanked back down.
+   */
+  private isNearBottom(): boolean {
+    const el = this.messagesContainer?.nativeElement;
+    if (!el) return true;
+    return el.scrollHeight - el.scrollTop - el.clientHeight < ProcessDesignerChatComponent.SCROLL_BOTTOM_THRESHOLD_PX;
   }
 
   private scrollToBottom(): void {
@@ -166,21 +211,42 @@ export class ProcessDesignerChatComponent implements OnInit, OnChanges, AfterVie
     }
   }
 
-  private attachFlowchartClickHandlers(): void {
-    if (!this.flowchartContainer?.nativeElement) return;
-    const nodes = this.flowchartContainer.nativeElement.querySelectorAll('[data-step-id]');
-    nodes.forEach((node: Element) => {
-      if ((node as HTMLElement).dataset['bound']) return;
-      (node as HTMLElement).dataset['bound'] = '1';
-      node.addEventListener('click', (e) => {
-        e.stopPropagation();
-        const stepId = (node as HTMLElement).dataset['stepId'];
-        if (stepId) this.onStepClick(stepId);
-      });
-    });
+  /**
+   * Delegated click handler bound once on the flowchart container (see the
+   * template). Since the SVG is injected via `[innerHTML]`, Angular can't bind
+   * `(click)` to its individual nodes directly — walking up to the closest
+   * `[data-step-id]` ancestor lets a single container-level listener handle
+   * clicks on any node, including ones added by a later `buildFlowchart` call.
+   */
+  onFlowchartClick(event: MouseEvent): void {
+    this.dispatchFlowchartStepEvent(event);
+  }
+
+  /**
+   * Delegated keyboard handler mirroring `onFlowchartClick`, so the step nodes
+   * generated in `buildFlowchart` (each rendered with `tabindex="0"`) are
+   * operable by keyboard, not just mouse.
+   */
+  onFlowchartKeydown(event: KeyboardEvent): void {
+    if (event.key !== 'Enter' && event.key !== ' ') return;
+    event.preventDefault(); // Space must not scroll the page.
+    this.dispatchFlowchartStepEvent(event);
+  }
+
+  private dispatchFlowchartStepEvent(event: Event): void {
+    const target = (event.target as HTMLElement).closest('[data-step-id]') as HTMLElement | null;
+    if (!target) return;
+    const stepId = target.dataset['stepId'];
+    if (stepId) this.onStepClick(stepId);
   }
 
   private startConversation(): void {
+    // Sequence token: startConversation can be invoked again (e.g. rapid team
+    // switching) before a prior createConversation call resolves. Stamp each
+    // call and drop any callback whose stamp is no longer the latest, so a
+    // slow older response can't complete last and overwrite the active
+    // conversationId/messages/process state with stale data.
+    const seq = ++this.conversationSeq;
     this.error.set(null);
     this.conversationId = null;
     this.messages.set([]);
@@ -189,9 +255,15 @@ export class ProcessDesignerChatComponent implements OnInit, OnChanges, AfterVie
     this.selectedStepId.set(null);
     this.selectedStep.set(null);
 
-    this.api.createConversation(this.team.team_id).subscribe({
-      next: (res) => this.applyState(res),
-      error: (err) => this.error.set(err?.error?.detail ?? 'Failed to start conversation'),
+    this.api.createConversation(this.team.team_id).pipe(takeUntil(this.destroy$)).subscribe({
+      next: (res) => {
+        if (seq !== this.conversationSeq) return; // superseded by a newer call
+        this.applyState(res);
+      },
+      error: (err) => {
+        if (seq !== this.conversationSeq) return;
+        this.error.set(extractErrorDetail(err, 'Failed to start conversation'));
+      },
     });
   }
 
@@ -201,6 +273,11 @@ export class ProcessDesignerChatComponent implements OnInit, OnChanges, AfterVie
     current_process: ProcessDefinition | null;
     suggested_questions: string[];
   }): void {
+    // Capture before mutating: a new message should only auto-scroll the view
+    // when the user hadn't already scrolled away from the bottom to read history.
+    if (res.messages.length > this.messages().length && this.isNearBottom()) {
+      this.pendingScrollToBottom = true;
+    }
     this.conversationId = res.conversation_id;
     this.messages.set(res.messages);
     this.currentProcess.set(res.current_process);
@@ -222,6 +299,19 @@ export class ProcessDesignerChatComponent implements OnInit, OnChanges, AfterVie
     }
   }
 
+  /**
+   * Reload the roster and its staffing validation from the backend.
+   *
+   * Preconditions: `this.team.team_id` is set.
+   * Postconditions: on success, `rosterAgents` and `rosterValidation` reflect
+   * the latest backend state and `rosterChanged` has been emitted with the
+   * new validation result. On failure, `rosterActionError` carries a message
+   * and `rosterChanged` is emitted with `null` so an embedding stage's
+   * "fully staffed" gate can't act on stale staffing.
+   * Invariant: only the most recently issued refresh (via `rosterRefreshGuard`)
+   * is allowed to apply its result, so an in-flight refresh superseded by a
+   * newer one is dropped rather than overwriting fresher state.
+   */
   refreshRoster(): void {
     // Sequence token: a roster mutation (add/delete/edit) can trigger a new
     // refresh while an older one is still in flight. Stamp each refresh and drop
@@ -229,35 +319,35 @@ export class ProcessDesignerChatComponent implements OnInit, OnChanges, AfterVie
     // validateRoster can't complete last and emit a stale is_fully_staffed —
     // which the embedding stage (Agent Studio Stage 3) would use to (wrongly)
     // enable "Test this team →" for a roster that has since changed.
-    const seq = ++this.rosterRefreshSeq;
+    const token = this.rosterRefreshGuard.next();
     this.rosterLoading.set(true);
     this.rosterActionError.set(null);
-    this.api.listTeamAgents(this.team.team_id).subscribe({
+    this.api.listTeamAgents(this.team.team_id).pipe(takeUntil(this.destroy$)).subscribe({
       next: (agents) => {
-        if (seq !== this.rosterRefreshSeq) return; // superseded by a newer refresh
+        if (!this.rosterRefreshGuard.isCurrent(token)) return; // superseded by a newer refresh
         this.rosterAgents.set(agents);
         // Keep the loading indicator up until validation also resolves — the
         // roster isn't "fully loaded" until its staffing gaps are known.
-        this.api.validateRoster(this.team.team_id).subscribe({
+        this.api.validateRoster(this.team.team_id).pipe(takeUntil(this.destroy$)).subscribe({
           next: (result) => {
-            if (seq !== this.rosterRefreshSeq) return;
+            if (!this.rosterRefreshGuard.isCurrent(token)) return;
             this.rosterValidation.set(result);
             this.rosterLoading.set(false);
             this.rosterChanged.emit(result);
           },
           error: (err) => {
-            if (seq !== this.rosterRefreshSeq) return;
+            if (!this.rosterRefreshGuard.isCurrent(token)) return;
             this.rosterValidation.set(null);
             this.rosterLoading.set(false);
             this.rosterChanged.emit(null);
             // Surface the failure too: clearing the gate silently disables the
             // embedding stage's "Test this team →" with no explanation otherwise.
-            this.rosterActionError.set(err?.error?.detail ?? 'Failed to validate the roster');
+            this.rosterActionError.set(extractErrorDetail(err, 'Failed to validate the roster'));
           },
         });
       },
       error: (err) => {
-        if (seq !== this.rosterRefreshSeq) return;
+        if (!this.rosterRefreshGuard.isCurrent(token)) return;
         // Surface the failure instead of silently leaving a stale roster: the
         // user needs to know their view may be out of date. Also clear the
         // validation and emit null so an embedding stage (Agent Studio Stage 3)
@@ -267,7 +357,7 @@ export class ProcessDesignerChatComponent implements OnInit, OnChanges, AfterVie
         this.rosterLoading.set(false);
         this.rosterValidation.set(null);
         this.rosterChanged.emit(null);
-        this.rosterActionError.set(err?.error?.detail ?? 'Failed to load roster');
+        this.rosterActionError.set(extractErrorDetail(err, 'Failed to load roster'));
       },
     });
   }
@@ -300,23 +390,26 @@ export class ProcessDesignerChatComponent implements OnInit, OnChanges, AfterVie
       AddAgentFromRegistryDialogData,
       AddAgentFromRegistryDialogResult
     >(AddAgentFromRegistryDialogComponent, { data, width: '480px' });
-    ref.afterClosed().subscribe((manifestId) => this.onAddFromRegistryDialogClosed(manifestId));
+    ref
+      .afterClosed()
+      .pipe(takeUntil(this.destroy$))
+      .subscribe((manifestId) => this.onAddFromRegistryDialogClosed(manifestId));
   }
 
   /** Public for unit tests; invoked by `openAddFromRegistry` after the dialog closes. */
   onAddFromRegistryDialogClosed(manifestId: AddAgentFromRegistryDialogResult | undefined): void {
     if (!manifestId) return;
-    this.api.addAgentFromRegistry(this.team.team_id, manifestId).subscribe({
+    this.api.addAgentFromRegistry(this.team.team_id, manifestId).pipe(takeUntil(this.destroy$)).subscribe({
       next: () => this.refreshRoster(),
       error: (err) => {
-        this.rosterActionError.set(err?.error?.detail ?? 'Failed to add agent from registry');
+        this.rosterActionError.set(extractErrorDetail(err, 'Failed to add agent from registry'));
       },
     });
   }
 
   /** "Suggest via chat": seed the chat input with a prompt asking for a new agent. */
   suggestAgentViaChat(): void {
-    this.form.patchValue({ message: 'Suggest an additional agent for this team.' });
+    this.form.patchValue({ message: SUGGEST_AGENT_PROMPT });
   }
 
   deleteAgent(agent: AgenticTeamAgent, event: Event): void {
@@ -338,20 +431,23 @@ export class ProcessDesignerChatComponent implements OnInit, OnChanges, AfterVie
       },
       width: '420px',
     });
-    ref.afterClosed().subscribe((confirmed) => this.onDeleteAgentConfirmed(agent, confirmed));
+    ref
+      .afterClosed()
+      .pipe(takeUntil(this.destroy$))
+      .subscribe((confirmed) => this.onDeleteAgentConfirmed(agent, confirmed));
   }
 
   /** Public for unit tests; invoked by `deleteAgent` after the confirm dialog closes. */
   onDeleteAgentConfirmed(agent: AgenticTeamAgent, confirmed: boolean | undefined): void {
     if (!confirmed) return;
     this.rosterActionError.set(null);
-    this.api.removeTeamAgent(this.team.team_id, agent.agent_name).subscribe({
+    this.api.removeTeamAgent(this.team.team_id, agent.agent_name).pipe(takeUntil(this.destroy$)).subscribe({
       next: () => {
         if (this.editingAgent() === agent.agent_name) this.editingAgent.set(null);
         this.refreshRoster();
       },
       error: (err) => {
-        this.rosterActionError.set(err?.error?.detail ?? 'Failed to remove agent');
+        this.rosterActionError.set(extractErrorDetail(err, 'Failed to remove agent'));
       },
     });
   }
@@ -414,6 +510,7 @@ export class ProcessDesignerChatComponent implements OnInit, OnChanges, AfterVie
     this.rosterActionError.set(null);
     this.api
       .updateTeamAgent(this.team.team_id, agent.agent_name, updates)
+      .pipe(takeUntil(this.destroy$))
       .subscribe({
         next: () => {
           this.editingAgent.set(null);
@@ -421,7 +518,7 @@ export class ProcessDesignerChatComponent implements OnInit, OnChanges, AfterVie
           this.refreshRoster();
         },
         error: (err) => {
-          this.rosterActionError.set(err?.error?.detail ?? 'Failed to update agent');
+          this.rosterActionError.set(extractErrorDetail(err, 'Failed to update agent'));
         },
       });
   }
@@ -438,23 +535,33 @@ export class ProcessDesignerChatComponent implements OnInit, OnChanges, AfterVie
   }
 
   private sendMessage(message: string): void {
-    if (!this.conversationId) return;
+    // Guard here (not just in onSubmit) so onSuggestedQuestion — which bypasses
+    // the form — can't fire a second concurrent send while one is in flight.
+    if (!this.conversationId || this.loading()) return;
 
     this.form.reset({ message: '' });
-    this.messages.update((msgs) => [
-      ...msgs,
-      { role: 'user' as const, content: message, timestamp: new Date().toISOString() },
-    ]);
+    const optimisticMessage: AgenticConversationMessage = {
+      role: 'user',
+      content: message,
+      timestamp: new Date().toISOString(),
+    };
+    if (this.isNearBottom()) this.pendingScrollToBottom = true;
+    this.messages.update((msgs) => [...msgs, optimisticMessage]);
     this.loading.set(true);
     this.error.set(null);
 
-    this.api.sendMessage(this.conversationId, message).subscribe({
+    this.api.sendMessage(this.conversationId, message).pipe(takeUntil(this.destroy$)).subscribe({
       next: (res) => {
         this.applyState(res);
         this.loading.set(false);
       },
       error: (err) => {
-        this.error.set(err?.error?.detail ?? 'Failed to send message');
+        // The backend persists the turn only once the LLM call and roster/process
+        // save succeed (see agentic_team_provisioning's send_message); on failure
+        // nothing was saved, so roll back the optimistic append rather than leave
+        // a message visible that a refresh would show was never sent.
+        this.messages.update((msgs) => msgs.filter((m) => m !== optimisticMessage));
+        this.error.set(extractErrorDetail(err, 'Failed to send message'));
         this.loading.set(false);
       },
     });
@@ -479,18 +586,23 @@ export class ProcessDesignerChatComponent implements OnInit, OnChanges, AfterVie
 
   createNewProcess(): void {
     this.saving.set(true);
-    this.api.createProcess(this.team.team_id).subscribe({
+    this.api.createProcess(this.team.team_id).pipe(takeUntil(this.destroy$)).subscribe({
       next: (process) => {
         this.currentProcess.set(process);
         this.buildFlowchart(process);
         this.saving.set(false);
         // Link the new process to the active conversation so chat stays in sync
         if (this.conversationId) {
-          this.api.setConversationProcess(this.conversationId, process.process_id).subscribe();
+          this.api
+            .setConversationProcess(this.conversationId, process.process_id)
+            .pipe(takeUntil(this.destroy$))
+            .subscribe({
+              error: (err) => this.error.set(extractErrorDetail(err, 'Failed to link process to conversation')),
+            });
         }
       },
       error: (err) => {
-        this.error.set(err?.error?.detail ?? 'Failed to create process');
+        this.error.set(extractErrorDetail(err, 'Failed to create process'));
         this.saving.set(false);
       },
     });
@@ -500,9 +612,9 @@ export class ProcessDesignerChatComponent implements OnInit, OnChanges, AfterVie
     const process = this.currentProcess();
     if (!process) return;
 
-    _stepCounter++;
+    this._stepCounter++;
     const newStep: ProcessStep = {
-      step_id: `step_${Date.now()}_${_stepCounter}`,
+      step_id: `step_${Date.now()}_${this._stepCounter}`,
       name: stepType === 'decision' ? 'New Decision' : 'New Step',
       description: '',
       step_type: stepType,
@@ -525,7 +637,7 @@ export class ProcessDesignerChatComponent implements OnInit, OnChanges, AfterVie
     const updated = { ...process, steps: updatedSteps };
     this.currentProcess.set(updated);
     this.buildFlowchart(updated);
-    this.saveProcess(updated);
+    this.saveProcess(updated, process);
     this.onStepClick(newStep.step_id);
   }
 
@@ -550,7 +662,7 @@ export class ProcessDesignerChatComponent implements OnInit, OnChanges, AfterVie
     this.currentProcess.set(updated);
     this.selectedStep.set({ ...updatedStep });
     this.buildFlowchart(updated);
-    this.saveProcess(updated);
+    this.saveProcess(updated, process);
   }
 
   onStepDeleted(stepId: string): void {
@@ -569,7 +681,7 @@ export class ProcessDesignerChatComponent implements OnInit, OnChanges, AfterVie
     this.selectedStepId.set(null);
     this.selectedStep.set(null);
     this.buildFlowchart(updated);
-    this.saveProcess(updated);
+    this.saveProcess(updated, process);
   }
 
   onStepEditorClosed(): void {
@@ -596,22 +708,24 @@ export class ProcessDesignerChatComponent implements OnInit, OnChanges, AfterVie
     };
     this.currentProcess.set(updated);
     this.editingProcessMeta.set(false);
-    this.saveProcess(updated);
+    this.saveProcess(updated, process);
   }
 
   cancelEditProcessMeta(): void {
     this.editingProcessMeta.set(false);
   }
 
-  private saveProcess(process: ProcessDefinition): void {
+  private saveProcess(process: ProcessDefinition, previous: ProcessDefinition | null): void {
     this.saving.set(true);
-    this.api.updateProcess(process.process_id, process).subscribe({
+    this.api.updateProcess(process.process_id, process).pipe(takeUntil(this.destroy$)).subscribe({
       next: () => {
         this.saving.set(false);
         this.refreshRoster();
       },
       error: (err) => {
-        this.error.set(err?.error?.detail ?? 'Failed to save process');
+        this.currentProcess.set(previous);
+        this.buildFlowchart(previous);
+        this.error.set(extractErrorDetail(err, 'Failed to save process'));
         this.saving.set(false);
       },
     });
@@ -622,8 +736,20 @@ export class ProcessDesignerChatComponent implements OnInit, OnChanges, AfterVie
   // ---------------------------------------------------------------------------
 
   /**
-   * Build a Mermaid-style flowchart as inline SVG from the process definition.
+   * Build a custom interactive SVG flowchart from the process definition.
    * Nodes are interactive — clicking them opens the step editor.
+   *
+   * Postconditions: `flowchartSvg` is `null` when `process` is null or has no
+   * steps; otherwise it holds a `SafeHtml` built from a hand-rolled SVG
+   * string via `sanitizer.bypassSecurityTrustHtml`, rendered unsanitized via
+   * `[innerHTML]`. Every process-derived value interpolated into that string
+   * (trigger type/description, step id/name, agent names, output
+   * description) MUST be passed through `escSvg` first — these values can
+   * originate from LLM-generated process definitions seeded by untrusted
+   * chat input, so an unescaped field here is a live stored-XSS vector, not
+   * just a display bug. Any new dynamic field added to this method must be
+   * wrapped in `escSvg` and covered by the tests in
+   * `describe('flowchart SVG escaping (XSS hardening)', ...)`.
    */
   private buildFlowchart(process: ProcessDefinition | null): void {
     if (!process || process.steps.length === 0) {
@@ -668,7 +794,7 @@ export class ProcessDesignerChatComponent implements OnInit, OnChanges, AfterVie
     // Draw trigger node (rounded rect, green tint)
     const trigY = nodeY(0);
     svg += `<rect x="${cx - nodeWidth / 2}" y="${trigY}" width="${nodeWidth}" height="${nodeHeight}" rx="25" ry="25" fill="#1a3a2a" stroke="#3fb950" stroke-width="1.5"/>`;
-    svg += `<text x="${cx}" y="${trigY + nodeHeight / 2 + 5}" text-anchor="middle" fill="#3fb950" font-size="12" font-family="sans-serif">${this.escSvg(process.trigger.trigger_type.toUpperCase())}: ${this.truncate(process.trigger.description || 'Trigger', 20)}</text>`;
+    svg += `<text x="${cx}" y="${trigY + nodeHeight / 2 + 5}" text-anchor="middle" fill="#3fb950" font-size="12" font-family="sans-serif">${this.escSvg(process.trigger.trigger_type.toUpperCase())}: ${this.escSvg(this.truncate(process.trigger.description || 'Trigger', 20))}</text>`;
 
     // Arrow from trigger to first step
     if (steps.length > 0) {
@@ -682,8 +808,9 @@ export class ProcessDesignerChatComponent implements OnInit, OnChanges, AfterVie
       const isSelected = step.step_id === selectedId;
       const hasNoAgents = step.agents.length === 0;
 
-      // Clickable group
-      svg += `<g data-step-id="${this.escSvg(step.step_id)}" class="flowchart-node" style="cursor:pointer">`;
+      // Clickable group — tabindex/role make it keyboard-focusable so
+      // onFlowchartKeydown (delegated on the container) can activate it.
+      svg += `<g data-step-id="${this.escSvg(step.step_id)}" class="flowchart-node" style="cursor:pointer" tabindex="0" role="button" aria-label="${this.escSvg(step.name)}">`;
 
       if (isDecision) {
         // Diamond shape
@@ -749,7 +876,23 @@ export class ProcessDesignerChatComponent implements OnInit, OnChanges, AfterVie
     return text.length > max ? text.substring(0, max - 1) + '\u2026' : text;
   }
 
+  /**
+   * Escape a plain-text value for interpolation into the hand-rolled SVG
+   * markup built by `buildFlowchart`.
+   *
+   * Precondition: `text` is plain text, not markup.
+   * Postcondition: returns `text` with `& < > " '` replaced by HTML
+   * entities. `buildFlowchart` trusts the assembled SVG string via
+   * `bypassSecurityTrustHtml`, so every value that reaches the template
+   * MUST be passed through this helper — a value that skips it is an XSS
+   * vector.
+   */
   private escSvg(text: string): string {
-    return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    return text
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
   }
 }

@@ -1,4 +1,4 @@
-"""Regression tests for the three Codex-flagged PR 2 issues.
+"""Regression tests for Codex-flagged paper-trading request/response issues.
 
 Covers:
 * ``_resolve_fee_overrides`` preserves explicit zero overrides (``0.0`` is
@@ -7,6 +7,15 @@ Covers:
   the PR 2 active states (OPENING / WARMING_UP / LIVE), not just the
   legacy RUNNING state, so SIGKILL orphans cannot block the new
   per-strategy concurrency guard.
+* ``_apply_paper_trading_failure`` (the shared status/error/completed_at
+  helper extracted so the recovery loop stops re-implementing
+  ``_fail_paper_trading_session``'s update logic) sets the right fields
+  under each keyword combination, and both ``_recover_orphaned_paper_trading_sessions``
+  and ``_fail_paper_trading_session`` delegate their terminal-write fields
+  to it instead of each re-implementing the status/error/completed_at
+  update inline.
+* ``RunPaperTradingRequest.timeframe`` rejects values outside its
+  documented allowed set at the API boundary instead of only failing later.
 
 The recovery tests run against an in-memory ``FakeJobServiceClient`` swapped
 into the module-level ``_paper_trading_sessions`` ``_PersistentDict`` so the
@@ -16,11 +25,17 @@ suite no longer requires Postgres or a live job-service.
 from __future__ import annotations
 
 import logging
+import threading
+import time
 
 import pytest
+from pydantic import ValidationError
 
+import investment_team.api.main as api_main
 from investment_team.api.main import (
     RunPaperTradingRequest,
+    _apply_paper_trading_failure,
+    _lock,
     _paper_trading_sessions,
     _recover_orphaned_paper_trading_sessions,
     _resolve_fee_overrides,
@@ -88,6 +103,41 @@ def test_nonzero_override_is_preserved() -> None:
     assert slip == 3.0
 
 
+def test_missing_overrides_use_asset_class_defaults_for_crypto() -> None:
+    """The live path passes the strategy's asset class through so a crypto
+    strategy omitting fee overrides gets Kraken-tier 26/10 bps instead of the
+    flat 5/2 stock-tier default."""
+    req = RunPaperTradingRequest(lab_record_id="x")
+    tx, slip = _resolve_fee_overrides(req, asset_class="crypto")
+    assert tx == 26.0
+    assert slip == 10.0
+
+
+def test_explicit_override_wins_over_asset_class_default() -> None:
+    req = RunPaperTradingRequest(lab_record_id="x", transaction_cost_bps=1.5, slippage_bps=0.0)
+    tx, slip = _resolve_fee_overrides(req, asset_class="crypto")
+    assert tx == 1.5
+    assert slip == 0.0
+
+
+# ---------------------------------------------------------------------------
+# timeframe validation
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "timeframe", ["1s", "15s", "30s", "1m", "5m", "15m", "30m", "1h", "4h", "1d", None]
+)
+def test_timeframe_accepts_documented_values(timeframe) -> None:
+    req = RunPaperTradingRequest(lab_record_id="x", timeframe=timeframe)
+    assert req.timeframe == timeframe
+
+
+def test_timeframe_rejects_undocumented_value() -> None:
+    with pytest.raises(ValidationError):
+        RunPaperTradingRequest(lab_record_id="x", timeframe="2m")
+
+
 # ---------------------------------------------------------------------------
 # Orphan recovery for PR 2 live statuses
 # ---------------------------------------------------------------------------
@@ -118,6 +168,58 @@ def _install_session(session: PaperTradingSession) -> None:
 def _fetch_session(session_id: str) -> PaperTradingSession:
     raw = _paper_trading_sessions[session_id]
     return PaperTradingSession(**raw) if isinstance(raw, dict) else raw
+
+
+# ---------------------------------------------------------------------------
+# Shared terminal-failure helper (`_apply_paper_trading_failure`)
+#
+# Regression coverage for the #5136 fix: `_recover_orphaned_paper_trading_sessions`
+# used to hand-roll the same status/error/completed_at update that
+# `_fail_paper_trading_session` centralizes. Both call sites now delegate to
+# this shared helper instead of duplicating the field-mutation logic.
+# ---------------------------------------------------------------------------
+
+
+def test_apply_paper_trading_failure_sets_status_error_and_default_completed_at() -> None:
+    session = _make_session("pt-apply-defaults", PaperTradingStatus.RUNNING)
+    _apply_paper_trading_failure(session, "boom")
+    assert session.status == PaperTradingStatus.FAILED
+    assert session.error == "boom"
+    assert session.completed_at
+    assert session.terminated_reason is None
+    assert session.divergence_analysis is None
+
+
+def test_apply_paper_trading_failure_honors_explicit_completed_at() -> None:
+    session = _make_session("pt-apply-completed-at", PaperTradingStatus.OPENING)
+    _apply_paper_trading_failure(session, "boom", completed_at="2020-01-01T00:00:00+00:00")
+    assert session.completed_at == "2020-01-01T00:00:00+00:00"
+
+
+def test_apply_paper_trading_failure_sets_terminated_reason_when_given() -> None:
+    session = _make_session("pt-apply-reason", PaperTradingStatus.LIVE)
+    _apply_paper_trading_failure(session, "boom", terminated_reason="process_exit")
+    assert session.terminated_reason == "process_exit"
+
+
+def test_apply_paper_trading_failure_leaves_terminated_reason_untouched_when_omitted() -> None:
+    session = _make_session("pt-apply-reason-untouched", PaperTradingStatus.WARMING_UP)
+    session.terminated_reason = "user_stop"
+    _apply_paper_trading_failure(session, "boom")
+    assert session.terminated_reason == "user_stop"
+
+
+def test_apply_paper_trading_failure_mirrors_legacy_divergence_analysis_when_requested() -> None:
+    session = _make_session("pt-apply-legacy", PaperTradingStatus.RUNNING)
+    _apply_paper_trading_failure(session, "boom", set_legacy_divergence_analysis=True)
+    assert session.divergence_analysis == "boom"
+
+
+def test_apply_paper_trading_failure_leaves_divergence_analysis_untouched_by_default() -> None:
+    session = _make_session("pt-apply-legacy-untouched", PaperTradingStatus.RUNNING)
+    session.divergence_analysis = "pre-existing"
+    _apply_paper_trading_failure(session, "boom")
+    assert session.divergence_analysis == "pre-existing"
 
 
 def test_recovery_fails_opening_session() -> None:
@@ -182,23 +284,228 @@ def test_recovery_leaves_terminal_sessions_untouched() -> None:
 def test_recovery_logs_and_skips_unparseable_session(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """Unparseable rows are skipped with a debug log; valid orphans still recover."""
-    _paper_trading_sessions["pt-bad"] = {"not": "a-paper-trading-session"}
+    """Unparseable rows are skipped with a warning log (not debug, which is
+    typically disabled in production and would let corrupted records go
+    unnoticed) that includes the session id when the raw record still has a
+    readable one; valid orphans still recover.
+
+    Written directly via the underlying job-service client's ``data`` field
+    (bypassing ``_PersistentDict.__setitem__``, which would wrap a plain dict
+    as ``{"value": ...}`` instead of storing it flat the way a real
+    ``PaperTradingSession.model_dump()`` -- corrupted by, e.g., a schema
+    migration dropping a required field -- would be).
+    """
+    _paper_trading_sessions._client.create_job(
+        "pt-bad", status="stored", data={"not": "a-paper-trading-session"}
+    )
+    _paper_trading_sessions._client.create_job(
+        "pt-bad-with-id", status="stored", data={"session_id": "pt-bad-with-id"}
+    )
     valid = _make_session("pt-good", PaperTradingStatus.OPENING)
     _install_session(valid)
     try:
-        with caplog.at_level(logging.DEBUG, logger="investment_team.api.main"):
+        with caplog.at_level(logging.WARNING, logger="investment_team.api.main"):
             _recover_orphaned_paper_trading_sessions()
         skip_records = [
             r
             for r in caplog.records
             if "Paper-trade recovery: skipping unparseable session record" in r.getMessage()
         ]
-        assert len(skip_records) == 1
-        assert skip_records[0].exc_info is not None
+        assert len(skip_records) == 2
+        assert all(r.levelno == logging.WARNING for r in skip_records)
+        assert all(r.exc_info is not None for r in skip_records)
+        messages = [r.getMessage() for r in skip_records]
+        assert any("session_id=unknown" in m for m in messages)
+        assert any("session_id=pt-bad-with-id" in m for m in messages)
         assert _fetch_session("pt-good").status == PaperTradingStatus.FAILED
-        # Corrupt row remains present and is not rewritten into a valid session.
+        # Corrupt rows remain present and are not rewritten into valid sessions.
         assert "pt-bad" in _paper_trading_sessions
+        assert "pt-bad-with-id" in _paper_trading_sessions
     finally:
         _paper_trading_sessions.pop("pt-bad", None)
+        _paper_trading_sessions.pop("pt-bad-with-id", None)
         _paper_trading_sessions.pop("pt-good", None)
+
+
+def test_recovery_logs_enumeration_failure_at_error_level(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A failure enumerating the persisted-session store itself (e.g. the
+    store being unreachable/misconfigured) is a non-recoverable
+    infrastructure failure, not a single malformed record — the outer
+    catch-all around the whole enumerate/parse/mutate/write pass must log it
+    at ERROR level (with a traceback), not debug, which is typically
+    disabled in production and would leave orphaned sessions unrecovered
+    with no operator-visible signal."""
+
+    def _boom():
+        raise RuntimeError("job service unavailable")
+
+    monkeypatch.setattr(_paper_trading_sessions, "values", _boom)
+
+    with caplog.at_level(logging.DEBUG, logger="investment_team.api.main"):
+        _recover_orphaned_paper_trading_sessions()  # must not raise
+
+    matches = [r for r in caplog.records if "could not enumerate sessions" in r.getMessage()]
+    assert len(matches) == 1
+    assert matches[0].levelno == logging.ERROR
+    assert matches[0].exc_info is not None
+
+
+def test_recovery_holds_lock_for_entire_pass_against_concurrent_writer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A concurrent writer racing to update the same session must be fully
+    serialized against the recovery pass (blocked until recovery releases
+    the lock), not interleaved between recovery's snapshot read and its
+    write-back. Otherwise recovery would silently clobber the writer's
+    newer state with a stale FAILED status.
+    """
+    session = _make_session("pt-race", PaperTradingStatus.OPENING)
+    _install_session(session)
+
+    background_started = threading.Event()
+    background_done = threading.Event()
+    threads: list[threading.Thread] = []
+
+    def _background_writer() -> None:
+        background_started.set()
+        with _lock:
+            _install_session(_make_session("pt-race", PaperTradingStatus.COMPLETED))
+        background_done.set()
+
+    original_values = _paper_trading_sessions.values
+
+    def _values_with_concurrent_writer() -> list:
+        result = original_values()
+        thread = threading.Thread(target=_background_writer)
+        threads.append(thread)
+        thread.start()
+        assert background_started.wait(timeout=1), "background writer never started"
+        # `values()` is only reached here while recovery still holds `_lock`
+        # (per the fix). Give the background thread a moment to attempt its
+        # own acquisition; if the lock is not held for the whole pass, it
+        # will race ahead and finish before recovery writes back. Do NOT
+        # join here — the writer can't unblock until recovery itself
+        # releases `_lock`, which only happens after this call returns.
+        time.sleep(0.05)
+        assert not background_done.is_set(), (
+            "concurrent writer completed while recovery held only a partial "
+            "lock — the fix must hold `_lock` for the entire enumerate/"
+            "mutate/write pass"
+        )
+        return result
+
+    try:
+        monkeypatch.setattr(_paper_trading_sessions, "values", _values_with_concurrent_writer)
+        _recover_orphaned_paper_trading_sessions()
+        for thread in threads:
+            thread.join(timeout=1)
+        # The writer's update happened after recovery released the lock, so
+        # its terminal status is authoritative and must not be overwritten.
+        assert _fetch_session("pt-race").status == PaperTradingStatus.COMPLETED
+    finally:
+        _paper_trading_sessions.pop("pt-race", None)
+
+
+def test_recovery_delegates_to_apply_paper_trading_failure_with_recovery_fields(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The recovery loop must delegate to the shared helper instead of
+    re-implementing the status/error/completed_at update itself, passing the
+    recovery-specific fields (`terminated_reason="process_exit"` and the
+    legacy `divergence_analysis` mirror) called out by #5136's acceptance
+    criteria. This would fail against the pre-fix implementation, which had
+    no such shared helper to delegate to.
+    """
+    real_apply = api_main._apply_paper_trading_failure
+    calls: list[tuple] = []
+
+    def _spy(session, error, **kwargs):
+        calls.append((session, error, kwargs))
+        return real_apply(session, error, **kwargs)
+
+    monkeypatch.setattr(api_main, "_apply_paper_trading_failure", _spy)
+
+    session = _make_session("pt-delegates", PaperTradingStatus.OPENING)
+    _install_session(session)
+    try:
+        _recover_orphaned_paper_trading_sessions()
+        assert len(calls) == 1
+        _, _, kwargs = calls[0]
+        assert kwargs["terminated_reason"] == "process_exit"
+        assert kwargs["set_legacy_divergence_analysis"] is True
+        assert kwargs["completed_at"]
+
+        recovered = _fetch_session("pt-delegates")
+        assert recovered.status == PaperTradingStatus.FAILED
+        assert recovered.terminated_reason == "process_exit"
+        assert recovered.divergence_analysis == recovered.error
+    finally:
+        _paper_trading_sessions.pop("pt-delegates", None)
+
+
+# ---------------------------------------------------------------------------
+# DRY consolidation: recovery and the single-session fail helper share one
+# terminal-write implementation (_apply_paper_trading_failure)
+# ---------------------------------------------------------------------------
+
+
+def test_recovery_sets_legacy_divergence_analysis_mirrored_from_error() -> None:
+    """The recovery loop mirrors ``error`` into the legacy
+    ``divergence_analysis`` field -- unlike ``_fail_paper_trading_session``,
+    which intentionally leaves that field untouched (see
+    ``test_run_paper_trading_background_marks_failed_on_empty_market_data``
+    in test_api_paper_and_backtest.py). This is one of the two
+    recovery-specific fields the shared helper must still apply after
+    delegating the common part of the update.
+    """
+    session = _make_session("pt-divergence", PaperTradingStatus.OPENING)
+    _install_session(session)
+    try:
+        _recover_orphaned_paper_trading_sessions()
+        recovered = _fetch_session("pt-divergence")
+        assert recovered.divergence_analysis is not None
+        assert recovered.divergence_analysis == recovered.error
+    finally:
+        _paper_trading_sessions.pop("pt-divergence", None)
+
+
+def test_fail_and_recover_delegate_to_shared_apply_paper_trading_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``_fail_paper_trading_session`` (single-session) and
+    ``_recover_orphaned_paper_trading_sessions`` (whole-batch) must both
+    route their terminal write through the shared ``_apply_paper_trading_failure``
+    helper rather than each re-implementing the status/error/completed_at
+    update inline -- the DRY consolidation this fix introduced, so a future
+    schema change to ``PaperTradingSession`` only needs to touch one place.
+
+    Regression guard: on the pre-fix code, ``_apply_paper_trading_failure``
+    does not exist, so ``monkeypatch.setattr`` below raises ``AttributeError``
+    and this test fails outright rather than silently passing.
+    """
+    calls: list[str] = []
+    original = api_main._apply_paper_trading_failure
+
+    def _tracking_apply(session, error, **kwargs):
+        calls.append(session.session_id)
+        return original(session, error, **kwargs)
+
+    monkeypatch.setattr(api_main, "_apply_paper_trading_failure", _tracking_apply)
+
+    single = _make_session("pt-single", PaperTradingStatus.RUNNING)
+    _install_session(single)
+    batch = _make_session("pt-batch", PaperTradingStatus.OPENING)
+    _install_session(batch)
+    try:
+        api_main._fail_paper_trading_session("pt-single", "boom")
+        api_main._recover_orphaned_paper_trading_sessions()
+
+        assert "pt-single" in calls
+        assert "pt-batch" in calls
+        assert _fetch_session("pt-single").status == PaperTradingStatus.FAILED
+        assert _fetch_session("pt-batch").status == PaperTradingStatus.FAILED
+    finally:
+        _paper_trading_sessions.pop("pt-single", None)
+        _paper_trading_sessions.pop("pt-batch", None)

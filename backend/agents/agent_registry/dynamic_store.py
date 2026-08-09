@@ -30,9 +30,10 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import threading
 import time
-from typing import Any, Callable, Optional, TypeVar
+from typing import Any, Callable, TypeVar
 
 from .models import AgentManifest
 
@@ -42,6 +43,15 @@ logger = logging.getLogger(__name__)
 
 _STORE = "agent_registry_dynamic"
 _TABLE = "agent_registry_dynamic_manifests"
+# psycopg's %s placeholders only parameterize values, never identifiers, so
+# every query below interpolates ``_TABLE`` into the SQL string directly
+# (matching the identifier-safety approach in shared.postgres.aggregate).
+# ``_TABLE`` is a fixed code literal, never attacker-controlled, but this
+# validates it as a bare SQL identifier once at import time so any future
+# change to its value (e.g. adding a schema-qualified prefix) that isn't a
+# safe identifier fails loudly here instead of silently becoming an
+# injection vector at every f-string call site below.
+assert re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", _TABLE), f"_TABLE is not a bare identifier: {_TABLE!r}"
 
 # Small TTL micro-cache for the full-list read (``all()``), which backs the
 # catalog list/search/teams endpoints. Point ``get()`` lookups (the invoke /
@@ -53,7 +63,7 @@ _ALL_CACHE_TTL_S = 2.0
 # concurrent all() query's network round trip.
 _all_cache_lock = threading.Lock()
 _all_cache_refresh_lock = threading.Lock()
-_all_cache: Optional[list[AgentManifest]] = None
+_all_cache: list[AgentManifest] | None = None
 _all_cache_at: float = 0.0
 
 # Bounds retries of a write (upsert/delete) whose first attempt hits a transient
@@ -353,7 +363,7 @@ def get(agent_id: str) -> AgentManifest | None:
     return _do()
 
 
-def all() -> list[AgentManifest]:  # noqa: A001 - mirrors AgentRegistry.all()
+def all() -> list[AgentManifest]:  # noqa: A001 - intentional: mirrors the public AgentRegistry.all() method name
     """Return every dynamic manifest.
 
     Preconditions:
@@ -390,7 +400,7 @@ def all() -> list[AgentManifest]:  # noqa: A001 - mirrors AgentRegistry.all()
     from shared.postgres import dict_row, get_conn
     from shared.postgres.metrics import timed_query
 
-    def _fresh_copy() -> Optional[list[AgentManifest]]:
+    def _fresh_copy() -> list[AgentManifest] | None:
         with _all_cache_lock:
             if _all_cache is not None and (time.monotonic() - _all_cache_at) < _ALL_CACHE_TTL_S:
                 return list(_all_cache)

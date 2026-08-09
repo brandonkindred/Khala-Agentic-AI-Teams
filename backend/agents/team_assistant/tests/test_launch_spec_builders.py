@@ -235,7 +235,7 @@ def test_social_marketing_builder_injects_llm_model_from_env(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """When the user didn't pick a model, fall back to LLM_MODEL env var."""
-    monkeypatch.setenv("LLM_MODEL", "glm-5.2:cloud")
+    monkeypatch.setenv("LLM_MODEL", "deepseek-v4-flash:cloud")
     built = _builder("social_marketing")(
         {
             "client_id": "c-1",
@@ -246,7 +246,7 @@ def test_social_marketing_builder_injects_llm_model_from_env(
     assert built.json == {
         "client_id": "c-1",
         "brand_id": "b-1",
-        "llm_model_name": "glm-5.2:cloud",
+        "llm_model_name": "deepseek-v4-flash:cloud",
         "goals": ["engagement"],
     }
 
@@ -254,7 +254,7 @@ def test_social_marketing_builder_injects_llm_model_from_env(
 def test_social_marketing_builder_prefers_context_value_over_env(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("LLM_MODEL", "glm-5.2:cloud")
+    monkeypatch.setenv("LLM_MODEL", "deepseek-v4-flash:cloud")
     built = _builder("social_marketing")(
         {
             "client_id": "c-1",

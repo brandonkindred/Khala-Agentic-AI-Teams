@@ -239,7 +239,7 @@ def test_qwen35_397b_uses_known_context_size() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_get_llm_for_agent_dummy_provider_returns_dummy_client() -> None:
+def test_get_client_dummy_provider_returns_dummy_client() -> None:
     """When LLM_PROVIDER=dummy, get_client returns DummyLLMClient."""
     with patch.dict(os.environ, {"LLM_PROVIDER": "dummy"}, clear=False):
         client = get_client("backend")
@@ -269,7 +269,7 @@ def _ollama_provider_list(monkeypatch):
     monkeypatch.setattr(ps, "select_active_entry", lambda es, **k: es[0])
 
 
-def test_get_llm_for_agent_per_agent_env_overrides(_ollama_provider_list) -> None:
+def test_get_client_per_agent_env_overrides(_ollama_provider_list) -> None:
     """LLM_MODEL_<agent_key> overrides global and default (blank entry model).
 
     The failover client resolves the concrete model lazily on first attribute access,
@@ -290,7 +290,7 @@ def test_get_llm_for_agent_per_agent_env_overrides(_ollama_provider_list) -> Non
         assert client.model == "custom-model"
 
 
-def test_get_llm_for_agent_global_fallback(_ollama_provider_list) -> None:
+def test_get_client_global_fallback(_ollama_provider_list) -> None:
     """When no per-agent env, LLM_MODEL is used (blank entry model)."""
     clear_client_cache()
     with patch.dict(
@@ -303,7 +303,7 @@ def test_get_llm_for_agent_global_fallback(_ollama_provider_list) -> None:
         assert client.model == "qwen3.5:397b-cloud"
 
 
-def test_get_llm_for_agent_uses_default_when_no_env(_ollama_provider_list) -> None:
+def test_get_client_uses_default_when_no_env(_ollama_provider_list) -> None:
     """When no env overrides, the agent default (e.g. kimi-k2.7-code:cloud for backend) is used."""
     clear_client_cache()
     with patch.dict(

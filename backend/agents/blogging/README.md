@@ -148,7 +148,7 @@ from blog_research_agent.models import ResearchBriefInput
 from blog_research_agent.llm import OllamaLLMClient  # or your own LLM client
 
 llm_client = OllamaLLMClient(  # points at local Ollama (127.0.0.1:11434) by default
-    model="glm-5.2:cloud",  # change to your preferred Ollama model
+    model="deepseek-v4-flash:cloud",  # change to your preferred Ollama model
 )
 agent = ResearchAgent(llm_client=llm_client)
 

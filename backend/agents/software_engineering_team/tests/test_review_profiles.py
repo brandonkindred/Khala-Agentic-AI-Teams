@@ -39,16 +39,15 @@ def test_shared_skeleton_pieces_are_slices_of_legacy_prompt() -> None:
 
 
 def test_requirement_citation_guardrail_in_spec_flavored_sections_only() -> None:
-    """Guardrail sits under Spec Compliance / Coverage items, not Naming/Quality."""
+    """Guardrail sits under the Ticket/Spec Fit item, not Style."""
     code_review = build_review_system_prompt(ReviewProfile.CODE_REVIEW)
     assert REQUIREMENT_CITATION_GUARDRAIL in code_review
-    # Search after the Spec Compliance checklist item — Naming also appears earlier
+    # Search after the Ticket/Spec Fit checklist item — Naming also appears earlier
     # in REVIEW_PRIORITY_FRAMEWORK.
-    i_spec = code_review.index("1. **Spec Compliance**")
-    i_guard = code_review.index(REQUIREMENT_CITATION_GUARDRAIL, i_spec)
-    i_naming = code_review.index("2. **Naming Conventions**", i_spec)
-    i_quality = code_review.index("4. **Code Quality**", i_spec)
-    assert i_spec < i_guard < i_naming < i_quality
+    i_ticket = code_review.index("7. **Ticket/Spec Fit**")
+    i_guard = code_review.index(REQUIREMENT_CITATION_GUARDRAIL, i_ticket)
+    i_style = code_review.index("8. **Style**", i_ticket)
+    assert i_ticket < i_guard < i_style
 
     spec_conf = build_review_system_prompt(ReviewProfile.SPEC_CONFORMANCE)
     assert REQUIREMENT_CITATION_GUARDRAIL in spec_conf
@@ -99,25 +98,52 @@ def test_summary_guidance_enforces_brevity_and_no_praise() -> None:
     assert 'return an empty string "" — do not write reassuring "meets the spec" prose' in prompt
 
 
-def test_code_review_criteria_covers_architecture_refactor_correctness_maintainability() -> None:
-    """The default CODE_REVIEW profile's checklist covers the four expanded review
-    angles: architecture consistency, refactoring opportunities, correctness/best
-    practices, and maintainability -- on top of everything it already checked."""
+def test_code_review_criteria_covers_eight_change_focused_headers() -> None:
+    """The default CODE_REVIEW profile's checklist covers all eight change-focused
+    criteria the diff-first review goal requires."""
     prompt = build_review_system_prompt(ReviewProfile.CODE_REVIEW)
-    assert "**Architecture Consistency**" in prompt
-    assert "**Refactoring Opportunities**" in prompt
-    assert "**Correctness & Best Practices**" in prompt
-    assert "**Maintainability**" in prompt
+    assert "1. **Correctness**" in prompt
+    assert "2. **Contracts**" in prompt
+    assert "3. **Caller Side Effects**" in prompt
+    assert "4. **Architecture**" in prompt
+    assert "5. **Best Practices**" in prompt
+    assert "6. **New Issues**" in prompt
+    assert "7. **Ticket/Spec Fit**" in prompt
+    assert "8. **Style**" in prompt
 
 
 def test_new_criteria_severity_guidance_caps_default_severity() -> None:
-    """Each new criterion's severity guidance defaults to medium/low/info and names
-    the narrow condition for escalation, so the new checks add feedback without
-    flooding the approval gate with noise."""
+    """The Architecture and New Issues criteria's severity guidance defaults to
+    medium/low/info and names the narrow condition for escalation, so the checks
+    add feedback without flooding the approval gate with noise."""
     prompt = build_review_system_prompt(ReviewProfile.CODE_REVIEW)
     assert "would actually break integration" in prompt
     assert "not merely because a cleaner alternative exists" in prompt
     assert "not for a design preference alone" in prompt
+
+
+def test_code_review_contracts_criterion_covers_dbc_and_documentation_accuracy() -> None:
+    """Contracts consolidates Design by Contract framing with the docstring-accuracy
+    guidance that used to live under the old Documentation item."""
+    prompt = build_review_system_prompt(ReviewProfile.CODE_REVIEW)
+    assert "Preconditions: conditions the function requires" in prompt
+    assert "Postconditions: what the function guarantees" in prompt
+    assert "Invariants: properties that hold before and after" in prompt
+    assert "A docstring or comment that claims behavior the implementation does not provide" in prompt
+
+
+def test_code_review_style_criterion_keeps_no_fixed_word_limit_guidance() -> None:
+    """The naming guidance's hard-won 'no fixed word limit' framing survives
+    consolidation into the Style criterion."""
+    prompt = build_review_system_prompt(ReviewProfile.CODE_REVIEW)
+    assert "There is NO fixed word limit" in prompt
+
+
+def test_code_review_new_issues_criterion_reinforces_pre_existing_semantics() -> None:
+    """New Issues explicitly ties its scope to the pre_existing JSON field so
+    reviewers separate diff-introduced defects from pre-existing ones."""
+    prompt = build_review_system_prompt(ReviewProfile.CODE_REVIEW)
+    assert '"pre_existing" field to make that distinction' in prompt
 
 
 def test_output_contract_accepts_new_categories() -> None:
@@ -209,7 +235,7 @@ def test_engine_threads_profile_to_chunk_reviewer(profile: ReviewProfile, anchor
     """Running the engine with a profile routes that profile's system prompt to
     the chunk reviewer."""
     probe = _SystemPromptProbe()
-    CodeReviewAgent(probe).run(CodeReviewInput(code="def f():\n    return 1", profile=profile))
+    CodeReviewAgent(probe, force_in_process=True).run(CodeReviewInput(code="def f():\n    return 1", profile=profile))
     assert probe.system_prompts, "expected at least one chunk-review call"
     assert any(anchor in sp for sp in probe.system_prompts)
 
@@ -255,7 +281,7 @@ def test_skip_false_positive_filter_bypasses_verifier(monkeypatch) -> None:
     # promises — the engine's LLM client, the CodeReviewInput, and the raw
     # issue list the chunk reviewer produced (asserting these guards against a
     # silent regression in how the coordinator invokes the filter).
-    CodeReviewAgent(_IssueProbe()).run(CodeReviewInput(files={"a.py": "x = 1"}))
+    CodeReviewAgent(_IssueProbe(), force_in_process=True).run(CodeReviewInput(files={"a.py": "x = 1"}))
     assert len(calls) == 1
     spy_llm, spy_input, spy_issues = calls[0]
     assert isinstance(spy_input, CodeReviewInput)
@@ -263,7 +289,43 @@ def test_skip_false_positive_filter_bypasses_verifier(monkeypatch) -> None:
     assert isinstance(spy_issues, list) and spy_issues, "expected the raw chunk issues"
 
     # Skipped: the filter is bypassed entirely.
-    CodeReviewAgent(_IssueProbe()).run(
+    CodeReviewAgent(_IssueProbe(), force_in_process=True).run(
         CodeReviewInput(files={"a.py": "x = 1"}, skip_false_positive_filter=True)
     )
     assert len(calls) == 1  # unchanged — no second call
+
+
+def test_skip_tail_passes_field_default_off() -> None:
+    """The skip_tail_passes input field defaults to False and is settable."""
+    assert CodeReviewInput(code="x").skip_tail_passes is False
+    assert CodeReviewInput(code="x", skip_tail_passes=True).skip_tail_passes
+
+
+def test_skip_tail_passes_bypasses_both_tail_passes(monkeypatch) -> None:
+    """skip_tail_passes=True bypasses both the false-positive filter and the
+    merged architecture/side-effect pass; the default runs both once."""
+    filter_calls: list[tuple] = []
+    merged_calls: list[tuple] = []
+
+    def _filter_spy(llm, input_data, issues, repo_reader=None, index=None):
+        filter_calls.append((llm, input_data, issues))
+        return issues
+
+    def _merged_spy(llm, input_data, repo_reader=None, index=None):
+        merged_calls.append((llm, input_data))
+        return ([], [])
+
+    monkeypatch.setattr(coord, "filter_false_positives", _filter_spy)
+    monkeypatch.setattr(coord, "find_architecture_and_side_effect_issues", _merged_spy)
+
+    # Default: both tail passes run once.
+    CodeReviewAgent(_IssueProbe(), force_in_process=True).run(CodeReviewInput(files={"a.py": "x = 1"}))
+    assert len(filter_calls) == 1
+    assert len(merged_calls) == 1
+
+    # Skipped: neither tail pass runs.
+    CodeReviewAgent(_IssueProbe(), force_in_process=True).run(
+        CodeReviewInput(files={"a.py": "x = 1"}, skip_tail_passes=True)
+    )
+    assert len(filter_calls) == 1  # unchanged — no second call
+    assert len(merged_calls) == 1  # unchanged — no second call

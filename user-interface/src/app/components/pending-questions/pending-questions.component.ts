@@ -95,6 +95,11 @@ export class PendingQuestionsComponent implements OnChanges {
   @Input() questions: PendingQuestion[] = [];
   /** Which endpoint to call: 'run-team' (default), 'planning', 'product-analysis', or 'coding-team'. */
   @Input() submitEndpoint: SubmitEndpointType = 'run-team';
+  /**
+   * Temporal-native pause token from job status. Echoed on coding-team answer submit when set;
+   * ignored by other endpoints.
+   */
+  @Input() resumeToken: string | null = null;
   @Output() answersSubmitted = new EventEmitter<AnswersSubmittedStatus>();
 
   answers = new Map<string, QuestionAnswer>();
@@ -343,13 +348,14 @@ export class PendingQuestionsComponent implements OnChanges {
         return this.api.submitProductAnalysisAnswers(jobId, request) as Observable<ProductAnalysisStatusResponse>;
       case 'coding-team': {
         // Coding-team answers are single-select: strip the multi-select field to
-        // match the backend contract exactly.
+        // match the backend contract exactly. Echo resume_token for Temporal-native pauses.
         const body = {
           answers: request.answers.map((a) => ({
             question_id: a.question_id,
             selected_option_id: a.selected_option_id,
             other_text: a.other_text,
           })),
+          ...(this.resumeToken ? { resume_token: this.resumeToken } : {}),
         };
         return this.codingTeamApi.submitAnswers(jobId, body);
       }

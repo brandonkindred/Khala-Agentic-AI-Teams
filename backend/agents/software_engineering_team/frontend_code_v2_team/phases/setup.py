@@ -13,7 +13,7 @@ import json
 import logging
 from pathlib import Path
 
-from software_engineering_team.shared.git_utils import commit_paths
+from shared.git.git_utils import commit_paths
 from software_engineering_team.shared.phases.setup import (
     configure_quality_tooling_impl,
     run_setup_impl,

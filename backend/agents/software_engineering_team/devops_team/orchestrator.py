@@ -8,9 +8,9 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Dict, List, Optional
 
-from llm_service import DummyLLMClient, LLMClient
-from software_engineering_team.shared.deliver_utils import DeliverGitOps
-from software_engineering_team.shared.git_utils import (
+from llm_service import LLMClient
+from llm_service.clients.dummy import is_dummy_llm_client_wrapped
+from shared.git.git_utils import (
     abort_merge,
     checkout_branch,
     commit_working_tree,
@@ -20,6 +20,7 @@ from software_engineering_team.shared.git_utils import (
     get_head_sha,
     merge_branch,
 )
+from software_engineering_team.shared.deliver_utils import DeliverGitOps
 from software_engineering_team.shared.repo_writer import write_agent_output
 from software_engineering_team.shared.team_lead_base import BaseTeamLead, TeamLeadSharedState
 
@@ -892,10 +893,13 @@ class DevOpsTeamLeadAgent(BaseTeamLead):
                 "phase2",
                 detail="DevOps team pipeline: phase 2 - change design (parallel)",
             )
-            # Enable parallel execution unless the backing LLM client is a
-            # DummyLLMClient (or subclass) — scripted test clients use a shared
-            # sequential response list that breaks under concurrent access.
-            use_parallel = not isinstance(self.llm, DummyLLMClient)
+            # Enable parallel execution unless the backing LLM client is (or
+            # wraps, e.g. a Strands LLMClientModel) a DummyLLMClient — scripted
+            # test clients use a shared sequential response list that breaks
+            # under concurrent access. Shared with
+            # shared.v2_review._review_steps_run_sequentially and
+            # code_review_agent.coordinator._tail_passes_run_sequentially.
+            use_parallel = not is_dummy_llm_client_wrapped(self.llm)
             phase2 = run_phase2_design_fanout(
                 task_spec=task_spec,
                 repo_path=repo_path,

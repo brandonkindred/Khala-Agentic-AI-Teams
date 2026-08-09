@@ -1,6 +1,6 @@
 """Pydantic models for the Product Delivery team.
 
-Shape mirrors :mod:`software_engineering_team.shared.models` (Initiative
+Shape mirrors :mod:`shared.dev_models.models` (Initiative
 → Epic → StoryPlan → TaskPlan) so the SE Tech Lead can later persist its
 ``PlanningHierarchy`` directly into these tables without translation.
 The principal differences are:

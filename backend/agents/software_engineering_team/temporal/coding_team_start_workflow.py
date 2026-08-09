@@ -23,6 +23,7 @@ def start_coding_team_workflow(
     job_id: str,
     repo_path: str,
     plan_input: Optional[Dict[str, Any]],
+    github: Optional[Dict[str, Any]] = None,
 ) -> None:
     """Start ``CodingTeamWorkflow`` for a coding-team job.
 
@@ -31,13 +32,16 @@ def start_coding_team_workflow(
           called ``create_job`` before dispatching).
         - ``repo_path`` is a non-empty str; ``plan_input`` is a JSON-serializable
           plan dict (a run with no plan has nothing to execute).
+        - ``github``, when provided, is a dict of GitHub-issue run metadata for
+          the workflow (owner/repo/issue/base/integration_branch/...). It must
+          not contain a plaintext token — activities resolve tokens activity-side.
     Postconditions:
         - A workflow with id ``coding_team-<job_id>`` is started on the coding
           team task queue (fire-and-forget; the caller polls
-          ``GET /status/{job_id}``). The activity reuses ``job_id`` so the polled
-          id matches the orchestrator's writes. Raises ``RuntimeError`` if the
-          worker's Temporal client never becomes available within the wait
-          window.
+          ``GET /status/{job_id}``). When ``github`` is a non-empty dict it is
+          included on the payload under ``"github"``; otherwise that key is
+          omitted. Raises ``RuntimeError`` if the worker's Temporal client never
+          becomes available within the wait window.
     """
     assert job_id, "start_coding_team_workflow requires a non-empty job_id"
     assert repo_path, "start_coding_team_workflow requires a non-empty repo_path"
@@ -46,6 +50,9 @@ def start_coding_team_workflow(
         "repo_path": repo_path,
         "plan_input": plan_input,
     }
+    if github:
+        assert "token" not in github, "github workflow payload must not include a token"
+        payload["github"] = github
     workflow_id = f"{WORKFLOW_ID_PREFIX}{job_id}"
     start_workflow_sync(
         CodingTeamWorkflow.run,

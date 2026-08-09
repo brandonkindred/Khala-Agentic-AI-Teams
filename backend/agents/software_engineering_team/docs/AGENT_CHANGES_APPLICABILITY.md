@@ -129,8 +129,8 @@ The following changes were implemented to reduce max cycles exceeded and erroneo
 
 | Component | Shared? | Location |
 |-----------|---------|----------|
-| `branch_has_commits_ahead_of` | YES | `shared/git_utils.py` (already added) |
-| `abort_merge` | YES | `shared/git_utils.py` (already added) |
+| `branch_has_commits_ahead_of` | YES | `shared/git/git_utils.py` (already added) |
+| `abort_merge` | YES | `shared/git/git_utils.py` (already added) |
 | Relaxed validation (repo_writer) | YES | `shared/repo_writer.py` (already applied) |
 | LLM output extraction | YES | `shared/llm.py`, `shared/llm_response_utils.py` (already applied) |
 | Emergency merge logic | NO | Per-agent (backend done; frontend needs it) |

@@ -51,15 +51,17 @@ from software_engineering_team.shared.context_sizing import parse_env_int
 from software_engineering_team.shared.llm import extract_json_from_response
 
 from .function_boundaries import (
+    EnclosingConstruct,
     enclosing_construct,
     enclosing_construct_start_heuristic,
+    iter_constructs,
     segment_containing_line,
     strip_numbered_prefixes,
 )
 from .model_resolution import resolve_code_review_verify_model
 from .models import CodeReviewInput, CodeReviewIssue
 from .prompts import FALSE_POSITIVE_VERIFY_PROMPT
-from .repo_reader import RepoReader
+from .repo_reader import DEFAULT_MAX_LISTED_FILES, DiskRepoReader, RepoReader
 
 logger = logging.getLogger(__name__)
 
@@ -71,6 +73,28 @@ _FILTER_ENV = "CODE_REVIEW_FALSE_POSITIVE_FILTER"
 # Cap on substring matches returned by ``search_codebase`` so a common token
 # cannot flood the tool result.
 _SEARCH_MATCH_LIMIT = 60
+
+# Cap on how many repository files one find_references repo half will scan when
+# the reader's per-fetch cost is unknown/expensive (e.g. GitHub-backed readers).
+_REPO_SEARCH_FILE_SCAN_LIMIT = 40
+
+# Cap used instead for DiskRepoReader (no per-file fetch cost) — match the
+# reader's own listing bound so alphabetical prefixes are not silently missed.
+_DISK_REPO_SEARCH_FILE_SCAN_LIMIT = DEFAULT_MAX_LISTED_FILES
+
+# Hard cap on inclusive line span returned by ``read_lines`` so a tool call
+# cannot pull an unbounded slice into the verifier context.
+_READ_LINES_MAX_SPAN = 400
+
+# Hard cap on the enclosing-construct excerpt size for one find_references hit.
+# Above this, _format_reference_hit shows a bounded line-window around the hit
+# instead of the whole construct so one oversized function can't flood the result.
+_EXCERPT_MAX_LINES = 60
+
+# Size of the fallback line-window shown when no enclosing construct is found
+# (module-level hit, non-Python file, or unparsable content) or when a found
+# construct exceeds _EXCERPT_MAX_LINES.
+_EXCERPT_WINDOW_LINES = 12
 
 # Cap on file paths listed inline in the verification prompt's manifest, so a
 # submission touching a large repo can't by itself blow the prompt past the
@@ -91,6 +115,10 @@ _CONTEXT_FIELD_TRUNCATION_MARKER = "\n... (truncated)"
 # ``_verify_timeout_seconds`` below.
 DEFAULT_VERIFY_TIMEOUT_SECONDS = 3600
 
+# Default cap on findings inlined into a single per-file verification LLM
+# call; see ``_verify_max_findings_per_group`` below.
+DEFAULT_VERIFY_MAX_FINDINGS_PER_GROUP = 40
+
 
 def _verify_timeout_seconds() -> int:
     """Per-group verification call timeout (seconds).
@@ -105,6 +133,27 @@ def _verify_timeout_seconds() -> int:
         - Returns an int >= 1.
     """
     return parse_env_int("CODE_REVIEW_VERIFY_TIMEOUT_SECONDS", DEFAULT_VERIFY_TIMEOUT_SECONDS, 1)
+
+
+def _verify_max_findings_per_group() -> int:
+    """Cap on findings verified in a single per-file LLM call.
+
+    Bounds how many findings ``_build_group_prompt`` renders in one
+    verification call for one cited file. A file whose genuine findings
+    exceed this cap is split into multiple same-sized batches by
+    ``_verify_and_filter`` (each its own ``_verify_group`` call, within the
+    cap) instead of growing one prompt/agent turn without bound. Env-
+    overridable via ``CODE_REVIEW_VERIFY_MAX_FINDINGS_PER_GROUP`` (see
+    docs/ENV_VARS.md).
+
+    Postconditions:
+        - Returns an int >= 1.
+    """
+    return parse_env_int(
+        "CODE_REVIEW_VERIFY_MAX_FINDINGS_PER_GROUP",
+        DEFAULT_VERIFY_MAX_FINDINGS_PER_GROUP,
+        1,
+    )
 
 
 def _verify_parallelism() -> int:
@@ -146,6 +195,17 @@ class CodebaseIndex:
           existing-codebase excerpt fail to resolve a path, which is what lets
           the verifier confirm "this file already exists" and drop the false
           positive. In-memory search (``search``) never touches it.
+        - ``full_content_complete`` is True iff ``from_input`` applied the
+          ``CodeReviewInput.full_content`` overlay (see that method) -- i.e. a
+          pre-numbered submission whose ``full_content`` covered every path this
+          index holds, so ``files`` holds real full bodies everywhere, not a mix
+          of full bodies and bounded excerpts. A partial ``full_content`` never
+          sets it (see ``from_input``'s all-or-nothing overlay rule). A
+          whole-codebase pass can gate on this flag alone -- never on
+          ``input_data.full_content`` directly -- without re-deriving path
+          coverage itself. False (the default, e.g. a directly-constructed
+          index, or ``pre_numbered=False`` where the field is inapplicable)
+          means "not verified complete."
         - The index is read-only after construction: the dataclass is frozen,
           ``files`` is shallow-copied at init, no method mutates ``files`` or
           ``existing_codebase``, and it never mutates ``repo_reader`` (whose
@@ -156,6 +216,7 @@ class CodebaseIndex:
     files: Dict[str, str]
     existing_codebase: str = ""
     repo_reader: Optional[RepoReader] = None
+    full_content_complete: bool = False
 
     EXISTING_CODEBASE_PATH = "<existing codebase>"
 
@@ -176,6 +237,26 @@ class CodebaseIndex:
               blocks via the coordinator's canonical parser; headerless blocks
               and empty-string bodies are dropped (they cannot be addressed by
               a path).
+            - When ``input_data.pre_numbered`` is True and ``input_data.full_content``
+              covers EVERY path this index would otherwise hold, each path's bounded
+              pre-numbered excerpt is replaced by its full body -- so a whole-codebase
+              pass reading via this index sees real content everywhere, while the
+              chunk reviewer (built from ``code``/``pre_numbered`` directly, not from
+              this index) is unaffected. A ``full_content`` that covers only SOME
+              paths is not applied at all (all-or-nothing): overlaying just the
+              covered subset would leave the rest as bounded excerpts sitting
+              alongside full bodies with no way for a caller to tell them apart,
+              which is worse than not overlaying anything -- a pass would read those
+              still-bounded, ``"N: "``-prefixed excerpts as if they were complete
+              files. ``full_content_complete`` on the returned index reports which
+              case occurred (see the class docstring). Ignored entirely when
+              ``pre_numbered`` is False. Only replaces content for paths already in
+              ``files`` -- an extra ``full_content`` key beyond what this submission
+              already holds is never added, so a caller that (like ``full_content_complete``
+              itself allows) supplies more paths than the submission covers can never
+              expand the index's changed-path set beyond what ``files``/``code``
+              actually determined; a whole-codebase pass reading ``index.files`` must
+              never see a path this submission did not itself include.
             - ``existing_codebase`` carries the input's full existing-codebase
               excerpt (empty string when absent); ``repo_reader`` is stored
               verbatim.
@@ -195,10 +276,24 @@ class CodebaseIndex:
             for path, content in parse_code_into_file_blocks(input_data.code or ""):
                 if path and content != "":
                     files[path] = content
+        full_content_complete = bool(
+            input_data.pre_numbered
+            and input_data.full_content
+            and set(input_data.full_content) >= set(files)
+        )
+        if full_content_complete:
+            # Intersect, never union: full_content may (per the coverage check above)
+            # legitimately carry MORE paths than this submission actually reviews --
+            # only paths files already holds are ever replaced, so an extra key can
+            # never expand the index's changed-path set.
+            files = {
+                path: input_data.full_content.get(path, content) for path, content in files.items()
+            }
         return cls(
             files=files,
             existing_codebase=input_data.existing_codebase or "",
             repo_reader=repo_reader,
+            full_content_complete=full_content_complete,
         )
 
     def _reader_read(self, path: str) -> Optional[str]:
@@ -378,8 +473,7 @@ class CodebaseIndex:
               files must not silently resolve to a repository file.
             - Falls through to the repo reader only when the submission has
               zero matches: if the reader can read the cited path, returns it
-              verbatim (so a finding about an existing-but-unchanged repo file
-              is still grouped and verified rather than skipped).
+              verbatim (see ``CodebaseIndex``'s ``repo_reader`` invariant for why).
             - Returns None for a blank, absent, or ambiguous path with no
               eligible reader hit — the verifier would have no single primary
               file to read, so the caller keeps the finding rather than verify it.
@@ -430,11 +524,9 @@ class CodebaseIndex:
                 f"Error: path '{path}' is ambiguous; it matches "
                 f"{', '.join(sorted(hits))}. Use list_files() and read the exact path."
             )
-        # Not in the submission — fall through to the repo reader so an
-        # existing-but-unchanged file (absent from the diff) is still readable.
-        # This is what lets the verifier confirm a file a finding calls "missing"
-        # actually exists in the repository. Ambiguous submission hits never
-        # reach here.
+        # Fall through to the repo reader for an existing-but-unchanged file
+        # (see CodebaseIndex's repo_reader invariant for why). Ambiguous
+        # submission hits never reach here.
         if key == self.EXISTING_CODEBASE_PATH:
             return None, "Error: no existing-codebase excerpt available."
 
@@ -474,6 +566,149 @@ class CodebaseIndex:
         content, _ = self._read(path)
         return content
 
+    def read_lines(self, path: str, start: int, end: int) -> str:
+        """Return an inclusive 1-based line slice of ``path``, capped by max span.
+
+        Preconditions:
+            - Callers should pass 1-based inclusive ``start``/``end``. Invalid
+              bounds are reported as ``Error: ...`` strings rather than raised.
+
+        Postconditions:
+            - Returns ``Error: ...`` for non-positive/non-int bounds, inverted
+              ranges, spans above ``_READ_LINES_MAX_SPAN``, unreadable paths, or
+              ``start`` past EOF — never raises on those cases.
+            - On success, returns a header ``{path} lines {start}–{end_eff} ({n} lines):``
+              followed by ``N| content`` body lines for the inclusive slice.
+            - When ``end`` exceeds file length and ``start`` is in range, clamps
+              ``end`` to the last line.
+            - Path resolution matches ``read_file``.
+        """
+        if not isinstance(start, int) or isinstance(start, bool) or start < 1:
+            return f"Error: start must be a positive integer, got {start!r}."
+        if not isinstance(end, int) or isinstance(end, bool) or end < 1:
+            return f"Error: end must be a positive integer, got {end!r}."
+        if start > end:
+            return f"Error: invalid range: start ({start}) > end ({end})."
+        span = end - start + 1
+        if span > _READ_LINES_MAX_SPAN:
+            return (
+                f"Error: range spans {span} lines; maximum is {_READ_LINES_MAX_SPAN}. "
+                "Narrow start/end or use read_function."
+            )
+
+        content, error = self._read(path)
+        if content is None:
+            return error if error is not None else f"Error: file not found: {path}."
+
+        lines = content.splitlines()
+        n_lines = len(lines)
+        if start > n_lines:
+            display = self.resolve_path(path) or path
+            if display == self.EXISTING_CODEBASE_PATH:
+                display = path
+            return (
+                f"Error: start line {start} is beyond the end of {display} "
+                f"(file has {n_lines} lines)."
+            )
+        end_eff = min(end, n_lines)
+        display = self.resolve_path(path) or path
+        if display == self.EXISTING_CODEBASE_PATH:
+            display = path
+        n = end_eff - start + 1
+        header = f"{display} lines {start}–{end_eff} ({n} lines):"
+        body = "\n".join(f"{i}| {lines[i - 1]}" for i in range(start, end_eff + 1))
+        return f"{header}\n{body}"
+
+    def read_function(self, path: str, line: int) -> str:
+        """Return the enclosing Python construct body for ``line``, or an error.
+
+        Preconditions:
+            - Callers should pass a 1-based ``line``. Invalid bounds and
+              unresolved lookups are reported as ``Error: ...`` strings rather
+              than raised.
+
+        Postconditions:
+            - Returns ``Error: ...`` for bad ``line``, unreadable paths,
+              non-``.py``/``.pyi`` paths, or when no enclosing function/class
+              brackets ``line`` — never raises on those cases.
+            - On success, returns a header
+              ``{path} {kind} {name} lines {start}–{end} ({n} lines):``
+              followed by ``N| content`` body lines for the inclusive construct
+              span (decorators included). Path resolution matches ``read_file``.
+            - Does not apply ``_READ_LINES_MAX_SPAN``.
+        """
+        if not isinstance(line, int) or isinstance(line, bool) or line < 1:
+            return f"Error: line must be a positive integer, got {line!r}."
+
+        content, error = self._read(path)
+        if content is None:
+            return error if error is not None else f"Error: file not found: {path}."
+
+        display = self.resolve_path(path) or path
+        if display == self.EXISTING_CODEBASE_PATH:
+            display = path
+        _, ext = os.path.splitext(display)
+        if ext.lower() not in (".py", ".pyi"):
+            return f"Error: read_function by line requires a Python file (.py/.pyi); got {display}."
+
+        stripped, physical, mapper = strip_numbered_prefixes(content, line)
+        construct = enclosing_construct(stripped, physical, annotated_hunks=mapper is not None)
+        if construct is None:
+            return f"Error: no enclosing function/class for line {line} of {display}."
+
+        return _format_construct_slice(display, construct, stripped.splitlines(), mapper=mapper)
+
+    def read_function_by_name(self, path: str, name: str) -> str:
+        """Return the construct body for an exact name match, or an error.
+
+        Preconditions:
+            - ``name`` should be a non-empty string matching ``EnclosingConstruct.name``
+              exactly (bare or ``Class.method``).
+
+        Postconditions:
+            - Returns ``Error: ...`` for bad name, unreadable/non-Python paths,
+              zero matches, or multiple matches — never raises on those cases.
+            - On a unique match, returns the same success format as ``read_function``.
+        """
+        if not isinstance(name, str) or not name.strip():
+            return f"Error: name must be a non-empty string, got {name!r}."
+        needle = name.strip()
+
+        content, error = self._read(path)
+        if content is None:
+            return error if error is not None else f"Error: file not found: {path}."
+
+        display = self.resolve_path(path) or path
+        if display == self.EXISTING_CODEBASE_PATH:
+            display = path
+        _, ext = os.path.splitext(display)
+        if ext.lower() not in (".py", ".pyi"):
+            return f"Error: read_function by name requires a Python file (.py/.pyi); got {display}."
+
+        stripped, _, mapper = strip_numbered_prefixes(content, 1)
+        # Pre-numbered hunk excerpts use annotated_hunks so a sibling
+        # unparseable continuation does not hide constructs in other hunks.
+        matches = [
+            c
+            for c in iter_constructs(stripped, annotated_hunks=mapper is not None)
+            if c.name == needle
+        ]
+        if not matches:
+            return f"Error: no function/class named {needle!r} in {display}."
+        if len(matches) > 1:
+
+            def _disp(n: int) -> int:
+                return mapper(n) if mapper is not None else n
+
+            detail = ", ".join(
+                f"{c.name} (lines {_disp(c.start_line)}–{_disp(c.end_line)})" for c in matches
+            )
+            return (
+                f"Error: name {needle!r} is ambiguous in {display}; matches: {detail}. "
+                f"Call read_function with a line number from one of those ranges."
+            )
+        return _format_construct_slice(display, matches[0], stripped.splitlines(), mapper=mapper)
+
     def search(
         self, query: str, max_matches: int = _SEARCH_MATCH_LIMIT
     ) -> List[Tuple[str, int, str]]:
@@ -509,6 +744,147 @@ class CodebaseIndex:
                         return results
         return results
 
+    def find_references(self, symbol: str, max_matches: int = _SEARCH_MATCH_LIMIT) -> str:
+        """Search submission (and repo_reader when present) for capped path:line hits.
+
+        Submission matches come from :meth:`search` first. When a ``repo_reader``
+        is attached and slots remain under ``max_matches``, fills them from the
+        repository (skipping submission paths) via ``_search_repo_references``.
+
+        Preconditions:
+            - ``max_matches`` > 0.
+
+        Postconditions:
+            - On complete hits with a reader: newline-joined hit blocks; each block
+              starts with ``path:line`` and appends a bounded excerpt: a full
+              enclosing-construct slice (same shape as ``read_function``) for
+              readable ``.py``/``.pyi`` files when the construct is at most
+              ``_EXCERPT_MAX_LINES``, else an ``_EXCERPT_WINDOW_LINES``-line
+              window around the hit (also used when no construct is found).
+            - When truncated (repo scan incomplete, or submission filled
+              ``max_matches`` so the repo half was skipped): append a truncated
+              banner (hits) or an empty-truncated message (no hits).
+            - When no ``repo_reader``: always append the no-repository-access note.
+            - Blank/whitespace-only ``symbol`` is not searched; the response must
+              not read as a complete empty scan of submission or repository.
+            - Never raises for missing symbols or reader failures; raises
+              ``ValueError`` when ``max_matches`` is non-positive (via ``search``).
+        """
+        if not (symbol or "").strip():
+            body = f"No references for {symbol!r}."
+            if self.repo_reader is None:
+                return f"{body}\n\nNo repository access is available beyond this submission."
+            return (
+                f"{body} Blank/whitespace symbols are not searched -- this does NOT prove "
+                "the symbol is absent from the submission or repository."
+            )
+
+        hits = list(self.search(symbol, max_matches=max_matches))
+        truncated = False
+        if self.repo_reader is None:
+            body = (
+                "\n\n".join(_format_reference_hit(self, path, lineno) for path, lineno, _ in hits)
+                if hits
+                else f"No references for {symbol!r}."
+            )
+            return f"{body}\n\nNo repository access is available beyond this submission."
+
+        remaining = max_matches - len(hits)
+        if remaining == 0:
+            truncated = True
+        elif remaining > 0:
+            repo_hits, repo_truncated = _search_repo_references(self, symbol, max_matches=remaining)
+            hits.extend(repo_hits)
+            truncated = repo_truncated
+
+        if not hits:
+            if truncated:
+                return (
+                    f"No references for {symbol!r} in the files scanned, but the scan was "
+                    "truncated before covering the whole repository -- this does NOT prove "
+                    "the symbol is absent elsewhere. Use list_files()/read_file() for a "
+                    "more targeted follow-up if this matters."
+                )
+            return f"No references for {symbol!r}."
+
+        result = "\n\n".join(_format_reference_hit(self, path, lineno) for path, lineno, _ in hits)
+        if truncated:
+            result += (
+                f"\n\n(Scan truncated before covering the whole repository -- there may be "
+                f"more matches for {symbol!r} beyond what's shown above.)"
+            )
+        return result
+
+
+def _search_repo_references(
+    index: CodebaseIndex,
+    query: str,
+    max_matches: int,
+    max_files_scanned: Optional[int] = None,
+) -> Tuple[List[Tuple[str, int, str]], bool]:
+    """Find case-insensitive substring hits via ``index.repo_reader`` only.
+
+    Preconditions:
+        - ``max_matches`` > 0 and, when given, ``max_files_scanned`` > 0.
+
+    Postconditions:
+        - Returns ``([], False)`` when ``repo_reader`` is None or ``query`` is blank.
+        - When ``max_files_scanned`` is None, uses ``_DISK_REPO_SEARCH_FILE_SCAN_LIMIT``
+          for ``DiskRepoReader`` else ``_REPO_SEARCH_FILE_SCAN_LIMIT``.
+        - Skips paths already keys of ``index.files``; returns up to ``max_matches``
+          ``(path, 1-based-line, line-text)`` tuples alongside a ``truncated`` flag.
+        - ``truncated`` is ``True`` whenever the scan did not inspect every candidate
+          path (file-scan cap, match cap, reader listing truncation, or read failures).
+        - Never raises on reader errors.
+    """
+    if max_matches <= 0:
+        raise ValueError("max_matches must be positive")
+    if max_files_scanned is not None and max_files_scanned <= 0:
+        raise ValueError("max_files_scanned must be positive")
+    if index.repo_reader is None:
+        return [], False
+    if max_files_scanned is None:
+        max_files_scanned = (
+            _DISK_REPO_SEARCH_FILE_SCAN_LIMIT
+            if isinstance(index.repo_reader, DiskRepoReader)
+            else _REPO_SEARCH_FILE_SCAN_LIMIT
+        )
+    needle = (query or "").strip().lower()
+    if not needle:
+        return [], False
+    try:
+        paths = index.repo_reader.list_files()
+    except Exception as exc:  # noqa: BLE001 - fail-safe
+        logger.debug("find_references: repo_reader.list_files() failed: %s", exc)
+        return [], True
+
+    results: List[Tuple[str, int, str]] = []
+    scanned = 0
+    incomplete = (
+        isinstance(index.repo_reader, DiskRepoReader) and index.repo_reader.listing_truncated()
+    )
+    for path in paths:
+        if path in index.files:
+            continue
+        if scanned >= max_files_scanned:
+            return results, True
+        scanned += 1
+        try:
+            content = index.repo_reader.read_file(path)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("find_references: repo_reader.read_file(%r) failed: %s", path, exc)
+            incomplete = True
+            continue
+        if content is None:
+            incomplete = True
+            continue
+        for lineno, line in enumerate(content.splitlines(), start=1):
+            if needle in line.lower():
+                results.append((path, lineno, line.rstrip()))
+                if len(results) >= max_matches:
+                    return results, True
+    return results, incomplete
+
 
 def _strip_numbered_prefixes(
     content: str, line_number: int
@@ -519,6 +895,142 @@ def _strip_numbered_prefixes(
     kept under this name for existing call sites/tests in this module.
     """
     return strip_numbered_prefixes(content, line_number)
+
+
+def _format_construct_slice(
+    display: str,
+    construct: EnclosingConstruct,
+    body_lines: List[str],
+    *,
+    mapper: Optional[Callable[[int], int]] = None,
+) -> str:
+    """Format one construct span as a header plus ``N| content`` body lines.
+
+    Preconditions:
+        - ``body_lines`` contains at least ``construct.end_line`` entries
+          (1-based indexing into ``body_lines``).
+
+    Postconditions:
+        - Returns the shared success format used by ``read_function`` and
+          ``read_function_by_name``.
+    """
+    display_start = mapper(construct.start_line) if mapper is not None else construct.start_line
+    display_end = mapper(construct.end_line) if mapper is not None else construct.end_line
+    n = construct.end_line - construct.start_line + 1
+    header = (
+        f"{display} {construct.kind} {construct.name} "
+        f"lines {display_start}–{display_end} ({n} lines):"
+    )
+    body = "\n".join(
+        f"{(mapper(i) if mapper is not None else i)}| {body_lines[i - 1]}"
+        for i in range(construct.start_line, construct.end_line + 1)
+    )
+    return f"{header}\n{body}"
+
+
+def _format_line_window(
+    display: str,
+    body_lines: List[str],
+    lineno: int,
+    *,
+    mapper: Optional[Callable[[int], int]] = None,
+    lo: int = 1,
+    hi: Optional[int] = None,
+) -> str:
+    """Format a bounded window of raw lines around ``lineno`` (no/oversized construct).
+
+    Preconditions:
+        - ``lineno`` is a 1-based index into ``body_lines``.
+        - When given, ``1 <= lo <= lineno <= hi``.
+
+    Postconditions:
+        - Returns a header plus ``N| content`` body lines for up to
+          ``_EXCERPT_WINDOW_LINES`` lines centered on ``lineno``, clamped to
+          ``[lo, hi or len(body_lines)]`` so a window inside an oversized
+          construct never spills past that construct's own span.
+        - Header reports the shown range and the total lines in ``[lo, hi]``
+          so the window reads as bounded/partial, not a complete excerpt.
+    """
+    total_hi = hi if hi is not None else len(body_lines)
+    span = total_hi - lo + 1
+    half = _EXCERPT_WINDOW_LINES // 2
+    start = max(lo, lineno - half)
+    end = min(total_hi, start + _EXCERPT_WINDOW_LINES - 1)
+    start = max(lo, end - _EXCERPT_WINDOW_LINES + 1)
+    display_start = mapper(start) if mapper is not None else start
+    display_end = mapper(end) if mapper is not None else end
+    shown = end - start + 1
+    header = f"{display} lines {display_start}–{display_end} (window, {shown} of {span} lines):"
+    body = "\n".join(
+        f"{(mapper(i) if mapper is not None else i)}| {body_lines[i - 1]}"
+        for i in range(start, end + 1)
+    )
+    return f"{header}\n{body}"
+
+
+def _format_reference_hit(index: CodebaseIndex, path: str, lineno: int) -> str:
+    """Format one find_references hit as path:line plus a bounded excerpt.
+
+    Preconditions:
+        - ``lineno`` >= 1 and is a 1-based storage index from ``search`` /
+          ``_search_repo_references`` (physical line in the stored blob).
+
+    Postconditions:
+        - Always starts with ``{path}:{display_line}`` where ``display_line`` is
+          the original ``N:`` file line when content is pre-numbered, else
+          ``lineno``.
+        - When readable ``.py``/``.pyi`` content has an enclosing construct at
+          the physical hit line spanning at most ``_EXCERPT_MAX_LINES``,
+          appends a full construct slice from ``_format_construct_slice``
+          (same shape as ``read_function``).
+        - When the construct exceeds ``_EXCERPT_MAX_LINES``, or no construct
+          is found (module-level hit, non-Python file, unparsable content),
+          appends a bounded ``_EXCERPT_WINDOW_LINES``-line window around the
+          hit instead, via ``_format_line_window`` -- excerpt payloads stay
+          bounded even when no construct can be resolved.
+        - Returns only the locator when the file content itself is
+          unreadable.
+        - Never raises.
+    """
+    loc = f"{path}:{lineno}"
+    content, _error = index._read(path)
+    if content is None:
+        return loc
+    display = index.resolve_path(path) or path
+    if display == index.EXISTING_CODEBASE_PATH:
+        display = path
+    _, ext = os.path.splitext(display)
+    try:
+        # ``lineno`` from search is a storage/physical index. ``strip_numbered_prefixes``
+        # remaps an *original* file line; pass a dummy original and keep ``lineno``
+        # as the physical index (same pattern as ``read_function_by_name``).
+        stripped, _, mapper = strip_numbered_prefixes(content, 1)
+        if mapper is not None:
+            loc = f"{path}:{mapper(lineno)}"
+        construct = (
+            enclosing_construct(stripped, lineno, annotated_hunks=mapper is not None)
+            if ext.lower() in (".py", ".pyi")
+            else None
+        )
+    except Exception:  # noqa: BLE001 - excerpt failure must not abort find_references
+        return loc
+    body_lines = stripped.splitlines()
+    if construct is not None:
+        n = construct.end_line - construct.start_line + 1
+        if n <= _EXCERPT_MAX_LINES:
+            excerpt = _format_construct_slice(display, construct, body_lines, mapper=mapper)
+            return f"{loc}\n{excerpt}"
+        excerpt = _format_line_window(
+            display,
+            body_lines,
+            lineno,
+            mapper=mapper,
+            lo=construct.start_line,
+            hi=construct.end_line,
+        )
+        return f"{loc}\n{excerpt}"
+    excerpt = _format_line_window(display, body_lines, lineno, mapper=mapper)
+    return f"{loc}\n{excerpt}"
 
 
 def _find_python_function_at_line(
@@ -681,8 +1193,9 @@ def _build_tools(index: CodebaseIndex) -> List[Callable[..., str]]:
     """Build strands tools bound to ``index`` for one verification agent.
 
     Postconditions:
-        - Returns four tools (``read_file``, ``list_files``, ``search_codebase``,
-          ``find_function_at_line``) that delegate to ``index``; each returns a
+        - Returns seven tools (``read_file``, ``read_lines``, ``read_function``,
+          ``list_files``, ``search_codebase``, ``find_function_at_line``,
+          ``find_references``) that delegate to ``index``; each returns a
           string and never raises, so a bad model-supplied argument becomes a
           tool message rather than an error that aborts the agent loop.
     """
@@ -707,6 +1220,62 @@ def _build_tools(index: CodebaseIndex) -> List[Callable[..., str]]:
             return index.read_file(path)
         except Exception as exc:
             return f"Error: could not read {path!r}: {type(exc).__name__}: {exc}"
+
+    @tool
+    def read_lines(path: str, start: int, end: int) -> str:
+        """Read an inclusive 1-based line range from a file under review.
+
+        Prefer this over read_file when you only need a bounded slice. The
+        maximum span is 400 lines; use a narrower range or read_function for
+        larger constructs.
+
+        Args:
+            path: File path (same paths accepted by read_file).
+            start: 1-based inclusive start line.
+            end: 1-based inclusive end line.
+
+        Returns:
+            A header plus ``N| content`` lines, or an ``Error: ...`` message.
+        """
+        try:
+            return index.read_lines(path, start, end)
+        except Exception as exc:
+            return (
+                f"Error: could not read_lines {path!r} [{start}:{end}]: {type(exc).__name__}: {exc}"
+            )
+
+    @tool
+    def read_function(path: str, name_or_line) -> str:
+        """Read one function/method/class body by line number or exact name.
+
+        Pass a positive integer for line-based lookup, or a name such as
+        ``foo`` / ``Class.method`` for exact name lookup. A string of only
+        digits (e.g. ``"12"``) is treated as a line number, not a name —
+        prefer an int when you mean a line.
+
+        Args:
+            path: File path (same paths accepted by read_file).
+            name_or_line: 1-based line number (int or digit-only string) or
+                exact construct name (any other non-empty string).
+
+        Returns:
+            Header plus ``N| content`` lines, or an ``Error: ...`` message.
+        """
+        try:
+            if isinstance(name_or_line, bool):
+                return f"Error: name_or_line must be a line number or name, got {name_or_line!r}."
+            if isinstance(name_or_line, int):
+                return index.read_function(path, name_or_line)
+            if isinstance(name_or_line, str) and name_or_line.strip().isdigit():
+                return index.read_function(path, int(name_or_line.strip()))
+            if isinstance(name_or_line, str):
+                return index.read_function_by_name(path, name_or_line)
+            return f"Error: name_or_line must be a line number or name, got {name_or_line!r}."
+        except Exception as exc:
+            return (
+                f"Error: could not read_function {path!r} ({name_or_line!r}): "
+                f"{type(exc).__name__}: {exc}"
+            )
 
     @tool
     def list_files() -> str:
@@ -793,7 +1362,36 @@ def _build_tools(index: CodebaseIndex) -> List[Callable[..., str]]:
         except Exception as exc:
             return f"Error: could not inspect {path!r} at line {line_number}: {type(exc).__name__}: {exc}"
 
-    return [read_file, list_files, search_codebase, find_function_at_line]
+    @tool
+    def find_references(symbol: str) -> str:
+        """Find bounded path:line references to a symbol across the submission
+        and (when attached) the wider repository, each with a short excerpt.
+
+        Use this to check whether a finding's claim about a symbol's usage
+        (e.g. "never called", "unused import") holds up, without manually
+        combining search_codebase and read_lines.
+
+        Args:
+            symbol: The function, class, or variable name to search for.
+
+        Returns:
+            Newline-separated reference blocks with excerpts, or a message
+            that nothing matched / access is limited to this submission.
+        """
+        try:
+            return index.find_references(symbol)
+        except Exception as exc:
+            return f"Error: could not find references for {symbol!r}: {type(exc).__name__}: {exc}"
+
+    return [
+        read_file,
+        read_lines,
+        read_function,
+        list_files,
+        search_codebase,
+        find_function_at_line,
+        find_references,
+    ]
 
 
 @dataclass
@@ -826,13 +1424,11 @@ def _coerce_verdict(item: object) -> Optional[Tuple[int, _Verdict]]:
         - Returns None for any item without a non-negative integer ``index``
           (bool, float, string, negative, or missing — a verdict we cannot map
           back to a finding is ignored, not guessed).
-        - ``is_false_positive`` is True only for ``is_real_issue is False`` with
-          an explicit ``"high"`` or ``"medium"`` confidence; every other shape —
-          real, low/blank/missing confidence, OR any unrecognized confidence
-          value — is kept. The allowlist is deliberate: an off-contract
-          confidence is an ambiguous verdict, and the fail-safe rule keeps
-          ambiguous findings rather than dropping them. Never raises on
-          malformed input.
+        - Builds ``is_false_positive`` from an explicit ``"high"``/``"medium"``
+          confidence allowlist, not a denylist — see ``_Verdict``'s invariant for
+          the exact shape and the module docstring's Fail-safe invariant for why
+          (an off-contract confidence is ambiguous, and ambiguous findings are
+          kept, never dropped). Never raises on malformed input.
     """
     if not isinstance(item, dict):
         return None
@@ -842,10 +1438,7 @@ def _coerce_verdict(item: object) -> Optional[Tuple[int, _Verdict]]:
     index = raw_index
     confidence = str(item.get("confidence", "") or "").strip().lower()
     is_real = item.get("is_real_issue")
-    # Drop ONLY on an explicit, confident "not a real issue". An allowlist (not a
-    # denylist) so an unrecognized confidence ("none", "unsure", a non-string the
-    # model returned, ...) is treated as not-confident and the finding is kept —
-    # dropping a real issue is far worse than keeping a questionable one.
+    # Allowlist, not a denylist — see module docstring's Fail-safe invariant.
     is_false_positive = is_real is False and confidence in ("high", "medium")
     return index, _Verdict(
         is_false_positive=is_false_positive,
@@ -1076,7 +1669,12 @@ def _verify_group(
     issues: List[CodeReviewIssue],
     input_data: CodeReviewInput,
 ) -> Dict[int, _Verdict]:
-    """Run one verification LLM call over all findings for a single file.
+    """Run one verification LLM call over one batch of a single file's findings.
+
+    ``issues`` is the whole file's findings unless the caller split them into
+    multiple batches under ``CODE_REVIEW_VERIFY_MAX_FINDINGS_PER_GROUP``; this
+    function has no notion of "the whole file" and simply verifies whatever
+    slice it is given.
 
     Postconditions:
         - Returns ``{finding_index: _Verdict}`` for the findings the model gave
@@ -1221,7 +1819,31 @@ def _verify_and_filter(
     # single call, not the sum. A per-group failure keeps that group's findings
     # (best-effort), exactly as the sequential path did, and the merge below
     # consumes results in submission order so the outcome stays deterministic.
-    group_items = list(groups.items())
+    #
+    # A file whose finding count exceeds _verify_max_findings_per_group() is
+    # split here into multiple same-sized batches, each becoming its own
+    # group_items entry (its own _verify_group call), so no single prompt
+    # inlines more than the cap. group_items and group_orig_index_batches are
+    # positionally aligned by list index rather than keyed by file_path, since
+    # one file_path can now produce more than one entry.
+    max_per_group = _verify_max_findings_per_group()
+    group_items: List[Tuple[str, List[CodeReviewIssue]]] = []
+    group_orig_index_batches: List[List[int]] = []
+    for file_path, group in groups.items():
+        orig_indices = group_orig_indices[file_path]
+        if len(group) > max_per_group:
+            batch_count = -(-len(group) // max_per_group)
+            logger.info(
+                "FalsePositiveFilter: splitting %s findings for %s into %s batches "
+                "of up to %s (CODE_REVIEW_VERIFY_MAX_FINDINGS_PER_GROUP)",
+                len(group),
+                file_path,
+                batch_count,
+                max_per_group,
+            )
+        for start in range(0, len(group), max_per_group):
+            group_items.append((file_path, group[start : start + max_per_group]))
+            group_orig_index_batches.append(orig_indices[start : start + max_per_group])
 
     def _verify_one(item: Tuple[str, List[CodeReviewIssue]]) -> Dict[int, _Verdict]:
         file_path, group = item
@@ -1272,8 +1894,9 @@ def _verify_and_filter(
         group_verdicts = [r if r is not None else {} for r in raw_results]
 
     removed_indices: set[int] = set()
-    for (file_path, group), verdicts in zip(group_items, group_verdicts):
-        orig_indices = group_orig_indices[file_path]
+    for (file_path, group), orig_indices, verdicts in zip(
+        group_items, group_orig_index_batches, group_verdicts
+    ):
         group_len = len(group)
         for idx, verdict in verdicts.items():
             if not isinstance(idx, int) or idx < 0 or idx >= group_len:

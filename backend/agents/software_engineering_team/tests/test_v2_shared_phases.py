@@ -17,15 +17,16 @@ from types import SimpleNamespace
 
 import pytest
 
-from software_engineering_team.backend_code_v2_team import models as be_models
-from software_engineering_team.shared.git_utils import write_files_and_commit
-from software_engineering_team.shared.models import (
+from llm_service.strands_model import LlmRunner
+from shared.dev_models.models import (
     ArchitectureComponent,
     SystemArchitecture,
     Task,
     TaskStatus,
     TaskType,
 )
+from shared.git.git_utils import write_files_and_commit
+from software_engineering_team.backend_code_v2_team import models as be_models
 from software_engineering_team.shared.phases import execution as sh_exec
 from software_engineering_team.shared.phases import planning as sh_plan
 from software_engineering_team.shared.phases import problem_solving as sh_ps
@@ -42,7 +43,6 @@ from software_engineering_team.shared.repo_writer import (
     write_repo_text_files,
 )
 from software_engineering_team.shared.stack_profile import StackProfile
-from software_engineering_team.shared.strands_model import LlmRunner
 from software_engineering_team.tests.test_helpers import init_repo_with_existing_development
 
 # --- helpers ---------------------------------------------------------------
@@ -380,6 +380,30 @@ def test_run_execution_impl_filters_and_handles_failure():
     ran = [m for m in result.microtasks]
     assert len(ran) == 1 and ran[0].id == "mt-2"
     assert ran[0].status == be_models.MicrotaskStatus.FAILED
+
+
+def test_run_execution_impl_logs_cleanly_when_tool_agent_is_none():
+    """A microtask with no tool_agent runs to completion without an AttributeError."""
+    mt = be_models.Microtask(
+        id="mt-1", tool_agent=be_models.ToolAgentKind.GENERAL, description="one"
+    )
+    mt.tool_agent = None  # simulate an unset tool_agent, as generate_microtask_files tolerates
+
+    planning = be_models.PlanningResult(microtasks=[mt], language="python")
+    result = sh_exec.run_execution_impl(
+        llm=object(),
+        task=_task(),
+        planning_result=planning,
+        repo_path=Path("/tmp"),
+        architecture=None,
+        existing_code="",
+        tool_runners={},
+        progress_callback=None,
+        only_microtask_ids=None,
+        models=be_models,
+        run_general_microtask=lambda **_kw: {},
+    )
+    assert result.microtasks[0].status == be_models.MicrotaskStatus.COMPLETED
 
 
 # --- setup helpers ---------------------------------------------------------

@@ -318,7 +318,7 @@ cycle. Disable to restore the pre-change context-free designer prompt.
 ### Ollama LLM transport (routed through `llm_service`)
 For the default **Ollama** provider, `get_strands_model` (`strategy_lab/agents/model_factory.py`)
 routes every Strategy Lab LLM call through the platform's hardened `llm_service` client (via
-`llm_service.strands_adapter.get_strands_model`) instead of constructing strands' native
+`llm_service.strands_adapter._get_strands_model`) instead of constructing strands' native
 `OllamaModel`. This closes the failure class where a thinking-enabled model returns an empty /
 thinking-only / prose-only turn on a long code-emitting generation: the strands-native path returned
 that as a "successful" empty string, which the parser then rejected with

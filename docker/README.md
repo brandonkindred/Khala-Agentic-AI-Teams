@@ -48,12 +48,13 @@ This directory defines a **Docker Compose stack** that runs:
 ## Required environment variables
 
 - **OLLAMA_API_KEY** – Create at [ollama.com/settings/keys](https://ollama.com/settings/keys). Required for Ollama Cloud (Option A). Passed into the agents container so the LLM client can call `https://ollama.com` with `Authorization: Bearer <key>`.
+- **POSTGRES_USER**, **POSTGRES_PASSWORD** – credentials for the default Postgres superuser; init scripts create `temporal` and `khala` DBs and users from these. `docker-compose.yml` has no fallback default for either — `docker compose up`/`config` fails fast with an `is required` error if they're unset, so they must be set explicitly (e.g. via `docker/.env`).
 
 Optional (defaults in compose / `docker/.env.example`; copy to `docker/.env` and set as needed):
 
 - **LLM_BASE_URL** – default is `https://ollama.com` (Ollama Cloud). Set to `http://ollama:11434` to use the local Ollama container instead.
 - **LLM_MODEL** – default `deepseek-v4-pro:cloud`
-- **POSTGRES_USER**, **POSTGRES_PASSWORD**, **POSTGRES_DB** – used for the default Postgres superuser; init scripts create `temporal` and `khala` DBs and users.
+- **POSTGRES_DB** – default `postgres`; the database name for the default Postgres superuser.
 - **NEO4J_BOLT_URL** – unset on `khala` by default (no Graphiti sync in the reverse proxy). Set to `bolt://neo4j:7687` to opt that process into graph sync; see `docs/ENV_VARS.md`. **NEO4J_PASSWORD** (and related Neo4j vars) configure the always-on Neo4j container for agents.
 
 Personal Assistant credential encryption uses a key generated at **Docker image build time** (stored in the image), so credentials persist across container restarts without setting any env var.
@@ -164,7 +165,7 @@ When running in this stack, the **khala** service uses the **stack’s Postgres*
 
 Agent Console sandboxes run as **per-sandbox docker compose projects** — each agent invocation gets its own isolated stack containing the agent container, **plus its own Postgres, Temporal, Prometheus, and Grafana**. Nothing in those stacks joins this `khala-stack` compose network, so the agent runs as if it were in a live environment but cannot touch the long-lived services here. (Permission tiers were removed in #456: every sandbox is provisioned with full access on its own services.)
 
-- The compose template lives at `backend/agent_sandbox_image/sandbox-stack.yml`. The provisioner (`backend/agents/agent_provisioning_team/sandbox/provisioner.py`) renders it into `${AGENT_CACHE}/agent_provisioning/sandboxes/stacks/<project>/` and runs `docker compose -p <project> -f <rendered> up -d`.
+- The compose template lives at `backend/agent_sandbox_image/sandbox-stack.yml`. The provisioner (`backend/agents/agent_team_studio/agent_provisioning_team/sandbox/provisioner.py`) renders it into `${AGENT_CACHE}/agent_provisioning/sandboxes/stacks/<project>/` and runs `docker compose -p <project> -f <rendered> up -d`.
 - The Postgres password is freshly generated per sandbox; Postgres / Temporal / Prometheus / Grafana speak to one another over the project's private bridge. Only the agent's `8090/tcp` is published to the host on a loopback-bound ephemeral port so the unified API can proxy invokes.
 - Idle sandboxes are torn down with `docker compose down -v` (named volumes go too) after `AGENT_PROVISIONING_SANDBOX_IDLE_MINUTES` (default 5) — no run inherits state from a previous one.
 

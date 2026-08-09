@@ -342,7 +342,7 @@ class TestPlanningPhase:
     def test_language_detection_python(self, tmp_path):
         from backend_code_v2_team.phases.planning import _detect_language
 
-        from software_engineering_team.shared.models import Task, TaskStatus, TaskType
+        from shared.dev_models.models import Task, TaskStatus, TaskType
 
         (tmp_path / "requirements.txt").write_text("flask")
         task = Task(
@@ -357,7 +357,7 @@ class TestPlanningPhase:
     def test_language_detection_java(self, tmp_path):
         from backend_code_v2_team.phases.planning import _detect_language
 
-        from software_engineering_team.shared.models import Task, TaskStatus, TaskType
+        from shared.dev_models.models import Task, TaskStatus, TaskType
 
         (tmp_path / "pom.xml").write_text("<project/>")
         task = Task(
@@ -372,7 +372,7 @@ class TestPlanningPhase:
     def test_language_detection_from_description(self, tmp_path):
         from backend_code_v2_team.phases.planning import _detect_language
 
-        from software_engineering_team.shared.models import Task, TaskStatus, TaskType
+        from shared.dev_models.models import Task, TaskStatus, TaskType
 
         task = Task(
             id="t1",
@@ -413,7 +413,7 @@ class TestPlanningPhase:
     def test_run_planning_fallback(self, tmp_path):
         from backend_code_v2_team.phases.planning import run_planning
 
-        from software_engineering_team.shared.models import Task, TaskStatus, TaskType
+        from shared.dev_models.models import Task, TaskStatus, TaskType
 
         mock_llm = _TextStubClient(
             "## MICROTASKS ##\n## END MICROTASKS ##\n"
@@ -441,7 +441,7 @@ class TestExecutionPhase:
     def test_run_execution_with_tool_runners(self, tmp_path):
         from backend_code_v2_team.phases.execution import run_execution
 
-        from software_engineering_team.shared.models import Task, TaskStatus, TaskType
+        from shared.dev_models.models import Task, TaskStatus, TaskType
 
         mock_llm = MagicMock()
         task = Task(
@@ -476,7 +476,7 @@ class TestExecutionPhase:
     def test_run_execution_general_fallback(self, tmp_path):
         from backend_code_v2_team.phases.execution import run_execution
 
-        from software_engineering_team.shared.models import Task, TaskStatus, TaskType
+        from shared.dev_models.models import Task, TaskStatus, TaskType
 
         mock_llm = _TextStubClient(
             "## FILE app.py ##\nprint('hello')\n## SUMMARY ##\ndone\n## END SUMMARY ##"
@@ -505,17 +505,40 @@ class TestExecutionPhase:
 # ---------------------------------------------------------------------------
 
 
+class _CriticalCodeReviewStubClient(DummyLLMClient):
+    """Returns one critical finding for every chunk-review call; ``run_coordinator``
+    calls ``complete_json`` directly (JSON, schema-validated), unlike the old
+    template/``Agent``-based fallback ``_TextStubClient`` targets. No QA/security/
+    build agent is configured in the tests using this stub, so the code-review
+    chunk call is the only ``complete_json`` call this client ever receives."""
+
+    def complete_json(self, prompt: str, **kwargs: Any) -> Any:
+        return {
+            "approved": False,
+            "issues": [
+                {
+                    "severity": "critical",
+                    "category": "security",
+                    "file_path": "app.py",
+                    "description": "SQL injection",
+                    "suggestion": "Use parameterized queries.",
+                }
+            ],
+            "summary": "critical issue",
+            "spec_compliance_notes": "",
+        }
+
+
 class TestReviewPhase:
     def test_review_passes_no_issues(self, tmp_path):
         from backend_code_v2_team.phases.review import run_review
 
-        from software_engineering_team.shared.models import Task, TaskStatus, TaskType
+        from shared.dev_models.models import Task, TaskStatus, TaskType
 
-        mock_llm = _TextStubClient(
-            "## PASSED ##\ntrue\n## END PASSED ##\n"
-            "## ISSUES ##\n## END ISSUES ##\n"
-            "## SUMMARY ##\nall good\n## END SUMMARY ##"
-        )
+        # A bare DummyLLMClient's built-in "senior code reviewer" branch already
+        # returns {"approved": True, "issues": []} for the coordinator's chunk-review
+        # call -- a clean pass with no custom stub needed.
+        mock_llm = DummyLLMClient()
         task = Task(
             id="t1",
             type=TaskType.BACKEND,
@@ -533,13 +556,9 @@ class TestReviewPhase:
     def test_review_fails_on_critical_issues(self, tmp_path):
         from backend_code_v2_team.phases.review import run_review
 
-        from software_engineering_team.shared.models import Task, TaskStatus, TaskType
+        from shared.dev_models.models import Task, TaskStatus, TaskType
 
-        mock_llm = _TextStubClient(
-            "## PASSED ##\nfalse\n## END PASSED ##\n"
-            "## ISSUES ##\n---\nsource: code_review\nseverity: critical\ndescription: SQL injection\nfile_path: \nrecommendation: \n---\n## END ISSUES ##\n"
-            "## SUMMARY ##\ncritical issue\n## END SUMMARY ##"
-        )
+        mock_llm = _CriticalCodeReviewStubClient()
         task = Task(
             id="t1",
             type=TaskType.BACKEND,
@@ -563,7 +582,7 @@ class TestProblemSolvingPhase:
     def test_no_actionable_issues(self):
         from backend_code_v2_team.phases.problem_solving import run_problem_solving
 
-        from software_engineering_team.shared.models import Task, TaskStatus, TaskType
+        from shared.dev_models.models import Task, TaskStatus, TaskType
 
         mock_llm = MagicMock()
         task = Task(
@@ -587,7 +606,7 @@ class TestProblemSolvingPhase:
     def test_applies_fixes(self):
         from backend_code_v2_team.phases.problem_solving import run_problem_solving
 
-        from software_engineering_team.shared.models import Task, TaskStatus, TaskType
+        from shared.dev_models.models import Task, TaskStatus, TaskType
 
         mock_llm = _TextStubClient(
             "## FILE a.py ##\nfixed_code()\n"
@@ -686,7 +705,7 @@ class TestToolAgents:
         create_ok, branch = agent.create_feature_branch(tmp_path, "t1", "API")
         assert not create_ok and branch is None
 
-        from software_engineering_team.shared.git_utils import initialize_new_repo
+        from shared.git.git_utils import initialize_new_repo
 
         ok, _ = initialize_new_repo(tmp_path)
         assert ok
@@ -695,7 +714,7 @@ class TestToolAgents:
         assert "feature/" in branch
 
     def test_git_agent_commit_current_changes(self, tmp_path):
-        from software_engineering_team.shared.git_utils import initialize_new_repo
+        from shared.git.git_utils import initialize_new_repo
         from software_engineering_team.shared.tool_agent_git_branch import (
             GitBranchManagementToolAgent,
         )
@@ -707,7 +726,7 @@ class TestToolAgents:
         assert ok
 
     def test_git_agent_deliver_with_feature_branch_name(self, tmp_path):
-        from software_engineering_team.shared.git_utils import (
+        from shared.git.git_utils import (
             create_feature_branch,
             initialize_new_repo,
         )
@@ -824,7 +843,7 @@ class TestBackendCodeV2TeamLead:
         """BackendCodeV2TeamLead reports a concrete setup-readiness failure."""
         from backend_code_v2_team.orchestrator import BackendCodeV2TeamLead
 
-        from software_engineering_team.shared.models import Task, TaskStatus, TaskType
+        from shared.dev_models.models import Task, TaskStatus, TaskType
 
         mock_llm = MagicMock()
         planning_response = (
@@ -861,7 +880,7 @@ class TestBackendCodeV2TeamLead:
             SetupResult,
         )
 
-        from software_engineering_team.shared.models import Task, TaskStatus, TaskType
+        from shared.dev_models.models import Task, TaskStatus, TaskType
 
         deliver = DeliverResult(
             branch_name="feature/api",
@@ -935,7 +954,7 @@ class TestBackendDevelopmentAgentBranchReuse:
             PlanningResult,
         )
 
-        from software_engineering_team.shared.models import Task, TaskStatus, TaskType
+        from shared.dev_models.models import Task, TaskStatus, TaskType
 
         (tmp_path / "pyproject.toml").write_text("[tool.ruff]\n[tool.pytest.ini_options]\n")
         (tmp_path / "tests").mkdir()
@@ -1038,7 +1057,7 @@ class TestBackendDevelopmentAgentBranchReuse:
             PlanningResult,
         )
 
-        from software_engineering_team.shared.models import Task, TaskStatus, TaskType
+        from shared.dev_models.models import Task, TaskStatus, TaskType
 
         (tmp_path / "pyproject.toml").write_text("[tool.ruff]\n[tool.pytest.ini_options]\n")
         (tmp_path / "tests").mkdir()

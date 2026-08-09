@@ -1,7 +1,7 @@
 """Regression: importing ``unified_api.routes.agents`` must not load sandbox Temporal.
 
 ``routes/agents.py`` only needs the Temporal-aware sandbox acquire dispatch
-(``agent_provisioning_team.temporal.sandbox_dispatch``, which pulls in
+(``agent_team_studio.agent_provisioning_team.temporal.sandbox_dispatch``, which pulls in
 ``temporalio``) inside the ``invoke_agent`` handler's warm-sandbox step. Request
 paths that never touch a sandbox — registry listing, schema resolution,
 samples, run history — must not pay for that import graph at module-import
@@ -49,7 +49,7 @@ def test_import_agents_route_does_not_load_sandbox_temporal_dispatch() -> None:
     script = """
 import sys
 assert "temporalio" not in sys.modules, "temporalio already loaded before import"
-assert "agent_provisioning_team.temporal.sandbox_dispatch" not in sys.modules, (
+assert "agent_team_studio.agent_provisioning_team.temporal.sandbox_dispatch" not in sys.modules, (
     "sandbox_dispatch already loaded before import"
 )
 import unified_api.routes.agents as agents_route_mod
@@ -57,7 +57,7 @@ assert "temporalio" not in sys.modules, (
     f"importing unified_api.routes.agents loaded temporalio: "
     f"{[m for m in sys.modules if m.startswith('temporalio')]}"
 )
-assert "agent_provisioning_team.temporal.sandbox_dispatch" not in sys.modules, (
+assert "agent_team_studio.agent_provisioning_team.temporal.sandbox_dispatch" not in sys.modules, (
     "importing unified_api.routes.agents loaded sandbox_dispatch"
 )
 assert callable(agents_route_mod.acquire), (

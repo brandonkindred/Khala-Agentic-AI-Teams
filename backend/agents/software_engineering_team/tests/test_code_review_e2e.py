@@ -89,7 +89,7 @@ def test_e2e_bounded_prompts_and_full_coverage() -> None:
     assert len(chunks) > 1, "test premise: the submission must split into many chunks"
     assert all(len(chunk.content) <= cap for chunk in chunks)
 
-    result = CodeReviewAgent(llm_client=client).run(
+    result = CodeReviewAgent(llm_client=client, force_in_process=True).run(
         CodeReviewInput(files=files, task_description="review big submission", language="python")
     )
     assert result.approved is True
@@ -153,7 +153,7 @@ def test_e2e_merged_issues_reanchored_to_original_lines() -> None:
     segments = [seg for chunk in chunks for seg in chunk.segments]
     assert len(segments) > 1, "test premise: the file must split into partial segments"
 
-    result = CodeReviewAgent(llm_client=client).run(
+    result = CodeReviewAgent(llm_client=client, force_in_process=True).run(
         CodeReviewInput(files={"huge.py": content}, language="python")
     )
 
@@ -196,7 +196,7 @@ def test_e2e_one_chunk_failure_degrades_gracefully_without_blocking(monkeypatch)
     bad_path = "pkg/mod_3.py"
     marker = f"### {bad_path} ###"
 
-    result = CodeReviewAgent(llm_client=_FailOneFile(marker)).run(
+    result = CodeReviewAgent(llm_client=_FailOneFile(marker), force_in_process=True).run(
         CodeReviewInput(files=files, task_description="review", language="python")
     )
 

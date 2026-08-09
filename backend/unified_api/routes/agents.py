@@ -46,14 +46,14 @@ from agent_console import (
     resolve_author,
 )
 from agent_console.models import RunCreate
-from agent_provisioning_team.sandbox import (
+from agent_registry import AgentDetail, AgentSummary, TeamGroup, get_registry
+from agent_registry.schema_resolver import SchemaResolutionError, resolve_schema
+from agent_team_studio.agent_provisioning_team.sandbox import (
     DockerUnavailableError,
     SandboxStatus,
     note_activity,
 )
-from agent_provisioning_team.sandbox.state import COLD_START_LOG_PREFIX
-from agent_registry import AgentDetail, AgentSummary, TeamGroup, get_registry
-from agent_registry.schema_resolver import SchemaResolutionError, resolve_schema
+from agent_team_studio.agent_provisioning_team.sandbox.state import COLD_START_LOG_PREFIX
 from shared.agent_invoke.limits import (
     RESPONSE_ENVELOPE_OVERHEAD_BYTES,
     max_output_bytes,
@@ -80,6 +80,15 @@ def list_agents(
 
 @router.get("/teams", response_model=list[TeamGroup])
 def list_teams() -> list[TeamGroup]:
+    """List every team present in the merged agent registry.
+
+    Preconditions: none.
+    Postconditions: returns one ``TeamGroup`` per distinct team key across all
+        merged manifests (static + dynamic), sorted by ``display_name``
+        case-insensitively; each group's ``tags`` is the sorted union of its
+        agents' tags and ``agent_count`` is the number of manifests for that
+        team. Returns an empty list when the registry has no manifests.
+    """
     return get_registry().teams()
 
 
@@ -164,7 +173,7 @@ def get_sample(agent_id: str, name: str) -> dict[str, Any]:
 async def acquire(agent_id: str):
     """Warm ``agent_id``'s sandbox via the Temporal-aware acquire dispatch.
 
-    Imports ``agent_provisioning_team.temporal.sandbox_dispatch`` lazily so
+    Imports ``agent_team_studio.agent_provisioning_team.temporal.sandbox_dispatch`` lazily so
     non-sandbox routes (registry listing, schema resolution, run history)
     never pull in ``temporalio`` at module-import time — only a call into
     this function (i.e. an actual invoke) does. Kept as a real module-level
@@ -179,7 +188,7 @@ async def acquire(agent_id: str):
           ``acquire_sandbox`` raises — this wrapper adds no error handling of
           its own.
     """
-    from agent_provisioning_team.temporal.sandbox_dispatch import acquire_sandbox
+    from agent_team_studio.agent_provisioning_team.temporal.sandbox_dispatch import acquire_sandbox
 
     return await acquire_sandbox(agent_id)
 

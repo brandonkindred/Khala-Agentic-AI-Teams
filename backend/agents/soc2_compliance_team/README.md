@@ -84,7 +84,7 @@ The agents use an LLM to analyze repository content and generate findings and re
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `SOC2_LLM_PROVIDER` | `ollama` or `dummy` | `ollama` |
-| `SOC2_LLM_MODEL` | Ollama model name | `glm-5.2:cloud` |
+| `SOC2_LLM_MODEL` | Ollama model name | `deepseek-v4-flash:cloud` |
 | `SOC2_LLM_BASE_URL` | Ollama API base URL | `http://127.0.0.1:11434` |
 | `SOC2_LLM_TIMEOUT` | Request timeout in seconds | `300` |
 
@@ -94,10 +94,10 @@ Example with Ollama:
 
 ```bash
 # Ensure Ollama is running and a model is available, e.g.:
-# ollama run glm-5.2:cloud
+# ollama run deepseek-v4-flash:cloud
 
 export SOC2_LLM_PROVIDER=ollama
-export SOC2_LLM_MODEL=glm-5.2:cloud
+export SOC2_LLM_MODEL=deepseek-v4-flash:cloud
 uvicorn soc2_compliance_team.api.main:app --host 0.0.0.0 --port 8020
 ```
 

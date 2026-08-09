@@ -101,7 +101,7 @@ def _start_run(client: TestClient) -> str:
         json={
             "client_id": "client_1",
             "brand_id": "brand_1",
-            "llm_model_name": "glm-5.2:cloud",
+            "llm_model_name": "deepseek-v4-flash:cloud",
             "human_approved_for_testing": True,
         },
     )
@@ -509,7 +509,7 @@ def test_run_endpoint_creates_job_and_completes(_mock_brand, fake_jobs, inline_t
     assert fake_jobs.get_job(job_id) is not None
     job = fake_jobs.get_job(job_id)
     assert job["status"] == "completed"
-    assert job["result"]["llm_model_name"] == "glm-5.2:cloud"
+    assert job["result"]["llm_model_name"] == "deepseek-v4-flash:cloud"
 
 
 @patch(
@@ -523,7 +523,7 @@ def test_run_endpoint_brand_not_found_422(_mock_fetch, fake_jobs) -> None:
         json={
             "client_id": "client_x",
             "brand_id": "brand_x",
-            "llm_model_name": "glm-5.2:cloud",
+            "llm_model_name": "deepseek-v4-flash:cloud",
         },
     )
     assert resp.status_code == 422
@@ -544,7 +544,7 @@ def test_run_endpoint_brand_incomplete_422(_mock_fetch, fake_jobs) -> None:
         json={
             "client_id": "client_y",
             "brand_id": "brand_y",
-            "llm_model_name": "glm-5.2:cloud",
+            "llm_model_name": "deepseek-v4-flash:cloud",
         },
     )
     assert resp.status_code == 422

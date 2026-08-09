@@ -114,6 +114,6 @@ Core, behavior-changing vars only. The complete reference (every var, defaults, 
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — detailed architecture with Mermaid diagrams (12 sections, including the Product Delivery Loop)
 - [`docs/ENV_VARS.md`](docs/ENV_VARS.md) — complete environment-variable reference (defaults, backoff math, edge cases)
 - [`backend/agents/software_engineering_team/README.md`](backend/agents/software_engineering_team/README.md) — SE team deep dive
-- [`backend/agents/agent_provisioning_team/AGENT_ANATOMY.md`](backend/agents/agent_provisioning_team/AGENT_ANATOMY.md) — required structure for AI agents (Input/Output, Tools, Memory, Prompts, Guardrails, Subagents)
+- [`backend/agents/agent_team_studio/agent_provisioning_team/AGENT_ANATOMY.md`](backend/agents/agent_team_studio/agent_provisioning_team/AGENT_ANATOMY.md) — required structure for AI agents (Input/Output, Tools, Memory, Prompts, Guardrails, Subagents)
 - [`docker/README.md`](docker/README.md) — full-stack setup, ports, env vars, security
 - [`user-interface/README.md`](user-interface/README.md) — UI setup and API configuration
