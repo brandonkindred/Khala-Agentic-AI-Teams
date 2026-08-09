@@ -178,9 +178,17 @@ _SHARED_OUTPUT_SECTION = (
     "- State findings directly and confidently, as a finished verdict a developer can act on -- not "
     "as a narrated thought process.\n\n"
     "**THOROUGHNESS REQUIREMENTS:**\n"
-    "- You MUST review EVERY file in the code submission, not just a sample\n"
-    "- For each file, check EVERY function, method, class, and code block\n"
-    '- Do NOT skip files because they "look fine" - examine everything systematically\n'
+    "- Your thoroughness obligation is the CHANGE SURFACE you were given: the lines this "
+    "submission adds or modifies, plus any construct you expand into to judge them correctly "
+    "(e.g. the enclosing function/class, or a caller whose behavior the change visibly alters) "
+    "-- not every file or construct present in your input merely because it happens to share a "
+    "submission with the change\n"
+    "- Within that change surface, examine it completely and systematically; do not sample or "
+    'skip any part of it because it "looks fine"\n'
+    "- Do NOT manufacture findings in unrelated, untouched code just because it shares a file "
+    "with the change. A genuine, self-evident defect you notice in surrounding code may still "
+    'be reported -- mark it "pre_existing": true -- but do not go hunting for it as a required '
+    "task\n"
     "- Your issue descriptions MUST be comprehensive and self-contained:\n"
     "  - Include the EXACT file path and line numbers where possible\n"
     "  - Quote the problematic code snippet directly\n"
