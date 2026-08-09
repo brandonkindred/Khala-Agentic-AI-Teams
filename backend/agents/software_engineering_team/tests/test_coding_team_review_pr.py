@@ -4316,6 +4316,7 @@ class TestDuplicateProposalDetection:
                 state="open",
                 html_url="https://example/issues/42",
                 labels=(),
+                id=42,
             )
         ]
         job = _run_review_with(
@@ -4342,6 +4343,7 @@ class TestDuplicateProposalDetection:
                 state="open",
                 html_url="https://example/issues/42",
                 labels=(),
+                id=42,
             )
         ]
         job = _run_review_with(
@@ -4443,6 +4445,7 @@ class TestDuplicateProposalDetection:
                 state="open",
                 html_url="https://example/issues/42",
                 labels=(),
+                id=42,
             )
         ]
         job = _run_review_with(
@@ -4482,6 +4485,7 @@ class TestDuplicateProposalDetection:
                 state="open",
                 html_url=f"https://example/issues/{n}",
                 labels=(),
+                id=n,
             )
             for n in range(1, 3)
         ] + [
@@ -4492,6 +4496,7 @@ class TestDuplicateProposalDetection:
                 state="open",
                 html_url="https://example/issues/99",
                 labels=(),
+                id=99,
             )
         ]
         job = _run_review_with(
@@ -4526,6 +4531,7 @@ class TestDuplicateProposalDetection:
                 state="open",
                 html_url=f"https://example/issues/{n}",
                 labels=(),
+                id=n,
             )
             for n in range(1, 3)
         ] + [
@@ -4536,6 +4542,7 @@ class TestDuplicateProposalDetection:
                 state="open",
                 html_url="https://example/issues/99",
                 labels=(),
+                id=99,
             )
         ]
         job = _run_review_with(
@@ -4604,6 +4611,7 @@ class TestDetectDuplicateProposalsUnit:
                     state="open",
                     html_url="https://example/issues/42",
                     labels=(),
+                    id=42,
                 )
             ]
         )

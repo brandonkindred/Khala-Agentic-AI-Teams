@@ -29,6 +29,19 @@ from .existing_comments import (
     match_existing_comment,
     partition_issues_by_existing_comments,
 )
+from .issue_grooming_runner import IssueGroomingRunner
+from .issue_grooming_scoring import (
+    ScoreBreakdown,
+    complexity_label,
+    merge_complexity_label,
+    nearest_fibonacci,
+    score_issue,
+)
+from .issue_grooming_split import (
+    build_sub_issue,
+    extract_checklist_items,
+    should_split,
+)
 from .issue_proposals import (
     annotate_duplicate_proposals,
     build_issue_from_proposal,
@@ -62,6 +75,7 @@ __all__ = [
     "GitHubRepoReader",
     "Issue",
     "IssueComment",
+    "IssueGroomingRunner",
     "NotAnIssueError",
     "PullRequest",
     "PullRequestDetail",
@@ -69,13 +83,17 @@ __all__ = [
     "ReadyCheckResult",
     "Repo",
     "ReviewComment",
+    "ScoreBreakdown",
     "SubIssue",
     "annotate_duplicate_proposals",
     "build_existing_comments",
     "build_issue_from_proposal",
     "build_review_body",
+    "build_sub_issue",
     "choose_event",
+    "complexity_label",
     "duplicate_check_max_open_issues",
+    "extract_checklist_items",
     "find_matching_open_issue",
     "format_comment_body",
     "format_issue_comment",
@@ -86,11 +104,15 @@ __all__ = [
     "issue_to_plan_input",
     "map_issues_to_comments",
     "match_existing_comment",
+    "merge_complexity_label",
+    "nearest_fibonacci",
     "parse_valid_lines",
     "partition_issues_by_existing_comments",
     "pick_ready_issue",
     "proposal_from_findings",
     "render_annotated_hunks",
+    "score_issue",
     "scrub_token_from_text",
+    "should_split",
     "split_review_comments",
 ]
