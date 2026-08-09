@@ -125,6 +125,16 @@ class AgenticTeamStore:
 
     @timed_query(store=_STORE, op="list_teams")
     def list_teams(self) -> list[dict]:
+        """List every persisted agentic team, most recently created first.
+
+        Preconditions: none.
+        Postconditions: returns one dict per row in ``agentic_teams``
+            (``team_id``, ``name``, ``description``, ``process_count``,
+            ``created_at``, ``updated_at``), ordered by ``created_at``
+            descending; ``process_count`` is the number of
+            ``agentic_processes`` rows linked to that team. Returns an empty
+            list when no teams exist.
+        """
         with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
             cur.execute(
                 """
@@ -502,6 +512,13 @@ class AgenticTeamStore:
 
     @timed_query(store=_STORE, op="list_team_agents")
     def list_team_agents(self, team_id: str) -> list[AgenticTeamAgent]:
+        """Return the roster agents for a team.
+
+        Preconditions: ``team_id`` is a non-empty string.
+        Postconditions: returns the team's roster agents ordered by
+            ``agent_name``; returns an empty list if the team has no agents
+            or does not exist.
+        """
         with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
             return self._load_team_agents(cur, team_id)
 
@@ -532,6 +549,15 @@ class AgenticTeamStore:
 
     @timed_query(store=_STORE, op="create_conversation")
     def create_conversation(self, team_id: str) -> str:
+        """Create a new conversation for a team.
+
+        Preconditions: ``team_id`` is a non-empty string; the caller should
+            pass an existing team id (no FK validation is performed here
+            beyond what the schema enforces).
+        Postconditions: inserts a new ``agentic_conversations`` row with
+            fresh ``created_at``/``updated_at`` timestamps and returns its
+            newly generated ``conversation_id``.
+        """
         conversation_id = str(uuid.uuid4())
         now = datetime.now(tz=timezone.utc)
         with get_conn() as conn, conn.cursor() as cur:
@@ -545,6 +571,12 @@ class AgenticTeamStore:
 
     @timed_query(store=_STORE, op="get_conversation_team_id")
     def get_conversation_team_id(self, conversation_id: str) -> Optional[str]:
+        """Return the team_id that owns a given conversation.
+
+        Preconditions: ``conversation_id`` is a non-empty string.
+        Postconditions: returns the owning team's id if the conversation
+            exists, else ``None``. Read-only.
+        """
         with get_conn() as conn, conn.cursor() as cur:
             cur.execute(
                 "SELECT team_id FROM agentic_conversations WHERE conversation_id = %s",
@@ -555,6 +587,13 @@ class AgenticTeamStore:
 
     @timed_query(store=_STORE, op="get_conversation_process_id")
     def get_conversation_process_id(self, conversation_id: str) -> Optional[str]:
+        """Return the process_id currently linked to a conversation, if any.
+
+        Preconditions: ``conversation_id`` is a non-empty string.
+        Postconditions: returns ``None`` if the conversation does not exist,
+            or if it exists but has no linked process yet; otherwise returns
+            the linked process's id. Read-only.
+        """
         with get_conn() as conn, conn.cursor() as cur:
             cur.execute(
                 "SELECT process_id FROM agentic_conversations WHERE conversation_id = %s",
@@ -567,6 +606,14 @@ class AgenticTeamStore:
 
     @timed_query(store=_STORE, op="set_conversation_process")
     def set_conversation_process(self, conversation_id: str, process_id: str) -> None:
+        """Link a conversation to a process definition.
+
+        Preconditions: ``conversation_id`` and ``process_id`` are non-empty
+            strings.
+        Postconditions: the conversation's ``process_id`` and ``updated_at``
+            are updated. No-op (no error) if no conversation matches
+            ``conversation_id``.
+        """
         now = datetime.now(tz=timezone.utc)
         with get_conn() as conn, conn.cursor() as cur:
             cur.execute(
@@ -577,6 +624,14 @@ class AgenticTeamStore:
 
     @timed_query(store=_STORE, op="append_message")
     def append_message(self, conversation_id: str, role: str, content: str) -> None:
+        """Append a message to a conversation's transcript.
+
+        Preconditions: ``conversation_id`` is a non-empty string naming an
+            existing conversation; ``role`` and ``content`` are strings.
+        Postconditions: inserts a new ``agentic_conv_messages`` row
+            timestamped now and bumps the conversation's ``updated_at`` to
+            match.
+        """
         now = datetime.now(tz=timezone.utc)
         with get_conn() as conn, conn.cursor() as cur:
             cur.execute(
@@ -591,6 +646,13 @@ class AgenticTeamStore:
 
     @timed_query(store=_STORE, op="get_messages")
     def get_messages(self, conversation_id: str) -> list[ConversationMessage]:
+        """Return a conversation's full message transcript in chronological order.
+
+        Preconditions: ``conversation_id`` is a non-empty string.
+        Postconditions: returns the conversation's messages ordered by
+            insertion order (``id``); returns an empty list if the
+            conversation has no messages or does not exist. Read-only.
+        """
         with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
             cur.execute(
                 "SELECT role, content, timestamp FROM agentic_conv_messages "
@@ -609,6 +671,15 @@ class AgenticTeamStore:
 
     @timed_query(store=_STORE, op="list_conversations")
     def list_conversations(self, team_id: str) -> list[dict]:
+        """Return summaries of all conversations for a team.
+
+        Preconditions: ``team_id`` is a non-empty string.
+        Postconditions: returns one dict per conversation
+            (``conversation_id``, ``team_id``, ``created_at``, ``updated_at``,
+            ``message_count``) ordered by ``created_at`` descending; returns
+            an empty list if the team has no conversations or does not
+            exist. Read-only.
+        """
         with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
             cur.execute(
                 """

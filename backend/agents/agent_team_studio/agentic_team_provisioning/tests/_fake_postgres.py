@@ -184,24 +184,31 @@ def _dispatch() -> DispatchTable:
 
     # -- team_agents ------------------------------------------------------
     # Full-roster prune used by _write_team_agents: delete rows whose agent_name
-    # is not in the kept set. Must precede the single-row delete (it also matches
-    # "agent_name in norm") and the team-wide delete.
+    # is not in the kept set. Mutually exclusive with the single-row delete
+    # below by signature ("<> all" vs "agent_name =" + "returning"), regardless
+    # of registration order.
     def match_prune_team_agents(norm: str) -> bool:
         return norm.startswith("delete from agentic_team_agents where team_id") and "<> all" in norm
 
     def handle_prune_team_agents(cur: FakeCursor, params: tuple) -> None:
         team_id, names = params
         keep = set(names)
+        removed = 0
         for k in list(cur.db["team_agents"].keys()):
             if k[0] == team_id and k[1] not in keep:
                 del cur.db["team_agents"][k]
+                removed += 1
+        cur.rowcount = removed
 
-    # Single-row targeted delete (RETURNING the deleted row) — must precede the
-    # team-wide delete handler, whose prefix this also matches.
+    # Single-row targeted delete (RETURNING the deleted row). Requires both
+    # "agent_name =" and "returning" so it stays mutually exclusive with the
+    # prune matcher above and the team-wide delete below, regardless of
+    # registration order.
     def match_delete_team_agent(norm: str) -> bool:
         return (
             norm.startswith("delete from agentic_team_agents where team_id")
-            and "agent_name" in norm
+            and "agent_name =" in norm
+            and "returning" in norm
         )
 
     def handle_delete_team_agent(cur: FakeCursor, params: tuple) -> None:
@@ -215,9 +222,12 @@ def _dispatch() -> DispatchTable:
 
     def handle_delete_team_agents(cur: FakeCursor, params: tuple) -> None:
         (team_id,) = params
+        removed = 0
         for k in list(cur.db["team_agents"].keys()):
             if k[0] == team_id:
                 del cur.db["team_agents"][k]
+                removed += 1
+        cur.rowcount = removed
 
     # Single-row upsert (ON CONFLICT) — preserves the existing created_at, like
     # real Postgres. Must precede the plain INSERT handler.
@@ -242,7 +252,9 @@ def _dispatch() -> DispatchTable:
         cur.rowcount = 1
 
     def match_insert_team_agent(norm: str) -> bool:
-        return norm.startswith("insert into agentic_team_agents")
+        # Exclude ON CONFLICT upserts so this stays mutually exclusive with
+        # match_upsert_team_agent even if dispatch order changes.
+        return norm.startswith("insert into agentic_team_agents") and "on conflict" not in norm
 
     def handle_insert_team_agent(cur: FakeCursor, params: tuple) -> None:
         team_id, agent_name, data_json, created_at, updated_at = params
@@ -297,6 +309,7 @@ def _dispatch() -> DispatchTable:
             "created_at": created_at,
             "updated_at": updated_at,
         }
+        cur.rowcount = 1
 
     def match_select_conv_team_id(norm: str) -> bool:
         return norm.startswith("select team_id from agentic_conversations where conversation_id")
@@ -323,6 +336,7 @@ def _dispatch() -> DispatchTable:
         if row:
             row["process_id"] = process_id
             row["updated_at"] = ts
+        cur.rowcount = 1 if row else 0
 
     def match_update_conv_updated_at(norm: str) -> bool:
         return norm.startswith("update agentic_conversations set updated_at")
@@ -332,6 +346,7 @@ def _dispatch() -> DispatchTable:
         row = cur.db["conversations"].get(cid)
         if row:
             row["updated_at"] = ts
+        cur.rowcount = 1 if row else 0
 
     def match_insert_conv_message(norm: str) -> bool:
         return norm.startswith("insert into agentic_conv_messages")
@@ -347,6 +362,7 @@ def _dispatch() -> DispatchTable:
                 "timestamp": ts,
             }
         )
+        cur.rowcount = 1
 
     def match_select_conv_messages(norm: str) -> bool:
         return norm.startswith(
@@ -441,6 +457,9 @@ def _dispatch() -> DispatchTable:
             row["status"] = status
             row["error_message"] = error_message
             row["updated_at"] = ts
+            cur.rowcount = 1
+        else:
+            cur.rowcount = 0
 
     def match_list_env_provisions(norm: str) -> bool:
         return norm.startswith(
@@ -521,10 +540,10 @@ def _dispatch() -> DispatchTable:
         return norm.startswith("update agentic_form_data set data_json")
 
     def handle_update_form_data(cur: FakeCursor, params: tuple) -> None:
-        data_json, ts, team_id, record_id = params
+        data_json, ts, team_id, record_id, form_key = params
         data = unwrap_json(data_json)
         row = cur.db["form_data"].get(record_id)
-        if row and row["team_id"] == team_id:
+        if row and row["team_id"] == team_id and row["form_key"] == form_key:
             row["data_json"] = data
             row["updated_at"] = ts
             cur.rowcount = 1
@@ -535,9 +554,9 @@ def _dispatch() -> DispatchTable:
         return norm.startswith("delete from agentic_form_data where team_id = %s and record_id")
 
     def handle_delete_form_data(cur: FakeCursor, params: tuple) -> None:
-        team_id, record_id = params
+        team_id, record_id, form_key = params
         row = cur.db["form_data"].get(record_id)
-        if row and row["team_id"] == team_id:
+        if row and row["team_id"] == team_id and row["form_key"] == form_key:
             del cur.db["form_data"][record_id]
             cur.rowcount = 1
         else:
@@ -555,10 +574,10 @@ def _dispatch() -> DispatchTable:
 
     # -- pipeline runs ----------------------------------------------------
     # Advisory lock (reap): a no-op that always "acquires" in the single-process
-    # fake. Matches the session, xact, and unlock variants. Must precede the
-    # generic UPDATE fallthrough below.
+    # fake. Anchored to the actual lock-function call prefix (not a substring
+    # match) so an unrelated query merely mentioning "advisory" can't misroute here.
     def match_advisory(norm: str) -> bool:
-        return "advisory" in norm
+        return norm.startswith("select pg_try_advisory") or norm.startswith("select pg_advisory")
 
     def handle_advisory(cur: FakeCursor, params: tuple) -> None:
         cur.set_one((True,))
@@ -629,7 +648,8 @@ def _dispatch() -> DispatchTable:
             cur.rowcount = 0
 
     # get_pipeline_run (WHERE run_id) vs list_pipeline_runs (WHERE team_id) share
-    # the same column list; split into two matchers so handlers need only params.
+    # the same column list; split into two mutually exclusive matchers so handlers
+    # need only params, regardless of which is registered first.
     def match_get_pipeline_run(norm: str) -> bool:
         return (
             norm.startswith("select run_id, team_id, process_id, status, current_step_id")
@@ -641,7 +661,10 @@ def _dispatch() -> DispatchTable:
         cur.set_one(cur.db["pipeline_runs"].get(run_id))
 
     def match_list_pipeline_runs(norm: str) -> bool:
-        return norm.startswith("select run_id, team_id, process_id, status, current_step_id")
+        return (
+            norm.startswith("select run_id, team_id, process_id, status, current_step_id")
+            and "where run_id" not in norm
+        )
 
     def handle_list_pipeline_runs(cur: FakeCursor, params: tuple) -> None:
         team_id, limit = params
@@ -653,8 +676,9 @@ def _dispatch() -> DispatchTable:
         cur.set_all(rows[:limit])
 
     # try_resume_pipeline_run_temporal (CAS into 'running', NO heartbeat guard).
-    # Must precede the heartbeat-guarded resume below; distinguished by the absence
-    # of a heartbeat_at clause in the SET (Temporal owns liveness).
+    # Mutually exclusive with the heartbeat-guarded resume below regardless of
+    # registration order; distinguished by the absence of a heartbeat_at clause
+    # in the SET (Temporal owns liveness).
     def match_resume_pipeline_temporal(norm: str) -> bool:
         return (
             norm.startswith("update agentic_test_pipeline_runs set status = 'running'")
@@ -672,7 +696,10 @@ def _dispatch() -> DispatchTable:
 
     # try_resume_pipeline_run (compare-and-swap into 'running', fresh-heartbeat).
     def match_resume_pipeline(norm: str) -> bool:
-        return norm.startswith("update agentic_test_pipeline_runs set status = 'running'")
+        return (
+            norm.startswith("update agentic_test_pipeline_runs set status = 'running'")
+            and "heartbeat_at" in norm
+        )
 
     def handle_resume_pipeline(cur: FakeCursor, params: tuple) -> None:
         human_input, heartbeat_at, run_id, cutoff = params
@@ -720,8 +747,10 @@ def _dispatch() -> DispatchTable:
             cur.rowcount = 0
 
     # try_fail_pipeline_run (CAS to 'failed', single row, WHERE status active).
-    # Must precede try_expire: both SET status='failed' WHERE run_id, but this one
-    # is gated on `status IN (...)` (an active run) rather than 'waiting_for_input'.
+    # Both this and try_expire below SET status='failed' WHERE run_id, but this one
+    # is gated on `status IN (...)` (an active run) rather than 'waiting_for_input';
+    # try_expire excludes that clause so the two are mutually exclusive regardless
+    # of registration order.
     def match_fail_pipeline_active(norm: str) -> bool:
         return (
             norm.startswith("update agentic_test_pipeline_runs set status = 'failed'")
@@ -743,6 +772,7 @@ def _dispatch() -> DispatchTable:
         return (
             norm.startswith("update agentic_test_pipeline_runs set status = 'failed'")
             and "where run_id" in norm
+            and "status in (" not in norm
         )
 
     def handle_expire_pipeline(cur: FakeCursor, params: tuple) -> None:

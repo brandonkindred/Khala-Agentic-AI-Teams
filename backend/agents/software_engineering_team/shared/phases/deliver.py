@@ -17,7 +17,8 @@ import logging
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional
 
-from software_engineering_team.shared import git_utils, repo_writer
+from shared.git import git_utils
+from software_engineering_team.shared import repo_writer
 from software_engineering_team.shared.deliver_utils import (
     DeliverGitOps,
     deliver_inline_merge,
@@ -41,6 +42,10 @@ def run_deliver_impl(
     commit_msg_template: str,
     models: PhaseModels,
     logger: logging.Logger,
+    build_verifier: Optional[Callable[[Path, str, str], Any]] = None,
+    build_verify_label: str = "",
+    linting_tool_agent: Any = None,
+    lint_agent_type: str = "",
 ) -> Any:
     """Create feature branch, write files, commit, merge to development.
 
@@ -116,6 +121,10 @@ def run_deliver_impl(
                 task_description=task_description,
                 task_id=task_id,
                 feature_branch_name=feature_branch_name,
+                build_verifier=build_verifier,
+                build_verify_label=build_verify_label,
+                linting_tool_agent=linting_tool_agent,
+                lint_agent_type=lint_agent_type,
             )
             try:
                 out = git_agent.deliver(phase_inp)
@@ -142,6 +151,10 @@ def run_deliver_impl(
         commit_msg_template=commit_msg_template,
         ops=ops,
         logger=logger,
+        build_verifier=build_verifier,
+        build_verify_label=build_verify_label,
+        linting_tool_agent=linting_tool_agent,
+        lint_agent_type=lint_agent_type,
     )
 
 
@@ -182,6 +195,10 @@ def make_run_deliver(
         task_description: str = "",
         feature_branch_name: Optional[str] = None,
         merge_to_development: bool = True,
+        build_verifier: Optional[Callable[[Path, str, str], Any]] = None,
+        build_verify_label: str = "",
+        linting_tool_agent: Any = None,
+        lint_agent_type: str = "",
     ) -> Any:
         """Create feature branch, write files, commit, merge to development.
 
@@ -220,6 +237,10 @@ def make_run_deliver(
             commit_msg_template=commit_msg_template,
             models=models,
             logger=logger,
+            build_verifier=build_verifier,
+            build_verify_label=build_verify_label,
+            linting_tool_agent=linting_tool_agent,
+            lint_agent_type=lint_agent_type,
         )
 
     return run_deliver

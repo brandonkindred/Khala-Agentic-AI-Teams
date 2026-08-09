@@ -7,7 +7,7 @@
       <!-- Paper trading results (or running state) — visible even for legacy non-publishable winners -->
       <div class="paper-trading-result">
         <div class="paper-verdict-row">
-          @if (session.status === 'running') {
+          @if (!isPaperTradingStatusTerminal(session.status)) {
             <div class="paper-verdict-badge verdict-running">
               <mat-spinner diameter="16" class="btn-spinner" aria-hidden="true"></mat-spinner>
               RUNNING

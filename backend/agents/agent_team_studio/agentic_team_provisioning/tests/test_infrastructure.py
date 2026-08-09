@@ -155,7 +155,7 @@ def test_form_store_crud(tmp_path: Path, fake_pg: dict) -> None:
     assert fetched["data"]["name"] == "Alice"
 
     # Update
-    assert store.update_record(record_id, {"name": "Alice", "role": "lead"})
+    assert store.update_record("intake", record_id, {"name": "Alice", "role": "lead"})
     updated = store.get_record(record_id)
     assert updated is not None
     assert updated["data"]["role"] == "lead"
@@ -165,7 +165,7 @@ def test_form_store_crud(tmp_path: Path, fake_pg: dict) -> None:
     assert "intake" in keys
 
     # Delete
-    assert store.delete_record(record_id)
+    assert store.delete_record("intake", record_id)
     assert store.get_record(record_id) is None
     assert store.get_records("intake") == []
 
@@ -175,8 +175,33 @@ def test_form_store_nonexistent_record(tmp_path: Path, fake_pg: dict) -> None:
 
     infra = provision_team("test-team-6")
     assert infra.form_store.get_record("nonexistent") is None
-    assert not infra.form_store.update_record("nonexistent", {"x": 1})
-    assert not infra.form_store.delete_record("nonexistent")
+    assert not infra.form_store.update_record("intake", "nonexistent", {"x": 1})
+    assert not infra.form_store.delete_record("intake", "nonexistent")
+
+
+def test_form_store_update_delete_scoped_by_form_key(tmp_path: Path, fake_pg: dict) -> None:
+    """A record cannot be mutated through a mismatched form_key in the path,
+    even when the team_id and record_id are otherwise correct."""
+    from agent_team_studio.agentic_team_provisioning.infrastructure import provision_team
+
+    infra = provision_team("test-team-8")
+    store = infra.form_store
+
+    record = store.create_record("intake", {"name": "Alice"})
+    record_id = record["record_id"]
+    store.create_record("survey", {"question": "unrelated"})
+
+    # Wrong form_key: no-op, record untouched.
+    assert not store.update_record("survey", record_id, {"name": "Mallory"})
+    assert store.get_record(record_id)["data"]["name"] == "Alice"
+    assert not store.delete_record("survey", record_id)
+    assert store.get_record(record_id) is not None
+
+    # Correct form_key: succeeds.
+    assert store.update_record("intake", record_id, {"name": "Bob"})
+    assert store.get_record(record_id)["data"]["name"] == "Bob"
+    assert store.delete_record("intake", record_id)
+    assert store.get_record(record_id) is None
 
 
 def test_form_store_is_scoped_by_team_id(tmp_path: Path, fake_pg: dict) -> None:

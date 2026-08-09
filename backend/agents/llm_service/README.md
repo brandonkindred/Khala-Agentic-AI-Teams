@@ -54,6 +54,11 @@ completion, retry, and error lines of a single call together.
 - **`objective`** is a **required** keyword on `complete_json` / `complete` /
   `complete_text` / `chat` (and `generate_text` / `generate_structured` /
   `complete_validated`). Pass a short phrase describing the purpose.
+  `DummyLLMClient` is the sole documented exception: it defaults `objective`
+  to `"dummy"` on `complete` / `complete_json` / `chat` because it makes no
+  real LLM call and performs no attribution, so test-only call sites are not
+  required to pass one. Real providers (`OllamaLLMClient`, `ClaudeLLMClient`)
+  enforce the non-empty requirement.
 - **`request_id`** is generated per call and printed as `rid=` on the request,
   completion, retry, and error log lines.
 - **`team`** is auto-derived from the calling code's source path (the
@@ -152,14 +157,14 @@ for the design rationale and migration notes.
 | `LLM_RATE_LIMIT_HONOR_RETRY_AFTER` | Honor an integer-seconds `Retry-After` header on a 429 (`max(computed, Retry-After)`, capped); default on, set `false` to disable |
 | `LLM_MAX_CONCURRENCY` | Max concurrent LLM calls, process-global across the Ollama **and** Claude paths (default 4) |
 | `LLM_ENABLE_THINKING` | Enable thinking mode (some Ollama Cloud models reject `think: true`; disable if you see 500s) |
-| `OLLAMA_API_KEY` | **Required for Ollama Cloud.** API key from https://ollama.com/settings/keys. All LLM requests use this when set. |
+| `OLLAMA_API_KEY` | Not read by `get_client`/the provider list — each Ollama-Cloud provider-list entry stores its own key; there is no env fallback, so a keyless entry fails at call time with an auth error. Setting this var alone does not enable Ollama Cloud calls. |
 
 ### Troubleshooting
 
 **ConnectErrors / timeouts**
 
 - **Docker:** If the app runs in Docker, the container may not resolve `ollama.com` or reach the internet. Set `LLM_BASE_URL` to a reachable host (e.g. `http://host.docker.internal:11434` for local Ollama, or ensure the container has outbound HTTPS and DNS for `https://ollama.com`).
-- **Ollama Cloud:** Ensure `OLLAMA_API_KEY` is set (from https://ollama.com/settings/keys). If you get 401, the key is missing or invalid.
+- **Ollama Cloud:** Ensure the active Ollama-Cloud provider-list entry (`/llm-config`) has its own API key set (from https://ollama.com/settings/keys) — there is no env fallback. A 401 means that entry's stored key is missing or invalid.
 - **Firewall / proxy:** Ensure the host (or container) can open HTTPS to your `LLM_BASE_URL`.
 
 **500 Internal Server Error from Ollama Cloud**

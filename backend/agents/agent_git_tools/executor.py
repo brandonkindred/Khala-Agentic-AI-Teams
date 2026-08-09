@@ -1,4 +1,4 @@
-"""Dispatch Git tool calls to software_engineering_team.shared.git_utils."""
+"""Dispatch Git tool calls to shared.git.git_utils."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ import re
 from pathlib import Path
 from typing import Any, Callable, Dict
 
-from software_engineering_team.shared.git_utils import (
+from shared.git.git_utils import (
     DEVELOPMENT_BRANCH,
     _run_git,
     checkout_branch,

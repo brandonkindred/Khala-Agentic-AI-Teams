@@ -1,5 +1,5 @@
-"""Temporal activities for GitHub-issue-driven coding-team hooks (branch prep,
-publish, plus the sibling failure-notice activity joining this module next).
+"""Temporal activities for GitHub-issue-driven coding-team hooks (branch
+prep, publish, and failure/outage-notice reporting).
 
 Deliberately its own module rather than appended to ``coding_team_workflow.py``:
 the co-location note in ``system_design/hitl_pause_resume_contract.md`` is
@@ -28,7 +28,46 @@ from typing import Any
 
 from temporalio import activity
 
-_REQUIRED_FIELDS = ("repo_path", "remote", "default_branch", "integration_branch")
+_REQUIRED_FIELDS = ("job_id", "repo_path", "remote", "default_branch", "integration_branch")
+
+
+def _require_activity_github_token(request: dict[str, Any]) -> str:
+    """Resolve a GitHub token for a Temporal GitHub-hook activity.
+
+    Preconditions:
+        - ``request`` is a dict (the activity request payload).
+    Postconditions:
+        - Raises ``ValueError`` if ``\"token\"`` is present in ``request`` (plain-text
+          tokens must not appear in Temporal activity arguments).
+        - Raises ``ValueError`` if ``job_id`` is missing/falsy, the job cannot be
+          loaded, or neither ``github_token_encrypted`` nor ``GITHUB_TOKEN`` yields
+          a usable token. Messages name field names / reasons only — never the
+          request payload, ciphertext, or plaintext secrets.
+        - Returns the plaintext token for in-activity use only (never place it in
+          the activity return value).
+    """
+    if "token" in request:
+        raise ValueError(
+            "github activity request must not include 'token'; "
+            "resolve the token activity-side from the job record or GITHUB_TOKEN"
+        )
+    job_id = request.get("job_id")
+    if not job_id:
+        raise ValueError("github activity missing required fields: ['job_id']")
+
+    import os
+
+    from software_engineering_team.api import coding_team_main as _main
+    from software_engineering_team.token_crypto import decrypt_token
+
+    job = _main.get_job(job_id)
+    if job is None:
+        raise ValueError("github activity job_id not found")
+
+    token = decrypt_token(job.get("github_token_encrypted")) or os.environ.get("GITHUB_TOKEN")
+    if not token:
+        raise ValueError("github activity has no usable GitHub token")
+    return token
 
 
 @activity.defn(name="coding_team_github_branch_prep")
@@ -44,13 +83,11 @@ def github_branch_prep_activity(request: dict[str, Any]) -> dict[str, Any]:
     comments (that is the sibling publish/failure-notice activity work).
 
     Preconditions:
-        - ``request`` carries non-empty string values for ``repo_path``,
-          ``remote``, ``default_branch``, and ``integration_branch``;
-          missing/falsy values raise ``ValueError`` before any git operation
-          runs. May also carry ``token`` (Optional[str] -- a plain-text
-          GitHub token; #3992 will replace this with activity-side
-          resolution from the encrypted job record, out of scope here) and
-          ``issue_number`` (Optional[int]).
+        - ``request`` carries non-empty string values for ``job_id``, ``repo_path``,
+          ``remote``, ``default_branch``, and ``integration_branch``. Must NOT
+          include a ``token`` field -- the activity resolves the GitHub token
+          from the job's ``github_token_encrypted`` or ``GITHUB_TOKEN``.
+        - May also carry ``issue_number`` (Optional[int]).
         - ``repo_path`` names a git checkout the calling process can write
           to; ``remote``/``default_branch``/``integration_branch`` may be
           untrusted ref-shaped strings -- ``_prepare_issue_branch`` rejects
@@ -67,8 +104,8 @@ def github_branch_prep_activity(request: dict[str, Any]) -> dict[str, Any]:
           is missing a required field -- a caller-wiring bug, not a git
           failure, so it must not be conflated with the ``ok=False`` outcome.
           The error message names only the missing field NAMES, never the
-          request payload itself (which may carry ``token``, and an activity
-          exception message is recorded in Temporal history).
+          request payload itself. Activity exception messages are recorded in
+          Temporal history, so they must never include secrets.
         - Does NOT catch exceptions ``_prepare_issue_branch`` itself raises
           (e.g. a bug in a helper) -- they propagate uncaught, exactly as
           they do today through the thread-mode call site in
@@ -76,6 +113,7 @@ def github_branch_prep_activity(request: dict[str, Any]) -> dict[str, Any]:
           try/except there either), so Temporal's own activity
           failure/retry semantics apply instead of a silently swallowed bug.
     """
+    token = _require_activity_github_token(request)
     missing = [f for f in _REQUIRED_FIELDS if not request.get(f)]
     if missing:
         raise ValueError(f"github_branch_prep_activity missing required fields: {missing!r}")
@@ -86,13 +124,13 @@ def github_branch_prep_activity(request: dict[str, Any]) -> dict[str, Any]:
         request["remote"],
         request["default_branch"],
         request["integration_branch"],
-        request.get("token"),
+        token,
         issue_number=request.get("issue_number"),
     )
     return {"ok": ok, "error": err, "notes": notes}
 
 
-_PUBLISH_REQUIRED_FIELDS = ("job_id", "owner", "repo", "repo_path", "issue_number", "token")
+_PUBLISH_REQUIRED_FIELDS = ("job_id", "owner", "repo", "repo_path", "issue_number")
 _PUBLISH_MERGED_WORK_FIELDS = ("base", "integration_branch", "issue_title")
 
 
@@ -115,11 +153,12 @@ def github_publish_activity(request: dict[str, Any]) -> dict[str, Any]:
 
     Preconditions:
         - ``request`` carries non-empty ``job_id``, ``owner``, ``repo``,
-          ``repo_path``, ``issue_number``, and ``token``; missing/falsy
-          values raise ``ValueError`` naming only the missing field NAMES
-          before any GitHub/job-store call runs (an activity exception is
-          recorded in Temporal history, so the payload -- which carries
-          ``token`` -- must never appear in the message).
+          ``repo_path``, and ``issue_number``. Must NOT include a ``token``
+          field -- the activity resolves the GitHub token from the job's
+          ``github_token_encrypted`` or ``GITHUB_TOKEN``. Missing/falsy values
+          raise ``ValueError`` naming only the missing field NAMES before any
+          GitHub side effect runs; activity exception messages are recorded in
+          Temporal history, so they must never include secrets.
         - When the job identified by ``job_id`` is not already-complete (per
           the job store's own ``already_complete`` flag), ``request`` must
           additionally carry non-empty ``base``, ``integration_branch``, and
@@ -129,22 +168,22 @@ def github_publish_activity(request: dict[str, Any]) -> dict[str, Any]:
         - May also carry ``remote`` (defaults to ``"origin"``, matching
           ``RunFromGitHubRequest``'s own default) and
           ``cleanup_checkout_on_success`` (defaults to ``False``).
-        - ``token`` is a plain-text GitHub token for now (activity-side
-          resolution from the encrypted job record is a separate, later
-          concern).
     Postconditions:
         - Delegates to ``_finish_already_complete`` or ``_publish_merged_work``
           exactly as thread mode does, then returns the job's resulting
           record (``get_job(job_id)``), or ``{"job_id": job_id, "status":
-          "unknown"}`` when the job store has nothing for it -- matching
-          ``run_pipeline_activity``'s existing return contract so a future
-          workflow caller can branch on ``status``/``github_pr_url``/``error``.
+          "unknown"}`` when the job store has nothing for it -- deliberately
+          the FULL record here, not the small fixed-shape summary
+          ``run_pipeline_activity`` returns on a terminal state: a future
+          workflow caller needs ``github_pr_url`` (and other publish-specific
+          fields) that only the full record carries.
         - Does NOT catch exceptions the wrapped functions raise -- they
           propagate uncaught, exactly as they do today through
           ``_run_with_github_hooks``'s call sites (no surrounding try/except
           there either), so Temporal's own activity failure/retry semantics
           apply.
     """
+    token = _require_activity_github_token(request)
     missing = [f for f in _PUBLISH_REQUIRED_FIELDS if not request.get(f)]
     if missing:
         raise ValueError(f"github_publish_activity missing required fields: {missing!r}")
@@ -176,7 +215,7 @@ def github_publish_activity(request: dict[str, Any]) -> dict[str, Any]:
         cleanup_checkout_on_success=bool(request.get("cleanup_checkout_on_success")),
     )
 
-    with _main.GitHubClient(token=request["token"]) as client:
+    with _main.GitHubClient(token=token) as client:
         if already_complete:
             issue_obj = _main.Issue(
                 number=num, title="", body="", state="open", html_url="", labels=()
@@ -198,7 +237,105 @@ def github_publish_activity(request: dict[str, Any]) -> dict[str, Any]:
                 issue_obj,
                 request["base"],
                 request["integration_branch"],
-                request["token"],
+                token,
+            )
+
+    return _main.get_job(job_id) or {"job_id": job_id, "status": "unknown"}
+
+
+_FAILURE_NOTICE_REQUIRED_FIELDS = ("job_id", "owner", "repo", "number", "message", "kind")
+_FAILURE_NOTICE_KINDS = ("failure", "outage")
+
+
+@activity.defn(name="coding_team_github_failure_notice")
+def github_failure_notice_activity(request: dict[str, Any]) -> dict[str, Any]:
+    """Report a job failure or review outage to GitHub as a Temporal activity.
+
+    Wraps ``_record_failure``/``_record_review_outage`` (``api/orchestration.py``)
+    unchanged, dispatching on the request's own ``kind`` field: ``"failure"``
+    marks the job failed and posts the raw scrubbed error as a PR/issue
+    comment; ``"outage"`` marks the job failed with the terminal
+    ``phase="completed"`` and posts (only when ``PR_REVIEW_POST_OUTAGE_NOTICE``
+    is enabled) a fixed neutral note instead of the raw error -- the
+    graceful-degradation path for a reviewer-side outage. This activity does
+    not itself evaluate that gate; it delegates to ``_record_review_outage``,
+    which checks it internally, so the gate's behavior lives in exactly one
+    place. Not yet called by ``CodingTeamWorkflow`` (workflow wiring is a
+    separate, later follow-up).
+
+    Preconditions:
+        - ``request`` carries non-empty ``job_id``, ``owner``, ``repo``,
+          ``number`` (an issue or PR number -- generic name matching
+          ``_safe_comment``'s own parameter, since this activity serves
+          both), ``message`` (the raw error text passed as the wrapped
+          functions' ``error`` argument), and ``kind``. Must NOT include a
+          ``token`` field -- the activity resolves the GitHub token from the
+          job's ``github_token_encrypted`` or ``GITHUB_TOKEN``. Missing/falsy
+          values raise ``ValueError`` naming only the missing field NAMES
+          before any GitHub/job-store side effect runs; activity exception
+          messages are recorded in Temporal history, so they must never include
+          secrets.
+        - ``kind`` must be exactly ``"failure"`` or ``"outage"``; any other
+          value raises a second, separate ``ValueError`` naming the invalid
+          value.
+    Postconditions:
+        - ``kind="failure"`` delegates to ``_record_failure`` unchanged: the
+          job (and review row, when one exists) is marked ``failed`` with
+          the scrubbed error captured, ``phase`` is left untouched, and a
+          comment containing the job id and the scrubbed error is always
+          posted.
+        - ``kind="outage"`` delegates to ``_record_review_outage`` unchanged:
+          the job (and review row) is marked ``failed`` with ``phase`` set
+          to the terminal ``"completed"``, and a neutral fixed-text comment
+          (never the raw error) is posted iff ``PR_REVIEW_POST_OUTAGE_NOTICE``
+          is enabled -- this activity does not re-check that gate itself.
+        - Returns the job's resulting record (``get_job(job_id)``), or
+          ``{"job_id": job_id, "status": "unknown"}`` when the job store has
+          nothing for it -- matching ``github_publish_activity``'s return
+          contract (the full record, not ``run_pipeline_activity``'s small
+          fixed-shape terminal summary).
+        - Does NOT catch exceptions the wrapped functions raise -- they
+          propagate uncaught, exactly as they do today through their
+          thread-mode call sites (``_run_with_github_hooks``,
+          ``_publish_merged_work``, ``api/pr_review.py``'s
+          ``_run_reviewer``/``_run_pr_review``), so Temporal's own activity
+          failure/retry semantics apply.
+    """
+    token = _require_activity_github_token(request)
+    missing = [f for f in _FAILURE_NOTICE_REQUIRED_FIELDS if not request.get(f)]
+    if missing:
+        raise ValueError(f"github_failure_notice_activity missing required fields: {missing!r}")
+
+    kind = request["kind"]
+    if kind not in _FAILURE_NOTICE_KINDS:
+        raise ValueError(
+            f"github_failure_notice_activity: kind must be one of {_FAILURE_NOTICE_KINDS!r}, "
+            f"got {kind!r}"
+        )
+
+    from software_engineering_team.api import coding_team_main as _main
+    from software_engineering_team.api.orchestration import _record_failure, _record_review_outage
+
+    job_id = request["job_id"]
+
+    with _main.GitHubClient(token=token) as client:
+        if kind == "failure":
+            _record_failure(
+                client,
+                request["owner"],
+                request["repo"],
+                request["number"],
+                job_id,
+                request["message"],
+            )
+        else:
+            _record_review_outage(
+                client,
+                request["owner"],
+                request["repo"],
+                request["number"],
+                job_id,
+                request["message"],
             )
 
     return _main.get_job(job_id) or {"job_id": job_id, "status": "unknown"}

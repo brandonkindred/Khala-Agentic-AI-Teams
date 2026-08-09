@@ -1,6 +1,6 @@
 """Tests for the deepthought Temporal wiring.
 
-Covers the three pieces the runtime needs to actually dispatch through
+Covers the four pieces the runtime needs to actually dispatch through
 Temporal instead of leaving the workflow as dead code:
 
 1. ``temporal/__init__.py`` — the activity threads ``job_id`` through and owns

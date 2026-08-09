@@ -5,7 +5,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 from typing import Any, Dict, List
 
-from software_engineering_team.shared.models import Task, TaskType
+from shared.dev_models.models import Task, TaskType
 from software_engineering_team.shared.v2_models import ReviewIssue
 
 

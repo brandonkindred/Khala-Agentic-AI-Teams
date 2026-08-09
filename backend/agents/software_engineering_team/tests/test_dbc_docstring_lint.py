@@ -236,6 +236,29 @@ def test_check_paths_walks_directories(tmp_path: Path) -> None:
     assert "do_thing" in violations[0]
 
 
+def test_check_paths_skips_tests_subdirectory(tmp_path: Path) -> None:
+    pkg = tmp_path / "pkg"
+    (pkg / "tests").mkdir(parents=True)
+    (pkg / "tests" / "test_a.py").write_text(
+        textwrap.dedent(
+            """
+            def test_do_thing():
+                return 1
+            """
+        ),
+        encoding="utf-8",
+    )
+    assert check_paths([pkg]) == []
+
+
 def test_default_targets_have_no_violations() -> None:
-    """Regression guard: tech_lead_agent/ and coding_team_orchestrator.py stay compliant."""
+    """Regression guard: tech_lead_agent/, coding_team_orchestrator.py, and
+    shared/cache/ stay compliant."""
     assert check_paths(_DEFAULT_TARGETS) == []
+
+
+def test_default_targets_include_shared_cache() -> None:
+    """shared/cache/ (added in the shared.cache module) must be in scan scope
+    so new public functions there are enforced in CI, not just the SE team's
+    own tech_lead_agent/coding_team_orchestrator files."""
+    assert any(target.parts[-2:] == ("shared", "cache") for target in _DEFAULT_TARGETS)

@@ -22,9 +22,9 @@ from typing import Any, Dict
 import pytest
 from pydantic import ValidationError
 
-from investment_team.api import main as lab_main  # noqa: E402
-from investment_team.api.main import RunStrategyLabRequest  # noqa: E402
-from investment_team.models import (  # noqa: E402
+from investment_team.api import main as lab_main
+from investment_team.api.main import RunStrategyLabRequest
+from investment_team.models import (
     BacktestConfig,
     BacktestRecord,
     BacktestResult,
@@ -125,6 +125,122 @@ def test_request_rejects_selection_with_no_valid_category() -> None:
         RunStrategyLabRequest(allowed_asset_classes=["options"])
     with pytest.raises(ValidationError):
         RunStrategyLabRequest(allowed_asset_classes=["bonds", "nonsense"])
+
+
+def test_request_rejection_message_reflects_canonical_classes() -> None:
+    """The error message is built from PROMPT_ASSET_CLASSES (the canonical
+    source), not a hardcoded copy that could drift out of sync with it."""
+    with pytest.raises(ValidationError) as exc_info:
+        RunStrategyLabRequest(allowed_asset_classes=["options"])
+    message = str(exc_info.value)
+    for cls in PROMPT_ASSET_CLASSES:
+        assert cls in message
+
+
+# ---------------------------------------------------------------------------
+# RunStrategyLabRequest.paper_trading_lookback_days bounds
+# ---------------------------------------------------------------------------
+
+
+def test_paper_trading_lookback_days_accepts_within_ceiling() -> None:
+    from investment_team.strategy_lab.config import MAX_PAPER_TRADING_LOOKBACK_DAYS
+
+    req = RunStrategyLabRequest(paper_trading_lookback_days=MAX_PAPER_TRADING_LOOKBACK_DAYS)
+    assert req.paper_trading_lookback_days == MAX_PAPER_TRADING_LOOKBACK_DAYS
+
+
+def test_paper_trading_lookback_days_rejects_above_ceiling() -> None:
+    from investment_team.strategy_lab.config import MAX_PAPER_TRADING_LOOKBACK_DAYS
+
+    with pytest.raises(ValidationError):
+        RunStrategyLabRequest(paper_trading_lookback_days=MAX_PAPER_TRADING_LOOKBACK_DAYS + 1)
+
+
+def test_paper_trading_lookback_days_default_within_cap() -> None:
+    """The omitted lookback default must never exceed the configured schema
+    ceiling — Pydantic v2 doesn't validate defaults, so the default itself
+    has to be derived from the cap (same pattern as ``max_parallel``)."""
+    from investment_team.api import main as api_main
+
+    default_days = api_main.RunStrategyLabRequest().paper_trading_lookback_days
+    assert default_days == min(365, api_main._MAX_PAPER_TRADING_LOOKBACK_DAYS)
+    assert 30 <= default_days <= api_main._MAX_PAPER_TRADING_LOOKBACK_DAYS
+
+
+def test_paper_trading_lookback_default_clamped_under_lowered_env_ceiling() -> None:
+    """Omitting the field must still respect a lowered env ceiling.
+
+    Preconditions: a fresh Python process can import ``investment_team`` with
+    ``agents/`` on ``PYTHONPATH`` and
+    ``STRATEGY_LAB_MAX_PAPER_TRADING_LOOKBACK_DAYS=90``.
+    Postconditions: the child exits 0; an omitted
+    ``paper_trading_lookback_days`` equals 90 (not the bare 365 default).
+    Runs in a subprocess so the import-time Field default/``le=`` bind against
+    the lowered ceiling without polluting this session's ``sys.modules``.
+    """
+    import os
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    backend_root = Path(__file__).resolve().parents[3]
+    agents_root = backend_root / "agents"
+    script = """
+from investment_team.api.main import RunStrategyLabRequest, _MAX_PAPER_TRADING_LOOKBACK_DAYS
+assert _MAX_PAPER_TRADING_LOOKBACK_DAYS == 90, _MAX_PAPER_TRADING_LOOKBACK_DAYS
+req = RunStrategyLabRequest()
+assert req.paper_trading_lookback_days == 90, req.paper_trading_lookback_days
+"""
+    env = os.environ.copy()
+    env["STRATEGY_LAB_MAX_PAPER_TRADING_LOOKBACK_DAYS"] = "90"
+    env["PYTHONPATH"] = os.pathsep.join(
+        [str(agents_root), env.get("PYTHONPATH", "")]
+    ).rstrip(os.pathsep)
+
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True,
+        text=True,
+        env=env,
+        cwd=str(backend_root),
+        check=False,
+    )
+    assert result.returncode == 0, f"stdout={result.stdout!r} stderr={result.stderr!r}"
+
+
+def test_max_paper_trading_lookback_days_floors_below_field_ge() -> None:
+    """Env ceiling below the Field ``ge=30`` must floor to 30 so ``le`` cannot
+    fall below ``ge`` and make every request unsatisfiable.
+
+    Runs in a subprocess so import-time config evaluation sees the lowered env
+    without reloading modules already imported by this session.
+    """
+    import os
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    backend_root = Path(__file__).resolve().parents[3]
+    agents_root = backend_root / "agents"
+    script = """
+from investment_team.strategy_lab.config import MAX_PAPER_TRADING_LOOKBACK_DAYS
+assert MAX_PAPER_TRADING_LOOKBACK_DAYS == 30, MAX_PAPER_TRADING_LOOKBACK_DAYS
+"""
+    env = os.environ.copy()
+    env["STRATEGY_LAB_MAX_PAPER_TRADING_LOOKBACK_DAYS"] = "10"
+    env["PYTHONPATH"] = os.pathsep.join(
+        [str(agents_root), env.get("PYTHONPATH", "")]
+    ).rstrip(os.pathsep)
+
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True,
+        text=True,
+        env=env,
+        cwd=str(backend_root),
+        check=False,
+    )
+    assert result.returncode == 0, f"stdout={result.stdout!r} stderr={result.stderr!r}"
 
 
 # ---------------------------------------------------------------------------
@@ -262,10 +378,14 @@ def _build_batch_input(
     )
 
     monkeypatch.setattr(run_state, "active_runs", {})
-    monkeypatch.setattr(run_state, "load_run_from_job_service", lambda rid: None)
+    # rehydrate_active_run_offset/get_resume_seed_counters read via
+    # get_run_state_strict (not the lenient get_run_state/
+    # load_run_from_job_service) -- see its own docstring for why a
+    # durable-read failure must propagate rather than being swallowed here.
+    monkeypatch.setattr(run_state, "get_run_state_strict", lambda rid: None)
 
     run_id = f"run-{uuid.uuid4().hex[:6]}"
-    return build_strategy_lab_batch_input(run_id, request)
+    return build_strategy_lab_batch_input(run_id, request, generation=1)
 
 
 def test_batch_input_computes_complement_exclusion(monkeypatch: pytest.MonkeyPatch) -> None:

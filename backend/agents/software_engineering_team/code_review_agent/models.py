@@ -6,7 +6,7 @@ from typing import Any, Callable, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field, StrictBool, model_validator
 
-from software_engineering_team.shared.models import SystemArchitecture
+from shared.dev_models.models import SystemArchitecture
 
 from .profiles import ReviewProfile
 
@@ -326,6 +326,13 @@ class ChunkReviewInput(BaseModel):
         description="Acceptance criteria the code must meet",
     )
     spec_excerpt: str = Field(default="", description="Spec excerpt (capped ~8K)")
+    spec_compliance_single_pass: bool = Field(
+        default=False,
+        description="When True, a dedicated single-pass spec/acceptance-criteria compliance check "
+        "(synthesize_spec_compliance) runs once post-dedupe instead of including "
+        "acceptance_criteria/spec_excerpt in this chunk's prompt. Computed once per run from "
+        "CODE_REVIEW_SPEC_COMPLIANCE_PASS, never re-read per chunk.",
+    )
     architecture_overview: str = Field(default="", description="Architecture overview (capped ~2K)")
     existing_codebase_excerpt: Optional[str] = Field(
         default=None,
@@ -432,6 +439,22 @@ class CodeReviewIssue(BaseModel):
 # this type directly rather than hand-copying its values, so a change here is
 # never silently missed downstream.
 CodeReviewIssueSeverity = Literal["critical", "high", "medium", "low", "info"]
+
+
+def _normalized_severity(severity: Optional[str]) -> str:
+    """Fold a severity token for rank / blocking comparisons.
+
+    Preconditions:
+        - ``severity`` is ``None`` or a string (may be empty / padded / mixed-case).
+
+    Postconditions:
+        - Returns ``(severity or "").strip().lower()``.
+        - Never raises; empty / ``None`` → ``""``.
+        - Pure; no side effects.
+    """
+    return (severity or "").strip().lower()
+
+
 _ChunkReviewIssueCategory = Literal[
     "naming",
     "structure",
@@ -582,7 +605,7 @@ class ChunkReviewLLMResponse(BaseModel):
 
         Computes the same "actionable critical/high issue" predicate
         ``coordinator._reconcile_approval`` derives from its ``issues``
-        parameter (severity in critical/high), narrowed by the two
+        parameter (normalized severity in critical/high), narrowed by the two
         conditions ``chunking._issues_from_chunk_output`` uses to drop an
         issue before it ever reaches that gate: a blank description, or a
         suggestion that is, in its entirety, a no-op admission
@@ -595,7 +618,7 @@ class ChunkReviewLLMResponse(BaseModel):
         critical/high issue, ``False`` requires at least one.
         """
         has_actionable_critical_or_high = any(
-            issue.severity in ("critical", "high")
+            _normalized_severity(issue.severity) in ("critical", "high")
             and issue.description.strip()
             and not is_no_op_suggestion(issue.suggestion)
             for issue in self.issues
@@ -845,12 +868,15 @@ class CodeReviewInput(BaseModel):
         default=False,
         description="When True, the coordinator skips BOTH tail passes entirely (the "
         "false-positive filter and the merged architecture/side-effect pass) and returns "
-        "the per-chunk findings as-is, with no additional LLM calls after the map phase. "
-        "Default False keeps both passes on for every existing caller. Intended for a "
-        "lightweight fallback caller that wants speed over full tail-pass rigor; implies "
-        "skip_false_positive_filter's effect (setting both is redundant, not conflicting). "
-        "Only honored by the in-process coordinator today — the Temporal workflow path "
-        "does not yet thread it through.",
+        "the per-chunk findings as-is, with no additional LLM calls from those two passes "
+        "after the map phase. Default False keeps both passes on for every existing caller. "
+        "Intended for a lightweight fallback caller that wants speed over full tail-pass "
+        "rigor; implies skip_false_positive_filter's effect (setting both is redundant, not "
+        "conflicting). Does NOT affect the separate, independently-gated post-dedupe "
+        "spec-compliance synthesis pass: when CODE_REVIEW_SPEC_COMPLIANCE_PASS is enabled "
+        "for the CODE_REVIEW profile, that single synthesize_spec_compliance call still runs "
+        "even if skip_tail_passes is set. Only honored by the in-process coordinator today — "
+        "the Temporal workflow path does not yet thread it through.",
     )
     repo_root: Optional[str] = Field(
         default=None,

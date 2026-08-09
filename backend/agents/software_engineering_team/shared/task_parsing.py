@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List
 
-from software_engineering_team.shared.models import (
+from shared.dev_models.models import (
     Epic,
     Initiative,
     PlanningHierarchy,

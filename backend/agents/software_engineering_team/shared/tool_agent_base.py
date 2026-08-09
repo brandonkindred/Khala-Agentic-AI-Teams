@@ -682,9 +682,3 @@ class BaseReviewToolAgent(LlmToolAgentBase):
             summary; never touches ``inp`` or applies any change.
         """
         return ToolAgentPhaseOutput(summary=f"{self.name} deliver.")
-
-
-# Preferred name for the generalized review base. The historical
-# ``BaseReviewToolAgent`` name is retained above and aliased here so both stacks
-# (and their tests) can import either.
-ReviewToolAgent = BaseReviewToolAgent

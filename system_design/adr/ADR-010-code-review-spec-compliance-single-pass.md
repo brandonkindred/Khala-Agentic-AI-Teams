@@ -1,13 +1,15 @@
 # ADR-010 — Single-pass spec/acceptance-criteria compliance for code review
 
-- **Status**: Proposed
-- **Date**: 2026-08-04
+- **Status**: Accepted — implemented with a deviation from the original Decision; see the
+  Amendment section at the bottom.
+- **Date**: 2026-08-05
 - **Owner**: Software Engineering Team / Code Review
 - **Related**:
-  - Reduces redundant per-chunk spec/architecture context in the code-review map phase; this ADR is
-    the design-decision deliverable that gates that work's implementation sub-issues. It authorizes
-    no code change to `chunk_reviewer.py`, `coordinator.py`, or `synthesis.py` by itself — a future
-    implementation PR is gated on this ADR existing.
+  - Reduces redundant per-chunk spec/architecture context in the code-review map phase; this ADR was
+    the design-decision deliverable that gated that work's implementation sub-issues. Implemented by
+    #5065, which gates per-chunk spec/acceptance-criteria inclusion behind
+    `CODE_REVIEW_SPEC_COMPLIANCE_PASS` in `chunk_reviewer.py`, `coordinator.py`, and related modules,
+    with the deviation from the original Decision documented in the Amendment section below.
   - `backend/agents/software_engineering_team/code_review_agent/merged_architecture_side_effect_pass.py`
     — the existing once-per-submission tail-pass pattern this ADR's new pass is structurally modeled
     on.
@@ -22,11 +24,11 @@ in bounded chunks (`chunking.py::build_review_chunks`), then merges the per-chun
 pieces of shared context — the project specification excerpt and the acceptance-criteria list — are
 computed **once per submission**, but are then embedded verbatim into **every chunk's** prompt:
 
-- `run_coordinator` computes `spec_content`/`arch_overview` once (`coordinator.py:733-752`, via
-  `compact_text`/`compute_code_review_spec_excerpt_chars`) and stores them, unchanged, in
-  `base_input` (`coordinator.py:766-776`).
-- That `base_input` is handed to every chunk via `ChunkReviewInput` (`models.py:304-350`).
-- `chunk_reviewer.py::_run_chunk_review` (lines 240-266) renders `input_data.acceptance_criteria`
+- `run_coordinator` computes `spec_content`/`arch_overview` once, via
+  `compact_text`/`compute_code_review_spec_excerpt_chars`, and stores them, unchanged, in
+  `base_input`.
+- That `base_input` is handed to every chunk via `ChunkReviewInput`.
+- `chunk_reviewer.py::_run_chunk_review` renders `input_data.acceptance_criteria`
   and `input_data.spec_excerpt` into the prompt's `context_parts` for **each** chunk.
 
 On a submission with N chunks, the same spec/acceptance-criteria text transmits N times — on a
@@ -39,16 +41,16 @@ The codebase already has a working precedent for eliminating exactly this kind o
 architecture-consistency and side-effect-impact checks **once per submission, never once per
 chunk** (its own module docstring says so explicitly), gated by `env_flag_enabled` env vars
 (`shared/env/__init__.py:32`), additive-only and fail-safe (`try/except` → `([], [])` on any
-failure), invoked from `coordinator.py::_run_tail_passes` (line 480) after the map phase, running
+failure), invoked from `coordinator.py::_run_tail_passes` after the map phase, running
 concurrently with the false-positive filter via `parallel_map` when possible.
 
 Separately, `synthesis.py::synthesize_review_findings` already performs a single, cheap,
 **findings-only** (no source code) reduce-phase LLM pass that consolidates N per-chunk
 `spec_compliance_notes` strings into one narrative — but that pass only rewrites text the per-chunk
 reviewers already produced; it does not eliminate the per-chunk spec/AC duplication that produced
-those notes in the first place. `_merge_narrative` (`coordinator.py:415-463`) already skips this
-synthesis LLM call entirely when there is exactly one chunk and no additive tail-pass findings
-(line 446-447) — an existing precedent for "run once, not per chunk" wherever possible.
+those notes in the first place. `_merge_narrative` already skips this
+synthesis LLM call entirely when there is exactly one chunk and no additive tail-pass findings —
+an existing precedent for "run once, not per chunk" wherever possible.
 
 **Explicitly out of scope** (per the parent work item this ADR resolves): removing per-chunk
 `architecture_overview`/sibling-surface context (it stays exactly as-is), and any change to the
@@ -75,11 +77,11 @@ defaulting to current behavior."
 ### When `CODE_REVIEW_SPEC_COMPLIANCE_PASS` is on
 
 1. **Per-chunk prompt shrinks.** `chunk_reviewer.py::_run_chunk_review` skips the
-   `acceptance_criteria` (lines 240-247) and `spec_excerpt` (lines 257-266) blocks. This is driven
+   `acceptance_criteria` and `spec_excerpt` blocks. This is driven
    by a new boolean threaded through `ChunkReviewInput` (e.g.
    `spec_compliance_single_pass: bool = False`), computed once in `run_coordinator` from the flag
    and copied into every chunk's `base_input` — never re-read from the environment per chunk.
-   `architecture_overview` (lines 267-268) and every other context block are untouched, per the
+   `architecture_overview` and every other context block are untouched, per the
    out-of-scope boundary above. The per-chunk LLM response schema
    (`ChunkReviewLLMResponse.spec_compliance_notes`) is not changed — a chunk given no spec/AC
    context naturally has nothing concrete to report and is expected to return an empty note, which
@@ -88,7 +90,7 @@ defaulting to current behavior."
 
 2. **A new tail pass runs once per submission.** New module (e.g. `spec_compliance_pass.py`,
    alongside `merged_architecture_side_effect_pass.py`), invoked as an additional entry in
-   `_run_tail_passes`'s `calls` list (`coordinator.py:517-534`) so it runs concurrently with the
+   `_run_tail_passes`'s `calls` list so it runs concurrently with the
    false-positive filter and the merged architecture/side-effect pass when the run's concurrency
    budget allows. It receives the already-computed, already-compacted `spec_content` and
    `input_data.acceptance_criteria` (no re-compaction) plus the full changed-code content, inlined
@@ -109,8 +111,8 @@ defaulting to current behavior."
    the N per-chunk notes `outcome.spec_notes` would otherwise have contributed (which are now empty,
    per point 1). `synthesize_review_findings` and `build_findings_digest` require **no code
    change** — they already accept `chunk_spec_notes: List[str]` of any length. The one change
-   required in `coordinator.py` is `_merge_narrative`'s single-chunk fast path
-   (`coordinator.py:446-447`): today it returns `outcome.summaries[0]`/`outcome.spec_notes[0]`
+   required in `coordinator.py` is `_merge_narrative`'s single-chunk fast path:
+   today it returns `outcome.summaries[0]`/`outcome.spec_notes[0]`
    directly, skipping the synthesis LLM call, whenever there is exactly one chunk and
    `has_additive_pass_findings` is `False`. That condition must be generalized to also require the
    new pass's note is empty — otherwise a single-chunk submission with a real single-pass finding
@@ -153,8 +155,9 @@ defaulting to current behavior."
   simultaneously. A single post-merge pass instead sees the whole diff at once and must
   self-attribute file/line references across every changed file, so attribution precision may
   degrade on very large, many-file submissions. Large submissions may also require the same kind of
-  content budgeting/truncation the architecture pass already accepts (`compute_code_review_merged_
-  pass_budgets`), which the per-chunk model — each chunk individually bounded, but never truncating
+  content budgeting/truncation the architecture pass already accepts
+  (`compute_code_review_merged_pass_budgets`), which the per-chunk model — each chunk individually
+  bounded, but never truncating
   the spec itself — does not need.
 - **Token-cost efficiency.** Duplication drops from O(chunks × spec/AC size) to O(1) for the
   spec/AC text; the new pass still inlines the full changed-code content once (comparable to what
@@ -188,10 +191,10 @@ A future implementation must satisfy exactly this surface:
 - A new tail-pass module, function-shaped like `find_architecture_and_side_effect_issues`
   (`llm`, `input_data`, optional `repo_reader`/`index` in; a single narrative string out, empty on
   any failure or when the flag is off), restricted to `ReviewProfile.CODE_REVIEW`, added as one more
-  entry in `_run_tail_passes`'s `calls` list (`coordinator.py:517-534`).
-- `_TailPassResult` (`coordinator.py:466-477`) gains a field carrying the new pass's note (e.g.
+  entry in `_run_tail_passes`'s `calls` list.
+- `_TailPassResult` gains a field carrying the new pass's note (e.g.
   `spec_compliance_note: str = ""`), threaded through `_run_tail_passes`'s return.
-- `_merge_narrative` (`coordinator.py:415-463`): its single-chunk fast-path condition
+- `_merge_narrative`'s single-chunk fast-path condition
   (`len(outcome.summaries) == 1 and not has_additive_pass_findings`) must additionally require the
   new pass's note to be empty before skipping the synthesis LLM call; when the new pass has a
   non-empty note, `chunk_spec_notes` passed to `synthesize_review_findings` is
@@ -215,9 +218,54 @@ A future implementation must satisfy exactly this surface:
 - **`synthesize_review_findings` and its digest/prompt stay untouched**, minimizing the blast radius
   of the eventual implementation to `chunk_reviewer.py`'s prompt assembly, one new tail-pass module,
   and `_merge_narrative`'s fast-path condition.
-- **This ADR does not itself implement anything.** A future implementation PR must still: add the
-  `env_bool` flag read, thread the new `ChunkReviewInput` boolean, write the new tail-pass module
-  (budgeting, prompt, fail-safe wrapper), extend `_TailPassResult` and `_run_tail_passes`, adjust
-  `_merge_narrative`'s fast-path condition, add dual-mode test coverage (≥90% on changed code, per
-  this repository's testing floor), measure the token/cost delta on a representative multi-chunk
-  fixture, and add the `docs/ENV_VARS.md` entry described above.
+- **This ADR does not itself implement anything.** *(Superseded by the Amendment below: the gating
+  sub-issue has since landed. What it actually did was add the `env_bool` flag read, thread the new
+  `ChunkReviewInput` boolean, wire the already-shipped, findings-only `synthesize_spec_compliance`
+  call into `run_coordinator` immediately before `_merge_narrative` — not a new tail-pass module, and
+  no `_TailPassResult`/`_run_tail_passes` change, per the Amendment — adjust `_merge_narrative`'s
+  fast-path condition, add dual-mode test coverage (≥90% on changed code, per this repository's
+  testing floor), and add the `docs/ENV_VARS.md` entry described above. Token/cost delta measurement
+  on a representative multi-chunk fixture remains a separate, later work item.)*
+
+## Amendment (implementation, gating sub-issue)
+
+The single-pass function implementation sub-issue shipped `synthesize_spec_compliance`
+(`backend/agents/software_engineering_team/code_review_agent/synthesis.py`) as a
+**findings-only** pass — paired with `synthesize_review_findings`, taking the final
+deduped issue list plus the full spec/acceptance-criteria text, with **no source code**
+included — rather than the code-aware tail-pass module this ADR's Decision section
+originally specified. The gating sub-issue then wired that already-shipped function in
+as "the new single pass," instead of writing a second, separate module. Concretely, this
+means the Decision/Contract-boundary text above is superseded on the following points:
+
+- **No new tail-pass module** (e.g. `spec_compliance_pass.py`) was written. There is no
+  code-aware pass that inlines changed-file content, and nothing runs inside
+  `_run_tail_passes` for this purpose.
+- **`_TailPassResult` gained no new field.** `synthesize_spec_compliance` requires the
+  *final* deduped issue list (post-dedupe) per its own precondition, which is only
+  available after `_run_tail_passes` and `_dedupe_issues`/`_cap_issues`/
+  `_reconcile_approval` complete — well outside the concurrent tail-pass phase — so
+  there is nothing to thread through that machinery.
+- **The call site is in `run_coordinator`, immediately before `_merge_narrative`,** gated
+  on `spec_compliance_single_pass and input_data.profile == ReviewProfile.CODE_REVIEW`.
+  Its result is passed into a new `_merge_narrative(..., single_pass_spec_notes=...)`
+  parameter: `None` (flag/profile off, or the pass failed) preserves today's behavior
+  exactly (including the single-chunk fast path); a non-`None` value (possibly `""`)
+  unconditionally bypasses the fast path and feeds `[single_pass_spec_notes]` into
+  `synthesize_review_findings` in place of `outcome.spec_notes` — satisfying the same
+  "must not silently drop a real single-chunk finding" concern the Contract boundary's
+  point 4 raised, without needing the `_TailPassResult` field it proposed.
+- The `ChunkReviewInput` boolean (`spec_compliance_single_pass`), the `env_bool`-gated,
+  default-off flag read (computed once in `run_coordinator`), the `chunk_reviewer.py`
+  gating of the `acceptance_criteria`/`spec_excerpt` blocks (leaving
+  `architecture_overview` untouched), and the `CODE_REVIEW` profile restriction all
+  landed exactly as this ADR specified.
+
+Rationale for taking the smaller path: `synthesize_spec_compliance` was already
+implemented, reviewed, and merged by the time the gating sub-issue started, and its own
+issue's acceptance criteria described it in the same findings-only terms ("runs once
+over the merged issue list plus the full spec/acceptance criteria") the gating
+sub-issue's acceptance criteria then referred back to ("routes spec compliance through
+the new single pass"). Writing a second, code-aware pass would have duplicated
+functionality without a clear justification for the extra complexity relative to this
+sub-issue's own Fibonacci complexity score.

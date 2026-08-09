@@ -1,13 +1,14 @@
 """Lint check: public functions/methods must document a Design by Contract docstring.
 
-Per CLAUDE.md's DbC mandate, scoped to ``tech_lead_agent/`` and
-``coding_team_orchestrator.py`` (see the sibling audit tracked under the
-"Enforce Design by Contract docstrings in tech_lead_agent and
+Per CLAUDE.md's DbC mandate, scoped to ``tech_lead_agent/``,
+``coding_team_orchestrator.py``, and ``shared/cache/`` (see the sibling audit
+tracked under the "Enforce Design by Contract docstrings in tech_lead_agent and
 coding_team_orchestrator" issue) rather than repo-wide, to avoid a large
-unrelated failure surface elsewhere in the codebase.
+unrelated failure surface elsewhere in the codebase. Directory targets skip any
+``tests/`` subdirectory — test functions were never in scope for this checker.
 
 Run directly: ``python -m software_engineering_team.scripts.check_dbc_docstrings``
-(defaults to the two locations above) or pass explicit paths on the command line.
+(defaults to the locations above) or pass explicit paths on the command line.
 Exits 1 and prints one line per violation when any public function/method is
 missing a docstring or is missing a ``Preconditions:`` or ``Postconditions:``
 section header; exits 0 otherwise.
@@ -22,11 +23,14 @@ from pathlib import Path
 from typing import Iterable, List, Sequence
 
 _TEAM_DIR = Path(__file__).resolve().parent.parent
+_BACKEND_DIR = _TEAM_DIR.parent.parent
 _DEFAULT_TARGETS = [
     _TEAM_DIR / "tech_lead_agent",
     _TEAM_DIR / "coding_team_orchestrator.py",
+    _BACKEND_DIR / "shared" / "cache",
 ]
 _REQUIRED_SECTIONS = ("Preconditions:", "Postconditions:")
+_SKIPPED_DIR_NAMES = {"tests"}
 
 
 def _is_public(name: str) -> bool:
@@ -115,12 +119,20 @@ def check_paths(paths: Sequence[Path]) -> List[str]:
     Postconditions:
         - Returns the concatenation of ``check_file``'s results across every ``.py``
           file found — files given directly, plus every ``.py`` file discovered
-          recursively under any directory entry — in a deterministic (sorted) order.
+          recursively under any directory entry, excluding files under a ``tests/``
+          subdirectory at any depth (test functions are never in scope for this
+          checker) — in a deterministic (sorted) order.
     """
     files: List[Path] = []
     for path in paths:
         if path.is_dir():
-            files.extend(sorted(path.rglob("*.py")))
+            files.extend(
+                sorted(
+                    p
+                    for p in path.rglob("*.py")
+                    if not _SKIPPED_DIR_NAMES.intersection(p.relative_to(path).parts[:-1])
+                )
+            )
         else:
             files.append(path)
     violations: List[str] = []
@@ -144,7 +156,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         nargs="*",
         type=Path,
         default=_DEFAULT_TARGETS,
-        help="Files or directories to check (default: tech_lead_agent/ and coding_team_orchestrator.py)",
+        help="Files or directories to check (default: tech_lead_agent/, coding_team_orchestrator.py, shared/cache/)",
     )
     args = parser.parse_args(argv)
     violations = check_paths(args.paths)

@@ -10,6 +10,7 @@ from llm_service import DummyLLMClient
 from llm_service.compaction import (  # noqa: PLC2701 - internals are under test
     DEFAULT_COMPACTION_CACHE_SIZE,
     _compaction_cache_key,
+    _compaction_cache_namespace,
     _compaction_cache_size,
     _model_fingerprint,
     clear_compaction_cache,
@@ -260,6 +261,34 @@ def test_clear_compaction_cache_forces_cold_recompute() -> None:
     assert client.calls == 2
 
 
+def test_compaction_cache_namespace_includes_build_id(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Compaction namespace helper must suffix the stem when a build id is set."""
+    monkeypatch.delenv("KHALA_CACHE_BUILD_ID", raising=False)
+    monkeypatch.setenv("KHALA_BUILD_ID", "build-9")
+    assert _compaction_cache_namespace() == "llm:compact:v1:build-9"
+
+
+def test_corrupt_compaction_cache_entry_is_evicted_and_recomputed() -> None:
+    """Non-UTF-8 durable bytes are deleted; compaction recomputes and re-caches."""
+    from shared.cache import get_shared_cache
+
+    client = _CountingClient(result="REBUILT")
+    text = "c" * 200
+    key = _compaction_cache_key(text, 50, "spec", client)
+    cache = get_shared_cache(_compaction_cache_namespace())
+    cache.set(key, b"\xff\xfe not-utf8", max_entries=8)
+
+    first = compact_text(text, 50, client, "spec")
+    assert first == "REBUILT"
+    assert client.calls == 1
+    raw = cache.get(key)
+    assert raw == b"REBUILT"
+
+    second = compact_text(text, 50, client, "spec")
+    assert second == "REBUILT"
+    assert client.calls == 1  # hit after re-store
+
+
 # ---------------------------------------------------------------------------
 # supports_compaction capability check
 # ---------------------------------------------------------------------------
@@ -343,3 +372,11 @@ def test_cache_key_is_stable_and_input_sensitive() -> None:
     assert k1 != _compaction_cache_key("other", 100, "spec", client)
     assert k1 != _compaction_cache_key("text", 200, "spec", client)
     assert k1 != _compaction_cache_key("text", 100, "architecture", client)
+
+
+def test_cache_key_resists_null_byte_collision() -> None:
+    """Embedded NULs in description/text must not create colliding keys."""
+    client = _CountingClient(model_id="m")
+    a = _compaction_cache_key("baz", 100, "foo\x00bar", client)
+    b = _compaction_cache_key("bar\x00baz", 100, "foo", client)
+    assert a != b

@@ -10,18 +10,21 @@ through ``complete_validated`` and validates responses against
 from __future__ import annotations
 
 import json
+import math
 import threading
 import time
 from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
+from code_review_agent import mapping
 from code_review_agent.chunk_reviewer import CHUNK_REVIEW_NOTE, CODE_TO_REVIEW_HEADER
 from code_review_agent.chunking import _bisect_segment
 from code_review_agent.coordinator import (
     MAX_CODE_REVIEW_ISSUES,
     MIN_SPLIT_SEGMENT_CHARS,
     _cap_issues,
+    _is_content_failure,
     _issues_from_chunk_output,
     _map_parallelism,
     _reconcile_approval,
@@ -47,6 +50,7 @@ from code_review_agent.models import (
     CodeReviewUnavailableError,
     FileSegment,
     ReviewChunk,
+    _normalized_severity,
     is_no_op_suggestion,
 )
 from pydantic import ValidationError
@@ -88,6 +92,22 @@ def _issue(severity: str, description: str, *, line: int = 1) -> CodeReviewIssue
         description=description,
         suggestion="fix it",
     )
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        (None, ""),
+        ("", ""),
+        ("high", "high"),
+        ("High", "high"),
+        ("HIGH", "high"),
+        (" critical ", "critical"),
+        ("Medium", "medium"),
+    ],
+)
+def test_normalized_severity_folds_case_and_whitespace(raw: str | None, expected: str) -> None:
+    assert _normalized_severity(raw) == expected
 
 
 def test_cap_issues_under_limit_preserves_order() -> None:
@@ -146,6 +166,44 @@ def test_cap_then_reconcile_keeps_critical_and_rejects() -> None:
     approved, out = _reconcile_approval(True, capped)
     assert approved is False
     assert any(i.severity == "critical" for i in out)
+
+
+@pytest.mark.parametrize(
+    "severity",
+    ["High", "HIGH", " high ", "Critical", "CRITICAL", " critical "],
+)
+def test_reconcile_approval_treats_mixed_case_critical_high_as_blocking(
+    severity: str,
+) -> None:
+    """Blocking membership must match ``_cap_issues`` fold, not raw equality."""
+    approved, out = _reconcile_approval(True, [_issue(severity, "blocker")])
+    assert approved is False
+    assert len(out) == 1
+    assert _normalized_severity(out[0].severity) in {"critical", "high"}
+
+
+@pytest.mark.parametrize("severity", ["Medium", "LOW", "Info"])
+def test_reconcile_approval_mixed_case_non_blocking_still_auto_approves(
+    severity: str,
+) -> None:
+    """Non-blocking severities remain non-blocking after case fold."""
+    approved, out = _reconcile_approval(False, [_issue(severity, "nit")])
+    assert approved is True
+    assert len(out) == 1
+
+
+def test_reconcile_approval_override_log_names_non_critical_high(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The auto-approve override log must describe the overridden severities
+    accurately: medium/low/info are 'non-critical/high', not 'minor/nit'.
+    """
+    with caplog.at_level("INFO"):
+        approved, out = _reconcile_approval(False, [_issue("medium", "m"), _issue("low", "l")])
+    assert approved is True
+    assert len(out) == 2
+    assert "2 non-critical/high issues, no critical/high" in caplog.text
+    assert "minor/nit" not in caplog.text
 
 
 def test_parse_code_into_file_blocks_single_file() -> None:
@@ -336,7 +394,7 @@ def test_shared_context_compaction_is_memoized_across_runs() -> None:
     """The oversized spec/architecture/existing-codebase are compacted once and
     reused on the next coordinator run (the review→fix→re-review loop passes the
     same shared context each cycle)."""
-    from software_engineering_team.shared.models import SystemArchitecture
+    from shared.dev_models.models import SystemArchitecture
 
     over_budget = "specification detail line. " * 4000  # well over any budget
     arch = SystemArchitecture(
@@ -372,7 +430,7 @@ def test_render_architecture_context_folds_in_components_and_decisions() -> None
     """The architecture excerpt built for the reviewer includes not just the
     overview prose but component responsibilities and architecture decisions
     (ADRs) -- the concrete signal an architecture-consistency check needs."""
-    from software_engineering_team.shared.models import ArchitectureComponent, SystemArchitecture
+    from shared.dev_models.models import ArchitectureComponent, SystemArchitecture
 
     arch = SystemArchitecture(
         overview="Layered service architecture.",
@@ -399,7 +457,7 @@ def test_render_architecture_context_handles_missing_and_malformed_fields() -> N
     """
     from types import SimpleNamespace
 
-    from software_engineering_team.shared.models import SystemArchitecture
+    from shared.dev_models.models import SystemArchitecture
 
     bare = SystemArchitecture(overview="Just an overview.")
     rendered_bare = _render_architecture_context(bare)
@@ -413,7 +471,7 @@ def test_render_architecture_context_handles_missing_and_malformed_fields() -> N
 def test_chunk_prompt_includes_component_and_decision_text() -> None:
     """End-to-end: a submission reviewed with a component/decision-bearing
     architecture renders that content into the chunk reviewer's prompt."""
-    from software_engineering_team.shared.models import ArchitectureComponent, SystemArchitecture
+    from shared.dev_models.models import ArchitectureComponent, SystemArchitecture
 
     class _PromptCapturingClient(DummyLLMClient):
         """Records prompts; lock-guarded for parallel map/tail callers."""
@@ -601,7 +659,7 @@ def test_code_review_agent_uses_coordinator_when_code_exceeds_limit() -> None:
     code = "### app/main.py ###\n" + "".join(f"x{i} = {i}\n" for i in range(4000))
 
     client = _MapCounter()
-    agent = CodeReviewAgent(llm_client=client)
+    agent = CodeReviewAgent(llm_client=client, force_in_process=True)
     result = agent.run(
         CodeReviewInput(
             code=code,
@@ -634,26 +692,48 @@ def _failme_content_in_bisect_window(budget: int) -> str:
     Postconditions:
         - Returned content length L satisfies 2 * MIN_SPLIT_SEGMENT_CHARS <= L < budget.
         - Every line is 40 chars and contains the FAILME marker.
+    Raises:
+        ValueError: if budget is too tight for any whole number of lines to land in
+            [2 * MIN_SPLIT_SEGMENT_CHARS, budget) — this helper can only produce content
+            lengths that are multiples of the line stride (line_body_width + 1 chars),
+            so some tight budgets admit no valid line count at all.
     """
     line_body_width = 40
-    target = (2 * MIN_SPLIT_SEGMENT_CHARS + budget) // 2
-    # Joined length of n 40-char lines is 41*n - 1; use 41 as the stride estimate.
-    n_lines = max(1, (target + 1) // (line_body_width + 1))
+    stride = line_body_width + 1  # joined length of n lines is stride*n - 1
+    n_lines = max(1, math.ceil(2 * MIN_SPLIT_SEGMENT_CHARS / stride))
     content = "\n".join(
         f"FAILME {i:05d}".ljust(line_body_width, "x") for i in range(1, n_lines + 1)
     )
-    while len(content) >= budget and n_lines > 1:
+    if len(content) >= budget and n_lines > 1:
         n_lines -= 1
         content = "\n".join(
             f"FAILME {i:05d}".ljust(line_body_width, "x") for i in range(1, n_lines + 1)
         )
-    while len(content) < 2 * MIN_SPLIT_SEGMENT_CHARS:
-        n_lines += 1
-        content = "\n".join(
-            f"FAILME {i:05d}".ljust(line_body_width, "x") for i in range(1, n_lines + 1)
+    if not (2 * MIN_SPLIT_SEGMENT_CHARS <= len(content) < budget):
+        raise ValueError(
+            f"budget={budget} admits no line count landing content in "
+            f"[{2 * MIN_SPLIT_SEGMENT_CHARS}, budget) at this helper's {stride}-char "
+            "line granularity"
         )
-    assert 2 * MIN_SPLIT_SEGMENT_CHARS <= len(content) < budget
     return content
+
+
+def test_failme_content_in_bisect_window_raises_for_unsatisfiable_tight_budget() -> None:
+    """A budget within one line-stride of 2*MIN_SPLIT_SEGMENT_CHARS admits no valid
+    line count (this helper's line lengths are quantized to 41-char strides), so the
+    helper must raise a clear ValueError instead of silently violating its documented
+    postcondition (regression for the bisect-window helper)."""
+    budget = 2 * MIN_SPLIT_SEGMENT_CHARS + 1
+    with pytest.raises(ValueError, match="admits no line count"):
+        _failme_content_in_bisect_window(budget)
+
+
+def test_failme_content_in_bisect_window_satisfies_postcondition_at_min_feasible_budget() -> None:
+    """The smallest budget admitting a valid line count (one stride past the lower
+    bound) must still satisfy the documented postcondition exactly."""
+    budget = 2 * MIN_SPLIT_SEGMENT_CHARS + 41 + 1
+    content = _failme_content_in_bisect_window(budget)
+    assert 2 * MIN_SPLIT_SEGMENT_CHARS <= len(content) < budget
 
 
 def test_split_within_budget_returns_single_whole_segment() -> None:
@@ -1857,8 +1937,6 @@ def test_is_content_failure_classifies_model_output_errors_only() -> None:
     ``LLMSemanticExhaustionError``, ``LLMTruncatedError``, and
     ``LLMSchemaValidationError``) are recoverable content failures;
     reviewer-code bugs are not."""
-    from code_review_agent.coordinator import _is_content_failure
-
     assert _is_content_failure(LLMJsonParseError("bad")) is True
     assert _is_content_failure(LLMSemanticExhaustionError("empty")) is True
     assert _is_content_failure(json.JSONDecodeError("Expecting value", "not json", 0)) is True
@@ -2105,8 +2183,6 @@ def test_thinking_off_retry_recovers_semantic_exhaustion(monkeypatch) -> None:
     by the last-resort thinking-off retry, producing a real review (no
     not-reviewed range). The retry is normally skipped for injected strands
     models, so force the production-path gate on to exercise it."""
-    from code_review_agent import mapping
-
     monkeypatch.setenv("CODE_REVIEW_THINKING_OFF_RETRY", "true")
     monkeypatch.setattr(mapping, "thinking_override_supported", lambda llm: True)
 
@@ -2125,8 +2201,6 @@ def test_thinking_off_retry_recovers_semantic_exhaustion(monkeypatch) -> None:
 def test_thinking_off_retry_that_also_fails_degrades(monkeypatch) -> None:
     """When the thinking-off retry ALSO returns a content failure, the chunk
     degrades to a not-reviewed outcome rather than raising."""
-    from code_review_agent import mapping
-
     monkeypatch.setenv("CODE_REVIEW_THINKING_OFF_RETRY", "true")
     monkeypatch.setattr(mapping, "thinking_override_supported", lambda llm: True)
     reviewer = _ThinkAwareReviewer(
@@ -3059,6 +3133,13 @@ def test_no_stale_progress_reports_after_map_failure() -> None:
 
 
 def test_coordinator_single_chunk_propagates_notes() -> None:
+    """Default-off path: a single chunk's ``spec_compliance_notes`` propagate directly.
+
+    ``CODE_REVIEW_SPEC_COMPLIANCE_PASS`` is not enabled here, so the coordinator
+    keeps the single-chunk fast path (see ``_merge_narrative``) and the lone
+    chunk's notes reach ``CodeReviewOutput.spec_compliance_notes`` unchanged,
+    with no synthesis LLM call in between.
+    """
     client = _ScriptedClient(
         [
             {
@@ -3228,7 +3309,7 @@ def test_large_synthetic_input_is_fully_covered_with_bounded_prompts() -> None:
     cap = compute_code_review_map_chunk_chars(client)
     files = {f"app/mod_{i}.py": _numbered_file(2_500) for i in range(5)}  # ~500K chars total
 
-    agent = CodeReviewAgent(llm_client=client)
+    agent = CodeReviewAgent(llm_client=client, force_in_process=True)
     result = agent.run(CodeReviewInput(files=files, task_description="t", language="python"))
 
     assert isinstance(result, CodeReviewOutput)
@@ -3503,6 +3584,196 @@ def test_single_chunk_summary_reflects_side_effect_findings(monkeypatch) -> None
 
     assert synth_calls, "synthesis must run so the narrative reflects the side-effect finding"
     assert any(i.description == side_effect_issue.description for i in result.issues)
+
+
+def test_spec_compliance_single_pass_off_by_default_skips_dedicated_pass(monkeypatch) -> None:
+    """Default (``CODE_REVIEW_SPEC_COMPLIANCE_PASS`` unset): ``synthesize_spec_compliance``
+    is never invoked -- the flag-off path costs zero extra calls, matching today's
+    behavior exactly (see ``test_chunk_reviewer.py`` for the per-chunk-prompt side of
+    this same guarantee).
+
+    Hermetic against external environment state: explicitly clears the env var
+    instead of relying on it happening to be unset in CI or a developer's shell.
+    """
+    import code_review_agent.coordinator as coord
+
+    monkeypatch.delenv("CODE_REVIEW_SPEC_COMPLIANCE_PASS", raising=False)
+    calls: list = []
+    monkeypatch.setattr(
+        coord,
+        "synthesize_spec_compliance",
+        lambda *a, **kw: calls.append(True) or "should not run",
+    )
+
+    run_coordinator(
+        DummyLLMClient(),
+        CodeReviewInput(files={"a.py": "x = 1\n"}, task_description="t"),
+    )
+
+    assert not calls, "synthesize_spec_compliance must not run when the flag is off"
+
+
+def test_spec_compliance_single_pass_routes_note_into_synthesis(monkeypatch) -> None:
+    """``CODE_REVIEW_SPEC_COMPLIANCE_PASS=true`` on an explicit ``CODE_REVIEW`` profile,
+    multi-chunk submission: ``synthesize_spec_compliance`` runs exactly once, after
+    deduplication, over the final merged issue list, and its note replaces the
+    (now-empty) per-chunk spec notes fed into ``synthesize_review_findings`` for
+    EVERY chunk -- not just the first one. Two chunks each report the identical
+    (file_path, line, description) finding, so the merged list ``synthesize_spec_compliance``
+    receives is the single deduped copy, never the raw two-copy per-chunk list; this
+    also proves the old single-chunk fast path is bypassed regardless of chunk count,
+    so the dedicated pass's finding is never silently dropped (ADR-010 contract
+    boundary point 4)."""
+    import code_review_agent.coordinator as coord
+    from code_review_agent.profiles import ReviewProfile
+
+    monkeypatch.setenv("CODE_REVIEW_SPEC_COMPLIANCE_PASS", "true")
+
+    spec_calls: list = []
+
+    def _spec_spy(*args, **kwargs):
+        spec_calls.append(kwargs)
+        return "SPEC_GAP_MARKER: missing rate limiting."
+
+    monkeypatch.setattr(coord, "synthesize_spec_compliance", _spec_spy)
+
+    synth_calls: list = []
+    original_synthesize = coord.synthesize_review_findings
+
+    def _spy(*args, **kwargs):
+        synth_calls.append(kwargs.get("chunk_spec_notes"))
+        return original_synthesize(*args, **kwargs)
+
+    monkeypatch.setattr(coord, "synthesize_review_findings", _spy)
+
+    duplicate_issue = {
+        "severity": "high",
+        "category": "logic",
+        "file_path": "app/main.py",
+        "line": 10,
+        "description": "duplicate string literal",
+        "suggestion": "extract a constant",
+    }
+    client = _ScriptedClient(
+        [
+            {
+                "approved": False,
+                "issues": [duplicate_issue],
+                "summary": "Chunk 1 finding.",
+                "spec_compliance_notes": "",
+            },
+            {
+                "approved": False,
+                "issues": [duplicate_issue],
+                "summary": "Chunk 2 finding.",
+                "spec_compliance_notes": "",
+            },
+        ]
+    )
+
+    file1 = "### app/main.py ###\n" + ("x" * 20_000)
+    file2 = "### app/models.py ###\n" + ("y" * 20_000)
+    result = run_coordinator(
+        client,
+        CodeReviewInput(
+            code=file1 + "\n\n" + file2,
+            task_description="t",
+            profile=ReviewProfile.CODE_REVIEW,
+            skip_tail_passes=True,
+        ),
+    )
+
+    assert synth_calls, (
+        "synthesis must run (fast path bypassed) so the single-pass note isn't dropped"
+    )
+    assert synth_calls[-1] == ["SPEC_GAP_MARKER: missing rate limiting."], (
+        "chunk_spec_notes must be the single dedicated note for every chunk, not a "
+        "per-chunk list -- otherwise a later chunk's per-chunk note could survive"
+    )
+
+    assert len(spec_calls) == 1, "synthesize_spec_compliance must be called exactly once"
+    assert spec_calls[0]["issues"] == result.issues, (
+        "synthesize_spec_compliance must run over the final merged/deduped issue list"
+    )
+    # Both chunks reported the identical (file_path, line, description) finding;
+    # a genuine post-dedupe call sees exactly one copy, not two.
+    assert len(spec_calls[0]["issues"]) == 1, (
+        "the duplicate finding from both chunks must already be deduped before "
+        "synthesize_spec_compliance runs"
+    )
+
+
+def test_spec_compliance_single_pass_restricted_to_code_review_profile(monkeypatch) -> None:
+    """``CODE_REVIEW_SPEC_COMPLIANCE_PASS=true`` on a non-``CODE_REVIEW`` profile must
+    not call ``synthesize_spec_compliance`` -- and (per ``test_chunk_reviewer.py``'s
+    gating tests, computed off the same profile-aware boolean) must not omit the
+    per-chunk acceptance-criteria/spec-excerpt blocks either. Either alone (chunk
+    omission without a replacement pass) would silently drop spec-compliance checking
+    for that submission entirely."""
+    import code_review_agent.coordinator as coord
+    from code_review_agent.profiles import ReviewProfile
+
+    monkeypatch.setenv("CODE_REVIEW_SPEC_COMPLIANCE_PASS", "true")
+    calls: list = []
+    monkeypatch.setattr(
+        coord,
+        "synthesize_spec_compliance",
+        lambda *a, **kw: calls.append(True) or "should not run",
+    )
+
+    run_coordinator(
+        DummyLLMClient(),
+        CodeReviewInput(
+            files={"a.py": "x = 1\n"},
+            task_description="t",
+            acceptance_criteria=["Must validate input"],
+            profile=ReviewProfile.ACCEPTANCE,
+        ),
+    )
+
+    assert not calls, "synthesize_spec_compliance must not run outside the CODE_REVIEW profile"
+
+
+def test_spec_compliance_single_pass_failure_falls_back_to_per_chunk_notes(monkeypatch) -> None:
+    """When the dedicated ``synthesize_spec_compliance`` pass raises, the coordinator
+    must not abort: ``single_pass_spec_notes`` stays ``None`` so ``_merge_narrative``
+    falls back to per-chunk-sourced behavior (documented on the call site).
+    """
+    import code_review_agent.coordinator as coord
+    from code_review_agent.profiles import ReviewProfile
+
+    monkeypatch.setenv("CODE_REVIEW_SPEC_COMPLIANCE_PASS", "true")
+
+    def _boom(*_args, **_kwargs):
+        raise RuntimeError("spec-compliance single pass exploded")
+
+    monkeypatch.setattr(coord, "synthesize_spec_compliance", _boom)
+
+    merge_kwargs: list = []
+    original_merge = coord._merge_narrative
+
+    def _merge_spy(*args, **kwargs):
+        merge_kwargs.append(kwargs)
+        return original_merge(*args, **kwargs)
+
+    monkeypatch.setattr(coord, "_merge_narrative", _merge_spy)
+
+    result = run_coordinator(
+        DummyLLMClient(),
+        CodeReviewInput(
+            files={"a.py": "x = 1\n"},
+            task_description="t",
+            profile=ReviewProfile.CODE_REVIEW,
+            skip_tail_passes=True,
+        ),
+    )
+
+    assert isinstance(result, CodeReviewOutput)
+    assert merge_kwargs, "_merge_narrative must still run after a failed single pass"
+    assert merge_kwargs[-1].get("single_pass_spec_notes") is None, (
+        "failed synthesize_spec_compliance must leave single_pass_spec_notes as None "
+        "so _merge_narrative falls back to per-chunk notes"
+    )
 
 
 def test_skip_tail_passes_short_circuits_with_no_llm_calls() -> None:

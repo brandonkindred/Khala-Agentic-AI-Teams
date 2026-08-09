@@ -1,12 +1,20 @@
-"""Shared LLM-based code-review fallback for the V2 sub-teams.
+"""Shared LLM-based code-review fallback (retired from both V2 teams' production paths).
 
-The backend and frontend Code-V2 teams each fall back to an LLM-driven review
-when no external ``code_review_agent`` is available (or it raises). The
-orchestration around that fallback — function-aware chunking, per-chunk prompt
-formatting, parsing, and issue construction — is identical for both teams; only
-the prompt, the parser, and the issue type differ. This module owns that shared
-orchestration so it lives in one place; each team passes in its own
-``REVIEW_PROMPT``, ``parse_review_template``, and ``ReviewIssue`` factory.
+This module's ``run_llm_review``/``run_team_llm_review`` implement the
+original chunk/prompt/parse-template review loop: function-aware chunking,
+per-chunk prompt formatting, parsing, issue construction, and an
+ungrounded-claim filter (``drop_ungrounded_issues``).
+
+Both ``backend_code_v2_team`` and ``frontend_code_v2_team`` have since
+migrated their ``_run_llm_review`` fallback to call
+``code_review_agent.coordinator.run_coordinator`` directly, in its
+lightweight mode (``skip_tail_passes=True``), trading this module's
+ungrounded-claim filter for the coordinator's Pydantic-validated,
+map-reduce-reviewed output. Neither team calls into this module for code
+review anymore; it is kept only because ``run_llm_review``/
+``run_team_llm_review`` are still directly unit-tested
+(``tests/test_shared_llm_review.py``) pending their removal in a follow-up
+cleanup.
 """
 
 from __future__ import annotations
@@ -16,12 +24,12 @@ from dataclasses import dataclass
 from typing import Any, Callable, Dict, Generic, List, Optional, TypeVar
 
 from llm_service import LLMClient
+from shared.dev_models.models import ReviewContext, Task
 from software_engineering_team.shared.context_sizing import (
     compute_code_review_arch_overview_chars,
     compute_code_review_spec_excerpt_chars,
 )
 from software_engineering_team.shared.issue_grounding import drop_ungrounded_issues
-from software_engineering_team.shared.models import ReviewContext, Task
 
 logger = logging.getLogger(__name__)
 
@@ -32,24 +40,34 @@ IssueT = TypeVar("IssueT")
 
 @dataclass(frozen=True)
 class LlmReviewOutput(Generic[IssueT]):
-    """Result of one :func:`run_llm_review` call: kept issues plus the raw count.
+    """Result of one code-review fallback call: kept issues plus the raw count.
 
     The grounding filter (``drop_ungrounded_issues``) can silently discard every
     finding a review produced; without the pre-filter count, a caller cannot
     distinguish "the LLM found nothing" from "the LLM found things but grounding
-    rejected all of them" — the latter is the signal a circuit breaker needs.
+    rejected all of them" — the latter is the signal a circuit breaker needs
+    (see ``shared.phases.review_cycle.grounding_rejection_ratio``, which treats
+    ``None`` and ``<= 0`` identically as "no ratio available").
 
-    Preconditions: constructed only by ``run_llm_review``.
+    Preconditions: constructed by ``run_llm_review`` (unused by either V2
+    team's production path — see this module's docstring) or by either V2
+    team's coordinator-backed ``_run_llm_review``
+    (``backend_code_v2_team``/``frontend_code_v2_team``).
 
     Postconditions/Invariants:
-        - ``raw_issue_count == len(issues)`` measured before the grounding
-          filter ran (or unconditionally when grounding is disabled/skipped),
-          so ``raw_issue_count >= len(issues)`` always holds.
-        - Empty input (no non-blank files) yields ``LlmReviewOutput([], 0)``.
+        - From ``run_llm_review``: ``raw_issue_count == len(issues)`` measured
+          before the grounding filter ran (or unconditionally when grounding is
+          disabled/skipped), so ``raw_issue_count >= len(issues)`` always holds;
+          empty input (no non-blank files) yields ``LlmReviewOutput([], 0)``.
+        - From either V2 team's coordinator-backed fallback: ``raw_issue_count``
+          is always ``None`` — that path has no separate grounding pass to
+          report a pre-filter count for, and reporting a fabricated int (e.g.
+          ``len(issues)``) would make the circuit breaker see a false "0%
+          rejected" instead of "no data" for every call.
     """
 
     issues: List[IssueT]
-    raw_issue_count: int
+    raw_issue_count: Optional[int]
 
 
 def run_llm_review(
@@ -205,14 +223,15 @@ def run_team_llm_review(
     review_context: Optional[ReviewContext] = None,
     enable_llm_review_grounding: bool = True,
 ) -> LlmReviewOutput[IssueT]:
-    """Team-level entry point for the LLM review fallback.
+    """Team-level entry point for the LLM review fallback (unused by either V2
+    team's production path -- see this module's docstring).
 
-    Both V2 teams' ``_run_llm_review`` wrappers built the same
-    ``review_context`` -> ``architecture_context``/``spec_content`` bounding step
-    before delegating to :func:`run_llm_review`; this function owns that shared
-    step so each team's wrapper is left with only the
-    ``Agent``/``resolve_text_mode_strands_model`` invocation, which must stay in
-    the team module (tests patch it there directly).
+    Combines the ``review_context`` -> ``architecture_context``/``spec_content``
+    bounding step with :func:`run_llm_review`. Both ``backend_code_v2_team`` and
+    ``frontend_code_v2_team`` now call
+    ``code_review_agent.coordinator.run_coordinator`` directly instead (see
+    this module's docstring); this function remains only for its direct unit
+    test coverage (``tests/test_shared_llm_review.py``).
 
     Preconditions:
         - See :func:`run_llm_review` for ``files``/``prompt_template``/

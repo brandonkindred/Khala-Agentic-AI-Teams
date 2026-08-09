@@ -10,9 +10,10 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from llm_service import LLMClient
+from llm_service.strands_model import LlmRunner
+from shared.dev_models.models import ReviewContext, SystemArchitecture, Task
 from software_engineering_team.shared.agent_review import AgentReviewCache
 from software_engineering_team.shared.code_completeness import reject_invalid_python
-from software_engineering_team.shared.models import ReviewContext, SystemArchitecture, Task
 from software_engineering_team.shared.phases.documentation_phase import _run_documentation_phase
 from software_engineering_team.shared.phases.review_cycle import (
     GateOutcome,
@@ -24,7 +25,6 @@ from software_engineering_team.shared.phases.rollback import (
     _record_prior_values,
 )
 from software_engineering_team.shared.stack_profile import PhaseModels, StackProfile
-from software_engineering_team.shared.strands_model import LlmRunner
 
 logger = logging.getLogger(__name__)
 
@@ -242,7 +242,7 @@ def run_execution_impl(
             idx + 1,
             total,
             mt.id,
-            mt.tool_agent.value,
+            mt.tool_agent.value if mt.tool_agent else "none",
         )
 
         if progress_callback:
@@ -518,8 +518,9 @@ def run_gated_execution_impl(
         unaffected, and the LLM fallback reviewers' context-bounding path is
         never entered with nothing to bound).
         ``review_config.enable_llm_review_grounding`` (default True) is forwarded
-        to the code-review gate so the LLM-fallback path can drop ungrounded
-        proper-noun findings; set it False to disable that filter.
+        to the code-review gate for call-signature compatibility only; both V2
+        teams' coordinator-backed LLM fallback treats it as a no-op (see
+        ``_run_llm_review``'s docstring in either team's ``phases/review.py``).
     Postconditions:
         Returns an ``ExecutionResult``; each microtask ends COMPLETED, SKIPPED,
         FAILED or REVIEW_FAILED. When a microtask's review fails and

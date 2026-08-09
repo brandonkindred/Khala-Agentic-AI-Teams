@@ -13,10 +13,13 @@ from llm_service.clients.dummy import DummyLLMClient
 from llm_service.interface import LLMClient
 from llm_service.strands_adapter import (
     LLMClientModel,
+    _flatten_system_prompt_content,
     _strands_messages_to_openai,
     _tool_specs_to_openai,
-    get_strands_model,
     run_json_via_strands,
+)
+from llm_service.strands_adapter import (
+    _get_strands_model as get_strands_model,
 )
 
 # ---------------------------------------------------------------------------
@@ -168,6 +171,13 @@ def test_flatten_mixed_text_and_tool_result_splits_messages() -> None:
     assert out[1] == {"role": "user", "content": "please use the result"}
 
 
+def test_flatten_system_prompt_content_handles_absence_and_non_dict_blocks() -> None:
+    assert _flatten_system_prompt_content(None) == ""
+    assert _flatten_system_prompt_content([]) == ""
+    assert _flatten_system_prompt_content([{"text": "a"}, {"text": "b"}]) == "ab"
+    assert _flatten_system_prompt_content(["already-a-string"]) == "already-a-string"
+
+
 def test_flatten_skips_unknown_blocks() -> None:
     messages = [
         {
@@ -265,6 +275,45 @@ def test_stream_emits_text_events_for_plain_response() -> None:
     assert call["messages"][1] == {"role": "user", "content": "review this"}
     assert call["temperature"] == 0.1
     assert call["think"] is True
+
+
+def test_stream_merges_system_prompt_content_blocks() -> None:
+    """``system_prompt_content`` (Strands' structured system prompt) must not be
+    silently dropped — its flattened text reaches the emitted system message
+    even when no plain ``system_prompt`` string is given."""
+    client = _RecordingClient({"ok": True})
+    model = LLMClientModel(client)
+
+    _drain(
+        model.stream(
+            messages=[{"role": "user", "content": [{"text": "hi"}]}],
+            system_prompt_content=[{"text": "Follow the house style."}],
+        )
+    )
+
+    call = client.chat_calls[0]
+    assert call["messages"][0] == {"role": "system", "content": "Follow the house style."}
+
+
+def test_stream_combines_system_prompt_and_system_prompt_content() -> None:
+    """Both ``system_prompt`` and ``system_prompt_content`` may be supplied
+    together — both must reach the wire, merged into one system message."""
+    client = _RecordingClient({"ok": True})
+    model = LLMClientModel(client)
+
+    _drain(
+        model.stream(
+            messages=[{"role": "user", "content": [{"text": "hi"}]}],
+            system_prompt="You are a QA expert.",
+            system_prompt_content=[{"text": "Follow the house style."}],
+        )
+    )
+
+    call = client.chat_calls[0]
+    assert call["messages"][0] == {
+        "role": "system",
+        "content": "You are a QA expert.\n\nFollow the house style.",
+    }
 
 
 def test_stream_propagates_team_through_to_thread() -> None:
@@ -558,6 +607,13 @@ def test_llm_client_model_rejects_invalid_response_format() -> None:
         LLMClientModel(_RecordingClient({}), response_format="xml")
 
 
+def test_llm_client_model_rejects_none_client() -> None:
+    """A ``None`` client must fail fast at construction with a clear error
+    instead of surfacing as a confusing ``AttributeError`` on first use."""
+    with pytest.raises(ValueError, match="client is required"):
+        LLMClientModel(client=None)
+
+
 def test_get_strands_model_forwards_response_format() -> None:
     client = _RecordingClient({"ok": True})
     model = get_strands_model(client=client, response_format="text")
@@ -692,6 +748,20 @@ def test_public_llm_service_get_strands_model_accepts_client_kwarg() -> None:
     assert isinstance(model, LLMClientModel)
     assert model._client is client
     assert model.get_config()["response_format"] == "text"
+
+
+def test_adapter_get_strands_model_is_not_publicly_exported() -> None:
+    """``strands_adapter`` must not export a public ``get_strands_model`` name:
+    ``llm_service.get_strands_model`` (re-exported from ``strands_provider``,
+    which adds caching, provider resolution, and fingerprint invalidation) is
+    the sole canonical public entry point. The adapter's own factory is a
+    low-level, package-private helper (``_get_strands_model``).
+    """
+    import llm_service.strands_adapter as adapter
+
+    assert "get_strands_model" not in adapter.__all__
+    assert not hasattr(adapter, "get_strands_model")
+    assert hasattr(adapter, "_get_strands_model")
 
 
 def test_invocation_state_invalid_response_format_raises() -> None:

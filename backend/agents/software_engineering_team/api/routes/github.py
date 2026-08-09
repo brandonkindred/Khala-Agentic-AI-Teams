@@ -22,6 +22,10 @@ from software_engineering_team.github_source import (
     issue_to_plan_input,
     pick_ready_issue,
 )
+from software_engineering_team.models import JobStatus
+from software_engineering_team.temporal.coding_team_start_workflow import (
+    start_coding_team_workflow,
+)
 from software_engineering_team.token_crypto import encrypt_token
 
 logger = logging.getLogger(__name__)
@@ -30,7 +34,17 @@ router = APIRouter()
 
 @router.post("/run-from-github", response_model=RunFromGitHubResponse)
 def post_run_from_github(request: RunFromGitHubRequest) -> RunFromGitHubResponse:
-    """Discover (or verify) a ready GitHub issue and start a coding job for it."""
+    """Discover (or verify) a ready GitHub issue and start a coding job for it.
+
+    Preconditions:
+        - ``request`` names an existing local checkout and provides a GitHub token
+          either directly or through the configured environment.
+    Postconditions:
+        - A job record is created and tagged with GitHub context for the selected
+          ready issue.
+        - The CodingTeamWorkflow is started with a GitHub payload that contains
+          branch metadata but never the plaintext token.
+    """
     token = resolve_github_token(request)
     if not Path(request.repo_path).is_dir():
         raise HTTPException(status_code=400, detail=f"repo_path not found: {request.repo_path}")
@@ -52,6 +66,11 @@ def post_run_from_github(request: RunFromGitHubRequest) -> RunFromGitHubResponse
                 if picked is None:
                     raise HTTPException(status_code=404, detail="no ready issues")
                 issue, ready = picked
+            default_branch = (
+                None
+                if request.base_branch
+                else client.get_repo(request.owner, request.repo).default_branch
+            )
         except NotAnIssueError as e:
             # Operator passed a PR number — that's a 400, not an upstream error.
             raise HTTPException(status_code=400, detail=str(e)) from e
@@ -103,5 +122,42 @@ def post_run_from_github(request: RunFromGitHubRequest) -> RunFromGitHubResponse
         job_fields["github_token_encrypted"] = encrypted
     _main.update_job(job_id, **job_fields)
 
-    _main._start_hook_thread(job_id, request, plan, issue, token)
+    base = request.base_branch or default_branch
+    if not base:
+        raise HTTPException(
+            status_code=500,
+            detail="unable to resolve base branch for GitHub-issue run",
+        )
+    integration_branch = f"khala/issue-{issue.number}"
+    try:
+        start_coding_team_workflow(
+            job_id,
+            request.repo_path,
+            plan.model_dump(),
+            github={
+                "owner": request.owner,
+                "repo": request.repo,
+                "issue_number": issue.number,
+                "issue_title": issue.title,
+                "remote": request.remote,
+                "base": base,
+                "integration_branch": integration_branch,
+                "cleanup_checkout_on_success": request.cleanup_checkout_on_success,
+            },
+        )
+    except Exception as e:
+        # Dispatch failed (worker not ready, start timeout, bad config). Mark
+        # the freshly-created row failed so it is not orphaned in 'pending',
+        # and surface a retryable error instead of an opaque 500.
+        logger.exception("Coding team Temporal dispatch failed: %s", e)
+        _main.update_job(
+            job_id,
+            status=JobStatus.FAILED.value,
+            error=f"Temporal dispatch failed: {e}",
+            current_activity=None,
+        )
+        raise HTTPException(
+            status_code=503,
+            detail="Temporal dispatch failed (worker unavailable); job marked failed. Retry.",
+        ) from e
     return RunFromGitHubResponse(job_id=job_id, issue_number=issue.number, issue_url=issue.html_url)

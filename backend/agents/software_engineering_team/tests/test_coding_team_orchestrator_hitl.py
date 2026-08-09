@@ -234,13 +234,11 @@ def test_pause_publish_writes_heartbeat_atomically_with_flag(monkeypatch):
         update_fn=lambda **kw: (job.update(kw), updates.append(dict(kw))),
         on_pause=lambda qs: None,
     )
-    # The update that publishes the pause flag also carries the heartbeat timestamp and clears the
-    # cross-worker resume-claim lease so this pause is immediately claimable.
+    # The update that publishes the pause flag also carries the heartbeat timestamp.
     pause_update = next(u for u in updates if u.get("waiting_for_answers") is True)
     assert pause_update.get("answer_wait_heartbeat_at")
     assert "T" in pause_update["answer_wait_heartbeat_at"]  # ISO-8601
-    assert "resume_claim_at" in pause_update
-    assert pause_update["resume_claim_at"] is None
+    assert "resume_claim_at" not in pause_update
 
 
 def test_pause_renews_lease_during_slow_on_pause(monkeypatch):

@@ -7,7 +7,7 @@ from unittest.mock import MagicMock
 
 
 def _task(**overrides):
-    from software_engineering_team.shared.models import Task, TaskType
+    from shared.dev_models.models import Task, TaskType
 
     base = dict(
         id="t1",

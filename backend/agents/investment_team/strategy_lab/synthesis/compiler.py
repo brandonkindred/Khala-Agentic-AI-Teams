@@ -335,7 +335,7 @@ def _emit_indicator_call(ref: IndicatorRef) -> str:
 def _emit_source_helper() -> str:
     return textwrap.dedent(
         """\
-        def _src(self, bar, source):
+        def _src(self, bar: object, source: str) -> float:
             if source == "close":
                 return bar.close
             if source == "high":
@@ -378,12 +378,14 @@ _MACD_HELPER_BODY: str = render_macd_body(
 
 _ADX_HELPER_BODY: str = render_adx_body(bars_var="history", missing="None").format(period="period")
 
-_VWAP_HELPER_BODY: str = render_vwap_body(bars_var="history", missing="None").format(period="period")
+_VWAP_HELPER_BODY: str = render_vwap_body(bars_var="history", missing="None").format(
+    period="period"
+)
 
 _HELPER_BODIES: dict[str, str] = {
     "sma": textwrap.dedent(
         """\
-        def sma(self, history, period, source="close"):
+        def sma(self, history: list, period: int, source: str = "close") -> float | None:
             if len(history) < period:
                 return None
             vals = [self._src(b, source) for b in history[-period:]]
@@ -392,7 +394,7 @@ _HELPER_BODIES: dict[str, str] = {
     ),
     "ema": textwrap.dedent(
         """\
-        def ema(self, history, period, source="close"):
+        def ema(self, history: list, period: int, source: str = "close") -> float | None:
             if len(history) < period:
                 return None
             alpha = 2.0 / (period + 1.0)
@@ -405,7 +407,7 @@ _HELPER_BODIES: dict[str, str] = {
     ),
     "rsi": textwrap.dedent(
         """\
-        def rsi(self, history, period=14, source="close"):
+        def rsi(self, history: list, period: int = 14, source: str = "close") -> float | None:
             if len(history) < period + 1:
                 return None
             gains = 0.0
@@ -427,12 +429,13 @@ _HELPER_BODIES: dict[str, str] = {
         """
     ),
     "macd": (
-        'def macd(self, history, fast=12, slow=26, signal=9, source="close", select="macd"):\n'
+        "def macd(self, history: list, fast: int = 12, slow: int = 26, signal: int = 9, "
+        'source: str = "close", select: str = "macd") -> float | None:\n'
         + textwrap.indent(_MACD_HELPER_BODY, "    ")
     ),
     "bollinger_bands": textwrap.dedent(
         """\
-        def bollinger_bands(self, history, period=20, num_std=2.0, source="close", select="middle"):
+        def bollinger_bands(self, history: list, period: int = 20, num_std: float = 2.0, source: str = "close", select: str = "middle") -> float | None:
             if len(history) < period:
                 return None
             s = sq = 0.0
@@ -466,7 +469,7 @@ _HELPER_BODIES: dict[str, str] = {
     ),
     "atr": textwrap.dedent(
         """\
-        def atr(self, history, period=14):
+        def atr(self, history: list, period: int = 14) -> float | None:
             if len(history) < period + 1:
                 return None
             trs = []
@@ -479,11 +482,12 @@ _HELPER_BODIES: dict[str, str] = {
         """
     ),
     "adx": (
-        "def adx(self, history, period=14):\n" + textwrap.indent(_ADX_HELPER_BODY, "    ")
+        "def adx(self, history: list, period: int = 14) -> float | None:\n"
+        + textwrap.indent(_ADX_HELPER_BODY, "    ")
     ),
     "stochastic": textwrap.dedent(
         """\
-        def stochastic(self, history, k_period=14, d_period=3, select="k"):
+        def stochastic(self, history: list, k_period: int = 14, d_period: int = 3, select: str = "k") -> float | None:
             if len(history) < k_period:
                 return None
             def _k_at(end):
@@ -504,11 +508,12 @@ _HELPER_BODIES: dict[str, str] = {
         """
     ),
     "vwap": (
-        "def vwap(self, history, period=20):\n" + textwrap.indent(_VWAP_HELPER_BODY, "    ")
+        "def vwap(self, history: list, period: int = 20) -> float | None:\n"
+        + textwrap.indent(_VWAP_HELPER_BODY, "    ")
     ),
     "donchian_channels": textwrap.dedent(
         """\
-        def donchian_channels(self, history, period=20, select="middle"):
+        def donchian_channels(self, history: list, period: int = 20, select: str = "middle") -> float | None:
             if len(history) < period:
                 return None
             window = history[-period:]
@@ -525,7 +530,7 @@ _HELPER_BODIES: dict[str, str] = {
     ),
     "keltner_channels": textwrap.dedent(
         """\
-        def keltner_channels(self, history, period=20, atr_period=10, multiplier=2.0, select="middle"):
+        def keltner_channels(self, history: list, period: int = 20, atr_period: int = 10, multiplier: float = 2.0, select: str = "middle") -> float | None:
             if len(history) < max(period, atr_period + 1):
                 return None
             alpha = 2.0 / (period + 1.0)
@@ -552,7 +557,7 @@ _HELPER_BODIES: dict[str, str] = {
     ),
     "obv": textwrap.dedent(
         """\
-        def obv(self, history):
+        def obv(self, history: list) -> float | None:
             if not history:
                 return None
             value = 0.0
@@ -568,7 +573,7 @@ _HELPER_BODIES: dict[str, str] = {
     ),
     "mfi": textwrap.dedent(
         """\
-        def mfi(self, history, period=14):
+        def mfi(self, history: list, period: int = 14) -> float | None:
             if len(history) < period + 1:
                 return None
             pos = 0.0
@@ -591,7 +596,7 @@ _HELPER_BODIES: dict[str, str] = {
     ),
     "roc": textwrap.dedent(
         """\
-        def roc(self, history, period=12, source="close"):
+        def roc(self, history: list, period: int = 12, source: str = "close") -> float | None:
             if len(history) < period + 1:
                 return None
             cur = self._src(history[-1], source)
@@ -603,7 +608,7 @@ _HELPER_BODIES: dict[str, str] = {
     ),
     "cci": textwrap.dedent(
         """\
-        def cci(self, history, period=20):
+        def cci(self, history: list, period: int = 20) -> float | None:
             if len(history) < period:
                 return None
             tps = [(b.high + b.low + b.close) / 3.0 for b in history[-period:]]
@@ -616,7 +621,7 @@ _HELPER_BODIES: dict[str, str] = {
     ),
     "williams_r": textwrap.dedent(
         """\
-        def williams_r(self, history, period=14):
+        def williams_r(self, history: list, period: int = 14) -> float | None:
             if len(history) < period:
                 return None
             window = history[-period:]

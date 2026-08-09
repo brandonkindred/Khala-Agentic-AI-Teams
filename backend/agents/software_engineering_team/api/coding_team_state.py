@@ -6,15 +6,14 @@ split; models are imported directly.
 
 Invariants:
     - The run-thread registry itself lives in ``shared.run_thread_registry.RunThreadRegistry``;
-      ``_active_run_threads``/``_starting_run_jobs``/``_run_thread_lock`` are back-compat aliases
-      onto its live internals, so background threads and the answers/resume routes observe the
-      same maps regardless of whether they go through the registry or poke these aliases directly.
+      ``_starting_run_jobs``/``_run_thread_lock`` are back-compat aliases onto its live internals,
+      so background threads observe the same maps regardless of whether they go through the
+      registry or poke these aliases directly.
 """
 
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from shared.hitl.progress import coerce_progress
@@ -26,12 +25,10 @@ from software_engineering_team.api.coding_team_models import (
 
 logger = logging.getLogger(__name__)
 
-# Tracks the orchestrator thread per job so the answers endpoint can tell whether a blocked wait
-# loop will pick up answers automatically (thread alive) or the job needs an explicit /resume (the
-# thread died, e.g. on a server restart). Mirrors the SE team's _active_orchestrator_threads.
+# Tracks the orchestrator thread per job (legacy block-mode / github-hook paths). Temporal-native
+# pauses do not register here — resume is via workflow signal, not thread restart.
 _registry = RunThreadRegistry()
 # Back-compat aliases — existing call sites and tests reference these names directly.
-_active_run_threads = _registry.threads
 _starting_run_jobs = _registry.starting_jobs
 _run_thread_lock = _registry.lock
 _register_run_thread = _registry.register
@@ -61,15 +58,10 @@ def _validate_answers(data: Dict[str, Any], request: SubmitAnswersRequest) -> Li
     return validate_answers(data, request)
 
 
-# A paused orchestrator's wait loop heartbeats every poll (~5s); anything older than this many
-# seconds means no live wait loop exists anywhere — including other worker processes, which the
-# process-local thread registry cannot see.
-
-_ANSWER_WAIT_HEARTBEAT_STALE_S = 30.0
-
 # Tolerated clock skew between worker hosts: a heartbeat stamped up to this many seconds in the
 # future (relative to the checking worker) is still treated as fresh. This covers NTP drift in
-# multi-host deployments without blocking resume indefinitely on a far-future/corrupt stamp.
+# multi-host deployments without blocking admission indefinitely on a far-future/corrupt stamp.
+# Shared by PR-review admission (``_review_job_heartbeat_live``).
 _HEARTBEAT_CLOCK_SKEW_TOLERANCE_S = 10.0
 
 # GitHub returns 422 Unprocessable Entity for validation errors — specifically a
@@ -80,28 +72,3 @@ _HTTP_UNPROCESSABLE = 422
 # Body for the extra COMMENT review(s) the bisection path submits after the
 # summary has already been posted on its own — so they don't repeat the summary.
 _BISECT_CONTINUATION_BODY = "*(continued — additional findings)*"
-
-
-def _answer_wait_heartbeat_fresh(data: Dict[str, Any]) -> bool:
-    """True when a live answer-wait loop (possibly in another worker process) heartbeated recently.
-
-    Preconditions:
-        - ``data`` is a job record dict (possibly empty).
-    Postconditions:
-        - Returns True iff ``answer_wait_heartbeat_at`` parses as an ISO timestamp whose age is in
-          ``(-_HEARTBEAT_CLOCK_SKEW_TOLERANCE_S, _ANSWER_WAIT_HEARTBEAT_STALE_S)``. Stamps more
-          than ``_HEARTBEAT_CLOCK_SKEW_TOLERANCE_S`` seconds in the future (implausible skew or
-          corruption) are NOT fresh — they must never block resume indefinitely. Missing/garbage
-          values → False, never raises.
-    """
-    raw = (data or {}).get("answer_wait_heartbeat_at")
-    if not raw:
-        return False
-    try:
-        beat = datetime.fromisoformat(str(raw))
-    except ValueError:
-        return False
-    if beat.tzinfo is None:
-        beat = beat.replace(tzinfo=timezone.utc)
-    age = (datetime.now(timezone.utc) - beat).total_seconds()
-    return age > -_HEARTBEAT_CLOCK_SKEW_TOLERANCE_S and age < _ANSWER_WAIT_HEARTBEAT_STALE_S

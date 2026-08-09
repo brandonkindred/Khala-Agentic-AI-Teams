@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict
 
 from llm_service import LLMClient
-from software_engineering_team.shared.models import Task
+from shared.dev_models.models import Task
 from software_engineering_team.shared.repo_writer import UnsafeRepoPathError
 from software_engineering_team.shared.repo_writer import write_repo_text_files as _write_files
 from software_engineering_team.shared.stack_profile import PhaseModels

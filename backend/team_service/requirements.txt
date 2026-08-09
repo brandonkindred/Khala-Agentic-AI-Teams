@@ -23,6 +23,10 @@ strands-agents-tools>=0.4,<1.0
 # the container that actually runs agent_provisioning_team.temporal.worker.
 redis>=7.4,<8.0
 json-repair>=0.28,<1.0
+# shared.cache Redis backend (code-review / compaction caches). Without this
+# wheel, factory falls open to MemoryBackend and silently loses cross-worker
+# sharing even when REDIS_URL is set. Keep in lockstep with agents/requirements.
+redis>=7.4,<8.0
 python-multipart>=0.0.26,<1.0
 slack-sdk>=3.41,<4
 APScheduler>=3.11,<4.0

@@ -14,6 +14,7 @@ import pytest
 from pydantic import ValidationError
 
 from llm_service.clients.dummy import DummyLLMClient
+from shared.git.git_utils import initialize_new_repo
 from software_engineering_team.devops_team import (
     DevOpsTaskSpec,
     DevOpsTeamLeadAgent,
@@ -67,7 +68,6 @@ from software_engineering_team.devops_team.tool_agents import (
     TerraformExecutionOutput,
     TerraformExecutionToolAgent,
 )
-from software_engineering_team.shared.git_utils import initialize_new_repo
 from software_engineering_team.tests.conftest import (
     _patch_fenced_response,
     _strands_model_double,
@@ -136,10 +136,44 @@ class _ScriptedClient(DummyLLMClient):
             return self._default_factory()
         return self._responses[-1] if self._responses else {}
 
+    @property
+    def responses(self) -> List[Dict[str, Any]]:
+        """Copy of the scripted response list (safe to mutate by callers)."""
+        return list(self._responses)
+
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+# Shared prefix for the security-blocking pipeline script: task_clarifier →
+# iac → cicd → deployment → devsecops (blocked). Tests that need this
+# five-step blocked-by-security-review sequence append their own differing
+# tail entries rather than re-inlining the prefix.
+_SECURITY_BLOCKING_SCRIPT_PREFIX: List[Dict[str, Any]] = [
+    {"approved_for_execution": True},
+    {"artifacts": {}, "summary": "iac"},
+    {"artifacts": {}, "summary": "cicd", "required_gates_present": True},
+    {
+        "artifacts": {},
+        "summary": "deploy",
+        "strategy": "rolling",
+        "rollback_plan": ["rb"],
+    },
+    {
+        "approved": False,
+        "findings": [
+            {
+                "finding_id": "F1",
+                "severity": "high",
+                "blocking": True,
+                "issue": "bad iam",
+            }
+        ],
+        "summary": "blocked",
+    },
+]
 
 
 def _base_task_spec(**overrides) -> DevOpsTaskSpec:
@@ -375,32 +409,42 @@ class TestNestedModels:
 
 
 class TestEnvPolicy:
+    """Verify ENV_POLICY defines the expected auto-deploy, approval, and rollback rules per environment."""
+
     def test_dev_allows_auto_deploy(self) -> None:
+        """Dev allows auto-deploy and does not require approval."""
         assert ENV_POLICY["dev"]["auto_deploy_allowed"] is True
         assert ENV_POLICY["dev"]["approval_required"] is False
 
     def test_staging_requires_rollback_test(self) -> None:
+        """Staging requires a rollback test before deploy."""
         assert ENV_POLICY["staging"]["rollback_test_required"] is True
 
     def test_production_requires_approval(self) -> None:
+        """Production requires approval and disallows auto-deploy."""
         assert ENV_POLICY["production"]["approval_required"] is True
         assert ENV_POLICY["production"]["auto_deploy_allowed"] is False
 
 
 class TestEnforceEnvPolicy:
+    """Verify DevOpsTeamLeadAgent._enforce_env_policy blocks task specs that violate ENV_POLICY."""
+
     def test_blocks_prod_without_approval(self) -> None:
+        """A production-scope spec without an approval step is blocked with an approval-related reason."""
         spec = _base_task_spec(scope={"included": ["build"], "excluded": []})
         reason = DevOpsTeamLeadAgent._enforce_env_policy(spec)
         assert reason is not None
         assert "approval" in reason.lower()
 
     def test_blocks_prod_without_rollback(self) -> None:
+        """A production-scope spec without rollback requirements is blocked with a rollback-related reason."""
         spec = _base_task_spec(rollback_requirements=[])
         reason = DevOpsTeamLeadAgent._enforce_env_policy(spec)
         assert reason is not None
         assert "rollback" in reason.lower()
 
     def test_allows_dev_only(self) -> None:
+        """A dev-only spec with no rollback requirements passes the policy check."""
         spec = _base_task_spec(
             platform_scope={"environments": ["dev"]},
             rollback_requirements=[],
@@ -409,6 +453,7 @@ class TestEnforceEnvPolicy:
         assert reason is None
 
     def test_allows_full_spec(self) -> None:
+        """A fully-specified spec satisfying all environment policies passes the check."""
         spec = _base_task_spec()
         reason = DevOpsTeamLeadAgent._enforce_env_policy(spec)
         assert reason is None
@@ -603,7 +648,10 @@ class TestRepoNavigatorToolAgent:
 
 
 class TestIaCValidationToolAgent:
+    """Verify IaCValidationToolAgent skips Terraform checks when no .tf files exist."""
+
     def test_skipped_when_no_tf_files(self) -> None:
+        """When the repo contains no Terraform files, both iac_validate and iac_validate_fmt are skipped."""
         with tempfile.TemporaryDirectory() as tmp:
             out = IaCValidationToolAgent().run(IaCValidationInput(repo_path=tmp))
             assert out.checks["iac_validate"] == "skipped"
@@ -612,7 +660,10 @@ class TestIaCValidationToolAgent:
 
 
 class TestPolicyAsCodeToolAgent:
+    """Verify PolicyAsCodeToolAgent skips policy-as-code checks when checkov is unavailable."""
+
     def test_skipped_when_checkov_missing(self) -> None:
+        """When checkov is not installed, the policy_checks gate is reported as skipped."""
         with tempfile.TemporaryDirectory() as tmp:
             out = PolicyAsCodeToolAgent().run(PolicyAsCodeInput(repo_path=tmp))
             assert out.checks["policy_checks"] == "skipped"
@@ -620,7 +671,11 @@ class TestPolicyAsCodeToolAgent:
 
 
 class TestCICDLintToolAgent:
+    """Verify CICDLintPipelineValidationToolAgent lints GitHub Actions workflows for
+    structure and production-deploy safeguards."""
+
     def test_pass_valid_workflow(self) -> None:
+        """A workflow with a valid job definition passes the pipeline_lint gate."""
         with tempfile.TemporaryDirectory() as tmp:
             wf_dir = Path(tmp) / ".github" / "workflows"
             wf_dir.mkdir(parents=True)
@@ -632,6 +687,7 @@ class TestCICDLintToolAgent:
             assert out.success is True
 
     def test_fail_missing_jobs(self) -> None:
+        """A workflow missing a jobs section fails the pipeline_lint gate."""
         with tempfile.TemporaryDirectory() as tmp:
             wf_dir = Path(tmp) / ".github" / "workflows"
             wf_dir.mkdir(parents=True)
@@ -641,6 +697,7 @@ class TestCICDLintToolAgent:
             assert out.success is False
 
     def test_fail_prod_deploy_without_approval(self) -> None:
+        """A workflow that deploys to production without an approval step fails the pipeline_gate_check gate."""
         with tempfile.TemporaryDirectory() as tmp:
             wf_dir = Path(tmp) / ".github" / "workflows"
             wf_dir.mkdir(parents=True)
@@ -652,6 +709,7 @@ class TestCICDLintToolAgent:
             assert out.success is False
 
     def test_skipped_no_workflows(self) -> None:
+        """When no workflow files exist, the pipeline_lint gate is reported as skipped."""
         with tempfile.TemporaryDirectory() as tmp:
             out = CICDLintPipelineValidationToolAgent().run(CICDLintInput(repo_path=tmp))
             assert out.checks["pipeline_lint"] == "skipped"
@@ -659,11 +717,31 @@ class TestCICDLintToolAgent:
 
 
 class TestDeploymentDryRunToolAgent:
+    """Verify DeploymentDryRunPlanToolAgent skips the dry-run gate when no Helm chart is present."""
+
     def test_skipped_no_chart(self) -> None:
+        """When the repo contains no Helm chart, the deployment_dry_run gate is reported as skipped."""
         with tempfile.TemporaryDirectory() as tmp:
             out = DeploymentDryRunPlanToolAgent().run(DeploymentDryRunInput(repo_path=tmp))
             assert out.checks["deployment_dry_run"] == "skipped"
             assert out.success is True
+
+
+def test_devops_env_policy_and_tool_agent_test_classes_have_docstrings() -> None:
+    """Docstring-coverage guard for the DevOps env-policy and tool-agent test classes."""
+    target_classes = [
+        TestEnvPolicy,
+        TestEnforceEnvPolicy,
+        TestIaCValidationToolAgent,
+        TestPolicyAsCodeToolAgent,
+        TestCICDLintToolAgent,
+        TestDeploymentDryRunToolAgent,
+    ]
+    for cls in target_classes:
+        assert cls.__doc__, f"{cls.__name__} is missing a class docstring"
+        for name, member in vars(cls).items():
+            if name.startswith("test_"):
+                assert member.__doc__, f"{cls.__name__}.{name} is missing a docstring"
 
 
 # ===========================================================================
@@ -1529,7 +1607,7 @@ class TestDevOpsTeamLeadAgentIntegration:
         # 8 LLM calls while hosts without it consume 9 — which desynchronizes a
         # chained two-run script. Use the full 9-response happy-path script twice.
         happy_path = _scripted_llm_for_happy_path()
-        per_run = list(happy_path._responses)
+        per_run = list(happy_path.responses)
         assert len(per_run) == 9
         chained = _ScriptedClient(per_run + per_run, default_factory=happy_path._default_factory)
         agent = DevOpsTeamLeadAgent(chained)
@@ -1575,28 +1653,8 @@ class TestDevOpsTeamLeadAgentIntegration:
 
     def test_blocked_by_security_review(self) -> None:
         mock_llm = _ScriptedClient(
-            [
-                {"approved_for_execution": True},
-                {"artifacts": {}, "summary": "iac"},
-                {"artifacts": {}, "summary": "cicd", "required_gates_present": True},
-                {
-                    "artifacts": {},
-                    "summary": "deploy",
-                    "strategy": "rolling",
-                    "rollback_plan": ["rb"],
-                },
-                {
-                    "approved": False,
-                    "findings": [
-                        {
-                            "finding_id": "F1",
-                            "severity": "high",
-                            "blocking": True,
-                            "issue": "bad iam",
-                        }
-                    ],
-                    "summary": "blocked",
-                },
+            _SECURITY_BLOCKING_SCRIPT_PREFIX
+            + [
                 {"approved": True, "findings": [], "summary": "ok"},
                 {"approved": True, "quality_gates": {"iac_validate": "pass"}, "summary": "ok"},
             ]
@@ -1619,28 +1677,8 @@ class TestDevOpsTeamLeadAgentIntegration:
         a blocking DevSecOps review: the gate is force-assigned from the
         DevSecOps + policy result, not preserved via setdefault."""
         mock_llm = _ScriptedClient(
-            [
-                {"approved_for_execution": True},
-                {"artifacts": {}, "summary": "iac"},
-                {"artifacts": {}, "summary": "cicd", "required_gates_present": True},
-                {
-                    "artifacts": {},
-                    "summary": "deploy",
-                    "strategy": "rolling",
-                    "rollback_plan": ["rb"],
-                },
-                {
-                    "approved": False,
-                    "findings": [
-                        {
-                            "finding_id": "F1",
-                            "severity": "high",
-                            "blocking": True,
-                            "issue": "bad iam",
-                        }
-                    ],
-                    "summary": "blocked",
-                },
+            _SECURITY_BLOCKING_SCRIPT_PREFIX
+            + [
                 {"approved": True, "findings": [], "summary": "ok"},
                 # Validation agent wrongly reports the security gate as passing.
                 {
@@ -1741,10 +1779,7 @@ class TestDevOpsTeamLeadAgentIntegration:
         spec = _base_task_spec()
         pkg = agent.run(spec)
         assert len(pkg.files_changed) > 0
-        assert any(
-            path.endswith((".tf", ".yml", ".yaml", ".md")) or "/" in path
-            for path in pkg.files_changed
-        )
+        assert any(path.endswith((".tf", ".yml", ".yaml", ".md")) for path in pkg.files_changed)
 
     def test_quality_gates_in_completion(self) -> None:
         mock_llm = _scripted_llm_for_happy_path()

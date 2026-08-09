@@ -12,8 +12,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Tuple
 
+from shared.dev_models.models import Task
 from shared.repo_context.repo_utils import find_repo_files
-from software_engineering_team.shared.models import Task
 from software_engineering_team.shared.stack_profile import StackProfile
 from software_engineering_team.shared.text_utils import has_section_header, toml_has_section
 from software_engineering_team.shared.v2_review import ReviewConfig

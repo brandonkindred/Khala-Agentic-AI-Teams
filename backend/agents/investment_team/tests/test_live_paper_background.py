@@ -16,6 +16,7 @@ fires.
 
 from __future__ import annotations
 
+import types
 from typing import Any, Dict
 
 import pytest
@@ -123,13 +124,15 @@ def _install_run_paper_trade(
 ):
     """Patch the ``run_paper_trade`` import inside the worker function.
 
-    If ``captured`` is given, the call's ``backtest_config`` is stashed under
-    ``captured["backtest_config"]`` for assertions.
+    If ``captured`` is given, the call's ``backtest_config``/``paper_config``
+    are stashed under ``captured["backtest_config"]``/``captured["paper_config"]``
+    for assertions.
     """
 
     def _fake_run(*, strategy, backtest_config, paper_config, stop_controller):
         if captured is not None:
             captured["backtest_config"] = backtest_config
+            captured["paper_config"] = paper_config
         if isinstance(result, Exception):
             raise result
         return result
@@ -189,6 +192,36 @@ def test_live_paper_background_marks_completed_on_clean_termination(
     assert "pt-1" not in api_state._live_paper_stop_controllers
 
 
+def test_live_paper_background_falls_back_to_default_timeframe(
+    monkeypatch: pytest.MonkeyPatch, api_state
+) -> None:
+    """Neither the request nor the strategy supplies a timeframe: the worker
+    must fall back to ``api_main._DEFAULT_TIMEFRAME``, not a bare literal."""
+    from investment_team.api import main as api_main
+
+    _seed_running_session(api_state, session_id="pt-default-timeframe")
+    # A strategy stand-in with no ``timeframe`` attribute — ``StrategySpec``
+    # can't express this since ``timeframe`` is a required Literal field.
+    strategy = types.SimpleNamespace(asset_class="equities")
+
+    import investment_team.market_data_service as mds
+
+    monkeypatch.setattr(mds, "MarketDataService", lambda: _FakeMarketService(["AAA"]))
+
+    captured: Dict[str, Any] = {}
+    _install_run_paper_trade(monkeypatch, _FakeRunResult(), captured=captured)
+
+    req = api_main.RunPaperTradingRequest(lab_record_id="lab-w")
+    api_main._run_live_paper_trading_background(
+        "pt-default-timeframe", "lab-w", strategy, req
+    )
+
+    assert (
+        captured["paper_config"].kwargs["strategy_timeframe"]
+        == api_main._DEFAULT_TIMEFRAME
+    )
+
+
 def test_live_paper_background_marks_failed_on_lookahead_violation(
     monkeypatch: pytest.MonkeyPatch, api_state
 ) -> None:
@@ -236,6 +269,39 @@ def test_live_paper_background_handles_crash_and_clears_controller(
     assert "pt-3" not in api_state._live_paper_stop_controllers
 
 
+def test_live_paper_background_unparseable_record_does_not_escape_crash_handler(
+    monkeypatch: pytest.MonkeyPatch, api_state
+) -> None:
+    """The crash handler's own ``PaperTradingSession.parse_persisted(raw)``
+    call can itself raise (e.g. a corrupt persisted record) — that secondary
+    exception must not escape the worker in place of the original crash,
+    contradicting the documented ``Raises: None`` contract. The record is
+    left as-is (logged, not updated) rather than propagating."""
+    # A raw dict missing required fields -> parse_persisted raises when the
+    # crash handler tries to re-parse it.
+    api_state._paper_trading_sessions["pt-crash-corrupt"] = {"session_id": "pt-crash-corrupt"}
+    strategy = _winning_strategy()
+
+    import investment_team.market_data_service as mds
+
+    monkeypatch.setattr(mds, "MarketDataService", lambda: _FakeMarketService(["AAA"]))
+    _install_run_paper_trade(monkeypatch, RuntimeError("provider exploded"))
+
+    from investment_team.api.main import RunPaperTradingRequest, _run_live_paper_trading_background
+
+    req = RunPaperTradingRequest(lab_record_id="lab-w")
+
+    # Must not raise.
+    _run_live_paper_trading_background("pt-crash-corrupt", "lab-w", strategy, req)
+
+    # Left as-is: the corrupt record could not be re-parsed, so it was logged
+    # rather than overwritten with a FAILED status.
+    assert api_state._paper_trading_sessions.get("pt-crash-corrupt") == {
+        "session_id": "pt-crash-corrupt"
+    }
+    assert "pt-crash-corrupt" not in api_state._live_paper_stop_controllers
+
+
 def test_live_paper_background_raises_when_no_symbols(
     monkeypatch: pytest.MonkeyPatch, api_state
 ) -> None:
@@ -257,6 +323,133 @@ def test_live_paper_background_raises_when_no_symbols(
 
     session = api_state._paper_trading_sessions.get("pt-4")
     assert session.status == PaperTradingStatus.FAILED
+
+
+def test_live_paper_background_logs_when_session_removed_before_success_write(
+    monkeypatch: pytest.MonkeyPatch, api_state, caplog: pytest.LogCaptureFixture
+) -> None:
+    """If the session is removed from ``_paper_trading_sessions`` (e.g.
+    deleted) while this worker is still running, the success-path persist
+    must not silently discard the completed run's results — it should log a
+    warning identifying the session before returning."""
+    strategy = _winning_strategy()
+
+    import investment_team.market_data_service as mds
+
+    monkeypatch.setattr(mds, "MarketDataService", lambda: _FakeMarketService(["AAA"]))
+    _install_run_paper_trade(monkeypatch, _FakeRunResult(
+        trades=[], fill_count=5, provider_id="binance",
+        terminated_reason="min_fills_reached", error=None,
+    ))
+
+    from investment_team.api.main import RunPaperTradingRequest, _run_live_paper_trading_background
+
+    req = RunPaperTradingRequest(lab_record_id="lab-w")
+    with caplog.at_level("WARNING"):
+        _run_live_paper_trading_background("pt-removed", "lab-w", strategy, req)
+
+    # No session entry was (re)created for a session that no longer exists.
+    assert "pt-removed" not in api_state._paper_trading_sessions
+    assert "pt-removed" not in api_state._live_paper_stop_controllers
+    assert any(
+        "pt-removed" in record.message and "discarding" in record.message.lower()
+        for record in caplog.records
+    )
+
+
+def test_live_paper_background_does_not_clobber_already_terminal_session_on_success(
+    monkeypatch: pytest.MonkeyPatch, api_state
+) -> None:
+    """If the session was already declared FAILED (e.g. by
+    ``run_paper_trading``'s dispatch-failure path, ``_fail_paper_trading_session``)
+    while this worker was an orphaned Temporal workflow still running
+    server-side, the worker's own late-arriving success write must not
+    clobber that FAILED status."""
+    from investment_team.models import PaperTradingSession, PaperTradingStatus
+
+    strategy = _winning_strategy()
+    failed_session = PaperTradingSession(
+        session_id="pt-orphan-success",
+        lab_record_id="lab-w",
+        strategy=strategy,
+        status=PaperTradingStatus.FAILED,
+        initial_capital=100_000.0,
+        current_capital=100_000.0,
+        symbols_traded=[],
+        data_source="live",
+        data_period_start="",
+        data_period_end="",
+        started_at="2024-06-01T00:00:00Z",
+        completed_at="2024-06-01T00:05:00Z",
+        error="Failed to start the paper-trading workflow (Temporal unavailable).",
+    )
+    api_state._paper_trading_sessions["pt-orphan-success"] = failed_session
+
+    import investment_team.market_data_service as mds
+
+    monkeypatch.setattr(mds, "MarketDataService", lambda: _FakeMarketService(["AAA"]))
+    _install_run_paper_trade(
+        monkeypatch,
+        _FakeRunResult(
+            trades=[],
+            fill_count=5,
+            provider_id="binance",
+            terminated_reason="min_fills_reached",
+            error=None,
+        ),
+    )
+
+    from investment_team.api.main import RunPaperTradingRequest, _run_live_paper_trading_background
+
+    req = RunPaperTradingRequest(lab_record_id="lab-w")
+    _run_live_paper_trading_background("pt-orphan-success", "lab-w", strategy, req)
+
+    session = api_state._paper_trading_sessions.get("pt-orphan-success")
+    assert session.status == PaperTradingStatus.FAILED
+    assert session.error == "Failed to start the paper-trading workflow (Temporal unavailable)."
+    assert session.completed_at == "2024-06-01T00:05:00Z"
+    # The orphaned run's data must not have been persisted onto the session.
+    assert session.fill_count == 0
+
+
+def test_live_paper_background_does_not_clobber_already_terminal_session_on_crash(
+    monkeypatch: pytest.MonkeyPatch, api_state
+) -> None:
+    """Same guard on the crash-handler's terminal write."""
+    from investment_team.models import PaperTradingSession, PaperTradingStatus
+
+    strategy = _winning_strategy()
+    failed_session = PaperTradingSession(
+        session_id="pt-orphan-crash",
+        lab_record_id="lab-w",
+        strategy=strategy,
+        status=PaperTradingStatus.FAILED,
+        initial_capital=100_000.0,
+        current_capital=100_000.0,
+        symbols_traded=[],
+        data_source="live",
+        data_period_start="",
+        data_period_end="",
+        started_at="2024-06-01T00:00:00Z",
+        completed_at="2024-06-01T00:05:00Z",
+        error="Failed to start the paper-trading workflow (Temporal unavailable).",
+    )
+    api_state._paper_trading_sessions["pt-orphan-crash"] = failed_session
+
+    import investment_team.market_data_service as mds
+
+    monkeypatch.setattr(mds, "MarketDataService", lambda: _FakeMarketService(["AAA"]))
+    _install_run_paper_trade(monkeypatch, RuntimeError("provider exploded"))
+
+    from investment_team.api.main import RunPaperTradingRequest, _run_live_paper_trading_background
+
+    req = RunPaperTradingRequest(lab_record_id="lab-w")
+    _run_live_paper_trading_background("pt-orphan-crash", "lab-w", strategy, req)
+
+    session = api_state._paper_trading_sessions.get("pt-orphan-crash")
+    assert session.status == PaperTradingStatus.FAILED
+    assert session.error == "Failed to start the paper-trading workflow (Temporal unavailable)."
+    assert session.completed_at == "2024-06-01T00:05:00Z"
 
 
 def test_live_paper_background_bt_config_start_end_date_match(
