@@ -1,22 +1,20 @@
-"""Shared LLM-based code-review fallback for the frontend V2 sub-team.
+"""Shared LLM-based code-review fallback (retired from both V2 teams' production paths).
 
-``frontend_code_v2_team`` falls back to an LLM-driven review when no external
-``code_review_agent`` is available (or it raises). The orchestration around
-that fallback — function-aware chunking, per-chunk prompt formatting,
-parsing, and issue construction — lives here so it isn't duplicated, and the
-team passes in its own ``REVIEW_PROMPT``, ``parse_review_template``, and
-``ReviewIssue`` factory.
+This module's ``run_llm_review``/``run_team_llm_review`` implement the
+original chunk/prompt/parse-template review loop: function-aware chunking,
+per-chunk prompt formatting, parsing, issue construction, and an
+ungrounded-claim filter (``drop_ungrounded_issues``).
 
-``backend_code_v2_team``'s fallback (``backend_code_v2_team/phases/review.py
-::_run_llm_review``) is an intentional exception: it calls
-``code_review_agent.coordinator.run_coordinator`` directly in its lightweight
-mode (``skip_tail_passes=True``) instead of this module's hand-rolled
-chunk/prompt/parse loop, trading this module's ungrounded-claim filter
-(``drop_ungrounded_issues``) for the coordinator's Pydantic-validated,
-map-reduce-reviewed output. Frontend has not made the same migration yet
-(tracked separately) — until it does, this module still owns the frontend's
-fallback orchestration, and callers should not assume both V2 teams' code-
-review fallbacks share one implementation.
+Both ``backend_code_v2_team`` and ``frontend_code_v2_team`` have since
+migrated their ``_run_llm_review`` fallback to call
+``code_review_agent.coordinator.run_coordinator`` directly, in its
+lightweight mode (``skip_tail_passes=True``), trading this module's
+ungrounded-claim filter for the coordinator's Pydantic-validated,
+map-reduce-reviewed output. Neither team calls into this module for code
+review anymore; it is kept only because ``run_llm_review``/
+``run_team_llm_review`` are still directly unit-tested
+(``tests/test_shared_llm_review.py``) pending their removal in a follow-up
+cleanup.
 """
 
 from __future__ import annotations
@@ -51,18 +49,19 @@ class LlmReviewOutput(Generic[IssueT]):
     (see ``shared.phases.review_cycle.grounding_rejection_ratio``, which treats
     ``None`` and ``<= 0`` identically as "no ratio available").
 
-    Preconditions: constructed by ``run_llm_review`` (frontend's fallback) or
-    ``backend_code_v2_team.phases.review._run_llm_review`` (backend's,
-    coordinator-backed fallback — see this module's docstring).
+    Preconditions: constructed by ``run_llm_review`` (unused by either V2
+    team's production path — see this module's docstring) or by either V2
+    team's coordinator-backed ``_run_llm_review``
+    (``backend_code_v2_team``/``frontend_code_v2_team``).
 
     Postconditions/Invariants:
         - From ``run_llm_review``: ``raw_issue_count == len(issues)`` measured
           before the grounding filter ran (or unconditionally when grounding is
           disabled/skipped), so ``raw_issue_count >= len(issues)`` always holds;
           empty input (no non-blank files) yields ``LlmReviewOutput([], 0)``.
-        - From backend's coordinator-backed fallback: ``raw_issue_count`` is
-          always ``None`` — that path has no separate grounding pass to report
-          a pre-filter count for, and reporting a fabricated int (e.g.
+        - From either V2 team's coordinator-backed fallback: ``raw_issue_count``
+          is always ``None`` — that path has no separate grounding pass to
+          report a pre-filter count for, and reporting a fabricated int (e.g.
           ``len(issues)``) would make the circuit breaker see a false "0%
           rejected" instead of "no data" for every call.
     """
@@ -224,17 +223,15 @@ def run_team_llm_review(
     review_context: Optional[ReviewContext] = None,
     enable_llm_review_grounding: bool = True,
 ) -> LlmReviewOutput[IssueT]:
-    """Team-level entry point for the LLM review fallback.
+    """Team-level entry point for the LLM review fallback (unused by either V2
+    team's production path -- see this module's docstring).
 
-    The ``frontend_code_v2_team`` ``_run_llm_review`` wrapper builds the same
-    ``review_context`` -> ``architecture_context``/``spec_content`` bounding step
-    before delegating to :func:`run_llm_review`; this function owns that shared
-    step so the frontend wrapper is left with only the
-    ``Agent``/``resolve_text_mode_strands_model`` invocation, which must stay in
-    the team module (tests patch it there directly). ``backend_code_v2_team``
-    no longer uses this path; it calls
-    ``code_review_agent.coordinator.run_coordinator`` directly (see this
-    module's docstring).
+    Combines the ``review_context`` -> ``architecture_context``/``spec_content``
+    bounding step with :func:`run_llm_review`. Both ``backend_code_v2_team`` and
+    ``frontend_code_v2_team`` now call
+    ``code_review_agent.coordinator.run_coordinator`` directly instead (see
+    this module's docstring); this function remains only for its direct unit
+    test coverage (``tests/test_shared_llm_review.py``).
 
     Preconditions:
         - See :func:`run_llm_review` for ``files``/``prompt_template``/
