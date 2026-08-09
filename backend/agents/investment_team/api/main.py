@@ -5295,6 +5295,10 @@ def _fail_paper_trading_session(session_id: str, error: str) -> None:
 _DEFAULT_TX_COST_BPS = 5.0
 _DEFAULT_SLIPPAGE_BPS = 2.0
 
+# Fallback timeframe for live paper trading when neither the request nor the
+# strategy specifies one.
+_DEFAULT_TIMEFRAME = "1m"
+
 
 def _default_tx_cost_bps() -> float:
     """Operator-tunable fallback ``transaction_cost_bps`` (basis points) used
@@ -5401,7 +5405,9 @@ def _run_live_paper_trading_background(
         if not symbols:
             raise RuntimeError("no symbols resolved for strategy")
 
-        strategy_timeframe = request.timeframe or getattr(strategy, "timeframe", None) or "1m"
+        strategy_timeframe = (
+            request.timeframe or getattr(strategy, "timeframe", None) or _DEFAULT_TIMEFRAME
+        )
 
         tx_cost, slip = _resolve_fee_overrides(request, asset_class=strategy.asset_class)
         # Captured once: two separate datetime.now() calls could straddle
