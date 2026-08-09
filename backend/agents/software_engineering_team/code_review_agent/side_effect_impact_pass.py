@@ -43,8 +43,14 @@ Invariants:
       produced. Any setup or LLM failure is swallowed and logged, returning
       no additional findings — the same fail-safe posture those passes use.
 
-    - **Bounded cost.** Exactly one LLM call per submission (not per chunk),
-      matching the architecture pass's per-submission cost shape.
+    - **Bounded cost per call, with reactive recovery.** Agent construction,
+      context budgeting, proactive file-group chunking, and reactive overflow
+      bisect/shrink recovery are all owned by the shared
+      :func:`~code_review_agent.submission_pass_runner.run_submission_pass`
+      runner; this module supplies only its system prompt, tool set, and
+      prompt/parse callbacks. A submission that fits under the budget still
+      makes exactly one call, matching the architecture pass's per-submission
+      cost shape.
 
     - **``CODE_REVIEW`` profile only.** The other :class:`.profiles.ReviewProfile`
       values narrow the engine to a specific checklist whose contract expects
@@ -61,19 +67,18 @@ import json
 import logging
 from typing import List, Optional, Tuple
 
-from strands import Agent, tool
+from strands import tool
 
 from llm_service import LLMClient
 from shared.env import env_flag_enabled
-from software_engineering_team.shared.context_sizing import compute_code_review_map_chunk_chars
 
 from .chunking import _coerce_bool
 from .false_positive_filter import CodebaseIndex, _build_tools, _code_fence_for
-from .model_resolution import resolve_code_review_model
 from .models import CodeReviewInput, CodeReviewIssue, coerce_line, is_no_op_suggestion
 from .profiles import ReviewProfile
 from .prompts import SIDE_EFFECT_IMPACT_PROMPT
 from .repo_reader import DEFAULT_MAX_LISTED_FILES, DiskRepoReader, RepoReader
+from .submission_pass_runner import FileBatch, SubmissionPassBudgets, run_submission_pass
 
 logger = logging.getLogger(__name__)
 
@@ -277,28 +282,120 @@ def build_side_effect_tools(index: CodebaseIndex) -> list:
     return _build_side_effect_tools(index)
 
 
-def _build_prompt(index: CodebaseIndex, max_inline_chars: int) -> str:
-    """Render the single user prompt for this pass.
+def _overflow_manifest_note(omitted: int) -> str:
+    """Tool-reachable note for changed paths omitted from the inline manifest."""
+    return (
+        f"... and {omitted} more changed path(s) not listed; use read_file(path) or "
+        "list_files() to reach them."
+    )
+
+
+def _render_manifest(paths: List[str], max_manifest_chars: int) -> List[str]:
+    """Render the changed-file path list, truncated to ``max_manifest_chars``.
+
+    A small pass-owned duplicate of
+    ``merged_architecture_side_effect_pass._render_manifest`` -- that module
+    imports this one, so importing the reverse direction would be circular.
 
     Postconditions:
-        - Inlines the submission's changed files up to ``max_inline_chars``;
-          any files beyond that budget are named as reachable via the
-          attached tools rather than silently dropped.
+        - Always includes the section header.
+        - When the full remaining list fits in the budget, renders every
+          remaining path (no overflow note) -- never reserves note room that
+          would hide paths that already fit.
+        - When the full list exceeds the budget, includes as many paths as fit
+          and a tool-reachable overflow note for the rest.
+    """
+    header = f"**Changed files in this submission ({len(paths)}):**"
+    lines: List[str] = [header]
+    used = len(header) + 1
+    shown = 0
+    for i, path in enumerate(paths):
+        rest_cost = sum(len(p) + 1 for p in paths[i:])
+        if used + rest_cost <= max_manifest_chars:
+            lines.extend(paths[i:])
+            return lines
+
+        line_cost = len(path) + 1
+        omitted_after = len(paths) - (shown + 1)
+        room_for_note = len(_overflow_manifest_note(omitted_after)) + 1 if omitted_after > 0 else 0
+        if used + line_cost + room_for_note > max_manifest_chars and shown > 0:
+            lines.append(_overflow_manifest_note(len(paths) - shown))
+            break
+        if used + line_cost > max_manifest_chars and shown == 0:
+            lines.append(_overflow_manifest_note(len(paths)))
+            break
+        lines.append(path)
+        used += line_cost
+        shown += 1
+    return lines
+
+
+def _build_prompt(
+    index: CodebaseIndex,
+    max_inline_chars: int,
+    *,
+    max_manifest_chars: int,
+    content_items: Optional[List[Tuple[str, str]]] = None,
+    batch_index: Optional[int] = None,
+    total_batches: Optional[int] = None,
+    is_partial: bool = False,
+) -> str:
+    """Render the user prompt for one submission-pass runner call.
+
+    Preconditions:
+        - Budget ints are ``>= 0`` (from :class:`.submission_pass_runner.SubmissionPassBudgets`).
+        - ``content_items``, when given, is this call's batch of the changed
+          files (a subset of ``index.files.items()``); ``None`` inlines every
+          changed file (the pre-batching / single-batch behavior).
+        - ``batch_index``/``total_batches`` are both ``None`` (no batch label
+          rendered) or both set to this batch's 1-based position and the
+          total batch count.
+        - ``is_partial`` is True only for a reactive-recovery bisect/shrink
+          child batch (:attr:`~code_review_agent.submission_pass_runner.FileBatch.is_partial`).
+
+    Postconditions:
+        - The changed-file path manifest always lists every changed file in
+          the submission (from ``index.files``, not ``content_items``),
+          truncated to ``max_manifest_chars`` with a tool-reachable overflow
+          note when needed.
+        - Inlines ``content_items`` (or every changed file when ``None``) up
+          to ``max_inline_chars``; any file content beyond that budget is
+          named as reachable via the attached tools rather than silently
+          dropped. When ``is_partial`` is True, the content section header
+          renders a reduced-view recovery banner instead of a "batch N of M"
+          claim; otherwise, when ``total_batches`` is set (> 1), it names this
+          batch's position.
     """
     parts: List[str] = []
 
     changed_files = list(index.files.items())
-    manifest = [path for path, _ in changed_files]
-    parts.append(f"**Changed files in this submission ({len(manifest)}):**")
-    parts.extend(manifest)
+    paths = [path for path, _ in changed_files]
+    parts.extend(_render_manifest(paths, max_manifest_chars))
     parts.append("")
 
-    parts.append("**Full content of the changed files:**")
+    batch_files = content_items if content_items is not None else changed_files
+    if is_partial:
+        parts.append(
+            f"**Content of the changed files shown in this call ({len(batch_files)} of "
+            f"{len(changed_files)} changed files in this submission -- a reduced view "
+            "produced while recovering from a context-size overflow; any file not shown "
+            "here is still listed in the manifest above and reachable via "
+            "read_file()/list_files()):**"
+        )
+    elif total_batches and total_batches > 1:
+        parts.append(
+            f"**Full content of the changed files (batch {batch_index} of {total_batches} -- "
+            f"showing {len(batch_files)} of {len(changed_files)} changed files in this "
+            "submission; the rest are listed in the manifest above and reachable via "
+            "read_file()/list_files()):**"
+        )
+    else:
+        parts.append("**Full content of the changed files:**")
     remaining = max_inline_chars
     omitted = 0
-    for i, (path, content) in enumerate(changed_files):
+    for i, (path, content) in enumerate(batch_files):
         if remaining <= 0:
-            omitted = len(changed_files) - i
+            omitted = len(batch_files) - i
             break
         body = content[:remaining]
         body_fence = _code_fence_for(body)
@@ -619,6 +716,13 @@ def _run_pass(
     Postconditions:
         - Same contract as :func:`find_side_effect_impact_issues`, minus the
           env-toggle/profile early returns the caller already handled.
+        - Delegates budgeting, proactive chunking, ``Agent`` construction, and
+          reactive overflow bisect/shrink recovery to
+          :func:`~code_review_agent.submission_pass_runner.run_submission_pass`,
+          which never raises; a batch's findings are folded into the returned
+          list in batch order. An empty runner result (context too small, or
+          every batch unrecoverable) folds to ``[]`` -- never ``None`` and
+          never a raised exception.
     """
     if index is None:
         index = CodebaseIndex.from_input(input_data, repo_reader=repo_reader)
@@ -627,22 +731,40 @@ def _run_pass(
         # for caller impact or documentation drift.
         return []
 
-    model = resolve_code_review_model(llm)
-    max_inline_chars = compute_code_review_map_chunk_chars(llm)
+    pre_numbered = _effective_pre_numbered(input_data, index)
+    tools = _build_side_effect_tools(index)
 
-    prompt = _build_prompt(index, max_inline_chars)
-    agent = Agent(
-        model=model,
-        system_prompt=SIDE_EFFECT_IMPACT_PROMPT,
-        tools=_build_side_effect_tools(index),
-    )
-    raw = str(agent(prompt)).strip()
-    data = json.loads(raw)
-    findings = _parse_findings(data)
-    if findings:
-        findings = _validate_findings(
-            index, findings, pre_numbered=_effective_pre_numbered(input_data, index)
+    def _build_prompt_for_batch(batch: FileBatch, budgets: SubmissionPassBudgets) -> str:
+        return _build_prompt(
+            index,
+            budgets.max_inline_code_chars,
+            max_manifest_chars=budgets.max_manifest_chars,
+            content_items=batch.items,
+            batch_index=batch.index,
+            total_batches=batch.total,
+            is_partial=batch.is_partial,
         )
+
+    def _parse_batch_reply(raw: str) -> List[CodeReviewIssue]:
+        data = json.loads(raw)
+        findings = _parse_findings(data)
+        if findings:
+            findings = _validate_findings(index, findings, pre_numbered=pre_numbered)
+        return findings
+
+    results = run_submission_pass(
+        llm,
+        changed_files=list(index.files.items()),
+        system_prompt=SIDE_EFFECT_IMPACT_PROMPT,
+        build_prompt=_build_prompt_for_batch,
+        tools=tools,
+        parse=_parse_batch_reply,
+        extra_reserved_chars=0,
+        finding_array_count=1,
+        pass_label="SideEffectImpactPass",
+    )
+    findings = [finding for batch_findings in results for finding in batch_findings]
+    if findings:
         logger.info(
             "SideEffectImpactPass: found %s new finding(s) (side-effects/documentation)",
             len(findings),
