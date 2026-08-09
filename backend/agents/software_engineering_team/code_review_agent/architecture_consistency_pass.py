@@ -14,7 +14,8 @@ This pass runs ONCE PER SUBMISSION (never once per chunk), after the
 false-positive filter, and is purely additive: it is given the full
 architecture document and the merged submission, with read access to the rest
 of the repository via the same tools the false-positive filter uses
-(``read_file``, ``list_files``, ``search_codebase``, ``find_function_at_line``),
+(``read_file``, ``read_lines``, ``read_function``, ``list_files``, ``search_codebase``,
+``find_function_at_line``, ``find_references``),
 and emits new findings in two categories only: ``"architecture"`` (a stated
 boundary/pattern/decision the change contradicts) and ``"refactor"`` (a
 capability the change re-implements that already exists elsewhere). Every
