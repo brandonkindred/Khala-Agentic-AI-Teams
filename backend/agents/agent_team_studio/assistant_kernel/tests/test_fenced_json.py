@@ -99,6 +99,21 @@ def test_parse_body_containing_embedded_backticks() -> None:
     assert parse_fenced_json(text, "agent") == {"name": "x", "system_prompt": inner}
 
 
+def test_parse_tolerates_crlf_line_endings() -> None:
+    text = '```agent\r\n{"name": "x"}\r\n```\r\n'
+    assert parse_fenced_json(text, "agent") == {"name": "x"}
+
+
+def test_parse_tolerates_trailing_whitespace_after_closing_fence() -> None:
+    text = '```agent\n{"name": "x"}\n```   \n'
+    assert parse_fenced_json(text, "agent") == {"name": "x"}
+
+
+def test_parse_tolerates_indented_closing_fence() -> None:
+    text = '```agent\n{"name": "x"}\n   ```\n'
+    assert parse_fenced_json(text, "agent") == {"name": "x"}
+
+
 def test_parse_none_on_oversized_integer() -> None:
     # json.loads raises a plain ValueError (not JSONDecodeError) once an
     # integer literal exceeds Python's int-string conversion limit.
@@ -166,6 +181,15 @@ def test_strip_removes_the_whole_block_despite_embedded_backticks() -> None:
     assert stripped == "prose before\n\n\n\nprose after"
     assert "system_prompt" not in stripped
     assert "```" not in stripped
+
+
+def test_strip_removes_a_crlf_block_with_trailing_whitespace() -> None:
+    text = 'prose before\r\n\r\n```agent\r\n{"a": 1}\r\n```   \r\n\r\nprose after'
+    stripped = strip_fenced_blocks(text, ["agent"])
+    assert "```" not in stripped
+    assert '"a": 1' not in stripped
+    assert stripped.startswith("prose before")
+    assert stripped.endswith("prose after")
 
 
 # ---------------------------------------------------------------------------

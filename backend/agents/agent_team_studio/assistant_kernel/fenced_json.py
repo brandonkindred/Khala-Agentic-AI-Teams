@@ -35,14 +35,21 @@ def _fenced_block_pattern(tag: str) -> re.Pattern[str]:
           one, whether the longer tag extends it with a word character
           (``"agent"`` vs. ```` ```agents ````) or punctuation (``"agent"``
           vs. ```` ```agent-v2 ````).
-        * The closing ```` ``` ```` must be on its own line — preceded by a
-          newline and followed by a newline or end of string — so a literal
-          backtick run embedded inside the JSON body (e.g. a
+        * The closing ```` ``` ```` must be alone on its own line — so a
+          literal backtick run embedded inside the JSON body (e.g. a
           ``system_prompt`` string containing a markdown code example like
           ```` ```python ... ``` ````) is never mistaken for the block's
-          real closing fence. Group 1 captures the block body.
+          real closing fence — but that line tolerates the whitespace real
+          Markdown allows around a fence: leading indentation, trailing
+          spaces/tabs, and a CRLF line ending (a stray ``\\r`` immediately
+          before the line's ``\\n`` is absorbed into the preceding body/line
+          content rather than breaking the match; ``json.loads`` doesn't
+          care about the trailing ``\\r`` since callers ``.strip()`` the
+          captured body first). Group 1 captures the block body.
     """
-    return re.compile(r"```" + re.escape(tag) + r"(?=\s|`)[^\n]*\n(.*?)\n```(?=\n|$)", re.DOTALL)
+    return re.compile(
+        r"```" + re.escape(tag) + r"(?=\s|`)[^\n]*\n(.*?)\n[ \t]*```[ \t]*(?=\r?\n|$)", re.DOTALL
+    )
 
 
 def parse_fenced_json(
