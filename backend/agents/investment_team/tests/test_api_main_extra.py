@@ -1525,9 +1525,13 @@ def test_run_backtest_background_mid_run_cancellation(
     assert "backtest_id" not in state
 
 
-def test_run_backtest_background_cancel_before_completed_write(
+def test_run_backtest_background_cancel_at_completed_write(
     monkeypatch: pytest.MonkeyPatch, api_client
 ) -> None:
+    """A cancel landing after the backtest record is already persisted but
+    before/during the atomic COMPLETED write must still be reported as
+    cancelled — the write itself, not a separate prior check, is what catches
+    it."""
     from investment_team.api import main as api_main
     from investment_team.models import (
         BacktestConfig,
@@ -1536,9 +1540,16 @@ def test_run_backtest_background_cancel_before_completed_write(
     )
 
     state: Dict[str, Any] = {}
-    cancel_checks = iter([False, False, True])
-    monkeypatch.setattr(api_main, "_bt_is_job_cancelled", lambda jid: next(cancel_checks))
-    monkeypatch.setattr(api_main, "_bt_update_job", lambda jid, **kw: state.update(kw))
+    # Mid-run check (right after the backtest executes) is not yet cancelled;
+    # the RUNNING write succeeds; the COMPLETED write is the one that finds
+    # the job cancelled.
+    monkeypatch.setattr(api_main, "_bt_is_job_cancelled", lambda jid: False)
+
+    def _fake_update_if_not_cancelled(jid, **kw):
+        state.update(kw)
+        return kw.get("status") != api_main._BT_JOB_STATUS_COMPLETED
+
+    monkeypatch.setattr(api_main, "_bt_update_job_if_not_cancelled", _fake_update_if_not_cancelled)
 
     bt_result = BacktestResult(
         total_return_pct=10.0,
@@ -1569,16 +1580,14 @@ def test_run_backtest_background_cancel_before_completed_write(
     )
 
     status = api_main._run_backtest_background(
-        "job-cancel-before-completed", strategy, config, "tester", []
+        "job-cancel-at-completed", strategy, config, "tester", []
     )
 
-    # Cancelled at the checkpoint immediately before the COMPLETED write.
     assert status == api_main._BT_JOB_STATUS_CANCELLED
-    # Only the earlier RUNNING write happened — COMPLETED must never land.
-    assert state.get("status") == "running"
-    assert "backtest_id" not in state
-    # But the backtest record was already persisted before that checkpoint —
-    # the fix skips the status write, not the record write.
+    assert state.get("status") == api_main._BT_JOB_STATUS_COMPLETED
+    # The backtest record was already persisted before the guarded write
+    # rejected the COMPLETED status — the guard skips the status write, not
+    # the record write.
     assert len(api_main._backtests) == 1
 
 
