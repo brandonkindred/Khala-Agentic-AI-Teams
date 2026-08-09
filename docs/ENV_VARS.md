@@ -1683,9 +1683,13 @@ worker. With it on, such tasks are routed to a devops worker that builds a struc
 `DevOpsTaskSpec`, runs the full DevOps pipeline (including its own internal IaC/CI/CD/security/change-
 review gates — the coding team's generic build/lint gate is skipped for these tasks), and hands the
 resulting feature branch back for the normal Tech Lead review/merge step, the same as a v2 team's
-output. The devops worker's `DevOpsTaskSpec` is always built with `environment="dev"` — this path
-never targets a production environment; production approval happens at PR merge, outside DevOps's own
-pipeline gates.
+output. The devops worker's `DevOpsTaskSpec.environment` is *derived* from the task's own title,
+description, and acceptance criteria (via the same inference `run_workflow`'s free-text callers
+already use) — `"production"` when the task text carries an explicit production signal, `"staging"`
+otherwise. A genuinely production-scoped task therefore keeps the DevOps pipeline's own production
+policy and approval-gate checks (`required_approvals`/`prod_approval_required` on the completion
+package); if its text carries no explicit approval-gate language it fails Phase 1's environment-policy
+gate rather than silently proceeding, the same trade-off `run_workflow` callers already accept.
 
 ---
 
