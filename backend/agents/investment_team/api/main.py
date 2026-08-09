@@ -5370,6 +5370,7 @@ def _run_live_paper_trading_background(
     from investment_team.models import BacktestConfig as _BC
     from investment_team.trading_service.modes.paper_trade import (
         PaperTradeConfig,
+        PaperTradeTerminatedReason,
         StopController,
         run_paper_trade,
     )
@@ -5455,12 +5456,13 @@ def _run_live_paper_trading_background(
             # to the exact bars that drove warm-up.
             session.dataset_fingerprint = run_result.dataset_fingerprint
             session.completed_at = datetime.now(tz=timezone.utc).isoformat()
-            if run_result.error or run_result.terminated_reason in {
-                "lookahead_violation",
-                "provider_error",
-                "region_blocked",
-                "no_provider",
-            }:
+            _terminated_reason_failures = {
+                PaperTradeTerminatedReason.LOOKAHEAD_VIOLATION,
+                PaperTradeTerminatedReason.PROVIDER_ERROR,
+                PaperTradeTerminatedReason.REGION_BLOCKED,
+                PaperTradeTerminatedReason.NO_PROVIDER,
+            }
+            if run_result.error or run_result.terminated_reason in _terminated_reason_failures:
                 session.status = PaperTradingStatus.FAILED
             else:
                 session.status = PaperTradingStatus.COMPLETED
