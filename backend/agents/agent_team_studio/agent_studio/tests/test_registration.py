@@ -79,6 +79,28 @@ def test_build_manifest_rejects_blank_name() -> None:
         build_studio_agent_manifest(AgentDefinition(name="  "))
 
 
+def test_build_manifest_folds_system_prompt_into_executing_state() -> None:
+    definition = AgentDefinition(name="Planner", role="r", system_prompt="Be terse.")
+    manifest = build_studio_agent_manifest(definition)
+
+    by_key = {s.key: s.system_prompt for s in manifest.states}
+    assert by_key["executing"] == "Be terse."
+    # Other states are untouched — they still carry the seeded defaults.
+    assert by_key["planning"] != "Be terse."
+    assert by_key["researching"] != "Be terse."
+
+
+def test_build_manifest_blank_system_prompt_leaves_states_untouched() -> None:
+    definition = AgentDefinition(name="Planner", role="r")
+    definition.states[1].system_prompt = "hand-edited executing prompt"
+    assert definition.system_prompt == ""  # default, unset by the assistant
+
+    manifest = build_studio_agent_manifest(definition)
+
+    by_key = {s.key: s.system_prompt for s in manifest.states}
+    assert by_key["executing"] == "hand-edited executing prompt"
+
+
 def _manifest(**overrides) -> AgentManifest:
     base = dict(
         id="blogging.planner",
@@ -149,6 +171,35 @@ def test_clone_backfills_default_states_for_legacy_manifest() -> None:
     draft = clone_from_manifest(_manifest())  # _manifest() has no states -> []
     assert [s.key for s in draft.states] == list(STATE_ORDER)
     assert all(s.system_prompt.strip() for s in draft.states)
+    # system_prompt is restored from the (backfilled) executing state, not left blank.
+    assert draft.system_prompt.strip()
+
+
+def test_clone_restores_system_prompt_from_executing_state() -> None:
+    states = [
+        AgentStateSpec(key="planning", label="Planning", system_prompt="plan"),
+        AgentStateSpec(key="executing", label="Executing", system_prompt="Be terse."),
+        AgentStateSpec(key="researching", label="Researching", system_prompt="research"),
+    ]
+    draft = clone_from_manifest(_manifest(states=states))
+    assert draft.system_prompt == "Be terse."
+
+
+def test_clone_restores_system_prompt_when_executing_key_dropped() -> None:
+    # Only an unsupported key is persisted -> executing is backfilled with the
+    # default prompt, which system_prompt must reflect (not "").
+    states = [AgentStateSpec(key="deploying", label="Deploying", system_prompt="bad")]
+    draft = clone_from_manifest(_manifest(states=states))
+    assert draft.system_prompt.strip()
+    executing = next(s for s in draft.states if s.key == "executing")
+    assert draft.system_prompt == executing.system_prompt
+
+
+def test_build_then_clone_round_trips_system_prompt() -> None:
+    definition = AgentDefinition(name="Planner", role="r", system_prompt="Be terse.")
+    manifest = build_studio_agent_manifest(definition)
+    draft = clone_from_manifest(manifest)
+    assert draft.system_prompt == "Be terse."
 
 
 def test_clone_does_not_mutate_source() -> None:
