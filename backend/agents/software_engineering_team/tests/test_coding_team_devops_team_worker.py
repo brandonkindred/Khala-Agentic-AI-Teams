@@ -777,6 +777,43 @@ def test_devops_worker_spec_dev_only_revision_feedback_overrides_stale_productio
     assert spec.platform_scope.environments == ["dev"]
 
 
+def test_devops_worker_ignores_incidental_environment_word_in_feedback() -> None:
+    """A feedback line can mention an environment word without redirecting the
+    target environment at all -- e.g. "rebase onto development" names the git
+    branch, not the deploy environment. Treating a bare mention as a redirect
+    would silently drop a genuinely production-scoped task's approval-gate
+    policy checks."""
+    task = _base_task(
+        title="Add production deployment workflow",
+        description="Deploy to production with a blue-green rollout.",
+        revision_feedback=[
+            {"source": "tech_lead", "reason": "Rebase onto development before merging."}
+        ],
+    )
+
+    spec = _to_devops_task_spec(task)
+
+    assert spec.environment == "production"
+    assert spec.platform_scope.environments == ["dev", "production"]
+
+
+def test_devops_worker_ignores_git_stage_verb_in_feedback() -> None:
+    """Feedback that reads "Stage the generated files" uses "stage" as the
+    git-add verb, not the staging environment -- it must not be treated as an
+    environment redirect."""
+    task = _base_task(
+        title="Add production deployment workflow",
+        description="Deploy to production with a blue-green rollout.",
+        revision_feedback=[
+            {"source": "tech_lead", "reason": "Stage the generated files before committing."}
+        ],
+    )
+
+    spec = _to_devops_task_spec(task)
+
+    assert spec.environment == "production"
+
+
 # ------------------------------------------------- task scope in acceptance_criteria (finding H)
 
 
@@ -796,6 +833,24 @@ def test_devops_worker_spec_folds_task_scope_into_acceptance_criteria() -> None:
     # out_of_scope must NOT be folded into acceptance_criteria/scope.included -- see
     # test_devops_worker_scope_note_excludes_out_of_scope_to_protect_approval_policy.
     assert "Do not touch the legacy Jenkins pipeline." not in spec.acceptance_criteria[0]
+
+
+def test_devops_worker_spec_scope_note_includes_title_alongside_description() -> None:
+    """A nonempty description does not guarantee it restates every requirement the
+    title carries (e.g. title "Add canary Kubernetes deployment" vs. a generic
+    description "Configure deployment for the service" that never says "canary").
+    DeploymentStrategyAgent.build_context reads neither title nor scope, so the
+    title's requirement must reach acceptance_criteria alongside the description,
+    not be dropped whenever a description happens to be present."""
+    task = _base_task(
+        title="Add canary Kubernetes deployment",
+        description="Configure deployment for the service.",
+    )
+
+    spec = _to_devops_task_spec(task)
+
+    assert "Add canary Kubernetes deployment" in spec.acceptance_criteria[0]
+    assert "Configure deployment for the service." in spec.acceptance_criteria[0]
 
 
 def test_devops_worker_scope_note_excludes_out_of_scope_to_protect_approval_policy() -> None:

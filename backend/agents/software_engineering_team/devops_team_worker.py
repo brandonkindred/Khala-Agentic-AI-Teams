@@ -86,14 +86,20 @@ def _augment_goal_summary(task: Any) -> str:
     )
 
 
-_ENV_SIGNAL_TOKEN = re.compile(
-    r"\b(?:production|prod|staging|stage|dev|development)\b", re.IGNORECASE
+_ENV_NAME = r"(?:production|prod|staging|stage|dev|development)"
+_ENV_REDIRECT_TOKEN = re.compile(
+    r"\b" + _ENV_NAME + r"[- ]only\b"
+    r"|\bdeploy(?:ed|ing)?\s+(?:to|on|into)\s+(?:the\s+)?" + _ENV_NAME + r"\b"
+    r"|\btarget(?:s|ing)?\s+(?:environment\s+)?(?:is\s+|:\s*)?(?:the\s+)?" + _ENV_NAME + r"\b"
+    r"|\b" + _ENV_NAME + r"\s+(?:environment|env)\b"
+    r"|\b" + _ENV_NAME + r"\s+is\s+(?:fine|ok|okay|good|acceptable)\b",
+    re.IGNORECASE,
 )
 
 
 def _latest_feedback_environment_text(task: Any) -> Optional[str]:
-    """Return the newest revision-feedback line that mentions an environment at
-    all, or ``None`` when no feedback line does.
+    """Return the newest revision-feedback line that carries an explicit
+    target-environment redirect, or ``None`` when no feedback line does.
 
     ``task.revision_feedback`` is append-only, so an early round's "make this
     production" and a later round's "actually, staging only" (or "make this
@@ -101,18 +107,27 @@ def _latest_feedback_environment_text(task: Any) -> Optional[str]:
     combined-text scan means a stale early mention can never be overridden --
     ``_legacy_environment_from_text`` returns ``"production"`` if ANY clause
     across the combined text implies it. Scanning newest-first and stopping at
-    the first line that mentions an environment at all lets the latest
+    the first line that carries an explicit redirect lets the latest
     instruction win instead.
+
+    Matching requires explicit target-environment wording (``"X-only"``,
+    ``"deploy to X"``, ``"target X"``, ``"X environment"``, ``"X is fine"``) --
+    a bare environment-name mention is NOT enough. A feedback line can mention
+    "development"/"staging" incidentally without redirecting the target
+    environment at all -- e.g. "rebase onto development" (the git branch, not
+    the deploy environment) or "stage the generated files" (the git-add verb,
+    not the staging environment) -- and treating those as redirects would
+    silently drop a genuine production task's approval-gate policy checks.
 
     Preconditions: none.
     Postconditions:
-        - Returns the single newest feedback line containing "production"/
-          "prod"/"staging"/"stage"/"dev"/"development" (case-insensitive), or
-          ``None`` if no feedback line mentions any of those -- callers should
-          fall back to the original task text in that case.
+        - Returns the single newest feedback line carrying an explicit
+          target-environment redirect (case-insensitive), or ``None`` if no
+          feedback line does -- callers should fall back to the original task
+          text in that case.
     """
     for line in reversed(_feedback_lines(list(task.revision_feedback or []))):
-        if _ENV_SIGNAL_TOKEN.search(line):
+        if _ENV_REDIRECT_TOKEN.search(line):
             return line.lower()
     return None
 
@@ -222,18 +237,21 @@ def _platform_environments(task: Any, environment: str) -> List[str]:
 
 
 def _task_scope_note(task: Any) -> Optional[str]:
-    """Render the task's own description (falling back to title) as an
-    acceptance-criteria entry.
+    """Render the task's title and description together as an acceptance-criteria entry.
 
     ``CICDPipelineAgent.build_context`` and ``DeploymentStrategyAgent.build_context``
     read ``acceptance_criteria`` (plus environments/constraints) but never
     ``goal.summary`` or ``scope`` -- ``DeploymentStrategyAgent`` doesn't even read
     ``title`` -- only ``InfrastructureAsCodeAgent.build_context`` reads ``scope``.
     So an operational requirement recorded only in ``task.description`` (e.g.
-    "use GitLab CI, deploy to ECS") or, absent a description, only in
-    ``task.title`` (e.g. "Add canary Kubernetes deployment") is invisible to
-    those two specialists unless it also reaches ``acceptance_criteria`` -- the
-    same problem ``_revision_feedback_scope_note`` solves for revision feedback.
+    "use GitLab CI, deploy to ECS") or only in ``task.title`` (e.g. a title of
+    "Add canary Kubernetes deployment" paired with a generic description like
+    "Configure deployment for the service", which never repeats "canary") is
+    invisible to those two specialists unless it also reaches
+    ``acceptance_criteria`` -- the same problem ``_revision_feedback_scope_note``
+    solves for revision feedback. A nonempty description does not guarantee it
+    restates every requirement the title carries, so both are combined rather
+    than the title being dropped whenever a description exists.
 
     Deliberately excludes ``task.out_of_scope``: ``_enforce_env_policy`` scans
     ``scope.included`` (which ``acceptance_criteria`` feeds into, see
@@ -241,14 +259,19 @@ def _task_scope_note(task: Any) -> Optional[str]:
     mandatory production approval-gate check. Folding an exclusion like
     "Manual approval gates" in here would make an explicitly EXCLUDED approval
     gate satisfy that check. ``scope.excluded`` (which the policy check never
-    scans) already carries ``task.out_of_scope`` verbatim, so
-    ``InfrastructureAsCodeAgent`` still sees it -- ``CICDPipelineAgent``/
-    ``DeploymentStrategyAgent`` not seeing exclusions is a narrower, less
-    safety-critical gap than bypassing the approval-gate policy.
+    scans) already carries ``task.out_of_scope`` verbatim; see
+    ``_to_devops_task_spec``'s docstring for how it additionally reaches
+    ``CICDPipelineAgent``/``DeploymentStrategyAgent`` alongside
+    ``InfrastructureAsCodeAgent``.
 
     Returns ``None`` when the task carries neither a description nor a title.
     """
-    text = (task.description or task.title or "").strip()
+    title = (task.title or "").strip()
+    description = (task.description or "").strip()
+    if title and description and title != description:
+        text = f"{title}: {description}"
+    else:
+        text = description or title
     if not text:
         return None
     return f"TASK SCOPE: {text}"

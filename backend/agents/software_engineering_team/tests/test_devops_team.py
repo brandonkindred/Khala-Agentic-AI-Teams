@@ -40,6 +40,9 @@ from software_engineering_team.devops_team.orchestrator import (
     MAX_LEGACY_TITLE_LENGTH,
     criterion_traces_from_phase4,
 )
+from software_engineering_team.devops_team.phases.quality_gate import (
+    _describe_task_with_exclusions,
+)
 from software_engineering_team.devops_team.task_clarifier import (
     DevOpsTaskClarifierAgent,
     DevOpsTaskClarifierInput,
@@ -835,6 +838,20 @@ class TestCICDPipelineAgent:
         assert "source map" in lowered
         assert "frontend.yml" in lowered
 
+    def test_build_context_surfaces_scope_exclusions(self) -> None:
+        """This agent never reads task_spec.scope directly (only
+        InfrastructureAsCodeAgent does), so an explicit exclusion must reach it
+        through the prompt context instead, or a generated pipeline could
+        violate it with the agent never having been told about it."""
+        from software_engineering_team.devops_team.cicd_pipeline_agent import (
+            CICDPipelineAgent,
+            CICDPipelineAgentInput,
+        )
+
+        agent = CICDPipelineAgent(_StubClient({}))
+        context = agent.build_context(CICDPipelineAgentInput(task_spec=_base_task_spec()))
+        assert "cluster provisioning" in context
+
 
 class TestDeploymentStrategyAgent:
     def test_run_returns_strategy(self) -> None:
@@ -925,6 +942,21 @@ class TestDeploymentStrategyAgent:
             {"alerting_configured": "TRUE"},
         )
         assert out.alerting_configured is True
+
+    def test_build_context_surfaces_scope_exclusions(self) -> None:
+        """This agent never reads task_spec.scope directly (only
+        InfrastructureAsCodeAgent does) and doesn't even read title, so an
+        explicit exclusion must reach it through the prompt context instead,
+        or a chosen rollout strategy could violate it with the agent never
+        having been told about it."""
+        from software_engineering_team.devops_team.deployment_strategy_agent import (
+            DeploymentStrategyAgent,
+            DeploymentStrategyAgentInput,
+        )
+
+        agent = DeploymentStrategyAgent(_StubClient({}))
+        context = agent.build_context(DeploymentStrategyAgentInput(task_spec=_base_task_spec()))
+        assert "cluster provisioning" in context
 
 
 class TestDevSecOpsReviewAgent:
@@ -1534,6 +1566,45 @@ class TestCriterionTracesFromPhase4:
         )
         assert traces[0].tests == []
         assert {"validation": "pass"} not in traces[0].tests
+
+
+# ===========================================================================
+# UNIT TESTS -- PHASE 4 REVIEW-INPUT SCOPE EXCLUSIONS
+# ===========================================================================
+
+
+class TestDescribeTaskWithExclusions:
+    """Unit tests for the Phase 4 devsecops/change-review exclusion propagation.
+
+    Neither DevSecOpsReviewInput.requirements (task_spec.goal.summary) nor
+    ChangeReviewInput.task_description (task_spec.title) otherwise carries
+    task_spec.scope.excluded, so an explicit exclusion could be violated by
+    generated artifacts with neither reviewer ever having been told about it.
+    """
+
+    def test_appends_exclusions_when_present(self) -> None:
+        spec = _base_task_spec(
+            scope={"included": ["build"], "excluded": ["legacy Jenkins pipeline"]}
+        )
+        result = _describe_task_with_exclusions(spec, "base text")
+        assert "base text" in result
+        assert "legacy Jenkins pipeline" in result
+
+    def test_returns_base_unchanged_when_no_exclusions(self) -> None:
+        spec = _base_task_spec(scope={"included": ["build"], "excluded": []})
+        result = _describe_task_with_exclusions(spec, "base text")
+        assert result == "base text"
+
+    def test_joins_multiple_exclusions(self) -> None:
+        spec = _base_task_spec(
+            scope={
+                "included": ["build"],
+                "excluded": ["legacy Jenkins pipeline", "blue-green rollout"],
+            }
+        )
+        result = _describe_task_with_exclusions(spec, "base text")
+        assert "legacy Jenkins pipeline" in result
+        assert "blue-green rollout" in result
 
 
 # ===========================================================================
