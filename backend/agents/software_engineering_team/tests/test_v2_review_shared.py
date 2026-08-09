@@ -23,6 +23,7 @@ Preconditions:
 
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Callable, Dict, Optional, Tuple
@@ -35,6 +36,8 @@ from software_engineering_team.shared.v2_review import (
     ReviewConfig,
     _lint_passed,
     _maybe_build_change_surface_from_pairs,
+    _patch_has_any_removal,
+    _resolve_change_surface_for_review,
     run_microtask_review,
     run_review,
 )
@@ -834,12 +837,13 @@ def test_code_review_input_carries_repo_root_for_durable_reader(tmp_path: Path) 
 
 
 def test_run_review_old_contents_meaningful_diff_uses_surface_code(tmp_path: Path) -> None:
-    """When ``old_contents`` yields a meaningful diff, the external agent's
+    """When ``old_contents`` yields a meaningful, purely-additive diff (no
+    deleted line -- see ``_patch_has_any_removal``), the external agent's
     ``CodeReviewInput`` carries ``code=<surface>``/``pre_numbered=True`` instead of
     ``files=``."""
     config = _build_config()
-    files = {"a.py": "def f():\n    return 1\n"}
-    old_contents = {"a.py": "def f():\n    return 0\n"}
+    old_contents = {"a.py": "def f():\n    return 1\n"}
+    files = {"a.py": old_contents["a.py"] + "\n\ndef g():\n    return 2\n"}
 
     cr_agent = MagicMock()
     cr_agent.run.return_value = MagicMock(issues=[])
@@ -928,10 +932,12 @@ def test_run_review_old_contents_identical_to_files_keeps_files_behavior(tmp_pat
 
 def test_microtask_old_contents_meaningful_diff_uses_surface_code(tmp_path: Path) -> None:
     """``run_microtask_review`` threads ``old_contents`` through to the same
-    ``_code_review_step`` surface wiring as ``run_review``."""
+    ``_code_review_step`` surface wiring as ``run_review``. Purely additive (no
+    deleted line -- see ``_patch_has_any_removal``), same rationale as
+    ``test_run_review_old_contents_meaningful_diff_uses_surface_code``."""
     config = _build_config()
-    files = {"a.py": "def f():\n    return 1\n"}
-    old_contents = {"a.py": "def f():\n    return 0\n"}
+    old_contents = {"a.py": "def f():\n    return 1\n"}
+    files = {"a.py": old_contents["a.py"] + "\n\ndef g():\n    return 2\n"}
 
     cr_agent = MagicMock()
     cr_agent.run.return_value = MagicMock(issues=[])
@@ -1370,3 +1376,626 @@ def _real_build_change_surface_from_pairs():
     )
 
     return build_change_surface_from_pairs
+
+
+# ---------------------------------------------------------------------------
+# _resolve_change_surface_for_review / _code_review_step surface-vs-fallback
+# wiring (no-base and empty-diff fallback triggers, GitHub issue #5400)
+# ---------------------------------------------------------------------------
+
+
+def _git(repo: Path, *args: str) -> None:
+    subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True)
+
+
+def _init_repo(repo_path: Path) -> None:
+    """Initialize ``repo_path`` in place as a git repo (mirrors
+    ``test_previous_content_git.py``'s ``_init_repo``, but initializes the
+    caller's own directory rather than creating a ``repo`` subdirectory, so
+    the same ``tmp_path`` doubles as both ``repo_path`` and the git root)."""
+    _git(repo_path, "init")
+    _git(repo_path, "config", "user.email", "test@test.com")
+    _git(repo_path, "config", "user.name", "Test")
+    _git(repo_path, "config", "commit.gpgsign", "false")
+
+
+def _commit_file(repo_path: Path, rel_path: str, content: str) -> None:
+    target = repo_path / rel_path
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(content)
+    _git(repo_path, "add", rel_path)
+    _git(repo_path, "commit", "-m", f"add {rel_path}")
+
+
+def test_code_review_no_git_repo_falls_back_to_files(tmp_path: Path) -> None:
+    """No ``.git`` under ``repo_path`` -> no base resolves for any path -> the
+    external agent still runs, submitted ``files`` as-is (unchanged from
+    pre-#5400 behavior). Also pins that every existing test using a plain
+    ``tmp_path`` (no git) keeps getting the same ``files=`` submission."""
+    config = _build_config()
+    cr_agent = MagicMock()
+    cr_agent.run.return_value = MagicMock(issues=[])
+
+    run_microtask_review(
+        config=config,
+        llm=DummyLLMClient(),
+        task=_task(),
+        microtask=_microtask(),
+        repo_path=tmp_path,
+        files={"x.py": "code"},
+        code_review_agent=cr_agent,
+        language="python",
+        **_noop_runners(),
+    )
+
+    assert cr_agent.run.called
+    cr_input = cr_agent.run.call_args.args[0]
+    assert cr_input.files == {"x.py": "code"}
+    assert cr_input.pre_numbered is False
+    assert cr_input.code == ""
+
+
+def test_code_review_empty_diff_falls_back_to_files(tmp_path: Path) -> None:
+    """A real git base exists, but it's identical to the new content -> no
+    surface is built (nothing changed); the agent still runs, submitted
+    ``files`` as-is rather than a degenerate empty surface."""
+    config = _build_config()
+    _init_repo(tmp_path)
+    _commit_file(tmp_path, "x.py", "code")
+
+    cr_agent = MagicMock()
+    cr_agent.run.return_value = MagicMock(issues=[])
+
+    run_microtask_review(
+        config=config,
+        llm=DummyLLMClient(),
+        task=_task(),
+        microtask=_microtask(),
+        repo_path=tmp_path,
+        files={"x.py": "code"},
+        code_review_agent=cr_agent,
+        language="python",
+        **_noop_runners(),
+    )
+
+    assert cr_agent.run.called
+    cr_input = cr_agent.run.call_args.args[0]
+    assert cr_input.files == {"x.py": "code"}
+    assert cr_input.pre_numbered is False
+    assert cr_input.code == ""
+
+
+def test_code_review_purely_additive_diff_uses_change_surface(tmp_path: Path) -> None:
+    """A real git base exists and the new content only APPENDS new lines --
+    no existing line is touched or removed -- so the agent is submitted the
+    diff-derived change surface (``code=``, ``pre_numbered=True``) instead of
+    ``files=``, with ``full_content`` (scoped to the surface's own paths)
+    riding along so the coordinator's whole-codebase side-effect/architecture
+    passes still see real full bodies instead of being disabled by
+    ``pre_numbered=True``. Any deletion at all (a replaced or removed line)
+    instead falls back to ``files=`` -- see
+    ``test_code_review_same_line_edit_falls_back_to_files`` -- since the
+    change surface can never prove a removed line's information survives
+    elsewhere in the rendered surface."""
+    config = _build_config()
+    _init_repo(tmp_path)
+    old_content = "def existing():\n    return 1\n"
+    _commit_file(tmp_path, "x.py", old_content)
+    files = {"x.py": old_content + "\n\ndef added():\n    return 2\n"}
+
+    cr_agent = MagicMock()
+    cr_agent.run.return_value = MagicMock(issues=[])
+
+    run_microtask_review(
+        config=config,
+        llm=DummyLLMClient(),
+        task=_task(),
+        microtask=_microtask(),
+        repo_path=tmp_path,
+        files=files,
+        code_review_agent=cr_agent,
+        language="python",
+        **_noop_runners(),
+    )
+
+    assert cr_agent.run.called
+    cr_input = cr_agent.run.call_args.args[0]
+    assert cr_input.files is None
+    assert cr_input.pre_numbered is True
+    assert "### x.py ###" in cr_input.code
+    assert "def added" in cr_input.code
+    assert cr_input.full_content == files
+
+
+def test_code_review_same_line_edit_falls_back_to_files(tmp_path: Path) -> None:
+    """A real git base exists but the new content replaces an existing line
+    (not a pure append) -- even a single-line, same-function edit -- so the
+    diff contains a deletion the surface can never prove is safely
+    represented (see ``_patch_has_any_removal``); the agent must be
+    submitted ``files=`` as-is rather than a surface."""
+    config = _build_config()
+    _init_repo(tmp_path)
+    _commit_file(tmp_path, "x.py", "def f():\n    return 0\n")
+    files = {"x.py": "def f():\n    return 1\n"}
+
+    cr_agent = MagicMock()
+    cr_agent.run.return_value = MagicMock(issues=[])
+
+    run_microtask_review(
+        config=config,
+        llm=DummyLLMClient(),
+        task=_task(),
+        microtask=_microtask(),
+        repo_path=tmp_path,
+        files=files,
+        code_review_agent=cr_agent,
+        language="python",
+        **_noop_runners(),
+    )
+
+    assert cr_agent.run.called
+    cr_input = cr_agent.run.call_args.args[0]
+    assert cr_input.files == files
+    assert cr_input.pre_numbered is False
+    assert cr_input.code == ""
+
+
+def test_resolve_change_surface_for_review_no_files_returns_none(tmp_path: Path) -> None:
+    assert _resolve_change_surface_for_review({}, tmp_path) is None
+
+
+def test_resolve_change_surface_for_review_new_file_no_base_returns_none(
+    tmp_path: Path,
+) -> None:
+    """A real git repo exists (HEAD is resolvable), but the given path was
+    never committed -> a pure miss for every path -> no base at all, so the
+    caller must fall back to ``files=`` rather than treating the file as a
+    from-scratch surface."""
+    _init_repo(tmp_path)
+    _commit_file(tmp_path, "unrelated.py", "unrelated\n")
+
+    result = _resolve_change_surface_for_review({"new.py": "brand new\n"}, tmp_path)
+
+    assert result is None
+
+
+def test_resolve_change_surface_for_review_deletion_only_file_returns_none(
+    tmp_path: Path,
+) -> None:
+    """A deletion-only diff (old had a function, new drops it with no added
+    lines) contributes no touched lines, so the builder silently omits that
+    path from ``blocks`` even though it genuinely changed. When another file
+    in the same submission DOES have added lines, the builder still returns a
+    non-empty (but partial) surface -- that partial surface must be rejected
+    (``None``) rather than silently submitted, or the reviewer would approve
+    without ever seeing the dropped file's change."""
+    _init_repo(tmp_path)
+    _commit_file(
+        tmp_path,
+        "a.py",
+        "def validate(x):\n    if not x:\n        raise ValueError('bad')\n    return x\n\n\ndef other():\n    return 1\n",
+    )
+    _commit_file(tmp_path, "b.py", "def helper():\n    return 1\n")
+
+    files = {
+        # validate() deleted entirely -> pure removal, no added touched lines.
+        "a.py": "def other():\n    return 1\n",
+        # b.py gains a function -> has added touched lines.
+        "b.py": "def helper():\n    return 1\n\n\ndef added():\n    return 2\n",
+    }
+
+    result = _resolve_change_surface_for_review(files, tmp_path)
+
+    assert result is None
+
+
+def test_code_review_deletion_only_file_falls_back_to_files(tmp_path: Path) -> None:
+    """End-to-end: a mixed submission where one file's only change is a
+    deletion must submit ``files=`` (every path), never a surface that omits
+    the deletion."""
+    config = _build_config()
+    _init_repo(tmp_path)
+    _commit_file(
+        tmp_path,
+        "a.py",
+        "def validate(x):\n    if not x:\n        raise ValueError('bad')\n    return x\n\n\ndef other():\n    return 1\n",
+    )
+    _commit_file(tmp_path, "b.py", "def helper():\n    return 1\n")
+
+    files = {
+        "a.py": "def other():\n    return 1\n",
+        "b.py": "def helper():\n    return 1\n\n\ndef added():\n    return 2\n",
+    }
+
+    cr_agent = MagicMock()
+    cr_agent.run.return_value = MagicMock(issues=[])
+
+    run_microtask_review(
+        config=config,
+        llm=DummyLLMClient(),
+        task=_task(),
+        microtask=_microtask(),
+        repo_path=tmp_path,
+        files=files,
+        code_review_agent=cr_agent,
+        language="python",
+        **_noop_runners(),
+    )
+
+    assert cr_agent.run.called
+    cr_input = cr_agent.run.call_args.args[0]
+    assert cr_input.files == files
+    assert cr_input.pre_numbered is False
+    assert cr_input.code == ""
+
+
+# ---------------------------------------------------------------------------
+# _patch_has_any_removal
+# ---------------------------------------------------------------------------
+
+
+def test_patch_has_any_removal_true_for_pure_deletion_hunk() -> None:
+    patch = "--- a/a.py\n+++ b/a.py\n@@ -1,3 +1,0 @@\n-def validate():\n-    pass\n-\n"
+    assert _patch_has_any_removal(patch) is True
+
+
+def test_patch_has_any_removal_false_for_pure_addition_hunk() -> None:
+    patch = "--- a/a.py\n+++ b/a.py\n@@ -1,0 +1,2 @@\n+def added():\n+    return 1\n"
+    assert _patch_has_any_removal(patch) is False
+
+
+def test_patch_has_any_removal_true_for_same_spot_modify_hunk() -> None:
+    """Even a same-spot modification (a removed line immediately followed by
+    an added replacement) counts -- there is no general, language-agnostic
+    way to prove the removed line's information survives elsewhere in the
+    rendered surface, so any deletion at all is treated as unrepresented."""
+    patch = "--- a/a.py\n+++ b/a.py\n@@ -1,2 +1,2 @@\n-def old_name():\n+def new_name():\n     return 1\n"
+    assert _patch_has_any_removal(patch) is True
+
+
+def test_patch_has_any_removal_true_when_only_one_of_several_hunks_has_a_deletion() -> None:
+    """A deletion buried in a later hunk, behind an earlier addition-only
+    hunk, must still be found."""
+    patch = (
+        "--- a/a.py\n+++ b/a.py\n"
+        "@@ -1,0 +1,2 @@\n+def added():\n+    return 1\n"
+        "@@ -10,2 +12,0 @@\n-def removed():\n-    pass\n"
+    )
+    assert _patch_has_any_removal(patch) is True
+
+
+def test_patch_has_any_removal_blank_patch_returns_false() -> None:
+    assert _patch_has_any_removal("") is False
+
+
+def test_patch_has_any_removal_no_hunks_returns_false() -> None:
+    assert _patch_has_any_removal("--- a/a.py\n+++ b/a.py\n") is False
+
+
+# ---------------------------------------------------------------------------
+# Mixed hunk with an unrepresented deletion, and a new blank-content path
+# treated as unchanged -- GitHub issue #5400 follow-up (round 2)
+# ---------------------------------------------------------------------------
+
+# validate() is deleted immediately before other(), and other()'s body is
+# also modified -- close enough that difflib merges the deletion and the
+# modification into ONE hunk. Any deletion at all now falls back (see
+# _patch_has_any_removal), so this is caught regardless of hunk merging.
+_MIXED_SINGLE_HUNK_OLD = (
+    "def validate(x):\n"
+    "    if not x:\n"
+    "        raise ValueError('bad')\n"
+    "    return x\n"
+    "\n"
+    "def other():\n"
+    "    return 1\n"
+)
+_MIXED_SINGLE_HUNK_NEW = "def other():\n    return 2\n"
+
+
+def test_resolve_change_surface_for_review_mixed_hunk_unrepresented_deletion_returns_none(
+    tmp_path: Path,
+) -> None:
+    """A path present in ``surface.blocks`` (its hunk has an added line) whose
+    same hunk also deletes an unrelated function must not be treated as
+    covered."""
+    _init_repo(tmp_path)
+    _commit_file(tmp_path, "a.py", _MIXED_SINGLE_HUNK_OLD)
+
+    result = _resolve_change_surface_for_review({"a.py": _MIXED_SINGLE_HUNK_NEW}, tmp_path)
+
+    assert result is None
+
+
+def test_code_review_mixed_hunk_unrepresented_deletion_falls_back_to_files(
+    tmp_path: Path,
+) -> None:
+    """End-to-end: the same mixed-single-hunk scenario must submit ``files=``
+    rather than a surface whose rendered body omits the deletion."""
+    config = _build_config()
+    _init_repo(tmp_path)
+    _commit_file(tmp_path, "a.py", _MIXED_SINGLE_HUNK_OLD)
+    files = {"a.py": _MIXED_SINGLE_HUNK_NEW}
+
+    cr_agent = MagicMock()
+    cr_agent.run.return_value = MagicMock(issues=[])
+
+    run_microtask_review(
+        config=config,
+        llm=DummyLLMClient(),
+        task=_task(),
+        microtask=_microtask(),
+        repo_path=tmp_path,
+        files=files,
+        code_review_agent=cr_agent,
+        language="python",
+        **_noop_runners(),
+    )
+
+    assert cr_agent.run.called
+    cr_input = cr_agent.run.call_args.args[0]
+    assert cr_input.files == files
+    assert cr_input.pre_numbered is False
+    assert cr_input.code == ""
+
+
+# ---------------------------------------------------------------------------
+# Same-spot construct swap (deletion+addition pair whose deleted symbol's
+# identity never reappears) -- GitHub issue #5400 follow-up (round 3);
+# subsumed by _patch_has_any_removal's blanket "any deletion" rule (round 4),
+# kept as regression coverage for this specific real-world scenario.
+# ---------------------------------------------------------------------------
+
+_CONSTRUCT_SWAP_OLD = (
+    "def validate(x):\n"
+    "    if not x:\n"
+    "        raise ValueError('bad')\n"
+    "    return x\n"
+    "\n"
+    "def other():\n"
+    "    return validate(1)\n"
+)
+_CONSTRUCT_SWAP_NEW = "def unrelated():\n    return 1\n\ndef other():\n    return validate(1)\n"
+
+
+def test_resolve_change_surface_for_review_construct_swap_returns_none(
+    tmp_path: Path,
+) -> None:
+    """A deleted function (``validate``) immediately replaced by an unrelated one
+    (``unrelated``) is a same-spot deletion+addition pair -- the deleted
+    symbol, still called by the unchanged ``other()``, would be invisible in
+    the rendered surface. Must fall back rather than hide it."""
+    _init_repo(tmp_path)
+    _commit_file(tmp_path, "a.py", _CONSTRUCT_SWAP_OLD)
+
+    result = _resolve_change_surface_for_review({"a.py": _CONSTRUCT_SWAP_NEW}, tmp_path)
+
+    assert result is None
+
+
+def test_code_review_construct_swap_falls_back_to_files(tmp_path: Path) -> None:
+    """End-to-end: the same construct-swap scenario must submit ``files=``
+    rather than a surface that omits the removed function's identity."""
+    config = _build_config()
+    _init_repo(tmp_path)
+    _commit_file(tmp_path, "a.py", _CONSTRUCT_SWAP_OLD)
+    files = {"a.py": _CONSTRUCT_SWAP_NEW}
+
+    cr_agent = MagicMock()
+    cr_agent.run.return_value = MagicMock(issues=[])
+
+    run_microtask_review(
+        config=config,
+        llm=DummyLLMClient(),
+        task=_task(),
+        microtask=_microtask(),
+        repo_path=tmp_path,
+        files=files,
+        code_review_agent=cr_agent,
+        language="python",
+        **_noop_runners(),
+    )
+
+    assert cr_agent.run.called
+    cr_input = cr_agent.run.call_args.args[0]
+    assert cr_input.files == files
+    assert cr_input.pre_numbered is False
+    assert cr_input.code == ""
+
+
+_BLANK_PATH_SCENARIO_OLD_A = "def f():\n    return 1\n"
+# Purely additive (no deleted line) so this isolates the blank-path gap --
+# without this, _patch_has_any_removal would already reject a.py's own diff
+# for an unrelated reason, and the test would pass without actually
+# exercising the blank-path coverage check at all.
+_BLANK_PATH_SCENARIO_NEW_A = _BLANK_PATH_SCENARIO_OLD_A + "\n\ndef g():\n    return 2\n"
+
+
+def test_resolve_change_surface_for_review_new_blank_path_not_treated_as_unchanged(
+    tmp_path: Path,
+) -> None:
+    """A brand-new path (never in the resolved base) whose new content happens
+    to be blank -- e.g. a newly added ``.gitkeep`` marker -- must not be
+    silently treated as "unchanged": it can never appear in the built
+    surface (blank content is always omitted), so its presence must force
+    the fallback rather than being skipped by an ``old.get(path, "") ==
+    new_text`` coincidence. ``a.py``'s own change is purely additive (no
+    deletion) so it alone would otherwise produce a valid surface -- isolating
+    the blank-path gap as the sole reason for the fallback."""
+    _init_repo(tmp_path)
+    _commit_file(tmp_path, "a.py", _BLANK_PATH_SCENARIO_OLD_A)
+    files = {
+        "a.py": _BLANK_PATH_SCENARIO_NEW_A,
+        ".gitkeep": "",
+    }
+
+    result = _resolve_change_surface_for_review(files, tmp_path)
+
+    assert result is None
+
+
+def test_code_review_new_blank_path_falls_back_to_files(tmp_path: Path) -> None:
+    """End-to-end: a new blank-content path alongside a real, purely-additive
+    change must submit ``files=`` rather than a surface that silently
+    excludes it."""
+    config = _build_config()
+    _init_repo(tmp_path)
+    _commit_file(tmp_path, "a.py", _BLANK_PATH_SCENARIO_OLD_A)
+    files = {
+        "a.py": _BLANK_PATH_SCENARIO_NEW_A,
+        ".gitkeep": "",
+    }
+
+    cr_agent = MagicMock()
+    cr_agent.run.return_value = MagicMock(issues=[])
+
+    run_microtask_review(
+        config=config,
+        llm=DummyLLMClient(),
+        task=_task(),
+        microtask=_microtask(),
+        repo_path=tmp_path,
+        files=files,
+        code_review_agent=cr_agent,
+        language="python",
+        **_noop_runners(),
+    )
+
+    assert cr_agent.run.called
+    cr_input = cr_agent.run.call_args.args[0]
+    assert cr_input.files == files
+    assert cr_input.pre_numbered is False
+    assert cr_input.code == ""
+
+
+def test_code_review_full_content_scoped_to_surface_paths_not_all_files(
+    tmp_path: Path,
+) -> None:
+    """When ``files`` includes a path this task left byte-identical to
+    ``HEAD`` alongside a genuinely (purely-additively) changed one, the
+    identical path is correctly omitted from ``surface.blocks`` -- and
+    ``full_content`` on the built ``CodeReviewInput`` must match that same
+    scope, not include the unchanged path, or the coordinator's whole-codebase
+    passes would analyze code this task never touched as if it had."""
+    config = _build_config()
+    _init_repo(tmp_path)
+    _commit_file(tmp_path, "changed.py", "def f():\n    return 1\n")
+    _commit_file(tmp_path, "untouched.py", "def g():\n    return 2\n")
+    files = {
+        "changed.py": "def f():\n    return 1\n\n\ndef added():\n    return 3\n",
+        "untouched.py": "def g():\n    return 2\n",  # byte-identical to HEAD
+    }
+
+    cr_agent = MagicMock()
+    cr_agent.run.return_value = MagicMock(issues=[])
+
+    run_microtask_review(
+        config=config,
+        llm=DummyLLMClient(),
+        task=_task(),
+        microtask=_microtask(),
+        repo_path=tmp_path,
+        files=files,
+        code_review_agent=cr_agent,
+        language="python",
+        **_noop_runners(),
+    )
+
+    assert cr_agent.run.called
+    cr_input = cr_agent.run.call_args.args[0]
+    assert cr_input.pre_numbered is True
+    assert cr_input.full_content == {"changed.py": files["changed.py"]}
+
+
+# ---------------------------------------------------------------------------
+# Within-file removal-only hunk (a covered path whose rendered block still
+# omits a distant deletion), GitHub issue #5400 follow-up
+# ---------------------------------------------------------------------------
+
+# Old/new content for a single file with two well-separated hunks: an
+# early pure-deletion hunk (removes validate()) and a later pure-addition
+# hunk (adds added()). Difflib keeps these as two distinct hunks because the
+# filler lines between them exceed the default 3-line context window.
+_MIXED_HUNK_OLD = (
+    "def validate(x):\n"
+    "    if not x:\n"
+    "        raise ValueError('bad')\n"
+    "    return x\n"
+    "\n"
+    "\n"
+    "def filler1(): return 1\n"
+    "def filler2(): return 2\n"
+    "def filler3(): return 3\n"
+    "def filler4(): return 4\n"
+    "def filler5(): return 5\n"
+    "def filler6(): return 6\n"
+    "def filler7(): return 7\n"
+    "def filler8(): return 8\n"
+    "\n"
+    "def other():\n"
+    "    return 1\n"
+    "\n"
+)
+_MIXED_HUNK_NEW = (
+    "def filler1(): return 1\n"
+    "def filler2(): return 2\n"
+    "def filler3(): return 3\n"
+    "def filler4(): return 4\n"
+    "def filler5(): return 5\n"
+    "def filler6(): return 6\n"
+    "def filler7(): return 7\n"
+    "def filler8(): return 8\n"
+    "\n"
+    "def other():\n"
+    "    return 1\n"
+    "\n"
+    "def added():\n"
+    "    return 2\n"
+    "\n"
+)
+
+
+def test_resolve_change_surface_for_review_within_file_removal_only_hunk_returns_none(
+    tmp_path: Path,
+) -> None:
+    """A path present in ``surface.blocks`` (it has an added-only hunk) but
+    whose distant removal-only hunk (a deleted function) is nowhere in the
+    rendered body must not be treated as covered."""
+    _init_repo(tmp_path)
+    _commit_file(tmp_path, "a.py", _MIXED_HUNK_OLD)
+
+    result = _resolve_change_surface_for_review({"a.py": _MIXED_HUNK_NEW}, tmp_path)
+
+    assert result is None
+
+
+def test_code_review_within_file_removal_only_hunk_falls_back_to_files(
+    tmp_path: Path,
+) -> None:
+    """End-to-end: the same within-file scenario must submit ``files=``
+    rather than a surface whose rendered body omits the deletion."""
+    config = _build_config()
+    _init_repo(tmp_path)
+    _commit_file(tmp_path, "a.py", _MIXED_HUNK_OLD)
+    files = {"a.py": _MIXED_HUNK_NEW}
+
+    cr_agent = MagicMock()
+    cr_agent.run.return_value = MagicMock(issues=[])
+
+    run_microtask_review(
+        config=config,
+        llm=DummyLLMClient(),
+        task=_task(),
+        microtask=_microtask(),
+        repo_path=tmp_path,
+        files=files,
+        code_review_agent=cr_agent,
+        language="python",
+        **_noop_runners(),
+    )
+
+    assert cr_agent.run.called
+    cr_input = cr_agent.run.call_args.args[0]
+    assert cr_input.files == files
+    assert cr_input.pre_numbered is False
+    assert cr_input.code == ""

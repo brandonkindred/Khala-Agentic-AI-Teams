@@ -647,6 +647,45 @@ def test_finds_and_returns_new_findings_with_pre_numbered_input() -> None:
     assert result[0].line == 4242  # not nulled by the 2-physical-line hunk's length
 
 
+def test_finds_and_returns_new_findings_bounds_checks_when_full_content_supplied() -> None:
+    """When ``full_content`` covers the pre-numbered submission, the citation
+    IS bounds-checked against the real full body (not trusted as-is): the
+    same out-of-range line that survives under bare ``pre_numbered=True`` is
+    now nulled, proving the effective flag (``pre_numbered and not
+    full_content_complete``), not the raw ``input_data.pre_numbered``, reaches
+    ``_run_pass``/``_validate_findings`` here too -- matching the fix already
+    applied to the side-effect and merged passes."""
+
+    class _FindingsClient(DummyLLMClient):
+        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+            if _ARCH_PASS_ANCHOR in prompt:
+                return {
+                    "findings": [
+                        {
+                            "severity": "high",
+                            "category": "architecture",
+                            "file_path": "app/main.py",
+                            "line": 4242,
+                            "description": "bypasses the repository layer",
+                        }
+                    ]
+                }
+            return {"approved": True, "issues": [], "summary": "ok", "spec_compliance_notes": ""}
+
+    result = find_architecture_and_redundancy_issues(
+        _FindingsClient(),
+        CodeReviewInput(
+            files={"app/main.py": "4242: def bar():\n4243:     return 1\n"},
+            task_description="wire up bar",
+            architecture=_arch(),
+            pre_numbered=True,
+            full_content={"app/main.py": "def bar():\n    return 1\n"},
+        ),
+    )
+    assert len(result) == 1
+    assert result[0].line is None  # nulled: real file is 2 lines, 4242 is out of range
+
+
 # --------------------------------------------------------------------------- coordinator integration
 
 

@@ -63,6 +63,7 @@ from .models import CodeReviewInput, CodeReviewIssue, coerce_line, is_no_op_sugg
 from .profiles import ReviewProfile
 from .prompts import ARCHITECTURE_CONSISTENCY_PROMPT
 from .repo_reader import RepoReader
+from .side_effect_impact_pass import _effective_pre_numbered
 
 logger = logging.getLogger(__name__)
 
@@ -467,7 +468,9 @@ def _run_pass(
     data = json.loads(raw)
     findings = _parse_findings(data)
     if findings:
-        findings = _validate_findings(index, findings, pre_numbered=input_data.pre_numbered)
+        findings = _validate_findings(
+            index, findings, pre_numbered=_effective_pre_numbered(input_data, index)
+        )
         logger.info(
             "ArchitectureConsistencyPass: found %s new finding(s) (architecture/refactor)",
             len(findings),
