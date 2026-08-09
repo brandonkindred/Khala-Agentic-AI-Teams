@@ -571,12 +571,61 @@ def test_read_function_tool_rejects_bool_and_non_str_non_int() -> None:
         assert "line number or name" in msg
 
 
+def test_read_lines_missing_path_errors() -> None:
+    """A path that resolves to nothing (no repo_reader) returns a not-found error."""
+    idx = CodebaseIndex(files={"app/main.py": "a\nb\n"})
+    msg = idx.read_lines("app/missing.py", 1, 2)
+    assert msg.startswith("Error:")
+    assert "file not found: app/missing.py" in msg
+
+
+def test_read_lines_at_max_span_succeeds() -> None:
+    """A span exactly equal to _READ_LINES_MAX_SPAN succeeds (only span+1 errors)."""
+    body = "\n".join(f"line-{i}" for i in range(1, _READ_LINES_MAX_SPAN + 2)) + "\n"
+    idx = CodebaseIndex(files={"big.py": body})
+    result = idx.read_lines("big.py", 1, _READ_LINES_MAX_SPAN)
+    assert not result.startswith("Error:")
+    assert result.startswith(
+        f"big.py lines 1–{_READ_LINES_MAX_SPAN} ({_READ_LINES_MAX_SPAN} lines):"
+    )
+
+
+def test_read_function_missing_path_errors() -> None:
+    """A path that resolves to nothing (no repo_reader) returns a not-found error."""
+    idx = CodebaseIndex(files={"app/mod.py": "def f():\n    return 1\n"})
+    msg = idx.read_function("app/missing.py", 1)
+    assert msg.startswith("Error:")
+    assert "file not found: app/missing.py" in msg
+
+
+def test_read_function_by_name_missing_path_errors() -> None:
+    """A path that resolves to nothing (no repo_reader) returns a not-found error."""
+    idx = CodebaseIndex(files={"app/mod.py": "def f():\n    return 1\n"})
+    msg = idx.read_function_by_name("app/missing.py", "f")
+    assert msg.startswith("Error:")
+    assert "file not found: app/missing.py" in msg
+
+
 def test_false_positive_prompt_documents_read_function() -> None:
     """Verifier system prompt must advertise the unified read_function tool."""
     from code_review_agent.prompts import FALSE_POSITIVE_VERIFY_PROMPT
 
     assert "read_function(path, name_or_line)" in FALSE_POSITIVE_VERIFY_PROMPT
     assert "read_lines(path, start, end)" in FALSE_POSITIVE_VERIFY_PROMPT
+
+
+def test_false_positive_prompt_prefers_scoped_reads_over_whole_file() -> None:
+    """The verifier prompt must default to find_references -> read_function/read_lines,
+    not "read the entire file / never use partial ranges"."""
+    from code_review_agent.prompts import FALSE_POSITIVE_VERIFY_PROMPT
+
+    lower = FALSE_POSITIVE_VERIFY_PROMPT.lower()
+    assert "do not examine the file in a series of partial ranges" not in lower
+    assert "read_file always returns the complete file" not in lower
+    assert "find_references" in FALSE_POSITIVE_VERIFY_PROMPT
+    find_references_idx = FALSE_POSITIVE_VERIFY_PROMPT.index("find_references")
+    non_default_idx = FALSE_POSITIVE_VERIFY_PROMPT.index("Non-default")
+    assert find_references_idx < non_default_idx
 
 
 def test_list_files_appends_existing_codebase_only_when_present() -> None:
