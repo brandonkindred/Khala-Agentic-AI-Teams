@@ -1916,6 +1916,38 @@ def test_filter_removes_confirmed_false_positive() -> None:
     assert out == [keep]
 
 
+def test_verify_group_disables_strands_tool_result_truncation(monkeypatch) -> None:
+    """_verify_group must construct its Agent with
+    SlidingWindowConversationManager(should_truncate_results=False) so
+    Strands' default overflow-recovery path -- silently truncating an
+    oversized toolResult in place while leaving status="success" -- can
+    never run for this agent. That is what lets
+    _agent_read_the_cited_file trust status=="success" alone: there is no
+    partially-truncated-but-successful shape left for it to have to detect
+    and distinguish from a real, complete read (including one that merely
+    mentions truncation-like text as incidental content)."""
+    import code_review_agent.false_positive_filter as fpf
+    from strands.agent.conversation_manager import SlidingWindowConversationManager
+
+    captured: Dict[str, Any] = {}
+    real_agent_cls = fpf.Agent
+
+    class _CapturingAgent(real_agent_cls):
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            captured.update(kwargs)
+            super().__init__(*args, **kwargs)
+
+    monkeypatch.setattr(fpf, "Agent", _CapturingAgent)
+
+    keep = _issue(description="real bug", line=5)
+    stub = _VerdictStub(verdicts=[{"index": 0, "is_real_issue": True, "confidence": "high"}])
+    filter_false_positives(stub, _input(), [keep])
+
+    manager = captured.get("conversation_manager")
+    assert isinstance(manager, SlidingWindowConversationManager)
+    assert manager.should_truncate_results is False
+
+
 def test_filter_drop_log_truncates_description(caplog) -> None:
     """Drop INFO logs truncate oversized description and reasoning fields."""
     keep = _issue(description="real", line=5)
@@ -2416,58 +2448,19 @@ def test_agent_read_the_cited_file_true_for_successful_read_file() -> None:
     assert _agent_read_the_cited_file(agent, idx, "app/main.py") is True
 
 
-def test_agent_read_the_cited_file_false_when_strands_truncated_the_result() -> None:
-    """Strands' default SlidingWindowConversationManager recovers from a
-    context-window overflow by truncating an oversized toolResult in place
-    (keeping only the first/last 200 chars, splicing in a
-    "... [truncated: N chars removed] ..." marker) while explicitly leaving
-    status "success". A toolResult carrying that marker is NOT grounded
-    evidence, even though status says success -- the model never actually
-    saw the file's real, full content, just a ~400-char sliver of it."""
-    idx = CodebaseIndex(files={"app/main.py": "x" * 100_000})
-    truncated_text = (
-        "x" * 200 + "...\n\n... [truncated: 99600 chars removed] ...\n\n..." + "x" * 200
-    )
-    agent = _fake_agent(
-        [
-            _tool_use_message("assistant", "t1", "read_file", path="app/main.py"),
-            _tool_result_message("t1", truncated_text, status="success"),
-        ]
-    )
-    assert _agent_read_the_cited_file(agent, idx, "app/main.py") is False
-
-
-def test_agent_read_the_cited_file_true_when_content_is_large_but_untruncated() -> None:
-    """The mirror of the above: large content is fine as long as Strands
-    never actually truncated it (no marker present) -- the check is about
-    detecting truncation specifically, not about penalizing file size."""
+def test_agent_read_the_cited_file_true_when_content_is_large() -> None:
+    """Large content grounds normally -- this function no longer inspects
+    the result text for a truncation signature at all. Instead, the caller
+    (_verify_group) configures the Agent's conversation manager with
+    should_truncate_results=False, so Strands' in-place tool-result
+    truncation can never run for this agent in the first place; there is no
+    partially-truncated-but-status-success shape left for this function to
+    have to distinguish from a real, complete read."""
     idx = CodebaseIndex(files={"app/main.py": "x" * 100_000})
     agent = _fake_agent(
         [
             _tool_use_message("assistant", "t1", "read_file", path="app/main.py"),
             _tool_result_message("t1", "x" * 100_000, status="success"),
-        ]
-    )
-    assert _agent_read_the_cited_file(agent, idx, "app/main.py") is True
-
-
-def test_agent_read_the_cited_file_true_when_content_merely_contains_the_marker_text() -> None:
-    """Real, complete file content that happens to contain the literal phrase
-    "... [truncated:" as incidental prose (e.g. this very module's own
-    comments describing the truncation check) must NOT be mistaken for an
-    actual Strands-truncated read. The check matches the exact structural
-    shape Strands' recovery path produces (200 chars, the literal separator,
-    200 more chars, nothing else) -- not a bare substring search -- so an
-    untruncated read whose content merely mentions the phrase mid-file, or
-    even at the very boundary, still grounds normally."""
-    content = (
-        "def foo():\n    # explains the '... [truncated: N chars removed] ...' marker\n    pass\n"
-    )
-    idx = CodebaseIndex(files={"app/main.py": content})
-    agent = _fake_agent(
-        [
-            _tool_use_message("assistant", "t1", "read_file", path="app/main.py"),
-            _tool_result_message("t1", content, status="success"),
         ]
     )
     assert _agent_read_the_cited_file(agent, idx, "app/main.py") is True

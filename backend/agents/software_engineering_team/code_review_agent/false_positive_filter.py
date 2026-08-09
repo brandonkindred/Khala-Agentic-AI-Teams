@@ -58,6 +58,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from strands import Agent, tool
+from strands.agent.conversation_manager import SlidingWindowConversationManager
 from strands.models.model import Model as _StrandsModel
 
 from llm_service import LLMClient
@@ -1706,64 +1707,6 @@ def _build_group_prompt(
     return "\n".join(parts)
 
 
-# Strands' default SlidingWindowConversationManager recovers from a
-# context-window overflow by truncating an oversized toolResult in place
-# (keeping only the first/last 200 chars) rather than failing the call, and
-# explicitly leaves toolResult.status as "success"
-# (sliding_window_conversation_manager.py, _truncate_tool_results: "The tool
-# result status is not changed."). The regex below matches the *exact*
-# structural shape that recovery path produces -- not a bare substring of its
-# marker text -- so that source content which merely contains the marker as
-# incidental text (e.g. this very module's own constant/comments) is never
-# mistaken for an actual truncated read; see _agent_read_the_cited_file for
-# the full rationale.
-_PRESERVE_CHARS = 200  # mirrors sliding_window_conversation_manager.py's _PRESERVE_CHARS
-_STRANDS_TRUNCATION_RE = re.compile(
-    r"\A.{"
-    + str(_PRESERVE_CHARS)
-    + r"}\.\.\.\n\n\.\.\. \[truncated: \d+ chars removed\] \.\.\.\n\n\.\.\..{"
-    + str(_PRESERVE_CHARS)
-    + r"}\Z",
-    re.DOTALL,
-)
-
-
-def _tool_result_text(tool_result: Dict[str, Any]) -> str:
-    """Flatten a Strands toolResult block's content into text.
-
-    Preconditions: ``tool_result`` is a toolResult block's inner dict (may be malformed).
-    Postconditions: returns the joined text of any "text" content blocks
-        (empty string when there is none). Never raises.
-    """
-    try:
-        return "\n".join(
-            str(block["text"])
-            for block in (tool_result.get("content") or [])
-            if isinstance(block, dict) and "text" in block
-        )
-    except Exception:
-        return ""
-
-
-def _is_strands_truncated_result(text: str) -> bool:
-    """Whether ``text`` has the exact shape Strands' recovery path produces.
-
-    ``_STRANDS_TRUNCATION_RE`` anchors both ends of ``text`` and requires
-    precisely ``_PRESERVE_CHARS`` characters, then the literal separator (with
-    a digit run for the removed-count), then precisely ``_PRESERVE_CHARS``
-    more characters, with nothing else in the string. Real source text
-    containing the marker as incidental prose (e.g. a comment describing this
-    very check) does not additionally happen to sit at exactly this offset
-    with nothing surrounding it, so this is a reliable structural signal
-    rather than the ambiguous substring check it replaces.
-
-    Preconditions: none (``text`` may be any string, including empty).
-    Postconditions: returns True iff the whole string matches the recovery
-        path's exact output shape. Never raises.
-    """
-    return bool(_STRANDS_TRUNCATION_RE.match(text))
-
-
 def _agent_read_the_cited_file(agent: Agent, index: CodebaseIndex, file_path: str) -> bool:
     """Whether ``agent``'s just-finished run obtained ``file_path``'s full
     content via a successful ``read_file`` call.
@@ -1799,26 +1742,27 @@ def _agent_read_the_cited_file(agent: Agent, index: CodebaseIndex, file_path: st
     model's tool call but happens to succeed on a later, separate check. Only
     the specific invocation's own recorded result counts.
 
-    One text check remains, on top of ``status``: Strands' default
-    ``SlidingWindowConversationManager`` recovers from a context-window
-    overflow by truncating an oversized toolResult in place -- keeping only
-    the first/last ``_PRESERVE_CHARS`` (200) chars and splicing in a
-    distinctive ``"... [truncated: N chars removed] ..."`` separator --
-    while explicitly leaving ``status`` as ``"success"``
-    (``sliding_window_conversation_manager.py``, ``_truncate_tool_results``:
-    "The tool result status is not changed."). Without checking for that,
-    a huge cited file could overflow context, get silently truncated to
-    ~400 chars by Strands' own recovery, and still register as a grounded
-    "success" read here -- letting a drop through on a sliver of the file.
-    The check (``_is_strands_truncated_result``) matches the *exact
-    structural shape* of that recovery path's output (200 chars, the literal
-    separator, 200 more chars, nothing else -- anchored both ends), not a
-    bare substring search for the separator text: a bare substring check
-    would misfire on real source content that happens to contain that
-    phrase incidentally (this very module's own comments/constant included),
-    permanently blocking any drop for findings that cite this file. Requiring
-    the full structural shape keeps the check reliable without that
-    self-referential false positive.
+    No separate truncation check is needed on top of ``status``: Strands'
+    default ``SlidingWindowConversationManager`` would otherwise recover from
+    a context-window overflow by truncating an oversized toolResult in place
+    (keeping only the first/last 200 chars) while explicitly leaving
+    ``status`` as ``"success"`` (``sliding_window_conversation_manager.py``,
+    ``_truncate_tool_results``: "The tool result status is not changed.") --
+    which would let a drop through on a sliver of the file. Rather than
+    trying to detect that after the fact (any text-based signal, however
+    precise, risks either missing a real truncation or misfiring on
+    legitimate content that happens to share its shape -- e.g. a fixture file
+    whose exact bytes are a snapshot of that format), ``_verify_group``
+    constructs its ``Agent`` with
+    ``SlidingWindowConversationManager(should_truncate_results=False)``, so
+    that recovery path can never run for this agent: on overflow it falls
+    straight to trimming whole messages instead of truncating a tool result
+    in place. If the cited file's read survives trimming, its content is
+    always the complete, untouched original; if it doesn't survive, the
+    correlation search below simply finds no matching toolUse/toolResult
+    pair and this function returns ``False`` (fail-safe, same as any other
+    "never grounded" case). Either way there is no code path left that could
+    accept a partial read as if it were complete.
 
     Correlating a toolUse with its toolResult is done by matching
     ``toolUseId``, but scoped to the very next message only (never a global
@@ -1853,14 +1797,12 @@ def _agent_read_the_cited_file(agent: Agent, index: CodebaseIndex, file_path: st
           ``index.resolve_path``, covering a near-miss the model typed instead
           of the exact quoted path) has a toolResult with a matching
           ``toolUseId`` in the message at index ``i + 1``, with
-          ``status == "success"`` AND whose text does not structurally match
-          Strands' recovery-path truncation shape (see
-          ``_is_strands_truncated_result``). A genuinely empty result (a
-          real zero-byte file, e.g. an unchanged ``__init__.py``) still
-          counts. Never raises: a malformed/empty message list, or a toolUse
-          with no following message or no untruncated matching success
-          result, yields ``False`` (fail-safe: treated as "not grounded", so
-          the caller keeps rather than drops on ambiguity).
+          ``status == "success"``. A genuinely empty result (a real
+          zero-byte file, e.g. an unchanged ``__init__.py``) still counts.
+          Never raises: a malformed/empty message list, or a toolUse with no
+          following message or no matching success result, yields ``False``
+          (fail-safe: treated as "not grounded", so the caller keeps rather
+          than drops on ambiguity).
     """
     try:
         messages = agent.messages
@@ -1886,8 +1828,6 @@ def _agent_read_the_cited_file(agent: Agent, index: CodebaseIndex, file_path: st
                     if not isinstance(result, dict) or result.get("toolUseId") != tool_use_id:
                         continue
                     if result.get("status") != "success":
-                        continue
-                    if _is_strands_truncated_result(_tool_result_text(result)):
                         continue
                     return True
         return False
@@ -1928,6 +1868,10 @@ def _verify_group(
         model=model,
         system_prompt=FALSE_POSITIVE_VERIFY_PROMPT,
         tools=_build_tools(index),
+        # Disabled so a large cited file can never be silently truncated to a
+        # sliver in place (with status left as "success") and mistaken for a
+        # complete read; see _agent_read_the_cited_file for the full rationale.
+        conversation_manager=SlidingWindowConversationManager(should_truncate_results=False),
     )
     raw = str(agent(prompt)).strip()
     data = extract_json_from_response(raw)

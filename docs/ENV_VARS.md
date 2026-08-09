@@ -1037,18 +1037,20 @@ original inlined design had (the whole cited file was visible before any
 drop in that batch was accepted). A narrow `read_lines`/`read_function`
 slice, a successful read of only a *related* file, calling only
 `list_files()` (no code content), or a `read_file` call that errors
-(unknown/ambiguous path), does not count as grounded. Nor does a
-`read_file` call Strands' own default conversation manager silently
-truncated after a context-window overflow (kept only the first/last 200
-chars, spliced with a `"... [truncated: ...]"` marker) while still marking
-it `status="success"` — the exact structural shape of that truncated output
-(200 chars, the literal separator, 200 more chars, nothing else) is detected
-and rejected too, so an oversized file that overflows context can't slip
-through as if it had been read in full. The check is structural rather than
-a bare substring search specifically so that real file content which merely
-*mentions* that phrase (this doc's own text included) is never mistaken for
-an actual truncated read. A false-positive verdict from a run that never met
-this bar is discarded (the finding is kept) rather than trusted.
+(unknown/ambiguous path), does not count as grounded. The verification
+`Agent` is also constructed with
+`SlidingWindowConversationManager(should_truncate_results=False)`, so
+Strands' own default conversation manager can never silently truncate an
+oversized `read_file` result in place (keeping only the first/last 200
+chars) while still marking it `status="success"` on a context-window
+overflow — that recovery path is disabled outright rather than trying to
+detect its output after the fact, since any text-based detection risks
+either missing a real truncation or misfiring on legitimate content that
+happens to share its shape. On overflow the conversation is trimmed instead;
+if the cited file's read survives, its content is always the complete
+original, and if it doesn't survive, the grounding check simply finds no
+matching read and fails safe. A false-positive verdict from a run that never
+met this bar is discarded (the finding is kept) rather than trusted.
 
 When the review is invoked with a repository reader (the GitHub PR-review path
 fetches whole files at the PR head and supplies a reader; the software-engineering
