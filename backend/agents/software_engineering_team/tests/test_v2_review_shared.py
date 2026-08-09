@@ -36,8 +36,7 @@ from software_engineering_team.shared.v2_review import (
     ReviewConfig,
     _lint_passed,
     _maybe_build_change_surface_from_pairs,
-    _patch_has_unrepresented_removal,
-    _removes_a_symbol_that_never_reappears,
+    _patch_has_any_removal,
     _resolve_change_surface_for_review,
     run_microtask_review,
     run_review,
@@ -838,12 +837,13 @@ def test_code_review_input_carries_repo_root_for_durable_reader(tmp_path: Path) 
 
 
 def test_run_review_old_contents_meaningful_diff_uses_surface_code(tmp_path: Path) -> None:
-    """When ``old_contents`` yields a meaningful diff, the external agent's
+    """When ``old_contents`` yields a meaningful, purely-additive diff (no
+    deleted line -- see ``_patch_has_any_removal``), the external agent's
     ``CodeReviewInput`` carries ``code=<surface>``/``pre_numbered=True`` instead of
     ``files=``."""
     config = _build_config()
-    files = {"a.py": "def f():\n    return 1\n"}
-    old_contents = {"a.py": "def f():\n    return 0\n"}
+    old_contents = {"a.py": "def f():\n    return 1\n"}
+    files = {"a.py": old_contents["a.py"] + "\n\ndef g():\n    return 2\n"}
 
     cr_agent = MagicMock()
     cr_agent.run.return_value = MagicMock(issues=[])
@@ -932,10 +932,12 @@ def test_run_review_old_contents_identical_to_files_keeps_files_behavior(tmp_pat
 
 def test_microtask_old_contents_meaningful_diff_uses_surface_code(tmp_path: Path) -> None:
     """``run_microtask_review`` threads ``old_contents`` through to the same
-    ``_code_review_step`` surface wiring as ``run_review``."""
+    ``_code_review_step`` surface wiring as ``run_review``. Purely additive (no
+    deleted line -- see ``_patch_has_any_removal``), same rationale as
+    ``test_run_review_old_contents_meaningful_diff_uses_surface_code``."""
     config = _build_config()
-    files = {"a.py": "def f():\n    return 1\n"}
-    old_contents = {"a.py": "def f():\n    return 0\n"}
+    old_contents = {"a.py": "def f():\n    return 1\n"}
+    files = {"a.py": old_contents["a.py"] + "\n\ndef g():\n    return 2\n"}
 
     cr_agent = MagicMock()
     cr_agent.run.return_value = MagicMock(issues=[])
@@ -1463,16 +1465,23 @@ def test_code_review_empty_diff_falls_back_to_files(tmp_path: Path) -> None:
     assert cr_input.code == ""
 
 
-def test_code_review_meaningful_diff_uses_change_surface(tmp_path: Path) -> None:
-    """A real git base exists and differs from the new content -> the agent is
-    submitted the diff-derived change surface (``code=``, ``pre_numbered=True``)
-    instead of ``files=``, with ``full_content=files`` riding along so the
-    coordinator's whole-codebase side-effect/architecture passes still see real
-    full bodies instead of being disabled by ``pre_numbered=True``."""
+def test_code_review_purely_additive_diff_uses_change_surface(tmp_path: Path) -> None:
+    """A real git base exists and the new content only APPENDS new lines --
+    no existing line is touched or removed -- so the agent is submitted the
+    diff-derived change surface (``code=``, ``pre_numbered=True``) instead of
+    ``files=``, with ``full_content`` (scoped to the surface's own paths)
+    riding along so the coordinator's whole-codebase side-effect/architecture
+    passes still see real full bodies instead of being disabled by
+    ``pre_numbered=True``. Any deletion at all (a replaced or removed line)
+    instead falls back to ``files=`` -- see
+    ``test_code_review_same_line_edit_falls_back_to_files`` -- since the
+    change surface can never prove a removed line's information survives
+    elsewhere in the rendered surface."""
     config = _build_config()
     _init_repo(tmp_path)
-    _commit_file(tmp_path, "x.py", "old content\n")
-    files = {"x.py": "new content\n"}
+    old_content = "def existing():\n    return 1\n"
+    _commit_file(tmp_path, "x.py", old_content)
+    files = {"x.py": old_content + "\n\ndef added():\n    return 2\n"}
 
     cr_agent = MagicMock()
     cr_agent.run.return_value = MagicMock(issues=[])
@@ -1494,8 +1503,41 @@ def test_code_review_meaningful_diff_uses_change_surface(tmp_path: Path) -> None
     assert cr_input.files is None
     assert cr_input.pre_numbered is True
     assert "### x.py ###" in cr_input.code
-    assert "new content" in cr_input.code
+    assert "def added" in cr_input.code
     assert cr_input.full_content == files
+
+
+def test_code_review_same_line_edit_falls_back_to_files(tmp_path: Path) -> None:
+    """A real git base exists but the new content replaces an existing line
+    (not a pure append) -- even a single-line, same-function edit -- so the
+    diff contains a deletion the surface can never prove is safely
+    represented (see ``_patch_has_any_removal``); the agent must be
+    submitted ``files=`` as-is rather than a surface."""
+    config = _build_config()
+    _init_repo(tmp_path)
+    _commit_file(tmp_path, "x.py", "def f():\n    return 0\n")
+    files = {"x.py": "def f():\n    return 1\n"}
+
+    cr_agent = MagicMock()
+    cr_agent.run.return_value = MagicMock(issues=[])
+
+    run_microtask_review(
+        config=config,
+        llm=DummyLLMClient(),
+        task=_task(),
+        microtask=_microtask(),
+        repo_path=tmp_path,
+        files=files,
+        code_review_agent=cr_agent,
+        language="python",
+        **_noop_runners(),
+    )
+
+    assert cr_agent.run.called
+    cr_input = cr_agent.run.call_args.args[0]
+    assert cr_input.files == files
+    assert cr_input.pre_numbered is False
+    assert cr_input.code == ""
 
 
 def test_resolve_change_surface_for_review_no_files_returns_none(tmp_path: Path) -> None:
@@ -1588,76 +1630,46 @@ def test_code_review_deletion_only_file_falls_back_to_files(tmp_path: Path) -> N
 
 
 # ---------------------------------------------------------------------------
-# _patch_has_unrepresented_removal
+# _patch_has_any_removal
 # ---------------------------------------------------------------------------
 
 
-def test_patch_has_unrepresented_removal_true_for_pure_deletion_hunk() -> None:
+def test_patch_has_any_removal_true_for_pure_deletion_hunk() -> None:
     patch = "--- a/a.py\n+++ b/a.py\n@@ -1,3 +1,0 @@\n-def validate():\n-    pass\n-\n"
-    assert _patch_has_unrepresented_removal(patch) is True
+    assert _patch_has_any_removal(patch) is True
 
 
-def test_patch_has_unrepresented_removal_false_for_pure_addition_hunk() -> None:
+def test_patch_has_any_removal_false_for_pure_addition_hunk() -> None:
     patch = "--- a/a.py\n+++ b/a.py\n@@ -1,0 +1,2 @@\n+def added():\n+    return 1\n"
-    assert _patch_has_unrepresented_removal(patch) is False
+    assert _patch_has_any_removal(patch) is False
 
 
-def test_patch_has_unrepresented_removal_false_for_mixed_modify_hunk() -> None:
-    """A hunk with a removed line immediately followed by an added line (a
-    same-spot modification) is not an unrepresented removal -- the touched
-    added line still anchors the surface's expansion around that exact
-    location."""
+def test_patch_has_any_removal_true_for_same_spot_modify_hunk() -> None:
+    """Even a same-spot modification (a removed line immediately followed by
+    an added replacement) counts -- there is no general, language-agnostic
+    way to prove the removed line's information survives elsewhere in the
+    rendered surface, so any deletion at all is treated as unrepresented."""
     patch = "--- a/a.py\n+++ b/a.py\n@@ -1,2 +1,2 @@\n-def old_name():\n+def new_name():\n     return 1\n"
-    assert _patch_has_unrepresented_removal(patch) is False
+    assert _patch_has_any_removal(patch) is True
 
 
-def test_patch_has_unrepresented_removal_true_when_earlier_hunk_is_removal_only() -> None:
-    """A later hunk with additions must not mask an earlier removal-only hunk."""
-    patch = (
-        "--- a/a.py\n+++ b/a.py\n"
-        "@@ -1,2 +1,0 @@\n-def removed():\n-    pass\n"
-        "@@ -10,0 +9,2 @@\n+def added():\n+    return 1\n"
-    )
-    assert _patch_has_unrepresented_removal(patch) is True
-
-
-def test_patch_has_unrepresented_removal_true_when_later_hunk_is_removal_only() -> None:
-    """An earlier hunk with additions must not mask a later removal-only hunk."""
+def test_patch_has_any_removal_true_when_only_one_of_several_hunks_has_a_deletion() -> None:
+    """A deletion buried in a later hunk, behind an earlier addition-only
+    hunk, must still be found."""
     patch = (
         "--- a/a.py\n+++ b/a.py\n"
         "@@ -1,0 +1,2 @@\n+def added():\n+    return 1\n"
         "@@ -10,2 +12,0 @@\n-def removed():\n-    pass\n"
     )
-    assert _patch_has_unrepresented_removal(patch) is True
+    assert _patch_has_any_removal(patch) is True
 
 
-def test_patch_has_unrepresented_removal_true_for_mixed_hunk_with_unrelated_deletion() -> None:
-    """A SINGLE hunk that merges an unrelated deletion (no replacement) with a
-    same-spot modification elsewhere must still be flagged: the deletion run
-    is not immediately followed by an addition run, even though the hunk as a
-    whole contains added lines. This is the precise gap a whole-hunk-level
-    "does this hunk have any '+' line" check would miss."""
-    patch = (
-        "--- a/a.py\n+++ b/a.py\n"
-        "@@ -1,7 +1,2 @@\n"
-        "-def validate(x):\n"
-        "-    if not x:\n"
-        "-        raise ValueError('bad')\n"
-        "-    return x\n"
-        "-\n"
-        " def other():\n"
-        "-    return 1\n"
-        "+    return 2\n"
-    )
-    assert _patch_has_unrepresented_removal(patch) is True
+def test_patch_has_any_removal_blank_patch_returns_false() -> None:
+    assert _patch_has_any_removal("") is False
 
 
-def test_patch_has_unrepresented_removal_blank_patch_returns_false() -> None:
-    assert _patch_has_unrepresented_removal("") is False
-
-
-def test_patch_has_unrepresented_removal_no_hunks_returns_false() -> None:
-    assert _patch_has_unrepresented_removal("--- a/a.py\n+++ b/a.py\n") is False
+def test_patch_has_any_removal_no_hunks_returns_false() -> None:
+    assert _patch_has_any_removal("--- a/a.py\n+++ b/a.py\n") is False
 
 
 # ---------------------------------------------------------------------------
@@ -1667,8 +1679,8 @@ def test_patch_has_unrepresented_removal_no_hunks_returns_false() -> None:
 
 # validate() is deleted immediately before other(), and other()'s body is
 # also modified -- close enough that difflib merges the deletion and the
-# modification into ONE hunk (see the reproduction in
-# test_patch_has_unrepresented_removal_true_for_mixed_hunk_with_unrelated_deletion).
+# modification into ONE hunk. Any deletion at all now falls back (see
+# _patch_has_any_removal), so this is caught regardless of hunk merging.
 _MIXED_SINGLE_HUNK_OLD = (
     "def validate(x):\n"
     "    if not x:\n"
@@ -1728,51 +1740,10 @@ def test_code_review_mixed_hunk_unrepresented_deletion_falls_back_to_files(
 
 
 # ---------------------------------------------------------------------------
-# _removes_a_symbol_that_never_reappears
-# ---------------------------------------------------------------------------
-
-
-def test_removes_a_symbol_that_never_reappears_true_for_construct_swap() -> None:
-    """A deleted function immediately replaced by a differently-named one is a
-    same-spot modification per ``_patch_has_unrepresented_removal``, but the
-    deleted symbol's identity is still gone -- this check catches it."""
-    old_text = "def validate(x):\n    return x\n"
-    new_text = "def unrelated():\n    return 1\n"
-    assert _removes_a_symbol_that_never_reappears(old_text, new_text) is True
-
-
-def test_removes_a_symbol_that_never_reappears_false_for_same_name_edit() -> None:
-    """An ordinary in-place edit that keeps the function's name is not flagged --
-    this check adds precision on top of the line-level check, it must not make
-    the common case fall back to files=."""
-    old_text = "def f():\n    return 0\n"
-    new_text = "def f():\n    return 1\n"
-    assert _removes_a_symbol_that_never_reappears(old_text, new_text) is False
-
-
-def test_removes_a_symbol_that_never_reappears_false_when_renamed_symbol_is_new_addition() -> None:
-    """A symbol added under a name that ALSO exists in old_text (e.g. two
-    functions swap bodies) is not a removal -- only a name present before and
-    absent after counts."""
-    old_text = "def a():\n    return 1\n\n\ndef b():\n    return 2\n"
-    new_text = "def a():\n    return 2\n\n\ndef b():\n    return 1\n"
-    assert _removes_a_symbol_that_never_reappears(old_text, new_text) is False
-
-
-def test_removes_a_symbol_that_never_reappears_false_for_non_code_content() -> None:
-    """Content with no extractable top-level symbols on either side never
-    triggers -- there is nothing for the regex-based extractor to compare."""
-    assert _removes_a_symbol_that_never_reappears("old content\n", "new content\n") is False
-
-
-def test_removes_a_symbol_that_never_reappears_false_for_blank_old_text() -> None:
-    """A brand-new file (no old content) has no old symbols to lose."""
-    assert _removes_a_symbol_that_never_reappears("", "def f():\n    return 1\n") is False
-
-
-# ---------------------------------------------------------------------------
 # Same-spot construct swap (deletion+addition pair whose deleted symbol's
-# identity never reappears) -- GitHub issue #5400 follow-up (round 3)
+# identity never reappears) -- GitHub issue #5400 follow-up (round 3);
+# subsumed by _patch_has_any_removal's blanket "any deletion" rule (round 4),
+# kept as regression coverage for this specific real-world scenario.
 # ---------------------------------------------------------------------------
 
 _CONSTRUCT_SWAP_OLD = (
@@ -1791,9 +1762,9 @@ def test_resolve_change_surface_for_review_construct_swap_returns_none(
     tmp_path: Path,
 ) -> None:
     """A deleted function (``validate``) immediately replaced by an unrelated one
-    (``unrelated``) passes the line-level same-spot-modify check, but the
-    deleted symbol -- still called by the unchanged ``other()`` -- would be
-    invisible in the rendered surface. Must fall back rather than hide it."""
+    (``unrelated``) is a same-spot deletion+addition pair -- the deleted
+    symbol, still called by the unchanged ``other()``, would be invisible in
+    the rendered surface. Must fall back rather than hide it."""
     _init_repo(tmp_path)
     _commit_file(tmp_path, "a.py", _CONSTRUCT_SWAP_OLD)
 
@@ -1832,35 +1803,12 @@ def test_code_review_construct_swap_falls_back_to_files(tmp_path: Path) -> None:
     assert cr_input.code == ""
 
 
-def test_code_review_same_name_edit_still_uses_change_surface(tmp_path: Path) -> None:
-    """Guardrail: an ordinary in-place edit to a function that keeps its name
-    must still use the bounded surface -- the construct-swap check must not
-    regress the common case back to files= for every real edit."""
-    config = _build_config()
-    _init_repo(tmp_path)
-    _commit_file(tmp_path, "a.py", "def f():\n    return 0\n")
-    files = {"a.py": "def f():\n    return 1\n"}
-
-    cr_agent = MagicMock()
-    cr_agent.run.return_value = MagicMock(issues=[])
-
-    run_microtask_review(
-        config=config,
-        llm=DummyLLMClient(),
-        task=_task(),
-        microtask=_microtask(),
-        repo_path=tmp_path,
-        files=files,
-        code_review_agent=cr_agent,
-        language="python",
-        **_noop_runners(),
-    )
-
-    assert cr_agent.run.called
-    cr_input = cr_agent.run.call_args.args[0]
-    assert cr_input.files is None
-    assert cr_input.pre_numbered is True
-    assert "### a.py ###" in cr_input.code
+_BLANK_PATH_SCENARIO_OLD_A = "def f():\n    return 1\n"
+# Purely additive (no deleted line) so this isolates the blank-path gap --
+# without this, _patch_has_any_removal would already reject a.py's own diff
+# for an unrelated reason, and the test would pass without actually
+# exercising the blank-path coverage check at all.
+_BLANK_PATH_SCENARIO_NEW_A = _BLANK_PATH_SCENARIO_OLD_A + "\n\ndef g():\n    return 2\n"
 
 
 def test_resolve_change_surface_for_review_new_blank_path_not_treated_as_unchanged(
@@ -1871,11 +1819,13 @@ def test_resolve_change_surface_for_review_new_blank_path_not_treated_as_unchang
     silently treated as "unchanged": it can never appear in the built
     surface (blank content is always omitted), so its presence must force
     the fallback rather than being skipped by an ``old.get(path, "") ==
-    new_text`` coincidence."""
+    new_text`` coincidence. ``a.py``'s own change is purely additive (no
+    deletion) so it alone would otherwise produce a valid surface -- isolating
+    the blank-path gap as the sole reason for the fallback."""
     _init_repo(tmp_path)
-    _commit_file(tmp_path, "a.py", "def f():\n    return 0\n")
+    _commit_file(tmp_path, "a.py", _BLANK_PATH_SCENARIO_OLD_A)
     files = {
-        "a.py": "def f():\n    return 1\n",
+        "a.py": _BLANK_PATH_SCENARIO_NEW_A,
         ".gitkeep": "",
     }
 
@@ -1885,13 +1835,14 @@ def test_resolve_change_surface_for_review_new_blank_path_not_treated_as_unchang
 
 
 def test_code_review_new_blank_path_falls_back_to_files(tmp_path: Path) -> None:
-    """End-to-end: a new blank-content path alongside a real change must
-    submit ``files=`` rather than a surface that silently excludes it."""
+    """End-to-end: a new blank-content path alongside a real, purely-additive
+    change must submit ``files=`` rather than a surface that silently
+    excludes it."""
     config = _build_config()
     _init_repo(tmp_path)
-    _commit_file(tmp_path, "a.py", "def f():\n    return 0\n")
+    _commit_file(tmp_path, "a.py", _BLANK_PATH_SCENARIO_OLD_A)
     files = {
-        "a.py": "def f():\n    return 1\n",
+        "a.py": _BLANK_PATH_SCENARIO_NEW_A,
         ".gitkeep": "",
     }
 
@@ -1915,6 +1866,45 @@ def test_code_review_new_blank_path_falls_back_to_files(tmp_path: Path) -> None:
     assert cr_input.files == files
     assert cr_input.pre_numbered is False
     assert cr_input.code == ""
+
+
+def test_code_review_full_content_scoped_to_surface_paths_not_all_files(
+    tmp_path: Path,
+) -> None:
+    """When ``files`` includes a path this task left byte-identical to
+    ``HEAD`` alongside a genuinely (purely-additively) changed one, the
+    identical path is correctly omitted from ``surface.blocks`` -- and
+    ``full_content`` on the built ``CodeReviewInput`` must match that same
+    scope, not include the unchanged path, or the coordinator's whole-codebase
+    passes would analyze code this task never touched as if it had."""
+    config = _build_config()
+    _init_repo(tmp_path)
+    _commit_file(tmp_path, "changed.py", "def f():\n    return 1\n")
+    _commit_file(tmp_path, "untouched.py", "def g():\n    return 2\n")
+    files = {
+        "changed.py": "def f():\n    return 1\n\n\ndef added():\n    return 3\n",
+        "untouched.py": "def g():\n    return 2\n",  # byte-identical to HEAD
+    }
+
+    cr_agent = MagicMock()
+    cr_agent.run.return_value = MagicMock(issues=[])
+
+    run_microtask_review(
+        config=config,
+        llm=DummyLLMClient(),
+        task=_task(),
+        microtask=_microtask(),
+        repo_path=tmp_path,
+        files=files,
+        code_review_agent=cr_agent,
+        language="python",
+        **_noop_runners(),
+    )
+
+    assert cr_agent.run.called
+    cr_input = cr_agent.run.call_args.args[0]
+    assert cr_input.pre_numbered is True
+    assert cr_input.full_content == {"changed.py": files["changed.py"]}
 
 
 # ---------------------------------------------------------------------------

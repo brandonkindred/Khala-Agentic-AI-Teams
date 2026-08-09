@@ -69,7 +69,6 @@ from software_engineering_team.code_review_agent.change_surface import (
     build_change_surface_from_pairs,
     unified_diffs_from_pairs,
 )
-from software_engineering_team.code_review_agent.mapping import _symbol_surface
 from software_engineering_team.code_review_agent.previous_content import (
     resolve_previous_content,
 )
@@ -289,22 +288,25 @@ def _maybe_build_change_surface_from_pairs(
     return surface
 
 
-def _patch_has_unrepresented_removal(patch: str) -> bool:
-    """True when ``patch`` deletes lines that the change surface cannot render.
+def _patch_has_any_removal(patch: str) -> bool:
+    """True when ``patch`` deletes any line at all.
 
-    ``build_change_surface_from_pairs`` only expands the rendered body around
-    *added* touched lines (see ``change_surface._assemble_path_block`` /
-    ``extract_touched_lines``); a deletion is only "covered" by that expansion
-    when it is a same-spot modification -- a run of removed (``-``) lines
-    immediately followed by a run of added (``+``) lines, with no context line
-    between them, which is exactly how ``difflib.unified_diff`` renders a
-    replace. A deletion run NOT immediately followed by an addition run --
-    whether its hunk has no additions at all, or the hunk also happens to
-    contain an unrelated addition elsewhere (difflib merges nearby changes
-    into one hunk whenever they fall within its default context window) --
-    has no added line anywhere for the AST/heuristic expansion to anchor on,
-    so that region is silently absent from the rendered block even when the
-    path as a whole is otherwise present in ``ChangeSurface.blocks``.
+    ``build_change_surface_from_pairs`` only ever expands the rendered body
+    around *added* touched lines, anchored to their enclosing construct via
+    AST (Python) or a capped heuristic window (every other language) -- see
+    ``change_surface._assemble_path_block`` / ``expand_touched_ranges``. It
+    never renders a removed line's text, and expansion around some nearby
+    *added* line is not a reliable stand-in: a same-spot replace can delete
+    an entire named construct (a function/class) and add a differently-named,
+    unrelated one in its place, with no added line anywhere that touches the
+    deleted construct's own identity, and no way to check this generically --
+    ``mapping._symbol_surface`` only recognizes Python ``def``/``class``/
+    ``type`` and TS/JS ``export`` bindings, so a non-exported TS/JS function,
+    a module-level constant, or any construct in a language it doesn't parse
+    at all would defeat a symbol-based check. Since there is no general,
+    language-agnostic way to prove a given deletion's information already
+    survives elsewhere in the rendered surface, any deletion at all means the
+    path cannot be proven fully covered.
 
     Preconditions:
         - ``patch`` is one file's unified-diff text (``difflib.unified_diff``
@@ -312,76 +314,19 @@ def _patch_has_unrepresented_removal(patch: str) -> bool:
           change.
 
     Postconditions:
-        - Returns True iff ``patch`` contains at least one maximal run of
-          ``"-"``-prefixed lines that is not immediately followed by a
-          ``"+"``-prefixed line (end of hunk, a context line, or end of
-          patch all count as "not immediately followed").
-        - Blank ``patch``, a patch with no ``@@`` hunk headers, or a patch
-          whose every deletion run is immediately paired with an addition
-          run -> False.
+        - Returns True iff ``patch`` contains at least one line, within a
+          ``@@ ... @@`` hunk body, starting with ``"-"``.
+        - Blank ``patch``, or a patch with no ``@@`` hunk headers -> False.
         - Never raises.
     """
-    lines = (patch or "").splitlines()
-    n = len(lines)
     in_hunk = False
-    i = 0
-    while i < n:
-        line = lines[i]
+    for line in (patch or "").splitlines():
         if line.startswith("@@"):
             in_hunk = True
-            i += 1
             continue
-        if not in_hunk:
-            i += 1
-            continue
-        if line.startswith("-"):
-            j = i
-            while j < n and lines[j].startswith("-"):
-                j += 1
-            if j >= n or not lines[j].startswith("+"):
-                return True
-            i = j
-            continue
-        i += 1
+        if in_hunk and line.startswith("-"):
+            return True
     return False
-
-
-def _removes_a_symbol_that_never_reappears(old_text: str, new_text: str) -> bool:
-    """True when a top-level symbol from ``old_text`` is entirely gone from ``new_text``.
-
-    ``_patch_has_unrepresented_removal`` treats a deletion run immediately
-    followed by an addition run as a safe same-spot modification -- correct
-    for an in-place edit (``return 0`` -> ``return 1`` inside a function that
-    keeps its name), but wrong when the "modification" is actually one named
-    top-level construct (a function/class definition, or a TS/JS export
-    binding) being entirely replaced by a *different*, unrelated one at the
-    same location: ``def validate(x): ...`` deleted, ``def unrelated(): ...``
-    added in its place. The rendered surface then shows only the new
-    construct's body -- there is no added line anywhere that could anchor an
-    expansion covering the deleted construct's name, and any unchanged
-    caller elsewhere in the file that still references it (now broken) is
-    invisible too. Reusing ``mapping._symbol_surface`` (already the source of
-    truth the reviewer's own cross-file sibling-symbol awareness relies on)
-    catches exactly this: a symbol present before and absent after, whether
-    or not something else was added in its place.
-
-    Preconditions:
-        - ``old_text`` / ``new_text`` are one path's full old/new content
-          (may be blank, e.g. a brand-new or deleted file).
-
-    Postconditions:
-        - Returns True iff at least one top-level symbol name extracted from
-          ``old_text`` is absent from the symbols extracted from ``new_text``.
-        - A path with no extractable top-level symbols on either side (e.g.
-          non-code content, or a language ``_symbol_surface`` doesn't
-          recognize) never triggers -- this check adds precision on top of
-          ``_patch_has_unrepresented_removal``, it does not replace it.
-        - Never raises.
-    """
-    old_symbols = set(_symbol_surface(old_text))
-    if not old_symbols:
-        return False
-    return not old_symbols.issubset(_symbol_surface(new_text))
 
 
 def _resolve_change_surface_for_review(
@@ -421,21 +366,22 @@ def _resolve_change_surface_for_review(
           identical to its new content; a path absent from ``old_map``
           (including one whose new content happens to be blank, e.g. a newly
           added empty marker file) is always genuinely new, never treated as
-          unchanged -- and any of: the built surface omits that path entirely
+          unchanged -- and either: the built surface omits that path entirely
           (a deletion-only *file*, or a blank new file, contributes no added
-          touched lines), the path's patch deletes lines the surface cannot
-          render (see :func:`_patch_has_unrepresented_removal`), or a
-          top-level symbol (function/class/export) present in the old content
-          is entirely gone from the new content even though something else
-          was added in its place (see
-          :func:`_removes_a_symbol_that_never_reappears` -- a same-spot
-          construct swap that ``_patch_has_unrepresented_removal`` alone
-          would accept as a safe in-place edit). Submitting a surface that
-          omits a real change -- a whole file, part of one, or a removed
-          construct's identity -- would let the reviewer approve without ever
-          seeing it, so this is treated the same as no surface at all: the
-          caller must submit ``files`` as-is rather than a subset of what
-          changed.
+          touched lines), or the path's patch deletes any line at all (see
+          :func:`_patch_has_any_removal` -- the change surface can never
+          faithfully render a removed line's content or prove some nearby
+          addition safely stands in for it, so any deletion means the path
+          cannot be proven fully covered). Submitting a surface that omits a
+          real change -- a whole file, or any deleted line within one --
+          would let the reviewer approve without ever seeing it, so this is
+          treated the same as no surface at all: the caller must submit
+          ``files`` as-is rather than a subset of what changed. In practice
+          this means the surface path only fires for purely-additive changes
+          (a brand-new file, or existing lines left untouched with new ones
+          appended) -- any path that replaces, edits, or removes an existing
+          line falls back to ``files=``, exactly as before this feature
+          existed.
         - Otherwise (every genuinely-changed path is fully represented)
           returns the built ``ChangeSurface``.
         - Never raises: ``resolve_previous_content`` already degrades
@@ -460,14 +406,11 @@ def _resolve_change_surface_for_review(
         return None
     patches = unified_diffs_from_pairs(files, old_map)
     for path, new_text in files.items():
-        old_text = old_map.get(path, "")
-        if path in old_map and old_text == new_text:
+        if path in old_map and old_map[path] == new_text:
             continue
         if path not in surface.blocks:
             return None
-        if _patch_has_unrepresented_removal(patches.get(path, "")):
-            return None
-        if _removes_a_symbol_that_never_reappears(old_text, new_text):
+        if _patch_has_any_removal(patches.get(path, "")):
             return None
     return surface
 
@@ -527,18 +470,21 @@ def _code_review_step(
           and ``raw_issue_count`` from the LLM fallback when it ran (``None`` when the
           external agent succeeded or a bare-list stub reported no count).
         - The external agent's ``CodeReviewInput`` is built with ``code=<surface>,
-          pre_numbered=True, full_content=files`` (no ``files=``) when a change surface
-          can be resolved for ``files`` -- from caller-supplied ``old_contents``, or
-          auto-resolved from ``repo_path``'s pre-task ``HEAD`` when ``old_contents`` is
-          ``None`` -- and every genuinely-changed path is fully represented in it (see
-          ``_resolve_change_surface_for_review``). ``full_content=files`` rides along
-          with the bounded surface so the coordinator's whole-codebase side-effect and
-          architecture passes (which would otherwise treat ``pre_numbered=True`` as "only
-          a partial excerpt is available" and skip caller-impact analysis entirely) still
-          see real full bodies for the changed paths. Otherwise -- no base resolvable for
-          any path, every resolved path identical to its new content, or a
-          genuinely-changed path only partially covered (whole file or one hunk within
-          it) -- it falls back to submitting ``files`` as-is, exactly as before this
+          pre_numbered=True, full_content=<surface's own paths>`` (no ``files=``) when
+          a change surface can be resolved for ``files`` -- from caller-supplied
+          ``old_contents``, or auto-resolved from ``repo_path``'s pre-task ``HEAD`` when
+          ``old_contents`` is ``None`` -- and every genuinely-changed path is fully
+          represented in it (see ``_resolve_change_surface_for_review``). ``full_content``
+          rides along with the bounded surface, scoped to exactly ``surface.blocks``'
+          paths (never a path ``files`` carries that the surface itself omitted as
+          unchanged), so the coordinator's whole-codebase side-effect and architecture
+          passes (which would otherwise treat ``pre_numbered=True`` as "only a partial
+          excerpt is available" and skip caller-impact analysis entirely) still see real
+          full bodies for exactly the paths this task actually changed -- not a wider
+          changed-file scope than the map review itself used. Otherwise -- no base
+          resolvable for any path, every resolved path identical to its new content, or a
+          genuinely-changed path only partially covered (whole file or any deleted line
+          within it) -- it falls back to submitting ``files`` as-is, exactly as before this
           parameter existed. Code review runs identically either way; a missing, empty,
           or partial base never skips it.
         - Never raises: an external ``code_review_agent`` failure logs a warning and falls back
@@ -585,16 +531,21 @@ def _code_review_step(
             # resolves (caller-supplied old_contents, or auto-resolved from repo_path's
             # HEAD); otherwise files= (per-file attribution, no header parsing, no
             # upstream truncation) — see _resolve_change_surface_for_review for the
-            # fallback contract. full_content=files rides along with the surface so
-            # the coordinator's whole-codebase side-effect/architecture passes still
-            # see real full bodies for the changed paths (CodeReviewInput.full_content)
-            # instead of being silently disabled by pre_numbered=True.
+            # fallback contract. full_content rides along with the surface so the
+            # coordinator's whole-codebase side-effect/architecture passes still see
+            # real full bodies for the changed paths (CodeReviewInput.full_content)
+            # instead of being silently disabled by pre_numbered=True -- scoped to
+            # surface.blocks' own paths, not all of files: files can include a path
+            # this task left byte-identical to HEAD (surface.blocks correctly omits
+            # it as unchanged), and full_content is documented as complete-or-absent
+            # (CodebaseIndex.from_input), so including that path would pull it into
+            # the tail passes' changed-file scope as if this task had touched it.
             surface = _resolve_change_surface_for_review(files, repo_path, old_contents)
             if surface is not None:
                 cr_input = _build_cr_input(
                     code=surface.code,
                     pre_numbered=True,
-                    full_content=files,
+                    full_content={path: files[path] for path in surface.blocks},
                     **common_kwargs,
                 )
             else:
