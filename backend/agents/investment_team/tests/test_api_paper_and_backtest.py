@@ -1378,6 +1378,95 @@ def test_run_paper_trading_wraps_runtime_dispatch_error_as_503(
     assert sessions and all(s.status == PaperTradingStatus.FAILED for s in sessions)
 
 
+def test_run_paper_trading_unexpected_dispatch_error_returns_500(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """A non-dispatch exception from ``_start_paper_trading`` (a real bug, bad
+    payload, etc.) must surface as its own 500, not be misreported as the
+    dispatch-failure 503 'Temporal worker unavailable' — regression test for
+    the fix narrowing the ``except Exception`` block to only the documented
+    dispatch/worker failure modes (HTTPException, RuntimeError, TimeoutError,
+    RPCError)."""
+    from investment_team.api import main as api_main
+    from investment_team.models import PaperTradingSession, PaperTradingStatus
+
+    monkeypatch.setenv("INVESTMENT_LIVE_PAPER_ENABLED", "true")
+    api_main._strategy_lab_records["lab-w"] = _winning_record()
+
+    def _boom(session_id, payload):
+        raise ValueError("boom")
+
+    monkeypatch.setattr(api_main, "_start_paper_trading", _boom)
+
+    resp = api_client.post("/strategy-lab/paper-trade", json={"lab_record_id": "lab-w"})
+
+    assert resp.status_code == 500
+    assert resp.json()["detail"] == "Unexpected error starting the paper-trading workflow."
+    sessions = [
+        PaperTradingSession.parse_persisted(s) for s in api_main._paper_trading_sessions.values()
+    ]
+    assert sessions and all(s.status == PaperTradingStatus.FAILED for s in sessions)
+    assert all(s.error == "Unexpected error starting the paper-trading workflow." for s in sessions)
+    assert all("Temporal unavailable" not in (s.error or "") for s in sessions)
+
+
+def test_run_paper_trading_timeout_dispatch_error_returns_503(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """``TimeoutError`` (the start-ack wait timing out) stays in the documented
+    dispatch-failure set and must still map to 503, not the unexpected-error
+    500 path."""
+    from investment_team.api import main as api_main
+    from investment_team.models import PaperTradingSession, PaperTradingStatus
+
+    monkeypatch.setenv("INVESTMENT_LIVE_PAPER_ENABLED", "true")
+    api_main._strategy_lab_records["lab-w"] = _winning_record()
+
+    def _boom(session_id, payload):
+        raise TimeoutError("start ack timed out")
+
+    monkeypatch.setattr(api_main, "_start_paper_trading", _boom)
+
+    resp = api_client.post("/strategy-lab/paper-trade", json={"lab_record_id": "lab-w"})
+
+    assert resp.status_code == 503
+    assert "Temporal worker unavailable" in resp.json()["detail"]
+    sessions = [
+        PaperTradingSession.parse_persisted(s) for s in api_main._paper_trading_sessions.values()
+    ]
+    assert sessions and all(s.status == PaperTradingStatus.FAILED for s in sessions)
+    assert all("Temporal unavailable" in (s.error or "") for s in sessions)
+
+
+def test_run_paper_trading_rpc_dispatch_error_returns_503(
+    monkeypatch: pytest.MonkeyPatch, api_client
+) -> None:
+    """``temporalio.service.RPCError`` (the dispatch RPC itself failing) stays in
+    the documented dispatch-failure set and must still map to 503."""
+    from temporalio.service import RPCError, RPCStatusCode
+
+    from investment_team.api import main as api_main
+    from investment_team.models import PaperTradingSession, PaperTradingStatus
+
+    monkeypatch.setenv("INVESTMENT_LIVE_PAPER_ENABLED", "true")
+    api_main._strategy_lab_records["lab-w"] = _winning_record()
+
+    def _boom(session_id, payload):
+        raise RPCError("unavailable", RPCStatusCode.UNAVAILABLE, b"")
+
+    monkeypatch.setattr(api_main, "_start_paper_trading", _boom)
+
+    resp = api_client.post("/strategy-lab/paper-trade", json={"lab_record_id": "lab-w"})
+
+    assert resp.status_code == 503
+    assert "Temporal worker unavailable" in resp.json()["detail"]
+    sessions = [
+        PaperTradingSession.parse_persisted(s) for s in api_main._paper_trading_sessions.values()
+    ]
+    assert sessions and all(s.status == PaperTradingStatus.FAILED for s in sessions)
+    assert all("Temporal unavailable" in (s.error or "") for s in sessions)
+
+
 def test_run_paper_trading_dispatch_failure_attempts_best_effort_stop_signal(
     monkeypatch: pytest.MonkeyPatch, api_client
 ) -> None:
