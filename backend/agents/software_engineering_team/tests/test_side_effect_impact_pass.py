@@ -696,6 +696,34 @@ def test_runs_when_pre_numbered_with_full_content_supplied() -> None:
     assert result[0].category == "side-effects"
 
 
+def test_stays_disabled_when_full_content_covers_only_some_paths() -> None:
+    """``full_content`` that covers only SOME of the submission's changed paths
+    must NOT re-enable this pass: overlaying just the covered subset would leave
+    the rest as bounded ``N: ``-prefixed excerpts, and reasoning about those as
+    if they were complete files is exactly the "flag from a guess" failure mode
+    this pass's ``pre_numbered`` guard exists to prevent."""
+
+    class _FailIfAskedClient(DummyLLMClient):
+        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+            assert _SIDE_EFFECT_PASS_ANCHOR not in prompt, "pass should stay disabled"
+            return {"approved": True, "issues": [], "summary": "ok", "spec_compliance_notes": ""}
+
+    result = find_side_effect_impact_issues(
+        _FailIfAskedClient(),
+        CodeReviewInput(
+            code=(
+                "### app/main.py ###\n1: def bar():\n2:     return 1\n"
+                "### app/util.py ###\n1: def helper():\n2:     return 2\n"
+            ),
+            pre_numbered=True,
+            # Covers only app/main.py, not app/util.py -- partial coverage.
+            full_content={"app/main.py": "def bar():\n    return 1\n"},
+            task_description="wire up bar",
+        ),
+    )
+    assert result == []
+
+
 # --------------------------------------------------------------------------- happy path
 
 

@@ -167,10 +167,11 @@ def test_index_from_files_keeps_whitespace_only() -> None:
     assert set(idx.files) == {"a.py", "b.py", "d.py"}
 
 
-def test_index_from_input_overlays_full_content_for_pre_numbered_paths() -> None:
-    """A ``pre_numbered`` submission's ``full_content`` overlays real full bodies
-    onto the index for the paths it covers, so whole-codebase passes reading via
-    the index see complete content instead of the bounded pre-numbered excerpt."""
+def test_index_from_input_overlays_full_content_when_it_covers_every_path() -> None:
+    """A ``pre_numbered`` submission whose ``full_content`` covers EVERY path
+    the index would otherwise hold has it overlaid, and the index reports
+    ``full_content_complete=True`` -- so whole-codebase passes reading via the
+    index see complete content instead of the bounded pre-numbered excerpt."""
     code = "### app/main.py ###\n1: def bar():\n2:     return foo()\n"
     full = "def bar():\n    return foo()\n\ndef extra():\n    pass\n"
     idx = CodebaseIndex.from_input(
@@ -182,6 +183,32 @@ def test_index_from_input_overlays_full_content_for_pre_numbered_paths() -> None
         )
     )
     assert idx.files["app/main.py"] == full
+    assert idx.full_content_complete is True
+
+
+def test_index_from_input_does_not_overlay_partial_full_content() -> None:
+    """A ``full_content`` that covers only SOME of the submission's paths is not
+    applied at all (all-or-nothing) -- overlaying just the covered subset would
+    leave the rest as bounded ``N: ``-prefixed excerpts sitting alongside full
+    bodies, with no way for a downstream pass to tell them apart. Both paths
+    keep their original (pre-numbered) content, and the index reports
+    ``full_content_complete=False``."""
+    code = (
+        "### app/main.py ###\n1: def bar():\n2:     return foo()\n"
+        "### app/util.py ###\n1: def foo():\n2:     return 1\n"
+    )
+    idx = CodebaseIndex.from_input(
+        CodeReviewInput(
+            code=code,
+            pre_numbered=True,
+            # Covers only app/main.py, not app/util.py.
+            full_content={"app/main.py": "def bar():\n    return foo()\n"},
+            task_description="t",
+        )
+    )
+    assert idx.files["app/main.py"] == "1: def bar():\n2:     return foo()"
+    assert idx.files["app/util.py"] == "1: def foo():\n2:     return 1"
+    assert idx.full_content_complete is False
 
 
 def test_index_from_input_ignores_full_content_when_not_pre_numbered() -> None:
@@ -195,6 +222,7 @@ def test_index_from_input_ignores_full_content_when_not_pre_numbered() -> None:
         )
     )
     assert idx.files["app/main.py"] == "def bar(): pass\n"
+    assert idx.full_content_complete is False
 
 
 def test_verdict_invariant_rejects_low_confidence_false_positive() -> None:

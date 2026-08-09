@@ -499,22 +499,26 @@ def validate_findings(
     return _validate_findings(index, findings, pre_numbered=pre_numbered)
 
 
-def _effective_pre_numbered(input_data: CodeReviewInput) -> bool:
+def _effective_pre_numbered(input_data: CodeReviewInput, index: CodebaseIndex) -> bool:
     """True when this pass must treat the submission as bounded/pre-numbered.
 
-    ``input_data.full_content`` overlays real full bodies onto
-    ``CodebaseIndex.files`` for the paths it covers (see
-    ``CodebaseIndex.from_input``), so a caller that supplies it alongside
-    ``pre_numbered=True`` has given this pass something fuller than the
-    bounded diff surface to reason from -- the ``pre_numbered`` skip guard
-    (and the line-bounds-check skip) exist only because ``index.files``
-    would otherwise hold nothing but that bounded surface.
+    Gates on ``index.full_content_complete`` -- set by ``CodebaseIndex.from_input``
+    only when ``input_data.full_content`` covered EVERY path the index holds --
+    rather than on ``input_data.full_content`` directly. A caller-supplied
+    ``full_content`` that covers only some paths never sets that flag (the
+    overlay is all-or-nothing; see ``from_input``), so this correctly keeps
+    treating the submission as pre-numbered rather than trusting a
+    partially-numbered, partially-full index as if every path were complete.
+
+    Preconditions:
+        - ``index`` was built from this same ``input_data`` (``CodebaseIndex.from_input``
+          or an equivalent shared build).
 
     Postconditions:
-        - Returns ``input_data.pre_numbered and not input_data.full_content``.
+        - Returns ``input_data.pre_numbered and not index.full_content_complete``.
         - Pure; never raises.
     """
-    return input_data.pre_numbered and not input_data.full_content
+    return input_data.pre_numbered and not index.full_content_complete
 
 
 def find_side_effect_impact_issues(
@@ -536,7 +540,8 @@ def find_side_effect_impact_issues(
         - ``index``, when given, must have been built from this same
           ``input_data``/``repo_reader`` (the coordinator shares one index
           across this pass and the others rather than each rebuilding it);
-          ``None`` builds a fresh one.
+          ``None`` builds a fresh one (here, before the pre-numbered gate
+          check below, so :func:`_effective_pre_numbered` can consult it).
 
     Postconditions:
         - Returns ``[]`` (no LLM call) when the pass is disabled via
@@ -547,7 +552,7 @@ def find_side_effect_impact_issues(
           side-effects finding never is -- see
           ``architecture_consistency_pass``'s identical restriction), when
           :func:`_effective_pre_numbered` is True (the PR-review hunk-fallback
-          mode, used when whole-file fetching is unavailable and no fuller
+          mode, used when whole-file fetching is unavailable and no fully-covering
           ``full_content`` was supplied: ``index.files`` then holds partial
           diff-hunk excerpts rendered with original-line-number prefixes, not
           complete file content, and no tool this pass has can retrieve a
@@ -558,10 +563,12 @@ def find_side_effect_impact_issues(
           current behavior from a partial hunk would violate that, risking
           false-positive caller-impact findings on code the pass never
           actually saw in full), or when the submission has no readable
-          files. A caller that supplies ``full_content`` alongside
-          ``pre_numbered=True`` re-enables this pass (see
-          ``_effective_pre_numbered``), since ``index.files`` then holds real
-          full bodies for the paths it covers.
+          files. A caller that supplies ``full_content`` covering every
+          changed path re-enables this pass (see ``_effective_pre_numbered``
+          / ``CodebaseIndex.full_content_complete``); a ``full_content`` that
+          covers only some paths does NOT re-enable it -- the pass would
+          otherwise reason over a mix of real bodies and bounded excerpts as
+          if all were complete.
         - Otherwise returns zero or more NEW ``CodeReviewIssue``s in category
           ``"side-effects"`` (a caller-breaking side effect) or
           ``"documentation"`` (a docstring/implementation mismatch) only, each
@@ -578,7 +585,9 @@ def find_side_effect_impact_issues(
         return []
     if input_data.profile != ReviewProfile.CODE_REVIEW:
         return []
-    if _effective_pre_numbered(input_data):
+    if index is None:
+        index = CodebaseIndex.from_input(input_data, repo_reader=repo_reader)
+    if _effective_pre_numbered(input_data, index):
         return []
     try:
         return _run_pass(llm, input_data, repo_reader, index)
@@ -630,7 +639,7 @@ def _run_pass(
     findings = _parse_findings(data)
     if findings:
         findings = _validate_findings(
-            index, findings, pre_numbered=_effective_pre_numbered(input_data)
+            index, findings, pre_numbered=_effective_pre_numbered(input_data, index)
         )
         logger.info(
             "SideEffectImpactPass: found %s new finding(s) (side-effects/documentation)",
