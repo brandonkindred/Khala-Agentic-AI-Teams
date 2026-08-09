@@ -62,7 +62,7 @@ import json
 import logging
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple, Union
+from typing import Any, Callable, Dict, Generic, List, Mapping, Optional, Tuple, TypeVar, Union
 
 from llm_service import LLMClient
 from shared.dev_models.models import ReviewContext, Task
@@ -71,7 +71,6 @@ from software_engineering_team.code_review_agent.change_surface import (
     build_change_surface_from_pairs,
 )
 from software_engineering_team.shared.agent_review import AgentReviewCache
-from software_engineering_team.shared.llm_review import LlmReviewOutput
 from software_engineering_team.shared.review_progress import (
     build_disk_repo_reader,
     call_code_review_agent,
@@ -84,6 +83,32 @@ logger = logging.getLogger(__name__)
 # The microtask build-failure recommendation is identical across teams, so it is
 # a shared constant rather than a config knob.
 _MICROTASK_BUILD_FAIL_RECOMMENDATION = "Fix build errors before proceeding."
+
+# The two V2 teams each own a distinct ``ReviewIssue`` type, so the helper is
+# generic over whatever the caller's ``issue_factory``/coordinator translation
+# produces.
+IssueT = TypeVar("IssueT")
+
+
+@dataclass(frozen=True)
+class LlmReviewOutput(Generic[IssueT]):
+    """Result of one code-review fallback call: kept issues plus the raw count.
+
+    Preconditions: constructed by :func:`run_coordinator_llm_review` (either
+    V2 team's coordinator-backed ``_run_llm_review``).
+
+    Postconditions/Invariants:
+        - ``raw_issue_count`` is always ``None`` for the coordinator-backed
+          fallback — that path has no separate grounding pass to report a
+          pre-filter count for, and reporting a fabricated int (e.g.
+          ``len(issues)``) would make the circuit breaker see a false "0%
+          rejected" instead of "no data" for every call (see
+          ``shared.phases.review_cycle.grounding_rejection_ratio``, which
+          already treats ``None`` as "no ratio available").
+    """
+
+    issues: List[IssueT]
+    raw_issue_count: Optional[int]
 
 
 @dataclass(frozen=True)

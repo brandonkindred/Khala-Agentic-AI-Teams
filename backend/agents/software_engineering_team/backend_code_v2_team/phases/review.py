@@ -30,7 +30,6 @@ from software_engineering_team.shared.agent_review import (
     run_qa_agent,
     run_security_agent,
 )
-from software_engineering_team.shared.llm_review import LlmReviewOutput
 from software_engineering_team.shared.phases.review import (
     run_code_review_phase_impl,
     run_qa_testing_phase_impl,
@@ -47,6 +46,7 @@ from software_engineering_team.shared.review_utils import (
     run_documentation_self_review as _shared_run_documentation_self_review,
 )
 from software_engineering_team.shared.v2_review import (
+    LlmReviewOutput,
     _review_steps_run_sequentially,  # noqa: F401  (re-exported for tests)
     run_coordinator_llm_review,
 )
