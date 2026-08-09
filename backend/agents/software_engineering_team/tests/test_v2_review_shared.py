@@ -1507,6 +1507,44 @@ def test_code_review_purely_additive_diff_uses_change_surface(tmp_path: Path) ->
     assert cr_input.full_content == files
 
 
+def test_run_review_git_auto_resolved_base_uses_change_surface(tmp_path: Path) -> None:
+    """``run_review`` (execution_result path) with no caller-supplied
+    ``old_contents``: a real git base exists under ``repo_path`` and the new
+    content only appends -- the base is auto-resolved from ``HEAD`` (see
+    ``_resolve_change_surface_for_review``) and the external agent is
+    submitted the diff-derived change surface (``code=``, ``pre_numbered=True``)
+    rather than ``files=``. Mirrors
+    ``test_code_review_purely_additive_diff_uses_change_surface``, which
+    covers the same auto-resolve path through ``run_microtask_review``."""
+    config = _build_config()
+    _init_repo(tmp_path)
+    old_content = "def existing():\n    return 1\n"
+    _commit_file(tmp_path, "x.py", old_content)
+    files = {"x.py": old_content + "\n\ndef added():\n    return 2\n"}
+
+    cr_agent = MagicMock()
+    cr_agent.run.return_value = MagicMock(issues=[])
+
+    run_review(
+        config=config,
+        llm=DummyLLMClient(),
+        task=_task(),
+        execution_result=_execution_result(files),
+        repo_path=tmp_path,
+        code_review_agent=cr_agent,
+        language="python",
+        **_noop_runners(),
+    )
+
+    assert cr_agent.run.called
+    cr_input = cr_agent.run.call_args.args[0]
+    assert cr_input.files is None
+    assert cr_input.pre_numbered is True
+    assert "### x.py ###" in cr_input.code
+    assert "def added" in cr_input.code
+    assert cr_input.full_content == files
+
+
 def test_code_review_same_line_edit_falls_back_to_files(tmp_path: Path) -> None:
     """A real git base exists but the new content replaces an existing line
     (not a pure append) -- even a single-line, same-function edit -- so the
