@@ -47,11 +47,27 @@ export type AgenticTeamAgentSource = 'generated' | 'registry';
 /** Named agent in the team's roster (per agentic team architecture). */
 export interface AgenticTeamAgent {
   agent_name: string;
+  // Non-SoT, pending demotion: duplicates identity that belongs on the registered
+  // AgentManifest. See AgenticTeamAgentRef below and the backend README ("Roster
+  // identity: thin refs vs. Manifest SoT") for the field mapping and migration notes.
   role: string;
   skills: string[];
   capabilities: string[];
   tools: string[];
   expertise: string[];
+  source: AgenticTeamAgentSource;
+  manifest_id: string | null;
+}
+
+/**
+ * Thin roster reference to an AgentManifest identity (target roster shape).
+ *
+ * Not yet the persisted/API roster row — `AgenticTeamAgent` above remains that
+ * shape until the store/API/consumers are migrated in a later change. `manifest_id`
+ * is required whenever `source === 'registry'`.
+ */
+export interface AgenticTeamAgentRef {
+  agent_name: string;
   source: AgenticTeamAgentSource;
   manifest_id: string | null;
 }
