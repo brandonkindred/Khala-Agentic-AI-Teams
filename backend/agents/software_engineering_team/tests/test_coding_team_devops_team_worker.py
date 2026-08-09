@@ -130,7 +130,12 @@ def test_devops_worker_builds_spec_from_task() -> None:
 
     assert spec.task_id == "provision"
     assert spec.title == long_title
-    assert spec.acceptance_criteria == ["pipeline lints"]
+    # A leading TASK SCOPE/OUT OF SCOPE entry is prepended (finding: CI/CD and
+    # Deployment specialists read acceptance_criteria but never goal/scope) --
+    # the task's own criteria still follow it, untouched.
+    assert spec.acceptance_criteria[-1] == "pipeline lints"
+    assert "Add CI/CD pipeline" in spec.acceptance_criteria[0]
+    assert "cluster provisioning" in spec.acceptance_criteria[0]
     assert spec.dependencies == ["other"]
     # No explicit production language in the task text -> staging (matches
     # _build_legacy_spec's existing default for the same "no signal" case).
@@ -630,3 +635,41 @@ def test_devops_worker_derives_environment_from_revision_feedback() -> None:
 
     assert spec.environment == "production"
     assert spec.platform_scope.environments == ["dev", "production"]
+
+
+# ------------------------------------------------- task scope in acceptance_criteria (finding H)
+
+
+def test_devops_worker_spec_folds_task_scope_into_acceptance_criteria() -> None:
+    """CICDPipelineAgent.build_context and DeploymentStrategyAgent.build_context read
+    acceptance_criteria but never goal.summary or scope -- only InfrastructureAsCodeAgent
+    reads scope. An operational requirement recorded only in the task description (e.g.
+    "use GitLab CI, deploy to ECS") would otherwise be invisible to those two specialists."""
+    task = _base_task(
+        description="Use GitLab CI and deploy to ECS with a canary rollout.",
+        out_of_scope="Do not touch the legacy Jenkins pipeline.",
+    )
+
+    spec = _to_devops_task_spec(task)
+
+    assert "Use GitLab CI and deploy to ECS with a canary rollout." in spec.acceptance_criteria[0]
+    assert "Do not touch the legacy Jenkins pipeline." in spec.acceptance_criteria[0]
+
+
+def test_devops_worker_spec_scope_note_omitted_without_description_or_exclusion() -> None:
+    from types import SimpleNamespace
+
+    task = SimpleNamespace(
+        id="t1",
+        title="",
+        description="",
+        acceptance_criteria=["a criterion"],
+        dependencies=[],
+        out_of_scope="",
+        revision_feedback=[],
+        feature_branch=None,
+    )
+
+    spec = _to_devops_task_spec(task)
+
+    assert spec.acceptance_criteria == ["a criterion"]

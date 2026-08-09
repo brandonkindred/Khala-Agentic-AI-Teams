@@ -2100,6 +2100,46 @@ class TestRunTaskStructuredEntrypoint:
         assert result.completion_package.git_operations.merge.status == "merged"
         assert "feature/" not in branches
 
+    def test_run_task_cleans_untracked_validation_leftovers_before_delivering(
+        self, monkeypatch
+    ) -> None:
+        """A Phase 4/4.5 validation tool (e.g. `terraform init` leaving
+        `.terraform.lock.hcl`) can leave untracked files in the working tree
+        AFTER Phase 3 has already written+committed the generated artifacts.
+        deliver_inline_merge/prepare_handoff_branch both commit via `git add
+        -A`, which would otherwise sweep those files into the delivered
+        commit even though they were never part of the generated artifact
+        map. Simulate that leftover as a Phase 4 validation-tool side effect
+        (planting it before Phase 3 runs would just get it committed by
+        Phase 3's own git-add-A, which doesn't exercise this fix) and prove
+        it never reaches the delivered branch."""
+        import software_engineering_team.devops_team.tool_dispatch as tool_dispatch_mod
+
+        real_run_validation_tools = tool_dispatch_mod.run_validation_tools
+
+        def _run_validation_tools_with_leftover(agent, repo_path):
+            (Path(repo_path) / "untracked.leftover").write_text(
+                "validation tool side effect", encoding="utf-8"
+            )
+            return real_run_validation_tools(agent, repo_path)
+
+        monkeypatch.setattr(
+            tool_dispatch_mod, "run_validation_tools", _run_validation_tools_with_leftover
+        )
+        mock_llm = _scripted_llm_for_happy_path()
+        agent = DevOpsTeamLeadAgent(mock_llm)
+        spec = _base_task_spec(task_id="devops-clean-untracked")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp)
+            init_ok, _ = initialize_new_repo(path)
+            assert init_ok
+
+            result = agent.run_task(spec, repo_path=path, merge_to_development=False)
+
+            assert not (path / "untracked.leftover").exists()
+        assert result.success
+        assert "untracked.leftover" not in result.completion_package.files_changed
+
 
 # ===========================================================================
 # COMPATIBILITY / MIGRATION TESTS

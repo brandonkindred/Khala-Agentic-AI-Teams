@@ -131,6 +131,31 @@ def _derive_environment(task: Any) -> str:
     return _legacy_environment_from_text(combined_text)
 
 
+def _task_scope_note(task: Any) -> Optional[str]:
+    """Render the task's description/out_of_scope as an acceptance-criteria entry.
+
+    ``CICDPipelineAgent.build_context`` and ``DeploymentStrategyAgent.build_context``
+    read ``acceptance_criteria`` (plus environments/constraints) but never
+    ``goal.summary`` or ``scope`` -- only ``InfrastructureAsCodeAgent.build_context``
+    reads ``scope``. So an operational requirement or exclusion recorded only in
+    ``task.description``/``task.out_of_scope`` (e.g. "use GitLab CI, deploy to
+    ECS, no blue-green rollout") is invisible to those two specialists unless it
+    also reaches ``acceptance_criteria`` -- the same problem
+    ``_revision_feedback_scope_note`` solves for revision feedback.
+
+    Returns ``None`` when the task carries neither a description nor an
+    out_of_scope exclusion.
+    """
+    description = (task.description or "").strip()
+    out_of_scope = str(getattr(task, "out_of_scope", "") or "").strip()
+    if not description and not out_of_scope:
+        return None
+    parts = [f"TASK SCOPE: {description}"] if description else []
+    if out_of_scope:
+        parts.append(f"OUT OF SCOPE: {out_of_scope}")
+    return " ".join(parts)
+
+
 def _revision_feedback_scope_note(task: Any) -> Optional[str]:
     """Render ``task.revision_feedback`` as a single scope/acceptance-criteria entry.
 
@@ -183,11 +208,20 @@ def _to_devops_task_spec(task: Any) -> DevOpsTaskSpec:
           (e.g. "Production deploy requires explicit approval") must be
           visible there too, or a correctly production-derived task would
           fail Phase 1 despite already carrying the required gate structurally.
+        - The task's own description/out_of_scope is also folded into
+          ``acceptance_criteria`` as a leading entry (see ``_task_scope_note``)
+          so ``CICDPipelineAgent``/``DeploymentStrategyAgent`` -- which read
+          ``acceptance_criteria`` but never ``goal``/``scope`` -- see
+          operational requirements or exclusions recorded there, not just the
+          ``InfrastructureAsCodeAgent`` (which reads ``scope`` directly).
     """
     goal_summary = _augment_goal_summary(task)
     environment = _derive_environment(task)
     scope_excluded = [task.out_of_scope] if getattr(task, "out_of_scope", "") else []
     acceptance_criteria = list(task.acceptance_criteria or []) or list(_DEFAULT_ACCEPTANCE_CRITERIA)
+    scope_note = _task_scope_note(task)
+    if scope_note:
+        acceptance_criteria = [scope_note] + acceptance_criteria
     scope_included = [task.description or task.title or task.id, *acceptance_criteria]
     feedback_note = _revision_feedback_scope_note(task)
     if feedback_note:

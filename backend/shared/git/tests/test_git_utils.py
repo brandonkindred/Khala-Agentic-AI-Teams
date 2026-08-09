@@ -19,6 +19,7 @@ from shared.git.git_utils import (
     DEVELOPMENT_BRANCH,
     add_worktree,
     checkout_branch,
+    clean_untracked_files,
     create_feature_branch,
     development_branch_exists,
     ensure_development_branch,
@@ -492,6 +493,27 @@ def test_reset_hard_to_removes_untracked_files(repo: Path) -> None:
 
     assert ok2, msg2
     assert not (repo / "untracked.lock").exists()
+
+
+def test_clean_untracked_files_removes_untracked_but_preserves_tracked(repo: Path) -> None:
+    (repo / "tracked.txt").write_text("committed content", encoding="utf-8")
+    subprocess.run(["git", "add", "-A"], cwd=repo, capture_output=True, check=True)
+    subprocess.run(["git", "commit", "-m", "add tracked file"], cwd=repo, capture_output=True, check=True)
+    (repo / "untracked.lock").write_text("leftover from a validation tool", encoding="utf-8")
+
+    ok, msg = clean_untracked_files(repo)
+
+    assert ok, msg
+    assert not (repo / "untracked.lock").exists()
+    assert (repo / "tracked.txt").exists()
+
+
+def test_clean_untracked_files_fails_honestly_for_non_repo(tmp_path: Path) -> None:
+    not_a_repo = tmp_path / "plain"
+    not_a_repo.mkdir()
+    ok, msg = clean_untracked_files(not_a_repo)
+    assert not ok
+    assert "Not a git repository" in msg
 
 
 def test_reset_hard_to_fails_honestly_for_non_repo(tmp_path: Path) -> None:

@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from shared.git.branch_utils import make_branch_suffix
-from shared.git.git_utils import DEVELOPMENT_BRANCH
+from shared.git.git_utils import DEVELOPMENT_BRANCH, clean_untracked_files
 from software_engineering_team.shared.deliver_utils import (
     DeliverGitOps,
     deliver_inline_merge,
@@ -155,7 +155,11 @@ def run_phase5_deliver_merge(
       ``blocked_result=None``. When ``merge_to_development`` is ``False``,
       the feature branch is committed and left in place (not merged or
       deleted) for external review, and ``completion.git_operations.merge``
-      is ``None`` rather than fabricated merge metadata.
+      is ``None`` rather than fabricated merge metadata. Before delivering,
+      untracked files are cleaned from ``repo_path`` (best-effort) so Phase
+      4's validation/execution tool side effects (e.g. a Terraform provider
+      lock file from ``terraform init``) don't get swept into the delivered
+      commit alongside ``aggregated_artifacts``.
     """
     doc = doc_runbook_agent.run(
         DocumentationRunbookInput(
@@ -196,6 +200,20 @@ def run_phase5_deliver_merge(
     # which git refuses while it's attached in another worktree).
     git_operations = GitOperationsMetadata()
     if write_changes and aggregated_artifacts:
+        # Phase 4's validation/execution tools (e.g. `terraform init` leaving
+        # `.terraform.lock.hcl`) can leave untracked files in the working tree.
+        # deliver_inline_merge/prepare_handoff_branch both commit via
+        # `git add -A`, which would otherwise sweep those tool-created files
+        # into the delivered commit even though they were never part of
+        # aggregated_artifacts, completion.files_changed, or the internal
+        # security/change reviews.
+        clean_ok, clean_msg = clean_untracked_files(repo_path)
+        if not clean_ok:
+            logger.warning(
+                "[%s] Deliver: failed to clean untracked validation artifacts: %s",
+                task_spec.task_id,
+                clean_msg,
+            )
         if merge_to_development:
             deliver_result = deliver_inline_merge(
                 task_id=task_spec.task_id,

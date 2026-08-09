@@ -334,6 +334,35 @@ def commit_working_tree(repo_path: str | Path, message: str) -> Tuple[bool, str]
     return True, "Committed"
 
 
+def clean_untracked_files(repo_path: str | Path) -> Tuple[bool, str]:
+    """Remove untracked, non-ignored files and directories (``git clean -fd``).
+
+    A caller-run tool (e.g. a validation dry-run that shells out to a
+    package/build tool, such as ``terraform init`` leaving ``.terraform.lock.hcl``
+    behind) can leave untracked files in the working tree. Those survive a
+    plain ``git reset --hard`` (which only touches tracked files) and later
+    get swept into an unrelated commit by a subsequent ``git add -A``. No
+    ``-x`` is passed, so gitignored paths (caches, build output) are left alone
+    -- only genuinely untracked-and-not-ignored files are removed.
+
+    Preconditions:
+        - ``repo_path`` is an existing git repository.
+    Postconditions:
+        - On success, no untracked, non-ignored files/directories remain in
+          the working tree; returns ``(True, message)``.
+        - On failure (not a repo, or the ``git clean`` invocation itself
+          fails) returns ``(False, message)`` and leaves the working tree
+          unchanged.
+    """
+    path = Path(repo_path).resolve()
+    if not (path / ".git").exists():
+        return False, "Not a git repository"
+    code, out = _run_git(path, ["git", "clean", "-fd"])
+    if code != 0:
+        return False, f"Failed to clean untracked files: {out}"
+    return True, "Cleaned untracked files"
+
+
 def reset_hard_to(repo_path: str | Path, ref: str) -> Tuple[bool, str]:
     """Hard-reset the CURRENTLY checked-out branch to ``ref``'s commit and clean the tree.
 
@@ -342,12 +371,8 @@ def reset_hard_to(repo_path: str | Path, ref: str) -> Tuple[bool, str]:
     different worktree -- ``git reset --hard <ref>`` only reads ``ref``'s
     commit, it never attaches it here.
 
-    ``git reset --hard`` only touches tracked files; a caller-run tool (e.g. a
-    validation dry-run that shells out to a package/build tool) can leave
-    untracked files behind that survive the reset and later get swept into an
-    unrelated commit by a subsequent ``git add -A``. Following the reset with
-    ``git clean -fd`` (no ``-x``, so gitignored paths like caches/build output
-    are left alone) removes those untracked leftovers too.
+    Also removes untracked files via :func:`clean_untracked_files` -- see its
+    docstring for why that matters on top of the reset itself.
 
     Preconditions:
         - ``repo_path`` is an existing git repository; ``ref`` resolves to a
@@ -369,9 +394,9 @@ def reset_hard_to(repo_path: str | Path, ref: str) -> Tuple[bool, str]:
     code, out = _run_git(path, ["git", "reset", "--hard", ref])
     if code != 0:
         return False, f"Failed to reset to {ref}: {out}"
-    clean_code, clean_out = _run_git(path, ["git", "clean", "-fd"])
-    if clean_code != 0:
-        logger.warning("Reset to '%s' succeeded but cleaning untracked files failed: %s", ref, clean_out)
+    clean_ok, clean_msg = clean_untracked_files(path)
+    if not clean_ok:
+        logger.warning("Reset to '%s' succeeded but cleaning untracked files failed: %s", ref, clean_msg)
     logger.info("Reset current branch to '%s'", ref)
     return True, f"Reset to {ref}"
 
