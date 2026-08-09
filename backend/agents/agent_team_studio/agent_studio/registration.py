@@ -21,10 +21,16 @@ worker and the per-invoke sandbox resolve it — not just this process. Local-on
 
 from __future__ import annotations
 
-import hashlib
 import re
 
+from agent_registry.manifest_projection import filter_marker_tags, hash_suffix, revalidate
 from agent_registry.models import AgentManifest, AgentStateSpec, CognitionSpec, IOSchema, SourceInfo
+from agent_team_studio.agentic_team_provisioning.generated_runtime import (
+    GENERATED_AGENT_ANATOMY_REF,
+    GENERATED_AGENT_ENTRYPOINT,
+    GENERATED_AGENT_INPUT_REF,
+    GENERATED_AGENT_OUTPUT_REF,
+)
 
 from .agent_states import STATE_ORDER
 from .models import AgentDefinition, AgentState
@@ -39,12 +45,10 @@ _KNOWN_STATE_KEYS = frozenset(STATE_ORDER)
 
 # Shared generated-agent runtime — reused so a saved Studio agent is invokable
 # exactly like a generated team agent.
-_GEN_ENTRYPOINT = (
-    "agent_team_studio.agentic_team_provisioning.runtime.agent_builder:invoke_generated_agent"
-)
-_GEN_INPUT_REF = "agent_team_studio.agentic_team_provisioning.models:GeneratedAgentInvokeInput"
-_GEN_OUTPUT_REF = "agent_team_studio.agentic_team_provisioning.models:GeneratedAgentInvokeOutput"
-_ANATOMY_REF = "backend/agents/agent_team_studio/agent_provisioning_team/AGENT_ANATOMY.md"
+_GEN_ENTRYPOINT = GENERATED_AGENT_ENTRYPOINT
+_GEN_INPUT_REF = GENERATED_AGENT_INPUT_REF
+_GEN_OUTPUT_REF = GENERATED_AGENT_OUTPUT_REF
+_ANATOMY_REF = GENERATED_AGENT_ANATOMY_REF
 
 # Tags that describe the registry plumbing rather than the agent itself; stripped
 # when projecting a manifest back into an editable definition.
@@ -63,7 +67,7 @@ def studio_agent_id(name: str) -> str:
         raise ValueError("studio_agent_id: name must be non-empty")
     slug = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-") or "agent"
     # Non-cryptographic: a short, stable suffix that disambiguates equal slugs.
-    digest = hashlib.sha256(name.encode("utf-8")).hexdigest()[:8]
+    digest = hash_suffix(name, 8)
     return f"{STUDIO_TEAM}.{slug}-{digest}"
 
 
@@ -141,7 +145,7 @@ def build_studio_agent_manifest(definition: AgentDefinition) -> AgentManifest:
         source=SourceInfo(entrypoint=_GEN_ENTRYPOINT, anatomy_ref=_ANATOMY_REF),
     )
     # Round-trip so the returned object is guaranteed fully validated and serializable.
-    return AgentManifest.model_validate(manifest.model_dump(mode="json"))
+    return revalidate(manifest)
 
 
 def clone_from_manifest(manifest: AgentManifest) -> AgentDefinition:
@@ -170,7 +174,7 @@ def clone_from_manifest(manifest: AgentManifest) -> AgentDefinition:
         * The returned definition has exactly three operating states.
     """
     tools = list(manifest.cognition.tools) if manifest.cognition else []
-    tags = [t for t in manifest.tags if t not in _PLUMBING_TAGS]
+    tags = filter_marker_tags(manifest.tags, _PLUMBING_TAGS)
     # Keep only canonical keys: AgentState.key is a Literal, so a manifest carrying
     # an unsupported (permissive-str) key would raise here and surface as a 500.
     # Dropped/missing keys are backfilled by the AgentDefinition states normalizer.
