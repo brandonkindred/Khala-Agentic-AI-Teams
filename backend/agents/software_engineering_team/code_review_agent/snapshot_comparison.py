@@ -43,8 +43,16 @@ from .merged_architecture_side_effect_pass import find_architecture_and_side_eff
 from .models import CodeReviewInput, CodeReviewIssue
 from .repo_reader import DiskRepoReader, RepoReader, disk_repo_reader_from_root
 from .side_effect_impact_pass import find_side_effect_impact_issues
+from .submission_pass_runner import run_submission_pass
 
 logger = logging.getLogger(__name__)
+
+# The shared runner's own logger name, derived the same way callers derive a
+# pass's logger name (see _call_pass_detecting_failure) -- a relative import
+# of the same package resolves to whichever bare/fully-qualified form this
+# package was actually loaded under, so this always matches how
+# run_submission_pass's own `logging.getLogger(__name__)` resolves at runtime.
+_SUBMISSION_PASS_RUNNER_LOGGER_NAME = run_submission_pass.__module__
 
 # Text-similarity threshold above which a lost/added pair is considered the
 # "same" finding reworded rather than two genuinely different findings.
@@ -285,14 +293,21 @@ class _FailureCapturingHandler(logging.Handler):
     Each pass (``architecture_consistency_pass``, ``side_effect_impact_pass``,
     ``merged_architecture_side_effect_pass``) never raises to its caller by
     design — a setup/LLM/parse failure is caught internally and degrades to
-    an empty finding list, logged at WARNING via that module's own
-    ``logging.getLogger(__name__)`` (a documented, stable contract, not a
-    private implementation detail). That empty list is indistinguishable
-    from a genuine "found nothing" result to a caller that only looks at the
-    return value — this harness needs the distinction (see
-    :func:`_call_pass_detecting_failure`), so it listens for that warning
-    instead of reaching into the pass's private internals to bypass its
-    fail-safe try/except.
+    an empty finding list. That empty list is indistinguishable from a
+    genuine "found nothing" result to a caller that only looks at the return
+    value — this harness needs the distinction (see
+    :func:`_call_pass_detecting_failure`), so it listens for the WARNING each
+    pass's fail-safe path logs instead of reaching into private internals to
+    bypass the try/except.
+
+    Since all three passes construct their ``Agent`` calls only through
+    :func:`~code_review_agent.submission_pass_runner.run_submission_pass`, a
+    setup failure (env/profile gating, index build) still logs on the pass's
+    own ``logging.getLogger(__name__)``, but an LLM-call failure logs on the
+    shared runner's logger instead (``submission_pass_runner`` catches it,
+    returns no results for that batch, and the pass's own try/except never
+    sees an exception to log). :func:`_call_pass_detecting_failure` listens
+    on both loggers so either source is caught.
 
     Known blind spot: a pass only logs this warning on a hard failure
     (exception, provider error) — a provider reply that is valid JSON but
@@ -316,7 +331,8 @@ class _FailureCapturingHandler(logging.Handler):
 
 
 def _call_pass_detecting_failure(fn: Callable[[], object], logger_name: str) -> Tuple[object, bool]:
-    """Call ``fn()``, reporting whether ``logger_name`` logged a WARNING during the call.
+    """Call ``fn()``, reporting whether ``logger_name`` (or the shared
+    submission-pass runner's logger) logged a WARNING during the call.
 
     Preconditions:
         - ``logger_name`` is the ``__name__``-derived logger of the pass module
@@ -328,21 +344,26 @@ def _call_pass_detecting_failure(fn: Callable[[], object], logger_name: str) -> 
           (``software_engineering_team.code_review_agent.architecture_consistency_pass``).
 
     Postconditions:
-        - Returns ``(fn()'s result, failed)`` where ``failed`` is True iff that
-          logger emitted a WARNING (or higher) during the call — the pass's own
-          fail-safe failure log line, per this module's own docstring
-          guarantee ("any setup or LLM failure is logged at warning level").
-          The temporary handler is always removed, even if ``fn`` raises
-          (it shouldn't, per that same fail-safe contract, but this must not
+        - Returns ``(fn()'s result, failed)`` where ``failed`` is True iff
+          ``logger_name`` or :data:`_SUBMISSION_PASS_RUNNER_LOGGER_NAME`
+          emitted a WARNING (or higher) during the call — the pass's own
+          fail-safe failure log line (setup failures) or the shared runner's
+          (LLM-call failures), per each module's own docstring guarantee
+          ("any setup or LLM failure is logged at warning level"). The
+          temporary handlers are always removed, even if ``fn`` raises (it
+          shouldn't, per that same fail-safe contract, but this must not
           leak a handler if it ever does).
     """
     handler = _FailureCapturingHandler()
     target_logger = logging.getLogger(logger_name)
+    runner_logger = logging.getLogger(_SUBMISSION_PASS_RUNNER_LOGGER_NAME)
     target_logger.addHandler(handler)
+    runner_logger.addHandler(handler)
     try:
         result = fn()
     finally:
         target_logger.removeHandler(handler)
+        runner_logger.removeHandler(handler)
     return result, handler.failed
 
 
