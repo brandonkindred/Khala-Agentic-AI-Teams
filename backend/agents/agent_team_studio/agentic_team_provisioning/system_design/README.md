@@ -50,4 +50,4 @@ External dependency nodes always use a dashed stroke so readers can immediately 
 
 ## Last reviewed
 
-Against the working tree on branch `claude/document-team-provisioning-architecture-gNlHj` (2026-04-11). Revisit these diagrams whenever `api/main.py`, `assistant/agent.py`, `runtime/pipeline_runner.py`, `roster_validation.py`, `agent_env_provisioning.py`, `infrastructure.py`, `postgres/__init__.py`, or `models.py` change materially.
+Against the working tree on branch `claude/github-issue-5710-nl19mr` (2026-08-09), updated for the `api/main.py` → `api/routes/*` + `api/services/*` split (teams, conversations, testing, processes, jobs, questions, assets, forms). Revisit these diagrams whenever `api/main.py`, `api/routes/`, `api/services/`, `assistant/agent.py`, `runtime/pipeline_runner.py`, `roster_validation.py`, `agent_env_provisioning.py`, `infrastructure.py`, `postgres/__init__.py`, or `models.py` change materially.
