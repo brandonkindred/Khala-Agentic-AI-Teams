@@ -52,6 +52,10 @@ class ConversationTurn(Generic[D]):
     Invariants:
         * The bound write callables are only valid for the lifetime of the
           enclosing ``with store.turn(...)`` block that produced this object.
+        * ``draft`` must be treated as read-only unless the enclosing
+          ``turn()`` call was given a ``clone`` function (see
+          :meth:`InMemoryTurnLocks.turn`) — mutating it in place rather than
+          calling :meth:`set_draft` can corrupt the turn's rollback snapshot.
     """
 
     def __init__(
@@ -131,6 +135,7 @@ class InMemoryTurnLocks(Generic[D]):
         on_message: Callable[[str, str], None],
         on_draft: Callable[[D], None],
         restore: Callable[[list[tuple[str, str]], D], None],
+        clone: Callable[[D], D] | None = None,
     ) -> Iterator[ConversationTurn[D]]:
         """Serialize a whole turn for ``key``, rolling back on exception.
 
@@ -149,6 +154,15 @@ class InMemoryTurnLocks(Generic[D]):
               immediately when called — they are not buffered by this class.
             * ``restore(history, draft)`` resets the caller's backing state
               to exactly the given pre-turn snapshot; it must not raise.
+            * If ``D`` is mutable and ``clone`` is omitted, the caller must
+              treat the yielded ``turn.draft`` as read-only (only replace it
+              wholesale via ``turn.set_draft``) — without ``clone``, the
+              rollback snapshot is the *same object* ``read()`` returned, so
+              an in-place mutation of ``turn.draft`` would silently also
+              mutate the value ``restore`` rolls back to. Pass ``clone``
+              (e.g. a deep-copy function for ``D``) to get a rollback
+              snapshot that's independent of whatever the caller does to
+              ``turn.draft``.
         Postconditions:
             * On clean exit, whatever ``on_message``/``on_draft`` calls were
               made during the block stand as committed.
@@ -156,13 +170,15 @@ class InMemoryTurnLocks(Generic[D]):
               the pre-turn snapshot before the exception propagates, so a
               partial write (e.g. the user message appended before the LLM
               call fails) is undone — the caller's state is restored to
-              exactly its turn-start values, then the lock is released.
+              exactly its turn-start values (subject to the ``clone``
+              precondition above), then the lock is released.
         """
         lock = self._lock_for(key)
         lock.acquire()
         try:
             history, draft = read()
-            history_before, draft_before = list(history), draft
+            history_before = list(history)
+            draft_before = clone(draft) if clone is not None else draft
             try:
                 yield ConversationTurn(
                     history=history, draft=draft, on_message=on_message, on_draft=on_draft

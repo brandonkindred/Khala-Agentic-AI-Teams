@@ -20,15 +20,31 @@ import re
 from typing import Any
 
 
+def _fenced_block_pattern(tag: str) -> re.Pattern[str]:
+    """Compile the regex matching a fenced ```` ```{tag} ... ``` ```` block.
+
+    Preconditions:
+        * ``tag`` contains no regex metacharacters that would need escaping
+          beyond what :func:`re.escape` handles (callers pass literal block
+          names like ``"agent"``/``"process"``/``"suggestions"``).
+    Postconditions:
+        * The returned pattern's match starts at a literal ```` ```{tag} ````
+          fence and requires a non-word character (or end of the fence line)
+          immediately after ``tag`` — via the ``(?!\\w)`` lookahead — so a
+          shorter tag never matches as a prefix of a longer one (``"agent"``
+          must not match a ```` ```agents ```` block). Group 1 captures the
+          block body.
+    """
+    return re.compile(r"```" + re.escape(tag) + r"(?!\w)\s*\n?(.*?)```", re.DOTALL)
+
+
 def parse_fenced_json(
     text: str, tag: str, *, expected_type: type | tuple[type, ...] = dict
 ) -> Any | None:
     """Extract and parse the first ```` ```{tag} ... ``` ```` block in ``text``.
 
     Preconditions:
-        * ``tag`` contains no regex metacharacters that would need escaping
-          beyond what :func:`re.escape` handles (callers pass literal block
-          names like ``"agent"``/``"process"``/``"suggestions"``).
+        * See :func:`_fenced_block_pattern` for constraints on ``tag``.
     Postconditions:
         * Returns the parsed JSON value when a block is found, its body is
           valid JSON, and the parsed value is an instance of
@@ -37,10 +53,11 @@ def parse_fenced_json(
           raises, so a pathological model output degrades to "no parseable
           update" rather than propagating an exception.
         * When ``text`` contains more than one ``{tag}`` block, only the
-          first (non-greedy match) is considered.
+          first (non-greedy match) is considered. A block for a *different*,
+          longer tag that merely starts with ``tag`` (e.g. ``agents`` vs.
+          ``agent``) is never matched.
     """
-    pattern = re.compile(r"```" + re.escape(tag) + r"\s*\n?(.*?)```", re.DOTALL)
-    match = pattern.search(text)
+    match = _fenced_block_pattern(tag).search(text)
     if not match:
         return None
     try:
@@ -54,14 +71,17 @@ def strip_fenced_blocks(text: str, tags: list[str]) -> str:
     """Remove every ```` ```{tag} ... ``` ```` block (for each tag in ``tags``) from ``text``.
 
     Preconditions:
-        * ``tags`` contains literal block names (see :func:`parse_fenced_json`).
+        * ``tags`` contains literal block names (see :func:`_fenced_block_pattern`).
     Postconditions:
         * Returns ``text`` with every block for every listed tag removed and
           the result stripped of leading/trailing whitespace. A tag with no
-          matching block in ``text`` is a no-op for that tag.
+          matching block in ``text`` is a no-op for that tag — including when
+          ``text`` only contains a block for a longer tag sharing ``tag`` as
+          a prefix (e.g. stripping ``"agent"`` leaves a ```` ```agents ````
+          block untouched).
     """
     for tag in tags:
-        text = re.sub(r"```" + re.escape(tag) + r"\s*\n?.*?```", "", text, flags=re.DOTALL)
+        text = _fenced_block_pattern(tag).sub("", text)
     return text.strip()
 
 

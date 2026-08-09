@@ -98,6 +98,46 @@ def test_turn_rolls_back_partial_write_on_later_exception() -> None:
     assert record == {"history": [], "draft": "initial"}
 
 
+def test_turn_without_clone_rollback_reflects_inplace_mutation() -> None:
+    """Documents the ``clone``-less precondition: mutating ``turn.draft`` in
+    place (instead of calling ``set_draft``) corrupts the rollback snapshot,
+    since it aliases the same object ``read()`` returned."""
+    record = {"history": [], "draft": {"count": 0}}
+    read, on_message, on_draft, restore = _record_ops(record)
+    locks = InMemoryTurnLocks()
+
+    with pytest.raises(_Boom):
+        with locks.turn(
+            "conv-1", read=read, on_message=on_message, on_draft=on_draft, restore=restore
+        ) as turn:
+            turn.draft["count"] = 99
+            raise _Boom()
+
+    assert record["draft"] == {"count": 99}
+
+
+def test_turn_clone_isolates_rollback_from_inplace_mutation() -> None:
+    """Passing ``clone`` fixes the scenario above: the rollback snapshot is
+    independent of whatever the caller does to ``turn.draft`` afterward."""
+    record = {"history": [], "draft": {"count": 0}}
+    read, on_message, on_draft, restore = _record_ops(record)
+    locks = InMemoryTurnLocks()
+
+    with pytest.raises(_Boom):
+        with locks.turn(
+            "conv-1",
+            read=read,
+            on_message=on_message,
+            on_draft=on_draft,
+            restore=restore,
+            clone=dict,
+        ) as turn:
+            turn.draft["count"] = 99
+            raise _Boom()
+
+    assert record["draft"] == {"count": 0}
+
+
 def test_turn_after_rollback_is_usable_again() -> None:
     record = {"history": [], "draft": "initial"}
     read, on_message, on_draft, restore = _record_ops(record)

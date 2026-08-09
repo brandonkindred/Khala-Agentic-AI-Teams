@@ -90,6 +90,13 @@ def test_strip_ignores_tags_not_present() -> None:
     assert stripped == ""
 
 
+def test_strip_does_not_consume_a_longer_tags_block() -> None:
+    # Stripping "agent" must not also remove an unlisted ```agents``` block —
+    # "agent" is a prefix of "agents", not the same tag.
+    text = 'keep this\n\n```agents\n[{"agent_name": "A"}]\n```'
+    assert strip_fenced_blocks(text, ["agent"]) == text
+
+
 # ---------------------------------------------------------------------------
 # merge_list_by_key
 # ---------------------------------------------------------------------------
