@@ -287,9 +287,7 @@ def test_degraded_outcome_is_not_cached() -> None:
     # Default graceful degradation: the clean sibling drives an approved verdict,
     # chunk b is recorded as a non-blocking not-reviewed range (never posted).
     assert degraded.approved is True
-    assert not any(
-        mapping.NOT_REVIEWED_FINDING_MARKER in i.description for i in degraded.issues
-    )
+    assert not any(mapping.NOT_REVIEWED_FINDING_MARKER in i.description for i in degraded.issues)
     assert degraded.not_reviewed_ranges  # b's range is recorded for observability
 
     # Heal the client and re-run identical input: chunk a is a cache hit (no new
@@ -479,6 +477,30 @@ def test_symbol_surface_is_not_capped_at_sixty() -> None:
     assert "fn_0" in result and "fn_74" in result
 
 
+def test_symbol_surface_finds_symbols_in_pre_numbered_content() -> None:
+    """Pre-numbered content (``FileSegment.pre_numbered`` / a diff-first
+    ``code=`` submission's ``N: `` prefixes) must not blind symbol extraction
+    -- the anchored patterns match column zero, so a raw ``"12: def foo():"``
+    line would otherwise never match ``def`` at all, silently emptying the
+    sibling surface for every pre-numbered submission."""
+    content = "1: def foo():\n2:     pass\n3: \n4: class Bar:\n5:     pass\n"
+    assert coord._symbol_surface(content) == ["Bar", "foo"]
+
+
+def test_symbol_surface_pre_numbered_still_excludes_indented_defs() -> None:
+    """De-numbering must restore each line's real column position, not just
+    strip the prefix and shift everything to column zero -- an indented
+    method stays non-top-level even once its ``N: `` prefix is removed."""
+    content = (
+        "10: class C:\n"
+        "11:     def method(self):\n"  # indented → not top-level
+        "12:         pass\n"
+        "13: def top():\n"  # column-zero → top-level
+        "14:     pass\n"
+    )
+    assert coord._symbol_surface(content) == ["C", "top"]
+
+
 def test_half_sibling_surface_falls_back_without_map() -> None:
     """With no surface map (a direct caller), a bisected half keeps the parent's surface."""
     from code_review_agent.models import FileSegment, ReviewChunk
@@ -513,6 +535,7 @@ def test_sibling_surface_honors_env_cap(monkeypatch: pytest.MonkeyPatch) -> None
 
     monkeypatch.setenv("CODE_REVIEW_SIBLING_SURFACE_CHARS", "0")
     assert coord._sibling_surface(chunk, surface) == ""
+
 
 def test_surface_by_path_skips_headerless_and_symbolless() -> None:
     """Only named blocks with a non-empty surface appear in the map."""
@@ -692,18 +715,14 @@ def test_waiter_reuses_resolved_inflight_result() -> None:
 
     def leader() -> None:
         try:
-            results.append(
-                mapping._cached_review_chunk(reviewer, chunk, base_input, context_fp)
-            )
+            results.append(mapping._cached_review_chunk(reviewer, chunk, base_input, context_fp))
         except BaseException as exc:  # noqa: BLE001 - collect for assertion
             errors.append(exc)
 
     def waiter() -> None:
         assert started.wait(timeout=2), "leader never started"
         try:
-            results.append(
-                mapping._cached_review_chunk(reviewer, chunk, base_input, context_fp)
-            )
+            results.append(mapping._cached_review_chunk(reviewer, chunk, base_input, context_fp))
         except BaseException as exc:  # noqa: BLE001 - collect for assertion
             errors.append(exc)
 

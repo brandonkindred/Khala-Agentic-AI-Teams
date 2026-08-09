@@ -377,6 +377,91 @@ def test_skips_side_effect_half_when_pre_numbered() -> None:
     assert side == []
 
 
+def test_side_effect_half_runs_when_pre_numbered_with_full_content_supplied() -> None:
+    """A caller that supplies ``full_content`` alongside ``pre_numbered=True`` has
+    given the coordinator real full bodies for the changed paths -- the side-effect
+    half must run (same re-enable condition as the standalone pass), not be
+    silently discarded as unverifiable hunk-fallback mode."""
+    prompts: list = []
+
+    class _FindingsClient(DummyLLMClient):
+        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+            if _MERGED_PASS_ANCHOR in prompt:
+                prompts.append(prompt)
+                return {
+                    "architecture_findings": [],
+                    "side_effect_findings": [
+                        {
+                            "severity": "high",
+                            "category": "side-effects",
+                            "file_path": "app/main.py",
+                            "description": "bar() behavior changed",
+                            "suggestion": "check callers",
+                            "pre_existing": False,
+                        }
+                    ],
+                }
+            return {"approved": True, "issues": [], "summary": "ok", "spec_compliance_notes": ""}
+
+    arch, side = find_architecture_and_side_effect_issues(
+        _FindingsClient(),
+        CodeReviewInput(
+            code="### app/main.py ###\n4242: def bar():\n4243:     return 1\n",
+            pre_numbered=True,
+            full_content={"app/main.py": "def bar():\n    return 1\n"},
+            task_description="wire up bar",
+            existing_codebase=_DEFAULT_EXISTING_CODEBASE,
+        ),
+    )
+    assert len(prompts) == 1
+    assert len(side) == 1
+    assert side[0].category == "side-effects"
+
+
+def test_side_effect_half_stays_off_when_full_content_covers_only_some_paths() -> None:
+    """``full_content`` that covers only SOME of the submission's changed paths
+    must NOT re-enable the side-effect half: overlaying just the covered subset
+    would leave the rest as bounded ``N: ``-prefixed excerpts sitting alongside
+    full bodies, with no way for the pass to tell them apart. The architecture
+    half (unaffected by ``pre_numbered``) may still run."""
+    prompts: list = []
+
+    class _FindingsClient(DummyLLMClient):
+        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+            if _MERGED_PASS_ANCHOR in prompt:
+                prompts.append(prompt)
+                return {
+                    "architecture_findings": [],
+                    "side_effect_findings": [
+                        {
+                            "severity": "high",
+                            "category": "side-effects",
+                            "file_path": "app/main.py",
+                            "description": "should never be emitted -- half is off",
+                            "suggestion": "n/a",
+                            "pre_existing": False,
+                        }
+                    ],
+                }
+            return {"approved": True, "issues": [], "summary": "ok", "spec_compliance_notes": ""}
+
+    arch, side = find_architecture_and_side_effect_issues(
+        _FindingsClient(),
+        CodeReviewInput(
+            code=(
+                "### app/main.py ###\n4242: def bar():\n4243:     return 1\n"
+                "### app/util.py ###\n1: def helper():\n2:     return 2\n"
+            ),
+            pre_numbered=True,
+            # Covers only app/main.py, not app/util.py -- partial coverage.
+            full_content={"app/main.py": "def bar():\n    return 1\n"},
+            task_description="wire up bar",
+            existing_codebase=_DEFAULT_EXISTING_CODEBASE,
+        ),
+    )
+    assert side == []
+
+
 def test_large_architecture_document_shrinks_code_inline_budget(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
