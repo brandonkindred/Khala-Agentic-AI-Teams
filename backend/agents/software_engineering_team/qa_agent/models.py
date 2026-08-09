@@ -86,8 +86,8 @@ class QAOutput(BaseModel):
           ``validation_evidence``) are only populated in ``acceptance_evidence``
           mode; in every other mode they keep their empty defaults.
         - ``quality_gates`` values are unconstrained strings here (no dependency
-          on the DevOps ``GateStatus`` literal); the DevOps shim validates them
-          into ``GateStatus`` at its own boundary.
+          on the DevOps ``GateStatus`` literal); the DevOps quality-gate phase
+          coerces them into ``GateStatus`` at its own boundary.
     """
 
     bugs_found: List[BugReport] = Field(

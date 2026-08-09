@@ -411,7 +411,6 @@ software_engineering_team/
 │   ├── cicd_pipeline_agent/        # CI/CD workflows
 │   ├── deployment_strategy_agent/  # Rollout and rollback
 │   ├── devsecops_review_agent/     # Security review
-│   ├── test_validation_agent/      # Gate aggregation
 │   ├── change_review_agent/        # Senior DevOps review
 │   ├── doc_runbook_agent/          # Runbooks and handoff
 │   ├── infra_debug_agent/          # Diagnoses infrastructure/deploy failures
@@ -513,9 +512,10 @@ The `devops_team/` package is the contract-first, multi-agent DevOps engineering
 | **CICDPipelineAgent** | Creates CI/CD workflows with required gates and OIDC auth preference |
 | **DeploymentStrategyAgent** | Defines rollout strategy, rollback plan, health checks, and timeouts |
 | **DevSecOpsReviewAgent** | Reviews IAM, secrets, network exposure, artifact integrity; blocks on high-risk findings |
-| **DevOpsTestValidationAgent** | Aggregates tool results and maps evidence to acceptance criteria |
 | **ChangeReviewAgent** | Independent senior DevOps review for maintainability and architecture fit |
 | **DocumentationRunbookAgent** | Produces runbooks, rollback docs, and operational handoff artifacts |
+
+Acceptance/release validation (mapping tool results to acceptance criteria and producing quality gates) is not a DevOps-local agent — the orchestrator calls the cross-cutting `QAExpertAgent` (see `qa_agent/` above) directly in its `acceptance_evidence` mode.
 
 ### Tool Agents (stateless, no LLM)
 

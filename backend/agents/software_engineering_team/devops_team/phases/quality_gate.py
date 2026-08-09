@@ -6,7 +6,7 @@ Split out of ``orchestrator.py``. ``run_phase4_quality_gate`` takes the owning
 live access to several agent-owned collaborators invoked multiple times
 (``agent._run_execution_tools``, ``agent._debug_patch_once``,
 ``agent._run_bounded_retry_loop``, ``agent._report_status``, plus the
-DevSecOps/change-review/test-validation agents).
+DevSecOps/change-review/QA agents).
 """
 
 from __future__ import annotations
@@ -16,14 +16,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from software_engineering_team.qa_agent import QAInput
 from software_engineering_team.shared.security_service import infra_gate_passed
 
 from .. import tool_dispatch
 from ..change_review_agent import ChangeReviewInput
 from ..debug_patch import MAX_INFRA_FIX_ITERATIONS, _DebugPatchState
 from ..devsecops_review_agent import DevSecOpsReviewInput
-from ..models import DevOpsCompletionPackage, DevOpsTaskSpec, DevOpsTeamResult
-from ..test_validation_agent import DevOpsTestValidationInput
+from ..models import DevOpsCompletionPackage, DevOpsTaskSpec, DevOpsTeamResult, coerce_gate_status
 
 logger = logging.getLogger(__name__)
 
@@ -55,7 +55,7 @@ def run_phase4_quality_gate(
       be empty); ``agent`` provides ``_report_status``,
       ``_run_execution_tools``, ``_debug_patch_once``,
       ``_run_bounded_retry_loop``, ``devsecops_review_agent``,
-      ``change_review_agent``, and ``test_validation_agent``.
+      ``change_review_agent``, and ``qa_agent``.
     Postconditions: runs tool validation, execution verification, the
       debug-patch loop, and independent reviews, returning the assembled
       ``quality_gates``, ``acceptance_trace``, ``tool_gate_map``, and
@@ -136,8 +136,10 @@ def run_phase4_quality_gate(
         ChangeReviewInput(task_description=task_spec.title, artifacts=aggregated_artifacts)
     )
 
-    val = agent.test_validation_agent.run(
-        DevOpsTestValidationInput(
+    qa_val = agent.qa_agent.run(
+        QAInput(
+            code="",
+            request_mode="acceptance_evidence",
             acceptance_criteria=task_spec.acceptance_criteria,
             tool_results={
                 "iac": iac_checks.checks,
@@ -147,9 +149,9 @@ def run_phase4_quality_gate(
             },
         )
     )
-    acceptance_trace = list(val.acceptance_trace)
+    acceptance_trace = list(qa_val.acceptance_trace)
 
-    quality_gates = dict(val.quality_gates)
+    quality_gates = {k: coerce_gate_status(v) for k, v in qa_val.quality_gates.items()}
     # The infra security gate routes both the DevSecOps LLM review and the
     # policy-as-code (checkov) scan through the unified infra decision. This
     # is force-assigned (not setdefault) so the authoritative DevSecOps +
@@ -174,7 +176,7 @@ def run_phase4_quality_gate(
                     status="blocked",
                     files_changed=sorted(aggregated_artifacts.keys()),
                     quality_gates=quality_gates,
-                    notes=[devsec.summary, change_review.summary, val.summary],
+                    notes=[devsec.summary, change_review.summary, qa_val.summary],
                     risks_remaining=[f.issue for f in devsec.findings if f.blocking],
                 ),
             ),
