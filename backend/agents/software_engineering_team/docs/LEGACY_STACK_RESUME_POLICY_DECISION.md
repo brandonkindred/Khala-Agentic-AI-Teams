@@ -174,6 +174,17 @@ WHERE (
   );
 ```
 
+The query is a point-in-time snapshot, not a standing guarantee: a
+`pending` job with an empty `stack_specs`/`task_graph_snapshot` passes it
+today but can still be planned by the still-running pre-cleanup code
+afterward — e.g. a Tech Lead LLM-call failure produces the
+`{"name": "default", ...}` fallback stack — and reach `waiting_for_user`
+before the deploy actually lands. Treat zero rows as safe only for a
+query run immediately before the deploy, with new `coding_team`/`run_team`
+job submissions paused (or otherwise frozen) from that point until the
+repair-code-removal build is live; re-run the query right before
+un-pausing submissions if the deploy window is longer than a few minutes.
+
 - **Zero rows:** safe to deploy.
 - **Any rows:** do not deploy the repair-code removal yet. The valid
   recovery path depends on the row's status — `POST
