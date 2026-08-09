@@ -760,13 +760,13 @@ def _build_design_system() -> Dict[str, Any]:
     }
 
 _PHASE3_SPECIALISTS_REGISTRY = [
-    (("logo specifier", "clear_space"), _build_logo_specifier),
-    (("psychological_rationale", "color system builder"), _build_color_system),
-    (("typography builder", "weight_range"), _build_typography),
-    (("iconography_style", "illustration_style"), _build_iconography),
-    (("photography_direction", "motion_principles"), _build_photography),
-    (("voice_tone_spectrum", "language_donts"), _build_voice_tone),
-    (("foundation_tokens", "component_standards"), _build_design_system),
+    (("logo specifier", "clear_space"), _phase3_logo_specifier_stub),
+    (("psychological_rationale", "color system builder"), _phase3_color_system_builder_stub),
+    (("typography builder", "weight_range"), _phase3_typography_builder_stub),
+    (("iconography_style", "illustration_style"), _phase3_iconography_director_stub),
+    (("photography_direction", "motion_principles"), _phase3_photography_video_director_stub),
+    (("voice_tone_spectrum", "language_donts"), _phase3_voice_tone_builder_stub),
+    (("foundation_tokens", "component_standards"), _phase3_design_system_codifier_stub),
 ]
 
 
@@ -787,8 +787,8 @@ def _branding_phase3_structured_stub(system_lowered: str) -> Optional[Dict[str, 
         (space), color_system_builder matches "color system builder", and
         typography_builder matches "typography builder". The remaining four
         specialists (iconography_director, photography_video_director,
-        voice_tone_builder, design_system_codifier) have no name-substring
-        anchor at all — they match on output-field names only.
+        voice_tone_builder, design_system_codifier) also match on output-field name
+        substrings present in the system prompt.
 
     Ordering constraints (first three only — do not conflate them):
         1. CreativeDirector
@@ -799,24 +799,20 @@ def _branding_phase3_structured_stub(system_lowered: str) -> Optional[Dict[str, 
     # 1. CreativeDirector
     if "mood_board_candidates" in system_lowered and "converge_decider" in system_lowered:
         return _phase3_creative_director_stub()
+    
+    # 2. MoodBoardConceptualist
     if "moodboard conceptualist" in system_lowered and "visual_direction" in system_lowered:
         return _phase3_moodboard_conceptualist_stub()
+    
+    # 3. ConvergeDecider
     if "winning_candidate_title" in system_lowered and "scores_by_candidate" in system_lowered:
         return _phase3_converge_decider_stub()
-    if "logo specifier" in system_lowered and "clear_space" in system_lowered:
-        return _phase3_logo_specifier_stub()
-    if "psychological_rationale" in system_lowered and "color system builder" in system_lowered:
-        return _phase3_color_system_builder_stub()
-    if "typography builder" in system_lowered and "weight_range" in system_lowered:
-        return _phase3_typography_builder_stub()
-    if "iconography_style" in system_lowered and "illustration_style" in system_lowered:
-        return _phase3_iconography_director_stub()
-    if "photography_direction" in system_lowered and "motion_principles" in system_lowered:
-        return _phase3_photography_video_director_stub()
-    if "voice_tone_spectrum" in system_lowered and "language_donts" in system_lowered:
-        return _phase3_voice_tone_builder_stub()
-    if "foundation_tokens" in system_lowered and "component_standards" in system_lowered:
-        return _phase3_design_system_codifier_stub()
+
+    # 4. Phase 3 Specialists via Registry
+    for anchors, builder_fn in _PHASE3_SPECIALISTS_REGISTRY:
+        if all(anchor in system_lowered for anchor in anchors):
+            return builder_fn()
+
     return None
 
 
@@ -981,7 +977,7 @@ def _branding_phase4_structured_output_stub(
         return _phase4_architecture_stub()
     if model_name == "BrandInActionOutput":
         return _phase4_brand_in_action_stub()
-    return None
+    
 
     # 4. Phase 3 Specialists via Registry
     for anchors, builder_fn in _PHASE3_SPECIALISTS_REGISTRY:
