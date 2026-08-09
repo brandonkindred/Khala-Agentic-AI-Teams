@@ -490,6 +490,65 @@ def test_fe_deliver_inline_quality_gate_blocks_merge(tmp_path: Path, monkeypatch
     merge_mock.assert_not_called()
 
 
+def test_fe_deliver_dispatches_real_git_agent_with_quality_gate_fields(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Regression: run_deliver must construct the real (Pydantic)
+    ToolAgentPhaseInput with the quality-gate fields and route them through the
+    real GitBranchManagementToolAgent. The other gate tests either bypass the
+    inline-fallback path entirely (no tool_agents supplied) or drive the Git
+    agent with a bare SimpleNamespace, which skips Pydantic validation -- a
+    renamed/removed field on the team model would stay green in both while
+    silently dropping gate configuration in production. This test would fail
+    if build_verifier/build_verify_label/linting_tool_agent/lint_agent_type
+    were removed from frontend_code_v2_team.models.ToolAgentPhaseInput.
+    """
+    from software_engineering_team.frontend_code_v2_team.models import ToolAgentKind
+    from software_engineering_team.frontend_code_v2_team.orchestrator import run_deliver
+    from software_engineering_team.shared import tool_agent_git_branch as tab_mod
+    from software_engineering_team.shared.tool_agent_git_branch import (
+        GitBranchManagementToolAgent,
+    )
+
+    (tmp_path / ".git").mkdir()
+    monkeypatch.setattr(tab_mod, "commit_working_tree", lambda *a, **k: (True, ""))
+    monkeypatch.setattr(tab_mod, "merge_branch", lambda *a, **k: (True, ""))
+    monkeypatch.setattr(tab_mod, "delete_branch", lambda *a, **k: (True, ""))
+    monkeypatch.setattr(tab_mod, "checkout_branch", lambda *a, **k: (True, ""))
+
+    build_calls: list[tuple[str, str]] = []
+
+    def _build_verifier(repo_path, label, task_id):
+        build_calls.append((label, task_id))
+        return True, ""
+
+    lint_calls: list = []
+
+    class _LintAgent:
+        def run(self, inp):
+            lint_calls.append(inp)
+            return SimpleNamespace(execution_result=SimpleNamespace(success=True), passed=True)
+
+    result = run_deliver(
+        task_id="t1",
+        repo_path=tmp_path,
+        files={"a.ts": "x"},
+        summary="ok",
+        feature_branch_name="feature/x",
+        tool_agents={ToolAgentKind.GIT_BRANCH_MANAGEMENT: GitBranchManagementToolAgent()},
+        build_verifier=_build_verifier,
+        build_verify_label="frontend",
+        linting_tool_agent=_LintAgent(),
+        lint_agent_type="frontend",
+    )
+
+    assert result.merged is True
+    assert build_calls == [("frontend", "t1")]
+    assert len(lint_calls) == 1
+    assert lint_calls[0].agent_type == "frontend"
+    assert lint_calls[0].task_id == "t1"
+
+
 def test_fe_deliver_inline_happy_path(tmp_path: Path, monkeypatch) -> None:
     """Frontend inline delivery exercises branch creation, write, merge, and cleanup."""
     from shared.git import git_utils
