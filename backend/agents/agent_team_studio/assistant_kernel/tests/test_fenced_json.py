@@ -82,10 +82,19 @@ def test_parse_distinguishes_punctuation_suffixed_tags() -> None:
 
 
 def test_parse_none_when_tag_immediately_closed_with_no_body() -> None:
-    # A closing fence must be on its own line (see the embedded-backtick
-    # tests below), so a tag closed on the same line with no body at all
-    # doesn't match — no fenced block, not just an empty/invalid one.
+    # A backtick is not accepted as a tag-boundary character (only
+    # whitespace is), so a same-line "```agent```" fails the boundary check
+    # and never matches — no fenced block, not just an empty/invalid one.
     assert parse_fenced_json("```agent```", "agent") is None
+
+
+def test_parse_none_when_immediately_closed_tag_precedes_an_unrelated_block() -> None:
+    # A self-closed ```agent``` marker earlier in the text must not be
+    # read as the *opening* of a new block whose body then swallows
+    # everything up to some later, unrelated block's closing fence.
+    text = '```agent``` some prose\n\nkeep this paragraph\n\n```suggestions\n["a", "b"]\n```\n'
+    assert parse_fenced_json(text, "agent") is None
+    assert parse_fenced_json(text, "suggestions", expected_type=list) == ["a", "b"]
 
 
 def test_parse_body_containing_embedded_backticks() -> None:
@@ -167,6 +176,14 @@ def test_strip_does_not_consume_a_longer_tags_block() -> None:
 
 def test_strip_does_not_consume_a_punctuation_suffixed_tags_block() -> None:
     text = 'keep this\n\n```agent-v2\n{"x": 1}\n```'
+    assert strip_fenced_blocks(text, ["agent"]) == text
+
+
+def test_strip_does_not_swallow_an_unrelated_block_past_a_self_closed_marker() -> None:
+    # Mirrors test_parse_none_when_immediately_closed_tag_precedes_an_unrelated_block:
+    # a self-closed ```agent``` marker must not be treated as an opening
+    # fence whose body extends through prose and an unrelated later block.
+    text = '```agent``` some prose\n\nkeep this paragraph\n\n```suggestions\n["a", "b"]\n```'
     assert strip_fenced_blocks(text, ["agent"]) == text
 
 

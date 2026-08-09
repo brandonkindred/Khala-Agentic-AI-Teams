@@ -30,11 +30,19 @@ def _fenced_block_pattern(tag: str) -> re.Pattern[str]:
     Postconditions:
         * The returned pattern's match starts at a literal ```` ```{tag} ````
           fence and requires the character immediately after ``tag`` to be
-          whitespace or the fence's closing backtick — via the ``(?=\\s|`)``
-          lookahead — so a shorter tag never matches as a prefix of a longer
-          one, whether the longer tag extends it with a word character
-          (``"agent"`` vs. ```` ```agents ````) or punctuation (``"agent"``
-          vs. ```` ```agent-v2 ````).
+          whitespace — via the ``(?=\\s)`` lookahead — so a shorter tag
+          never matches as a prefix of a longer one, whether the longer tag
+          extends it with a word character (``"agent"`` vs.
+          ```` ```agents ````) or punctuation (``"agent"`` vs.
+          ```` ```agent-v2 ````). A backtick is deliberately *not* accepted
+          as a boundary character here: earlier revisions did, to treat a
+          same-line ```` ```{tag}``` ```` as a (degenerate, empty-body)
+          closed block, but combined with the opening line's ``[^\\n]*``
+          that let a self-closed marker be read as the *opening* of a new
+          block whose body then swallowed everything up to some unrelated
+          later block's closing fence — corrupting both parsing and
+          stripping. Requiring whitespace makes ```` ```{tag}``` ```` fail
+          to match at all, which is the correct outcome either way.
         * The closing ```` ``` ```` must be alone on its own line — so a
           literal backtick run embedded inside the JSON body (e.g. a
           ``system_prompt`` string containing a markdown code example like
@@ -48,7 +56,7 @@ def _fenced_block_pattern(tag: str) -> re.Pattern[str]:
           captured body first). Group 1 captures the block body.
     """
     return re.compile(
-        r"```" + re.escape(tag) + r"(?=\s|`)[^\n]*\n(.*?)\n[ \t]*```[ \t]*(?=\r?\n|$)", re.DOTALL
+        r"```" + re.escape(tag) + r"(?=\s)[^\n]*\n(.*?)\n[ \t]*```[ \t]*(?=\r?\n|$)", re.DOTALL
     )
 
 
