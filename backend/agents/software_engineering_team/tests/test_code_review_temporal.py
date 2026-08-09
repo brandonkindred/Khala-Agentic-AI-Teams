@@ -330,7 +330,7 @@ def test_prepare_activity_single_chunk_fanout_width_is_one(
 def test_prepare_activity_compacts_architecture_overview() -> None:
     from code_review_agent.temporal import activities as A
 
-    from software_engineering_team.shared.models import SystemArchitecture
+    from shared.dev_models.models import SystemArchitecture
 
     arch = SystemArchitecture(
         overview="A small service that does one thing.",

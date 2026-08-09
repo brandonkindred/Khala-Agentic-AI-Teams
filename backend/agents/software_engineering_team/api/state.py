@@ -7,9 +7,8 @@ never participates in an import cycle.
 
 Invariants:
     - The orchestrator-thread registry itself lives in
-      ``shared.run_thread_registry.RunThreadRegistry``; ``_active_orchestrator_threads`` is a
-      back-compat alias onto its live internal map, so background threads and routes see the same
-      map regardless of whether they go through the registry or poke the alias directly.
+      ``shared.run_thread_registry.RunThreadRegistry``; background threads and routes go through
+      the registry's methods (e.g. ``_is_orchestrator_alive``) rather than poking its internals.
 """
 
 import logging
@@ -111,7 +110,6 @@ def create_project_workspace(project_name: str, spec_content: bytes) -> Path:
 
 # Track active orchestrator threads so we can detect when a server restart killed one
 _registry = RunThreadRegistry()
-_active_orchestrator_threads = _registry.threads
 _is_orchestrator_alive = _registry.is_alive
 
 

@@ -30,7 +30,7 @@ from typing import Any, Callable, Dict, Optional, Tuple
 from unittest.mock import MagicMock
 
 from llm_service.clients.dummy import DummyLLMClient
-from software_engineering_team.shared.models import ReviewContext, SystemArchitecture
+from shared.dev_models.models import ReviewContext, SystemArchitecture
 from software_engineering_team.shared.v2_models import ReviewIssue
 from software_engineering_team.shared.v2_review import (
     ReviewConfig,
@@ -173,6 +173,133 @@ def test_run_review_forwards_language_to_llm_review_fn(tmp_path: Path) -> None:
         **runners,
     )
     assert captured["language"] == "python"
+
+
+def test_run_review_forwards_review_context_to_llm_review_fn(tmp_path: Path) -> None:
+    """The code-review step's LLM fallback must see the caller's ``review_context``
+    object unchanged -- surface-first wiring (diff-first review) must not drop the
+    architecture/spec context the fallback reasons over."""
+    captured: dict = {}
+
+    def _spy_llm_review_fn(*, llm, task, files, **kw):
+        captured["review_context"] = kw.get("review_context")
+        return []
+
+    runners = _noop_runners()
+    runners["llm_review_fn"] = _spy_llm_review_fn
+    ctx = ReviewContext(architecture=SystemArchitecture(overview="layered"), spec_content="spec")
+
+    run_review(
+        config=_build_config(),
+        llm=DummyLLMClient(),
+        task=_task(),
+        execution_result=_execution_result({"x.py": "code"}),
+        repo_path=tmp_path,
+        language="python",
+        review_context=ctx,
+        **runners,
+    )
+    assert captured["review_context"] is ctx
+
+
+def test_run_review_forwards_grounding_flag_to_llm_review_fn(tmp_path: Path) -> None:
+    """``enable_llm_review_grounding`` must reach the LLM fallback unchanged, both at
+    its default (True) and when a caller explicitly disables it -- this is the kill
+    switch for ungrounded-claim filtering and must never be silently overridden."""
+    captured: dict = {}
+
+    def _spy_llm_review_fn(*, llm, task, files, **kw):
+        captured["enable_llm_review_grounding"] = kw.get("enable_llm_review_grounding")
+        return []
+
+    runners = _noop_runners()
+    runners["llm_review_fn"] = _spy_llm_review_fn
+
+    run_review(
+        config=_build_config(),
+        llm=DummyLLMClient(),
+        task=_task(),
+        execution_result=_execution_result({"x.py": "code"}),
+        repo_path=tmp_path,
+        language="python",
+        **runners,
+    )
+    assert captured["enable_llm_review_grounding"] is True
+
+    run_review(
+        config=_build_config(),
+        llm=DummyLLMClient(),
+        task=_task(),
+        execution_result=_execution_result({"x.py": "code"}),
+        repo_path=tmp_path,
+        language="python",
+        enable_llm_review_grounding=False,
+        **runners,
+    )
+    assert captured["enable_llm_review_grounding"] is False
+
+
+def test_code_review_agent_receives_disk_repo_reader(tmp_path: Path, monkeypatch) -> None:
+    """The ``DiskRepoReader`` built from ``repo_path`` must reach the external
+    ``code_review_agent.run(...)`` call as ``repo_reader=`` -- surface-first wiring must
+    keep attaching it so later passes can resolve callers outside the change surface."""
+    sentinel_reader = object()
+    monkeypatch.setattr(
+        "software_engineering_team.shared.v2_review.build_disk_repo_reader",
+        lambda repo_path: sentinel_reader,
+    )
+
+    cr_agent = MagicMock()
+    cr_agent.run.return_value = MagicMock(issues=[])
+
+    run_review(
+        config=_build_config(),
+        llm=DummyLLMClient(),
+        task=_task(),
+        execution_result=_execution_result({"x.py": "code"}),
+        repo_path=tmp_path,
+        code_review_agent=cr_agent,
+        language="python",
+        **_noop_runners(),
+    )
+    assert cr_agent.run.call_args.kwargs["repo_reader"] is sentinel_reader
+
+
+def test_microtask_forwards_language_review_context_and_grounding_to_llm_review_fn(
+    tmp_path: Path,
+) -> None:
+    """``run_microtask_review``'s LLM fallback must see ``language``, ``review_context``,
+    and ``enable_llm_review_grounding`` unchanged too -- these three are only pinned for
+    ``run_review`` elsewhere in this file; the microtask path shares ``_code_review_step``
+    but had no equivalent coverage."""
+    captured: dict = {}
+
+    def _spy_llm_review_fn(*, llm, task, files, **kw):
+        captured["language"] = kw.get("language")
+        captured["review_context"] = kw.get("review_context")
+        captured["enable_llm_review_grounding"] = kw.get("enable_llm_review_grounding")
+        return []
+
+    ctx = ReviewContext(architecture=SystemArchitecture(overview="layered"), spec_content="spec")
+
+    run_microtask_review(
+        config=_build_config(),
+        llm=DummyLLMClient(),
+        task=_task(),
+        microtask=_microtask(),
+        repo_path=tmp_path,
+        files={"x.py": "code"},
+        language="python",
+        review_context=ctx,
+        enable_llm_review_grounding=False,
+        llm_review_fn=_spy_llm_review_fn,
+        qa_agent_fn=lambda **kw: [],
+        security_agent_fn=lambda **kw: [],
+        build_verify_fn=_build_verify_fn,
+    )
+    assert captured["language"] == "python"
+    assert captured["review_context"] is ctx
+    assert captured["enable_llm_review_grounding"] is False
 
 
 def test_lint_passed_defends_missing_execution_result() -> None:
@@ -702,6 +829,168 @@ def test_code_review_input_carries_repo_root_for_durable_reader(tmp_path: Path) 
     )
     cr_input = cr_agent.run.call_args.args[0]
     assert cr_input.repo_root == str(tmp_path)
+
+
+# ---------------------------------------------------------------------------
+# _code_review_step / CodeReviewInput code= + pre_numbered= surface wiring
+# ---------------------------------------------------------------------------
+
+
+def test_run_review_old_contents_meaningful_diff_uses_surface_code(tmp_path: Path) -> None:
+    """When ``old_contents`` yields a meaningful diff, the external agent's
+    ``CodeReviewInput`` carries ``code=<surface>``/``pre_numbered=True`` instead of
+    ``files=``."""
+    config = _build_config()
+    files = {"a.py": "def f():\n    return 1\n"}
+    old_contents = {"a.py": "def f():\n    return 0\n"}
+
+    cr_agent = MagicMock()
+    cr_agent.run.return_value = MagicMock(issues=[])
+
+    run_review(
+        config=config,
+        llm=DummyLLMClient(),
+        task=_task(),
+        execution_result=_execution_result(files),
+        repo_path=tmp_path,
+        code_review_agent=cr_agent,
+        language="python",
+        llm_review_fn=lambda *, llm, task, files, **kw: [],
+        qa_agent_fn=lambda **kw: [],
+        security_agent_fn=lambda **kw: [],
+        build_verify_fn=_build_verify_fn,
+        old_contents=old_contents,
+    )
+
+    cr_input = cr_agent.run.call_args.args[0]
+    expected_surface = _maybe_build_change_surface_from_pairs(files, old_contents)
+    assert expected_surface is not None
+    assert cr_input.code == expected_surface.code
+    assert cr_input.pre_numbered is True
+    assert cr_input.files is None
+
+
+def test_run_review_old_contents_none_default_keeps_files_behavior(tmp_path: Path) -> None:
+    """``old_contents`` defaults to ``None`` -- every existing caller that does not
+    pass it keeps today's ``files=`` construction unchanged (no surface attempted)."""
+    config = _build_config()
+    files = {"a.py": "def f():\n    return 1\n"}
+
+    cr_agent = MagicMock()
+    cr_agent.run.return_value = MagicMock(issues=[])
+
+    run_review(
+        config=config,
+        llm=DummyLLMClient(),
+        task=_task(),
+        execution_result=_execution_result(files),
+        repo_path=tmp_path,
+        code_review_agent=cr_agent,
+        language="python",
+        llm_review_fn=lambda *, llm, task, files, **kw: [],
+        qa_agent_fn=lambda **kw: [],
+        security_agent_fn=lambda **kw: [],
+        build_verify_fn=_build_verify_fn,
+    )
+
+    cr_input = cr_agent.run.call_args.args[0]
+    assert cr_input.files == files
+    assert cr_input.code == ""
+    assert cr_input.pre_numbered is False
+
+
+def test_run_review_old_contents_identical_to_files_keeps_files_behavior(tmp_path: Path) -> None:
+    """``old_contents`` supplied but identical to ``files`` (no meaningful diff) still
+    falls back to ``files=`` -- an empty/no-op diff never masquerades as a surface."""
+    config = _build_config()
+    files = {"a.py": "unchanged\n"}
+
+    cr_agent = MagicMock()
+    cr_agent.run.return_value = MagicMock(issues=[])
+
+    run_review(
+        config=config,
+        llm=DummyLLMClient(),
+        task=_task(),
+        execution_result=_execution_result(files),
+        repo_path=tmp_path,
+        code_review_agent=cr_agent,
+        language="python",
+        llm_review_fn=lambda *, llm, task, files, **kw: [],
+        qa_agent_fn=lambda **kw: [],
+        security_agent_fn=lambda **kw: [],
+        build_verify_fn=_build_verify_fn,
+        old_contents=dict(files),
+    )
+
+    cr_input = cr_agent.run.call_args.args[0]
+    assert cr_input.files == files
+    assert cr_input.code == ""
+    assert cr_input.pre_numbered is False
+
+
+def test_microtask_old_contents_meaningful_diff_uses_surface_code(tmp_path: Path) -> None:
+    """``run_microtask_review`` threads ``old_contents`` through to the same
+    ``_code_review_step`` surface wiring as ``run_review``."""
+    config = _build_config()
+    files = {"a.py": "def f():\n    return 1\n"}
+    old_contents = {"a.py": "def f():\n    return 0\n"}
+
+    cr_agent = MagicMock()
+    cr_agent.run.return_value = MagicMock(issues=[])
+
+    run_microtask_review(
+        config=config,
+        llm=DummyLLMClient(),
+        task=_task(),
+        microtask=_microtask(),
+        repo_path=tmp_path,
+        files=files,
+        code_review_agent=cr_agent,
+        language="python",
+        llm_review_fn=lambda *, llm, task, files, **kw: [],
+        qa_agent_fn=lambda **kw: [],
+        security_agent_fn=lambda **kw: [],
+        build_verify_fn=_build_verify_fn,
+        old_contents=old_contents,
+    )
+
+    cr_input = cr_agent.run.call_args.args[0]
+    expected_surface = _maybe_build_change_surface_from_pairs(files, old_contents)
+    assert expected_surface is not None
+    assert cr_input.code == expected_surface.code
+    assert cr_input.pre_numbered is True
+    assert cr_input.files is None
+
+
+def test_microtask_old_contents_none_default_keeps_files_behavior(tmp_path: Path) -> None:
+    """``run_microtask_review`` without ``old_contents`` keeps today's ``files=``
+    construction unchanged."""
+    config = _build_config()
+    files = {"a.py": "def f():\n    return 1\n"}
+
+    cr_agent = MagicMock()
+    cr_agent.run.return_value = MagicMock(issues=[])
+
+    run_microtask_review(
+        config=config,
+        llm=DummyLLMClient(),
+        task=_task(),
+        microtask=_microtask(),
+        repo_path=tmp_path,
+        files=files,
+        code_review_agent=cr_agent,
+        language="python",
+        llm_review_fn=lambda *, llm, task, files, **kw: [],
+        qa_agent_fn=lambda **kw: [],
+        security_agent_fn=lambda **kw: [],
+        build_verify_fn=_build_verify_fn,
+    )
+
+    cr_input = cr_agent.run.call_args.args[0]
+    assert cr_input.files == files
+    assert cr_input.code == ""
+    assert cr_input.pre_numbered is False
 
 
 def test_microtask_qa_and_security_with_detail_callback(tmp_path: Path) -> None:

@@ -286,9 +286,9 @@ def test_persist_run_state_activity_fails_closed_on_generation_lookup_failure(mo
     assert persisted == []  # the write never happened despite a legitimately fresh generation
 
 
-def test_snapshot_prior_records_activity_delegates_to_api_main(monkeypatch):
-    from investment_team.api import main as api_main
+def test_snapshot_prior_records_activity_delegates_to_orchestrator_api(monkeypatch):
     from investment_team.models import StrategyLabRecord
+    from investment_team.strategy_lab import orchestrator_api
 
     record = StrategyLabRecord(
         lab_record_id="rec-1",
@@ -308,7 +308,9 @@ def test_snapshot_prior_records_activity_delegates_to_api_main(monkeypatch):
         analysis_narrative="n",
         created_at="2023-01-01T00:00:00Z",
     )
-    monkeypatch.setattr(api_main, "_snapshot_prior_records", lambda *, reverse=False: [record])
+    monkeypatch.setattr(
+        orchestrator_api, "_snapshot_prior_records", lambda *, reverse=False: [record]
+    )
 
     result = act.snapshot_prior_records_activity()
     assert result[0]["lab_record_id"] == "rec-1"

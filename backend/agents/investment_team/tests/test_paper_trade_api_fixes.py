@@ -7,12 +7,15 @@ Covers:
   the PR 2 active states (OPENING / WARMING_UP / LIVE), not just the
   legacy RUNNING state, so SIGKILL orphans cannot block the new
   per-strategy concurrency guard.
+* ``_apply_paper_trading_failure`` (the shared status/error/completed_at
+  helper extracted so the recovery loop stops re-implementing
+  ``_fail_paper_trading_session``'s update logic) sets the right fields
+  under each keyword combination, and both ``_recover_orphaned_paper_trading_sessions``
+  and ``_fail_paper_trading_session`` delegate their terminal-write fields
+  to it instead of each re-implementing the status/error/completed_at
+  update inline.
 * ``RunPaperTradingRequest.timeframe`` rejects values outside its
   documented allowed set at the API boundary instead of only failing later.
-* ``_recover_orphaned_paper_trading_sessions`` and ``_fail_paper_trading_session``
-  both delegate their terminal-write fields to the shared
-  ``_apply_paper_trading_failure`` helper instead of each re-implementing the
-  status/error/completed_at update inline.
 
 The recovery tests run against an in-memory ``FakeJobServiceClient`` swapped
 into the module-level ``_paper_trading_sessions`` ``_PersistentDict`` so the
@@ -31,6 +34,7 @@ from pydantic import ValidationError
 import investment_team.api.main as api_main
 from investment_team.api.main import (
     RunPaperTradingRequest,
+    _apply_paper_trading_failure,
     _lock,
     _paper_trading_sessions,
     _recover_orphaned_paper_trading_sessions,
@@ -164,6 +168,58 @@ def _install_session(session: PaperTradingSession) -> None:
 def _fetch_session(session_id: str) -> PaperTradingSession:
     raw = _paper_trading_sessions[session_id]
     return PaperTradingSession(**raw) if isinstance(raw, dict) else raw
+
+
+# ---------------------------------------------------------------------------
+# Shared terminal-failure helper (`_apply_paper_trading_failure`)
+#
+# Regression coverage for the #5136 fix: `_recover_orphaned_paper_trading_sessions`
+# used to hand-roll the same status/error/completed_at update that
+# `_fail_paper_trading_session` centralizes. Both call sites now delegate to
+# this shared helper instead of duplicating the field-mutation logic.
+# ---------------------------------------------------------------------------
+
+
+def test_apply_paper_trading_failure_sets_status_error_and_default_completed_at() -> None:
+    session = _make_session("pt-apply-defaults", PaperTradingStatus.RUNNING)
+    _apply_paper_trading_failure(session, "boom")
+    assert session.status == PaperTradingStatus.FAILED
+    assert session.error == "boom"
+    assert session.completed_at
+    assert session.terminated_reason is None
+    assert session.divergence_analysis is None
+
+
+def test_apply_paper_trading_failure_honors_explicit_completed_at() -> None:
+    session = _make_session("pt-apply-completed-at", PaperTradingStatus.OPENING)
+    _apply_paper_trading_failure(session, "boom", completed_at="2020-01-01T00:00:00+00:00")
+    assert session.completed_at == "2020-01-01T00:00:00+00:00"
+
+
+def test_apply_paper_trading_failure_sets_terminated_reason_when_given() -> None:
+    session = _make_session("pt-apply-reason", PaperTradingStatus.LIVE)
+    _apply_paper_trading_failure(session, "boom", terminated_reason="process_exit")
+    assert session.terminated_reason == "process_exit"
+
+
+def test_apply_paper_trading_failure_leaves_terminated_reason_untouched_when_omitted() -> None:
+    session = _make_session("pt-apply-reason-untouched", PaperTradingStatus.WARMING_UP)
+    session.terminated_reason = "user_stop"
+    _apply_paper_trading_failure(session, "boom")
+    assert session.terminated_reason == "user_stop"
+
+
+def test_apply_paper_trading_failure_mirrors_legacy_divergence_analysis_when_requested() -> None:
+    session = _make_session("pt-apply-legacy", PaperTradingStatus.RUNNING)
+    _apply_paper_trading_failure(session, "boom", set_legacy_divergence_analysis=True)
+    assert session.divergence_analysis == "boom"
+
+
+def test_apply_paper_trading_failure_leaves_divergence_analysis_untouched_by_default() -> None:
+    session = _make_session("pt-apply-legacy-untouched", PaperTradingStatus.RUNNING)
+    session.divergence_analysis = "pre-existing"
+    _apply_paper_trading_failure(session, "boom")
+    assert session.divergence_analysis == "pre-existing"
 
 
 def test_recovery_fails_opening_session() -> None:
@@ -350,6 +406,43 @@ def test_recovery_holds_lock_for_entire_pass_against_concurrent_writer(
         assert _fetch_session("pt-race").status == PaperTradingStatus.COMPLETED
     finally:
         _paper_trading_sessions.pop("pt-race", None)
+
+
+def test_recovery_delegates_to_apply_paper_trading_failure_with_recovery_fields(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The recovery loop must delegate to the shared helper instead of
+    re-implementing the status/error/completed_at update itself, passing the
+    recovery-specific fields (`terminated_reason="process_exit"` and the
+    legacy `divergence_analysis` mirror) called out by #5136's acceptance
+    criteria. This would fail against the pre-fix implementation, which had
+    no such shared helper to delegate to.
+    """
+    real_apply = api_main._apply_paper_trading_failure
+    calls: list[tuple] = []
+
+    def _spy(session, error, **kwargs):
+        calls.append((session, error, kwargs))
+        return real_apply(session, error, **kwargs)
+
+    monkeypatch.setattr(api_main, "_apply_paper_trading_failure", _spy)
+
+    session = _make_session("pt-delegates", PaperTradingStatus.OPENING)
+    _install_session(session)
+    try:
+        _recover_orphaned_paper_trading_sessions()
+        assert len(calls) == 1
+        _, _, kwargs = calls[0]
+        assert kwargs["terminated_reason"] == "process_exit"
+        assert kwargs["set_legacy_divergence_analysis"] is True
+        assert kwargs["completed_at"]
+
+        recovered = _fetch_session("pt-delegates")
+        assert recovered.status == PaperTradingStatus.FAILED
+        assert recovered.terminated_reason == "process_exit"
+        assert recovered.divergence_analysis == recovered.error
+    finally:
+        _paper_trading_sessions.pop("pt-delegates", None)
 
 
 # ---------------------------------------------------------------------------

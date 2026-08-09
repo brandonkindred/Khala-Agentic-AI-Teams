@@ -464,9 +464,9 @@ def test_plan_project_activity_records_planning_run_on_success(
     """
     from unittest.mock import MagicMock
 
+    from shared.dev_models.models import ProductRequirements
     from software_engineering_team.planning_adapter import PlanningAdapterResult
     from software_engineering_team.shared import job_store as js
-    from software_engineering_team.shared.models import ProductRequirements
     from software_engineering_team.temporal import activities
 
     js.create_job("pp-success", repo_path=str(tmp_path))
@@ -603,7 +603,7 @@ def test_execute_coding_team_activity_passes_band_and_default_llm_getter(
 
     from planning_adapter import PlanningAdapterResult
 
-    from software_engineering_team.shared.models import ProductRequirements
+    from shared.dev_models.models import ProductRequirements
 
     adapter_dict = PlanningAdapterResult(
         requirements=ProductRequirements(
@@ -668,7 +668,7 @@ def test_adapter_result_round_trips_through_dict() -> None:
 
     from planning_adapter import PlanningAdapterResult
 
-    from software_engineering_team.shared.models import ProductRequirements
+    from shared.dev_models.models import ProductRequirements
 
     original = PlanningAdapterResult(
         requirements=ProductRequirements(
@@ -775,9 +775,9 @@ def test_execute_coding_team_activity_binds_the_passed_trace_id(
     the bound id via ``contextvars.copy_context()`` once it is bound here."""
     from planning_adapter import PlanningAdapterResult
 
+    from shared.dev_models.models import ProductRequirements
     from shared.observability import current_trace_id
     from software_engineering_team.shared import job_store as js
-    from software_engineering_team.shared.models import ProductRequirements
     from software_engineering_team.temporal import activities
 
     js.create_job("ec-trace", repo_path=str(tmp_path))

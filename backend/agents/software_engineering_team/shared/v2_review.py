@@ -63,6 +63,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple, Union
 
 from llm_service import LLMClient
+from shared.dev_models.models import ReviewContext, Task
 from software_engineering_team.code_review_agent.change_surface import (
     ChangeSurface,
     build_change_surface_from_pairs,
@@ -73,7 +74,6 @@ from software_engineering_team.code_review_agent.previous_content import (
 )
 from software_engineering_team.shared.agent_review import AgentReviewCache
 from software_engineering_team.shared.llm_review import LlmReviewOutput
-from software_engineering_team.shared.models import ReviewContext, Task
 from software_engineering_team.shared.review_progress import (
     build_disk_repo_reader,
     call_code_review_agent,
@@ -328,25 +328,31 @@ def _patch_has_removal_only_hunk(patch: str) -> bool:
 def _resolve_change_surface_for_review(
     files: Mapping[str, str],
     repo_path: Path,
+    old_contents: Optional[Mapping[str, str]] = None,
 ) -> Optional[ChangeSurface]:
-    """Best-effort change surface for ``files`` against ``repo_path``'s pre-task HEAD.
+    """Best-effort, fully-represented change surface for ``files``.
 
-    The SE task engine commits the workspace exactly once, at Deliver (see
-    ``shared/deliver_utils.py``) -- never during Execution or Review -- so at
-    every point this is called, ``HEAD`` in ``repo_path`` still points at the
-    commit that preceded this task's in-flight edits. ``revision="HEAD"``
-    therefore resolves genuine prior content for any path that existed before
-    this task touched it.
+    When ``old_contents`` is given (a caller already resolved a base), it is
+    used directly. Otherwise this auto-resolves a base from ``repo_path``'s
+    pre-task ``HEAD``: the SE task engine commits the workspace exactly once,
+    at Deliver (see ``shared/deliver_utils.py``) -- never during Execution or
+    Review -- so at every point this is called, ``HEAD`` in ``repo_path``
+    still points at the commit that preceded this task's in-flight edits, and
+    ``revision="HEAD"`` therefore resolves genuine prior content for any path
+    that existed before this task touched it.
 
     Preconditions:
         - ``files`` maps path -> new content (may be empty).
         - ``repo_path`` is the task's workspace checkout.
+        - ``old_contents``, when given, maps path -> previously resolved file
+          text; ``None`` (the default) means "resolve it from ``repo_path``".
 
     Postconditions:
         - Returns ``None`` ("no base") when ``files`` is empty, or when
-          ``resolve_previous_content`` resolves previous content for NONE of
-          the given paths (no ``.git``, git unavailable, or every path is new
-          relative to HEAD) -- the caller must then submit ``files`` as-is.
+          neither ``old_contents`` nor auto-resolution (``resolve_previous_content``
+          against every given path -- no ``.git``, git unavailable, or every
+          path new relative to HEAD) yields previous content for ANY path --
+          the caller must then submit ``files`` as-is.
         - Returns ``None`` ("empty diff") when a base for at least one path
           was resolved but the resulting surface has nothing to show (every
           resolved path is identical to its new content), via
@@ -371,18 +377,22 @@ def _resolve_change_surface_for_review(
     """
     if not files:
         return None
-    try:
-        old = resolve_previous_content(str(repo_path), files.keys(), revision="HEAD")
-    except ValueError:
-        return None
-    if not old.contents:
-        return None
-    surface = _maybe_build_change_surface_from_pairs(files, old.contents)
+    if old_contents is None:
+        try:
+            resolved = resolve_previous_content(str(repo_path), files.keys(), revision="HEAD")
+        except ValueError:
+            return None
+        if not resolved.contents:
+            return None
+        old_map: Mapping[str, str] = resolved.contents
+    else:
+        old_map = old_contents
+    surface = _maybe_build_change_surface_from_pairs(files, old_map)
     if surface is None:
         return None
-    patches = unified_diffs_from_pairs(files, old.contents)
+    patches = unified_diffs_from_pairs(files, old_map)
     for path, new_text in files.items():
-        if old.contents.get(path, "") == new_text:
+        if old_map.get(path, "") == new_text:
             continue
         if path not in surface.blocks:
             return None
@@ -405,6 +415,7 @@ def _code_review_step(
     review_context: Optional[ReviewContext] = None,
     detail_callback: Optional[Callable[[str], None]] = None,
     enable_llm_review_grounding: bool = True,
+    old_contents: Optional[Dict[str, str]] = None,
 ) -> _ReviewStepResult:
     """Independent code-review step: external agent (with LLM fallback), or LLM review alone.
 
@@ -426,24 +437,35 @@ def _code_review_step(
           ``typescript`` default. It returns an :class:`LlmReviewOutput` in
           production; a bare issue list is also accepted (see
           ``_unwrap_llm_review_result``) so a stub runner without a raw count is
-          unaffected.
+          unaffected. ``files=`` is always what this fallback receives, regardless of
+          ``old_contents`` -- only the external-agent's ``CodeReviewInput`` adopts the
+          surface (see ``old_contents`` below).
         - ``review_context`` bundles the caller's system architecture and project specification,
           when available; ``None`` means "nothing to add" so a caller that does not have this
           context yet keeps working unchanged.
         - ``enable_llm_review_grounding`` defaults True; forwarded to the LLM fallback
           (kill switch for ungrounded-claim filtering).
+        - ``old_contents``, when given, maps path -> previously resolved file text and is used
+          directly as the diff base for the external-agent's ``CodeReviewInput``. ``None`` (the
+          default) means "no caller-supplied base": the base is then auto-resolved from
+          ``repo_path``'s pre-task ``HEAD`` instead of skipping the surface attempt outright --
+          see :func:`_resolve_change_surface_for_review`.
 
     Postconditions:
         - Returns a :class:`_ReviewStepResult`: ``issues`` from the agent or LLM fallback,
           and ``raw_issue_count`` from the LLM fallback when it ran (``None`` when the
           external agent succeeded or a bare-list stub reported no count).
-        - When ``repo_path``'s pre-task ``HEAD`` resolves previous content for at least one
-          file in ``files`` and the resulting diff is non-trivial (see
-          ``_resolve_change_surface_for_review``), the external agent is submitted a
-          diff-derived change surface (``code=``, ``pre_numbered=True``). Otherwise -- no git
-          base resolvable for any path, or every resolved path is identical to its new
-          content -- it falls back to submitting ``files`` as-is, exactly as before. Code
-          review runs identically either way; a missing or empty base never skips it.
+        - The external agent's ``CodeReviewInput`` is built with ``code=<surface>,
+          pre_numbered=True`` (no ``files=``) when a change surface can be resolved for
+          ``files`` -- from caller-supplied ``old_contents``, or auto-resolved from
+          ``repo_path``'s pre-task ``HEAD`` when ``old_contents`` is ``None`` -- and every
+          genuinely-changed path is fully represented in it (see
+          ``_resolve_change_surface_for_review``). Otherwise -- no base resolvable for any
+          path, every resolved path identical to its new content, or a genuinely-changed
+          path only partially covered (whole file or one hunk within it) -- it falls back
+          to submitting ``files`` as-is, exactly as before this parameter existed. Code
+          review runs identically either way; a missing, empty, or partial base never
+          skips it.
         - Never raises: an external ``code_review_agent`` failure logs a warning and falls back
           to the LLM reviewer, matching this step's long-standing solo behavior. The LLM fallback
           itself (used both here and when ``code_review_agent`` is None) is also guarded — any
@@ -484,11 +506,12 @@ def _code_review_step(
                 spec_content=ctx.spec_content,
                 repo_root=str(repo_path),
             )
-            # code= (pre-numbered diff surface) when a meaningful base diff
-            # resolves; otherwise files= (per-file attribution, no header
-            # parsing, no upstream truncation) — see
-            # _resolve_change_surface_for_review for the fallback contract.
-            surface = _resolve_change_surface_for_review(files, repo_path)
+            # code= (pre-numbered diff surface) when a fully-represented base diff
+            # resolves (caller-supplied old_contents, or auto-resolved from repo_path's
+            # HEAD); otherwise files= (per-file attribution, no header parsing, no
+            # upstream truncation) — see _resolve_change_surface_for_review for the
+            # fallback contract.
+            surface = _resolve_change_surface_for_review(files, repo_path, old_contents)
             if surface is not None:
                 cr_input = _build_cr_input(code=surface.code, pre_numbered=True, **common_kwargs)
             else:
@@ -862,6 +885,7 @@ def run_review(
     build_verify_fn: Callable[..., Tuple[bool, str]],
     review_context: Optional[ReviewContext] = None,
     enable_llm_review_grounding: bool = True,
+    old_contents: Optional[Dict[str, str]] = None,
 ) -> ReviewResult:
     """Execute the shared Review phase over an execution result's files.
 
@@ -873,6 +897,10 @@ def run_review(
           unaffected.
         - ``enable_llm_review_grounding`` is forwarded to the LLM-fallback path
           (defaults True).
+        - ``old_contents`` is forwarded to the code-review step only (see
+          ``_code_review_step``'s ``old_contents``); ``None`` (the default) means "no
+          caller-supplied base" -- the code-review step then auto-resolves a base from
+          ``repo_path``'s pre-task ``HEAD`` instead of always using ``files=``.
 
     Postconditions:
         - Returns a :class:`ReviewResult` whose ``passed`` reflects the team's
@@ -945,6 +973,7 @@ def run_review(
                 llm_review_fn=llm_review_fn,
                 review_context=review_context,
                 enable_llm_review_grounding=enable_llm_review_grounding,
+                old_contents=old_contents,
             ),
             lambda: _qa_review_step(
                 qa_agent=qa_agent,
@@ -1022,6 +1051,7 @@ def run_microtask_review(
     enable_llm_review_grounding: bool = True,
     agent_review_cache: Optional[AgentReviewCache] = None,
     tool_agent_cache: Optional[AgentReviewCache] = None,
+    old_contents: Optional[Dict[str, str]] = None,
 ) -> ReviewResult:
     """Run the shared full review on a single microtask's output files.
 
@@ -1038,6 +1068,10 @@ def run_microtask_review(
           ``software_engineering_team.shared.agent_review.run_chunked_agent_review``.
         - ``tool_agent_cache``, when given, is forwarded to the tool-agent fan-out
           step only — see ``_run_tool_agents_review``.
+        - ``old_contents`` is forwarded to the code-review step only (see
+          ``_code_review_step``'s ``old_contents``); ``None`` (the default) means "no
+          caller-supplied base" -- the code-review step then auto-resolves a base from
+          ``repo_path``'s pre-task ``HEAD`` instead of always using ``files=``.
 
     Postconditions:
         - Returns a :class:`ReviewResult` scoped to ``files``; ``passed``
@@ -1134,6 +1168,7 @@ def run_microtask_review(
                 review_context=review_context,
                 detail_callback=detail_callback,
                 enable_llm_review_grounding=enable_llm_review_grounding,
+                old_contents=old_contents,
             ),
             lambda: _qa_review_step(
                 qa_agent=qa_agent,

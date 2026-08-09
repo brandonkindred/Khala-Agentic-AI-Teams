@@ -12,8 +12,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
+from shared.git.git_utils import DEVELOPMENT_BRANCH
 from software_engineering_team.shared.deliver_utils import DeliverGitOps, deliver_inline_merge
-from software_engineering_team.shared.git_utils import DEVELOPMENT_BRANCH
 from software_engineering_team.shared.team_lead_base import build_team_failure_result
 
 from ..doc_runbook_agent import DocumentationRunbookAgent, DocumentationRunbookInput

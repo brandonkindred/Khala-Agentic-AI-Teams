@@ -12,7 +12,7 @@ import re
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
-from .git_utils import (
+from shared.git.git_utils import (
     UnsafeRepoPathError,  # noqa: F401  re-exported: code-v2 phases import it from here
     resolve_safe_repo_path,
     write_files_and_commit,

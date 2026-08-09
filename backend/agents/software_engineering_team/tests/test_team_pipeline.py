@@ -5,7 +5,7 @@ from qa_agent import QAExpertAgent, QAInput
 from security_agent import CybersecurityExpertAgent, SecurityInput
 
 from llm_service import DummyLLMClient
-from software_engineering_team.shared.models import ProductRequirements
+from shared.dev_models.models import ProductRequirements
 
 
 def test_full_pipeline_with_dummy_llm() -> None:

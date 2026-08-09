@@ -29,8 +29,8 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 from llm_service import LLMClient
+from shared.dev_models.models import ReviewContext, Task
 from software_engineering_team.shared.agent_review import AgentReviewCache
-from software_engineering_team.shared.models import ReviewContext, Task
 from software_engineering_team.shared.security_service import is_blocking
 from software_engineering_team.shared.v2_models import Phase, ReviewIssue
 from software_engineering_team.shared.v2_review import _code_review_step

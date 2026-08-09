@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
+from shared.dev_models.models import Task
 from software_engineering_team.shared.llm import complete_json_with_continuation
-from software_engineering_team.shared.models import Task
 
 from ..models import IntakeResult
 from ..prompts import intake_system_prompt

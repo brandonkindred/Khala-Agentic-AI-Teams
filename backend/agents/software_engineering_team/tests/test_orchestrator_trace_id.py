@@ -12,8 +12,8 @@ from unittest.mock import MagicMock, patch
 import orchestrator
 import pytest
 
+from shared.dev_models.models import ProductRequirements
 from shared.observability import current_trace_id
-from software_engineering_team.shared.models import ProductRequirements
 
 
 @pytest.fixture(autouse=True)

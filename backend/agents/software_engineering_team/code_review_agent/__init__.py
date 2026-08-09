@@ -14,8 +14,8 @@ from typing import TYPE_CHECKING, Any
 # Every submodule here reaches ``strands``/``llm_service``/``httpx``/``boto3``
 # one way or another — directly (``agent``, ``chunk_reviewer``,
 # ``false_positive_filter`` import ``strands``/``llm_service`` at module scope)
-# or transitively (``models``/``profiles`` import
-# ``software_engineering_team.shared.models``/``coding_standards``, and
+# or transitively (``profiles`` imports ``coding_standards``/``prompt_utils``/
+# ``prompts.requirement_citation`` from ``software_engineering_team.shared``, and
 # importing ANY submodule of ``software_engineering_team.shared`` first
 # executes ``shared/__init__.py``, which eagerly imports ``.llm`` — itself a
 # top-level ``from strands import Agent``). Since importing ``code_review_agent``
