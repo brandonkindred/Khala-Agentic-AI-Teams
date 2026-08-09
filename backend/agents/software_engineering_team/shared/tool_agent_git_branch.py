@@ -160,6 +160,9 @@ class GitBranchManagementToolAgent:
                 return ToolAgentPhaseOutput(
                     success=False, summary=f"Pre-merge quality gate failed: {gate_msg}"
                 )
+            # The gate's build verifier may have autofixed and left uncommitted changes;
+            # sweep them up (safe no-op on a clean tree) so the merge includes them.
+            commit_working_tree(repo_path, "chore: pre-merge quality gate autofix")
             merge_ok, merge_msg = merge_branch(repo_path, branch_name, DEVELOPMENT_BRANCH)
             if not merge_ok:
                 abort_merge(repo_path)
@@ -204,6 +207,9 @@ class GitBranchManagementToolAgent:
                 return ToolAgentPhaseOutput(
                     success=False, summary=f"Pre-merge quality gate failed: {gate_msg}"
                 )
+            # The gate's build verifier may have autofixed and left uncommitted changes;
+            # sweep them up (safe no-op on a clean tree) so the merge includes them.
+            commit_working_tree(repo_path, "chore: pre-merge quality gate autofix")
             merge_ok, merge_msg = merge_branch(repo_path, created_branch, DEVELOPMENT_BRANCH)
             if not merge_ok:
                 abort_merge(repo_path)

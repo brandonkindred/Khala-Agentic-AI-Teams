@@ -253,6 +253,10 @@ def deliver_inline_merge(
         ops.checkout_branch(repo_path, DEVELOPMENT_BRANCH)
         return result
 
+    # The gate's build verifier may have autofixed and left uncommitted changes;
+    # sweep them up (safe no-op on a clean tree) so the merge includes them.
+    ops.commit_working_tree(repo_path, "chore: pre-merge quality gate autofix")
+
     merge_ok, merge_msg = ops.merge_branch(repo_path, result.branch_name, DEVELOPMENT_BRANCH)
     if not merge_ok:
         result.summary = f"Merge failed: {merge_msg}"
