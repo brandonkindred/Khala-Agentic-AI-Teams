@@ -30,7 +30,7 @@ from code_review_agent.false_positive_filter import (
     DEFAULT_VERIFY_MAX_FINDINGS_PER_GROUP,
     DEFAULT_VERIFY_TIMEOUT_SECONDS,
     CodebaseIndex,
-    _agent_used_a_tool,
+    _agent_read_real_code,
     _build_group_prompt,
     _build_tools,
     _code_fence_for,
@@ -105,17 +105,64 @@ def _first_user_text(messages: List[Any]) -> str:
     return ""
 
 
+def _tool_use_stream_events(
+    tool_use_id: str, name: str, tool_input: Dict[str, Any]
+) -> List[Dict[str, Any]]:
+    """Build the Strands stream-event sequence for one simulated tool-use turn."""
+    return [
+        {"messageStart": {"role": "assistant"}},
+        {
+            "contentBlockStart": {
+                "contentBlockIndex": 0,
+                "start": {"toolUse": {"toolUseId": tool_use_id, "name": name}},
+            },
+        },
+        {
+            "contentBlockDelta": {
+                "contentBlockIndex": 0,
+                "delta": {"toolUse": {"input": json.dumps(tool_input)}},
+            },
+        },
+        {"contentBlockStop": {"contentBlockIndex": 0}},
+        {
+            "messageStop": {"stopReason": "tool_use"},
+            "metadata": {
+                "usage": {"inputTokens": 0, "outputTokens": 0, "totalTokens": 0},
+                "metrics": {"latencyMs": 1},
+            },
+        },
+    ]
+
+
+def _final_text_stream_events(text: str) -> List[Dict[str, Any]]:
+    """Build the Strands stream-event sequence for one simulated final-text turn."""
+    return [
+        {"messageStart": {"role": "assistant"}},
+        {"contentBlockStart": {"contentBlockIndex": 0, "start": {}}},
+        {"contentBlockDelta": {"contentBlockIndex": 0, "delta": {"text": text}}},
+        {"contentBlockStop": {"contentBlockIndex": 0}},
+        {
+            "messageStop": {"stopReason": "end_turn"},
+            "metadata": {
+                "usage": {"inputTokens": 0, "outputTokens": 0, "totalTokens": 0},
+                "metrics": {"latencyMs": 1},
+            },
+        },
+    ]
+
+
 class _SimulatesFileReadToolCall(DummyLLMClient):
-    """``DummyLLMClient`` variant that issues one real ``read_file`` tool call
-    before answering a false-positive-verification prompt, mirroring a
-    well-behaved model. ``_build_group_prompt`` never inlines the cited file's
-    content (only names it and directs the model to a tool), so
-    ``_verify_group`` now discards any false-positive verdict from a run that
-    never called a tool (see ``_agent_used_a_tool``) -- stubs that want a drop
-    honored must actually exercise that tool-call turn instead of answering on
-    the first turn, exactly as this mixin does. Subclasses still customize the
-    final verdict via ``complete_json``, called with the *original* prompt
-    text once the simulated tool call has round-tripped.
+    """``DummyLLMClient`` variant that issues one real, successful ``read_file``
+    tool call before answering a false-positive-verification prompt, mirroring
+    a well-behaved model. ``_build_group_prompt`` never inlines the cited
+    file's content (only names it and directs the model to a tool), and
+    ``_verify_group`` discards any false-positive verdict from a run that
+    never obtained real code via a successful code-reading tool call (see
+    ``_agent_read_real_code``) -- stubs that want a drop honored must actually
+    exercise that tool-call turn instead of answering on the first turn,
+    exactly as this mixin does. Subclasses still customize the final verdict
+    via ``complete_json``, called with the *original* prompt text once the
+    simulated tool call has round-tripped.
     """
 
     async def stream(self, messages, tool_specs=None, system_prompt=None, **kwargs: Any):  # type: ignore[override]
@@ -129,44 +176,16 @@ class _SimulatesFileReadToolCall(DummyLLMClient):
             if not already_called:
                 match = _READ_FILE_CALL_RE.search(first_text)
                 path = match.group(1) if match else "unknown.py"
-                yield {"messageStart": {"role": "assistant"}}
-                yield {
-                    "contentBlockStart": {
-                        "contentBlockIndex": 0,
-                        "start": {"toolUse": {"toolUseId": "sim_read_file", "name": "read_file"}},
-                    },
-                }
-                yield {
-                    "contentBlockDelta": {
-                        "contentBlockIndex": 0,
-                        "delta": {"toolUse": {"input": json.dumps({"path": path})}},
-                    },
-                }
-                yield {"contentBlockStop": {"contentBlockIndex": 0}}
-                yield {
-                    "messageStop": {"stopReason": "tool_use"},
-                    "metadata": {
-                        "usage": {"inputTokens": 0, "outputTokens": 0, "totalTokens": 0},
-                        "metrics": {"latencyMs": 1},
-                    },
-                }
+                for event in _tool_use_stream_events("sim_read_file", "read_file", {"path": path}):
+                    yield event
                 return
             self._request_count += 1
             response_data = self.complete_json(first_text, system_prompt=system_prompt)
             response_text = (
                 json.dumps(response_data) if isinstance(response_data, dict) else str(response_data)
             )
-            yield {"messageStart": {"role": "assistant"}}
-            yield {"contentBlockStart": {"contentBlockIndex": 0, "start": {}}}
-            yield {"contentBlockDelta": {"contentBlockIndex": 0, "delta": {"text": response_text}}}
-            yield {"contentBlockStop": {"contentBlockIndex": 0}}
-            yield {
-                "messageStop": {"stopReason": "end_turn"},
-                "metadata": {
-                    "usage": {"inputTokens": 0, "outputTokens": 0, "totalTokens": 0},
-                    "metrics": {"latencyMs": 1},
-                },
-            }
+            for event in _final_text_stream_events(response_text):
+                yield event
             return
         async for event in super().stream(
             messages, tool_specs=tool_specs, system_prompt=system_prompt, **kwargs
@@ -1916,63 +1935,218 @@ def test_filter_keeps_ungrounded_drop_from_a_run_with_no_tool_call(caplog) -> No
     with caplog.at_level(logging.WARNING):
         out = filter_false_positives(NoToolCallDropStub(), _input(), issues)
     assert out == issues  # the drop is discarded -- kept, not removed
-    assert any("without ever calling a tool" in r.message for r in caplog.records)
+    assert any("without ever successfully reading real code" in r.message for r in caplog.records)
+
+
+def test_filter_keeps_drop_when_run_only_called_list_files(caplog) -> None:
+    """A run that calls only list_files() (no code content) before a confident
+    drop is treated the same as no tool call at all -- listing paths is not
+    evidence of having read any code."""
+    issues = [_issue()]
+
+    class ListFilesOnlyDropStub(DummyLLMClient):
+        async def stream(self, messages, tool_specs=None, system_prompt=None, **kwargs: Any):  # type: ignore[override]
+            if "toolUse" not in str(messages):
+                for event in _tool_use_stream_events("t_list", "list_files", {}):
+                    yield event
+                return
+            text = json.dumps(
+                {"verdicts": [{"index": 0, "is_real_issue": False, "confidence": "high"}]}
+            )
+            for event in _final_text_stream_events(text):
+                yield event
+
+    with caplog.at_level(logging.WARNING):
+        out = filter_false_positives(ListFilesOnlyDropStub(), _input(), issues)
+    assert out == issues
+    assert any("without ever successfully reading real code" in r.message for r in caplog.records)
+
+
+def test_filter_keeps_drop_when_read_file_call_errored(caplog) -> None:
+    """A read_file() call on a path that does not exist (the tool returns an
+    "Error: ..." string rather than raising -- see _build_tools) does not
+    ground a subsequent confident drop: the model attempted a read but never
+    actually saw any code."""
+    issues = [_issue()]
+
+    class FailedReadDropStub(DummyLLMClient):
+        async def stream(self, messages, tool_specs=None, system_prompt=None, **kwargs: Any):  # type: ignore[override]
+            if "toolUse" not in str(messages):
+                for event in _tool_use_stream_events(
+                    "t_read", "read_file", {"path": "definitely/does-not-exist.py"}
+                ):
+                    yield event
+                return
+            text = json.dumps(
+                {"verdicts": [{"index": 0, "is_real_issue": False, "confidence": "high"}]}
+            )
+            for event in _final_text_stream_events(text):
+                yield event
+
+    with caplog.at_level(logging.WARNING):
+        out = filter_false_positives(FailedReadDropStub(), _input(), issues)
+    assert out == issues
+    assert any("without ever successfully reading real code" in r.message for r in caplog.records)
 
 
 def test_filter_honors_drop_when_run_did_call_a_tool() -> None:
     """The mirror of the above: the same high-confidence drop IS honored once
-    the run actually issued a tool call first (``_SimulatesFileReadToolCall``),
-    confirming the new check is about tool-call evidence, not confidence level
-    (which was already high in the discarded case above)."""
+    the run actually issued a successful read_file() call first
+    (``_SimulatesFileReadToolCall``), confirming the new check is about
+    grounded-read evidence, not confidence level (which was already high in
+    the discarded cases above)."""
     issues = [_issue()]
     stub = _VerdictStub(verdicts=[{"index": 0, "is_real_issue": False, "confidence": "high"}])
     out = filter_false_positives(stub, _input(), issues)
     assert out == []
 
 
-def test_agent_used_a_tool_detects_tooluse_block() -> None:
-    """``_agent_used_a_tool`` scans ``agent.messages`` for any ``toolUse`` content
-    block, regardless of which message/role carries it."""
+def test_filter_honors_drop_grounded_in_a_different_related_file() -> None:
+    """A run that successfully reads a DIFFERENT (but real) file than the one
+    cited -- e.g. confirming "foo is defined in util.py" -- before dropping
+    still has its drop honored: file identity is not enforced, only that some
+    real code was actually read. This is legitimate cross-file verification,
+    which the system prompt explicitly directs the model to do."""
+    issues = [_issue(file_path="app/main.py")]
+
+    class ReadsSiblingFileDropStub(DummyLLMClient):
+        async def stream(self, messages, tool_specs=None, system_prompt=None, **kwargs: Any):  # type: ignore[override]
+            if "toolUse" not in str(messages):
+                for event in _tool_use_stream_events(
+                    "t_sibling", "read_file", {"path": "app/util.py"}
+                ):
+                    yield event
+                return
+            text = json.dumps(
+                {"verdicts": [{"index": 0, "is_real_issue": False, "confidence": "high"}]}
+            )
+            for event in _final_text_stream_events(text):
+                yield event
+
+    inp = _input(
+        files={
+            "app/main.py": "def bar():\n    return foo()\n",
+            "app/util.py": "def foo():\n    return 1\n",
+        }
+    )
+    out = filter_false_positives(ReadsSiblingFileDropStub(), inp, issues)
+    assert out == []
+
+
+def _fake_agent(messages: List[Dict[str, Any]]) -> Any:
+    """Build a minimal duck-typed stand-in for a Strands ``Agent`` exposing
+    only the ``.messages`` attribute ``_agent_read_real_code`` reads."""
 
     class _FakeAgent:
-        def __init__(self, messages: List[Dict[str, Any]]) -> None:
-            self.messages = messages
+        pass
 
-    no_tool = _FakeAgent(
+    agent = _FakeAgent()
+    agent.messages = messages  # type: ignore[attr-defined]
+    return agent
+
+
+def _tool_use_message(role: str, tool_use_id: str, name: str) -> Dict[str, Any]:
+    """Build one assistant-style message containing a single toolUse block."""
+    return {
+        "role": role,
+        "content": [{"toolUse": {"toolUseId": tool_use_id, "name": name, "input": {}}}],
+    }
+
+
+def _tool_result_message(tool_use_id: str, text: str) -> Dict[str, Any]:
+    """Build one user-style message containing a single toolResult block."""
+    return {
+        "role": "user",
+        "content": [
+            {
+                "toolResult": {
+                    "toolUseId": tool_use_id,
+                    "status": "success",
+                    "content": [{"text": text}],
+                }
+            }
+        ],
+    }
+
+
+def test_agent_read_real_code_false_with_no_tool_call() -> None:
+    """No toolUse block at all -> not grounded."""
+    agent = _fake_agent(
         [
             {"role": "user", "content": [{"text": "hi"}]},
             {"role": "assistant", "content": [{"text": "ok"}]},
         ]
     )
-    assert _agent_used_a_tool(no_tool) is False  # type: ignore[arg-type]
+    assert _agent_read_real_code(agent) is False
 
-    with_tool = _FakeAgent(
+
+def test_agent_read_real_code_false_for_non_code_reading_tool() -> None:
+    """A toolUse for list_files (not a code-reading tool) with a "successful"
+    toolResult still does not count -- it never returns code content."""
+    agent = _fake_agent(
         [
-            {"role": "user", "content": [{"text": "hi"}]},
-            {
-                "role": "assistant",
-                "content": [{"toolUse": {"toolUseId": "t1", "name": "read_file", "input": {}}}],
-            },
+            _tool_use_message("assistant", "t1", "list_files"),
+            _tool_result_message("t1", "a.py\nb.py"),
         ]
     )
-    assert _agent_used_a_tool(with_tool) is True  # type: ignore[arg-type]
+    assert _agent_read_real_code(agent) is False
 
 
-def test_agent_used_a_tool_is_failsafe_on_malformed_messages() -> None:
-    """A malformed/empty ``messages`` never raises -- degrades to False (no tool
-    call), so the caller's fail-safe keeps rather than drops on ambiguity."""
+def test_agent_read_real_code_false_for_errored_read() -> None:
+    """A read_file() toolUse whose matching toolResult text starts with
+    "Error:" is not grounded evidence -- the model attempted a read but never
+    saw real code."""
+    agent = _fake_agent(
+        [
+            _tool_use_message("assistant", "t1", "read_file"),
+            _tool_result_message("t1", "Error: file not found: missing.py."),
+        ]
+    )
+    assert _agent_read_real_code(agent) is False
+
+
+def test_agent_read_real_code_true_for_successful_code_reading_tools() -> None:
+    """A read_file()/read_lines()/read_function() toolUse whose matching
+    toolResult has real (non-error) text is grounded evidence."""
+    for tool_name in ("read_file", "read_lines", "read_function"):
+        agent = _fake_agent(
+            [
+                _tool_use_message("assistant", "t1", tool_name),
+                _tool_result_message("t1", "def foo():\n    return 1\n"),
+            ]
+        )
+        assert _agent_read_real_code(agent) is True, tool_name
+
+
+def test_agent_read_real_code_ignores_mismatched_tool_use_id() -> None:
+    """A toolResult for a *different* toolUseId than any code-reading toolUse
+    is not credited to it -- the match is by id, not just tool-name presence
+    anywhere in the conversation."""
+    agent = _fake_agent(
+        [
+            _tool_use_message("assistant", "t1", "read_file"),
+            _tool_result_message("some-other-id", "def foo():\n    return 1\n"),
+        ]
+    )
+    assert _agent_read_real_code(agent) is False
+
+
+def test_agent_read_real_code_is_failsafe_on_malformed_messages() -> None:
+    """A malformed/empty ``messages`` never raises -- degrades to False (no
+    grounded read), so the caller's fail-safe keeps rather than drops on
+    ambiguity."""
 
     class _EmptyAgent:
         messages: List[Any] = []
 
-    assert _agent_used_a_tool(_EmptyAgent()) is False  # type: ignore[arg-type]
+    assert _agent_read_real_code(_EmptyAgent()) is False  # type: ignore[arg-type]
 
     class _BrokenAgent:
         @property
         def messages(self):
             raise RuntimeError("boom")
 
-    assert _agent_used_a_tool(_BrokenAgent()) is False  # type: ignore[arg-type]
+    assert _agent_read_real_code(_BrokenAgent()) is False  # type: ignore[arg-type]
 
 
 @pytest.mark.parametrize("parallelism", ["1", "4"])

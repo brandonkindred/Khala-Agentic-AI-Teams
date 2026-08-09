@@ -1030,10 +1030,12 @@ file's content — it only names the file and directs the model to fetch it via
 the cited file's size with no cap or truncation involved: the model always
 sees the file's full, current content on demand instead of a possibly-stale
 or size-limited inline copy. Because nothing is inlined, `_verify_group` also
-enforces that at least one tool call happened during the run before honoring
-any false-positive verdict from it (`_agent_used_a_tool`): a run that answers
-on its first turn without calling a tool never saw any real code, so any
-false-positive verdict it returns is discarded (the finding is kept) rather
+enforces that the run obtained real code via a *successful* code-reading
+tool call before honoring any false-positive verdict from it
+(`_agent_read_real_code`): calling only `list_files()` (no code content), or
+attempting `read_file`/`read_lines`/`read_function` on a path that errors
+(unknown/ambiguous), does not count as grounded. A false-positive verdict
+from a run that never met this bar is discarded (the finding is kept) rather
 than trusted.
 
 When the review is invoked with a repository reader (the GitHub PR-review path

@@ -26,11 +26,14 @@ Three invariants hold:
 
     - **Grounded-only drops.** The cited file's content is never inlined into
       the verification prompt (see ``_build_group_prompt``) -- the verifier
-      must call a tool (``read_file``/``read_lines``/etc.) to see it. A verdict
-      returned by a run that never called any tool was made without ever
-      seeing real code, so ``_verify_group`` discards any false-positive
-      verdict from such a run (an absent verdict means "keep", per the
-      fail-safe invariant above) rather than trusting an ungrounded guess.
+      must call a tool to see it. A verdict is trusted only when the run
+      obtained real code via a *successful* call to a code-reading tool
+      (``read_file``/``read_lines``/``read_function``) -- calling only
+      ``list_files()`` (no code content) or a code-reading tool that errored
+      (unknown/ambiguous path) does not count. ``_verify_group`` discards any
+      false-positive verdict from a run that never met this bar (see
+      ``_agent_read_real_code``) rather than trusting an ungrounded guess (an
+      absent verdict means "keep", per the fail-safe invariant above).
 
     - **Coverage/safety findings never reach this module.** The coordinator
       passes only genuine reviewer findings here; the "not reviewed" degraded
@@ -47,7 +50,7 @@ import os
 import re
 from collections import OrderedDict
 from dataclasses import dataclass
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from strands import Agent, tool
 from strands.models.model import Model as _StrandsModel
@@ -1631,30 +1634,91 @@ def _build_group_prompt(
     return "\n".join(parts)
 
 
-def _agent_used_a_tool(agent: Agent) -> bool:
-    """Whether ``agent``'s just-finished run issued at least one tool call.
+# Tool names whose successful result contains real code content. Deliberately
+# excludes list_files() (paths only, no code), find_function_at_line()
+# (locates a construct without returning its body), and search_codebase()
+# (short match snippets, not the fuller context _agent_read_real_code
+# requires) -- a call to one of those alone should not count as "the model
+# saw real code", so the check below stays conservative rather than counting
+# any tool call whatsoever.
+_CODE_READING_TOOL_NAMES = frozenset({"read_file", "read_lines", "read_function"})
+
+
+def _tool_result_text(tool_result: Dict[str, Any]) -> str:
+    """Flatten a Strands toolResult block's content into text.
+
+    Preconditions: ``tool_result`` is a toolResult block's inner dict (may be malformed).
+    Postconditions: returns the joined text of any "text" content blocks
+        (empty string when there is none). Never raises.
+    """
+    try:
+        return "\n".join(
+            str(block["text"])
+            for block in (tool_result.get("content") or [])
+            if isinstance(block, dict) and "text" in block
+        )
+    except Exception:
+        return ""
+
+
+def _agent_read_real_code(agent: Agent) -> bool:
+    """Whether ``agent``'s just-finished run obtained real code via a
+    successful code-reading tool call.
 
     The cited file's content is never inlined into the verification prompt
-    (see ``_build_group_prompt``) -- a run that never called a tool never saw
-    any real code, so its verdicts are ungrounded guesses regardless of how
-    confident the JSON claims to be.
+    (see ``_build_group_prompt``) -- the model must fetch it via a tool. The
+    mere presence of *some* toolUse block is not enough: a run could call
+    list_files() (no code content) or attempt read_file()/read_lines()/
+    read_function() on a path that does not exist (``_build_tools``'s tools
+    never raise; they return an ``"Error: ..."`` string on failure instead of
+    the code) and still answer confidently. This requires at least one call
+    to a code-reading tool (``_CODE_READING_TOOL_NAMES``) whose *result* text
+    does not start with ``"Error:"`` -- i.e. the model actually saw some real
+    code, not merely attempted to look at some.
+
+    File identity is intentionally NOT enforced: the system prompt directs
+    the model to inspect "any related file" to confirm a finding (e.g. "foo
+    is defined in util.py" refutes a finding cited against a different file),
+    so a successful read of a *different* file than the one cited still
+    counts as grounded -- only "no successful code read happened at all" is
+    disqualifying.
 
     Preconditions:
         - ``agent`` has already completed a run (``agent(prompt)`` returned),
           so ``agent.messages`` holds the full conversation for that run.
 
     Postconditions:
-        - Returns ``True`` iff any message in ``agent.messages`` contains a
-          ``toolUse`` content block. Never raises: a malformed/empty message
-          list yields ``False`` (fail-safe: treated as "no tool call", so the
-          caller keeps rather than drops on ambiguity).
+        - Returns ``True`` iff some toolUse block naming a
+          ``_CODE_READING_TOOL_NAMES`` tool has a matching toolResult (by
+          ``toolUseId``) whose text is non-empty and does not start with
+          ``"Error:"``. Never raises: a malformed/empty message list yields
+          ``False`` (fail-safe: treated as "no grounded read", so the caller
+          keeps rather than drops on ambiguity).
     """
     try:
-        return any(
-            isinstance(block, dict) and "toolUse" in block
+        code_reading_ids = {
+            tool_use["toolUseId"]
             for message in agent.messages
             for block in (message.get("content") or [])
-        )
+            if isinstance(block, dict)
+            for tool_use in [block.get("toolUse")]
+            if isinstance(tool_use, dict)
+            and tool_use.get("name") in _CODE_READING_TOOL_NAMES
+            and tool_use.get("toolUseId") is not None
+        }
+        if not code_reading_ids:
+            return False
+        for message in agent.messages:
+            for block in message.get("content") or []:
+                if not isinstance(block, dict):
+                    continue
+                result = block.get("toolResult")
+                if not isinstance(result, dict) or result.get("toolUseId") not in code_reading_ids:
+                    continue
+                text = _tool_result_text(result).lstrip()
+                if text and not text.startswith("Error:"):
+                    return True
+        return False
     except Exception:
         return False
 
@@ -1680,10 +1744,11 @@ def _verify_group(
           position of the finding within ``issues`` (i.e. a valid index into
           the ``issues``/``group`` list the caller passed in), so callers may
           index back into their own list with it.
-        - A false-positive verdict from a run that never called any tool
-          (``_agent_used_a_tool`` is False) is dropped from the result rather
-          than returned -- the caller treats an absent index as "keep", so an
-          ungrounded drop never reaches the merge (see ``_agent_used_a_tool``).
+        - A false-positive verdict from a run that never obtained real code
+          via a successful code-reading tool call (``_agent_read_real_code``
+          is False) is dropped from the result rather than returned -- the
+          caller treats an absent index as "keep", so an ungrounded drop
+          never reaches the merge (see ``_agent_read_real_code``).
     """
     prompt = _build_group_prompt(index, file_path, issues, input_data)
     agent = Agent(
@@ -1694,12 +1759,12 @@ def _verify_group(
     raw = str(agent(prompt)).strip()
     data = extract_json_from_response(raw)
     verdicts = _parse_verdicts(data, len(issues))
-    if not _agent_used_a_tool(agent):
+    if not _agent_read_real_code(agent):
         false_positive_count = sum(1 for v in verdicts.values() if v.is_false_positive)
         if false_positive_count:
             logger.warning(
                 "FalsePositiveFilter: verification call for %s returned %s false-positive "
-                "verdict(s) without ever calling a tool to read the code; discarding them "
+                "verdict(s) without ever successfully reading real code; discarding them "
                 "and keeping those findings",
                 file_path,
                 false_positive_count,
