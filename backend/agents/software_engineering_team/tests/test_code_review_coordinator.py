@@ -1491,12 +1491,15 @@ def test_transient_failure_in_bisected_child_recovers() -> None:
         ),
     )
     assert result.approved is True
-    # combined fail + a fail + a retry success + b success
-    # + 1 reduce-phase synthesis pass (two recovered sub-reviews)
-    # + 1 merged architecture/side-effect pass call (its single prompt also inlines
-    # both files together, so it hits the same combined-fail branch and fails
-    # safe).
-    assert client.calls == 6
+    # Map phase: combined fail + a fail + a retry success + b success (4 calls).
+    # + 1 reduce-phase synthesis pass (two recovered sub-reviews).
+    # + Merged architecture/side-effect pass (now on the shared submission-pass
+    # runner, which reactively bisects on overflow rather than failing safe):
+    # its single combined prompt also inlines both files together, so it hits
+    # the same combined-fail branch and bisects into an a.py call (a_failures
+    # is already consumed by the map phase's retry, so this succeeds
+    # immediately) and a b.py call (3 calls).
+    assert client.calls == 8
 
 
 def test_bisect_halves_run_sequentially_detects_dummy_and_wrapped_dummy() -> None:

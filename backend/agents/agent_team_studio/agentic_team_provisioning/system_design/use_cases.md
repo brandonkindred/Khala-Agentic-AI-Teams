@@ -97,10 +97,10 @@ The left-to-right ribbon (`Actor → UI → API Layer → Agentic Team → File 
 | **Primary actor** | End user |
 | **API Layer category** | `User Requests` |
 | **Preconditions** | Team exists. |
-| **Trigger** | Visual editor `PUT /processes/{process_id}` (`api/main.py:262-276`) or follow-up chat message. |
-| **Main flow** | 1. Route validates `process_id` match; 2. Resolves `team_id` via `store.get_process_team_id`; 3. `_store.save_process` persists the `ProcessDefinition`; 4. `_after_process_saved` schedules per-step agent provisioning; 5. UI re-fetches the updated process. |
+| **Trigger** | Visual editor `PUT /processes/{process_id}` (`api/routes/processes.py`, delegating to `api/services/processes.py:update_process`) or follow-up chat message. |
+| **Main flow** | 1. Route validates `process_id` match; 2. Resolves `team_id` via `store.get_process_team_id`; 3. `_store.save_process` persists the `ProcessDefinition`; 4. `_after_process_saved` (hub collaborator on `api/main.py`, dereferenced via `main._after_process_saved`) schedules per-step agent provisioning; 5. UI re-fetches the updated process. |
 | **Postconditions** | `processes` row updated; provisioning bridge scheduled for any newly referenced agents. |
-| **Relevant files** | `api/main.py:262-276`, `assistant/store.py`, `agent_env_provisioning.py` |
+| **Relevant files** | `api/routes/processes.py`, `api/services/processes.py`, `assistant/store.py`, `agent_env_provisioning.py` |
 
 ### UC4 — Provision sandboxed agent environments
 
@@ -112,7 +112,7 @@ The left-to-right ribbon (`Actor → UI → API Layer → Agentic Team → File 
 | **Trigger** | Any call path that lands in `_after_process_saved` (UC1 or UC3). |
 | **Main flow** | 1. `schedule_provision_step_agents` iterates steps and step agents (`agent_env_provisioning.py:53-85`); 2. `make_provisioning_agent_id` derives the stable id; 3. `store.try_begin_agent_env_provision` inserts a row and returns `should_run`; 4. `_spawn_provision_thread` starts a daemon thread; 5. Thread calls `ProvisioningOrchestrator.run_workflow(manifest=minimal.yaml, access_tier=STANDARD)`; 6. `mark_agent_env_provision_finished` writes success/error. |
 | **Postconditions** | One `agent_env_provisions` row per `(team, process, step, agent)` in `pending` → `completed`/`failed`. |
-| **Relevant files** | `agent_env_provisioning.py`, `assistant/store.py`, `api/main.py:464-471` |
+| **Relevant files** | `agent_env_provisioning.py`, `assistant/store.py`, `api/routes/processes.py`, `api/services/processes.py:list_team_agent_environments` |
 
 ### UC5 — Answer pending questions / track jobs
 
@@ -122,9 +122,9 @@ The left-to-right ribbon (`Actor → UI → API Layer → Agentic Team → File 
 | **API Layer category** | `Questions` + `Team / Job Status` |
 | **Preconditions** | Team is provisioned (per-team `JobServiceClient` exists via `infrastructure.py`). |
 | **Trigger** | `GET /teams/{team_id}/questions` and `POST /teams/{team_id}/questions/{job_id}/answers`. |
-| **Main flow** | 1. `_get_infra_or_404` resolves `TeamInfrastructure`; 2. `infra.job_client.list_jobs(statuses=["pending","running"])` collects pending questions from each active job; 3. User submits answers; 4. `infra.job_client.atomic_update` clears `pending_questions`, sets `waiting_for_answers=False`, appends to `submitted_answers`. |
+| **Main flow** | 1. `_get_infra_or_404` (hub helper on `api/main.py`, dereferenced via `main._get_infra_or_404`) resolves `TeamInfrastructure`; 2. `infra.job_client.list_jobs(statuses=["pending","running"])` collects pending questions from each active job; 3. User submits answers; 4. `infra.job_client.atomic_update` clears `pending_questions`, sets `waiting_for_answers=False`, appends to `submitted_answers`. |
 | **Postconditions** | Job resumes (waited on by its owning team). |
-| **Relevant files** | `api/main.py:526-551`, `infrastructure.py` |
+| **Relevant files** | `api/routes/jobs.py`, `api/services/jobs.py`, `api/routes/questions.py`, `api/services/questions.py`, `infrastructure.py` |
 
 ### UC6 — Manage per-team assets (File System)
 
@@ -134,9 +134,9 @@ The left-to-right ribbon (`Actor → UI → API Layer → Agentic Team → File 
 | **API Layer category** | `Assets` → `File System` |
 | **Preconditions** | Team is provisioned (`assets_dir` exists). |
 | **Trigger** | `GET /teams/{team_id}/assets`, `GET /teams/{team_id}/assets/{name}`, `POST /teams/{team_id}/assets` (upload). |
-| **Main flow** | 1. `_safe_asset_name` prevents path traversal (`api/main.py:559-564`); 2. List enumerates `infra.assets_dir`; 3. Download uses `FileResponse`; 4. Upload reads `UploadFile` and writes to `infra.assets_dir / safe_name`. |
+| **Main flow** | 1. `_safe_asset_name` (`api/services/assets.py`, re-exported on `api/main.py` for tests) prevents path traversal; 2. List enumerates `infra.assets_dir`; 3. Download uses `FileResponse`; 4. Upload reads `UploadFile` in `_main._ASSET_UPLOAD_CHUNK_BYTES` chunks and writes to `infra.assets_dir / safe_name` off the event loop (`asyncio.to_thread`). |
 | **Postconditions** | File present under `$AGENT_CACHE/provisioned_teams/{team_id}/assets/`. |
-| **Relevant files** | `api/main.py:554-612`, `infrastructure.py` |
+| **Relevant files** | `api/routes/assets.py`, `api/services/assets.py`, `infrastructure.py` |
 
 ### UC7 — Manage per-team form data (Database)
 
@@ -146,9 +146,9 @@ The left-to-right ribbon (`Actor → UI → API Layer → Agentic Team → File 
 | **API Layer category** | `Form Information` → `Database` |
 | **Preconditions** | Team is provisioned (per-team `team.db` exists, WAL mode). |
 | **Trigger** | `GET/POST/PUT/DELETE` under `/teams/{team_id}/forms/...`. |
-| **Main flow** | 1. `_get_infra_or_404` resolves `TeamInfrastructure`; 2. `infra.form_store.create_record / list_form_keys / get_records / update_record / delete_record` operates on the per-team `form_data` table (`infrastructure.py:30-39`). |
+| **Main flow** | 1. `_get_infra_or_404` (hub helper on `api/main.py`, dereferenced via `main._get_infra_or_404`) resolves `TeamInfrastructure`; 2. `infra.form_store.create_record / list_form_keys / get_records / update_record / delete_record` operates on the per-team `form_data` table (`infrastructure.py:30-39`). |
 | **Postconditions** | `form_data` row created / updated / removed in the per-team SQLite. |
-| **Relevant files** | `api/main.py:615-662`, `infrastructure.py` |
+| **Relevant files** | `api/routes/forms.py`, `api/services/forms.py`, `infrastructure.py` |
 
 ### UC8 — Interactive testing chat with a rostered agent (new)
 
