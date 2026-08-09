@@ -74,8 +74,14 @@ _HEARTBEAT_TIMEOUT = timedelta(seconds=120)
 # it on the network-heartbeat cadence would leave a run that finishes before
 # the first heartbeat tick (or in the last _HEARTBEAT_INTERVAL_S of any run)
 # with no chance to ever observe a mid-run cancellation and persist it as
-# cancelled instead of completed.
-_CANCEL_POLL_INTERVAL_S = 1.0
+# cancelled instead of completed. This narrows (does not fully close) that
+# tail race — closing it fully would require either an internal checkpoint
+# inside the (out-of-scope, non-preemptible) backtest engine itself, or a
+# forced thread-cancel exception, which is unsafe here (see
+# no_thread_cancel_exception below) — matching the same checkpoint-based,
+# best-effort cancellation semantics _run_backtest_background already
+# documents for the REST cancel route.
+_CANCEL_POLL_INTERVAL_S = 0.25
 
 
 # no_thread_cancel_exception=True: by default temporalio forcibly raises
@@ -113,10 +119,17 @@ def run_backtest_activity(
           Temporal can detect a worker crash; a second, much faster one polls
           ``activity.is_cancelled()`` (``_CANCEL_POLL_INTERVAL_S`` — decoupled
           from the heartbeat cadence since it is a free in-memory check, not a
-          network call) and, on the first observed Temporal cancellation,
-          cancels the job (``_bt_cancel_job``) so ``_run_backtest_background``'s
-          own cancellation checkpoints see it and return ``cancelled`` at their
-          next check rather than overwriting the job to completed/failed.
+          network call). ``is_cancelled()`` is set for reasons beyond a real
+          user cancel (heartbeat timeout, worker shutdown, pause, reset —
+          see ``activity.cancellation_details()``); only when the details
+          report ``cancel_requested`` does the poller cancel the job
+          (``_bt_cancel_job``) so ``_run_backtest_background``'s own
+          cancellation checkpoints see it and return ``cancelled`` at their
+          next check rather than overwriting the job to completed/failed. A
+          non-``cancel_requested`` reason (e.g. a heartbeat timeout from a
+          crashed worker) leaves the job store untouched so a Temporal retry
+          can still resume/redo the work instead of being permanently
+          short-circuited as cancelled.
         - ``_run_backtest_background`` has run and persisted the job result;
           outcome is taken from the worker's return value (entry short-circuit
           still reads the job store). Raises ``ApplicationError`` if the worker
@@ -149,15 +162,26 @@ def run_backtest_activity(
         # test) this raises and BackgroundHeartbeat swallows it.
         activity.heartbeat()
 
-    # Cancelled at most once: _bt_cancel_job need not be re-invoked on every
-    # subsequent poll tick once the job store already reflects the cancel.
-    _cancelled = False
+    # Resolved at most once: cancellation_details() are "set once and do not
+    # change once set" (temporalio), so a single check suffices — no need to
+    # keep polling once is_cancelled() has flipped, regardless of the reason.
+    _resolved = False
 
     def _watch_cancellation() -> None:
-        nonlocal _cancelled
-        if not _cancelled and activity.is_cancelled():
+        nonlocal _resolved
+        if _resolved or not activity.is_cancelled():
+            return
+        _resolved = True
+        # is_cancelled() is a single shared flag for cancel_requested,
+        # timed_out (heartbeat timeout), worker_shutdown, paused, and reset —
+        # only cancel_requested is a genuine user/workflow-initiated cancel.
+        # Any other reason must leave the job store alone so a Temporal retry
+        # (e.g. after a crashed worker's heartbeat timeout) can still resume
+        # the work instead of finding it pre-marked cancelled and bailing out
+        # via _run_backtest_background's entry short-circuit.
+        details = activity.cancellation_details()
+        if details is not None and details.cancel_requested:
             _bt_cancel_job(job_id)
-            _cancelled = True
 
     with (
         BackgroundHeartbeat(

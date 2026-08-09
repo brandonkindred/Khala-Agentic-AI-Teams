@@ -488,6 +488,11 @@ def test_run_backtest_activity_cancellation_cancels_job(monkeypatch) -> None:
     monkeypatch.setattr(wf, "_CANCEL_POLL_INTERVAL_S", 0.01)
     monkeypatch.setattr(tl_activity, "heartbeat", lambda *a, **k: None)
     monkeypatch.setattr(tl_activity, "is_cancelled", lambda: True)
+    monkeypatch.setattr(
+        tl_activity,
+        "cancellation_details",
+        lambda: tl_activity.ActivityCancellationDetails(cancel_requested=True),
+    )
 
     cancelled_ids = []
     monkeypatch.setattr(api_main, "_bt_cancel_job", lambda jid: cancelled_ids.append(jid))
@@ -529,6 +534,11 @@ def test_run_backtest_activity_cancellation_observed_before_heartbeat_tick(monke
     monkeypatch.setattr(wf, "_CANCEL_POLL_INTERVAL_S", 0.01)
     monkeypatch.setattr(tl_activity, "heartbeat", lambda *a, **k: None)
     monkeypatch.setattr(tl_activity, "is_cancelled", lambda: True)
+    monkeypatch.setattr(
+        tl_activity,
+        "cancellation_details",
+        lambda: tl_activity.ActivityCancellationDetails(cancel_requested=True),
+    )
 
     cancelled_ids = []
     monkeypatch.setattr(api_main, "_bt_cancel_job", lambda jid: cancelled_ids.append(jid))
@@ -546,6 +556,61 @@ def test_run_backtest_activity_cancellation_observed_before_heartbeat_tick(monke
 
     assert cancelled_ids == ["job-cancel-fast"]
     assert result == {"job_id": "job-cancel-fast", "status": "cancelled"}
+
+
+@pytest.mark.parametrize(
+    "details_kwargs",
+    [
+        {"timed_out": True},
+        {"worker_shutdown": True},
+        {"paused": True},
+        {"reset": True},
+        {"not_found": True},
+    ],
+)
+def test_run_backtest_activity_non_user_cancellation_does_not_cancel_job(
+    monkeypatch, details_kwargs
+) -> None:
+    """Regression for a review finding: ``activity.is_cancelled()`` is one
+    shared flag for ``cancel_requested`` *and* infra-driven reasons (heartbeat
+    timeout, worker shutdown, pause, reset, not-found). Only a genuine
+    ``cancel_requested`` may cancel the durable job — any other reason must
+    leave it alone, so a Temporal retry (e.g. after a crashed worker's
+    heartbeat timeout) can still resume the work instead of finding it
+    pre-marked cancelled and bailing out via the entry short-circuit."""
+    from temporalio import activity as tl_activity
+
+    from investment_team import models as inv_models
+    from investment_team.api import main as api_main
+    from investment_team.temporal import workflows as wf
+
+    monkeypatch.setattr(inv_models, "StrategySpec", lambda **kw: object())
+    monkeypatch.setattr(inv_models, "BacktestConfig", lambda **kw: object())
+    monkeypatch.setattr(api_main, "_backtest_job_status", lambda jid: None)
+    monkeypatch.setattr(wf, "_CANCEL_POLL_INTERVAL_S", 0.01)
+    monkeypatch.setattr(tl_activity, "heartbeat", lambda *a, **k: None)
+    monkeypatch.setattr(tl_activity, "is_cancelled", lambda: True)
+    monkeypatch.setattr(
+        tl_activity,
+        "cancellation_details",
+        lambda: tl_activity.ActivityCancellationDetails(**details_kwargs),
+    )
+
+    cancelled_ids = []
+    monkeypatch.setattr(api_main, "_bt_cancel_job", lambda jid: cancelled_ids.append(jid))
+
+    def _bg(*a):
+        # Give the poller several ticks to (wrongly, if the bug regresses)
+        # observe cancellation before the run completes normally.
+        time.sleep(0.05)
+        return api_main._BT_JOB_STATUS_COMPLETED
+
+    monkeypatch.setattr(api_main, "_run_backtest_background", _bg)
+
+    result = wf.run_backtest_activity("job-infra", {}, {}, "agent", [])
+
+    assert cancelled_ids == []
+    assert result == {"job_id": "job-infra", "status": "completed"}
 
 
 def test_investment_backtest_workflow_sets_heartbeat_timeout(monkeypatch) -> None:
