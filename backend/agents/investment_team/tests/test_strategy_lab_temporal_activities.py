@@ -493,6 +493,64 @@ def test_run_design_attempt_activity_maps_unexpected_error(monkeypatch):
     assert exc_info.value.non_retryable is True
 
 
+def test_run_design_attempt_activity_raises_cancelled_between_checkpoints(monkeypatch):
+    """``activity.is_cancelled()`` flipping True at an ``emit`` checkpoint
+    (the "between steps" cancellation check) raises Temporal's
+    ``CancelledError`` and stops the attempt immediately — code past the
+    checkpoint that observed cancellation never runs."""
+    from temporalio.exceptions import CancelledError
+
+    from investment_team.strategy_lab.orchestrator import StrategyLabOrchestrator
+
+    reached_past_checkpoint = False
+
+    def _is_cancelled_after_first_call():
+        calls = {"n": 0}
+
+        def _check():
+            calls["n"] += 1
+            return calls["n"] > 1
+
+        return _check
+
+    monkeypatch.setattr(act, "is_cancelled", _is_cancelled_after_first_call())
+
+    def _fake_attempt(self, **kwargs):
+        nonlocal reached_past_checkpoint
+        kwargs["emit"]("design", {"sub_phase": "round_1"})  # not cancelled yet
+        kwargs["emit"]("design", {"sub_phase": "round_2"})  # cancellation observed here
+        reached_past_checkpoint = True
+        raise AssertionError("should not run past the cancelled checkpoint")
+
+    monkeypatch.setattr(StrategyLabOrchestrator, "_run_design_attempt", _fake_attempt)
+
+    with pytest.raises(CancelledError):
+        act.run_design_attempt_activity(_run_design_attempt_params())
+    assert reached_past_checkpoint is False
+
+
+def test_run_design_attempt_activity_unaffected_when_never_cancelled(monkeypatch):
+    """With ``is_cancelled()`` always False, ``no_thread_cancel_exception=True``
+    and the new ``BackgroundHeartbeat`` wrapping don't change the ordinary
+    (non-cancelled) outcome — regression coverage for those additions."""
+    from investment_team.strategy_lab.orchestrator import StrategyLabOrchestrator
+
+    class _FakeRecord:
+        def model_dump(self, *, mode: str = "python") -> Dict[str, Any]:
+            return {"lab_record_id": "rec-uncancelled"}
+
+    def _fake_attempt(self, **kwargs):
+        kwargs["emit"]("design", {"sub_phase": "round_1"})
+        kwargs["emit"]("coding", {"sub_phase": "completed"})
+        return _FakeRecord()
+
+    monkeypatch.setattr(StrategyLabOrchestrator, "_run_design_attempt", _fake_attempt)
+
+    out = act.run_design_attempt_activity(_run_design_attempt_params())
+    assert out["kind"] == "record"
+    assert out["record"]["lab_record_id"] == "rec-uncancelled"
+
+
 def test_run_design_attempt_activity_returns_skipped_outcome_for_502(monkeypatch):
     """A 502 ("no market data") HTTPException is caught and surfaced as a
     structured ``kind='skipped'`` outcome — cycle-terminal, never re-raised —
