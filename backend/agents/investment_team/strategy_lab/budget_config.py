@@ -73,15 +73,20 @@ def _derive_total_budget_s(max_retries: int, timeout_s: float, fallback: float) 
 
 
 def _require_at_least(field_name: str, value: float, floor: float) -> None:
-    """Raise ``ValueError`` naming ``field_name`` when ``value`` is non-finite
-    or ``< floor``.
+    """Raise ``ValueError`` naming ``field_name`` when ``value`` is a
+    ``bool``, non-finite, or ``< floor``.
 
     A ``nan`` fails every ordering comparison (``nan < floor`` is ``False``),
     so a bare ``<`` check alone would silently accept it; ``from_env()``
     already can't produce one (``env_float`` rejects non-finite values), but
     a direct caller passing ``float("nan")``/``float("inf")`` must not slip
-    past a "validated" config.
+    past a "validated" config. A ``bool`` is-a ``int`` is-a valid operand for
+    both ``math.isfinite`` and ``<`` (``True`` reads as a "finite" ``1.0``),
+    so it must be rejected explicitly before either check — otherwise
+    ``llm_timeout_s=True`` would silently become a one-second timeout.
     """
+    if isinstance(value, bool):
+        raise ValueError(f"{field_name} must be a float, got {value!r}")
     if not math.isfinite(value):
         raise ValueError(f"{field_name} must be finite, got {value!r}")
     if value < floor:
@@ -161,14 +166,15 @@ class StrategyLabBudgetConfig:
     Invariants:
         Every "retries"/"rounds"/"calls" cap field is a plain, non-boolean
         ``int`` (retries ``>= 0``, rounds/calls caps ``>= 1``); every
-        timeout/backoff/budget field is a finite float ``> 0``, and each
-        *max*/*cap* field is ``>=`` its paired *base*/*initial* (backoff
-        max vs. base, rate-limit max vs. initial) — ``nan``/``inf`` are
-        rejected even though a bare ``<`` comparison would let ``nan``
-        slip through. Enforced in ``__post_init__`` regardless of
-        construction path (``from_env`` or direct instantiation), so a
-        caller building this object with explicit overrides — tests
-        included — gets the same
+        timeout/backoff/budget field is a non-boolean, finite float ``> 0``,
+        and each *max*/*cap* field is ``>=`` its paired *base*/*initial*
+        (backoff max vs. base, rate-limit max vs. initial) — ``bool``
+        (``True``/``False`` read as a "finite" ``1.0``/``0.0``) and
+        ``nan``/``inf`` (which a bare ``<`` comparison would let slip
+        through) are both rejected explicitly. Enforced in
+        ``__post_init__`` regardless of construction path (``from_env`` or
+        direct instantiation), so a caller building this object with
+        explicit overrides — tests included — gets the same
         guarantees as the env-driven default.
     """
 

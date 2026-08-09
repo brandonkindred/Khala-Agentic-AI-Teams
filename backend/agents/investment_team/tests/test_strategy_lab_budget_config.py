@@ -337,6 +337,27 @@ def test_construction_rejects_infinite_field() -> None:
         StrategyLabBudgetConfig(llm_backoff_max_s=float("inf"))
 
 
+@pytest.mark.parametrize(
+    "field_name",
+    [
+        "llm_timeout_s",
+        "llm_backoff_base_s",
+        "llm_backoff_max_s",
+        "llm_rate_limit_backoff_initial_s",
+        "llm_rate_limit_backoff_max_s",
+        "llm_total_budget_s",
+    ],
+)
+@pytest.mark.parametrize("bool_value", [True, False])
+def test_construction_rejects_bool_for_float_field(field_name: str, bool_value: bool) -> None:
+    """``bool`` is-a ``int`` is-a valid operand for ``math.isfinite``/``<``
+    (``True`` reads as a "finite" ``1.0``), so it must be rejected
+    explicitly — otherwise ``llm_timeout_s=True`` would silently become a
+    one-second timeout instead of raising."""
+    with pytest.raises(ValueError, match=field_name):
+        StrategyLabBudgetConfig(**{field_name: bool_value})
+
+
 def test_construction_rejects_rate_limit_max_below_initial() -> None:
     with pytest.raises(ValueError, match="llm_rate_limit_backoff_max_s"):
         StrategyLabBudgetConfig(
