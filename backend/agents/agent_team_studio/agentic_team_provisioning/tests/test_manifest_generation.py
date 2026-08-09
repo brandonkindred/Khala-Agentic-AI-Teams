@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import pytest
 
-from agent_registry.models import AgentManifest, CognitionSpec
+from agent_registry.models import AgentManifest, CognitionSpec, SourceInfo
 from agent_team_studio.agentic_team_provisioning.manifest_generation import (
     build_agent_manifest,
     default_cognition_block,
     manifest_agent_id,
     register_team_manifests,
+    resolve_roster_persona,
 )
 from agent_team_studio.agentic_team_provisioning.models import AgenticTeamAgent
 
@@ -274,3 +275,125 @@ def test_register_team_manifests_propagates_atomic_replace_failure(
     assert reg.get(prior_a_id) is not None
     assert reg.get(prior_a_id).summary == "prior-A"
     assert {m.name for m in reg.all()} == {"A"}
+
+
+# ---------------------------------------------------------------------------
+# resolve_roster_persona — live persona resolution for thin registry rows
+# ---------------------------------------------------------------------------
+
+
+def _registered(monkeypatch: pytest.MonkeyPatch, *manifests: AgentManifest):
+    import agent_registry
+    from agent_registry.loader import AgentRegistry
+
+    reg = AgentRegistry([], {})
+    monkeypatch.setattr(agent_registry, "get_registry", lambda: reg)
+    for m in manifests:
+        reg.register(m)
+    return reg
+
+
+def test_resolve_roster_persona_generated_agent_passthrough(monkeypatch: pytest.MonkeyPatch):
+    """A generated row's fields are the definition — returned unchanged, no lookup."""
+    reg = _registered(monkeypatch)
+    agent = AgenticTeamAgent(agent_name="Writer", role="Writes drafts", skills=["seo"])
+    assert resolve_roster_persona(agent, reg) is agent
+
+
+def test_resolve_roster_persona_registry_agent_hydrates_from_manifest(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """A thin (un-overridden) registry row is hydrated from its manifest."""
+    manifest = AgentManifest(
+        id="blogging.planner",
+        team="blogging",
+        name="blogging.planner",
+        summary="Plans SEO-aware blog outlines",
+        tags=["studio", "seo"],
+        cognition=CognitionSpec(tools=["web.search", "draft"]),
+        source=SourceInfo(entrypoint="pkg.mod:Agent"),
+    )
+    reg = _registered(monkeypatch, manifest)
+    agent = AgenticTeamAgent(
+        agent_name="blogging.planner", source="registry", manifest_id="blogging.planner"
+    )
+
+    resolved = resolve_roster_persona(agent, reg)
+
+    assert resolved.role == "Plans SEO-aware blog outlines"
+    assert resolved.skills == ["studio", "seo"]
+    assert resolved.tools == ["web.search", "draft"]
+    assert resolved.expertise == ["blogging"]
+    # capabilities has no manifest counterpart — stays untouched.
+    assert resolved.capabilities == []
+    # The persisted thin row itself is not mutated in place.
+    assert agent.role == ""
+
+
+def test_resolve_roster_persona_bare_manifest_falls_back(monkeypatch: pytest.MonkeyPatch):
+    """No summary → role falls back to name; no cognition → empty tools."""
+    manifest = AgentManifest(
+        id="misc.bare",
+        team="misc",
+        name="misc.bare",
+        summary="",
+        tags=["studio"],
+        cognition=None,
+        source=SourceInfo(entrypoint="pkg.mod:Agent"),
+    )
+    reg = _registered(monkeypatch, manifest)
+    agent = AgenticTeamAgent(agent_name="misc.bare", source="registry", manifest_id="misc.bare")
+
+    resolved = resolve_roster_persona(agent, reg)
+
+    assert resolved.role == "misc.bare"
+    assert resolved.tools == []
+    assert resolved.skills == ["studio"]
+    assert resolved.expertise == ["misc"]
+
+
+def test_resolve_roster_persona_override_wins_over_manifest(monkeypatch: pytest.MonkeyPatch):
+    """A per-team override already saved on the row is never clobbered by resolution."""
+    manifest = AgentManifest(
+        id="blogging.planner",
+        team="blogging",
+        name="blogging.planner",
+        summary="Plans SEO-aware blog outlines",
+        tags=["studio", "seo"],
+        cognition=CognitionSpec(tools=["web.search", "draft"]),
+        source=SourceInfo(entrypoint="pkg.mod:Agent"),
+    )
+    reg = _registered(monkeypatch, manifest)
+    agent = AgenticTeamAgent(
+        agent_name="blogging.planner",
+        source="registry",
+        manifest_id="blogging.planner",
+        role="Custom role for this team",
+        skills=["custom-skill"],
+    )
+
+    resolved = resolve_roster_persona(agent, reg)
+
+    assert resolved.role == "Custom role for this team"
+    assert resolved.skills == ["custom-skill"]
+    # Fields with no override still resolve from the manifest.
+    assert resolved.tools == ["web.search", "draft"]
+    assert resolved.expertise == ["blogging"]
+
+
+def test_resolve_roster_persona_unresolvable_manifest_passthrough(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """A registry row whose manifest no longer resolves stays thin, not fabricated."""
+    reg = _registered(monkeypatch)  # empty registry
+    agent = AgenticTeamAgent(agent_name="Ghost", source="registry", manifest_id="gone")
+    assert resolve_roster_persona(agent, reg) is agent
+
+
+def test_resolve_roster_persona_missing_manifest_id_passthrough(monkeypatch: pytest.MonkeyPatch):
+    """A degenerate registry row with no manifest_id is returned unchanged."""
+    reg = _registered(monkeypatch)
+    agent = AgenticTeamAgent.model_construct(
+        agent_name="Ghost", source="registry", manifest_id=None
+    )
+    assert resolve_roster_persona(agent, reg) is agent

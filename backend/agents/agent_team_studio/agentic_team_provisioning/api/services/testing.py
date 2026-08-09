@@ -57,19 +57,26 @@ def set_team_mode(team_id: str, req: SetTeamModeRequest):
 
 
 def _find_agent_in_roster(team_id: str, agent_name: str) -> AgenticTeamAgent:
-    """Look up an agent by name in the team roster.
+    """Look up an agent by name in the team roster, with its persona resolved.
 
     Preconditions: ``team_id`` and ``agent_name`` are non-empty strings.
     Postconditions: returns the matching ``AgenticTeamAgent`` when
-        ``agent_name`` is on the team's roster; otherwise raises
-        ``HTTPException(404)`` and never returns.
+        ``agent_name`` is on the team's roster, hydrated via
+        ``manifest_generation.resolve_roster_persona`` so a thin
+        ``source == "registry"`` row carries a usable persona for the test-chat
+        / starter-prompt callers below (a no-op for a ``source == "generated"``
+        row); otherwise raises ``HTTPException(404)`` and never returns.
     """
+    from agent_registry import get_registry
     from agent_team_studio.agentic_team_provisioning.api import main as _main
+    from agent_team_studio.agentic_team_provisioning.manifest_generation import (
+        resolve_roster_persona,
+    )
 
     agents = _main._store.list_team_agents(team_id)
     for a in agents:
         if a.agent_name == agent_name:
-            return a
+            return resolve_roster_persona(a, get_registry())
     raise HTTPException(status_code=404, detail=f"Agent '{agent_name}' not found in team roster")
 
 

@@ -398,6 +398,69 @@ def test_action_step_runs_agent_and_completes(monkeypatch: pytest.MonkeyPatch) -
     assert row["finished_at"] is not None
 
 
+def test_action_step_hydrates_thin_registry_agent(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A thin ``source == "registry"`` roster row is resolved from its manifest
+    before ``build_agent`` is called — the pipeline must not run a
+    registry-sourced agent with an empty persona (issue #5891)."""
+    import agent_registry
+    from agent_registry.loader import AgentRegistry
+    from agent_registry.models import AgentManifest, CognitionSpec, SourceInfo
+
+    reg = AgentRegistry([], {})
+    reg.register(
+        AgentManifest(
+            id="catalog.worker",
+            team="catalog",
+            name="catalog.worker",
+            summary="Does the work",
+            tags=["studio", "seo"],
+            cognition=CognitionSpec(tools=["web.search"]),
+            source=SourceInfo(entrypoint="pkg.mod:Agent"),
+        )
+    )
+    monkeypatch.setattr(agent_registry, "get_registry", lambda: reg)
+
+    captured: dict = {}
+
+    def _capture_build_agent(agent_name, role, skills, capabilities, tools, expertise):
+        captured.update(role=role, skills=skills, tools=tools, expertise=expertise)
+        return object()
+
+    monkeypatch.setattr(
+        "agent_team_studio.agentic_team_provisioning.runtime.pipeline_runner.build_agent",
+        _capture_build_agent,
+    )
+    monkeypatch.setattr(
+        "agent_team_studio.agentic_team_provisioning.runtime.pipeline_runner.call_agent",
+        lambda _agent, _inp: "agent output",
+    )
+    store = _FakeStore()
+    store.seed("r1", initial_input="seed")
+    process = ProcessDefinition(
+        process_id="p1",
+        steps=[
+            ProcessStep(
+                step_id="s1",
+                name="Do work",
+                description="Run the agent",
+                step_type=StepType.ACTION,
+                agents=[ProcessStepAgent(agent_name="worker", role="doer")],
+            )
+        ],
+    )
+    thin_agent = AgenticTeamAgent(
+        agent_name="worker", source="registry", manifest_id="catalog.worker"
+    )
+    runner = _make_runner(store)
+    runner.start_run("r1", [thin_agent], process)
+
+    assert _wait_for(lambda: store.get_pipeline_run("r1")["status"] == "completed")
+    assert captured["role"] == "Does the work"
+    assert captured["skills"] == ["studio", "seo"]
+    assert captured["tools"] == ["web.search"]
+    assert captured["expertise"] == ["catalog"]
+
+
 def test_action_step_without_agent_records_placeholder() -> None:
     store = _FakeStore()
     store.seed("r1")

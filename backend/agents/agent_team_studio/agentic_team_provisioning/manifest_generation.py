@@ -16,7 +16,10 @@ is active, persists them so other workers and sandboxes can resolve them.
 from __future__ import annotations
 
 import hashlib
-from typing import NamedTuple
+from typing import TYPE_CHECKING, NamedTuple
+
+if TYPE_CHECKING:
+    from agent_registry.loader import AgentRegistry
 
 from agent_registry.models import (
     AgentManifest,
@@ -27,7 +30,11 @@ from agent_registry.models import (
     SourceInfo,
 )
 from agent_team_studio.agentic_team_provisioning.agent_env_provisioning import _slug
-from agent_team_studio.agentic_team_provisioning.models import SOURCE_GENERATED, AgenticTeamAgent
+from agent_team_studio.agentic_team_provisioning.models import (
+    SOURCE_GENERATED,
+    SOURCE_REGISTRY,
+    AgenticTeamAgent,
+)
 
 # The registry team key for this service (matches TEAM_CONFIGS in
 # unified_api/config.py). This is the manifest ``team`` value — distinct from the
@@ -165,6 +172,57 @@ def build_agent_manifest(team_id: str, agent: AgenticTeamAgent) -> AgentManifest
     # Round-trip through a JSON-safe dump so the returned object is guaranteed
     # to be a fully validated manifest (and safe to serialize over the API).
     return AgentManifest.model_validate(manifest.model_dump(mode="json"))
+
+
+def resolve_roster_persona(agent: AgenticTeamAgent, registry: "AgentRegistry") -> AgenticTeamAgent:
+    """Resolve the effective persona for a roster row, live from its manifest.
+
+    ``source == "registry"`` roster rows are persisted thin (see
+    ``api/services/teams.py::_roster_agent_from_manifest``): a fresh add carries
+    only ``agent_name``/``source``/``manifest_id``, with ``role``/``skills``/
+    ``tools``/``expertise`` at their empty defaults. Callers that need an actual
+    persona to validate staffing, build a system prompt, or run a pipeline step
+    call this instead of reading those fields off the row directly.
+
+    Preconditions: ``agent`` is a persisted roster row; ``registry`` is the
+        live ``AgentRegistry`` (e.g. ``agent_registry.get_registry()``).
+    Postconditions: a ``source == "generated"`` row is returned unchanged — its
+        fields are the only definition, there is nothing to resolve. A
+        ``source == "registry"`` row whose ``manifest_id`` doesn't resolve
+        (unset, or the manifest no longer exists) is also returned unchanged
+        (thin) rather than fabricated — mirrors ``list_team_agent_manifests``'s
+        "omit rather than fabricate" handling of the same case. Otherwise
+        returns a copy with each of ``role``/``skills``/``tools``/``expertise``
+        set to its existing value on ``agent`` if already non-empty (a per-team
+        override saved via ``PUT /teams/{id}/agents/{name}`` always wins), else
+        the value projected from the manifest using the same mapping
+        ``_roster_agent_from_manifest`` used to apply at write time: ``role`` from
+        ``manifest.summary`` (falling back to ``manifest.name``), ``skills`` from
+        ``manifest.tags``, ``tools`` from ``manifest.cognition.tools`` (empty
+        when the manifest has no ``cognition`` block), ``expertise`` from
+        ``[manifest.team]``. ``capabilities`` is never resolved from a manifest
+        (no such field there) and is left as-is.
+    """
+    if agent.source != SOURCE_REGISTRY:
+        return agent
+    if not agent.manifest_id:
+        return agent
+    manifest = registry.get(agent.manifest_id)
+    if manifest is None:
+        return agent
+    return agent.model_copy(
+        update={
+            "role": agent.role or (manifest.summary or manifest.name),
+            "skills": agent.skills or list(manifest.tags or []),
+            "tools": agent.tools
+            or (
+                list(manifest.cognition.tools)
+                if manifest.cognition and manifest.cognition.tools
+                else []
+            ),
+            "expertise": agent.expertise or ([manifest.team] if manifest.team else []),
+        }
+    )
 
 
 def is_generated_manifest(manifest: AgentManifest) -> bool:

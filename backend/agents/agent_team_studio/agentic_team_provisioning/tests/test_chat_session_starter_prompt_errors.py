@@ -87,3 +87,42 @@ def test_non_404_failure_during_prompt_generation_propagates(
 
     resp = client.get(f"/teams/{team_id}/test-chat/sessions/{session_id}")
     assert resp.status_code == 500
+
+
+def test_starter_prompts_hydrate_thin_registry_agent(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+):
+    """A thin ``source == "registry"`` roster agent's persona is resolved live
+    from its manifest before starter prompts are generated, so the prompts
+    reference the real role/skills rather than an empty persona (#5891)."""
+    import agent_registry
+    from agent_registry.loader import AgentRegistry
+    from agent_registry.models import AgentManifest, SourceInfo
+    from agent_team_studio.agentic_team_provisioning.api.services.teams import (
+        add_agent_from_registry,
+    )
+    from agent_team_studio.agentic_team_provisioning.models import AddAgentFromRegistryRequest
+
+    reg = AgentRegistry([], {})
+    reg.register(
+        AgentManifest(
+            id="catalog.worker",
+            team="catalog",
+            name="catalog.worker",
+            summary="Plans SEO-aware blog outlines",
+            tags=["studio", "seo"],
+            cognition=None,
+            source=SourceInfo(entrypoint="pkg.mod:Agent"),
+        )
+    )
+    monkeypatch.setattr(agent_registry, "get_registry", lambda: reg)
+
+    team_id = _new_team()
+    add_agent_from_registry(team_id, AddAgentFromRegistryRequest(manifest_id="catalog.worker"))
+    session_id = _stub_session(monkeypatch, team_id, "catalog.worker")
+
+    resp = client.get(f"/teams/{team_id}/test-chat/sessions/{session_id}")
+
+    assert resp.status_code == 200
+    prompts = resp.json()["suggested_prompts"]
+    assert any("Plans SEO-aware blog outlines" in p for p in prompts)

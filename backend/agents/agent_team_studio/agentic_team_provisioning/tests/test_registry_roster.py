@@ -98,7 +98,13 @@ def _new_team() -> str:
 
 
 def test_from_registry_projects_and_persists(client: TestClient) -> None:
-    """201 with the projected fields, and the agent is persisted on the roster."""
+    """201 with a thin roster ref — no manifest fields copied onto the row.
+
+    Persona resolution from the manifest (role/skills/tools/expertise) happens
+    live via ``manifest_generation.resolve_roster_persona`` for consumers that
+    need it (validation, prompt construction) — see ``test_manifest_generation.py``
+    — not at write time.
+    """
     team_id = _new_team()
 
     resp = client.post(
@@ -107,29 +113,30 @@ def test_from_registry_projects_and_persists(client: TestClient) -> None:
     assert resp.status_code == 201
     body = resp.json()
     assert body["agent_name"] == "blogging.planner"
-    assert body["role"] == "Plans SEO-aware blog outlines"
-    assert body["skills"] == ["studio", "seo"]  # from manifest tags
-    assert body["tools"] == ["web.search", "draft"]  # from cognition.tools
-    assert body["expertise"] == ["blogging"]  # from the home team
+    assert body["role"] == ""
+    assert body["skills"] == []
+    assert body["tools"] == []
+    assert body["expertise"] == []
     assert body["source"] == "registry"
     assert body["manifest_id"] == "blogging.planner"
 
-    # Persisted on the roster.
+    # Persisted on the roster, still thin.
     roster = client.get(f"/teams/{team_id}/agents").json()
     assert [a["agent_name"] for a in roster] == ["blogging.planner"]
     assert roster[0]["source"] == "registry"
+    assert roster[0]["role"] == ""
 
 
-def test_from_registry_bare_manifest_falls_back(client: TestClient) -> None:
-    """No summary → role falls back to name; no cognition → empty tools."""
+def test_from_registry_bare_manifest_is_thin(client: TestClient) -> None:
+    """A manifest with no summary/cognition still projects to a thin ref."""
     team_id = _new_team()
     resp = client.post(f"/teams/{team_id}/agents/from-registry", json={"manifest_id": "misc.bare"})
     assert resp.status_code == 201
     body = resp.json()
-    assert body["role"] == "misc.bare"
+    assert body["role"] == ""
     assert body["tools"] == []
-    assert body["skills"] == ["studio"]
-    assert body["expertise"] == ["misc"]
+    assert body["skills"] == []
+    assert body["expertise"] == []
 
 
 def test_from_registry_no_cognition_tools_passes_validation(client: TestClient) -> None:
@@ -147,13 +154,15 @@ def test_from_registry_no_cognition_tools_passes_validation(client: TestClient) 
 def test_from_registry_empty_tags_agent_added_but_flagged_sparse(
     client: TestClient, registry: _FakeRegistry
 ) -> None:
-    """A manifest with NO tags and no cognition projects to a roster agent with only
-    ``expertise`` populated (skills/capabilities/tools all empty) — three missing
-    categories, which ``roster_validation`` correctly flags ``sparse_profile``. The
-    add still succeeds (201); validation honestly reports the team is not fully
-    staffed. (Studio-saved manifests always carry the 'studio' tag, so this
-    degenerate shape only arises for hand-authored / non-Studio catalog manifests —
-    and a tag-less, tool-less, capability-less agent genuinely *is* under-specified.)"""
+    """A manifest with NO tags and no cognition resolves, for validation, to a
+    persona with only ``expertise`` populated (skills/capabilities/tools all
+    empty) — three missing categories, which ``roster_validation`` correctly
+    flags ``sparse_profile``. The add still succeeds (201) with a thin row;
+    validation honestly reports the team is not fully staffed once it hydrates
+    the row from the manifest. (Studio-saved manifests always carry the
+    'studio' tag, so this degenerate shape only arises for hand-authored /
+    non-Studio catalog manifests — and a tag-less, tool-less, capability-less
+    agent genuinely *is* under-specified.)"""
     registry.register(
         AgentManifest(
             id="empty.tags",
@@ -169,12 +178,43 @@ def test_from_registry_empty_tags_agent_added_but_flagged_sparse(
     resp = client.post(f"/teams/{team_id}/agents/from-registry", json={"manifest_id": "empty.tags"})
     assert resp.status_code == 201
     body = resp.json()
-    assert body["skills"] == []  # empty tags → empty skills
-    assert body["expertise"] == ["empty"]  # only expertise populated
+    assert body["skills"] == []  # thin row: not populated at write time
+    assert body["expertise"] == []  # thin row: not populated at write time
 
     validation = client.get(f"/teams/{team_id}/roster/validation").json()
     assert validation["is_fully_staffed"] is False  # sparse_profile: 3 categories missing
     assert any(g["category"] == "sparse_profile" for g in validation["gaps"])
+
+
+def test_mixed_registry_and_generated_roster_validates_without_false_gaps(
+    client: TestClient,
+) -> None:
+    """A roster mixing a thin registry-sourced agent and a fat generated agent
+    validates correctly: the registry agent's persona is hydrated from its
+    manifest (not read off its thin, empty roster row), and the generated
+    agent's own fields are used directly — neither is falsely flagged."""
+    team_id = _new_team()
+    client.post(f"/teams/{team_id}/agents/from-registry", json={"manifest_id": "blogging.planner"})
+    AgenticTeamStore().add_or_replace_team_agent(
+        team_id,
+        AgenticTeamAgent(
+            agent_name="Editor",
+            role="Edits drafts",
+            skills=["editing"],
+            tools=["Slack API"],
+            expertise=["publishing"],
+        ),
+    )
+
+    roster = client.get(f"/teams/{team_id}/agents").json()
+    assert {a["agent_name"] for a in roster} == {"blogging.planner", "Editor"}
+    assert next(a for a in roster if a["agent_name"] == "blogging.planner")["role"] == ""
+    assert next(a for a in roster if a["agent_name"] == "Editor")["role"] == "Edits drafts"
+
+    validation = client.get(f"/teams/{team_id}/roster/validation").json()
+    assert validation["agent_count"] == 2
+    assert validation["is_fully_staffed"] is True
+    assert validation["gaps"] == []
 
 
 def test_from_registry_is_idempotent_by_name(client: TestClient) -> None:
@@ -571,7 +611,7 @@ def test_from_registry_replace_unregister_failure_still_returns_201(
 
 
 def test_update_agent_edits_only_supplied_fields(client: TestClient) -> None:
-    """PUT edits the supplied fields and leaves the rest of the row untouched."""
+    """PUT edits the supplied fields and leaves the rest of the (thin) row untouched."""
     team_id = _new_team()
     client.post(f"/teams/{team_id}/agents/from-registry", json={"manifest_id": "blogging.planner"})
 
@@ -583,9 +623,9 @@ def test_update_agent_edits_only_supplied_fields(client: TestClient) -> None:
     body = resp.json()
     assert body["role"] == "Custom role for this team"
     assert body["skills"] == ["custom-skill"]
-    # Untouched fields keep their projected values.
-    assert body["tools"] == ["web.search", "draft"]
-    assert body["expertise"] == ["blogging"]
+    # Untouched fields stay at their thin default — not projected from the manifest.
+    assert body["tools"] == []
+    assert body["expertise"] == []
     # source/manifest_id are fixed — never changed by this route.
     assert body["source"] == "registry"
     assert body["manifest_id"] == "blogging.planner"
@@ -631,8 +671,8 @@ def test_update_agent_empty_body_is_a_noop(client: TestClient) -> None:
     resp = client.put(f"/teams/{team_id}/agents/blogging.planner", json={})
     assert resp.status_code == 200
     body = resp.json()
-    assert body["role"] == "Plans SEO-aware blog outlines"
-    assert body["skills"] == ["studio", "seo"]
+    assert body["role"] == ""  # still thin — no override was ever supplied
+    assert body["skills"] == []
 
 
 def test_update_agent_explicit_null_role_rejected_422(client: TestClient) -> None:
@@ -651,7 +691,7 @@ def test_update_agent_explicit_null_role_rejected_422(client: TestClient) -> Non
 
     # The roster is unchanged and still readable (no corrupt row was written).
     roster = client.get(f"/teams/{team_id}/agents").json()
-    assert roster[0]["role"] == "Plans SEO-aware blog outlines"
+    assert roster[0]["role"] == ""
 
 
 def test_update_generated_agent_reregisters_manifest_with_new_summary(
@@ -783,6 +823,23 @@ def test_roster_agent_from_manifest_rejects_missing_id() -> None:
     )
     with pytest.raises(ValueError):
         _roster_agent_from_manifest(manifest)
+
+
+def test_roster_agent_from_manifest_projects_ref_only() -> None:
+    """The projection copies no persona field off the manifest — only the thin
+    agent_name/source/manifest_id identity (issue #5891)."""
+    from agent_team_studio.agentic_team_provisioning.api.main import _roster_agent_from_manifest
+
+    agent = _roster_agent_from_manifest(_PLANNER)
+
+    assert agent.agent_name == "blogging.planner"
+    assert agent.source == "registry"
+    assert agent.manifest_id == "blogging.planner"
+    assert agent.role == ""
+    assert agent.skills == []
+    assert agent.capabilities == []
+    assert agent.tools == []
+    assert agent.expertise == []
 
 
 def test_full_save_preserves_created_at_and_prunes(monkeypatch: pytest.MonkeyPatch) -> None:

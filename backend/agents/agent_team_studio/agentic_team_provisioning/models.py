@@ -140,14 +140,23 @@ class AgenticTeamAgent(BaseModel):
     staffed: every process need (skill, capability, tool, expertise) must be
     covered by at least one agent on the roster.
 
-    Non-SoT fields (pending demotion): ``role``, ``skills``, ``capabilities``,
-    ``tools``, and ``expertise`` duplicate identity that belongs on the
-    registered ``AgentManifest`` (see ``agent_registry.models.AgentManifest``).
-    They remain the persisted/API shape today, but the target roster shape is
-    the thin ``AgenticTeamAgentRef`` below — see this package's README
-    ("Roster identity: thin refs vs. Manifest SoT") for the field mapping and
-    migration notes. Only ``agent_name``, ``source``, and ``manifest_id`` are
-    expected to survive as roster-persisted identity.
+    Non-SoT fields: ``role``, ``skills``, ``capabilities``, ``tools``, and
+    ``expertise`` duplicate identity that belongs on the registered
+    ``AgentManifest`` (see ``agent_registry.models.AgentManifest``) when
+    ``source == "registry"``. For a registry-sourced row the from-registry
+    projection (``api/services/teams.py::_roster_agent_from_manifest``) writes
+    only ``agent_name``/``source``/``manifest_id`` — these fields stay at their
+    defaults unless a caller sets an explicit per-team override via ``PUT
+    /teams/{id}/agents/{name}``. Callers that need an effective persona
+    (staffing validation, prompt construction, pipeline execution) resolve it
+    live from the referenced manifest via
+    ``manifest_generation.resolve_roster_persona`` rather than reading these
+    fields directly. For a ``source == "generated"`` row there is no other
+    definition, so these fields remain that agent's sole, non-duplicated
+    identity. See this package's README ("Roster identity: thin refs vs.
+    Manifest SoT") for the field-mapping cheat sheet. ``AgenticTeamAgentRef``
+    below is the typed thin shape the from-registry projection builds before
+    adapting it into this container for storage.
 
     Invariants:
         * ``source == "registry"`` implies ``manifest_id`` is set (enforced by the
@@ -157,7 +166,12 @@ class AgenticTeamAgent(BaseModel):
     """
 
     agent_name: str = Field(..., description="Stable, unique name within the team")
-    role: str = Field(..., description="Primary role this agent fills on the team")
+    role: str = Field(
+        default="",
+        description="Primary role this agent fills on the team. Empty for an "
+        "un-overridden registry-sourced row — resolve live via "
+        "manifest_generation.resolve_roster_persona instead of reading this directly.",
+    )
     skills: list[str] = Field(
         default_factory=list,
         description="Specific skills the agent possesses (e.g. 'data analysis', 'copywriting')",
@@ -195,9 +209,12 @@ class AgenticTeamAgentRef(BaseModel):
     reference it. See this package's README ("Roster identity: thin refs vs.
     Manifest SoT") for the full field-mapping cheat sheet.
 
-    Not yet the persisted/API roster row — ``AgenticTeamAgent`` above remains
-    that shape until the store/API/consumers are migrated in a later change.
-    Defining this type does not change any read/write path.
+    Not the persisted/API roster row itself — ``AgenticTeamAgent`` above remains
+    that container shape (JSON-blob store, existing response models). The
+    from-registry projection (``api/services/teams.py::_roster_agent_from_manifest``)
+    builds this type first — so its validator enforces the invariant below —
+    then adapts the result into ``AgenticTeamAgent`` with only these three
+    fields populated.
 
     Preconditions: none beyond field types.
     Postconditions: constructing an instance with ``source == "registry"``
@@ -231,8 +248,10 @@ class AgenticTeamAgentRef(BaseModel):
 class AddAgentFromRegistryRequest(BaseModel):
     """Request body for ``POST /teams/{team_id}/agents/from-registry``.
 
-    Adds a registered agent (by manifest id) to the team roster, projecting the
-    manifest's name/summary/tags/tools into the roster fields (Agent Studio §5.3).
+    Adds a registered agent (by manifest id) to the team roster as a thin
+    reference (``agent_name``/``source``/``manifest_id``) — persona fields are
+    resolved live from the manifest, not copied onto the roster row (Agent
+    Studio §5.3).
     """
 
     manifest_id: str = Field(

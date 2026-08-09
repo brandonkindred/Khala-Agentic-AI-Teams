@@ -19,12 +19,14 @@ from agent_registry.models import AgentManifest
 from agent_team_studio.agentic_team_provisioning.manifest_generation import (
     build_agent_manifest,
     is_generated_manifest,
+    resolve_roster_persona,
 )
 from agent_team_studio.agentic_team_provisioning.models import (
     SOURCE_GENERATED,
     SOURCE_REGISTRY,
     AddAgentFromRegistryRequest,
     AgenticTeamAgent,
+    AgenticTeamAgentRef,
     CreateTeamRequest,
     CreateTeamResponse,
     GeneratedManifestsResponse,
@@ -188,6 +190,11 @@ def validate_team_roster(team_id: str):
     referenced agent must exist and be assigned), flags roster agents unused by
     any process, and flags agents whose profile is too sparse (missing most of
     skills/capabilities/tools/expertise) — see ``roster_validation.validate_roster``.
+    A thin ``source == "registry"`` row is hydrated with its live-resolved
+    persona (``manifest_generation.resolve_roster_persona``) before the depth
+    check runs, so an un-overridden registry agent is judged on its manifest's
+    persona rather than the (deliberately empty) roster row —
+    ``roster_validation.py`` itself stays free of the registry dependency.
 
     Preconditions: ``team_id`` is a non-empty string.
     Postconditions: ``200`` with a ``RosterValidationResult`` summarizing
@@ -195,33 +202,37 @@ def validate_team_roster(team_id: str):
         roster fully covers every process); ``404`` if the team is not found.
     Invariants: none — a read-only check, no roster or process state changes.
     """
+    from agent_registry import get_registry
     from agent_team_studio.agentic_team_provisioning.api import main as _main
     from agent_team_studio.agentic_team_provisioning.roster_validation import validate_roster
 
     team = _main._store.get_team(team_id)
     if not team:
         raise HTTPException(status_code=404, detail="Team not found")
-    return validate_roster(team)
+    registry = get_registry()
+    hydrated_agents = [resolve_roster_persona(a, registry) for a in team.agents]
+    return validate_roster(team.model_copy(update={"agents": hydrated_agents}))
 
 
 def _roster_agent_from_manifest(manifest: AgentManifest) -> AgenticTeamAgent:
-    """Project a registry ``AgentManifest`` into a roster agent (Agent Studio §5.3).
+    """Project a registry ``AgentManifest`` into a thin roster reference (Agent Studio §5.3).
 
     Preconditions: ``manifest`` is a registered manifest.
-    Postconditions: returns an ``AgenticTeamAgent`` with ``source == "registry"``
-        and ``manifest_id == manifest.id``. To satisfy ``roster_validation``'s depth
-        check (which flags an agent missing ≥3 of skills/capabilities/tools/expertise
-        as ``sparse_profile``), the projection fills **two** persona fields that don't
-        both depend on the optional ``cognition.tools``: ``skills`` from the manifest
-        tags and ``expertise`` from the home ``team`` (always present). So a tagged
-        manifest with no cognition tools — the common catalog shape — still passes.
-        ``tools`` carries ``cognition.tools`` when present.
+    Postconditions: returns an ``AgenticTeamAgent`` with only ``agent_name``,
+        ``source == "registry"``, and ``manifest_id == manifest.id`` populated —
+        ``role``/``skills``/``capabilities``/``tools``/``expertise`` stay at their
+        empty defaults, since ``manifest`` already is their source of truth.
+        Callers needing an effective persona (staffing validation, prompt
+        construction, pipeline execution) resolve it live via
+        ``manifest_generation.resolve_roster_persona`` instead of reading this
+        row's fields directly. Building the intermediate ``AgenticTeamAgentRef``
+        enforces the invariant that ``manifest_id`` is set for a registry row.
 
     v1 scope boundary: the manifest's typed ``inputs`` / ``outputs`` schema_refs are intentionally
-    **not** projected here. In v1 a registry roster entry runs as a free-text LLM persona (built from
-    the projected ``role`` / ``skills`` / ``tools`` fields), so its declared typed IO is dropped at
-    this boundary rather than marshalled through the DAG. Executing a registry agent through its typed
-    contract is deferred — see
+    **not** projected here. In v1 a registry roster entry runs as a free-text LLM persona (resolved
+    live from the referenced manifest's ``role``/``skills``/``tools``), so its declared typed IO is
+    dropped at this boundary rather than marshalled through the DAG. Executing a registry agent
+    through its typed contract is deferred — see
     ``system_design/adr/ADR-008-typed-io-registry-agents-in-free-text-dag.md``. Do not add a
     schema-preserving branch here without first resolving that spike.
     """
@@ -233,22 +244,11 @@ def _roster_agent_from_manifest(manifest: AgentManifest) -> AgenticTeamAgent:
         raise ValueError("manifest.name must be non-empty")
     if not manifest.id:
         raise ValueError("manifest.id must be set")
+    ref = AgenticTeamAgentRef(
+        agent_name=manifest.name, source=SOURCE_REGISTRY, manifest_id=manifest.id
+    )
     return AgenticTeamAgent(
-        agent_name=manifest.name,
-        role=manifest.summary or manifest.name,
-        # ``tags``/``cognition.tools`` are non-Optional ``list[str]`` on a validated
-        # manifest, but guard ``or []`` / ``and`` defensively at this projection
-        # boundary so a degenerate (e.g. ``model_construct``-built) manifest can't
-        # pass ``None`` into ``list(...)`` or the model field.
-        skills=manifest.tags or [],
-        tools=list(manifest.cognition.tools)
-        if manifest.cognition and manifest.cognition.tools
-        else [],
-        # ``team`` is a required, non-empty str on AgentManifest; the guard is
-        # belt-and-suspenders so a degenerate empty team can never inject ``[""]``.
-        expertise=[manifest.team] if manifest.team else [],
-        source=SOURCE_REGISTRY,
-        manifest_id=manifest.id,
+        agent_name=ref.agent_name, source=ref.source, manifest_id=ref.manifest_id
     )
 
 
