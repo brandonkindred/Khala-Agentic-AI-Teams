@@ -132,28 +132,36 @@ def _derive_environment(task: Any) -> str:
 
 
 def _task_scope_note(task: Any) -> Optional[str]:
-    """Render the task's description/out_of_scope as an acceptance-criteria entry.
+    """Render the task's own description (falling back to title) as an
+    acceptance-criteria entry.
 
     ``CICDPipelineAgent.build_context`` and ``DeploymentStrategyAgent.build_context``
     read ``acceptance_criteria`` (plus environments/constraints) but never
-    ``goal.summary`` or ``scope`` -- only ``InfrastructureAsCodeAgent.build_context``
-    reads ``scope``. So an operational requirement or exclusion recorded only in
-    ``task.description``/``task.out_of_scope`` (e.g. "use GitLab CI, deploy to
-    ECS, no blue-green rollout") is invisible to those two specialists unless it
-    also reaches ``acceptance_criteria`` -- the same problem
-    ``_revision_feedback_scope_note`` solves for revision feedback.
+    ``goal.summary`` or ``scope`` -- ``DeploymentStrategyAgent`` doesn't even read
+    ``title`` -- only ``InfrastructureAsCodeAgent.build_context`` reads ``scope``.
+    So an operational requirement recorded only in ``task.description`` (e.g.
+    "use GitLab CI, deploy to ECS") or, absent a description, only in
+    ``task.title`` (e.g. "Add canary Kubernetes deployment") is invisible to
+    those two specialists unless it also reaches ``acceptance_criteria`` -- the
+    same problem ``_revision_feedback_scope_note`` solves for revision feedback.
 
-    Returns ``None`` when the task carries neither a description nor an
-    out_of_scope exclusion.
+    Deliberately excludes ``task.out_of_scope``: ``_enforce_env_policy`` scans
+    ``scope.included`` (which ``acceptance_criteria`` feeds into, see
+    ``_to_devops_task_spec``) for a POSITIVE "approval" mention to satisfy its
+    mandatory production approval-gate check. Folding an exclusion like
+    "Manual approval gates" in here would make an explicitly EXCLUDED approval
+    gate satisfy that check. ``scope.excluded`` (which the policy check never
+    scans) already carries ``task.out_of_scope`` verbatim, so
+    ``InfrastructureAsCodeAgent`` still sees it -- ``CICDPipelineAgent``/
+    ``DeploymentStrategyAgent`` not seeing exclusions is a narrower, less
+    safety-critical gap than bypassing the approval-gate policy.
+
+    Returns ``None`` when the task carries neither a description nor a title.
     """
-    description = (task.description or "").strip()
-    out_of_scope = str(getattr(task, "out_of_scope", "") or "").strip()
-    if not description and not out_of_scope:
+    text = (task.description or task.title or "").strip()
+    if not text:
         return None
-    parts = [f"TASK SCOPE: {description}"] if description else []
-    if out_of_scope:
-        parts.append(f"OUT OF SCOPE: {out_of_scope}")
-    return " ".join(parts)
+    return f"TASK SCOPE: {text}"
 
 
 def _revision_feedback_scope_note(task: Any) -> Optional[str]:
@@ -208,12 +216,15 @@ def _to_devops_task_spec(task: Any) -> DevOpsTaskSpec:
           (e.g. "Production deploy requires explicit approval") must be
           visible there too, or a correctly production-derived task would
           fail Phase 1 despite already carrying the required gate structurally.
-        - The task's own description/out_of_scope is also folded into
-          ``acceptance_criteria`` as a leading entry (see ``_task_scope_note``)
-          so ``CICDPipelineAgent``/``DeploymentStrategyAgent`` -- which read
-          ``acceptance_criteria`` but never ``goal``/``scope`` -- see
-          operational requirements or exclusions recorded there, not just the
-          ``InfrastructureAsCodeAgent`` (which reads ``scope`` directly).
+        - The task's own description (or title, absent a description) is also
+          folded into ``acceptance_criteria`` as a leading entry (see
+          ``_task_scope_note``) so ``CICDPipelineAgent``/``DeploymentStrategyAgent``
+          -- which read ``acceptance_criteria`` but never ``goal``/``scope``/
+          (for ``DeploymentStrategyAgent``) ``title`` -- see the requirement
+          too, not just ``InfrastructureAsCodeAgent`` (which reads ``scope``
+          directly). Deliberately excludes ``out_of_scope``: see
+          ``_task_scope_note``'s docstring for why folding an exclusion in here
+          would let it satisfy the production approval-gate policy check.
     """
     goal_summary = _augment_goal_summary(task)
     environment = _derive_environment(task)

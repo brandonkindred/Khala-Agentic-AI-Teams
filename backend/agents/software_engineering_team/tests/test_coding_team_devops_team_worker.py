@@ -130,12 +130,14 @@ def test_devops_worker_builds_spec_from_task() -> None:
 
     assert spec.task_id == "provision"
     assert spec.title == long_title
-    # A leading TASK SCOPE/OUT OF SCOPE entry is prepended (finding: CI/CD and
-    # Deployment specialists read acceptance_criteria but never goal/scope) --
-    # the task's own criteria still follow it, untouched.
+    # A leading TASK SCOPE entry is prepended (finding: CI/CD and Deployment
+    # specialists read acceptance_criteria but never goal/scope) -- the task's
+    # own criteria still follow it, untouched. out_of_scope is deliberately
+    # NOT folded in here (see _task_scope_note) -- it stays confined to
+    # scope.excluded, which the production approval-gate policy never scans.
     assert spec.acceptance_criteria[-1] == "pipeline lints"
     assert "Add CI/CD pipeline" in spec.acceptance_criteria[0]
-    assert "cluster provisioning" in spec.acceptance_criteria[0]
+    assert "cluster provisioning" not in spec.acceptance_criteria[0]
     assert spec.dependencies == ["other"]
     # No explicit production language in the task text -> staging (matches
     # _build_legacy_spec's existing default for the same "no signal" case).
@@ -653,7 +655,42 @@ def test_devops_worker_spec_folds_task_scope_into_acceptance_criteria() -> None:
     spec = _to_devops_task_spec(task)
 
     assert "Use GitLab CI and deploy to ECS with a canary rollout." in spec.acceptance_criteria[0]
-    assert "Do not touch the legacy Jenkins pipeline." in spec.acceptance_criteria[0]
+    # out_of_scope must NOT be folded into acceptance_criteria/scope.included -- see
+    # test_devops_worker_scope_note_excludes_out_of_scope_to_protect_approval_policy.
+    assert "Do not touch the legacy Jenkins pipeline." not in spec.acceptance_criteria[0]
+
+
+def test_devops_worker_scope_note_excludes_out_of_scope_to_protect_approval_policy() -> None:
+    """A production task that lists an approval gate under out_of_scope (e.g. "Manual
+    approval gates" -- explicitly NOT implementing one) must not have that exclusion
+    folded into acceptance_criteria/scope.included: _enforce_env_policy scans
+    scope.included for a POSITIVE "approval" mention to satisfy its mandatory
+    production approval-gate check, so an excluded approval gate would otherwise
+    incorrectly satisfy it. scope.excluded (never scanned by that policy) still
+    carries the exclusion verbatim for InfrastructureAsCodeAgent."""
+    task = _base_task(
+        title="Add production deployment workflow",
+        description="Deploy to production with a blue-green rollout.",
+        out_of_scope="Manual approval gates",
+    )
+
+    spec = _to_devops_task_spec(task)
+
+    assert not any("approval" in item.lower() for item in spec.acceptance_criteria)
+    assert not any("approval" in item.lower() for item in spec.scope.included)
+    assert spec.scope.excluded == ["Manual approval gates"]
+
+
+def test_devops_worker_spec_scope_note_falls_back_to_title_without_description() -> None:
+    """DeploymentStrategyAgent.build_context reads neither title nor goal/scope --
+    only acceptance_criteria (plus environments/constraints). A task carrying its
+    requirement only in the title (a valid Task: description defaults to empty)
+    must still reach that specialist via the acceptance-criteria scope note."""
+    task = _base_task(title="Add canary Kubernetes deployment", description="")
+
+    spec = _to_devops_task_spec(task)
+
+    assert "Add canary Kubernetes deployment" in spec.acceptance_criteria[0]
 
 
 def test_devops_worker_spec_scope_note_omitted_without_description_or_exclusion() -> None:
