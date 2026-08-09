@@ -20,6 +20,36 @@ Each team has a **roster** (`AgenticTeamAgent`): `agent_name`, `role`, `skills`,
 
 Validation logic lives in `roster_validation.py`.
 
+## Roster identity: thin refs vs. Manifest SoT
+
+**Today:** `AgenticTeamAgent` is a *fat* model — it duplicates persona fields
+(`role`, `skills`, `capabilities`, `tools`, `expertise`) alongside `source`/`manifest_id`.
+The whole model is persisted verbatim as a JSON blob per roster row (`assistant/store.py`)
+and those fat fields are read directly by `roster_validation.py` (staffing/depth checks),
+`runtime/agent_builder.py` (system-prompt construction), and `runtime/pipeline_runner.py`
+(execution).
+
+**Target:** the registered `AgentManifest` (see `agent_registry.models.AgentManifest`) is
+the sole writable source of truth for an agent's persona. A roster row should only need a
+thin reference — `models.AgenticTeamAgentRef` (`agent_name`, `source`, `manifest_id`) — with
+persona fields resolved live from the referenced manifest instead of duplicated on the
+roster. `agent_name` is a team-local slot key (may differ from `manifest.name`); it is not
+a persona override. This type currently exists only as a schema — the store/API/consumers
+above still read/write the fat `AgenticTeamAgent` shape; migrating them is a separate,
+later change.
+
+Field mapping, as implemented today by the from-registry projection
+(`api/services/teams.py::_roster_agent_from_manifest`):
+
+| Roster (fat, today) | Manifest (SoT) | Notes |
+|---|---|---|
+| `agent_name` | `name` | |
+| `role` | `summary` | falls back to `name` when `summary` is empty |
+| `skills` | `tags` | |
+| `tools` | `cognition.tools` | empty when the manifest has no `cognition` block |
+| `expertise` | `[team]` | single-element list: the manifest's home team |
+| `capabilities` | *(none)* | never populated from a manifest — open gap for the future cutover |
+
 ## Pipeline test runs (execution)
 
 Agent Studio's **pipeline test run** (`POST /teams/{team_id}/test-pipeline/runs`) walks a
