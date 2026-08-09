@@ -579,6 +579,20 @@ def test_false_positive_prompt_documents_read_function() -> None:
     assert "read_lines(path, start, end)" in FALSE_POSITIVE_VERIFY_PROMPT
 
 
+def test_false_positive_prompt_prefers_scoped_reads_over_whole_file() -> None:
+    """The verifier prompt must default to find_references -> read_function/read_lines,
+    not "read the entire file / never use partial ranges"."""
+    from code_review_agent.prompts import FALSE_POSITIVE_VERIFY_PROMPT
+
+    lower = FALSE_POSITIVE_VERIFY_PROMPT.lower()
+    assert "do not examine the file in a series of partial ranges" not in lower
+    assert "read_file always returns the complete file" not in lower
+    assert "find_references" in FALSE_POSITIVE_VERIFY_PROMPT
+    find_references_idx = FALSE_POSITIVE_VERIFY_PROMPT.index("find_references")
+    non_default_idx = FALSE_POSITIVE_VERIFY_PROMPT.index("Non-default")
+    assert find_references_idx < non_default_idx
+
+
 def test_list_files_appends_existing_codebase_only_when_present() -> None:
     """``list_files`` appends the existing-codebase pseudo-path only when an excerpt is present."""
     assert CodebaseIndex(files={"a.py": "x"}).list_files() == ["a.py"]
