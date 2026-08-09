@@ -40,11 +40,36 @@ from shared.env_config import env_float, env_int
 _DEFAULT_LLM_TIMEOUT_S = 3600.0
 _DEFAULT_RATE_LIMIT_BACKOFF_INITIAL_S = 30.0
 _DEFAULT_RATE_LIMIT_BACKOFF_MAX_S = 120.0
+# The all-defaults derivation ((2 retries + 1) * 3600s timeout * 1.5) — the
+# last-resort fallback when deriving the total budget from a resolved
+# retries/timeout pair overflows (see ``from_env()``).
+_DEFAULT_TOTAL_BUDGET_S = (2 + 1) * _DEFAULT_LLM_TIMEOUT_S * 1.5
 
 
 def _finite_or(value: float, fallback: float) -> float:
     """Return ``value`` if finite, else ``fallback``."""
     return value if math.isfinite(value) else fallback
+
+
+def _derive_total_budget_s(max_retries: int, timeout_s: float, fallback: float) -> float:
+    """Compute ``(max_retries + 1) * timeout_s * 1.5``, sanitized to a finite
+    result.
+
+    An astronomically large ``max_retries`` (unbounded — ``env_int`` applies
+    no ceiling) raises ``OverflowError`` converting it to ``float`` for the
+    multiplication; a very large but individually-finite ``timeout_s`` can
+    instead overflow the *product* to ``inf`` without raising. Both collapse
+    to ``fallback`` so callers never have to handle two different failure
+    shapes for "the derivation didn't produce a usable number".
+
+    Preconditions: ``timeout_s`` is finite; ``fallback`` is finite and > 0.
+    Postconditions: returns a finite float.
+    """
+    try:
+        budget = (max_retries + 1) * timeout_s * 1.5
+    except OverflowError:
+        return fallback
+    return _finite_or(budget, fallback)
 
 
 def _require_at_least(field_name: str, value: float, floor: float) -> None:
@@ -59,6 +84,23 @@ def _require_at_least(field_name: str, value: float, floor: float) -> None:
     """
     if not math.isfinite(value):
         raise ValueError(f"{field_name} must be finite, got {value!r}")
+    if value < floor:
+        raise ValueError(f"{field_name} must be >= {floor}, got {value!r}")
+
+
+def _require_int_at_least(field_name: str, value: int, floor: int) -> None:
+    """Raise ``ValueError`` naming ``field_name`` when ``value`` is not a
+    plain, non-boolean ``int`` ``>= floor``.
+
+    ``from_env()`` only ever produces plain ``int``s here (``env_int``
+    returns ``int(raw.strip())``), but a direct caller could pass a float
+    (``design_review_rounds=1.5``) that would silently misbehave wherever
+    this later feeds an integer-only operation (e.g. ``range()``), or a
+    ``bool`` (a ``bool`` is-a ``int`` in Python, but ``True``/``False`` are
+    never a meaningful round/retry count).
+    """
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"{field_name} must be an int, got {value!r}")
     if value < floor:
         raise ValueError(f"{field_name} must be >= {floor}, got {value!r}")
 
@@ -80,7 +122,9 @@ class StrategyLabBudgetConfig:
     - ``llm_backoff_base_s`` / ``llm_backoff_max_s`` —
       ``STRATEGY_LAB_LLM_BACKOFF_BASE`` / ``STRATEGY_LAB_LLM_BACKOFF_MAX``
       (fall back to ``LLM_BACKOFF_BASE``/``LLM_BACKOFF_MAX``, else
-      ``2.0``/``60.0``). Jittered exponential backoff between envelope retries.
+      ``2.0``/``60.0``; ``from_env()`` floors the max at the base, same as the
+      rate-limit pair below). Jittered exponential backoff between envelope
+      retries.
     - ``llm_rate_limit_backoff_initial_s`` / ``llm_rate_limit_backoff_max_s`` —
       ``STRATEGY_LAB_LLM_RATE_LIMIT_BACKOFF_INITIAL`` /
       ``STRATEGY_LAB_LLM_RATE_LIMIT_BACKOFF_MAX`` (fall back to the platform
@@ -115,14 +159,16 @@ class StrategyLabBudgetConfig:
       (default ``10``). Cap on the trade-alignment audit/fix loop.
 
     Invariants:
-        Every "retries" field is ``>= 0``; every "rounds"/"calls" cap field is
-        ``>= 1``; every timeout/backoff/budget field is finite and ``> 0``
-        (backoff-max fields ``>= 0``, and each rate-limit/backoff *max* is
-        ``>=`` its paired *initial*/*base*) — ``nan``/``inf`` are rejected
-        even though a bare ``<`` comparison would let ``nan`` slip through.
-        Enforced in ``__post_init__`` regardless of construction path
-        (``from_env`` or direct instantiation), so a caller building this
-        object with explicit overrides — tests included — gets the same
+        Every "retries"/"rounds"/"calls" cap field is a plain, non-boolean
+        ``int`` (retries ``>= 0``, rounds/calls caps ``>= 1``); every
+        timeout/backoff/budget field is a finite float ``> 0``, and each
+        *max*/*cap* field is ``>=`` its paired *base*/*initial* (backoff
+        max vs. base, rate-limit max vs. initial) — ``nan``/``inf`` are
+        rejected even though a bare ``<`` comparison would let ``nan``
+        slip through. Enforced in ``__post_init__`` regardless of
+        construction path (``from_env`` or direct instantiation), so a
+        caller building this object with explicit overrides — tests
+        included — gets the same
         guarantees as the env-driven default.
     """
 
@@ -156,13 +202,15 @@ class StrategyLabBudgetConfig:
         ``(llm_max_retries + 1) * llm_timeout_s * 1.5`` computed from *this
         instance's* (already-validated) retries/timeout before validation —
         so a direct-construction override of either still yields a budget
-        sized to it, matching ``from_env()``'s derivation.
+        sized to it, matching ``from_env()``'s derivation. A retries/timeout
+        combination whose product overflows raises ``ValueError`` naming
+        ``llm_total_budget_s`` rather than leaking a raw ``OverflowError``.
         """
-        _require_at_least("alignment_retries", self.alignment_retries, 0)
-        _require_at_least("llm_max_retries", self.llm_max_retries, 0)
+        _require_int_at_least("alignment_retries", self.alignment_retries, 0)
+        _require_int_at_least("llm_max_retries", self.llm_max_retries, 0)
         _require_at_least("llm_timeout_s", self.llm_timeout_s, 0.001)
         _require_at_least("llm_backoff_base_s", self.llm_backoff_base_s, 1.0)
-        _require_at_least("llm_backoff_max_s", self.llm_backoff_max_s, 0.0)
+        _require_at_least("llm_backoff_max_s", self.llm_backoff_max_s, self.llm_backoff_base_s)
         _require_at_least(
             "llm_rate_limit_backoff_initial_s", self.llm_rate_limit_backoff_initial_s, 1.0
         )
@@ -172,22 +220,26 @@ class StrategyLabBudgetConfig:
             self.llm_rate_limit_backoff_initial_s,
         )
         if self.llm_total_budget_s is None:
-            object.__setattr__(
-                self,
-                "llm_total_budget_s",
-                (self.llm_max_retries + 1) * self.llm_timeout_s * 1.5,
-            )
+            try:
+                derived_budget = (self.llm_max_retries + 1) * self.llm_timeout_s * 1.5
+            except OverflowError as exc:
+                raise ValueError(
+                    f"llm_total_budget_s could not be derived from "
+                    f"llm_max_retries={self.llm_max_retries!r} and "
+                    f"llm_timeout_s={self.llm_timeout_s!r}: {exc}"
+                ) from exc
+            object.__setattr__(self, "llm_total_budget_s", derived_budget)
         _require_at_least("llm_total_budget_s", self.llm_total_budget_s, 0.001)
-        _require_at_least("design_review_rounds", self.design_review_rounds, 1)
-        _require_at_least("design_review_stall_rounds", self.design_review_stall_rounds, 1)
-        _require_at_least("design_parse_retries", self.design_parse_retries, 0)
-        _require_at_least("design_self_revision_rounds", self.design_self_revision_rounds, 0)
-        _require_at_least("design_max_llm_calls", self.design_max_llm_calls, 1)
-        _require_at_least("refinement_parse_retries", self.refinement_parse_retries, 0)
-        _require_at_least("refinement_stall_rounds", self.refinement_stall_rounds, 1)
-        _require_at_least("max_code_refinement_rounds", self.max_code_refinement_rounds, 1)
-        _require_at_least("code_conformance_retries", self.code_conformance_retries, 0)
-        _require_at_least("max_alignment_rounds", self.max_alignment_rounds, 1)
+        _require_int_at_least("design_review_rounds", self.design_review_rounds, 1)
+        _require_int_at_least("design_review_stall_rounds", self.design_review_stall_rounds, 1)
+        _require_int_at_least("design_parse_retries", self.design_parse_retries, 0)
+        _require_int_at_least("design_self_revision_rounds", self.design_self_revision_rounds, 0)
+        _require_int_at_least("design_max_llm_calls", self.design_max_llm_calls, 1)
+        _require_int_at_least("refinement_parse_retries", self.refinement_parse_retries, 0)
+        _require_int_at_least("refinement_stall_rounds", self.refinement_stall_rounds, 1)
+        _require_int_at_least("max_code_refinement_rounds", self.max_code_refinement_rounds, 1)
+        _require_int_at_least("code_conformance_retries", self.code_conformance_retries, 0)
+        _require_int_at_least("max_alignment_rounds", self.max_alignment_rounds, 1)
 
     @classmethod
     def from_env(cls) -> "StrategyLabBudgetConfig":
@@ -227,9 +279,12 @@ class StrategyLabBudgetConfig:
         llm_backoff_base_s = env_float(
             "STRATEGY_LAB_LLM_BACKOFF_BASE", generic_backoff_base, floor=1.0
         )
-        generic_backoff_max = max(0.0, env_float("LLM_BACKOFF_MAX", 60.0))
+        # Floor the max at the resolved base — same shape as the rate-limit
+        # initial/max pair below — so a misconfigured max below the base can
+        # never leave the schedule capped under its own starting delay.
+        generic_backoff_max = max(llm_backoff_base_s, env_float("LLM_BACKOFF_MAX", 60.0))
         llm_backoff_max_s = env_float(
-            "STRATEGY_LAB_LLM_BACKOFF_MAX", generic_backoff_max, floor=0.0
+            "STRATEGY_LAB_LLM_BACKOFF_MAX", generic_backoff_max, floor=llm_backoff_base_s
         )
 
         # ``parse_rate_limit_retry_config`` parses its env vars with plain
@@ -253,7 +308,13 @@ class StrategyLabBudgetConfig:
             floor=llm_rate_limit_backoff_initial_s,
         )
 
-        default_total_budget_s = (llm_max_retries + 1) * llm_timeout_s * 1.5
+        # An unbounded llm_max_retries (env_int applies no ceiling) can raise
+        # OverflowError converting it to float here, and a merely-huge-but-
+        # finite llm_timeout_s can instead overflow the product to `inf`
+        # without raising — both are sanitized to a finite fallback.
+        default_total_budget_s = _derive_total_budget_s(
+            llm_max_retries, llm_timeout_s, _DEFAULT_TOTAL_BUDGET_S
+        )
         llm_total_budget_s = env_float(
             "STRATEGY_LAB_LLM_TOTAL_BUDGET", default_total_budget_s, floor=0.001
         )

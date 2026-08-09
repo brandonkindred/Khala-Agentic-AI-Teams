@@ -187,6 +187,41 @@ def test_sub_floor_generic_fallback_does_not_raise(
     StrategyLabBudgetConfig.from_env()  # must not raise
 
 
+def test_backoff_max_floors_at_base_when_max_env_is_lower(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A misconfigured backoff max below the base can never leave the
+    schedule capped under its own starting delay."""
+    monkeypatch.setenv("STRATEGY_LAB_LLM_BACKOFF_BASE", "20")
+    monkeypatch.setenv("STRATEGY_LAB_LLM_BACKOFF_MAX", "10")
+
+    config = StrategyLabBudgetConfig.from_env()
+
+    assert config.llm_backoff_base_s == 20.0
+    assert config.llm_backoff_max_s == 20.0
+
+
+@pytest.mark.parametrize(
+    "max_retries_env, timeout_env",
+    [
+        ("9" * 400, None),  # astronomically large int -> OverflowError on float conversion
+        (None, "1e308"),  # individually-finite float whose product overflows to inf
+    ],
+)
+def test_overflow_prone_total_budget_inputs_do_not_raise(
+    monkeypatch: pytest.MonkeyPatch, max_retries_env: str | None, timeout_env: str | None
+) -> None:
+    if max_retries_env is not None:
+        monkeypatch.setenv("STRATEGY_LAB_LLM_MAX_RETRIES", max_retries_env)
+    if timeout_env is not None:
+        monkeypatch.setenv("STRATEGY_LAB_LLM_TIMEOUT", timeout_env)
+
+    config = StrategyLabBudgetConfig.from_env()  # must not raise
+
+    assert math.isfinite(config.llm_total_budget_s)
+    assert config.llm_total_budget_s > 0
+
+
 def test_strategy_lab_override_still_wins_over_sub_floor_generic_fallback(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -307,6 +342,51 @@ def test_construction_rejects_rate_limit_max_below_initial() -> None:
         StrategyLabBudgetConfig(
             llm_rate_limit_backoff_initial_s=50.0, llm_rate_limit_backoff_max_s=10.0
         )
+
+
+def test_construction_rejects_backoff_max_below_base() -> None:
+    with pytest.raises(ValueError, match="llm_backoff_max_s"):
+        StrategyLabBudgetConfig(llm_backoff_base_s=20.0, llm_backoff_max_s=10.0)
+
+
+@pytest.mark.parametrize(
+    "field_name",
+    [
+        "alignment_retries",
+        "llm_max_retries",
+        "design_review_rounds",
+        "design_review_stall_rounds",
+        "design_parse_retries",
+        "design_self_revision_rounds",
+        "design_max_llm_calls",
+        "refinement_parse_retries",
+        "refinement_stall_rounds",
+        "max_code_refinement_rounds",
+        "code_conformance_retries",
+        "max_alignment_rounds",
+    ],
+)
+def test_construction_rejects_fractional_int_field(field_name: str) -> None:
+    """A fractional value for a retries/rounds/calls field would silently
+    misbehave wherever it later feeds an integer-only operation (e.g.
+    ``range()``) — reject it outright instead."""
+    with pytest.raises(ValueError, match=field_name):
+        StrategyLabBudgetConfig(**{field_name: 1.5})
+
+
+@pytest.mark.parametrize(
+    "field_name",
+    [
+        "alignment_retries",
+        "design_review_rounds",
+        "max_alignment_rounds",
+    ],
+)
+def test_construction_rejects_bool_for_int_field(field_name: str) -> None:
+    """``bool`` is-a ``int`` in Python, but ``True``/``False`` are never a
+    meaningful round/retry count."""
+    with pytest.raises(ValueError, match=field_name):
+        StrategyLabBudgetConfig(**{field_name: True})
 
 
 def test_config_is_frozen() -> None:
