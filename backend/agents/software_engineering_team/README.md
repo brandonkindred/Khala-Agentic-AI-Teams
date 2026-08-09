@@ -52,6 +52,11 @@ context-formatting scaffolding; see
 [`docs/PROMPT_TEMPLATE_MIGRATION_METRICS.md`](docs/PROMPT_TEMPLATE_MIGRATION_METRICS.md)
 for the before/after line-count report from that migration.
 
+Work removing the legacy stack-alias repair and legacy HITL reason parsing
+from routing, the Tech Lead, and `swarm_review` must follow the resume
+policy in
+[`docs/LEGACY_STACK_RESUME_POLICY_DECISION.md`](docs/LEGACY_STACK_RESUME_POLICY_DECISION.md).
+
 ## Sub-teams and SDLC
 
 Agents are grouped by **SDLC phase** and **who consumes whose output**. Execution is driven by **task assignee** (`backend`, `frontend`, `devops`, `git_setup`). QA and Security are **not** task assignees; they are invoked **inside** backend and frontend workflows (per task) and in a final full-codebase security pass.
@@ -617,7 +622,7 @@ notes:
 
 ### Backward Compatibility
 
-The `DevOpsTeamLeadAgent` provides a `run_workflow()` method that accepts the same parameters as the earlier DevOps agent's `run_workflow()`. When called by the Tech Lead's `trigger_devops_for_backend/frontend`, it constructs a `DevOpsTaskSpec` internally (adding defaults for rollback, security, approval gates) and runs the full pipeline.
+`DevOpsTeamLeadAgent` exposes three entry points: `run(spec)` (skips orchestrator-managed artifact writes/branch commits, but Phase 4.5 validation/execution tools such as `terraform init` or `cdk synth` may still write under the working directory as side effects), `run_task(spec, repo_path=...)` (the current structured entry point — writes artifacts to a real repo on a feature branch and merges them into `development`), and a legacy free-text `run_workflow(...)` adapter kept for backward compatibility, which internally builds a `DevOpsTaskSpec` via `_build_legacy_spec` (adding defaults for rollback, security, approval gates) and delegates to `run_task`. No production caller currently invokes any of these — `DevOpsTeamLeadAgent` is registered in the SE orchestrator's agent registry but not yet wired into the Tech Lead handoff; DevOps/infrastructure work is routed to `backend_v2` today.
 
 ### Expanded Team (Phase 2, not yet implemented)
 

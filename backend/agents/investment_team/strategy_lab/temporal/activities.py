@@ -53,6 +53,18 @@ cancellation would close both remaining gaps (the wasted compute AND
 execution outright once terminated) and is tracked as a separate,
 deliberately deferred optimization.
 
+Cooperative cancellation for ``run_design_attempt_activity`` specifically is
+no longer deferred: it heartbeats via a background thread
+(``shared.concurrency.BackgroundHeartbeat``) while ``_run_design_attempt``
+runs, and checks ``activity.is_cancelled()`` at every ``emit`` checkpoint
+threaded through that pipeline (design/synthesis/refinement/alignment/
+verification/analysis), exiting via ``CancelledError`` as soon as the owning
+workflow is terminated/cancelled. This closes the wasted-compute half of the
+gap for that one activity; ``finalize_cycle_record_activity`` (no
+phase-granular checkpoint hook to reuse, and a fencing-checked write path
+this change deliberately does not touch) is unchanged and still covered by
+the paragraph above.
+
 More honest edges: the fencing checks read via ``run_state.
 get_run_generation_strict``, which fails CLOSED (raises, rejecting the
 write) on a transient durable-read failure rather than defaulting to the
@@ -90,9 +102,26 @@ import time
 from typing import Any, Dict, List, Optional, Tuple
 
 from temporalio import activity
-from temporalio.exceptions import ApplicationError
+from temporalio.exceptions import ApplicationError, CancelledError
+
+from shared.concurrency.heartbeat import BackgroundHeartbeat
+from shared.temporal.activity_utils import is_cancelled
 
 logger = logging.getLogger(__name__)
+
+
+class _DesignAttemptCancelled(BaseException):
+    """Internal signal: cancellation observed at an ``emit`` checkpoint.
+
+    Deliberately a ``BaseException`` (not ``Exception``) subclass -- the same
+    reason ``asyncio.CancelledError`` moved to ``BaseException`` in Python
+    3.8 -- so it survives every ``except Exception`` (and narrower) handler
+    inside the design-attempt phase pipeline instead of being silently
+    swallowed as an ordinary failure (e.g. the walk-forward evaluation
+    fallback in ``orchestrator_verification.py``). Caught and converted to
+    ``temporalio.exceptions.CancelledError`` only at
+    ``run_design_attempt_activity``'s own outer boundary, immediately below.
+    """
 
 # Local, in-process retry delays (seconds) for finalize_cycle_record_activity's
 # post-write fencing check's durable-generation read. Empty for every other
@@ -488,7 +517,42 @@ def build_short_circuit_record_activity(params: Dict[str, Any]) -> Dict[str, Any
     }
 
 
-@activity.defn(name="strategy_lab_run_design_attempt")
+_DESIGN_ATTEMPT_HEARTBEAT_INTERVAL_S = 20.0
+"""How often the background heartbeat beats during a design attempt.
+
+Decoupled from ``emit`` checkpoint cadence on purpose: some single LLM/
+sub-calls between two ``emit()`` calls can run long, so relying on ``emit()``
+cadence for heartbeat *delivery* risks a missed server-side liveness deadline
+(``workflows.py``'s ``_DESIGN_ATTEMPT_HEARTBEAT_TIMEOUT``) triggering a full,
+up-to-2-hour attempt retry. A short fixed interval keeps delivery steady
+regardless of what the pipeline is doing at any given moment.
+"""
+
+
+def _design_attempt_cancellation_checkpoint(phase: str, data: Dict[str, Any]) -> None:
+    """``emit``-shaped checkpoint: raise once cancellation is observed.
+
+    Threaded as the ``emit`` callback into ``_run_design_attempt`` (and
+    therefore invoked at every sub-phase step of the design/synthesis/
+    refinement/alignment/verification/analysis pipeline), so this is the
+    "between steps" cancellation check the owning activity relies on. Does
+    not itself call ``activity.heartbeat()`` -- heartbeat *delivery* is owned
+    by the background ``BackgroundHeartbeat`` wrapping the whole call (see
+    ``_DESIGN_ATTEMPT_HEARTBEAT_INTERVAL_S``); this only checks state.
+
+    Preconditions:
+        None (safe to call outside a real activity context -- direct-call
+        unit tests -- via :func:`shared.temporal.activity_utils.is_cancelled`).
+    Postconditions:
+        Returns normally when not cancelled. Raises
+        :class:`_DesignAttemptCancelled` when ``activity.is_cancelled()`` is
+        True.
+    """
+    if is_cancelled():
+        raise _DesignAttemptCancelled()
+
+
+@activity.defn(name="strategy_lab_run_design_attempt", no_thread_cancel_exception=True)
 def run_design_attempt_activity(params: Dict[str, Any]) -> Dict[str, Any]:
     """Run one full ``StrategyLabOrchestrator._run_design_attempt`` verbatim.
 
@@ -504,6 +568,21 @@ def run_design_attempt_activity(params: Dict[str, Any]) -> Dict[str, Any]:
     structured ``{"kind": "reentry", ...}`` outcome rather than crossing the
     activity boundary as an exception; the workflow branches on
     ``outcome["kind"]`` exactly where ``run_cycle`` branches on the ``except``.
+
+    Cooperative cancellation: heartbeats on a background thread
+    (``BackgroundHeartbeat``, every ``_DESIGN_ATTEMPT_HEARTBEAT_INTERVAL_S``
+    seconds) while ``_run_design_attempt`` runs, and checks
+    ``activity.is_cancelled()`` at every ``emit`` checkpoint the pipeline
+    already threads through each phase
+    (:func:`_design_attempt_cancellation_checkpoint`). ``no_thread_cancel_exception=True``
+    disables the SDK's own asynchronous thread-injected cancellation so this
+    checkpoint is the only cancellation-delivery path -- otherwise the SDK's
+    injection can land at an arbitrary point in the call tree (including
+    inside a broad ``except Exception`` in the phase pipeline) and race the
+    checkpoint. On cancellation this raises ``temporalio.exceptions.
+    CancelledError`` instead of returning an outcome dict, so the caller
+    workflow sees the activity as cancelled rather than as any of the
+    ``kind`` outcomes below.
 
     Preconditions:
         ``params`` carries the JSON-shaped attempt inputs:
@@ -633,13 +712,26 @@ def run_design_attempt_activity(params: Dict[str, Any]) -> Dict[str, Any]:
     # own outcome already returned separately as "reentry").
     gate_results_len_before = len(cumulative_gate_results)
 
+    def _beat() -> None:
+        # Best-effort: outside a real activity context (e.g. a direct-call
+        # unit test) this raises and BackgroundHeartbeat swallows it.
+        activity.heartbeat()
+
     try:
-        with use_budget(budget):
+        with (
+            BackgroundHeartbeat(
+                _beat,
+                _DESIGN_ATTEMPT_HEARTBEAT_INTERVAL_S,
+                copy_context=True,
+                name="strategy-lab-design-attempt-hb",
+            ),
+            use_budget(budget),
+        ):
             record = orch._run_design_attempt(
                 prior_records=prior_records,
                 config=config,
                 signal_brief=signal_brief,
-                emit=lambda *_a, **_kw: None,
+                emit=_design_attempt_cancellation_checkpoint,
                 exclude_asset_classes=params.get("exclude_asset_classes"),
                 directives=list(params.get("directives") or []),
                 design_attempt=params.get("design_attempt", 0),
@@ -648,6 +740,11 @@ def run_design_attempt_activity(params: Dict[str, Any]) -> Dict[str, Any]:
                 cumulative_gate_results=cumulative_gate_results,
                 regime_summary=regime_summary,
             )
+    except _DesignAttemptCancelled:
+        # BaseException, so it already bypassed every ``except Exception``
+        # (and narrower) handler in the phase pipeline untouched -- convert
+        # it to the real Temporal signal only here, at the activity boundary.
+        raise CancelledError("Strategy Lab design attempt cancelled before completion") from None
     except SpecImplementabilityError as exc:
         design_context = exc.design_context
         design_context_wire = (

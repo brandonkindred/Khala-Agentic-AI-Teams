@@ -17,7 +17,11 @@ Covers three things the runtime depends on:
    and delegates to the *existing* ``_run_backtest_background`` worker. (The
    Strategy Lab batch run is no longer a coarse activity here — it is driven by
    the fine-grained ``StrategyLabBatchWorkflow`` in
-   ``investment_team.strategy_lab.temporal`` on ``strategy-lab-queue``.)
+   ``investment_team.strategy_lab.temporal`` on ``strategy-lab-queue``.) A
+   background heartbeat (mirroring ``paper_trading.py``) beats for the run's
+   duration and, on Temporal cancellation, cancels the underlying job so
+   ``_run_backtest_background``'s own checkpoints honor it;
+   ``InvestmentBacktestWorkflow`` sets a matching ``heartbeat_timeout``.
 
 3. **Dispatch branch.** ``POST /backtests`` routes through a Temporal workflow
    when ``is_temporal_enabled()`` and falls back to a daemon thread otherwise
@@ -30,8 +34,10 @@ Covers three things the runtime depends on:
 
 from __future__ import annotations
 
+import asyncio
 import importlib
 import sys
+import time
 import unittest.mock as mock
 
 import pytest
@@ -64,6 +70,7 @@ def test_workflows_and_activities_are_registered() -> None:
     assert WORKFLOWS == [InvestmentBacktestWorkflow, PaperTradingWorkflow]
     assert {a.__name__ for a in ACTIVITIES} == {
         "run_backtest_activity",
+        "mark_backtest_job_cancelled_activity",
         "run_paper_trading_activity",
         "mark_paper_trading_stopped_activity",
     }
@@ -451,6 +458,308 @@ def test_run_backtest_activity_raises_on_non_terminal_status(monkeypatch) -> Non
 
     with pytest.raises(ApplicationError, match="non-terminal"):
         run_backtest_activity("job-stuck", {}, {}, "agent", [])
+
+
+def test_run_backtest_activity_heartbeats_during_run(monkeypatch) -> None:
+    """A background heartbeat must beat while ``_run_backtest_background`` runs
+    — without it (the gap this closes), Temporal has no way to detect a worker
+    crash during a run that can last hours."""
+    from temporalio import activity as tl_activity
+
+    from investment_team import models as inv_models
+    from investment_team.api import main as api_main
+    from investment_team.temporal import workflows as wf
+
+    monkeypatch.setattr(inv_models, "StrategySpec", lambda **kw: object())
+    monkeypatch.setattr(inv_models, "BacktestConfig", lambda **kw: object())
+    monkeypatch.setattr(api_main, "_backtest_job_status", lambda jid: None)
+    monkeypatch.setattr(wf, "_HEARTBEAT_INTERVAL_S", 0.01)
+    monkeypatch.setattr(tl_activity, "is_cancelled", lambda: False)
+
+    beats = []
+    monkeypatch.setattr(tl_activity, "heartbeat", lambda *a, **k: beats.append(1))
+
+    def _bg(*a):
+        # Block until at least one heartbeat fires (bounded).
+        for _ in range(200):
+            if beats:
+                return api_main._BT_JOB_STATUS_COMPLETED
+            time.sleep(0.01)
+        return api_main._BT_JOB_STATUS_COMPLETED
+
+    monkeypatch.setattr(api_main, "_run_backtest_background", _bg)
+
+    result = wf.run_backtest_activity("job-hb", {}, {}, "agent", [])
+
+    assert len(beats) >= 1
+    assert result == {"job_id": "job-hb", "status": "completed"}
+
+
+def test_run_backtest_activity_cancellation_cancels_job(monkeypatch) -> None:
+    """On Temporal cancellation the cancellation poller cancels the underlying
+    job so the existing checkpoints inside ``_run_backtest_background``
+    observe it and honor the cancellation, instead of the run silently
+    continuing to completion/failure with no way for Temporal to stop it."""
+    from temporalio import activity as tl_activity
+
+    from investment_team import models as inv_models
+    from investment_team.api import main as api_main
+    from investment_team.temporal import workflows as wf
+
+    monkeypatch.setattr(inv_models, "StrategySpec", lambda **kw: object())
+    monkeypatch.setattr(inv_models, "BacktestConfig", lambda **kw: object())
+    monkeypatch.setattr(api_main, "_backtest_job_status", lambda jid: None)
+    monkeypatch.setattr(wf, "_CANCEL_POLL_INTERVAL_S", 0.01)
+    monkeypatch.setattr(tl_activity, "heartbeat", lambda *a, **k: None)
+    monkeypatch.setattr(tl_activity, "is_cancelled", lambda: True)
+    monkeypatch.setattr(
+        tl_activity,
+        "cancellation_details",
+        lambda: tl_activity.ActivityCancellationDetails(cancel_requested=True),
+    )
+
+    cancelled_ids = []
+    monkeypatch.setattr(api_main, "_bt_cancel_job", lambda jid: cancelled_ids.append(jid))
+
+    def _bg(job_id, *a):
+        # Block until the poller observes cancellation (bounded).
+        for _ in range(200):
+            if cancelled_ids:
+                return api_main._BT_JOB_STATUS_CANCELLED
+            time.sleep(0.01)
+        return api_main._BT_JOB_STATUS_COMPLETED
+
+    monkeypatch.setattr(api_main, "_run_backtest_background", _bg)
+
+    result = wf.run_backtest_activity("job-cancel", {}, {}, "agent", [])
+
+    assert cancelled_ids == ["job-cancel"]
+    assert result == {"job_id": "job-cancel", "status": "cancelled"}
+
+
+def test_run_backtest_activity_cancellation_observed_before_heartbeat_tick(monkeypatch) -> None:
+    """Regression for a review finding: cancellation polling must be decoupled
+    from (and much faster than) the network-heartbeat cadence. With
+    ``_HEARTBEAT_INTERVAL_S`` set so large the heartbeat never ticks during
+    this test, cancellation must still be observed and cancel the job via the
+    fast ``_CANCEL_POLL_INTERVAL_S`` poller — otherwise a run that finishes
+    before the first heartbeat tick (or in the tail of any run) could persist
+    ``completed`` despite an already-cancelled activity."""
+    from temporalio import activity as tl_activity
+
+    from investment_team import models as inv_models
+    from investment_team.api import main as api_main
+    from investment_team.temporal import workflows as wf
+
+    monkeypatch.setattr(inv_models, "StrategySpec", lambda **kw: object())
+    monkeypatch.setattr(inv_models, "BacktestConfig", lambda **kw: object())
+    monkeypatch.setattr(api_main, "_backtest_job_status", lambda jid: None)
+    monkeypatch.setattr(wf, "_HEARTBEAT_INTERVAL_S", 1000.0)
+    monkeypatch.setattr(wf, "_CANCEL_POLL_INTERVAL_S", 0.01)
+    monkeypatch.setattr(tl_activity, "heartbeat", lambda *a, **k: None)
+    monkeypatch.setattr(tl_activity, "is_cancelled", lambda: True)
+    monkeypatch.setattr(
+        tl_activity,
+        "cancellation_details",
+        lambda: tl_activity.ActivityCancellationDetails(cancel_requested=True),
+    )
+
+    cancelled_ids = []
+    monkeypatch.setattr(api_main, "_bt_cancel_job", lambda jid: cancelled_ids.append(jid))
+
+    def _bg(job_id, *a):
+        for _ in range(200):
+            if cancelled_ids:
+                return api_main._BT_JOB_STATUS_CANCELLED
+            time.sleep(0.01)
+        return api_main._BT_JOB_STATUS_COMPLETED
+
+    monkeypatch.setattr(api_main, "_run_backtest_background", _bg)
+
+    result = wf.run_backtest_activity("job-cancel-fast", {}, {}, "agent", [])
+
+    assert cancelled_ids == ["job-cancel-fast"]
+    assert result == {"job_id": "job-cancel-fast", "status": "cancelled"}
+
+
+@pytest.mark.parametrize(
+    "details_kwargs",
+    [
+        {"timed_out": True},
+        {"worker_shutdown": True},
+        {"paused": True},
+        {"reset": True},
+        {"not_found": True},
+    ],
+)
+def test_run_backtest_activity_non_user_cancellation_does_not_cancel_job(
+    monkeypatch, details_kwargs
+) -> None:
+    """Regression for a review finding: ``activity.is_cancelled()`` is one
+    shared flag for ``cancel_requested`` *and* infra-driven reasons (heartbeat
+    timeout, worker shutdown, pause, reset, not-found). Only a genuine
+    ``cancel_requested`` may cancel the durable job — any other reason must
+    leave it alone, so a Temporal retry (e.g. after a crashed worker's
+    heartbeat timeout) can still resume the work instead of finding it
+    pre-marked cancelled and bailing out via the entry short-circuit."""
+    from temporalio import activity as tl_activity
+
+    from investment_team import models as inv_models
+    from investment_team.api import main as api_main
+    from investment_team.temporal import workflows as wf
+
+    monkeypatch.setattr(inv_models, "StrategySpec", lambda **kw: object())
+    monkeypatch.setattr(inv_models, "BacktestConfig", lambda **kw: object())
+    monkeypatch.setattr(api_main, "_backtest_job_status", lambda jid: None)
+    monkeypatch.setattr(wf, "_CANCEL_POLL_INTERVAL_S", 0.01)
+    monkeypatch.setattr(tl_activity, "heartbeat", lambda *a, **k: None)
+    monkeypatch.setattr(tl_activity, "is_cancelled", lambda: True)
+    monkeypatch.setattr(
+        tl_activity,
+        "cancellation_details",
+        lambda: tl_activity.ActivityCancellationDetails(**details_kwargs),
+    )
+
+    cancelled_ids = []
+    monkeypatch.setattr(api_main, "_bt_cancel_job", lambda jid: cancelled_ids.append(jid))
+
+    def _bg(*a):
+        # Give the poller several ticks to (wrongly, if the bug regresses)
+        # observe cancellation before the run completes normally.
+        time.sleep(0.05)
+        return api_main._BT_JOB_STATUS_COMPLETED
+
+    monkeypatch.setattr(api_main, "_run_backtest_background", _bg)
+
+    result = wf.run_backtest_activity("job-infra", {}, {}, "agent", [])
+
+    assert cancelled_ids == []
+    assert result == {"job_id": "job-infra", "status": "completed"}
+
+
+def test_investment_backtest_workflow_sets_heartbeat_timeout(monkeypatch) -> None:
+    """``InvestmentBacktestWorkflow`` must pass ``heartbeat_timeout`` to
+    ``execute_activity`` so Temporal actually enforces the activity's
+    heartbeat contract at the workflow level."""
+    from temporalio import workflow as tl_workflow
+
+    from investment_team.temporal.workflows import (
+        _HEARTBEAT_TIMEOUT,
+        InvestmentBacktestWorkflow,
+    )
+
+    captured = {}
+
+    async def _fake_exec(fn, *, args, **kw):
+        captured.update(kw)
+        return {"job_id": "job-1", "status": "completed"}
+
+    monkeypatch.setattr(tl_workflow, "execute_activity", _fake_exec)
+
+    result = asyncio.run(InvestmentBacktestWorkflow().run("job-1", {}, {}, "agent", []))
+
+    assert captured["heartbeat_timeout"] == _HEARTBEAT_TIMEOUT
+    assert result == {"job_id": "job-1", "status": "completed"}
+
+
+def test_mark_backtest_job_cancelled_activity_cancels_active_job(monkeypatch) -> None:
+    from investment_team.api import main as api_main
+    from investment_team.temporal.workflows import mark_backtest_job_cancelled_activity
+
+    monkeypatch.setattr(api_main, "_bt_cancel_job", lambda jid: True)
+    monkeypatch.setattr(
+        api_main, "_backtest_job_status", lambda jid: api_main._BT_JOB_STATUS_CANCELLED
+    )
+
+    result = mark_backtest_job_cancelled_activity("job-9")
+
+    assert result == {"job_id": "job-9", "status": "cancelled"}
+
+
+def test_mark_backtest_job_cancelled_activity_is_noop_on_terminal_job(monkeypatch) -> None:
+    """``_bt_cancel_job`` itself no-ops (returns False, no write) on an
+    already-terminal job — the activity just reports the unchanged status."""
+    from investment_team.api import main as api_main
+    from investment_team.temporal.workflows import mark_backtest_job_cancelled_activity
+
+    calls = []
+    monkeypatch.setattr(api_main, "_bt_cancel_job", lambda jid: (calls.append(jid), False)[1])
+    monkeypatch.setattr(
+        api_main, "_backtest_job_status", lambda jid: api_main._BT_JOB_STATUS_COMPLETED
+    )
+
+    result = mark_backtest_job_cancelled_activity("job-10")
+
+    assert calls == ["job-10"]
+    assert result == {"job_id": "job-10", "status": "completed"}
+
+
+def test_mark_backtest_job_cancelled_activity_missing_job(monkeypatch) -> None:
+    from investment_team.api import main as api_main
+    from investment_team.temporal.workflows import mark_backtest_job_cancelled_activity
+
+    monkeypatch.setattr(api_main, "_bt_cancel_job", lambda jid: False)
+    monkeypatch.setattr(api_main, "_backtest_job_status", lambda jid: None)
+
+    assert mark_backtest_job_cancelled_activity("nope") == {
+        "job_id": "nope",
+        "status": "unknown",
+    }
+
+
+def test_investment_backtest_workflow_runs_compensation_on_cancellation(monkeypatch) -> None:
+    """Regression for a review finding: if the workflow itself is cancelled
+    (e.g. directly via Temporal, independent of anything the REST API wires
+    up) while the activity is still scheduled, the activity never runs and
+    so never gets a chance to observe the cancellation itself. A best-effort
+    compensation activity must cancel the job before the cancellation
+    propagates — otherwise it would sit pending/running forever."""
+    from temporalio import workflow as tl_workflow
+
+    from investment_team.temporal.workflows import InvestmentBacktestWorkflow
+
+    calls = []
+
+    async def _fake_exec(fn, *, args, **kw):
+        calls.append((fn.__name__, args))
+        if fn.__name__ == "run_backtest_activity":
+            raise asyncio.CancelledError()
+        return {"job_id": args[0], "status": "cancelled"}
+
+    monkeypatch.setattr(tl_workflow, "execute_activity", _fake_exec)
+
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(InvestmentBacktestWorkflow().run("job-1", {}, {}, "agent", []))
+
+    assert [c[0] for c in calls] == [
+        "run_backtest_activity",
+        "mark_backtest_job_cancelled_activity",
+    ]
+    assert calls[1][1] == ["job-1"]
+
+
+def test_investment_backtest_workflow_cancellation_survives_compensation_failure(
+    monkeypatch,
+) -> None:
+    """A persistent compensation-activity failure must not mask the original
+    cancellation — the workflow must still complete as cancelled (re-raise),
+    not swallow it into a normal return."""
+    from temporalio import workflow as tl_workflow
+
+    from investment_team.temporal.workflows import InvestmentBacktestWorkflow
+
+    async def _fake_exec(fn, *, args, **kw):
+        if fn.__name__ == "run_backtest_activity":
+            raise asyncio.CancelledError()
+        raise RuntimeError("store unavailable")
+
+    monkeypatch.setattr(tl_workflow, "execute_activity", _fake_exec)
+    monkeypatch.setattr(
+        tl_workflow, "logger", type("L", (), {"warning": staticmethod(lambda *a, **k: None)})()
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(InvestmentBacktestWorkflow().run("job-1", {}, {}, "agent", []))
 
 
 # ---------------------------------------------------------------------------

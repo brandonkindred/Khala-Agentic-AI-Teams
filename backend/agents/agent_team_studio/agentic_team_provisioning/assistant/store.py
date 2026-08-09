@@ -125,6 +125,16 @@ class AgenticTeamStore:
 
     @timed_query(store=_STORE, op="list_teams")
     def list_teams(self) -> list[dict]:
+        """List every persisted agentic team, most recently created first.
+
+        Preconditions: none.
+        Postconditions: returns one dict per row in ``agentic_teams``
+            (``team_id``, ``name``, ``description``, ``process_count``,
+            ``created_at``, ``updated_at``), ordered by ``created_at``
+            descending; ``process_count`` is the number of
+            ``agentic_processes`` rows linked to that team. Returns an empty
+            list when no teams exist.
+        """
         with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
             cur.execute(
                 """

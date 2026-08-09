@@ -91,6 +91,14 @@ _ACTIVITY_TIMEOUT = timedelta(minutes=10)
 # ``STRATEGY_LAB_DESIGN_MAX_LLM_CALLS`` model round-trips plus backtests), so it
 # needs a far wider ceiling than a single LLM/gate/persist activity.
 _DESIGN_ATTEMPT_TIMEOUT = timedelta(hours=2)
+# Server-enforced liveness deadline for the design-attempt activity's
+# heartbeat (activities.py wraps the attempt in a fixed-interval
+# BackgroundHeartbeat, decoupled from ``emit`` checkpoint cadence -- see
+# ``_DESIGN_ATTEMPT_HEARTBEAT_INTERVAL_S`` there). Sized generously relative
+# to that fixed interval (not to the pipeline's own uneven cadence) so a
+# missed heartbeat window is a real liveness problem, not a slow-but-healthy
+# attempt: missing it fails/retries the WHOLE up-to-2-hour attempt.
+_DESIGN_ATTEMPT_HEARTBEAT_TIMEOUT = timedelta(seconds=90)
 
 # A cycle child workflow is expensive and its own activities already retry
 # internally, so a failed cycle is not re-run at the child level — it surfaces
@@ -115,6 +123,7 @@ async def _exec(
     *,
     params: Optional[Dict[str, Any]] = None,
     timeout: timedelta = _ACTIVITY_TIMEOUT,
+    heartbeat_timeout: Optional[timedelta] = None,
 ) -> Any:
     """Thin ``workflow.execute_activity`` wrapper.
 
@@ -126,6 +135,9 @@ async def _exec(
         ``fn`` is an ``@activity.defn``-decorated function from the
         ``activities`` module. ``params`` is the single positional dict the
         activity expects, or ``None`` for a no-argument activity.
+        ``heartbeat_timeout`` is ``None`` (the default -- no heartbeat
+        deadline, matching every non-heartbeating activity) unless ``fn``
+        heartbeats itself (currently only ``run_design_attempt_activity``).
     Postconditions:
         Returns the activity's result, retried per ``_ACTIVITY_RETRY``.
     """
@@ -134,6 +146,7 @@ async def _exec(
         fn,
         args=args,
         start_to_close_timeout=timeout,
+        heartbeat_timeout=heartbeat_timeout,
         retry_policy=_ACTIVITY_RETRY,
     )
 
@@ -247,6 +260,7 @@ class StrategyLabCycleWorkflow:
                     "convergence_tracker_state": tracker_state,
                 },
                 timeout=_DESIGN_ATTEMPT_TIMEOUT,
+                heartbeat_timeout=_DESIGN_ATTEMPT_HEARTBEAT_TIMEOUT,
             )
             # Thread the whole-cycle accumulators forward regardless of outcome.
             tracker_state = outcome["convergence_tracker_state"]

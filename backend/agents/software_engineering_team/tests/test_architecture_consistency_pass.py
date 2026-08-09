@@ -67,7 +67,13 @@ def test_build_prompt_includes_architecture_document_and_changed_files() -> None
     changed file's content."""
     arch = _arch(architecture_document="# Arch\nAll writes MUST go through the repository layer.")
     index = CodebaseIndex.from_input(_input(architecture=arch))
-    prompt = _build_prompt(index, arch, max_inline_chars=100_000)
+    prompt = _build_prompt(
+        index,
+        arch,
+        max_inline_chars=100_000,
+        max_architecture_chars=100_000,
+        max_manifest_chars=100_000,
+    )
     assert "All writes MUST go through the repository layer." in prompt
     assert "app/main.py" in prompt
     assert "def bar():" in prompt
@@ -77,7 +83,13 @@ def test_build_prompt_falls_back_to_overview_with_no_document() -> None:
     """With no ``architecture_document``, the overview is inlined instead."""
     arch = _arch(overview="Overview-only architecture.", architecture_document="")
     index = CodebaseIndex.from_input(_input(architecture=arch))
-    prompt = _build_prompt(index, arch, max_inline_chars=100_000)
+    prompt = _build_prompt(
+        index,
+        arch,
+        max_inline_chars=100_000,
+        max_architecture_chars=100_000,
+        max_manifest_chars=100_000,
+    )
     assert "Overview-only architecture." in prompt
 
 
@@ -100,7 +112,13 @@ def test_build_prompt_includes_components_and_decisions_alongside_document() -> 
         ],
     )
     index = CodebaseIndex.from_input(_input(architecture=arch))
-    prompt = _build_prompt(index, arch, max_inline_chars=100_000)
+    prompt = _build_prompt(
+        index,
+        arch,
+        max_inline_chars=100_000,
+        max_architecture_chars=100_000,
+        max_manifest_chars=100_000,
+    )
     assert "General overview doc." in prompt
     assert "billing-service" in prompt
     assert "Owns all billing writes." in prompt
@@ -117,19 +135,50 @@ def test_build_prompt_includes_components_and_decisions_with_no_document() -> No
         components=[ArchitectureComponent(name="auth-service", type="backend")],
     )
     index = CodebaseIndex.from_input(_input(architecture=arch))
-    prompt = _build_prompt(index, arch, max_inline_chars=100_000)
+    prompt = _build_prompt(
+        index,
+        arch,
+        max_inline_chars=100_000,
+        max_architecture_chars=100_000,
+        max_manifest_chars=100_000,
+    )
     assert "auth-service" in prompt
 
 
-def test_build_prompt_includes_architecture_document_in_full() -> None:
-    """The architecture document is never truncated -- no tool exposes it, so
-    unlike the changed files it is always inlined in its entirety."""
-    arch = _arch(architecture_document="X" * 10_000)
+def test_build_prompt_includes_architecture_document_in_full_when_budget_allows() -> None:
+    """The architecture document is inlined in full when ``max_architecture_chars``
+    is at least its size -- no tool exposes it, so a real truncation (tested
+    separately) is the only way part of it goes missing."""
+    arch = _arch(overview="", architecture_document="X" * 10_000)
     index = CodebaseIndex.from_input(_input(architecture=arch))
-    prompt = _build_prompt(index, arch, max_inline_chars=100_000)
+    prompt = _build_prompt(
+        index,
+        arch,
+        max_inline_chars=100_000,
+        max_architecture_chars=10_000,
+        max_manifest_chars=100_000,
+    )
     assert "X" * 10_000 in prompt
     assert "are shown above" not in prompt
     assert "was not available to this pass" not in prompt
+
+
+def test_build_prompt_truncates_architecture_document_beyond_its_budget() -> None:
+    """When the architecture document exceeds ``max_architecture_chars``, it is
+    cut to that budget with a tool-unreachable omission note (unlike the
+    changed-file content budget, no tool can recover the rest of the doc)."""
+    arch = _arch(overview="", architecture_document="X" * 10_000)
+    index = CodebaseIndex.from_input(_input(architecture=arch))
+    prompt = _build_prompt(
+        index,
+        arch,
+        max_inline_chars=100_000,
+        max_architecture_chars=100,
+        max_manifest_chars=100_000,
+    )
+    assert "X" * 100 in prompt
+    assert "X" * 101 not in prompt
+    assert "the remainder was omitted to fit the model context" in prompt
 
 
 def test_build_prompt_omits_files_beyond_inline_budget() -> None:
@@ -142,7 +191,13 @@ def test_build_prompt_omits_files_beyond_inline_budget() -> None:
     # number that happens to match it) so the second file is fully omitted
     # rather than partially truncated -- see test_build_prompt_notes_mid_file_truncation
     # for that other branch.
-    prompt = _build_prompt(index, arch, max_inline_chars=len(file_a_content))
+    prompt = _build_prompt(
+        index,
+        arch,
+        max_inline_chars=len(file_a_content),
+        max_architecture_chars=100_000,
+        max_manifest_chars=100_000,
+    )
     assert file_a_content in prompt  # inlined in full (fits the budget exactly)
     assert "more changed file(s) not shown above" in prompt
     assert "list_files()" in prompt
@@ -154,7 +209,9 @@ def test_build_prompt_notes_mid_file_truncation() -> None:
     arch = _arch()
     files = {"a.py": "x" * 100}
     index = CodebaseIndex.from_input(_input(files=files, architecture=arch))
-    prompt = _build_prompt(index, arch, max_inline_chars=30)
+    prompt = _build_prompt(
+        index, arch, max_inline_chars=30, max_architecture_chars=100_000, max_manifest_chars=100_000
+    )
     assert "Only the first 30 characters of `a.py` are shown above" in prompt
 
 
@@ -647,6 +704,248 @@ def test_finds_and_returns_new_findings_with_pre_numbered_input() -> None:
     assert result[0].line == 4242  # not nulled by the 2-physical-line hunk's length
 
 
+def test_finds_and_returns_new_findings_bounds_checks_when_full_content_supplied() -> None:
+    """When ``full_content`` covers the pre-numbered submission, the citation
+    IS bounds-checked against the real full body (not trusted as-is): the
+    same out-of-range line that survives under bare ``pre_numbered=True`` is
+    now nulled, proving the effective flag (``pre_numbered and not
+    full_content_complete``), not the raw ``input_data.pre_numbered``, reaches
+    ``_run_pass``/``_validate_findings`` here too -- matching the fix already
+    applied to the side-effect and merged passes."""
+
+    class _FindingsClient(DummyLLMClient):
+        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+            if _ARCH_PASS_ANCHOR in prompt:
+                return {
+                    "findings": [
+                        {
+                            "severity": "high",
+                            "category": "architecture",
+                            "file_path": "app/main.py",
+                            "line": 4242,
+                            "description": "bypasses the repository layer",
+                        }
+                    ]
+                }
+            return {"approved": True, "issues": [], "summary": "ok", "spec_compliance_notes": ""}
+
+    result = find_architecture_and_redundancy_issues(
+        _FindingsClient(),
+        CodeReviewInput(
+            files={"app/main.py": "4242: def bar():\n4243:     return 1\n"},
+            task_description="wire up bar",
+            architecture=_arch(),
+            pre_numbered=True,
+            full_content={"app/main.py": "def bar():\n    return 1\n"},
+        ),
+    )
+    assert len(result) == 1
+    assert result[0].line is None  # nulled: real file is 2 lines, 4242 is out of range
+
+
+# --------------------------------------------------------------------------- batching / reactive recovery
+
+
+def test_no_extra_batching_for_small_multi_file_submission_under_budget() -> None:
+    """Several small files that together still fit the per-call budget must
+    make exactly one LLM call, not one per file -- no behavior change for
+    submissions under the budget."""
+    prompts: list = []
+
+    class _Client(DummyLLMClient):
+        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+            if _ARCH_PASS_ANCHOR in prompt:
+                prompts.append(prompt)
+                return {"findings": []}
+            return {"approved": True, "issues": [], "summary": "ok", "spec_compliance_notes": ""}
+
+    files = {
+        "a.py": "def a():\n    return 1\n",
+        "b.py": "def b():\n    return 2\n",
+        "c.py": "def c():\n    return 3\n",
+    }
+    find_architecture_and_redundancy_issues(_Client(), _input(files=files, architecture=_arch()))
+    assert len(prompts) == 1
+
+
+def test_splits_into_multiple_batches_for_oversized_submission(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When the changed-file set's total estimated size exceeds one call's
+    inline-code budget, the pass issues one independent LLM call per batch and
+    concatenates each batch's findings into a single list."""
+    import code_review_agent.submission_pass_runner as runner_mod
+
+    from software_engineering_team.shared.context_sizing import MergedPassBudgets
+
+    monkeypatch.setattr(
+        runner_mod,
+        "compute_code_review_merged_pass_budgets",
+        lambda *a, **k: MergedPassBudgets(
+            max_architecture_chars=100_000,
+            max_inline_code_chars=200,
+            max_manifest_chars=2_000,
+            reserved_response_tokens=4096,
+        ),
+    )
+
+    prompts: list = []
+
+    class _Client(DummyLLMClient):
+        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+            if _ARCH_PASS_ANCHOR in prompt:
+                prompts.append(prompt)
+                for path in ("a.py", "b.py", "c.py"):
+                    if f"### {path} ###" in prompt:
+                        return {
+                            "findings": [
+                                {
+                                    "severity": "medium",
+                                    "category": "architecture",
+                                    "file_path": path,
+                                    "description": f"finding for {path}",
+                                    "suggestion": "n/a",
+                                }
+                            ]
+                        }
+                return {"findings": []}
+            return {"approved": True, "issues": [], "summary": "ok", "spec_compliance_notes": ""}
+
+    files = {
+        "a.py": "x = 1\n" * 10,
+        "b.py": "y = 2\n" * 10,
+        "c.py": "z = 3\n" * 10,
+    }
+    result = find_architecture_and_redundancy_issues(
+        _Client(), _input(files=files, architecture=_arch())
+    )
+
+    assert len(prompts) == 3
+    assert {f.description for f in result} == {
+        "finding for a.py",
+        "finding for b.py",
+        "finding for c.py",
+    }
+    # Every batch's manifest still lists all three changed files (whole-
+    # submission awareness), even though its content section shows only one.
+    for prompt in prompts:
+        manifest_section = prompt.split("**Full content of the changed files", 1)[0]
+        assert "a.py" in manifest_section
+        assert "b.py" in manifest_section
+        assert "c.py" in manifest_section
+    assert any("batch 1 of 3" in p for p in prompts)
+    assert any("batch 3 of 3" in p for p in prompts)
+
+
+def test_one_batch_failure_does_not_discard_other_batches(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A malformed reply for one batch must not wipe out findings already
+    collected from other, successful batches."""
+    import code_review_agent.submission_pass_runner as runner_mod
+
+    from software_engineering_team.shared.context_sizing import MergedPassBudgets
+
+    monkeypatch.setattr(
+        runner_mod,
+        "compute_code_review_merged_pass_budgets",
+        lambda *a, **k: MergedPassBudgets(
+            max_architecture_chars=100_000,
+            max_inline_code_chars=200,
+            max_manifest_chars=2_000,
+            reserved_response_tokens=4096,
+        ),
+    )
+
+    class _Client(DummyLLMClient):
+        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+            if _ARCH_PASS_ANCHOR in prompt:
+                if "### a.py ###" in prompt:
+                    return "not even a dict-shaped reply"  # type: ignore[return-value]
+                if "### b.py ###" in prompt:
+                    return {
+                        "findings": [
+                            {
+                                "severity": "medium",
+                                "category": "architecture",
+                                "file_path": "b.py",
+                                "description": "finding for b.py",
+                                "suggestion": "n/a",
+                            }
+                        ]
+                    }
+                return {"findings": []}
+            return {"approved": True, "issues": [], "summary": "ok", "spec_compliance_notes": ""}
+
+    files = {
+        "a.py": "x = 1\n" * 10,
+        "b.py": "y = 2\n" * 10,
+        "c.py": "z = 3\n" * 10,
+    }
+    result = find_architecture_and_redundancy_issues(
+        _Client(), _input(files=files, architecture=_arch())
+    )
+    assert [f.description for f in result] == ["finding for b.py"]
+
+
+def test_reactive_recovery_bisects_overflowing_batch_through_public_entry_point(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The pass must now benefit from the shared runner's reactive bisect
+    recovery: a combined batch call that overflows mid-turn is retried as two
+    single-file calls, rather than simply skipped (the pre-runner behavior --
+    this pass had no reactive recovery of its own)."""
+    import code_review_agent.submission_pass_runner as runner_mod
+    from strands.types.exceptions import ContextWindowOverflowException
+
+    from software_engineering_team.shared.context_sizing import MergedPassBudgets
+
+    monkeypatch.setattr(
+        runner_mod,
+        "compute_code_review_merged_pass_budgets",
+        lambda *a, **k: MergedPassBudgets(
+            max_architecture_chars=100_000,
+            max_inline_code_chars=100_000,
+            max_manifest_chars=2_000,
+            reserved_response_tokens=4096,
+        ),
+    )
+
+    call_count = {"n": 0}
+
+    class _Client(DummyLLMClient):
+        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+            if _ARCH_PASS_ANCHOR in prompt:
+                call_count["n"] += 1
+                if "### a.py ###" in prompt and "### b.py ###" in prompt:
+                    raise ContextWindowOverflowException("combined batch too large")
+                for path in ("a.py", "b.py"):
+                    if f"### {path} ###" in prompt:
+                        return {
+                            "findings": [
+                                {
+                                    "severity": "medium",
+                                    "category": "architecture",
+                                    "file_path": path,
+                                    "description": f"finding for {path}",
+                                    "suggestion": "n/a",
+                                }
+                            ]
+                        }
+                return {"findings": []}
+            return {"approved": True, "issues": [], "summary": "ok", "spec_compliance_notes": ""}
+
+    files = {"a.py": "x = 1\n", "b.py": "y = 2\n"}
+    result = find_architecture_and_redundancy_issues(
+        _Client(), _input(files=files, architecture=_arch())
+    )
+
+    assert {f.description for f in result} == {"finding for a.py", "finding for b.py"}
+    # More than one call proves the overflowing combined attempt was actually
+    # retried (bisected), not that the test happened to pass on the first try.
+    assert call_count["n"] > 1
+
+
 # --------------------------------------------------------------------------- coordinator integration
 
 
@@ -765,29 +1064,61 @@ def test_coordinator_runs_pass_with_no_architecture() -> None:
 def test_run_pass_inlines_full_arch_doc_without_shrinking_code_budget(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The architecture document reaches ``_build_prompt`` in full regardless of
-    its size, and the inline code budget is exactly
-    ``compute_code_review_map_chunk_chars`` -- never reduced by an
-    architecture-document reserve."""
+    """The architecture document's full length reaches the shared runner as
+    ``extra_reserved_chars`` regardless of its size, so the runner's budgeting
+    -- not this pass -- decides how much of it (and how much code) actually
+    fits one call."""
     import code_review_agent.architecture_consistency_pass as pass_mod
 
     captured: Dict[str, Any] = {}
-    original_build_prompt = pass_mod._build_prompt
+    original_run_submission_pass = pass_mod.run_submission_pass
 
-    def _spy(index, architecture, max_inline_chars):
-        captured["max_inline_chars"] = max_inline_chars
-        return original_build_prompt(index, architecture, max_inline_chars)
+    def _spy(llm, **kwargs):
+        captured["extra_reserved_chars"] = kwargs["extra_reserved_chars"]
+        captured["finding_array_count"] = kwargs["finding_array_count"]
+        return original_run_submission_pass(llm, **kwargs)
 
-    monkeypatch.setattr(pass_mod, "_build_prompt", _spy)
-    monkeypatch.setattr(pass_mod, "compute_code_review_map_chunk_chars", lambda llm: 20_000)
+    monkeypatch.setattr(pass_mod, "run_submission_pass", _spy)
 
-    arch = _arch(architecture_document="X" * 100_000)
+    arch = _arch(overview="", architecture_document="X" * 100_000)
 
     class _EmptyClient(DummyLLMClient):
         def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
-            assert "X" * 100_000 in prompt
             return {"findings": []}
 
     find_architecture_and_redundancy_issues(_EmptyClient(), _input(architecture=arch))
 
-    assert captured["max_inline_chars"] == 20_000
+    assert captured["extra_reserved_chars"] == 100_000
+    assert captured["finding_array_count"] == 1
+
+
+def test_run_pass_wires_scoped_tools_into_runner(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The architecture-consistency pass hands the shared runner the full
+    shared tool set, including the scoped read_lines/read_function/
+    find_references tools the module docstring previously omitted."""
+    import code_review_agent.architecture_consistency_pass as pass_mod
+
+    captured: Dict[str, Any] = {}
+    original_run_submission_pass = pass_mod.run_submission_pass
+
+    def _spy(llm, **kwargs):
+        captured["tool_names"] = {t.tool_name for t in kwargs["tools"]}
+        return original_run_submission_pass(llm, **kwargs)
+
+    monkeypatch.setattr(pass_mod, "run_submission_pass", _spy)
+
+    class _EmptyClient(DummyLLMClient):
+        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+            return {"findings": []}
+
+    find_architecture_and_redundancy_issues(_EmptyClient(), _input(architecture=_arch()))
+
+    assert captured["tool_names"] == {
+        "read_file",
+        "read_lines",
+        "read_function",
+        "list_files",
+        "search_codebase",
+        "find_function_at_line",
+        "find_references",
+    }

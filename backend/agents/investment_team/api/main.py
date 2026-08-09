@@ -4333,7 +4333,13 @@ async def stream_strategy_lab_run(run_id: str) -> StreamingResponse:
         - Otherwise the response subscribes to the per-job event bus and
           streams ``snapshot``/``progress``/``cycle_complete``/
           ``cycle_skipped`` events, terminating on ``complete``/``error``/
-          ``cancelled`` followed by a final ``done``.
+          ``cancelled`` followed by a final ``done``. Its connect-time
+          ``snapshot`` event is sourced from ``_active_runs.get(run_id)`` when
+          present, else falls back to the ``state`` loaded above -- so a
+          non-terminal run that exists only via the job-service fallback
+          (e.g. recovered after a server restart, never yet touched by
+          another endpoint) still receives its documented connect-time
+          snapshot instead of none at all.
 
     Raises:
         - ``HTTPException`` 404: ``run_id`` resolves to no state in either
@@ -4384,9 +4390,14 @@ async def stream_strategy_lab_run(run_id: str) -> StreamingResponse:
         return StreamingResponse(_terminal_gen(), media_type="text/event-stream")
 
     async def _snapshot_event() -> Optional[dict]:
-        # Skip the snapshot when there's no current in-memory state to send.
+        # Fall back to the state loaded above (e.g. from the job service) when
+        # _active_runs has no live entry for run_id -- otherwise a non-terminal
+        # run recovered only from the job-service fallback (never written into
+        # _active_runs) would silently get no connect-time snapshot at all.
         async with _async_lock:
             current = _active_runs.get(run_id, {})
+        if not current:
+            current = state
         if not current:
             return None
         return {"type": "snapshot", **_run_state_to_response(current).model_dump(mode="json")}
@@ -5284,6 +5295,10 @@ def _fail_paper_trading_session(session_id: str, error: str) -> None:
 _DEFAULT_TX_COST_BPS = 5.0
 _DEFAULT_SLIPPAGE_BPS = 2.0
 
+# Fallback timeframe for live paper trading when neither the request nor the
+# strategy specifies one.
+_DEFAULT_TIMEFRAME = "1m"
+
 
 def _default_tx_cost_bps() -> float:
     """Operator-tunable fallback ``transaction_cost_bps`` (basis points) used
@@ -5370,6 +5385,7 @@ def _run_live_paper_trading_background(
     from investment_team.models import BacktestConfig as _BC
     from investment_team.trading_service.modes.paper_trade import (
         PaperTradeConfig,
+        PaperTradeTerminatedReason,
         StopController,
         run_paper_trade,
     )
@@ -5389,7 +5405,9 @@ def _run_live_paper_trading_background(
         if not symbols:
             raise RuntimeError("no symbols resolved for strategy")
 
-        strategy_timeframe = request.timeframe or getattr(strategy, "timeframe", None) or "1m"
+        strategy_timeframe = (
+            request.timeframe or getattr(strategy, "timeframe", None) or _DEFAULT_TIMEFRAME
+        )
 
         tx_cost, slip = _resolve_fee_overrides(request, asset_class=strategy.asset_class)
         # Captured once: two separate datetime.now() calls could straddle
@@ -5455,12 +5473,13 @@ def _run_live_paper_trading_background(
             # to the exact bars that drove warm-up.
             session.dataset_fingerprint = run_result.dataset_fingerprint
             session.completed_at = datetime.now(tz=timezone.utc).isoformat()
-            if run_result.error or run_result.terminated_reason in {
-                "lookahead_violation",
-                "provider_error",
-                "region_blocked",
-                "no_provider",
-            }:
+            _terminated_reason_failures = {
+                PaperTradeTerminatedReason.LOOKAHEAD_VIOLATION,
+                PaperTradeTerminatedReason.PROVIDER_ERROR,
+                PaperTradeTerminatedReason.REGION_BLOCKED,
+                PaperTradeTerminatedReason.NO_PROVIDER,
+            }
+            if run_result.error or run_result.terminated_reason in _terminated_reason_failures:
                 session.status = PaperTradingStatus.FAILED
             else:
                 session.status = PaperTradingStatus.COMPLETED

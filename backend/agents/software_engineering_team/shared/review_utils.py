@@ -11,8 +11,9 @@ and ``DocumentationSelfReviewResult`` factory, plus an ``invoke_model`` callable
 (so the Strands ``Agent`` build stays the team module's patch surface).
 
 The LLM-based code-review fallback's shared core lives in
-``software_engineering_team.shared.llm_review`` (``run_llm_review``); the tuning
-constants both that fallback and this self-review use are owned here.
+``software_engineering_team.shared.v2_review``
+(``run_coordinator_llm_review``); the tuning constants both that fallback and
+this self-review use are owned here.
 """
 
 from __future__ import annotations
@@ -62,7 +63,7 @@ def doc_review_code_chunks(code_files: Dict[str, str]) -> List[str]:
           the review still runs one pass.
     """
     # Imported lazily, fully-qualified, to match this package's existing
-    # convention for code_review_agent imports (see ``shared.llm_review``).
+    # convention for code_review_agent imports (see ``shared.v2_review``).
     from software_engineering_team.code_review_agent.coordinator import build_review_chunks
 
     blocks = [(p, c) for p, c in code_files.items() if c and c.strip()]

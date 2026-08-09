@@ -1008,8 +1008,8 @@ def test_fe_run_code_review_phase_code_review_failure_is_contained(monkeypatch, 
     from software_engineering_team.frontend_code_v2_team.phases.review import (
         run_code_review_phase,
     )
-    from software_engineering_team.shared.llm_review import LlmReviewOutput
     from software_engineering_team.shared.v2_models import ReviewIssue
+    from software_engineering_team.shared.v2_review import LlmReviewOutput
 
     monkeypatch.setattr(
         review_mod,
@@ -1118,7 +1118,7 @@ def test_fe_run_code_review_phase_passes_when_clean(monkeypatch, tmp_path: Path)
     from software_engineering_team.frontend_code_v2_team.phases.review import (
         run_code_review_phase,
     )
-    from software_engineering_team.shared.llm_review import LlmReviewOutput
+    from software_engineering_team.shared.v2_review import LlmReviewOutput
 
     monkeypatch.setattr(
         review_mod,
