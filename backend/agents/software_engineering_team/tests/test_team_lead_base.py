@@ -8,7 +8,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from software_engineering_team.shared.models import Task, TaskStatus, TaskType
+from shared.dev_models.models import Task, TaskStatus, TaskType
 from software_engineering_team.shared.team_lead_base import (
     BaseTeamLead,
     TeamLeadSharedState,

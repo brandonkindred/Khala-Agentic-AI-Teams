@@ -1788,6 +1788,8 @@ def test_purge_strategy_lab_job_storage_reports_none_for_timed_out_unit(
     import job_service_client as jsc_mod
     from investment_team.strategy_lab import orchestrator_api
 
+    # Timeout lives (and is read) on orchestrator_api; patching api.main's
+    # re-export alias would not shrink the deadline the purge helper uses.
     monkeypatch.setattr(orchestrator_api, "_PURGE_TIMEOUT_S", 0.2)
 
     release = threading.Event()

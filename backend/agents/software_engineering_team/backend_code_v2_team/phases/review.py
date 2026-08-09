@@ -22,6 +22,8 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from strands import Agent
 
 from llm_service import LLMClient
+from llm_service.strands_model import resolve_text_mode_strands_model
+from shared.dev_models.models import ReviewContext, Task
 from software_engineering_team.code_review_agent.coordinator import run_coordinator
 from software_engineering_team.code_review_agent.models import CodeReviewInput
 from software_engineering_team.shared.agent_review import (
@@ -30,7 +32,6 @@ from software_engineering_team.shared.agent_review import (
     run_security_agent,
 )
 from software_engineering_team.shared.llm_review import LlmReviewOutput
-from software_engineering_team.shared.models import ReviewContext, Task
 from software_engineering_team.shared.phases.review import (
     run_code_review_phase_impl,
     run_qa_testing_phase_impl,
@@ -46,7 +47,6 @@ from software_engineering_team.shared.review_utils import (
 from software_engineering_team.shared.review_utils import (
     run_documentation_self_review as _shared_run_documentation_self_review,
 )
-from software_engineering_team.shared.strands_model import resolve_text_mode_strands_model
 from software_engineering_team.shared.v2_review import (
     _review_steps_run_sequentially,  # noqa: F401  (re-exported for tests)
 )

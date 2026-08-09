@@ -22,10 +22,10 @@ import re
 from typing import Any, Callable, Dict, List, Optional
 
 from llm_service import LLMClient
+from llm_service.strands_model import LlmRunner
+from shared.dev_models.models import Task
 from software_engineering_team.shared.code_completeness import reject_invalid_python
-from software_engineering_team.shared.models import Task
 from software_engineering_team.shared.stack_profile import PhaseModels, StackProfile
-from software_engineering_team.shared.strands_model import LlmRunner
 
 logger = logging.getLogger(__name__)
 

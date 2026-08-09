@@ -52,9 +52,9 @@ from typing import List, Optional
 from strands import Agent
 
 from llm_service import LLMClient
+from shared.dev_models.models import SystemArchitecture
 from shared.env import env_flag_enabled
 from software_engineering_team.shared.context_sizing import compute_code_review_map_chunk_chars
-from software_engineering_team.shared.models import SystemArchitecture
 
 from .architecture_context import architecture_evidence_available, render_architecture_context
 from .false_positive_filter import CodebaseIndex, _build_tools, _code_fence_for

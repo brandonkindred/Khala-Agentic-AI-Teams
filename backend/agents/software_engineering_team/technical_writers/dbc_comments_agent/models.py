@@ -5,7 +5,7 @@ from typing import Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field
 
-from software_engineering_team.shared.models import SystemArchitecture
+from shared.dev_models.models import SystemArchitecture
 
 # Single source of truth for the default commit message, referenced by both
 # schema field defaults below and by agent.run()'s cross-chunk fallback --

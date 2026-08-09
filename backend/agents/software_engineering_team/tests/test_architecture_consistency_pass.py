@@ -29,7 +29,7 @@ from code_review_agent.false_positive_filter import CodebaseIndex
 from code_review_agent.models import CodeReviewInput, CodeReviewIssue
 
 from llm_service.clients.dummy import DummyLLMClient
-from software_engineering_team.shared.models import ArchitectureComponent, SystemArchitecture
+from shared.dev_models.models import ArchitectureComponent, SystemArchitecture
 
 # Unique anchor in this pass's user prompt (never the system prompt -- a
 # DummyLLMClient subclass must branch on the user prompt only, matching the

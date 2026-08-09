@@ -4,7 +4,7 @@ from typing import List, Optional
 
 from pydantic import BaseModel, Field
 
-from software_engineering_team.shared.models import SystemArchitecture
+from shared.dev_models.models import SystemArchitecture
 
 
 class SecurityVulnerability(BaseModel):

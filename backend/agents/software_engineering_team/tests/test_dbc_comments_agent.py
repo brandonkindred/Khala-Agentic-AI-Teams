@@ -287,7 +287,7 @@ def test_dbc_run_compliant_no_summary_default_praise() -> None:
 
 
 def test_dbc_run_with_architecture_context() -> None:
-    from software_engineering_team.shared.models import SystemArchitecture
+    from shared.dev_models.models import SystemArchitecture
 
     client = _StubClient(canned={"insertions": [], "already_compliant": True, "summary": "ok"})
     arch = SystemArchitecture(overview="big picture")

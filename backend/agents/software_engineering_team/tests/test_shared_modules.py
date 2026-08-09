@@ -86,7 +86,7 @@ def test_planning_consolidation_backend_openapi(tmp_path: Path) -> None:
 
 
 def _make_task(id: str, deps=None):
-    from software_engineering_team.shared.models import Task, TaskType
+    from shared.dev_models.models import Task, TaskType
 
     return Task(
         id=id,
@@ -114,7 +114,7 @@ def test_validate_task_missing_dependency() -> None:
 
 
 def test_validate_assignment_happy_path() -> None:
-    from software_engineering_team.shared.models import TaskAssignment
+    from shared.dev_models.models import TaskAssignment
     from software_engineering_team.shared.task_validation import validate_assignment
 
     tasks = [_make_task("a"), _make_task("b", ["a"])]
@@ -125,7 +125,7 @@ def test_validate_assignment_happy_path() -> None:
 
 
 def test_validate_assignment_order_references_missing_task() -> None:
-    from software_engineering_team.shared.models import TaskAssignment
+    from shared.dev_models.models import TaskAssignment
     from software_engineering_team.shared.task_validation import validate_assignment
 
     tasks = [_make_task("a")]
@@ -136,7 +136,7 @@ def test_validate_assignment_order_references_missing_task() -> None:
 
 
 def test_validate_assignment_task_missing_from_execution_order() -> None:
-    from software_engineering_team.shared.models import TaskAssignment
+    from shared.dev_models.models import TaskAssignment
     from software_engineering_team.shared.task_validation import validate_assignment
 
     tasks = [_make_task("a"), _make_task("b")]
@@ -877,7 +877,7 @@ def test_recursive_processor_default_branch_uses_injected_llm_client(monkeypatch
     """
     import strands
 
-    import software_engineering_team.shared.strands_model as strands_model_module
+    import llm_service.strands_model as strands_model_module
     from llm_service import LLMClient
     from software_engineering_team.shared.decomposition import (
         RecursiveProcessor,

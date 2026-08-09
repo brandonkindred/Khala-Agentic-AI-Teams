@@ -3296,11 +3296,11 @@ class TestWholeFileReview:
         )
         assert not expected_surface.is_empty, "test setup must produce a non-empty surface"
 
-        # Surface-first: pre-numbered code=, no files= dict, even though the
-        # whole-file fetch (head_content above) succeeded.
+        # Surface-first: pre-numbered files= dict, even though the whole-file
+        # fetch (head_content above) succeeded.
         assert captured["pre_numbered"] is True
-        assert captured["code"] == expected_surface.code
-        assert "files" not in captured or not captured.get("files")
+        assert captured["files"] == dict(expected_surface.blocks)
+        assert "code" not in captured or not captured.get("code")
         # repo_reader is still attached regardless of which mode dispatched.
         assert isinstance(captured["repo_reader"], GitHubRepoReader)
 
@@ -3412,14 +3412,10 @@ class TestWholeFileReview:
         # a.py went through the surface; b.py -- fetched but not surfaced --
         # must still be reviewed via hunk fallback, not dropped.
         assert len(calls) == 2
-        assert all("files" not in c for c in calls)
+        assert all(c.get("files") for c in calls)
         assert all(c["pre_numbered"] is True for c in calls)
-        surface_call = next(
-            c for c in calls if c.get("code") and "a.py" in c["code"] and "b.py" not in c["code"]
-        )
-        hunk_call = next(
-            c for c in calls if c.get("code") and "b.py" in c["code"] and "a.py" not in c["code"]
-        )
+        surface_call = next(c for c in calls if "a.py" in c["files"] and "b.py" not in c["files"])
+        hunk_call = next(c for c in calls if "b.py" in c["files"] and "a.py" not in c["files"])
         assert surface_call is not hunk_call
 
         job = review_app["jobs"].get_job(resp.json()["job_id"])
@@ -3428,7 +3424,7 @@ class TestWholeFileReview:
 
     def test_endpoint_falls_back_to_hunks_when_no_head_files(self, review_app, monkeypatch) -> None:
         gh = review_app["github"]["client"]
-        # Head fetch yields nothing -> hunk fallback (pre_numbered code blob).
+        # Head fetch yields nothing -> hunk fallback (pre_numbered files dict).
         gh.get_file_contents = lambda o, r, path, ref: None
 
         captured: dict[str, Any] = {}
@@ -3442,9 +3438,8 @@ class TestWholeFileReview:
 
         resp = review_app["client"].post("/review-pr", json=_review_body())
         assert resp.status_code == 200
-        assert captured.get("files") is None
         assert captured["pre_numbered"] is True
-        assert captured["code"]  # the hunk-rendered blob
+        assert captured["files"]  # the hunk-rendered per-file dict
         # Hunk mode carries the same diff-first focus note as whole-file mode.
         from software_engineering_team.api.pr_review import REVIEW_FOCUS_NOTE_PREFIX
 
@@ -3508,16 +3503,12 @@ class TestWholeFileReview:
         resp = review_app["client"].post("/review-pr", json=_review_body())
         assert resp.status_code == 200
         # a.py covered by change surface; b.py falls back to hunks only.
-        # Both attempts are pre-numbered code= (no files=).
+        # Both attempts are pre-numbered files= (per-file dicts, disjoint paths).
         assert len(calls) == 2
-        assert all("files" not in c for c in calls)
+        assert all(c.get("files") for c in calls)
         assert all(c["pre_numbered"] is True for c in calls)
-        surface_call = next(
-            c for c in calls if c.get("code") and "a.py" in c["code"] and "b.py" not in c["code"]
-        )
-        hunk_call = next(
-            c for c in calls if c.get("code") and "b.py" in c["code"] and "a.py" not in c["code"]
-        )
+        surface_call = next(c for c in calls if "a.py" in c["files"] and "b.py" not in c["files"])
+        hunk_call = next(c for c in calls if "b.py" in c["files"] and "a.py" not in c["files"])
 
         from software_engineering_team.api.pr_review import (
             REVIEW_FOCUS_NOTE_PREFIX,
@@ -3527,10 +3518,9 @@ class TestWholeFileReview:
         assert "pre_existing" in surface_call["task_requirements"]
         assert "Architectural standards" in surface_call["task_requirements"]
         assert "diff-first" in surface_call["task_requirements"].lower()
-        assert not hunk_call.get("files")
         assert hunk_call["pre_numbered"] is True
-        assert "b.py" in hunk_call["code"]
-        assert "a.py" not in hunk_call["code"]
+        assert "b.py" in hunk_call["files"]
+        assert "a.py" not in hunk_call["files"]
         # Both calls share the same diff-first focus note (input shape differs).
         assert REVIEW_FOCUS_NOTE_PREFIX in hunk_call["task_requirements"]
         assert "pre_existing" in hunk_call["task_requirements"]
@@ -3554,8 +3544,7 @@ class TestWholeFileReview:
 
         class _SplitProvider:
             def run_pr_code_review(self, **kw: Any) -> Any:
-                code = kw.get("code") or ""
-                if "### a.py ###" in code:
+                if "a.py" in (kw.get("files") or {}):
                     return _FakeOutput(
                         issues=[
                             _FakeReviewIssue(
@@ -4738,7 +4727,7 @@ class TestDecideReviewModeUnit:
             _file_contents_client(_contents), "job1", "o", "r", 7, _mode_pr(), files
         )
         assert result is not None
-        assert result.code == ""
+        assert result.hunk_files == {}
         assert result.files_reviewed == 2
         assert set(result.head_files) == {"a.py", "b.py"}
         assert set(result.valid_by_path["a.py"]) == {1}
@@ -4766,11 +4755,11 @@ class TestDecideReviewModeUnit:
         assert result is not None
         assert not result.change_surface.is_empty
         assert "mod.py" in result.change_surface.blocks
-        # hunk-fallback code is empty because the whole-file fetch fully
+        # hunk_files is empty because the whole-file fetch fully
         # succeeded, so nothing needs hunk rendering. Which of change_surface
         # vs head_files actually gets dispatched to the reviewer is decided in
         # _run_reviewer (surface-first), not here.
-        assert result.code == ""
+        assert result.hunk_files == {}
 
     def test_partial_fetch_falls_back_to_hunks_for_the_missing_subset(self) -> None:
         from software_engineering_team.api import pr_review
@@ -4791,8 +4780,8 @@ class TestDecideReviewModeUnit:
         )
         assert result is not None
         assert set(result.head_files) == {"a.py"}
-        assert "b.py" in result.code  # missing file's hunk was rendered
-        assert "a.py" not in result.code  # fetched file's hunk was NOT rendered
+        assert "b.py" in result.hunk_files  # missing file's hunk was rendered
+        assert "a.py" not in result.hunk_files  # fetched file's hunk was NOT rendered
         assert result.files_reviewed == 2  # 1 whole + 1 hunk
         assert "b.py" not in result.change_surface.blocks
 
@@ -4834,8 +4823,8 @@ class TestDecideReviewModeUnit:
         assert "a.py" in result.change_surface.blocks
         assert "b.py" not in result.change_surface.blocks
         # b.py falls back to hunk rendering instead of being dropped.
-        assert "b.py" in result.code
-        assert "a.py" not in result.code  # surfaced file not double-rendered
+        assert "b.py" in result.hunk_files
+        assert "a.py" not in result.hunk_files  # surfaced file not double-rendered
         assert result.files_reviewed == 2  # 1 surfaced + 1 hunk
 
     def test_total_fetch_failure_renders_every_files_hunks(self) -> None:
@@ -4854,7 +4843,7 @@ class TestDecideReviewModeUnit:
         )
         assert result is not None
         assert result.head_files == {}
-        assert result.code
+        assert result.hunk_files
         assert result.files_reviewed == 1
         assert result.change_surface.is_empty
 

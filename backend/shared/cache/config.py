@@ -82,6 +82,8 @@ _PORT_IN_HOST_ERROR = "REDIS_HOST must not include a port; set REDIS_PORT separa
 def is_redis_configured() -> bool:
     """True when a Redis endpoint is configured for the shared cache.
 
+    Preconditions:
+        - None (reads only from the process environment).
     Postconditions:
         - Returns ``True`` iff ``REDIS_URL`` or ``REDIS_HOST`` is a non-blank
           string. Unset means the factory uses the in-process memory backend.
@@ -92,6 +94,8 @@ def is_redis_configured() -> bool:
 def key_prefix() -> str:
     """Global Redis key prefix (default ``khala``). Blank env falls back to default.
 
+    Preconditions:
+        - None (reads only from the process environment).
     Postconditions:
         - Returns a non-empty string with no ``:`` (the backend appends
           ``:{namespace}:`` itself). Blank/whitespace ``REDIS_KEY_PREFIX``
@@ -108,6 +112,8 @@ def key_prefix() -> str:
 def redis_url() -> str | None:
     """Return a Redis URL when configured, else ``None``.
 
+    Preconditions:
+        - None (reads only from the process environment).
     Postconditions:
         - When ``REDIS_URL`` is set to a non-blank value, returns it stripped.
         - When ``REDIS_URL`` is blank/unset and ``REDIS_HOST`` is set, builds
@@ -165,17 +171,38 @@ def redis_url() -> str | None:
 
 
 def cache_ttl_s() -> int:
-    """TTL (seconds) applied to Redis value keys. Floor 1."""
+    """TTL (seconds) applied to Redis value keys. Floor 1.
+
+    Preconditions:
+        - None (env is optional).
+    Postconditions:
+        - Returns ``REDIS_CACHE_TTL_S`` parsed as an int, floored at 1, or
+          ``_DEFAULT_CACHE_TTL_S`` when unset/blank/invalid.
+    """
     return parse_int("REDIS_CACHE_TTL_S", _DEFAULT_CACHE_TTL_S, minimum=1)
 
 
 def lock_ttl_s() -> int:
-    """TTL (seconds) for single-flight leader locks. Floor 1."""
+    """TTL (seconds) for single-flight leader locks. Floor 1.
+
+    Preconditions:
+        - None (env is optional).
+    Postconditions:
+        - Returns ``REDIS_LOCK_TTL_S`` parsed as an int, floored at 1, or
+          ``_DEFAULT_LOCK_TTL_S`` when unset/blank/invalid.
+    """
     return parse_int("REDIS_LOCK_TTL_S", _DEFAULT_LOCK_TTL_S, minimum=1)
 
 
 def waiter_poll_s() -> float:
-    """Seconds between waiter polls for a leader's result. Floor 0.01."""
+    """Seconds between waiter polls for a leader's result. Floor 0.01.
+
+    Preconditions:
+        - None (env is optional).
+    Postconditions:
+        - Returns ``REDIS_WAITER_POLL_S`` parsed as a float, floored at 0.01,
+          or ``_DEFAULT_WAITER_POLL_S`` when unset/blank/invalid.
+    """
     return parse_float("REDIS_WAITER_POLL_S", _DEFAULT_WAITER_POLL_S, minimum=0.01)
 
 
@@ -188,6 +215,12 @@ def waiter_timeout_s() -> float:
     whose compute exceeds this bound may see waiters recompute in parallel.
     Set ``REDIS_WAITER_TIMEOUT_S`` explicitly (up to the lock TTL) when
     duplicate work is worse than a longer wait.
+
+    Preconditions:
+        - None (env is optional).
+    Postconditions:
+        - Returns ``REDIS_WAITER_TIMEOUT_S`` parsed as a float, floored at 1.0,
+          or ``_DEFAULT_WAITER_TIMEOUT_S`` when unset/blank/invalid.
     """
     return parse_float(
         "REDIS_WAITER_TIMEOUT_S",
@@ -218,6 +251,13 @@ def result_ttl_s() -> int:
     When ``REDIS_RESULT_TTL_S`` is unset/blank, defaults to the *current*
     ``lock_ttl_s()``. ``RedisBackend`` still applies its own hard cap so
     abandoned markers cannot outlive leadership by more than that ceiling.
+
+    Preconditions:
+        - None (env is optional).
+    Postconditions:
+        - Returns ``REDIS_RESULT_TTL_S`` parsed as an int, floored at 1, when
+          set to a non-blank value; otherwise returns the current
+          ``lock_ttl_s()``.
     """
     raw = os.getenv("REDIS_RESULT_TTL_S")
     if raw is None or not str(raw).strip():
@@ -226,7 +266,14 @@ def result_ttl_s() -> int:
 
 
 def redis_socket_connect_timeout_s() -> float:
-    """redis-py socket connect timeout (seconds). Floor 0.1."""
+    """redis-py socket connect timeout (seconds). Floor 0.1.
+
+    Preconditions:
+        - None (env is optional).
+    Postconditions:
+        - Returns ``REDIS_SOCKET_CONNECT_TIMEOUT_S`` parsed as a float, floored
+          at 0.1, or ``_DEFAULT_SOCKET_CONNECT_TIMEOUT_S`` when unset/blank/invalid.
+    """
     return parse_float(
         "REDIS_SOCKET_CONNECT_TIMEOUT_S",
         _DEFAULT_SOCKET_CONNECT_TIMEOUT_S,

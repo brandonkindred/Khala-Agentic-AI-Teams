@@ -213,10 +213,6 @@ class ToolAgentPhaseInput(BaseModel):
 class MicrotaskReviewConfig(BaseMicrotaskReviewConfig):
     """Configuration for per-microtask review gates with per-phase retry limits."""
 
-    max_retries: int = Field(
-        default=3,
-        description="Max problem-solving attempts per microtask before marking as failed (legacy, used if per-phase not set)",
-    )
     code_review_max_retries: int = Field(
         default=3,
         description="Max fix attempts for code review phase (build + lint + code review)",

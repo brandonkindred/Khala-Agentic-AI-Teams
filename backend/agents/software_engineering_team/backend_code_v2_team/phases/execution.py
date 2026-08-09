@@ -24,8 +24,12 @@ from typing import Any, Callable, Dict, List, Optional
 from strands import Agent
 
 from llm_service import LLMClient
+from llm_service.strands_model import (
+    LlmRunner,
+    resolve_text_mode_strands_model,
+)
+from shared.dev_models.models import ReviewContext, SystemArchitecture, Task
 from software_engineering_team.shared.agent_review import AgentReviewCache
-from software_engineering_team.shared.models import ReviewContext, SystemArchitecture, Task
 from software_engineering_team.shared.phases.execution import (
     GatedExecutionConfig,
     GateOutcome,
@@ -33,10 +37,6 @@ from software_engineering_team.shared.phases.execution import (
     _run_general_microtask_impl,
     run_execution_impl,
     run_gated_execution_impl,
-)
-from software_engineering_team.shared.strands_model import (
-    LlmRunner,
-    resolve_text_mode_strands_model,
 )
 
 from .. import models as _models

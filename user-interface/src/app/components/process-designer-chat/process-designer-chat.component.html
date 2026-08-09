@@ -379,7 +379,13 @@
           </div>
 
           @if (flowchartSvg()) {
-            <div class="flowchart-container" #flowchartContainer [innerHTML]="flowchartSvg()"></div>
+            <div
+              class="flowchart-container"
+              tabindex="-1"
+              [innerHTML]="flowchartSvg()"
+              (click)="onFlowchartClick($event)"
+              (keydown)="onFlowchartKeydown($event)"
+            ></div>
             <p class="flowchart-hint">Click a step to edit it and assign agents</p>
           }
 

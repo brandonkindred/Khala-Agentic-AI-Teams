@@ -14,6 +14,7 @@ import pytest
 from pydantic import ValidationError
 
 from llm_service.clients.dummy import DummyLLMClient
+from shared.git.git_utils import initialize_new_repo
 from software_engineering_team.devops_team import (
     DevOpsTaskSpec,
     DevOpsTeamLeadAgent,
@@ -67,7 +68,6 @@ from software_engineering_team.devops_team.tool_agents import (
     TerraformExecutionOutput,
     TerraformExecutionToolAgent,
 )
-from software_engineering_team.shared.git_utils import initialize_new_repo
 from software_engineering_team.tests.conftest import (
     _patch_fenced_response,
     _strands_model_double,

@@ -181,6 +181,7 @@ _job_progress_percent = _strategy_lab_orchestrator_api._job_progress_percent
 _persist_run_state = _strategy_lab_orchestrator_api._persist_run_state
 _purge_strategy_lab_job_storage = _strategy_lab_orchestrator_api._purge_strategy_lab_job_storage
 _reconcile_run_progress = _strategy_lab_orchestrator_api._reconcile_run_progress
+_snapshot_prior_records = _strategy_lab_orchestrator_api._snapshot_prior_records
 _run_state_to_response = _strategy_lab_orchestrator_api._run_state_to_response
 _fail_strategy_lab_run = _strategy_lab_orchestrator_api._fail_strategy_lab_run
 _dispatch_strategy_lab_run = _strategy_lab_orchestrator_api._dispatch_strategy_lab_run
@@ -463,23 +464,6 @@ _backtests: _PersistentDict = _PersistentDict("backtests")
 _strategy_lab_records: _PersistentDict = _PersistentDict("strategy_lab_records")
 _paper_trading_sessions: _PersistentDict = _PersistentDict("paper_trading_sessions")
 _advisor_sessions: _PersistentDict = _PersistentDict("advisor_sessions")
-
-
-def _snapshot_prior_records(*, reverse: bool = False) -> list[StrategyLabRecord]:
-    """Locked read of the strategy-lab store, parsed and sorted by created_at.
-
-    Preconditions:
-        None — safe to call against an empty store.
-    Postconditions:
-        Returns a freshly parsed list of StrategyLabRecord, sorted by
-        ``created_at`` ascending (oldest-first) by default, or descending
-        (newest-first) when ``reverse=True``. Never returns None.
-    """
-    with _lock:
-        raw = list(_strategy_lab_records.values())
-    records = [StrategyLabRecord.parse_persisted(r) for r in raw]
-    records.sort(key=lambda r: r.created_at, reverse=reverse)
-    return records
 
 
 @lru_cache(maxsize=1)
@@ -3006,9 +2990,13 @@ def run_strategy_lab(request: RunStrategyLabRequest) -> StrategyLabRunStartRespo
     or ``GET /strategy-lab/runs/{run_id}/status`` for polling.
 
     Raises ``HTTPException(409)`` when another run is already active, or
-    (defense-in-depth, collision astronomically unlikely for a fresh uuid4)
-    when another transition for this freshly-minted run_id is already in
-    flight. An early, unlocked check runs before minting a run_id/acquiring
+    (defense-in-depth: when two concurrent requests happen to mint the
+    identical 8-hex-char run_id -- a 32-bit-entropy collision, not the full
+    uuid4 entropy the truncation forfeits -- the losing request's
+    ``_require_run_transition_lock`` call raises this 409; the active-run
+    check above does not itself guard against run_id collisions) when
+    another transition for this freshly-minted run_id is already in flight.
+    An early, unlocked check runs before minting a run_id/acquiring
     its transition lock, so a rejected request never allocates a registry
     entry that would otherwise never be looked up again -- but that check
     alone can't stop two concurrent requests from both minting a run_id and
@@ -4830,8 +4818,12 @@ def _run_paper_trading_background(
                     if raw is not None:
                         session = PaperTradingSession.parse_persisted(raw)
                         session.status = PaperTradingStatus.FAILED
-                        session.error = f"Paper trading crashed: {exc}"
-                        session.divergence_analysis = f"Paper trading crashed: {exc}"
+                        # User-facing fields must not leak raw exception text (internal
+                        # paths, dependency names) to API consumers; the full exception
+                        # is already captured above via logger.exception.
+                        user_message = "Paper trading crashed due to an internal error."
+                        session.error = user_message
+                        session.divergence_analysis = user_message
                         session.completed_at = datetime.now(tz=timezone.utc).isoformat()
                         _paper_trading_sessions[session_id] = session
         except Exception:
@@ -5503,7 +5495,18 @@ def stop_live_paper_trading(session_id: str) -> PaperTradingResponse:
         raise HTTPException(
             status_code=404, detail=f"Paper trading session '{session_id}' not found."
         )
-    session = PaperTradingSession.parse_persisted(raw)
+    try:
+        session = PaperTradingSession.parse_persisted(raw)
+    except Exception as exc:
+        logger.warning(
+            "Stop request for paper-trading session %s: persisted record could not be parsed.",
+            session_id,
+            exc_info=True,
+        )
+        raise HTTPException(
+            status_code=404,
+            detail=f"Paper trading session '{session_id}' not found or is corrupted.",
+        ) from exc
 
     # Idempotent: a terminal session's workflow is already closed, and Temporal
     # rejects signals to closed executions — so only signal an in-flight session

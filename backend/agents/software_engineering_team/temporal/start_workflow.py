@@ -10,7 +10,7 @@ import asyncio
 import logging
 from typing import Any, Dict, List, Optional
 
-from software_engineering_team.temporal.client import (
+from shared.temporal.client import (
     get_temporal_client,
     get_temporal_loop,
 )

@@ -63,13 +63,13 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple, Union
 
 from llm_service import LLMClient
+from shared.dev_models.models import ReviewContext, Task
 from software_engineering_team.code_review_agent.change_surface import (
     ChangeSurface,
     build_change_surface_from_pairs,
 )
 from software_engineering_team.shared.agent_review import AgentReviewCache
 from software_engineering_team.shared.llm_review import LlmReviewOutput
-from software_engineering_team.shared.models import ReviewContext, Task
 from software_engineering_team.shared.review_progress import (
     build_disk_repo_reader,
     call_code_review_agent,
@@ -298,6 +298,7 @@ def _code_review_step(
     review_context: Optional[ReviewContext] = None,
     detail_callback: Optional[Callable[[str], None]] = None,
     enable_llm_review_grounding: bool = True,
+    old_contents: Optional[Dict[str, str]] = None,
 ) -> _ReviewStepResult:
     """Independent code-review step: external agent (with LLM fallback), or LLM review alone.
 
@@ -319,17 +320,33 @@ def _code_review_step(
           ``typescript`` default. It returns an :class:`LlmReviewOutput` in
           production; a bare issue list is also accepted (see
           ``_unwrap_llm_review_result``) so a stub runner without a raw count is
-          unaffected.
+          unaffected. ``files=`` is always what this fallback receives, regardless of
+          ``old_contents`` -- only the external-agent's ``CodeReviewInput`` adopts the
+          surface (see ``old_contents`` below).
         - ``review_context`` bundles the caller's system architecture and project specification,
           when available; ``None`` means "nothing to add" so a caller that does not have this
           context yet keeps working unchanged.
         - ``enable_llm_review_grounding`` defaults True; forwarded to the LLM fallback
           (kill switch for ungrounded-claim filtering).
+        - ``old_contents``, when given, maps path -> previously resolved file text and is
+          forwarded to :func:`_maybe_build_change_surface_from_pairs` to attempt a diff-derived
+          surface for the external-agent's ``CodeReviewInput``. ``None`` (the default) means "no
+          base to diff against" and is *not* forwarded to that function -- unlike
+          ``_maybe_build_change_surface_from_pairs`` itself, which treats an explicit
+          ``old_contents=None`` as "every path is wholly new" (a meaningful diff), this step
+          only attempts a surface when a caller actually opts in with real (possibly empty)
+          previous-content data, so every existing caller that has no ``old_contents`` wiring
+          yet keeps today's ``files=`` behavior unchanged.
 
     Postconditions:
         - Returns a :class:`_ReviewStepResult`: ``issues`` from the agent or LLM fallback,
           and ``raw_issue_count`` from the LLM fallback when it ran (``None`` when the
           external agent succeeded or a bare-list stub reported no count).
+        - The external agent's ``CodeReviewInput`` is built with ``code=<surface>,
+          pre_numbered=True`` (no ``files=``) when ``old_contents`` is not ``None`` and
+          :func:`_maybe_build_change_surface_from_pairs` returns a non-empty surface for
+          ``(files, old_contents)``; otherwise it is built with ``files=files`` exactly as
+          before this parameter existed.
         - Never raises: an external ``code_review_agent`` failure logs a warning and falls back
           to the LLM reviewer, matching this step's long-standing solo behavior. The LLM fallback
           itself (used both here and when ``code_review_agent`` is None) is also guarded — any
@@ -357,14 +374,16 @@ def _code_review_step(
             )
 
             ctx = review_context or ReviewContext()
-            # files= keeps per-file attribution and lets the coordinator bound
-            # its own prompts — no header parsing, no upstream truncation.
+            surface = (
+                _maybe_build_change_surface_from_pairs(files, old_contents)
+                if old_contents is not None
+                else None
+            )
             # repo_root carries the workspace path as a serializable field so a
             # durable Temporal review can rebuild the whole-repo reader worker-side
             # (a live repo_reader object cannot cross that boundary); the live
             # reader below still drives the in-process/thread-mode path.
-            cr_input = _CRInput(
-                files=files,
+            cr_input_kwargs: Dict[str, Any] = dict(
                 task_description=task_description,
                 task_requirements=task.requirements or "",
                 acceptance_criteria=getattr(task, "acceptance_criteria", []) or [],
@@ -373,6 +392,18 @@ def _code_review_step(
                 spec_content=ctx.spec_content,
                 repo_root=str(repo_path),
             )
+            if surface is not None:
+                # A meaningful diff was built: submit the bounded, pre-numbered
+                # surface instead of full file bodies, matching api/pr_review.py's
+                # established happy-path shape.
+                cr_input_kwargs["code"] = surface.code
+                cr_input_kwargs["pre_numbered"] = True
+            else:
+                # No base to diff against (or nothing meaningful changed): files=
+                # keeps per-file attribution and lets the coordinator bound its own
+                # prompts — no header parsing, no upstream truncation.
+                cr_input_kwargs["files"] = files
+            cr_input = _CRInput(**cr_input_kwargs)
             cr_result = call_code_review_agent(
                 code_review_agent,
                 cr_input,
@@ -742,6 +773,7 @@ def run_review(
     build_verify_fn: Callable[..., Tuple[bool, str]],
     review_context: Optional[ReviewContext] = None,
     enable_llm_review_grounding: bool = True,
+    old_contents: Optional[Dict[str, str]] = None,
 ) -> ReviewResult:
     """Execute the shared Review phase over an execution result's files.
 
@@ -753,6 +785,10 @@ def run_review(
           unaffected.
         - ``enable_llm_review_grounding`` is forwarded to the LLM-fallback path
           (defaults True).
+        - ``old_contents`` is forwarded to the code-review step only (see
+          ``_code_review_step``'s ``old_contents``); ``None`` (the default) preserves the
+          existing ``files=``-only behavior for every caller that has no base-content
+          resolution wired in yet.
 
     Postconditions:
         - Returns a :class:`ReviewResult` whose ``passed`` reflects the team's
@@ -825,6 +861,7 @@ def run_review(
                 llm_review_fn=llm_review_fn,
                 review_context=review_context,
                 enable_llm_review_grounding=enable_llm_review_grounding,
+                old_contents=old_contents,
             ),
             lambda: _qa_review_step(
                 qa_agent=qa_agent,
@@ -902,6 +939,7 @@ def run_microtask_review(
     enable_llm_review_grounding: bool = True,
     agent_review_cache: Optional[AgentReviewCache] = None,
     tool_agent_cache: Optional[AgentReviewCache] = None,
+    old_contents: Optional[Dict[str, str]] = None,
 ) -> ReviewResult:
     """Run the shared full review on a single microtask's output files.
 
@@ -918,6 +956,10 @@ def run_microtask_review(
           ``software_engineering_team.shared.agent_review.run_chunked_agent_review``.
         - ``tool_agent_cache``, when given, is forwarded to the tool-agent fan-out
           step only — see ``_run_tool_agents_review``.
+        - ``old_contents`` is forwarded to the code-review step only (see
+          ``_code_review_step``'s ``old_contents``); ``None`` (the default) preserves the
+          existing ``files=``-only behavior for every caller that has no base-content
+          resolution wired in yet.
 
     Postconditions:
         - Returns a :class:`ReviewResult` scoped to ``files``; ``passed``
@@ -1014,6 +1056,7 @@ def run_microtask_review(
                 review_context=review_context,
                 detail_callback=detail_callback,
                 enable_llm_review_grounding=enable_llm_review_grounding,
+                old_contents=old_contents,
             ),
             lambda: _qa_review_step(
                 qa_agent=qa_agent,

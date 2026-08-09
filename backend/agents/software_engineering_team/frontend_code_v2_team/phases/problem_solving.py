@@ -16,7 +16,11 @@ from typing import Any, Callable, Dict, List, Optional
 from strands import Agent
 
 from llm_service import LLMClient
-from software_engineering_team.shared.models import Task
+from llm_service.strands_model import (
+    LlmRunner,
+    resolve_text_mode_strands_model,
+)
+from shared.dev_models.models import Task
 from software_engineering_team.shared.phases.problem_solving import (
     MAX_ITERATIONS_PER_ISSUE,
     _format_all_code,
@@ -25,10 +29,6 @@ from software_engineering_team.shared.phases.problem_solving import (
     run_batch_coding_fixes_impl,
     run_problem_solving_for_microtask_impl,
     run_problem_solving_impl,
-)
-from software_engineering_team.shared.strands_model import (
-    LlmRunner,
-    resolve_text_mode_strands_model,
 )
 
 from .. import models as _models

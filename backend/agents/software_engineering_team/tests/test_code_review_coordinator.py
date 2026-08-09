@@ -394,7 +394,7 @@ def test_shared_context_compaction_is_memoized_across_runs() -> None:
     """The oversized spec/architecture/existing-codebase are compacted once and
     reused on the next coordinator run (the review→fix→re-review loop passes the
     same shared context each cycle)."""
-    from software_engineering_team.shared.models import SystemArchitecture
+    from shared.dev_models.models import SystemArchitecture
 
     over_budget = "specification detail line. " * 4000  # well over any budget
     arch = SystemArchitecture(
@@ -430,7 +430,7 @@ def test_render_architecture_context_folds_in_components_and_decisions() -> None
     """The architecture excerpt built for the reviewer includes not just the
     overview prose but component responsibilities and architecture decisions
     (ADRs) -- the concrete signal an architecture-consistency check needs."""
-    from software_engineering_team.shared.models import ArchitectureComponent, SystemArchitecture
+    from shared.dev_models.models import ArchitectureComponent, SystemArchitecture
 
     arch = SystemArchitecture(
         overview="Layered service architecture.",
@@ -457,7 +457,7 @@ def test_render_architecture_context_handles_missing_and_malformed_fields() -> N
     """
     from types import SimpleNamespace
 
-    from software_engineering_team.shared.models import SystemArchitecture
+    from shared.dev_models.models import SystemArchitecture
 
     bare = SystemArchitecture(overview="Just an overview.")
     rendered_bare = _render_architecture_context(bare)
@@ -471,7 +471,7 @@ def test_render_architecture_context_handles_missing_and_malformed_fields() -> N
 def test_chunk_prompt_includes_component_and_decision_text() -> None:
     """End-to-end: a submission reviewed with a component/decision-bearing
     architecture renders that content into the chunk reviewer's prompt."""
-    from software_engineering_team.shared.models import ArchitectureComponent, SystemArchitecture
+    from shared.dev_models.models import ArchitectureComponent, SystemArchitecture
 
     class _PromptCapturingClient(DummyLLMClient):
         """Records prompts; lock-guarded for parallel map/tail callers."""

@@ -17,7 +17,8 @@ import logging
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional
 
-from software_engineering_team.shared import git_utils, repo_writer
+from shared.git import git_utils
+from software_engineering_team.shared import repo_writer
 from software_engineering_team.shared.deliver_utils import (
     DeliverGitOps,
     deliver_inline_merge,
