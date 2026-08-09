@@ -5,11 +5,13 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, Optional, Tuple
 
 from shared.git.branch_utils import make_branch_suffix, make_slug
 from shared.git.git_utils import DEVELOPMENT_BRANCH
 from software_engineering_team.shared.v2_models import DeliverResult
+
+BuildVerifier = Callable[[Path, str, str], Tuple[bool, str]]
 
 
 class FilesPayload:
@@ -127,6 +129,73 @@ def prepare_handoff_branch(
     return result
 
 
+def run_pre_merge_quality_gate(
+    *,
+    repo_path: Path,
+    task_id: str,
+    build_verifier: Optional[BuildVerifier] = None,
+    build_verify_label: str = "",
+    linting_tool_agent: Any = None,
+    lint_agent_type: str = "",
+    logger: logging.Logger,
+) -> Tuple[bool, str]:
+    """Run a whole-repo build/lint check on the final delivered state before merge.
+
+    Compensating gate for the standalone code-v2 endpoints, which invoke
+    ``run_workflow`` with ``merge_to_development`` defaulting to ``True`` and no
+    subsequent Tech Lead re-review (unlike the swarm-orchestrated path). Mirrors
+    the per-microtask build/lint check in ``v2_review.py`` but runs once, here,
+    immediately before a merge actually happens.
+
+    Preconditions:
+        ``repo_path`` reflects the final delivered file state (already written
+        and committed) when this is called.
+    Postconditions:
+        Returns ``(True, "")`` when both checks pass or are skipped (verifier/
+        agent is ``None``). A build failure -- returned or raised -- fails
+        closed: returns ``(False, reason)``. A genuine lint failure (the tool
+        ran and reported issues) also fails closed. An exception raised by the
+        lint tool itself (infrastructure failure, not a lint violation) fails
+        open and is logged, matching the per-microtask lint check's philosophy.
+        Never raises.
+    """
+    failures: list[str] = []
+
+    if build_verifier is not None:
+        try:
+            build_ok, build_msg = build_verifier(repo_path, build_verify_label, task_id)
+        except Exception as exc:
+            build_ok, build_msg = False, str(exc)
+        if not build_ok:
+            failures.append(f"Build failed: {build_msg}")
+
+    if linting_tool_agent is not None:
+        try:
+            from software_engineering_team.linting_tool_agent.models import (
+                LintToolInput as _LintInput,
+            )
+            from software_engineering_team.shared.v2_review import _lint_passed
+
+            lint_result = linting_tool_agent.run(
+                _LintInput(
+                    repo_path=str(repo_path),
+                    agent_type=lint_agent_type,
+                    task_id=task_id,
+                    task_description="",
+                )
+            )
+            if lint_result and not _lint_passed(lint_result):
+                failures.append("Lint failed.")
+        except Exception as exc:
+            logger.warning(
+                "[%s] Pre-merge quality gate: linting tool agent failed: %s", task_id, exc
+            )
+
+    if failures:
+        return False, "; ".join(failures)
+    return True, ""
+
+
 def deliver_inline_merge(
     *,
     task_id: str,
@@ -137,6 +206,10 @@ def deliver_inline_merge(
     commit_msg_template: str,
     ops: DeliverGitOps,
     logger: logging.Logger,
+    build_verifier: Optional[BuildVerifier] = None,
+    build_verify_label: str = "",
+    linting_tool_agent: Any = None,
+    lint_agent_type: str = "",
 ) -> DeliverResult:
     """Create a feature branch, write files, merge it, and restore development."""
     result = DeliverResult()
@@ -164,6 +237,21 @@ def deliver_inline_merge(
         ops.checkout_branch(repo_path, DEVELOPMENT_BRANCH)
         return result
     result.commit_messages.append(commit_msg)
+
+    gate_ok, gate_msg = run_pre_merge_quality_gate(
+        repo_path=repo_path,
+        task_id=task_id,
+        build_verifier=build_verifier,
+        build_verify_label=build_verify_label,
+        linting_tool_agent=linting_tool_agent,
+        lint_agent_type=lint_agent_type,
+        logger=logger,
+    )
+    if not gate_ok:
+        result.summary = f"Pre-merge quality gate failed: {gate_msg}"
+        logger.error("[%s] Deliver: %s", task_id, result.summary)
+        ops.checkout_branch(repo_path, DEVELOPMENT_BRANCH)
+        return result
 
     merge_ok, merge_msg = ops.merge_branch(repo_path, result.branch_name, DEVELOPMENT_BRANCH)
     if not merge_ok:

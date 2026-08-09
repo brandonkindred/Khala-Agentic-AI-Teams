@@ -578,6 +578,10 @@ class BaseV2DevelopmentAgent:
         logger: logging.Logger,
         team_label: str,
         deliver_in_progress_status: str,
+        build_verifier: Optional[Callable[..., Tuple[bool, str]]] = None,
+        build_verify_label: str = "",
+        linting_tool_agent: Any = None,
+        lint_agent_type: str = "",
     ) -> Optional[str]:
         """Run deliver, then emit final job status and workflow timing log.
 
@@ -594,7 +598,12 @@ class BaseV2DevelopmentAgent:
           ``result`` is a mutable workflow-result object with ``current_phase``,
           ``deliver_result``, ``success``, ``summary``, ``needs_followup``, and
           ``failure_reason`` attributes. ``start_time`` was captured via
-          ``time.monotonic()`` before this helper runs.
+          ``time.monotonic()`` before this helper runs. ``build_verifier``/
+          ``linting_tool_agent`` (with their ``build_verify_label``/
+          ``lint_agent_type`` labels), when provided, are forwarded into
+          ``run_deliver`` as a compensating pre-merge build/lint gate for the
+          ``merge_to_development=True`` case; ``None`` (the default) skips the
+          gate, matching the swarm-orchestrated path's existing behavior.
         Postconditions: on a non-raising ``run_deliver`` result (including soft
           failure where ``merged``/``branch_ready`` is false), mutates ``result``
           (sets ``deliver_result``, ``success``, ``summary``, and optionally
@@ -628,6 +637,10 @@ class BaseV2DevelopmentAgent:
                 task_description=task_description,
                 feature_branch_name=feature_branch_name,
                 merge_to_development=merge_to_development,
+                build_verifier=build_verifier,
+                build_verify_label=build_verify_label,
+                linting_tool_agent=linting_tool_agent,
+                lint_agent_type=lint_agent_type,
             )
             result.deliver_result = deliver_result
             delivered = (
@@ -880,6 +893,10 @@ class BaseV2DevelopmentAgent:
         )
 
         # ── Deliver ─────────────────────────────────────────────────
+        # ``PROFILE`` is a concrete-subclass class attribute (Backend/FrontendDevelopmentAgent);
+        # absent on a bare ``BaseV2DevelopmentAgent`` (e.g. unit tests), where the labels are
+        # unused anyway since such callers also don't pass build_verifier/linting_tool_agent.
+        stack_profile = getattr(self, "PROFILE", None)
         self._run_deliver_and_finalize(
             task_id=task_id,
             repo_path=repo_path,
@@ -899,6 +916,10 @@ class BaseV2DevelopmentAgent:
             logger=logger,
             team_label=team_label,
             deliver_in_progress_status=deliver_in_progress_status,
+            build_verifier=build_verifier,
+            build_verify_label=stack_profile.build_verify_label if stack_profile else "",
+            linting_tool_agent=linting_tool_agent,
+            lint_agent_type=stack_profile.name if stack_profile else "",
         )
         return result
 
