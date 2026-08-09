@@ -34,7 +34,7 @@ Invariants:
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Callable, List, Optional, Tuple, TypeVar, Union
 
 from strands import Agent
@@ -240,6 +240,25 @@ def _shrink_items(
     return shrunk if changed else None
 
 
+def _shrink_budgets(budgets: SubmissionPassBudgets) -> SubmissionPassBudgets:
+    """Halve the per-call inline-code budget for one shrink retry.
+
+    A ``build_prompt`` that truncates each file to
+    ``budgets.max_inline_code_chars`` (rather than to that file's own,
+    already-shrunk length) would otherwise render an identical prefix on the
+    shrink retry whenever a file's content is at least twice the budget —
+    :func:`_shrink_items` alone cannot guarantee a smaller rendered payload
+    in that case. Shrinking the budget alongside the content means at least
+    one of the two signals a compliant ``build_prompt`` can act on always
+    shrinks.
+
+    Postconditions: returns a new ``SubmissionPassBudgets`` with
+        ``max_inline_code_chars`` halved (``>= 0``); every other field is
+        unchanged. Never mutates ``budgets``.
+    """
+    return replace(budgets, max_inline_code_chars=budgets.max_inline_code_chars // 2)
+
+
 def _with_output_budget(
     model: "Union[LLMClient, _StrandsModel]",
     *,
@@ -369,9 +388,13 @@ def _recover_from_overflow(
           :attr:`FileBatch.is_partial` is True, since neither contains all of
           ``batch.items``.
         - Otherwise (a single file, or the depth cap reached) attempts exactly
-          one shrink-and-retry (:func:`_shrink_items`) with a fresh ``Agent``
-          call, also marked ``is_partial=True`` (the shrunk content is not
-          the full file body); returns ``[result]`` on success.
+          one shrink-and-retry with a fresh ``Agent`` call: both the item
+          content (:func:`_shrink_items`) and the inline-code budget
+          (:func:`_shrink_budgets`) shrink together, so the retry's rendered
+          payload is smaller even when ``build_prompt`` truncates by budget
+          rather than by content length. The retry batch is marked
+          ``is_partial=True`` (the shrunk content is not the full file body);
+          returns ``[result]`` on success.
         - Returns ``[]`` when nothing can be shrunk further, or the shrink
           retry itself still raises — logged, never raised.
     """
@@ -428,8 +451,9 @@ def _recover_from_overflow(
         exc,
     )
     shrink_batch = FileBatch(items=shrunk, index=batch.index, total=batch.total, is_partial=True)
+    shrink_budgets = _shrink_budgets(budgets)
     try:
-        prompt = build_prompt(shrink_batch, budgets)
+        prompt = build_prompt(shrink_batch, shrink_budgets)
         result = _call_agent(model, system_prompt, tools, prompt, parse)
     except Exception as retry_exc:  # noqa: BLE001 - one shrink attempt only
         logger.warning(

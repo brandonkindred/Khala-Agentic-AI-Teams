@@ -377,6 +377,50 @@ def test_reactive_shrink_recovers_when_single_file_batch_overflows(
     assert [b.is_partial for b in seen_batches] == [False, True]
 
 
+def test_reactive_shrink_reduces_budget_when_content_dwarfs_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When one file's content is far larger than the inline budget, a
+    compliant build_prompt truncates to budgets.max_inline_code_chars rather
+    than to the item's own length — so halving only the raw content
+    (_shrink_items) renders an identical truncated prefix on retry. The
+    runner must also shrink the budget it hands to build_prompt so the
+    retry's rendered payload is actually smaller."""
+    monkeypatch.setattr(
+        runner_mod,
+        "compute_code_review_merged_pass_budgets",
+        lambda *a, **k: _fixed_budgets(max_inline_code_chars=100),
+    )
+    rendered_lengths: List[int] = []
+
+    def build_prompt(batch: FileBatch, budgets: Any) -> str:
+        rendered = batch.items[0][1][: budgets.max_inline_code_chars]
+        rendered_lengths.append(len(rendered))
+        return "LEN:" + str(len(rendered))
+
+    class _Client(DummyLLMClient):
+        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+            length = int(prompt.replace("LEN:", ""))
+            if length >= 100:
+                raise MaxTokensReachedException("output too long for this much input")
+            return {"ok": True, "len": length}
+
+    files = [("only.py", "X" * 1_000)]  # far larger than the 100-char budget
+    result = run_submission_pass(
+        _Client(),
+        changed_files=files,
+        system_prompt="sys",
+        build_prompt=build_prompt,
+        tools=[],
+        parse=json.loads,
+    )
+    # Without shrinking the budget too, the retry would render the identical
+    # 100-char prefix and still overflow. The budget shrinking to 50 lets the
+    # retry actually send less.
+    assert rendered_lengths == [100, 50]
+    assert result == [{"ok": True, "len": 50}]
+
+
 def test_reactive_shrink_gives_up_after_one_failed_retry(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
