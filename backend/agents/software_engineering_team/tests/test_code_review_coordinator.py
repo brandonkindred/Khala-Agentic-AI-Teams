@@ -2768,8 +2768,9 @@ def test_unrecognized_category_is_clamped_to_general() -> None:
 
 def test_side_effects_category_survives_chunk_output_validation() -> None:
     """Regression test: the "side-effects" category (advertised to the chunk
-    reviewer by profiles.py's checklist item 12 / output contract) must be
-    accepted by the same validator as every other documented category -- it
+    reviewer by profiles.py's "Caller Side Effects" criterion, item 3, /
+    output contract) must be accepted by the same validator as every other
+    documented category -- it
     was previously missing from _VALID_CATEGORIES, silently clamping every
     chunk-level side-effects finding to "general" and losing its
     classification for rendering/grouping/dedup."""
@@ -2784,8 +2785,8 @@ def test_side_effects_category_survives_chunk_output_validation() -> None:
 
 def test_documentation_category_survives_chunk_output_validation() -> None:
     """The "documentation" category (advertised to the chunk reviewer by
-    profiles.py's Documentation criterion / output contract, and used for a
-    docstring-vs-implementation mismatch) must be accepted by the same
+    profiles.py's "Contracts" criterion, item 2, / output contract, and used
+    for a docstring-vs-implementation mismatch) must be accepted by the same
     validator as every other documented category rather than clamped to
     "general" -- mirrors the side-effects regression above."""
     seg = FileSegment(path="a.py", content="x = 1", total_lines=1)

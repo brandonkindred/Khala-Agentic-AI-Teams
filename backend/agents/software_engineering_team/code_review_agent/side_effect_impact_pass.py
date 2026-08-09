@@ -3,10 +3,11 @@
 The map-reduce reviewer (``coordinator.py``) flags issues from *bounded
 chunks*, and even the checklist item that asks the chunk reviewer to notice a
 behavior change in the function/method it is editing (see
-``profiles._CODE_REVIEW_CRITERIA`` item 12) has no tools and cannot see beyond
-the chunk it was given — it can flag that a function's contract *looks* like
-it changed, but it can never know who else in the codebase calls that
-function, or whether the new behavior breaks them. Neither the false-positive
+``profiles._CODE_REVIEW_CRITERIA`` item 3, Caller Side Effects) has no tools
+and cannot see beyond the chunk it was given — it can flag that a function's
+contract *looks* like it changed, but it can never know who else in the
+codebase calls that function, or whether the new behavior breaks them.
+Neither the false-positive
 filter nor the architecture-consistency pass answers that question either:
 both operate over *this submission's* files (plus, via ``RepoReader``, read
 access to the rest of the repository), but neither searches the wider
