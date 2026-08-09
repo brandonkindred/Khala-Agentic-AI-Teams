@@ -190,8 +190,12 @@ _SHARED_OUTPUT_SECTION = (
     'part of it because it "looks fine"\n'
     "- Do NOT extend that obligation to code shown to you only as background -- the separate "
     '"Existing codebase" input, or a file outside this task\'s submission -- merely because it was '
-    "included for context. A genuine, self-evident defect you notice there may still be reported "
-    '-- mark it "pre_existing": true -- but do not go hunting for it as a required task\n'
+    "included for context. When the criteria above do not restrict which issue types you may "
+    "emit, a genuine, self-evident defect you notice there may still be reported -- mark it "
+    '"pre_existing": true -- but do not go hunting for it as a required task. When the criteria '
+    "above DO restrict which issues you may emit (e.g. exactly one issue per unmet acceptance "
+    "criterion, in the criterion's required shape), follow that restriction instead: never emit an "
+    "issue outside it, even one you are confident is a genuine defect\n"
     "- Your issue descriptions MUST be comprehensive and self-contained:\n"
     "  - Include the EXACT file path and line numbers where possible\n"
     "  - Quote the problematic code snippet directly\n"
