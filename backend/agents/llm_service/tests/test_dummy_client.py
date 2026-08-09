@@ -18,6 +18,7 @@ from pydantic import BaseModel
 
 from llm_service import DummyLLMClient
 from llm_service.clients.dummy import (
+    _DEFAULT_DUMMY_CONTEXT_TOKENS,
     _PHASE3_SPECIALIST_REGISTRY,
     _STRIP_FILLERS,
     _STRIP_SUFFIXES,
@@ -40,6 +41,7 @@ from llm_service.clients.dummy import (
 def test_dummy_get_max_context_tokens() -> None:
     c = DummyLLMClient()
     assert c.get_max_context_tokens() == 16384
+    assert c.get_max_context_tokens() == _DEFAULT_DUMMY_CONTEXT_TOKENS
 
 
 def test_dummy_complete_returns_str() -> None:
@@ -47,6 +49,14 @@ def test_dummy_complete_returns_str() -> None:
     s = c.complete("hello", temperature=0.5)
     assert isinstance(s, str)
     assert "Dummy" in s
+
+
+def test_dummy_complete_docstring_documents_contract() -> None:
+    doc = " ".join((DummyLLMClient.complete.__doc__ or "").split()).lower()
+    assert "making a real llm call" in doc
+    assert "preconditions:" in doc
+    assert "postconditions:" in doc
+    assert "_request_count" in doc
 
 
 def test_dummy_complete_json_returns_dict() -> None:

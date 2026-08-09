@@ -24,6 +24,8 @@ class SharedCache(Protocol):
     def get(self, key: str) -> Optional[bytes]:
         """Return the cached payload for ``key``, or ``None`` on miss.
 
+        Preconditions:
+            - ``key`` is an opaque, non-empty string.
         Postconditions:
             - Returns the exact bytes previously ``set``, or ``None``.
             - Never raises for a backend outage (returns ``None`` instead).
@@ -44,6 +46,8 @@ class SharedCache(Protocol):
     def delete(self, key: str) -> None:
         """Drop a single key (and any associated single-flight markers).
 
+        Preconditions:
+            - ``key`` is an opaque, non-empty string.
         Postconditions:
             - Subsequent ``get(key)`` misses until a new ``set``. Backend
               failures are swallowed (fail-open). Used to evict corrupt entries.
@@ -87,6 +91,8 @@ class SharedCache(Protocol):
     def clear(self) -> Optional[int]:
         """Drop every entry in this namespace.
 
+        Preconditions:
+            - None.
         Postconditions:
             - Returns the number of entries removed on success, or ``None`` when
               a backend failure aborts the clear (Redis fail-open). Subsequent

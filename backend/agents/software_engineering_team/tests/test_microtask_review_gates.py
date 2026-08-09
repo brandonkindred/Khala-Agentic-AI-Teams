@@ -20,34 +20,13 @@ from unittest.mock import MagicMock
 import pytest
 
 if TYPE_CHECKING:
-    from software_engineering_team.shared.models import Task
+    from shared.dev_models.models import Task
 
 _team_dir = Path(__file__).resolve().parent.parent
 if str(_team_dir) not in sys.path:
     sys.path.insert(0, str(_team_dir))
 
 from llm_service.clients.dummy import DummyLLMClient  # noqa: E402
-
-
-class _TextStubClient(DummyLLMClient):
-    """Returns a canned text response from ``complete_json()`` to simulate the
-    legacy text-template review path."""
-
-    def __init__(self, text: str = "") -> None:
-        super().__init__()
-        self._text = text
-
-    def complete_json(
-        self,
-        prompt: str,
-        *,
-        temperature: float = 0.0,
-        system_prompt: Optional[str] = None,
-        tools: Optional[list] = None,
-        think: bool = False,
-        **kwargs: Any,
-    ) -> Any:
-        return self._text
 
 
 class _ScriptedTextClient(DummyLLMClient):
@@ -95,9 +74,17 @@ class _CallableTextClient(DummyLLMClient):
         return self._fn(prompt)
 
 
+_CLEAN_COORDINATOR_APPROVAL = {
+    "approved": True,
+    "issues": [],
+    "summary": "All good.",
+    "spec_compliance_notes": "",
+}
+
+
 def _create_test_task(task_type: str = "frontend") -> "Task":
     """Create a valid Task object for testing."""
-    from software_engineering_team.shared.models import Task, TaskStatus, TaskType
+    from shared.dev_models.models import Task, TaskStatus, TaskType
 
     return Task(
         id="task-1",
@@ -199,9 +186,10 @@ class TestFrontendRunMicrotaskReview:
         mt = Microtask(id="mt-1", title="Test Microtask")
         files = {"src/app.ts": "const x = 1;"}
 
-        mock_llm = _TextStubClient(
-            "## REVIEW_STATUS ##\npassed\n\n## ISSUES ##\n\n## SUMMARY ##\nNo issues found.\n"
-        )
+        # DummyLLMClient's built-in "code to review"/"senior code reviewer"
+        # catch-all already returns an approved, issue-free CodeReviewOutput
+        # for the coordinator's chunk-review call.
+        mock_llm = DummyLLMClient()
 
         # Provide mock QA and security agents that return no issues
         # (without these, fail-closed gates correctly flag missing agents)
@@ -230,9 +218,27 @@ class TestFrontendRunMicrotaskReview:
         mt = Microtask(id="mt-1", title="Test Microtask")
         files = {"src/app.ts": "const x = eval(input);"}
 
-        mock_llm = _TextStubClient(
-            "## REVIEW_STATUS ##\nfailed\n\n## ISSUES ##\n---\nsource: security\nseverity: critical\ndescription: Use of eval() is a security vulnerability\nfile_path: src/app.ts\nrecommendation: Remove eval and use safer alternatives\n---\n## END ISSUES ##\n\n## SUMMARY ##\nCritical security issue found.\n## END SUMMARY ##"
-        )
+        def _respond(prompt: str) -> Any:
+            # The coordinator's chunk reviewer calls complete_json directly
+            # and needs a schema-shaped dict (matches DummyLLMClient's own
+            # "code to review" catch-all anchor text).
+            assert "code to review" in prompt.lower()
+            return {
+                "approved": False,
+                "issues": [
+                    {
+                        "severity": "critical",
+                        "category": "logic",
+                        "file_path": "src/app.ts",
+                        "description": "Use of eval() is a security vulnerability",
+                        "suggestion": "Remove eval and use safer alternatives",
+                    }
+                ],
+                "summary": "Critical security issue found.",
+                "spec_compliance_notes": "",
+            }
+
+        mock_llm = _CallableTextClient(_respond)
 
         result = run_microtask_review(
             llm=mock_llm,
@@ -258,9 +264,7 @@ class TestFrontendAgentReviewCache:
         mt = Microtask(id="mt-1", title="Test Microtask")
         files = {"src/app.ts": "const x = 1;"}
 
-        mock_llm = _TextStubClient(
-            "## REVIEW_STATUS ##\npassed\n\n## ISSUES ##\n\n## SUMMARY ##\nNo issues found.\n"
-        )
+        mock_llm = DummyLLMClient()
         mock_qa = MagicMock()
         mock_qa.run.return_value = MagicMock(bugs_found=[], issues=[])
         mock_sec = MagicMock()
@@ -292,9 +296,7 @@ class TestFrontendAgentReviewCache:
         mt = Microtask(id="mt-1", title="Test Microtask")
         files = {"src/app.ts": "const x = 1;"}
 
-        mock_llm = _TextStubClient(
-            "## REVIEW_STATUS ##\npassed\n\n## ISSUES ##\n\n## SUMMARY ##\nNo issues found.\n"
-        )
+        mock_llm = DummyLLMClient()
         mock_qa = MagicMock()
         mock_qa.run.return_value = MagicMock(bugs_found=[], issues=[])
         mock_sec = MagicMock()
@@ -358,7 +360,15 @@ class TestFrontendRunExecutionWithReviewGates:
 
         _call_count = [0]
 
-        def _side_effect(prompt: str) -> str:
+        def _side_effect(prompt: str) -> Any:
+            # The coordinator's chunk reviewer calls complete_json directly and
+            # needs a schema-shaped dict; code generation (and any remaining
+            # text-template step, e.g. documentation self-review) goes through
+            # the Strands Agent/stream() path and needs raw template text --
+            # branch on the chunk-review prompt's own anchor text (matches
+            # DummyLLMClient's own "code to review" catch-all).
+            if "code to review" in prompt.lower():
+                return _CLEAN_COORDINATOR_APPROVAL
             _call_count[0] += 1
             if _call_count[0] == 1:
                 # First call: execution (file generation)
@@ -366,7 +376,8 @@ class TestFrontendRunExecutionWithReviewGates:
                     "\n## FILE src/app.ts ##\n"
                     "export const app = () => console.log('Hello');\n\n## SUMMARY ##\nCreated app module.\n"
                 )
-            # All subsequent calls: reviews and documentation self-review
+            # Any remaining non-review text-template call (e.g. documentation
+            # self-review).
             return "\n## REVIEW_STATUS ##\npassed\n\n## ISSUES ##\n\n## SUMMARY ##\nAll good.\n"
 
         mock_llm = _CallableTextClient(_side_effect)
@@ -410,7 +421,20 @@ class TestFrontendRunExecutionWithReviewGates:
         mock_llm = _ScriptedTextClient(
             [
                 "## FILES ##\n--- src/bad.ts ---\nconst x = eval('danger');\n---\n\n## SUMMARY ##\nCreated code with security issue.\n",
-                "## REVIEW_STATUS ##\nfailed\n\n## ISSUES ##\n---\nsource: security\nseverity: critical\ndescription: eval is dangerous\nfile_path: src/bad.ts\nrecommendation: Fix it\n---\n## END ISSUES ##\n\n## SUMMARY ##\nSecurity issue found.\n## END SUMMARY ##",
+                {
+                    "approved": False,
+                    "issues": [
+                        {
+                            "severity": "critical",
+                            "category": "logic",
+                            "file_path": "src/bad.ts",
+                            "description": "eval is dangerous",
+                            "suggestion": "Fix it",
+                        }
+                    ],
+                    "summary": "Security issue found.",
+                    "spec_compliance_notes": "",
+                },
             ]
         )
 
@@ -540,12 +564,19 @@ class TestFrontendQaSecurityGateToolAgentScoping:
 
         _call_count = [0]
 
-        def _side_effect(prompt: str) -> str:
+        def _side_effect(prompt: str) -> Any:
+            # The coordinator's chunk reviewer calls complete_json directly and
+            # needs a schema-shaped dict; code generation goes through the
+            # Strands Agent/stream() path and needs raw template text -- branch
+            # on the chunk-review prompt's own anchor text (matches
+            # DummyLLMClient's own "code to review" catch-all).
+            if "code to review" in prompt.lower():
+                return _CLEAN_COORDINATOR_APPROVAL
             _call_count[0] += 1
             if _call_count[0] == 1:
                 return (
-                    "\n## FILES ##\n--- src/app.ts ---\n"
-                    "export const app = () => console.log('Hello');\n---\n\n"
+                    "\n## FILE src/app.ts ##\n"
+                    "export const app = () => console.log('Hello');\n\n"
                     "## SUMMARY ##\nCreated app module.\n"
                 )
             return "\n## REVIEW_STATUS ##\npassed\n\n## ISSUES ##\n\n## SUMMARY ##\nAll good.\n"

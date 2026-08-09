@@ -411,6 +411,29 @@ def test_run_backtest_activity_reports_cancelled_status(monkeypatch) -> None:
     assert result == {"job_id": "job-cancelled", "status": "cancelled"}
 
 
+def test_run_backtest_activity_reports_missing_status(monkeypatch) -> None:
+    """A job row deleted out from under the worker (``DELETE /backtests/jobs/{id}``
+    racing the run) must be reported as ``missing``, not misreported as
+    ``cancelled`` — no cancellation actually happened, and retrying is pointless
+    since there is no row left to retry against."""
+    from investment_team import models as inv_models
+    from investment_team.api import main as api_main
+    from investment_team.temporal.workflows import run_backtest_activity
+
+    monkeypatch.setattr(inv_models, "StrategySpec", lambda **kw: object())
+    monkeypatch.setattr(inv_models, "BacktestConfig", lambda **kw: object())
+    monkeypatch.setattr(api_main, "_backtest_job_status", lambda jid: None)
+    monkeypatch.setattr(
+        api_main,
+        "_run_backtest_background",
+        lambda *a: api_main._BT_JOB_STATUS_MISSING,
+    )
+
+    result = run_backtest_activity("job-missing", {}, {}, "agent", [])
+
+    assert result == {"job_id": "job-missing", "status": "missing"}
+
+
 def test_run_backtest_activity_raises_on_non_terminal_status(monkeypatch) -> None:
     """A worker return value that is none of the three known terminal statuses
     (e.g. a stuck/non-terminal ``pending``/``running`` status — the modern
@@ -657,6 +680,7 @@ def api_client(monkeypatch):
     monkeypatch.setattr(_run_state, "active_runs", active_runs)
     monkeypatch.setattr(api_main, "_persist_run_state", lambda *a, **k: None)
     monkeypatch.setattr(orchestrator_api, "_persist_run_state", lambda *a, **k: None)
+
     # Dispatch-failure paths call ``_fail_strategy_lab_run``, which schedules a
     # 900s daemon ``threading.Timer``. Stub it so 503 route tests do not leave
     # real timers running for the suite process.

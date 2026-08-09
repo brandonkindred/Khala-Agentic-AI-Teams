@@ -230,7 +230,7 @@ export LLM_MODEL=kimi-k2.7-code:cloud
 python -m agent_implementations.run_api_server
 ```
 
-Ensure Ollama is running with the model (e.g. `ollama run kimi-k2.7-code:cloud`). If you use a different API (OpenRouter, Together, etc.) or get a "model not found" error, set `LLM_MODEL` to a model your API supports (e.g. `export LLM_MODEL=llama3.2` for Ollama, or your provider's model id). Note this only takes effect when the Postgres provider list is empty or the matching entry's model field is blank — otherwise the provider list value wins.
+Ensure Ollama is running with the model (e.g. `ollama run kimi-k2.7-code:cloud`). If you use a different API (OpenRouter, Together, etc.) or get a "model not found" error, set `LLM_MODEL` to a model your API supports (e.g. `export LLM_MODEL=deepseek-v4-flash:cloud` for Ollama, or your provider's model id). Note this only takes effect when the Postgres provider list is empty or the matching entry's model field is blank — otherwise the provider list value wins.
 
 **Per-phase retry limits:** each per-microtask review gate (Code Review, QA, Security, Documentation) has a hardcoded retry cap of `3` fix attempts (`max_retries`/`code_review_max_retries`/`qa_max_retries`/`security_max_retries`/`documentation_max_retries` on `MicrotaskReviewConfig`/`BaseMicrotaskReviewConfig` in `backend_code_v2_team/models.py`, `frontend_code_v2_team/models.py`, and `shared/v2_models.py`). These are not environment-configurable.
 
@@ -364,7 +364,7 @@ software_engineering_team/
 │                          # the coding-team engine's own app-assembly hub + routers
 ├── agent_implementations/
 │   └── run_api_server.py  # HTTP API entry point (uvicorn)
-├── shared/                # LLM client, models, coding_standards, git_utils, plan_dir,
+├── shared/                # LLM client, coding_standards, plan_dir,
 │                          # phases/, deliver_utils, logging_config, ...
 │
 │  # --- Design / setup ---
@@ -462,6 +462,29 @@ Leaf agents (direct children of `software_engineering_team/`, e.g. `qa_agent/`, 
 - `prompts.py` – LLM prompt templates
 
 Sub-team orchestrators (`backend_code_v2_team/`, `frontend_code_v2_team/`, `devops_team/`, `ai_agent_development_team/`, etc.) instead use `orchestrator.py`, `phases/`, and `tool_agents/`.
+
+## Caching (shared.cache / Redis)
+
+`shared/cache/` (`get_shared_cache(namespace: str)` in `shared/cache/factory.py`) is a small Redis-backed caching abstraction with an automatic in-process fallback. In this team it backs:
+
+- **Code review agent** (`code_review_agent/mapping.py`, `coordinator.py`): the per-chunk review-outcome cache and the whole-submission short-circuit cache.
+- **LLM service compaction** (`llm_service/compaction.py`): `compact_text` memoization.
+
+**Backend selection:** if `REDIS_URL` or `REDIS_HOST` is set (non-blank), `shared.cache` attempts to build a `RedisBackend`; otherwise it uses an in-process `MemoryBackend` directly, without ever trying Redis. Any failure building or talking to Redis (bad config, missing `redis` package, connection/runtime error) is logged (messages contain `shared.cache`) and the cache **fails open** — the operation falls back to memory / a cache miss / local recompute. A Redis outage can only reduce cache hit rate; it never fails a code review or a compaction call.
+
+**Redis configuration (environment variables):**
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `REDIS_URL` | Full Redis connection URL; wins over host/port/password when set | none |
+| `REDIS_HOST` | Redis hostname (bare host, no port); with `REDIS_URL` blank, enables the Redis backend | none |
+| `REDIS_PORT` | Redis port | `6379` |
+| `REDIS_PASSWORD` | Redis auth password | none |
+| `REDIS_DB` | Redis logical DB index | `0` |
+| `REDIS_CACHE_TTL_S` | TTL (seconds) for cached values | `3600` |
+| `REDIS_KEY_PREFIX` | Prefix for all `shared.cache` Redis keys | `khala` |
+
+See [docs/ENV_VARS.md](../../../docs/ENV_VARS.md) for the complete reference, including `KHALA_CACHE_BUILD_ID` / `KHALA_BUILD_ID` (build-id namespace suffixing), single-flight lock/waiter timing (`REDIS_LOCK_TTL_S`, `REDIS_WAITER_POLL_S`, `REDIS_WAITER_TIMEOUT_S`, `REDIS_RESULT_TTL_S`), and connection/socket tuning.
 
 ## DevOps Engineering Team (`devops_team/`)
 

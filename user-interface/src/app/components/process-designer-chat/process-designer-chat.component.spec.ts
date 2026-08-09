@@ -128,6 +128,16 @@ describe('ProcessDesignerChatComponent', () => {
     fixture.detectChanges();
   });
 
+  function createFlowchartFixture(proc: ProcessDefinition): ComponentFixture<ProcessDesignerChatComponent> {
+    api.createConversation.mockReturnValueOnce(
+      of({ conversation_id: 'c-flow', messages: [], current_process: proc, suggested_questions: [] }),
+    );
+    const flowFixture = TestBed.createComponent(ProcessDesignerChatComponent);
+    flowFixture.componentInstance.team = team();
+    flowFixture.detectChanges();
+    return flowFixture;
+  }
+
   it('should create and load the roster on init', () => {
     expect(component).toBeTruthy();
     expect(api.listTeamAgents).toHaveBeenCalledWith('t-1');
@@ -615,6 +625,20 @@ describe('ProcessDesignerChatComponent', () => {
     expect(component.error()).toBe('network down');
   });
 
+  it('createNewProcess falls back to the generic message when detail is a non-string 422 shape', () => {
+    api.createProcess.mockReturnValueOnce(of(process({ process_id: 'p-new' })));
+    api.setConversationProcess.mockReturnValueOnce(
+      throwError(() => ({ error: { detail: [{ msg: 'field required' }] } })),
+    );
+
+    component.createNewProcess();
+
+    // Regression for #5172: the old chain treated a truthy non-string `detail`
+    // (e.g. FastAPI's 422 validation-error array) as the message itself instead
+    // of falling through to a readable fallback string.
+    expect(component.error()).toBe('Failed to link process to conversation');
+  });
+
   // ── Process CRUD: roll back optimistic mutations on save failure ───────────
 
   it('addStep rolls back the new step when updateProcess fails', () => {
@@ -693,26 +717,19 @@ describe('ProcessDesignerChatComponent', () => {
     expect(component.error()).toBe('save failed');
   });
 
-  // ── Flowchart click-handler cleanup (memory-leak fix) ────────────────────
+  // ── Flowchart click delegation ────────────────────────────────────────────
   //
-  // attachFlowchartClickHandlers binds a click listener to every rendered
-  // [data-step-id] node. Because the flowchart SVG is fully replaced via
-  // [innerHTML] on each buildFlowchart call, those listeners must be
-  // explicitly detached before the old nodes are discarded (and on component
-  // destroy) or they leak closures over `this` and DOM node references.
+  // The flowchart SVG is injected via [innerHTML], so Angular can't bind
+  // (click)/(keydown) to its individual nodes. Instead single (click) and
+  // (keydown) listeners on the container (declared in the template) walk up
+  // to the closest [data-step-id] ancestor of the event target. Because the
+  // listeners live on the stable container rather than the replaced SVG
+  // children, they need no manual rebinding or cleanup when buildFlowchart
+  // replaces the DOM. Each generated node carries tabindex="0" so it's
+  // reachable by keyboard, with Enter/Space mirroring a click.
 
-  describe('flowchart click handler cleanup', () => {
-    function createFlowchartFixture(proc: ProcessDefinition): ComponentFixture<ProcessDesignerChatComponent> {
-      api.createConversation.mockReturnValueOnce(
-        of({ conversation_id: 'c-flow', messages: [], current_process: proc, suggested_questions: [] }),
-      );
-      const flowFixture = TestBed.createComponent(ProcessDesignerChatComponent);
-      flowFixture.componentInstance.team = team();
-      flowFixture.detectChanges();
-      return flowFixture;
-    }
-
-    it('clicking a rendered node still invokes onStepClick', () => {
+  describe('flowchart click delegation', () => {
+    it('clicking a rendered node invokes onStepClick', () => {
       const proc = process({ steps: [step({ step_id: 's-1' })] });
       const flowFixture = createFlowchartFixture(proc);
       const flowComponent = flowFixture.componentInstance;
@@ -720,50 +737,206 @@ describe('ProcessDesignerChatComponent', () => {
 
       const node = flowFixture.nativeElement.querySelector('[data-step-id]') as HTMLElement;
       expect(node).toBeTruthy();
-      expect(node.dataset['bound']).toBe('1');
 
       node.dispatchEvent(new MouseEvent('click', { bubbles: true }));
 
       expect(onStepClickSpy).toHaveBeenCalledWith('s-1');
     });
 
-    it('detaches listeners from outgoing nodes before the flowchart is rebuilt', () => {
+    it('clicking a descendant of a node (its label text) still resolves the step id', () => {
+      const proc = process({ steps: [step({ step_id: 's-1' })] });
+      const flowFixture = createFlowchartFixture(proc);
+      const flowComponent = flowFixture.componentInstance;
+      const onStepClickSpy = vi.spyOn(flowComponent, 'onStepClick');
+
+      const node = flowFixture.nativeElement.querySelector('[data-step-id]') as HTMLElement;
+      const descendant = node.querySelector('text') as HTMLElement;
+      expect(descendant).toBeTruthy();
+
+      descendant.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+
+      expect(onStepClickSpy).toHaveBeenCalledWith('s-1');
+    });
+
+    it('clicking the container background does not invoke onStepClick', () => {
+      const proc = process({ steps: [step({ step_id: 's-1' })] });
+      const flowFixture = createFlowchartFixture(proc);
+      const flowComponent = flowFixture.componentInstance;
+      const onStepClickSpy = vi.spyOn(flowComponent, 'onStepClick');
+
+      const container = flowFixture.nativeElement.querySelector('.flowchart-container') as HTMLElement;
+      expect(container).toBeTruthy();
+
+      container.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+
+      expect(onStepClickSpy).not.toHaveBeenCalled();
+    });
+
+    it('the single container listener still handles clicks after the flowchart is rebuilt', () => {
       const proc = process({
         steps: [step({ step_id: 's-1', next_steps: ['s-2'] }), step({ step_id: 's-2' })],
       });
       const flowFixture = createFlowchartFixture(proc);
       const flowComponent = flowFixture.componentInstance;
+      const onStepClickSpy = vi.spyOn(flowComponent, 'onStepClick');
 
-      const nodeBefore = flowFixture.nativeElement.querySelector('[data-step-id="s-2"]') as HTMLElement;
-      expect(nodeBefore).toBeTruthy();
-      const removeEventListenerSpy = vi.spyOn(nodeBefore, 'removeEventListener');
-
-      // Triggers buildFlowchart, which must detach the outgoing nodes' listeners
-      // (and clear their `data-bound` markers) before the new SVG is rendered.
+      // Triggers buildFlowchart, which fully replaces the injected SVG DOM.
       flowComponent.onStepDeleted('s-2');
-
-      expect(removeEventListenerSpy).toHaveBeenCalledWith('click', expect.any(Function));
-      expect(nodeBefore.dataset['bound']).toBeUndefined();
-      expect((flowComponent as unknown as { flowchartClickListeners: unknown[] }).flowchartClickListeners).toHaveLength(0);
-
-      // The rebuilt flowchart still binds a fresh listener to the surviving node.
       flowFixture.detectChanges();
+
       const nodeAfter = flowFixture.nativeElement.querySelector('[data-step-id="s-1"]') as HTMLElement;
-      expect(nodeAfter.dataset['bound']).toBe('1');
-      expect((flowComponent as unknown as { flowchartClickListeners: unknown[] }).flowchartClickListeners).toHaveLength(1);
+      expect(nodeAfter).toBeTruthy();
+
+      nodeAfter.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+
+      expect(onStepClickSpy).toHaveBeenCalledWith('s-1');
     });
 
-    it('detaches remaining listeners on destroy', () => {
+    it('pressing Enter on a focused node invokes onStepClick (keyboard activation)', () => {
       const proc = process({ steps: [step({ step_id: 's-1' })] });
       const flowFixture = createFlowchartFixture(proc);
+      const flowComponent = flowFixture.componentInstance;
+      const onStepClickSpy = vi.spyOn(flowComponent, 'onStepClick');
 
       const node = flowFixture.nativeElement.querySelector('[data-step-id]') as HTMLElement;
-      const removeEventListenerSpy = vi.spyOn(node, 'removeEventListener');
+      expect(node.getAttribute('tabindex')).toBe('0');
 
-      flowFixture.destroy();
+      node.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
 
-      expect(removeEventListenerSpy).toHaveBeenCalledWith('click', expect.any(Function));
-      expect(node.dataset['bound']).toBeUndefined();
+      expect(onStepClickSpy).toHaveBeenCalledWith('s-1');
+    });
+
+    it('pressing Space on a focused node invokes onStepClick and prevents page scroll', () => {
+      const proc = process({ steps: [step({ step_id: 's-1' })] });
+      const flowFixture = createFlowchartFixture(proc);
+      const flowComponent = flowFixture.componentInstance;
+      const onStepClickSpy = vi.spyOn(flowComponent, 'onStepClick');
+
+      const node = flowFixture.nativeElement.querySelector('[data-step-id]') as HTMLElement;
+      const spaceEvent = new KeyboardEvent('keydown', { key: ' ', bubbles: true, cancelable: true });
+      node.dispatchEvent(spaceEvent);
+
+      expect(onStepClickSpy).toHaveBeenCalledWith('s-1');
+      expect(spaceEvent.defaultPrevented).toBe(true);
+    });
+
+    it('pressing an unrelated key does not invoke onStepClick', () => {
+      const proc = process({ steps: [step({ step_id: 's-1' })] });
+      const flowFixture = createFlowchartFixture(proc);
+      const flowComponent = flowFixture.componentInstance;
+      const onStepClickSpy = vi.spyOn(flowComponent, 'onStepClick');
+
+      const node = flowFixture.nativeElement.querySelector('[data-step-id]') as HTMLElement;
+      node.dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', bubbles: true }));
+
+      expect(onStepClickSpy).not.toHaveBeenCalled();
+    });
+  });
+
+  // buildFlowchart string-templates raw SVG and trusts the result via
+  // sanitizer.bypassSecurityTrustHtml (rendered through [innerHTML] in the
+  // template). trigger.description, step.name, agent_name, and
+  // output.description can all originate from LLM-generated content seeded
+  // by untrusted chat input, so every one of them must be passed through
+  // escSvg before interpolation.
+  describe('flowchart SVG escaping (XSS hardening)', () => {
+    it('escapes a <script> payload in the trigger description', () => {
+      const payload = '<script>window.__pwned = true;</script>';
+      const proc = process({
+        trigger: { trigger_type: 'manual', description: payload },
+        steps: [step({ step_id: 's-1' })],
+      });
+      const flowFixture = createFlowchartFixture(proc);
+      const container = flowFixture.nativeElement.querySelector('.flowchart-container') as HTMLElement;
+
+      expect(container).toBeTruthy();
+      expect(container.innerHTML).not.toContain('<script');
+      expect(container.innerHTML).toContain('&lt;script');
+    });
+
+    it('escapes a quote-breakout payload in a step name', () => {
+      const payload = '"><img src=x onerror=alert(1)>';
+      const proc = process({ steps: [step({ step_id: 's-1', name: payload })] });
+      const flowFixture = createFlowchartFixture(proc);
+      const container = flowFixture.nativeElement.querySelector('.flowchart-container') as HTMLElement;
+
+      // step.name also feeds the node's aria-label attribute. Browsers only
+      // re-escape &/" when serializing a quoted attribute value back to
+      // innerHTML — literal </> there are valid and never parsed as markup,
+      // so a raw '<img' substring check would false-positive on that safe
+      // attribute content. What actually matters is that no live <img>
+      // element was created.
+      expect(container.querySelector('img')).toBeNull();
+      // Browsers only re-escape &, <, > when serializing text-node content
+      // back to innerHTML — quotes stay literal outside of attribute values.
+      expect(container.innerHTML).toContain('"&gt;&lt;img');
+    });
+
+    it('escapes an XSS payload in an agent name', () => {
+      const payload = '<img src=x onerror=alert(1)>';
+      const proc = process({
+        steps: [step({ step_id: 's-1', agents: [agent({ agent_name: payload })] })],
+      });
+      const flowFixture = createFlowchartFixture(proc);
+      const container = flowFixture.nativeElement.querySelector('.flowchart-container') as HTMLElement;
+
+      expect(container.innerHTML).not.toContain('<img');
+      expect(container.innerHTML).toContain('&lt;img src=x onerror=alert(1)&gt;');
+    });
+
+    it('escapes an XSS payload in the output description', () => {
+      const payload = '<svg onload=alert(1)>';
+      const proc = process({
+        steps: [step({ step_id: 's-1' })],
+        output: { description: payload, destination: '' },
+      });
+      const flowFixture = createFlowchartFixture(proc);
+      const container = flowFixture.nativeElement.querySelector('.flowchart-container') as HTMLElement;
+
+      expect(container.innerHTML).not.toContain('<svg onload');
+      expect(container.innerHTML).toContain('&lt;svg onload=alert(1)&gt;');
+    });
+
+    it('escapes a short marker in every known dynamic field in a single render (regression guard)', () => {
+      // Broader guard: renders all four currently-escaped dynamic fields at
+      // once with distinct markers, so a regression in ANY of them (e.g. an
+      // escSvg() wrapper accidentally dropped in a future refactor) fails
+      // this one test. Markers are kept short to stay under each field's
+      // truncate() limit (trigger: 20, step name: 22, agent label: 28,
+      // output: 22) so the full closing '>' survives truncation.
+      const proc = process({
+        trigger: { trigger_type: 'manual', description: '<xss-trig>' },
+        steps: [
+          step({
+            step_id: 's-1',
+            name: '<xss-step>',
+            agents: [agent({ agent_name: '<xss-agent>' })],
+          }),
+        ],
+        output: { description: '<xss-out>', destination: '' },
+      });
+      const flowFixture = createFlowchartFixture(proc);
+      const container = flowFixture.nativeElement.querySelector('.flowchart-container') as HTMLElement;
+      const raw = container.innerHTML;
+
+      // step.name also feeds the node's aria-label attribute, where a raw
+      // '<xss-step>' legitimately survives as literal (but inert) attribute
+      // text — see the quote-breakout test above. The real invariant is that
+      // an unescaped marker in TEXT CONTENT is never parsed as a live
+      // element, so assert that directly instead of a blanket substring check.
+      expect(container.querySelector('xss-trig, xss-step, xss-agent, xss-out')).toBeNull();
+      expect(raw).toContain('&lt;xss-trig&gt;');
+      expect(raw).toContain('&lt;xss-step&gt;');
+      expect(raw).toContain('&lt;xss-agent&gt;');
+      expect(raw).toContain('&lt;xss-out&gt;');
+    });
+  });
+
+  describe('escSvg', () => {
+    it('escapes &, <, >, ", and \' (defense-in-depth for future attribute changes)', () => {
+      const raw = `&<>"'`;
+      const escaped = (component as unknown as { escSvg(t: string): string }).escSvg(raw);
+      expect(escaped).toBe('&amp;&lt;&gt;&quot;&#39;');
     });
   });
 

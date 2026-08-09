@@ -14,7 +14,7 @@ import subprocess
 
 import pytest
 
-from software_engineering_team.shared.git_utils import (
+from shared.git.git_utils import (
     commit_working_tree,
     git_identity_env,
     initialize_new_repo,

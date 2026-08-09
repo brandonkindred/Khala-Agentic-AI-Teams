@@ -32,6 +32,8 @@ if TYPE_CHECKING:  # pragma: no cover - typing only; runtime uses lazy strands i
 
 _STRANDS_MODEL_REGISTERED = False
 
+_DEFAULT_DUMMY_CONTEXT_TOKENS = 16384
+
 
 def _strands_already_imported() -> bool:
     """Return True when any ``strands`` package module is already in ``sys.modules``.
@@ -1697,13 +1699,14 @@ class DummyLLMClient(LLMClient):
         return hashlib.md5(prompt.encode(), usedforsecurity=False).hexdigest()[:12]
 
     def get_max_context_tokens(self) -> int:
-        """Return the fixed maximum context token limit for the dummy client.
+        """Return the dummy client's nominal maximum context size.
 
         Preconditions: none.
-        Postconditions: returns the constant context-window limit (16384) used by this
-            dummy implementation; the value is not derived from any loaded model config.
+        Postconditions: returns the configured dummy context-window limit
+            (``_DEFAULT_DUMMY_CONTEXT_TOKENS``); the value is not derived from any
+            loaded model config.
         """
-        return 16384
+        return _DEFAULT_DUMMY_CONTEXT_TOKENS
 
     def complete(
         self,
@@ -1716,9 +1719,19 @@ class DummyLLMClient(LLMClient):
         tools: Optional[list] = None,
         think: "bool | str | None" = None,
     ) -> str:
-        # ``objective`` is accepted to match the LLMClient contract; the dummy
-        # client makes no real LLM call and performs no attribution, so it
-        # tolerates an omitted objective (test stubs need not declare one).
+        """Return a plain-text stub response.
+
+        This no-op implementation satisfies the LLMClient contract without
+        making a real LLM call. ``objective`` is accepted to match the
+        contract but performs no attribution, so test stubs may omit it.
+
+        Preconditions:
+            - ``prompt`` is a string; other arguments are accepted for
+              contract compatibility and are ignored.
+        Postconditions:
+            - ``self._request_count`` is incremented by one and a fixed
+              placeholder string is returned.
+        """
         self._request_count += 1
         return "Dummy text completion (no LLM)."
 

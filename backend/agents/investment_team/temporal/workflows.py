@@ -23,8 +23,9 @@ retry (which fires on worker crash / start_to_close timeout):
   tracked even when the retry lands in a fresh process after a restart;
 * it short-circuits a job that already completed — so a retry does not duplicate
   work (entry short-circuit reads the job store);
-* outcome determination (completed / cancelled / failed) uses the worker return
-  value from ``_run_backtest_background``, not a post-run job-store read;
+* outcome determination (completed / cancelled / missing / failed) uses the
+  worker return value from ``_run_backtest_background``, not a post-run
+  job-store read;
 * a worker-level failure is re-raised as an ``ApplicationError`` so Temporal sees
   the failure (and retries within the bounded policy) instead of the swallowed
   exception being reported as success;
@@ -136,17 +137,22 @@ def run_backtest_activity(
           returned ``failed`` (so Temporal retries within the bounded policy).
           If the worker returned ``cancelled`` (a user-initiated cancel during
           the run, including one driven by Temporal cancellation via the
-          heartbeat above), returns a status dict reporting ``cancelled`` rather
-          than ``completed``. Returns a ``completed`` status dict when the
-          worker returned ``completed``. Any other (non-terminal) return value
-          is a postcondition violation of ``_run_backtest_background`` and
-          raises ``ApplicationError`` rather than being silently reported as
-          ``completed``.
+          poller above), returns a status dict reporting ``cancelled`` rather
+          than ``completed``. If the worker returned ``missing`` (the job row
+          was deleted out from under it via ``DELETE /backtests/jobs/{job_id}``),
+          returns a status dict reporting ``missing`` — distinct from
+          ``cancelled`` since no cancellation actually happened, and there is
+          no job row left to retry against. Returns a ``completed`` status
+          dict when the worker returned ``completed``. Any other (non-terminal)
+          return value is a postcondition violation of
+          ``_run_backtest_background`` and raises ``ApplicationError`` rather
+          than being silently reported as ``completed``.
     """
     from investment_team.api.main import (
         _BT_JOB_STATUS_CANCELLED,
         _BT_JOB_STATUS_COMPLETED,
         _BT_JOB_STATUS_FAILED,
+        _BT_JOB_STATUS_MISSING,
         _backtest_job_status,
         _bt_cancel_job,
         _run_backtest_background,
@@ -210,6 +216,8 @@ def run_backtest_activity(
         raise ApplicationError(f"Backtest {job_id} failed", type="BacktestFailed")
     if final_status == _BT_JOB_STATUS_CANCELLED:
         return {"job_id": job_id, "status": "cancelled"}
+    if final_status == _BT_JOB_STATUS_MISSING:
+        return {"job_id": job_id, "status": "missing"}
     if final_status == _BT_JOB_STATUS_COMPLETED:
         return {"job_id": job_id, "status": "completed"}
     raise ApplicationError(

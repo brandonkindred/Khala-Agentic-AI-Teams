@@ -93,7 +93,6 @@ export class ProcessDesignerChatComponent implements OnInit, OnChanges, AfterVie
   @Output() readonly rosterChanged = new EventEmitter<RosterValidationResult | null>();
 
   @ViewChild('messagesContainer') messagesContainer!: ElementRef<HTMLDivElement>;
-  @ViewChild('flowchartContainer') flowchartContainer!: ElementRef<HTMLDivElement>;
 
   private readonly api = inject(AgenticTeamApiService);
   private readonly fb = inject(FormBuilder);
@@ -134,13 +133,6 @@ export class ProcessDesignerChatComponent implements OnInit, OnChanges, AfterVie
   private readonly editOriginal = signal<AgentEditDraft | null>(null);
   /** Guards `refreshRoster` against out-of-order refresh results. */
   private readonly rosterRefreshGuard = new LatestOnly();
-
-  /**
-   * Click listeners bound by `attachFlowchartClickHandlers`, tracked so they
-   * can be explicitly removed (see `detachFlowchartClickHandlers`) instead of
-   * being silently discarded whenever the flowchart SVG is replaced.
-   */
-  private readonly flowchartClickListeners: { node: HTMLElement; listener: (e: Event) => void }[] = [];
 
   private conversationId: string | null = null;
   /** Monotonic stamp for `startConversation`; guards against out-of-order createConversation results. */
@@ -189,7 +181,16 @@ export class ProcessDesignerChatComponent implements OnInit, OnChanges, AfterVie
       this.pendingScrollToBottom = false;
       this.scrollToBottom();
     }
-    this.attachFlowchartClickHandlers();
+  }
+
+  /**
+   * Postconditions: completes `destroy$`, unsubscribing every
+   * `takeUntil(this.destroy$)` stream so a late response can't mutate a
+   * destroyed component.
+   */
+  ngOnDestroy(): void {
+    this.destroy$.next();
+    this.destroy$.complete();
   }
 
   /**
@@ -210,41 +211,33 @@ export class ProcessDesignerChatComponent implements OnInit, OnChanges, AfterVie
     }
   }
 
-  private attachFlowchartClickHandlers(): void {
-    if (!this.flowchartContainer?.nativeElement) return;
-    const nodes = this.flowchartContainer.nativeElement.querySelectorAll('[data-step-id]');
-    nodes.forEach((node: Element) => {
-      if ((node as HTMLElement).dataset['bound']) return;
-      (node as HTMLElement).dataset['bound'] = '1';
-      const listener = (e: Event) => {
-        e.stopPropagation();
-        const stepId = (node as HTMLElement).dataset['stepId'];
-        if (stepId) this.onStepClick(stepId);
-      };
-      node.addEventListener('click', listener);
-      this.flowchartClickListeners.push({ node: node as HTMLElement, listener });
-    });
+  /**
+   * Delegated click handler bound once on the flowchart container (see the
+   * template). Since the SVG is injected via `[innerHTML]`, Angular can't bind
+   * `(click)` to its individual nodes directly — walking up to the closest
+   * `[data-step-id]` ancestor lets a single container-level listener handle
+   * clicks on any node, including ones added by a later `buildFlowchart` call.
+   */
+  onFlowchartClick(event: MouseEvent): void {
+    this.dispatchFlowchartStepEvent(event);
   }
 
   /**
-   * Remove every click listener bound by `attachFlowchartClickHandlers` and
-   * clear their `data-bound` markers. Called before each `buildFlowchart`
-   * replaces the flowchart's DOM (so the outgoing nodes' listeners don't
-   * linger) and from `ngOnDestroy` (so the component doesn't leave listeners
-   * closing over `this` attached to nodes still in the document).
+   * Delegated keyboard handler mirroring `onFlowchartClick`, so the step nodes
+   * generated in `buildFlowchart` (each rendered with `tabindex="0"`) are
+   * operable by keyboard, not just mouse.
    */
-  private detachFlowchartClickHandlers(): void {
-    for (const { node, listener } of this.flowchartClickListeners) {
-      node.removeEventListener('click', listener);
-      delete node.dataset['bound'];
-    }
-    this.flowchartClickListeners.length = 0;
+  onFlowchartKeydown(event: KeyboardEvent): void {
+    if (event.key !== 'Enter' && event.key !== ' ') return;
+    event.preventDefault(); // Space must not scroll the page.
+    this.dispatchFlowchartStepEvent(event);
   }
 
-  ngOnDestroy(): void {
-    this.destroy$.next();
-    this.destroy$.complete();
-    this.detachFlowchartClickHandlers();
+  private dispatchFlowchartStepEvent(event: Event): void {
+    const target = (event.target as HTMLElement).closest('[data-step-id]') as HTMLElement | null;
+    if (!target) return;
+    const stepId = target.dataset['stepId'];
+    if (stepId) this.onStepClick(stepId);
   }
 
   private startConversation(): void {
@@ -745,12 +738,20 @@ export class ProcessDesignerChatComponent implements OnInit, OnChanges, AfterVie
   /**
    * Build a custom interactive SVG flowchart from the process definition.
    * Nodes are interactive — clicking them opens the step editor.
+   *
+   * Postconditions: `flowchartSvg` is `null` when `process` is null or has no
+   * steps; otherwise it holds a `SafeHtml` built from a hand-rolled SVG
+   * string via `sanitizer.bypassSecurityTrustHtml`, rendered unsanitized via
+   * `[innerHTML]`. Every process-derived value interpolated into that string
+   * (trigger type/description, step id/name, agent names, output
+   * description) MUST be passed through `escSvg` first — these values can
+   * originate from LLM-generated process definitions seeded by untrusted
+   * chat input, so an unescaped field here is a live stored-XSS vector, not
+   * just a display bug. Any new dynamic field added to this method must be
+   * wrapped in `escSvg` and covered by the tests in
+   * `describe('flowchart SVG escaping (XSS hardening)', ...)`.
    */
   private buildFlowchart(process: ProcessDefinition | null): void {
-    // The outgoing SVG (if any) is about to be discarded via [innerHTML] —
-    // detach its listeners now rather than relying on the DOM nodes becoming
-    // unreferenced garbage.
-    this.detachFlowchartClickHandlers();
     if (!process || process.steps.length === 0) {
       this.flowchartSvg.set(null);
       return;
@@ -793,7 +794,7 @@ export class ProcessDesignerChatComponent implements OnInit, OnChanges, AfterVie
     // Draw trigger node (rounded rect, green tint)
     const trigY = nodeY(0);
     svg += `<rect x="${cx - nodeWidth / 2}" y="${trigY}" width="${nodeWidth}" height="${nodeHeight}" rx="25" ry="25" fill="#1a3a2a" stroke="#3fb950" stroke-width="1.5"/>`;
-    svg += `<text x="${cx}" y="${trigY + nodeHeight / 2 + 5}" text-anchor="middle" fill="#3fb950" font-size="12" font-family="sans-serif">${this.escSvg(process.trigger.trigger_type.toUpperCase())}: ${this.truncate(process.trigger.description || 'Trigger', 20)}</text>`;
+    svg += `<text x="${cx}" y="${trigY + nodeHeight / 2 + 5}" text-anchor="middle" fill="#3fb950" font-size="12" font-family="sans-serif">${this.escSvg(process.trigger.trigger_type.toUpperCase())}: ${this.escSvg(this.truncate(process.trigger.description || 'Trigger', 20))}</text>`;
 
     // Arrow from trigger to first step
     if (steps.length > 0) {
@@ -807,8 +808,9 @@ export class ProcessDesignerChatComponent implements OnInit, OnChanges, AfterVie
       const isSelected = step.step_id === selectedId;
       const hasNoAgents = step.agents.length === 0;
 
-      // Clickable group
-      svg += `<g data-step-id="${this.escSvg(step.step_id)}" class="flowchart-node" style="cursor:pointer">`;
+      // Clickable group — tabindex/role make it keyboard-focusable so
+      // onFlowchartKeydown (delegated on the container) can activate it.
+      svg += `<g data-step-id="${this.escSvg(step.step_id)}" class="flowchart-node" style="cursor:pointer" tabindex="0" role="button" aria-label="${this.escSvg(step.name)}">`;
 
       if (isDecision) {
         // Diamond shape
@@ -874,7 +876,23 @@ export class ProcessDesignerChatComponent implements OnInit, OnChanges, AfterVie
     return text.length > max ? text.substring(0, max - 1) + '\u2026' : text;
   }
 
+  /**
+   * Escape a plain-text value for interpolation into the hand-rolled SVG
+   * markup built by `buildFlowchart`.
+   *
+   * Precondition: `text` is plain text, not markup.
+   * Postcondition: returns `text` with `& < > " '` replaced by HTML
+   * entities. `buildFlowchart` trusts the assembled SVG string via
+   * `bypassSecurityTrustHtml`, so every value that reaches the template
+   * MUST be passed through this helper — a value that skips it is an XSS
+   * vector.
+   */
   private escSvg(text: string): string {
-    return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    return text
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
   }
 }

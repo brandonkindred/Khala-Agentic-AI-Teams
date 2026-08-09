@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from software_engineering_team.shared.models import PlanningHierarchy, ProductRequirements
+from shared.dev_models.models import PlanningHierarchy, ProductRequirements
 
 logger = logging.getLogger(__name__)
 

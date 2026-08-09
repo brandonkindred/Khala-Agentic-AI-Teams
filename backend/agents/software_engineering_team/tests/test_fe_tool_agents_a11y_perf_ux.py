@@ -48,7 +48,9 @@ def _fe_tool_input():
 def _fe_review_issue(**kwargs):
     from software_engineering_team.frontend_code_v2_team.models import ReviewIssue
 
-    base = dict(source="accessibility", severity="medium", description="d", file_path="", recommendation="")
+    base = dict(
+        source="accessibility", severity="medium", description="d", file_path="", recommendation=""
+    )
     base.update(kwargs)
     return ReviewIssue(**base)
 
@@ -472,7 +474,7 @@ def test_a11y_perf_ux_constructor_resolves_both_models_with_distinct_modes(monke
             return object()
 
         monkeypatch.setattr(
-            "software_engineering_team.shared.strands_model.resolve_strands_model",
+            "llm_service.strands_model.resolve_strands_model",
             _record,
         )
 

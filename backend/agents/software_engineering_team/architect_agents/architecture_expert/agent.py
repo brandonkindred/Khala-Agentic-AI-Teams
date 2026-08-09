@@ -7,12 +7,12 @@ from typing import Any, Dict
 
 from llm_service import LLMPermanentError, get_strands_model
 from llm_service.strands_model import resolve_strands_model
-from software_engineering_team.shared.llm import complete_json_with_continuation
-from software_engineering_team.shared.models import (
+from shared.dev_models.models import (
     ArchitectureComponent,
     ProductRequirements,
     SystemArchitecture,
 )
+from software_engineering_team.shared.llm import complete_json_with_continuation
 
 from .models import ArchitectureInput, ArchitectureOutput
 from .prompts import ARCHITECTURE_PROMPT

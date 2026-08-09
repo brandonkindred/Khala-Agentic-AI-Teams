@@ -35,11 +35,11 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import List, Optional, Union
+from typing import Optional, Union
 
 from llm_service import LLMClient, complete_validated
 
-from .models import ChunkReviewInput, ChunkReviewLLMResponse, ChunkReviewOutput, ReviewProfile
+from .models import ChunkReviewInput, ChunkReviewLLMResponse, ChunkReviewOutput
 from .profiles import build_review_system_prompt
 
 logger = logging.getLogger(__name__)
@@ -342,41 +342,3 @@ def _run_chunk_review(
         "summary": response.summary,
         "spec_compliance_notes": response.spec_compliance_notes,
     }
-
-
-def review_chunk(
-    llm: LLMClient,
-    code_chunk: str,
-    file_paths_label: str,
-    task_description: str,
-    task_requirements: str,
-    acceptance_criteria: List[str],
-    spec_excerpt: str,
-    architecture_overview: str,
-    existing_codebase_excerpt: Optional[str],
-    *,
-    profile: ReviewProfile = ReviewProfile.CODE_REVIEW,
-    language: str = "",
-    segment_note: str = "",
-    user_decisions: Optional[List[str]] = None,
-    sibling_surface: str = "",
-    think: Optional[Union[bool, str]] = None,
-) -> dict:
-    """Legacy function: review one chunk. Prefer ChunkReviewAgent.run(ChunkReviewInput(...))."""
-    inp = ChunkReviewInput(
-        code_chunk=code_chunk,
-        file_path_or_label=file_paths_label,
-        task_description=task_description,
-        task_requirements=task_requirements,
-        acceptance_criteria=acceptance_criteria,
-        spec_excerpt=spec_excerpt,
-        architecture_overview=architecture_overview,
-        existing_codebase_excerpt=existing_codebase_excerpt,
-        profile=profile,
-        language=language,
-        segment_note=segment_note,
-        user_decisions=user_decisions,
-        sibling_surface=sibling_surface,
-    )
-    result = _run_chunk_review(llm, inp, think=think)
-    return result
