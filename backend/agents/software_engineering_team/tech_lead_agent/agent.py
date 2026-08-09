@@ -205,6 +205,25 @@ def _call_json(
         return default
 
 
+def _fallback_stack_specs() -> List[Dict[str, Any]]:
+    """Canonical v2 roster used when planning can't determine real stacks.
+
+    Neither failure mode (LLM call failed outright, or returned no usable stacks) carries any
+    signal about which specialty is needed, so this returns both frontend_v2 and backend_v2
+    rather than guessing one.
+    """
+    return [
+        {
+            "name": "frontend_v2",
+            "tools_services": ["Angular", "TypeScript", "React", "CSS", "HTML"],
+        },
+        {
+            "name": "backend_v2",
+            "tools_services": ["Java", "Python", "Node.js", "Databases", "APIs", "DevOps"],
+        },
+    ]
+
+
 class TechLeadAgent:
     """Tech Lead: given plan, produce tasks + stacks; groom tasks; suggest assignments; code review.
 
@@ -248,8 +267,8 @@ class TechLeadAgent:
         Orchestrator will add tasks to Task Graph and create v2 implementation workers from stacks. A non-empty
         ``open_questions`` means the Tech Lead needs a product/design decision it must not make
         itself; the orchestrator pauses the job for the user rather than building tasks.
-        If ``target_team`` is missing from a task, legacy routing fields are
-        checked in order: ``team``, ``stack``, then ``assignee_stack``.
+        ``target_team`` is read verbatim from each task; a task with no ``target_team`` gets
+        ``""`` (swarm_assignment treats that as no team constraint, not a hard failure).
 
         Preconditions:
             - ``plan`` is a ``CodingTeamPlanInput`` carrying the plan/spec/architecture text the
@@ -270,7 +289,7 @@ class TechLeadAgent:
             required_keys=("tasks", "stacks", "open_questions", "already_complete"),
             default={
                 "tasks": [],
-                "stacks": [{"name": "default", "tools_services": []}],
+                "stacks": _fallback_stack_specs(),
                 "open_questions": [],
                 "already_complete": False,
                 "completion_evidence": "",
@@ -288,13 +307,7 @@ class TechLeadAgent:
                         "title": t.get("title", t["id"]),
                         "description": t.get("description", ""),
                         "dependencies": list(t.get("dependencies") or []),
-                        "target_team": str(
-                            t.get("target_team")
-                            or t.get("team")
-                            or t.get("stack")
-                            or t.get("assignee_stack")
-                            or ""
-                        ).strip(),
+                        "target_team": str(t.get("target_team") or "").strip(),
                     }
                 )
         stacks = []
@@ -306,7 +319,7 @@ class TechLeadAgent:
                     tools = []
                 stacks.append({"name": name, "tools_services": [str(x) for x in tools]})
         if not stacks:
-            stacks = [{"name": "default", "tools_services": []}]
+            stacks = _fallback_stack_specs()
         # already_complete only counts when the model also returned no tasks: a true flag alongside
         # a non-empty task list is contradictory, so the tasks win (we never silently drop work).
         # Use strict boolean coercion — the STRING "false" must not read as truthy (bool("false") is
