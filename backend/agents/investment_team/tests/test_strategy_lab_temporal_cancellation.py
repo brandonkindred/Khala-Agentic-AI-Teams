@@ -243,6 +243,7 @@ async def test_design_attempt_activity_stops_promptly_after_workflow_terminate()
                         message="design-attempt activity never started",
                     )
 
+                    terminate_issued_at = time.monotonic()
                     await handle.terminate(
                         reason="test: prompt cancellation after workflow terminate"
                     )
@@ -256,10 +257,14 @@ async def test_design_attempt_activity_stops_promptly_after_workflow_terminate()
                         ),
                     )
 
-    elapsed = state["cancelled_at"] - state["start_time"]
+    # Measured from immediately before handle.terminate() was issued, not from
+    # activity startup -- any scheduler delay between the activity starting and
+    # the test coroutine getting to call terminate() is not cancellation
+    # latency and must not count against this bound.
+    elapsed = state["cancelled_at"] - terminate_issued_at
     assert elapsed < _CANCEL_OBSERVED_BOUND_S, (
-        f"design-attempt activity took {elapsed:.2f}s to observe cancellation, "
-        f"expected under {_CANCEL_OBSERVED_BOUND_S}s"
+        f"design-attempt activity took {elapsed:.2f}s after terminate() to observe "
+        f"cancellation, expected under {_CANCEL_OBSERVED_BOUND_S}s"
     )
     assert not state.get("ran_to_completion"), (
         "design-attempt activity ran to completion instead of being cancelled "
