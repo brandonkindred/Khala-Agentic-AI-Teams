@@ -39,6 +39,7 @@ retry (which fires on worker crash / start_to_close timeout):
 
 from __future__ import annotations
 
+import asyncio
 from datetime import timedelta
 from typing import Any
 
@@ -226,6 +227,44 @@ def run_backtest_activity(
     )
 
 
+@activity.defn(name="investment_mark_backtest_cancelled")
+def mark_backtest_job_cancelled_activity(job_id: str) -> dict[str, Any]:
+    """Persist a cancelled state for a job whose activity attempt never ran.
+
+    Compensation for the race where the *workflow* itself is cancelled (e.g.
+    directly via Temporal, independent of anything the REST API wires up)
+    while ``run_backtest_activity`` is still merely *scheduled* — a busy task
+    queue can leave it queued for a while. That activity never starts, so
+    neither its heartbeat, its cancellation poller, nor
+    ``_run_backtest_background``'s own checkpoints ever get a chance to
+    observe the cancellation, and the job would otherwise sit pending/running
+    forever (and keep appearing in ``running_only`` job listings).
+
+    Preconditions:
+        - ``job_id`` may or may not exist in the job store, and may already
+          be in any status.
+
+    Postconditions:
+        - Idempotent and best-effort: cancels the job only if it is still
+          pending/running (``_bt_cancel_job`` — an atomic conditional update
+          that is a no-op, not an error, on a missing or already-terminal
+          job, mirroring the REST cancel route's own semantics). Returns
+          ``{"job_id", "status"}`` reflecting the job's status after the call
+          (``"unknown"`` if the job row does not exist).
+    """
+    from investment_team.api.main import _backtest_job_status, _bt_cancel_job
+
+    _bt_cancel_job(job_id)
+    return {"job_id": job_id, "status": _backtest_job_status(job_id) or "unknown"}
+
+
+# Bound, retrying policy for the short compensation activity (it only writes
+# the job store, so a transient store error is worth a couple of retries) —
+# mirrors paper_trading.py's own stop-compensation policy.
+_CANCEL_COMPENSATION_RETRY = RetryPolicy(maximum_attempts=3)
+_CANCEL_COMPENSATION_TIMEOUT = timedelta(seconds=30)
+
+
 @workflow.defn(name="InvestmentBacktestWorkflow")
 class InvestmentBacktestWorkflow:
     """Durable wrapper around a single backtest job."""
@@ -249,11 +288,33 @@ class InvestmentBacktestWorkflow:
               failure. ``heartbeat_timeout`` is set so Temporal treats a silent
               activity (no heartbeat within the window — e.g. a crashed worker)
               as failed rather than waiting the full ``_ACTIVITY_TIMEOUT``.
+            - If the workflow itself is cancelled (e.g. directly via Temporal),
+              ``execute_activity`` raises ``asyncio.CancelledError`` at this
+              await point; runs ``mark_backtest_job_cancelled_activity`` as a
+              best-effort compensation (a persistent failure there must not
+              mask the original cancellation) before re-raising so the
+              workflow still completes as cancelled.
         """
-        return await workflow.execute_activity(
-            run_backtest_activity,
-            args=[job_id, strategy, config, submitted_by, notes],
-            start_to_close_timeout=_ACTIVITY_TIMEOUT,
-            heartbeat_timeout=_HEARTBEAT_TIMEOUT,
-            retry_policy=_ACTIVITY_RETRY,
-        )
+        try:
+            return await workflow.execute_activity(
+                run_backtest_activity,
+                args=[job_id, strategy, config, submitted_by, notes],
+                start_to_close_timeout=_ACTIVITY_TIMEOUT,
+                heartbeat_timeout=_HEARTBEAT_TIMEOUT,
+                retry_policy=_ACTIVITY_RETRY,
+            )
+        except asyncio.CancelledError:
+            try:
+                await workflow.execute_activity(
+                    mark_backtest_job_cancelled_activity,
+                    args=[job_id],
+                    start_to_close_timeout=_CANCEL_COMPENSATION_TIMEOUT,
+                    retry_policy=_CANCEL_COMPENSATION_RETRY,
+                )
+            except Exception:
+                workflow.logger.warning(
+                    "mark_backtest_job_cancelled_activity failed for job %s; "
+                    "job may remain non-terminal.",
+                    job_id,
+                )
+            raise
