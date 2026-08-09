@@ -1435,6 +1435,35 @@ def test_code_review_no_git_repo_falls_back_to_files(tmp_path: Path) -> None:
     assert cr_input.code == ""
 
 
+def test_run_review_no_git_repo_falls_back_to_files(tmp_path: Path) -> None:
+    """``run_review`` (execution_result path) with no ``.git`` under
+    ``repo_path``: no base resolves, so the fallback still runs the
+    external agent, submitted ``files`` as-is rather than being silently
+    skipped. Mirrors ``test_code_review_no_git_repo_falls_back_to_files``,
+    which covers the same no-base fallback through ``run_microtask_review``."""
+    config = _build_config()
+    files = {"x.py": "code"}
+    cr_agent = MagicMock()
+    cr_agent.run.return_value = MagicMock(issues=[])
+
+    run_review(
+        config=config,
+        llm=DummyLLMClient(),
+        task=_task(),
+        execution_result=_execution_result(files),
+        repo_path=tmp_path,
+        code_review_agent=cr_agent,
+        language="python",
+        **_noop_runners(),
+    )
+
+    assert cr_agent.run.called
+    cr_input = cr_agent.run.call_args.args[0]
+    assert cr_input.files == files
+    assert cr_input.pre_numbered is False
+    assert cr_input.code == ""
+
+
 def test_code_review_empty_diff_falls_back_to_files(tmp_path: Path) -> None:
     """A real git base exists, but it's identical to the new content -> no
     surface is built (nothing changed); the agent still runs, submitted
