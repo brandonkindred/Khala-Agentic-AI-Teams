@@ -27,6 +27,14 @@ import re
 
 from agent_registry.models import AgentManifest, AgentStateSpec, CognitionSpec, IOSchema, SourceInfo
 
+from ..manifest_shared import (
+    AGENT_ANATOMY_REF,
+    DEFAULT_RULE_PACKS,
+    GENERATED_AGENT_ENTRYPOINT,
+    GENERATED_AGENT_INPUT_REF,
+    GENERATED_AGENT_OUTPUT_REF,
+    strip_marker_tags,
+)
 from .agent_states import EXECUTING_KEY, STATE_ORDER, normalize_agent_states
 from .models import AgentDefinition, AgentState
 
@@ -37,15 +45,6 @@ STUDIO_TEAM = "agent_studio"
 # accepts arbitrary persisted data), so a manifest may carry a key outside this set;
 # clone drops such keys and lets the AgentDefinition normalizer backfill the rest.
 _KNOWN_STATE_KEYS = frozenset(STATE_ORDER)
-
-# Shared generated-agent runtime — reused so a saved Studio agent is invokable
-# exactly like a generated team agent.
-_GEN_ENTRYPOINT = (
-    "agent_team_studio.agentic_team_provisioning.runtime.agent_builder:invoke_generated_agent"
-)
-_GEN_INPUT_REF = "agent_team_studio.agentic_team_provisioning.models:GeneratedAgentInvokeInput"
-_GEN_OUTPUT_REF = "agent_team_studio.agentic_team_provisioning.models:GeneratedAgentInvokeOutput"
-_ANATOMY_REF = "backend/agents/agent_team_studio/agent_provisioning_team/AGENT_ANATOMY.md"
 
 # Tags that describe the registry plumbing rather than the agent itself; stripped
 # when projecting a manifest back into an editable definition.
@@ -150,19 +149,19 @@ def build_studio_agent_manifest(definition: AgentDefinition) -> AgentManifest:
         tags=sorted({"studio", *definition.tags}),
         inputs=_io_schema(
             definition.input_schema,
-            schema_ref=_GEN_INPUT_REF,
+            schema_ref=GENERATED_AGENT_INPUT_REF,
             ref_description="Roster metadata + user message (shared generated-agent entrypoint).",
             inline_description="Authored input schema.",
         ),
         outputs=_io_schema(
             definition.output_schema,
-            schema_ref=_GEN_OUTPUT_REF,
+            schema_ref=GENERATED_AGENT_OUTPUT_REF,
             ref_description="The agent's response text.",
             inline_description="Authored output schema.",
         ),
-        cognition=CognitionSpec(rule_packs=["default_guardrails"], tools=list(definition.tools)),
+        cognition=CognitionSpec(rule_packs=list(DEFAULT_RULE_PACKS), tools=list(definition.tools)),
         states=_manifest_states(definition),
-        source=SourceInfo(entrypoint=_GEN_ENTRYPOINT, anatomy_ref=_ANATOMY_REF),
+        source=SourceInfo(entrypoint=GENERATED_AGENT_ENTRYPOINT, anatomy_ref=AGENT_ANATOMY_REF),
     )
     # Round-trip so the returned object is guaranteed fully validated and serializable.
     return AgentManifest.model_validate(manifest.model_dump(mode="json"))
@@ -194,7 +193,7 @@ def clone_from_manifest(manifest: AgentManifest) -> AgentDefinition:
         * The returned definition has exactly three operating states.
     """
     tools = list(manifest.cognition.tools) if manifest.cognition else []
-    tags = [t for t in manifest.tags if t not in _PLUMBING_TAGS]
+    tags = strip_marker_tags(manifest.tags, _PLUMBING_TAGS)
     # Keep only canonical keys: AgentState.key is a Literal, so a manifest carrying
     # an unsupported (permissive-str) key would raise here and surface as a 500.
     # Normalize up front (not just left to the AgentDefinition field validator) so

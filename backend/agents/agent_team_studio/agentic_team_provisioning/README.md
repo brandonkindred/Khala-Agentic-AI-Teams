@@ -22,33 +22,38 @@ Validation logic lives in `roster_validation.py`.
 
 ## Roster identity: thin refs vs. Manifest SoT
 
-**Today:** `AgenticTeamAgent` is a *fat* model — it duplicates persona fields
-(`role`, `skills`, `capabilities`, `tools`, `expertise`) alongside `source`/`manifest_id`.
-The whole model is persisted verbatim as a JSON blob per roster row (`assistant/store.py`)
-and those fat fields are read directly by `roster_validation.py` (staffing/depth checks),
-`runtime/agent_builder.py` (system-prompt construction), and `runtime/pipeline_runner.py`
-(execution).
+`AgenticTeamAgent` (`models.py`) is the thin, sole persisted/API roster shape —
+only `agent_name`, `source`, `manifest_id`. The registered `AgentManifest` (see
+`agent_registry.models.AgentManifest`) is the sole writable source of truth for
+an agent's persona; nothing writes `role`/`skills`/`capabilities`/`tools`/
+`expertise` onto a roster row. `agent_name` is a team-local slot key (may differ
+from `manifest.name`); it is not a persona override.
 
-**Target:** the registered `AgentManifest` (see `agent_registry.models.AgentManifest`) is
-the sole writable source of truth for an agent's persona. A roster row should only need a
-thin reference — `models.AgenticTeamAgentRef` (`agent_name`, `source`, `manifest_id`) — with
-persona fields resolved live from the referenced manifest instead of duplicated on the
-roster. `agent_name` is a team-local slot key (may differ from `manifest.name`); it is not
-a persona override. This type currently exists only as a schema — the store/API/consumers
-above still read/write the fat `AgenticTeamAgent` shape; migrating them is a separate,
-later change.
+Persona fields are resolved live from the linked manifest at read time via
+`roster_resolve.persona_from_manifest`/`resolve_persona`, and joined into the
+API response shape `EnrichedRosterAgent` (`models.py`) by
+`api/main.py::enrich_roster_agent` — never persisted. `roster_validation.py`,
+`runtime/agent_builder.py`, and `runtime/pipeline_runner.py` all consume the
+resolved persona, not stored fields. Legacy rows persisted before this
+migration (still carrying fat JSON in `assistant/store.py`) self-heal on first
+read via `roster_resolve.migrate_roster_row`, which folds any fat fields into
+the linked (or newly generated) `AgentManifest` and rewrites the row thin.
+`PUT /teams/{team_id}/agents/{agent_name}` rejects any persona field in the
+request body with a 400 (`api/services/teams.py::update_roster_agent`) — the
+API boundary enforces that Manifest is the only writable persona identity.
 
-Field mapping, as implemented today by the from-registry projection
-(`api/services/teams.py::_roster_agent_from_manifest`):
+Field mapping, as implemented by the from-registry projection
+(`api/services/teams.py::_roster_agent_from_manifest`) and the read-time join
+(`roster_resolve.persona_from_manifest`):
 
-| Roster (fat, today) | Manifest (SoT) | Notes |
+| `EnrichedRosterAgent` field (read view) | Manifest (SoT) | Notes |
 |---|---|---|
-| `agent_name` | `name` | |
+| `agent_name` | `name` | thin ref only; not resolved from the manifest at read time |
 | `role` | `summary` | falls back to `name` when `summary` is empty |
-| `skills` | `tags` | |
+| `skills` | `tags` | marker tags (`"generated"`, team key) stripped |
 | `tools` | `cognition.tools` | empty when the manifest has no `cognition` block |
 | `expertise` | `[team]` | single-element list: the manifest's home team |
-| `capabilities` | *(none)* | never populated from a manifest — open gap for the future cutover |
+| `capabilities` | *(none)* | never populated from a manifest — no Manifest field carries this concept |
 
 ## Pipeline test runs (execution)
 

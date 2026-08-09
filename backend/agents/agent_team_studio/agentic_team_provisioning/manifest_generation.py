@@ -28,27 +28,27 @@ from agent_registry.models import (
 )
 from agent_team_studio.agentic_team_provisioning.agent_env_provisioning import _slug
 from agent_team_studio.agentic_team_provisioning.models import SOURCE_GENERATED, AgenticTeamAgent
+from agent_team_studio.manifest_shared import (
+    AGENT_ANATOMY_REF as _ANATOMY_REF,
+)
+from agent_team_studio.manifest_shared import (
+    DEFAULT_RULE_PACKS,
+    strip_marker_tags,
+)
+from agent_team_studio.manifest_shared import (
+    GENERATED_AGENT_ENTRYPOINT as _ENTRYPOINT,
+)
+from agent_team_studio.manifest_shared import (
+    GENERATED_AGENT_INPUT_REF as _INPUT_SCHEMA_REF,
+)
+from agent_team_studio.manifest_shared import (
+    GENERATED_AGENT_OUTPUT_REF as _OUTPUT_SCHEMA_REF,
+)
 
 # The registry team key for this service (matches TEAM_CONFIGS in
 # unified_api/config.py). This is the manifest ``team`` value — distinct from the
 # per-instance team UUID, which only feeds the slugged manifest id.
 _TEAM_KEY = "agentic_team_provisioning"
-
-# Where the canonical agent-anatomy contract lives, repo-relative per SourceInfo.
-_ANATOMY_REF = "backend/agents/agent_team_studio/agent_provisioning_team/AGENT_ANATOMY.md"
-
-# The invokable sandbox entrypoint: a single callable that accepts one request
-# body (carrying the roster metadata + message), reconstructs the agent, and runs
-# it through the cognition-aware wrapper. The dispatch shim calls it as
-# ``entrypoint(body)``, so it must take exactly the request body.
-_ENTRYPOINT = (
-    "agent_team_studio.agentic_team_provisioning.runtime.agent_builder:invoke_generated_agent"
-)
-
-# Dotted refs to the Pydantic models describing the invoke contract (resolved
-# lazily by the registry, never imported at load time).
-_INPUT_SCHEMA_REF = "agent_team_studio.agentic_team_provisioning.models:GeneratedAgentInvokeInput"
-_OUTPUT_SCHEMA_REF = "agent_team_studio.agentic_team_provisioning.models:GeneratedAgentInvokeOutput"
 
 
 # Hex length of the id-disambiguating digest. 16 hex chars = 64 bits: accidental
@@ -117,7 +117,7 @@ def default_cognition_block() -> CognitionSpec:
     return CognitionSpec(
         memory=CognitionMemorySpec(retention_days_events=90),
         tools=[],
-        rule_packs=["default_guardrails"],
+        rule_packs=list(DEFAULT_RULE_PACKS),
         requires_idempotency_key=False,
         knowledge_graph=CognitionKnowledgeGraphSpec(),
     )
@@ -187,7 +187,7 @@ def skill_tags_from_manifest(manifest: AgentManifest) -> list[str]:
     Postconditions: returns tags excluding the ``"generated"`` and team-key markers
         stamped by :func:`build_agent_manifest`, order preserved.
     """
-    return [t for t in (manifest.tags or []) if t not in ("generated", _TEAM_KEY)]
+    return strip_marker_tags(manifest.tags or [], frozenset({"generated", _TEAM_KEY}))
 
 
 def is_generated_manifest(manifest: AgentManifest) -> bool:
