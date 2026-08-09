@@ -2,10 +2,9 @@
 
 from __future__ import annotations
 
-import sys
-
 import pytest
 
+from agent_team_studio.assistant_kernel import fenced_json as fenced_json_module
 from agent_team_studio.assistant_kernel.fenced_json import (
     merge_list_by_key,
     parse_fenced_json,
@@ -93,21 +92,21 @@ def test_parse_none_on_oversized_integer() -> None:
     assert parse_fenced_json(text, "agent") is None
 
 
-def test_parse_none_on_excessive_nesting() -> None:
+def test_parse_none_on_excessive_nesting(monkeypatch: pytest.MonkeyPatch) -> None:
     # Deeply nested JSON can blow the interpreter's recursion limit inside
     # json.loads, raising RecursionError rather than JSONDecodeError. The
-    # exact nesting depth needed varies by Python build/version, so the
-    # recursion limit is lowered for the duration of this test (well above
-    # pytest's own call depth, which is a few dozen frames) to make the
-    # failure deterministic rather than tied to a magic depth number.
-    body = "[" * 500 + "]" * 500
-    text = f"```agent\n{body}\n```"
-    old_limit = sys.getrecursionlimit()
-    sys.setrecursionlimit(100)
-    try:
-        assert parse_fenced_json(text, "agent", expected_type=list) is None
-    finally:
-        sys.setrecursionlimit(old_limit)
+    # nesting depth needed to actually trigger that varies by Python
+    # build/version — even lowering sys.setrecursionlimit() doesn't reliably
+    # force it on every CPython build (the C-accelerated decoder doesn't
+    # necessarily respect it the way pure-Python recursion does) — so this
+    # simulates the failure directly by making json.loads raise, which
+    # exercises the same except clause deterministically on every runtime.
+    def _raise_recursion_error(*_args, **_kwargs):
+        raise RecursionError("maximum recursion depth exceeded")
+
+    monkeypatch.setattr(fenced_json_module.json, "loads", _raise_recursion_error)
+    text = "```agent\n[1, 2, 3]\n```"
+    assert parse_fenced_json(text, "agent", expected_type=list) is None
 
 
 # ---------------------------------------------------------------------------
