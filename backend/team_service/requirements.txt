@@ -14,7 +14,6 @@ psycopg_pool>=3.3,<4.0
 temporalio>=1.25,<2.0
 strands-agents>=1.35,<2.0
 strands-agents-tools>=0.4,<1.0
-ollama>=0.6,<1.0
 # Tolerant JSON repair for LLM output. Its consumers import it lazily and
 # swallow ImportError by design (salvage must never crash), so a missing wheel
 # silently disables repair in production instead of failing loudly:
