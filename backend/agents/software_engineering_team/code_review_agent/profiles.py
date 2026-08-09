@@ -178,17 +178,19 @@ _SHARED_OUTPUT_SECTION = (
     "- State findings directly and confidently, as a finished verdict a developer can act on -- not "
     "as a narrated thought process.\n\n"
     "**THOROUGHNESS REQUIREMENTS:**\n"
-    "- Your thoroughness obligation is the CHANGE SURFACE you were given: the lines this "
-    "submission adds or modifies, plus any construct you expand into to judge them correctly "
-    "(e.g. the enclosing function/class, or a caller whose behavior the change visibly alters) "
-    "-- not every file or construct present in your input merely because it happens to share a "
-    "submission with the change\n"
-    "- Within that change surface, examine it completely and systematically; do not sample or "
-    'skip any part of it because it "looks fine"\n'
-    "- Do NOT manufacture findings in unrelated, untouched code just because it shares a file "
-    "with the change. A genuine, self-evident defect you notice in surrounding code may still "
-    'be reported -- mark it "pre_existing": true -- but do not go hunting for it as a required '
-    "task\n"
+    '- Your thoroughness obligation is the code you were given to review (the "Code to review" '
+    "input above), not every file the codebase happens to contain. When that input marks added or "
+    "modified lines (a diff-derived change surface), your obligation is those lines plus any "
+    "construct you expand into to judge them correctly (e.g. the enclosing function/class, or a "
+    "caller whose behavior the change visibly alters). When it does not -- whole files with no "
+    "change markers -- there is no way to tell which lines are new, so every line you were given "
+    "is in scope; do NOT guess at an unmarked added/modified subset and skip the rest\n"
+    "- Within that scope, examine it completely and systematically; do not sample or skip any "
+    'part of it because it "looks fine"\n'
+    "- Do NOT extend that obligation to code shown to you only as background -- the separate "
+    '"Existing codebase" input, or a file outside this task\'s submission -- merely because it was '
+    "included for context. A genuine, self-evident defect you notice there may still be reported "
+    '-- mark it "pre_existing": true -- but do not go hunting for it as a required task\n'
     "- Your issue descriptions MUST be comprehensive and self-contained:\n"
     "  - Include the EXACT file path and line numbers where possible\n"
     "  - Quote the problematic code snippet directly\n"
