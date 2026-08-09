@@ -110,14 +110,24 @@ def test_deliver_existing_branch_gate_blocks_merge(tmp_path, monkeypatch):
 
 
 def test_deliver_existing_branch_gate_passes_autofix_commit_before_merge(tmp_path, monkeypatch):
-    """A passing gate sweeps up any autofix commit before the merge proceeds."""
+    """A passing gate sweeps up any autofix commit before the merge proceeds.
+
+    Both operations are recorded into one shared, call-ordered list so the
+    assertion actually verifies ordering -- separate per-op lists would pass
+    even if an implementation merged before sweeping up the autofix commit.
+    """
     _git_dir(tmp_path)
-    commit_calls = []
+    calls: list[tuple[str, str]] = []
     monkeypatch.setattr(
-        mod, "commit_working_tree", lambda *a, **k: commit_calls.append(a) or (True, "")
+        mod,
+        "commit_working_tree",
+        lambda *a, **k: calls.append(("commit_working_tree", a[1])) or (True, ""),
     )
-    merge_calls = []
-    monkeypatch.setattr(mod, "merge_branch", lambda *a, **k: merge_calls.append(a) or (True, ""))
+    monkeypatch.setattr(
+        mod,
+        "merge_branch",
+        lambda *a, **k: calls.append(("merge_branch", "")) or (True, ""),
+    )
     monkeypatch.setattr(mod, "delete_branch", lambda *a, **k: (True, ""))
     monkeypatch.setattr(mod, "checkout_branch", lambda *a, **k: (True, ""))
     out = _agent().deliver(
@@ -130,9 +140,11 @@ def test_deliver_existing_branch_gate_passes_autofix_commit_before_merge(tmp_pat
         )
     )
     assert out.success is True
-    assert merge_calls
-    assert commit_calls[0][1] == "chore: finalize before merge"
-    assert commit_calls[-1][1] == "chore: pre-merge quality gate autofix"
+    assert calls == [
+        ("commit_working_tree", "chore: finalize before merge"),
+        ("commit_working_tree", "chore: pre-merge quality gate autofix"),
+        ("merge_branch", ""),
+    ]
 
 
 # --- fallback path (no feature_branch_name) --------------------------------
