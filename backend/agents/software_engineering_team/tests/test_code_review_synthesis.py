@@ -49,7 +49,7 @@ def _issue(
 
 
 def _input(**kwargs: Any) -> CodeReviewInput:
-    base: Dict[str, Any] = dict(code="### a.py ###\nx = 1", task_description="t", language="python")
+    base: Dict[str, Any] = dict(files={"a.py": "x = 1"}, task_description="t", language="python")
     base.update(kwargs)
     return CodeReviewInput(**base)
 
@@ -499,7 +499,7 @@ def test_single_chunk_makes_no_synthesis_call(monkeypatch) -> None:
     )
     result = run_coordinator(
         client,
-        CodeReviewInput(code="### a.py ###\nx = 1", task_description="t", language="python"),
+        CodeReviewInput(files={"a.py": "x = 1"}, task_description="t", language="python"),
     )
     assert calls == []  # exactly one sub-review → summary/notes pass through directly
     assert result.summary == "x"

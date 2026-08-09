@@ -70,7 +70,7 @@ def test_multi_file_surface_code_round_trips_through_chunker_header_parser() -> 
 
 def test_blocks_from_input_accepts_multi_file_surface_verbatim() -> None:
     surface = _multi_file_surface()
-    input_data = CodeReviewInput(code=surface.code, pre_numbered=True, language="python")
+    input_data = CodeReviewInput(files=dict(surface.blocks), pre_numbered=True, language="python")
     blocks, skipped = _blocks_from_input(input_data)
     assert blocks == list(surface.blocks.items())
     assert skipped == []
@@ -143,7 +143,7 @@ def test_multi_file_surface_through_coordinator_preserves_per_file_line_citation
 
     result = run_coordinator(
         client,
-        CodeReviewInput(code=surface.code, pre_numbered=True, language="python"),
+        CodeReviewInput(files=dict(surface.blocks), pre_numbered=True, language="python"),
     )
 
     issues_by_path = {issue.file_path: issue for issue in result.issues}

@@ -61,8 +61,11 @@ def _single_file_surface():
 
 def test_change_surface_code_round_trips_through_chunker_header_parser() -> None:
     """``surface.code`` parses back into exactly ``surface.blocks`` via the
-    chunker's own ``### path ###`` header parser (the function
-    ``_blocks_from_input`` delegates to for the legacy ``code=`` channel)."""
+    chunker's own ``### path ###`` header parser (the same parser
+    ``_blocks_from_input`` falls back to when a review input carries no
+    ``files=`` mapping; every ``CodeReviewInput`` constructed here supplies
+    ``files=`` directly, so this test locks the parser's contract on
+    ``surface.code`` in isolation, independent of that input path)."""
     surface = _single_file_surface()
     parsed = parse_code_into_file_blocks(surface.code)
     assert parsed == list(surface.blocks.items())
@@ -70,7 +73,7 @@ def test_change_surface_code_round_trips_through_chunker_header_parser() -> None
 
 def test_blocks_from_input_accepts_surface_code_verbatim() -> None:
     surface = _single_file_surface()
-    input_data = CodeReviewInput(code=surface.code, pre_numbered=True, language="python")
+    input_data = CodeReviewInput(files=dict(surface.blocks), pre_numbered=True, language="python")
     blocks, skipped = _blocks_from_input(input_data)
     assert blocks == list(surface.blocks.items())
     assert skipped == []
@@ -133,7 +136,7 @@ def test_change_surface_through_coordinator_preserves_original_line_citations() 
 
     result = run_coordinator(
         client,
-        CodeReviewInput(code=surface.code, pre_numbered=True, language="python"),
+        CodeReviewInput(files=dict(surface.blocks), pre_numbered=True, language="python"),
     )
 
     assert len(result.issues) == 1

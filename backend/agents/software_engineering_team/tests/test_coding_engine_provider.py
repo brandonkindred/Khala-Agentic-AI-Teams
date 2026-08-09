@@ -66,45 +66,7 @@ def test_quality_gate_methods_delegate(monkeypatch) -> None:
     provider = SECodeEngineProvider()
     assert provider.run_build_verification("repo", "backend", "t1") == "build"
     assert provider.run_linting("repo", "t1", llm_getter=None) == "lint"
-    assert provider.run_code_review(code="x", language="python") == "review"
-
-
-def test_run_pr_code_review_legacy_code_mode(monkeypatch) -> None:
-    """Diff-hunk (``code=``) mode: builds a code-backed input, forwards no reader."""
-    import software_engineering_team.code_review_agent as cra
-
-    class _FakeAgent:
-        def __init__(self, llm_client=None, *, force_in_process=False):
-            self.force_in_process = force_in_process
-
-        def run(self, review_input, **kwargs):
-            return types.SimpleNamespace(
-                issues=[],
-                review_input=review_input,
-                kwargs=kwargs,
-                force_in_process=self.force_in_process,
-            )
-
-    monkeypatch.setattr(cra, "CodeReviewAgent", _FakeAgent)
-
-    out = SECodeEngineProvider().run_pr_code_review(
-        code="c",
-        pre_numbered=True,
-        task_description="d",
-        task_requirements="r",
-        language="python",
-        progress_callback="cb",
-    )
-    assert out.issues == []
-    assert out.kwargs["progress_callback"] == "cb"
-    # No repo_reader supplied -> not forwarded (keeps duck-typed stubs working)
-    # and durable Temporal dispatch is retained (force_in_process stays False).
-    assert "repo_reader" not in out.kwargs
-    assert out.force_in_process is False
-    assert out.review_input.code == "c"
-    assert out.review_input.files is None
-    assert out.review_input.pre_numbered is True
-    assert out.review_input.language == "python"
+    assert provider.run_code_review(files={"x.py": "x"}, language="python") == "review"
 
 
 def test_run_pr_code_review_whole_file_mode_forwards_reader(monkeypatch) -> None:
@@ -137,8 +99,6 @@ def test_run_pr_code_review_whole_file_mode_forwards_reader(monkeypatch) -> None
         repo_reader=reader,
     )
     assert out.review_input.files == {"a.py": "x = 1\n"}
-    # files takes precedence: no code blob leaks through.
-    assert out.review_input.code == ""
     assert out.review_input.pre_numbered is False
     assert out.kwargs["repo_reader"] is reader
     # A live GitHub reader cannot cross the Temporal boundary, so the provider

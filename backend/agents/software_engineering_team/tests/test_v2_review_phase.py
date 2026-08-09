@@ -717,7 +717,6 @@ def test_run_review_passes_files_dict_unmodified(monkeypatch, tmp_path: Path):
 
     def _capture(inp, **kw):
         captured["files"] = inp.files
-        captured["code"] = inp.code
         return MagicMock(issues=[])
 
     cr_agent = MagicMock()
@@ -733,7 +732,6 @@ def test_run_review_passes_files_dict_unmodified(monkeypatch, tmp_path: Path):
         code_review_agent=cr_agent,
     )
     assert captured["files"] == files
-    assert captured["code"] == ""
 
 
 def test_run_review_forwards_architecture_and_spec_content(monkeypatch, tmp_path: Path):

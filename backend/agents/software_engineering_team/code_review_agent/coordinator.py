@@ -65,7 +65,7 @@ Submission-level short-circuit: the map-phase cache still re-runs the reduce and
 the false-positive *verification* pass on every cycle, so re-reviewing a
 byte-identical submission that was already approved is not free. A second,
 coarser shared LRU (``CODE_REVIEW_SUBMISSION_CACHE_SIZE``, via ``shared.cache``)
-keyed on the whole raw ``CodeReviewInput`` (files/code + task/spec/architecture
+keyed on the whole raw ``CodeReviewInput`` (files + task/spec/architecture
 context + profile + resolved model) records the approved ``CodeReviewOutput`` of
 each submission, and ``run_coordinator`` returns a freshly deserialized copy
 before touching the LLM when the same submission comes back — zero LLM calls
@@ -630,7 +630,7 @@ def run_coordinator(
           <= 1, either of which forces the sequential fallback instead. The
           central ``llm_service`` clients already guard their shared state
           internally for this.
-        - ``input_data`` carries the code under review via ``files`` or ``code``.
+        - ``input_data`` carries the code under review via ``files``.
         - ``progress_callback`` is None or satisfies the
           ``ReviewProgressCallback`` contract (non-raising, accepts
           ``(step, detail, fraction)``).
