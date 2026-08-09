@@ -478,16 +478,20 @@ def _code_review_step(
           and ``raw_issue_count`` from the LLM fallback when it ran (``None`` when the
           external agent succeeded or a bare-list stub reported no count).
         - The external agent's ``CodeReviewInput`` is built with ``code=<surface>,
-          pre_numbered=True`` (no ``files=``) when a change surface can be resolved for
-          ``files`` -- from caller-supplied ``old_contents``, or auto-resolved from
-          ``repo_path``'s pre-task ``HEAD`` when ``old_contents`` is ``None`` -- and every
-          genuinely-changed path is fully represented in it (see
-          ``_resolve_change_surface_for_review``). Otherwise -- no base resolvable for any
-          path, every resolved path identical to its new content, or a genuinely-changed
-          path only partially covered (whole file or one hunk within it) -- it falls back
-          to submitting ``files`` as-is, exactly as before this parameter existed. Code
-          review runs identically either way; a missing, empty, or partial base never
-          skips it.
+          pre_numbered=True, full_content=files`` (no ``files=``) when a change surface
+          can be resolved for ``files`` -- from caller-supplied ``old_contents``, or
+          auto-resolved from ``repo_path``'s pre-task ``HEAD`` when ``old_contents`` is
+          ``None`` -- and every genuinely-changed path is fully represented in it (see
+          ``_resolve_change_surface_for_review``). ``full_content=files`` rides along
+          with the bounded surface so the coordinator's whole-codebase side-effect and
+          architecture passes (which would otherwise treat ``pre_numbered=True`` as "only
+          a partial excerpt is available" and skip caller-impact analysis entirely) still
+          see real full bodies for the changed paths. Otherwise -- no base resolvable for
+          any path, every resolved path identical to its new content, or a
+          genuinely-changed path only partially covered (whole file or one hunk within
+          it) -- it falls back to submitting ``files`` as-is, exactly as before this
+          parameter existed. Code review runs identically either way; a missing, empty,
+          or partial base never skips it.
         - Never raises: an external ``code_review_agent`` failure logs a warning and falls back
           to the LLM reviewer, matching this step's long-standing solo behavior. The LLM fallback
           itself (used both here and when ``code_review_agent`` is None) is also guarded — any
@@ -532,10 +536,18 @@ def _code_review_step(
             # resolves (caller-supplied old_contents, or auto-resolved from repo_path's
             # HEAD); otherwise files= (per-file attribution, no header parsing, no
             # upstream truncation) — see _resolve_change_surface_for_review for the
-            # fallback contract.
+            # fallback contract. full_content=files rides along with the surface so
+            # the coordinator's whole-codebase side-effect/architecture passes still
+            # see real full bodies for the changed paths (CodeReviewInput.full_content)
+            # instead of being silently disabled by pre_numbered=True.
             surface = _resolve_change_surface_for_review(files, repo_path, old_contents)
             if surface is not None:
-                cr_input = _build_cr_input(code=surface.code, pre_numbered=True, **common_kwargs)
+                cr_input = _build_cr_input(
+                    code=surface.code,
+                    pre_numbered=True,
+                    full_content=files,
+                    **common_kwargs,
+                )
             else:
                 cr_input = _build_cr_input(files=files, **common_kwargs)
             cr_result = call_code_review_agent(

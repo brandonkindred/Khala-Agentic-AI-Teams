@@ -225,6 +225,12 @@ class CodebaseIndex:
               blocks via the coordinator's canonical parser; headerless blocks
               and empty-string bodies are dropped (they cannot be addressed by
               a path).
+            - When ``input_data.pre_numbered`` is True and ``input_data.full_content``
+              is given, each of its paths overlays (replaces) whatever bounded
+              pre-numbered excerpt that path had -- so a whole-codebase pass reading
+              via this index sees the real full body for those paths, while the
+              chunk reviewer (built from ``code``/``pre_numbered`` directly, not from
+              this index) is unaffected. Ignored when ``pre_numbered`` is False.
             - ``existing_codebase`` carries the input's full existing-codebase
               excerpt (empty string when absent); ``repo_reader`` is stored
               verbatim.
@@ -244,6 +250,8 @@ class CodebaseIndex:
             for path, content in parse_code_into_file_blocks(input_data.code or ""):
                 if path and content != "":
                     files[path] = content
+        if input_data.pre_numbered and input_data.full_content:
+            files = {**files, **input_data.full_content}
         return cls(
             files=files,
             existing_codebase=input_data.existing_codebase or "",
@@ -603,23 +611,14 @@ class CodebaseIndex:
             display = path
         _, ext = os.path.splitext(display)
         if ext.lower() not in (".py", ".pyi"):
-            return (
-                f"Error: read_function by line requires a Python file (.py/.pyi); "
-                f"got {display}."
-            )
+            return f"Error: read_function by line requires a Python file (.py/.pyi); got {display}."
 
         stripped, physical, mapper = strip_numbered_prefixes(content, line)
-        construct = enclosing_construct(
-            stripped, physical, annotated_hunks=mapper is not None
-        )
+        construct = enclosing_construct(stripped, physical, annotated_hunks=mapper is not None)
         if construct is None:
-            return (
-                f"Error: no enclosing function/class for line {line} of {display}."
-            )
+            return f"Error: no enclosing function/class for line {line} of {display}."
 
-        return _format_construct_slice(
-            display, construct, stripped.splitlines(), mapper=mapper
-        )
+        return _format_construct_slice(display, construct, stripped.splitlines(), mapper=mapper)
 
     def read_function_by_name(self, path: str, name: str) -> str:
         """Return the construct body for an exact name match, or an error.
@@ -646,10 +645,7 @@ class CodebaseIndex:
             display = path
         _, ext = os.path.splitext(display)
         if ext.lower() not in (".py", ".pyi"):
-            return (
-                f"Error: read_function by name requires a Python file (.py/.pyi); "
-                f"got {display}."
-            )
+            return f"Error: read_function by name requires a Python file (.py/.pyi); got {display}."
 
         stripped, _, mapper = strip_numbered_prefixes(content, 1)
         # Pre-numbered hunk excerpts use annotated_hunks so a sibling
@@ -673,9 +669,7 @@ class CodebaseIndex:
                 f"Error: name {needle!r} is ambiguous in {display}; matches: {detail}. "
                 f"Call read_function with a line number from one of those ranges."
             )
-        return _format_construct_slice(
-            display, matches[0], stripped.splitlines(), mapper=mapper
-        )
+        return _format_construct_slice(display, matches[0], stripped.splitlines(), mapper=mapper)
 
     def search(
         self, query: str, max_matches: int = _SEARCH_MATCH_LIMIT
@@ -712,9 +706,7 @@ class CodebaseIndex:
                         return results
         return results
 
-    def find_references(
-        self, symbol: str, max_matches: int = _SEARCH_MATCH_LIMIT
-    ) -> str:
+    def find_references(self, symbol: str, max_matches: int = _SEARCH_MATCH_LIMIT) -> str:
         """Search submission (and repo_reader when present) for capped path:line hits.
 
         Submission matches come from :meth:`search` first. When a ``repo_reader``
@@ -743,9 +735,7 @@ class CodebaseIndex:
         if not (symbol or "").strip():
             body = f"No references for {symbol!r}."
             if self.repo_reader is None:
-                return (
-                    f"{body}\n\nNo repository access is available beyond this submission."
-                )
+                return f"{body}\n\nNo repository access is available beyond this submission."
             return (
                 f"{body} Blank/whitespace symbols are not searched -- this does NOT prove "
                 "the symbol is absent from the submission or repository."
@@ -755,9 +745,7 @@ class CodebaseIndex:
         truncated = False
         if self.repo_reader is None:
             body = (
-                "\n\n".join(
-                    _format_reference_hit(self, path, lineno) for path, lineno, _ in hits
-                )
+                "\n\n".join(_format_reference_hit(self, path, lineno) for path, lineno, _ in hits)
                 if hits
                 else f"No references for {symbol!r}."
             )
@@ -767,9 +755,7 @@ class CodebaseIndex:
         if remaining == 0:
             truncated = True
         elif remaining > 0:
-            repo_hits, repo_truncated = _search_repo_references(
-                self, symbol, max_matches=remaining
-            )
+            repo_hits, repo_truncated = _search_repo_references(self, symbol, max_matches=remaining)
             hits.extend(repo_hits)
             truncated = repo_truncated
 
@@ -783,9 +769,7 @@ class CodebaseIndex:
                 )
             return f"No references for {symbol!r}."
 
-        result = "\n\n".join(
-            _format_reference_hit(self, path, lineno) for path, lineno, _ in hits
-        )
+        result = "\n\n".join(_format_reference_hit(self, path, lineno) for path, lineno, _ in hits)
         if truncated:
             result += (
                 f"\n\n(Scan truncated before covering the whole repository -- there may be "
@@ -938,10 +922,7 @@ def _format_line_window(
     display_start = mapper(start) if mapper is not None else start
     display_end = mapper(end) if mapper is not None else end
     shown = end - start + 1
-    header = (
-        f"{display} lines {display_start}–{display_end} "
-        f"(window, {shown} of {span} lines):"
-    )
+    header = f"{display} lines {display_start}–{display_end} (window, {shown} of {span} lines):"
     body = "\n".join(
         f"{(mapper(i) if mapper is not None else i)}| {body_lines[i - 1]}"
         for i in range(start, end + 1)
@@ -1222,8 +1203,7 @@ def _build_tools(index: CodebaseIndex) -> List[Callable[..., str]]:
             return index.read_lines(path, start, end)
         except Exception as exc:
             return (
-                f"Error: could not read_lines {path!r} [{start}:{end}]: "
-                f"{type(exc).__name__}: {exc}"
+                f"Error: could not read_lines {path!r} [{start}:{end}]: {type(exc).__name__}: {exc}"
             )
 
     @tool
@@ -1245,20 +1225,14 @@ def _build_tools(index: CodebaseIndex) -> List[Callable[..., str]]:
         """
         try:
             if isinstance(name_or_line, bool):
-                return (
-                    f"Error: name_or_line must be a line number or name, "
-                    f"got {name_or_line!r}."
-                )
+                return f"Error: name_or_line must be a line number or name, got {name_or_line!r}."
             if isinstance(name_or_line, int):
                 return index.read_function(path, name_or_line)
             if isinstance(name_or_line, str) and name_or_line.strip().isdigit():
                 return index.read_function(path, int(name_or_line.strip()))
             if isinstance(name_or_line, str):
                 return index.read_function_by_name(path, name_or_line)
-            return (
-                f"Error: name_or_line must be a line number or name, "
-                f"got {name_or_line!r}."
-            )
+            return f"Error: name_or_line must be a line number or name, got {name_or_line!r}."
         except Exception as exc:
             return (
                 f"Error: could not read_function {path!r} ({name_or_line!r}): "
@@ -1350,7 +1324,14 @@ def _build_tools(index: CodebaseIndex) -> List[Callable[..., str]]:
         except Exception as exc:
             return f"Error: could not inspect {path!r} at line {line_number}: {type(exc).__name__}: {exc}"
 
-    return [read_file, read_lines, read_function, list_files, search_codebase, find_function_at_line]
+    return [
+        read_file,
+        read_lines,
+        read_function,
+        list_files,
+        search_codebase,
+        find_function_at_line,
+    ]
 
 
 @dataclass

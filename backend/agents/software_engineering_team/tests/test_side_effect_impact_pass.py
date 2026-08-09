@@ -657,6 +657,45 @@ def test_returns_empty_when_pre_numbered() -> None:
     assert result == []
 
 
+def test_runs_when_pre_numbered_with_full_content_supplied() -> None:
+    """A caller that supplies ``full_content`` alongside ``pre_numbered=True`` has
+    given this pass real full bodies (via ``CodebaseIndex.from_input``'s overlay) --
+    the pass must run its normal caller-impact analysis instead of treating the
+    submission as unverifiable hunk-fallback mode."""
+
+    class _FindingsClient(DummyLLMClient):
+        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+            if _SIDE_EFFECT_PASS_ANCHOR in prompt:
+                assert (
+                    "def bar():" in prompt
+                )  # full_content reached the prompt, not "1: def bar():"
+                return {
+                    "findings": [
+                        {
+                            "severity": "high",
+                            "category": "side-effects",
+                            "file_path": "app/main.py",
+                            "description": "bar() behavior changed",
+                            "suggestion": "check callers",
+                        }
+                    ]
+                }
+            return {"approved": True, "issues": [], "summary": "ok", "spec_compliance_notes": ""}
+
+    full = "def bar():\n    return 1\n"
+    result = find_side_effect_impact_issues(
+        _FindingsClient(),
+        CodeReviewInput(
+            code="### app/main.py ###\n1: def bar():\n2:     return 1\n",
+            pre_numbered=True,
+            full_content={"app/main.py": full},
+            task_description="wire up bar",
+        ),
+    )
+    assert len(result) == 1
+    assert result[0].category == "side-effects"
+
+
 # --------------------------------------------------------------------------- happy path
 
 

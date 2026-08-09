@@ -1465,10 +1465,13 @@ def test_code_review_empty_diff_falls_back_to_files(tmp_path: Path) -> None:
 def test_code_review_meaningful_diff_uses_change_surface(tmp_path: Path) -> None:
     """A real git base exists and differs from the new content -> the agent is
     submitted the diff-derived change surface (``code=``, ``pre_numbered=True``)
-    instead of ``files=``."""
+    instead of ``files=``, with ``full_content=files`` riding along so the
+    coordinator's whole-codebase side-effect/architecture passes still see real
+    full bodies instead of being disabled by ``pre_numbered=True``."""
     config = _build_config()
     _init_repo(tmp_path)
     _commit_file(tmp_path, "x.py", "old content\n")
+    files = {"x.py": "new content\n"}
 
     cr_agent = MagicMock()
     cr_agent.run.return_value = MagicMock(issues=[])
@@ -1479,7 +1482,7 @@ def test_code_review_meaningful_diff_uses_change_surface(tmp_path: Path) -> None
         task=_task(),
         microtask=_microtask(),
         repo_path=tmp_path,
-        files={"x.py": "new content\n"},
+        files=files,
         code_review_agent=cr_agent,
         language="python",
         **_noop_runners(),
@@ -1491,6 +1494,7 @@ def test_code_review_meaningful_diff_uses_change_surface(tmp_path: Path) -> None
     assert cr_input.pre_numbered is True
     assert "### x.py ###" in cr_input.code
     assert "new content" in cr_input.code
+    assert cr_input.full_content == files
 
 
 def test_resolve_change_surface_for_review_no_files_returns_none(tmp_path: Path) -> None:

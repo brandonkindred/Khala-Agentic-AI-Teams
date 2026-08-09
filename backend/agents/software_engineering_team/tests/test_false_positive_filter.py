@@ -167,6 +167,36 @@ def test_index_from_files_keeps_whitespace_only() -> None:
     assert set(idx.files) == {"a.py", "b.py", "d.py"}
 
 
+def test_index_from_input_overlays_full_content_for_pre_numbered_paths() -> None:
+    """A ``pre_numbered`` submission's ``full_content`` overlays real full bodies
+    onto the index for the paths it covers, so whole-codebase passes reading via
+    the index see complete content instead of the bounded pre-numbered excerpt."""
+    code = "### app/main.py ###\n1: def bar():\n2:     return foo()\n"
+    full = "def bar():\n    return foo()\n\ndef extra():\n    pass\n"
+    idx = CodebaseIndex.from_input(
+        CodeReviewInput(
+            code=code,
+            pre_numbered=True,
+            full_content={"app/main.py": full},
+            task_description="t",
+        )
+    )
+    assert idx.files["app/main.py"] == full
+
+
+def test_index_from_input_ignores_full_content_when_not_pre_numbered() -> None:
+    """``full_content`` is documented as a no-op unless ``pre_numbered=True`` --
+    a ``files=`` submission (never pre-numbered by construction) is unaffected."""
+    idx = CodebaseIndex.from_input(
+        CodeReviewInput(
+            files={"app/main.py": "def bar(): pass\n"},
+            full_content={"app/main.py": "SHOULD NOT APPEAR"},
+            task_description="t",
+        )
+    )
+    assert idx.files["app/main.py"] == "def bar(): pass\n"
+
+
 def test_verdict_invariant_rejects_low_confidence_false_positive() -> None:
     """``_Verdict`` rejects is_false_positive=True without high/medium confidence."""
     from code_review_agent.false_positive_filter import _Verdict
@@ -332,14 +362,7 @@ def test_read_lines_rejects_non_positive_bounds() -> None:
 
 def test_read_function_returns_method_in_class_body() -> None:
     """Line inside a method returns only that method's construct body."""
-    src = (
-        "class C:\n"
-        "    def m(self):\n"
-        "        return 1\n"
-        "\n"
-        "def other():\n"
-        "    return 2\n"
-    )
+    src = "class C:\n    def m(self):\n        return 1\n\ndef other():\n    return 2\n"
     idx = CodebaseIndex(files={"app/mod.py": src})
     # Line 3 is inside C.m
     result = idx.read_function("app/mod.py", 3)
@@ -376,14 +399,7 @@ def test_read_function_rejects_non_positive_line() -> None:
 
 
 def test_read_function_by_name_unique_match() -> None:
-    src = (
-        "class C:\n"
-        "    def m(self):\n"
-        "        return 1\n"
-        "\n"
-        "def other():\n"
-        "    return 2\n"
-    )
+    src = "class C:\n    def m(self):\n        return 1\n\ndef other():\n    return 2\n"
     idx = CodebaseIndex(files={"app/mod.py": src})
     by_name = idx.read_function_by_name("app/mod.py", "C.m")
     by_line = idx.read_function("app/mod.py", 3)
@@ -400,13 +416,7 @@ def test_read_function_by_name_missing_errors() -> None:
 
 def test_read_function_by_name_ambiguous_errors() -> None:
     """Two same-named top-level defs in one AST file → ambiguous exact match."""
-    src = (
-        "def twin():\n"
-        "    return 1\n"
-        "\n"
-        "def twin():\n"
-        "    return 2\n"
-    )
+    src = "def twin():\n    return 1\n\ndef twin():\n    return 2\n"
     idx = CodebaseIndex(files={"app/mod.py": src})
     msg = idx.read_function_by_name("app/mod.py", "twin")
     assert msg.startswith("Error:")
@@ -440,13 +450,7 @@ def test_read_function_by_name_property_setter_not_ambiguous() -> None:
 
 def test_read_function_by_name_ambiguous_pre_numbered_shows_original_lines() -> None:
     """Pre-numbered twin defs → ambiguous error uses original line numbers, not physical."""
-    src = (
-        "100: def twin():\n"
-        "101:     return 1\n"
-        "\n"
-        "102: def twin():\n"
-        "103:     return 2\n"
-    )
+    src = "100: def twin():\n101:     return 1\n\n102: def twin():\n103:     return 2\n"
     idx = CodebaseIndex(files={"app/mod.py": src})
     msg = idx.read_function_by_name("app/mod.py", "twin")
     assert msg.startswith("Error:")
@@ -689,9 +693,7 @@ def test_search_repo_references_respects_max_files_scanned() -> None:
 
     reader_files = {f"f{i}.py": "needle\n" for i in range(5)}
     idx = CodebaseIndex(files={"sub.py": "other\n"}, repo_reader=_FakeReader(reader_files))
-    hits, truncated = _search_repo_references(
-        idx, "needle", max_matches=10, max_files_scanned=2
-    )
+    hits, truncated = _search_repo_references(idx, "needle", max_matches=10, max_files_scanned=2)
     assert len(hits) == 2
     assert truncated is True
     assert {path for path, _, _ in hits} <= set(reader_files)
@@ -755,13 +757,7 @@ def test_find_references_list_files_failure_is_empty_truncated() -> None:
 
 def test_find_references_attaches_enclosing_construct_excerpt() -> None:
     """A hit inside a Python function includes the construct slice."""
-    src = (
-        "def outer():\n"
-        "    return 1\n"
-        "\n"
-        "def caller():\n"
-        "    return outer()\n"
-    )
+    src = "def outer():\n    return 1\n\ndef caller():\n    return outer()\n"
     idx = CodebaseIndex(files={"mod.py": src})
     result = idx.find_references("outer")
     assert "mod.py:5" in _hit_locs(result)
@@ -838,13 +834,7 @@ def test_find_references_construct_exceeding_cap_uses_window(monkeypatch) -> Non
 
 def test_find_references_pre_numbered_uses_original_line_and_correct_excerpt() -> None:
     """Annotated hunk hits remap storage indices to original lines and the right construct."""
-    src = (
-        "100: def earlier():\n"
-        "101:     pass\n"
-        "102: \n"
-        "103: def later():\n"
-        "104:     return NEEDLE\n"
-    )
+    src = "100: def earlier():\n101:     pass\n102: \n103: def later():\n104:     return NEEDLE\n"
     idx = CodebaseIndex(files={"mod.py": src})
     result = idx.find_references("NEEDLE")
     assert _hit_locs(result) == ["mod.py:104"]
@@ -860,8 +850,8 @@ def test_find_references_pre_numbered_uses_original_line_and_correct_excerpt() -
 def test_build_tools_delegate_to_index() -> None:
     """``_build_tools`` returns six tools that delegate to the index."""
     idx = CodebaseIndex(files={"app/main.py": "def foo(): pass\n"}, existing_codebase="old")
-    read_file, read_lines, read_function, list_files, search_codebase, find_function_at_line = _build_tools(
-        idx
+    read_file, read_lines, read_function, list_files, search_codebase, find_function_at_line = (
+        _build_tools(idx)
     )
     assert {
         read_file.tool_name,

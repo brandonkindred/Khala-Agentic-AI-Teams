@@ -499,6 +499,24 @@ def validate_findings(
     return _validate_findings(index, findings, pre_numbered=pre_numbered)
 
 
+def _effective_pre_numbered(input_data: CodeReviewInput) -> bool:
+    """True when this pass must treat the submission as bounded/pre-numbered.
+
+    ``input_data.full_content`` overlays real full bodies onto
+    ``CodebaseIndex.files`` for the paths it covers (see
+    ``CodebaseIndex.from_input``), so a caller that supplies it alongside
+    ``pre_numbered=True`` has given this pass something fuller than the
+    bounded diff surface to reason from -- the ``pre_numbered`` skip guard
+    (and the line-bounds-check skip) exist only because ``index.files``
+    would otherwise hold nothing but that bounded surface.
+
+    Postconditions:
+        - Returns ``input_data.pre_numbered and not input_data.full_content``.
+        - Pure; never raises.
+    """
+    return input_data.pre_numbered and not input_data.full_content
+
+
 def find_side_effect_impact_issues(
     llm: LLMClient,
     input_data: CodeReviewInput,
@@ -528,18 +546,22 @@ def find_side_effect_impact_issues(
           attributable to a specific criterion/requirement, which a
           side-effects finding never is -- see
           ``architecture_consistency_pass``'s identical restriction), when
-          ``input_data.pre_numbered`` is True (the PR-review hunk-fallback
-          mode, used when whole-file fetching is unavailable: ``index.files``
-          then holds partial diff-hunk excerpts rendered with original-line-
-          number prefixes, not complete file content, and no tool this pass
-          has can retrieve a more complete view of a changed file --
-          ``read_file`` resolves a changed path from ``index.files`` first, so
-          it returns the same partial excerpt already in the prompt. This
-          pass's entire contract is "never flag from a guess"; reasoning
-          about a function's complete current behavior from a partial hunk
-          would violate that, risking false-positive caller-impact findings
-          on code the pass never actually saw in full), or when the
-          submission has no readable files.
+          :func:`_effective_pre_numbered` is True (the PR-review hunk-fallback
+          mode, used when whole-file fetching is unavailable and no fuller
+          ``full_content`` was supplied: ``index.files`` then holds partial
+          diff-hunk excerpts rendered with original-line-number prefixes, not
+          complete file content, and no tool this pass has can retrieve a
+          more complete view of a changed file -- ``read_file`` resolves a
+          changed path from ``index.files`` first, so it returns the same
+          partial excerpt already in the prompt. This pass's entire contract
+          is "never flag from a guess"; reasoning about a function's complete
+          current behavior from a partial hunk would violate that, risking
+          false-positive caller-impact findings on code the pass never
+          actually saw in full), or when the submission has no readable
+          files. A caller that supplies ``full_content`` alongside
+          ``pre_numbered=True`` re-enables this pass (see
+          ``_effective_pre_numbered``), since ``index.files`` then holds real
+          full bodies for the paths it covers.
         - Otherwise returns zero or more NEW ``CodeReviewIssue``s in category
           ``"side-effects"`` (a caller-breaking side effect) or
           ``"documentation"`` (a docstring/implementation mismatch) only, each
@@ -556,7 +578,7 @@ def find_side_effect_impact_issues(
         return []
     if input_data.profile != ReviewProfile.CODE_REVIEW:
         return []
-    if input_data.pre_numbered:
+    if _effective_pre_numbered(input_data):
         return []
     try:
         return _run_pass(llm, input_data, repo_reader, index)
@@ -607,7 +629,9 @@ def _run_pass(
     data = json.loads(raw)
     findings = _parse_findings(data)
     if findings:
-        findings = _validate_findings(index, findings, pre_numbered=input_data.pre_numbered)
+        findings = _validate_findings(
+            index, findings, pre_numbered=_effective_pre_numbered(input_data)
+        )
         logger.info(
             "SideEffectImpactPass: found %s new finding(s) (side-effects/documentation)",
             len(findings),
