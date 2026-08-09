@@ -1174,11 +1174,11 @@ def _build_tools(index: CodebaseIndex) -> List[Callable[..., str]]:
     """Build strands tools bound to ``index`` for one verification agent.
 
     Postconditions:
-        - Returns six tools (``read_file``, ``read_lines``, ``read_function``,
-          ``list_files``, ``search_codebase``, ``find_function_at_line``) that
-          delegate to ``index``; each returns a string and never raises, so a
-          bad model-supplied argument becomes a tool message rather than an
-          error that aborts the agent loop.
+        - Returns seven tools (``read_file``, ``read_lines``, ``read_function``,
+          ``list_files``, ``search_codebase``, ``find_function_at_line``,
+          ``find_references``) that delegate to ``index``; each returns a
+          string and never raises, so a bad model-supplied argument becomes a
+          tool message rather than an error that aborts the agent loop.
     """
 
     @tool
@@ -1350,7 +1350,36 @@ def _build_tools(index: CodebaseIndex) -> List[Callable[..., str]]:
         except Exception as exc:
             return f"Error: could not inspect {path!r} at line {line_number}: {type(exc).__name__}: {exc}"
 
-    return [read_file, read_lines, read_function, list_files, search_codebase, find_function_at_line]
+    @tool
+    def find_references(symbol: str) -> str:
+        """Find bounded path:line references to a symbol across the submission
+        and (when attached) the wider repository, each with a short excerpt.
+
+        Use this to check whether a finding's claim about a symbol's usage
+        (e.g. "never called", "unused import") holds up, without manually
+        combining search_codebase and read_lines.
+
+        Args:
+            symbol: The function, class, or variable name to search for.
+
+        Returns:
+            Newline-separated reference blocks with excerpts, or a message
+            that nothing matched / access is limited to this submission.
+        """
+        try:
+            return index.find_references(symbol)
+        except Exception as exc:
+            return f"Error: could not find references for {symbol!r}: {type(exc).__name__}: {exc}"
+
+    return [
+        read_file,
+        read_lines,
+        read_function,
+        list_files,
+        search_codebase,
+        find_function_at_line,
+        find_references,
+    ]
 
 
 @dataclass
