@@ -144,6 +144,17 @@ def _build_workflow_runner() -> Any:
         # exclusively in activity code.
         "numpy",
         "pandas",
+        # StrategyLabCycleWorkflow.run() calls dto.convergence_tracker_from_wire,
+        # which imports quality_gates.ConvergenceTracker; quality_gates/__init__.py
+        # eagerly imports every quality gate (including backtest_anomaly.py,
+        # spec_readiness.py), and those import investment_team.market_data_service
+        # for a type/helper reference. market_data_service reads
+        # ALPHA_VANTAGE_API_KEY via `os.environ.get(...)` at module scope, which
+        # the sandbox's re-import forbids (`RestrictedWorkflowAccessError`).
+        # Passing the module through is safe on the same grounds as numpy/pandas
+        # above: workflow run() bodies never call into market_data_service
+        # themselves, only reach it as a side effect of this import chain.
+        "investment_team.market_data_service",
     )
     return SandboxedWorkflowRunner(restrictions=restrictions)
 

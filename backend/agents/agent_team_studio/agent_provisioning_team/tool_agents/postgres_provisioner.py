@@ -23,12 +23,12 @@ from .base import BaseToolProvisioner, CompensationRegistrar
 _FULL_POSTGRES_PERMISSIONS: list[str] = ["ALL PRIVILEGES"]
 
 try:
-    import psycopg2
-    from psycopg2 import sql
+    import psycopg
+    from psycopg import sql
 
-    HAS_PSYCOPG2 = True
+    HAS_PSYCOPG = True
 except ImportError:
-    HAS_PSYCOPG2 = False
+    HAS_PSYCOPG = False
 
 
 class PostgresProvisionerTool(BaseToolProvisioner):
@@ -52,15 +52,15 @@ class PostgresProvisionerTool(BaseToolProvisioner):
 
     def _get_admin_connection(self):
         """Get a connection with admin privileges."""
-        if not HAS_PSYCOPG2:
-            raise RuntimeError("psycopg2 is not installed")
+        if not HAS_PSYCOPG:
+            raise RuntimeError("psycopg is not installed")
 
-        return psycopg2.connect(
+        return psycopg.connect(
             host=self.host,
             port=self.port,
             user=self.admin_user,
             password=self.admin_password,
-            database="postgres",
+            dbname="postgres",
         )
 
     def provision(
@@ -71,8 +71,8 @@ class PostgresProvisionerTool(BaseToolProvisioner):
         fencing_token: Optional[int] = None,
     ) -> ToolProvisionResult:
         """Create a PostgreSQL database and user for the agent."""
-        if not HAS_PSYCOPG2:
-            return self._make_error_result("psycopg2 is not installed")
+        if not HAS_PSYCOPG:
+            return self._make_error_result("psycopg is not installed")
 
         return self.run_idempotent(
             agent_id,
@@ -109,7 +109,7 @@ class PostgresProvisionerTool(BaseToolProvisioner):
                 sql.SQL("CREATE USER {} WITH PASSWORD %s").format(sql.Identifier(username)),
                 [password],
             )
-        except psycopg2.errors.DuplicateObject:
+        except psycopg.errors.DuplicateObject:
             role_existed = True
             cursor.execute(
                 sql.SQL("ALTER USER {} WITH PASSWORD %s").format(sql.Identifier(username)),
@@ -127,7 +127,7 @@ class PostgresProvisionerTool(BaseToolProvisioner):
                     sql.Identifier(username),
                 )
             )
-        except psycopg2.errors.DuplicateDatabase:
+        except psycopg.errors.DuplicateDatabase:
             db_existed = True
         if not db_existed:
             # Registered second so LIFO replay drops the DB before the role
@@ -224,11 +224,11 @@ class PostgresProvisionerTool(BaseToolProvisioner):
         final state persist, so a stale caller is rejected before it can
         touch the live database.
         """
-        if not HAS_PSYCOPG2:
+        if not HAS_PSYCOPG:
             return DeprovisionResult(
                 tool_name=self.tool_name,
                 success=False,
-                error="psycopg2 is not installed",
+                error="psycopg is not installed",
             )
 
         if fencing_token is not None:
@@ -295,8 +295,8 @@ class PostgresProvisionerTool(BaseToolProvisioner):
         Orchestrator iterates compensations in reverse, so the DB is always
         dropped before the role that owns it.
         """
-        if not HAS_PSYCOPG2:
-            raise RuntimeError("psycopg2 is not installed")
+        if not HAS_PSYCOPG:
+            raise RuntimeError("psycopg is not installed")
 
         conn = self._get_admin_connection()
         conn.autocommit = True
