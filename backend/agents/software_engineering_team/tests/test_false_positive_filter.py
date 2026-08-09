@@ -2416,6 +2416,41 @@ def test_agent_read_the_cited_file_true_for_successful_read_file() -> None:
     assert _agent_read_the_cited_file(agent, idx, "app/main.py") is True
 
 
+def test_agent_read_the_cited_file_false_when_strands_truncated_the_result() -> None:
+    """Strands' default SlidingWindowConversationManager recovers from a
+    context-window overflow by truncating an oversized toolResult in place
+    (keeping only the first/last 200 chars, splicing in a
+    "... [truncated: N chars removed] ..." marker) while explicitly leaving
+    status "success". A toolResult carrying that marker is NOT grounded
+    evidence, even though status says success -- the model never actually
+    saw the file's real, full content, just a ~400-char sliver of it."""
+    idx = CodebaseIndex(files={"app/main.py": "x" * 100_000})
+    truncated_text = (
+        "x" * 200 + "...\n\n... [truncated: 99600 chars removed] ...\n\n..." + "x" * 200
+    )
+    agent = _fake_agent(
+        [
+            _tool_use_message("assistant", "t1", "read_file", path="app/main.py"),
+            _tool_result_message("t1", truncated_text, status="success"),
+        ]
+    )
+    assert _agent_read_the_cited_file(agent, idx, "app/main.py") is False
+
+
+def test_agent_read_the_cited_file_true_when_content_is_large_but_untruncated() -> None:
+    """The mirror of the above: large content is fine as long as Strands
+    never actually truncated it (no marker present) -- the check is about
+    detecting truncation specifically, not about penalizing file size."""
+    idx = CodebaseIndex(files={"app/main.py": "x" * 100_000})
+    agent = _fake_agent(
+        [
+            _tool_use_message("assistant", "t1", "read_file", path="app/main.py"),
+            _tool_result_message("t1", "x" * 100_000, status="success"),
+        ]
+    )
+    assert _agent_read_the_cited_file(agent, idx, "app/main.py") is True
+
+
 def test_agent_read_the_cited_file_true_for_a_genuinely_empty_file() -> None:
     """A successful read_file() whose result is the empty string -- a real
     zero-byte cited file, e.g. an unchanged __init__.py -- still counts as

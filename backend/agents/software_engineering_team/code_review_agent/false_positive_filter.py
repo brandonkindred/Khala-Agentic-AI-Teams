@@ -1706,6 +1706,36 @@ def _build_group_prompt(
     return "\n".join(parts)
 
 
+# Strands' default SlidingWindowConversationManager recovers from a
+# context-window overflow by truncating an oversized toolResult in place
+# (keeping only the first/last 200 chars) rather than failing the call, and
+# explicitly leaves toolResult.status as "success"
+# (sliding_window_conversation_manager.py, _truncate_tool_results: "The tool
+# result status is not changed."). The spliced-in marker below is the exact
+# text that recovery path inserts between the preserved head/tail; see
+# _agent_read_the_cited_file for why checking for it (unlike sniffing for our
+# own "Error: ..." convention) is a reliable signal rather than an ambiguous
+# one.
+_STRANDS_TRUNCATION_MARKER = "... [truncated:"
+
+
+def _tool_result_text(tool_result: Dict[str, Any]) -> str:
+    """Flatten a Strands toolResult block's content into text.
+
+    Preconditions: ``tool_result`` is a toolResult block's inner dict (may be malformed).
+    Postconditions: returns the joined text of any "text" content blocks
+        (empty string when there is none). Never raises.
+    """
+    try:
+        return "\n".join(
+            str(block["text"])
+            for block in (tool_result.get("content") or [])
+            if isinstance(block, dict) and "text" in block
+        )
+    except Exception:
+        return ""
+
+
 def _agent_read_the_cited_file(agent: Agent, index: CodebaseIndex, file_path: str) -> bool:
     """Whether ``agent``'s just-finished run obtained ``file_path``'s full
     content via a successful ``read_file`` call.
@@ -1729,17 +1759,35 @@ def _agent_read_the_cited_file(agent: Agent, index: CodebaseIndex, file_path: st
     ``read_function`` slice, which does not cover findings outside that slice).
 
     "Success" is read directly off ``read_file``'s own ``toolResult.status``
-    -- never by sniffing the returned text, and never by an independent
-    ``index`` re-read. The ``read_file`` *tool* itself (``_build_tools``) sets
-    ``status`` accurately from ``CodebaseIndex._read``'s ``(content, error)``
-    outcome for THIS call, so status alone is trustworthy: it cannot mistake
-    real content that happens to start with "Error: ..." (a checked-in log
-    fixture, diagnostic output) for a failed read, and it does not depend on
-    an independent, later ``index`` probe that could disagree with what THIS
-    call actually returned -- e.g. a repo-reader backed by a network call
-    that fails transiently during the model's tool call but happens to
-    succeed on a later, separate check. Only the specific invocation's own
-    recorded result counts.
+    -- never by sniffing the returned text for our own conventions, and never
+    by an independent ``index`` re-read. The ``read_file`` *tool* itself
+    (``_build_tools``) sets ``status`` accurately from ``CodebaseIndex._read``'s
+    ``(content, error)`` outcome for THIS call, so status alone is
+    trustworthy: it cannot mistake real content that happens to start with
+    "Error: ..." (a checked-in log fixture, diagnostic output) for a failed
+    read, and it does not depend on an independent, later ``index`` probe
+    that could disagree with what THIS call actually returned -- e.g. a
+    repo-reader backed by a network call that fails transiently during the
+    model's tool call but happens to succeed on a later, separate check. Only
+    the specific invocation's own recorded result counts.
+
+    One text check remains, on top of ``status``: Strands' default
+    ``SlidingWindowConversationManager`` recovers from a context-window
+    overflow by truncating an oversized toolResult in place -- keeping only
+    the first/last 200 chars and splicing in a distinctive
+    ``"... [truncated: N chars removed] ..."`` marker -- while explicitly
+    leaving ``status`` as ``"success"``
+    (``sliding_window_conversation_manager.py``, ``_truncate_tool_results``:
+    "The tool result status is not changed."). Without checking for that
+    marker, a huge cited file could overflow context, get silently truncated
+    to ~400 chars by Strands' own recovery, and still register as a grounded
+    "success" read here -- letting a drop through on a sliver of the file.
+    Unlike a generic prefix such as our own tools' "Error: ..." convention
+    (deliberately not sniffed, above), this marker is Strands-authored,
+    inserted into the text only by that specific recovery path, and not
+    something real source code would plausibly contain verbatim -- so
+    checking for it is reliable rather than the kind of ambiguous heuristic
+    this function otherwise avoids.
 
     Correlating a toolUse with its toolResult is done by matching
     ``toolUseId``, but scoped to the very next message only (never a global
@@ -1774,13 +1822,13 @@ def _agent_read_the_cited_file(agent: Agent, index: CodebaseIndex, file_path: st
           ``index.resolve_path``, covering a near-miss the model typed instead
           of the exact quoted path) has a toolResult with a matching
           ``toolUseId`` in the message at index ``i + 1``, with
-          ``status == "success"``. A genuinely empty result (a real zero-byte
-          file, e.g. an unchanged ``__init__.py``) still counts, since
-          ``status`` -- not the result text's length or content -- is what is
-          checked. Never raises: a malformed/empty message list, or a toolUse
-          with no following message or no matching result, yields ``False``
-          (fail-safe: treated as "not grounded", so the caller keeps rather
-          than drops on ambiguity).
+          ``status == "success"`` AND whose text does not contain Strands'
+          ``"... [truncated:"`` recovery marker. A genuinely empty result (a
+          real zero-byte file, e.g. an unchanged ``__init__.py``) still
+          counts. Never raises: a malformed/empty message list, or a toolUse
+          with no following message or no untruncated matching success
+          result, yields ``False`` (fail-safe: treated as "not grounded", so
+          the caller keeps rather than drops on ambiguity).
     """
     try:
         messages = agent.messages
@@ -1803,12 +1851,13 @@ def _agent_read_the_cited_file(agent: Agent, index: CodebaseIndex, file_path: st
                     if not isinstance(result_block, dict):
                         continue
                     result = result_block.get("toolResult")
-                    if (
-                        isinstance(result, dict)
-                        and result.get("toolUseId") == tool_use_id
-                        and result.get("status") == "success"
-                    ):
-                        return True
+                    if not isinstance(result, dict) or result.get("toolUseId") != tool_use_id:
+                        continue
+                    if result.get("status") != "success":
+                        continue
+                    if _STRANDS_TRUNCATION_MARKER in _tool_result_text(result):
+                        continue
+                    return True
         return False
     except Exception:
         return False
