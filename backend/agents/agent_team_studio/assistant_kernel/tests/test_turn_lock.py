@@ -9,6 +9,7 @@ and only owns the locking/rollback mechanics.
 from __future__ import annotations
 
 import threading
+import time
 
 import pytest
 
@@ -179,7 +180,7 @@ def test_turn_serializes_concurrent_turns_no_lost_update() -> None:
         ) as turn:
             current = turn.draft
             # Yield to widen the race window if the lock weren't held.
-            threading.Event().wait(0.001)
+            time.sleep(0.001)
             turn.set_draft(current + 1)
 
     threads = [threading.Thread(target=worker) for _ in range(n)]

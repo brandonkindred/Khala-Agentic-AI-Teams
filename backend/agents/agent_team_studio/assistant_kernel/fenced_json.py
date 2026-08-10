@@ -129,6 +129,16 @@ def merge_list_by_key(current: list[dict], incoming: list[dict], *, key: str) ->
           the values under ``key`` are hashable. Violating this is a caller
           bug (malformed entries must be filtered out, or rejected, before
           calling) — this function does not coerce or skip bad entries.
+        * The values under ``key`` are unique within ``current``. A
+          duplicate key in ``current`` is a caller bug, not something this
+          function detects by returning a partial result: only the
+          last-encountered entry for that key would otherwise survive,
+          silently dropping the earlier one even though ``incoming`` never
+          mentioned it — the "current entries are kept unchanged" guarantee
+          below only holds for a de-duplicated ``current``. Duplicate keys
+          *within* ``incoming`` are fine — the overlay's usual last-wins
+          semantics apply there, same as a real partial echo overwriting
+          itself.
     Postconditions:
         * Returns a new list; neither ``current`` nor ``incoming`` is
           mutated. The merge is shallow — kept/overlaid/appended entries are
@@ -138,6 +148,8 @@ def merge_list_by_key(current: list[dict], incoming: list[dict], *, key: str) ->
     """
     assert all(key in item for item in current), f"every current entry must contain {key!r}"
     assert all(key in item for item in incoming), f"every incoming entry must contain {key!r}"
+    current_keys = [item[key] for item in current]
+    assert len(current_keys) == len(set(current_keys)), f"duplicate {key!r} values in current"
     by_key = {item[key]: item for item in current}
     for item in incoming:
         by_key[item[key]] = item

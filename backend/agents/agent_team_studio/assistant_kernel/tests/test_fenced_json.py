@@ -277,6 +277,20 @@ def test_merge_asserts_on_entry_missing_key() -> None:
         merge_list_by_key([{"key": "a"}], [{"not_key": "b"}], key="key")
 
 
+def test_merge_asserts_on_duplicate_key_in_current() -> None:
+    with pytest.raises(AssertionError):
+        merge_list_by_key([{"key": "a", "v": 1}, {"key": "a", "v": 2}], [], key="key")
+
+
+def test_merge_last_wins_on_duplicate_key_within_incoming() -> None:
+    # Duplicate keys are only a precondition violation for current;
+    # incoming may legitimately repeat a key (e.g. a model echoing the same
+    # entry twice), and the usual overlay last-wins semantics apply.
+    current = [{"key": "a", "v": 1}]
+    incoming = [{"key": "a", "v": 2}, {"key": "a", "v": 3}]
+    assert merge_list_by_key(current, incoming, key="key") == [{"key": "a", "v": 3}]
+
+
 def test_merge_is_shallow_entries_are_not_deep_copied() -> None:
     # The merge only guarantees the *lists* aren't mutated (see
     # test_merge_does_not_mutate_inputs) — entries themselves are shared
