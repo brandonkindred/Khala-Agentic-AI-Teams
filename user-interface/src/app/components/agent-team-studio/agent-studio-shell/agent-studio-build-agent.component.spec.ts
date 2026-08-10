@@ -4,7 +4,7 @@ import { By } from '@angular/platform-browser';
 import { NoopAnimationsModule } from '@angular/platform-browser/animations';
 import { AgentStudioStateService } from '../../../services/agent-studio-state.service';
 import { AgentCatalogComponent } from '../agent-console/agent-catalog/agent-catalog.component';
-import { AgentProvisionSlideOutComponent } from '../agent-provision-slide-out/agent-provision-slide-out.component';
+import { AgentProvisioningPanelComponent } from '../agent-provisioning-panel/agent-provisioning-panel.component';
 import { AgentStudioBuildAgentComponent } from './agent-studio-build-agent.component';
 
 /** Stand-in for the catalog: same selector + the one output Stage 1 wires, so
@@ -14,11 +14,11 @@ class StubAgentCatalogComponent {
   @Output() readonly requestRun = new EventEmitter<string>();
 }
 
-/** Stand-in for the provision slide-out (embeds team-assistant-chat + polls),
+/** Stand-in for the provisioning panel (embeds team-assistant-chat + polls),
  *  so opening the Stage-1 slide-out doesn't start real chat HTTP / job
  *  polling in these shell-level tests. */
-@Component({ selector: 'app-agent-provision-slide-out', standalone: true, template: '' })
-class StubProvisionSlideOutComponent {}
+@Component({ selector: 'app-agent-provisioning-panel', standalone: true, template: '' })
+class StubAgentProvisioningPanelComponent {}
 
 describe('AgentStudioBuildAgentComponent', () => {
   let fixture: ComponentFixture<AgentStudioBuildAgentComponent>;
@@ -31,8 +31,8 @@ describe('AgentStudioBuildAgentComponent', () => {
       providers: [AgentStudioStateService],
     })
       .overrideComponent(AgentStudioBuildAgentComponent, {
-        remove: { imports: [AgentCatalogComponent, AgentProvisionSlideOutComponent] },
-        add: { imports: [StubAgentCatalogComponent, StubProvisionSlideOutComponent] },
+        remove: { imports: [AgentCatalogComponent, AgentProvisioningPanelComponent] },
+        add: { imports: [StubAgentCatalogComponent, StubAgentProvisioningPanelComponent] },
       })
       .compileComponents();
 
@@ -65,19 +65,19 @@ describe('AgentStudioBuildAgentComponent', () => {
 
   it('keeps the provisioning slide-out closed until requested', () => {
     expect(component.provisionOpen()).toBe(false);
-    expect(fixture.nativeElement.querySelector('app-agent-provision-slide-out')).toBeNull();
+    expect(fixture.nativeElement.querySelector('app-agent-provisioning-panel')).toBeNull();
   });
 
   it('opens and closes the provisioning slide-out', () => {
     fixture.nativeElement.querySelector('.studio-build__provision-btn').click();
     fixture.detectChanges();
     expect(component.provisionOpen()).toBe(true);
-    expect(fixture.nativeElement.querySelector('app-agent-provision-slide-out')).toBeTruthy();
+    expect(fixture.nativeElement.querySelector('app-agent-provisioning-panel')).toBeTruthy();
 
     fixture.nativeElement.querySelector('.studio-build__provision-head button').click();
     fixture.detectChanges();
     expect(component.provisionOpen()).toBe(false);
-    expect(fixture.nativeElement.querySelector('app-agent-provision-slide-out')).toBeNull();
+    expect(fixture.nativeElement.querySelector('app-agent-provisioning-panel')).toBeNull();
   });
 
   it('closes the provisioning slide-out when the scrim is clicked', () => {

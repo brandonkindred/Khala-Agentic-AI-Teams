@@ -7,11 +7,11 @@ import { AgentProvisioningApiService } from '../../../services/agent-provisionin
 import { TeamAssistantApiService } from '../../../services/team-assistant-api.service';
 import { createTeamAssistantApiMock } from '../../../testing/team-assistant.mock';
 import { TeamAssistantChatComponent } from '../../team-assistant-chat/team-assistant-chat.component';
-import { AgentProvisionSlideOutComponent } from './agent-provision-slide-out.component';
+import { AgentProvisioningPanelComponent } from './agent-provisioning-panel.component';
 
-describe('AgentProvisionSlideOutComponent', () => {
-  let fixture: ComponentFixture<AgentProvisionSlideOutComponent>;
-  let component: AgentProvisionSlideOutComponent;
+describe('AgentProvisioningPanelComponent', () => {
+  let fixture: ComponentFixture<AgentProvisioningPanelComponent>;
+  let component: AgentProvisioningPanelComponent;
   let apiSpy: { getJobStatus: ReturnType<typeof vi.fn> };
 
   beforeEach(async () => {
@@ -19,14 +19,14 @@ describe('AgentProvisionSlideOutComponent', () => {
     apiSpy = { getJobStatus: vi.fn() };
 
     await TestBed.configureTestingModule({
-      imports: [AgentProvisionSlideOutComponent, NoopAnimationsModule],
+      imports: [AgentProvisioningPanelComponent, NoopAnimationsModule],
       providers: [
         { provide: AgentProvisioningApiService, useValue: apiSpy },
         { provide: TeamAssistantApiService, useValue: createTeamAssistantApiMock() },
       ],
     }).compileComponents();
 
-    fixture = TestBed.createComponent(AgentProvisionSlideOutComponent);
+    fixture = TestBed.createComponent(AgentProvisioningPanelComponent);
     component = fixture.componentInstance;
     fixture.detectChanges();
   });
@@ -49,7 +49,7 @@ describe('AgentProvisionSlideOutComponent', () => {
     expect(chatInstance.fields.map((f) => f.key)).toEqual(['agent_id', 'manifest_path']);
     expect(chatInstance.fields[0].required).toBe(true);
 
-    expect(fixture.nativeElement.querySelector('.provision-slide-out__status')).toBeNull();
+    expect(fixture.nativeElement.querySelector('.provisioning-panel__status')).toBeNull();
     const liveRegion = fixture.nativeElement.querySelector('[role="status"]');
     expect(liveRegion.textContent.trim()).toBe('');
   });
@@ -75,7 +75,7 @@ describe('AgentProvisionSlideOutComponent', () => {
     expect(apiSpy.getJobStatus).toHaveBeenCalledTimes(1);
     expect(apiSpy.getJobStatus).toHaveBeenCalledWith('j1');
     expect(component.jobStatus()?.status).toBe('running');
-    expect(fixture.nativeElement.querySelector('.provision-slide-out__status-grid dd').textContent).toContain('j1');
+    expect(fixture.nativeElement.querySelector('.provisioning-panel__status-grid dd').textContent).toContain('j1');
 
     vi.advanceTimersByTime(20000);
     fixture.detectChanges();
@@ -124,7 +124,7 @@ describe('AgentProvisionSlideOutComponent', () => {
     component.onAssistantLaunched({ job_id: 'j1', conversation_id: 'c1' });
     vi.advanceTimersByTime(0);
     fixture.detectChanges();
-    const errorEl = fixture.nativeElement.querySelector('.provision-slide-out__status-error');
+    const errorEl = fixture.nativeElement.querySelector('.provisioning-panel__status-error');
     expect(errorEl.textContent).toContain('boom');
   });
 

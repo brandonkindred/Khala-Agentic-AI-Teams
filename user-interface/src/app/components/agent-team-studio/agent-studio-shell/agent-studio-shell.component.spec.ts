@@ -2,7 +2,7 @@ import { Component, EventEmitter, Input, Output } from '@angular/core';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { NoopAnimationsModule } from '@angular/platform-browser/animations';
 import { AgentCatalogComponent } from '../agent-console/agent-catalog/agent-catalog.component';
-import { AgentProvisionSlideOutComponent } from '../agent-provision-slide-out/agent-provision-slide-out.component';
+import { AgentProvisioningPanelComponent } from '../agent-provisioning-panel/agent-provisioning-panel.component';
 import { AgentRunnerComponent } from '../agent-console/agent-runner/agent-runner.component';
 import { AgentStudioBuildAgentComponent } from './agent-studio-build-agent.component';
 import { AgentStudioComposeTeamComponent } from './agent-studio-compose-team.component';
@@ -18,15 +18,15 @@ class StubAgentRunnerComponent {
   @Output() readonly requestCatalogReturn = new EventEmitter<void>();
 }
 
-/** Stub the catalog + provisioning dashboard so the Build stage (the default
+/** Stub the catalog + provisioning panel so the Build stage (the default
  *  active stage) mounts without firing catalog HTTP / provisioning polling. */
 @Component({ selector: 'app-agent-catalog', standalone: true, template: '' })
 class StubAgentCatalogComponent {
   @Output() readonly requestRun = new EventEmitter<string>();
 }
 
-@Component({ selector: 'app-agent-provision-slide-out', standalone: true, template: '' })
-class StubProvisionSlideOutComponent {}
+@Component({ selector: 'app-agent-provisioning-panel', standalone: true, template: '' })
+class StubAgentProvisioningPanelComponent {}
 
 /** Stub the Stage-4 persona component so the shell's final-stage tests don't pull
  *  in its API services / dialog. */
@@ -51,8 +51,8 @@ describe('AgentStudioShellComponent', () => {
         add: { imports: [StubAgentRunnerComponent] },
       })
       .overrideComponent(AgentStudioBuildAgentComponent, {
-        remove: { imports: [AgentCatalogComponent, AgentProvisionSlideOutComponent] },
-        add: { imports: [StubAgentCatalogComponent, StubProvisionSlideOutComponent] },
+        remove: { imports: [AgentCatalogComponent, AgentProvisioningPanelComponent] },
+        add: { imports: [StubAgentCatalogComponent, StubAgentProvisioningPanelComponent] },
       })
       .overrideComponent(AgentStudioShellComponent, {
         remove: { imports: [AgentStudioPersonaComponent, AgentStudioComposeTeamComponent] },

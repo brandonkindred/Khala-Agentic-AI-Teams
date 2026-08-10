@@ -14,19 +14,19 @@
 />
 
 @if (jobId(); as id) {
-  <section class="provision-slide-out__status">
-    <h3 class="provision-slide-out__status-title">
+  <section class="provisioning-panel__status">
+    <h3 class="provisioning-panel__status-title">
       <mat-icon aria-hidden="true">cloud_sync</mat-icon>
       Provisioning job
     </h3>
-    <dl class="provision-slide-out__status-grid">
+    <dl class="provisioning-panel__status-grid">
       <dt>Job ID</dt>
       <dd>{{ id }}</dd>
       <dt>Status</dt>
       <dd>{{ jobStatus()?.status ?? 'starting…' }}</dd>
     </dl>
     @if (jobStatus()?.error; as err) {
-      <p class="provision-slide-out__status-error">
+      <p class="provisioning-panel__status-error">
         <mat-icon aria-hidden="true">error_outline</mat-icon>
         {{ err }}
       </p>

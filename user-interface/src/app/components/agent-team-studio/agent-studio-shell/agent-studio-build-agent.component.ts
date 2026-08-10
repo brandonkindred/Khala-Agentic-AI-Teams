@@ -4,7 +4,7 @@ import { MatButtonModule } from '@angular/material/button';
 import { MatIconModule } from '@angular/material/icon';
 import { BUILD_SUB_STAGES } from '../../../models/agent-studio.model';
 import { AgentCatalogComponent } from '../agent-console/agent-catalog/agent-catalog.component';
-import { AgentProvisionSlideOutComponent } from '../agent-provision-slide-out/agent-provision-slide-out.component';
+import { AgentProvisioningPanelComponent } from '../agent-provisioning-panel/agent-provisioning-panel.component';
 import { AgentStudioStateService } from '../../../services/agent-studio-state.service';
 import { AgentStudioStagePlaceholderComponent } from './agent-studio-stage-placeholder.component';
 
@@ -26,17 +26,20 @@ import { AgentStudioStagePlaceholderComponent } from './agent-studio-stage-place
  * "Test this agent →" (Stage 1 → Stage 2) is unaffected by the sub-stepper.
  *
  * Provisioning is folded into this stage (spec §3, Stage 1): a "Provision an
- * agent" affordance opens `AgentProvisionSlideOutComponent`, a thin,
- * route-agnostic wrapper (spec §4.1's Stage 1 adaptation caveat) around the
- * same provisioning chat used by the full `AgentProvisioningDashboardComponent`
- * — without that component's `DashboardShellComponent` page chrome or its
- * `ActivatedRoute`-based `?jobId=` deep link, neither of which apply on this
- * route. The full dashboard is untouched and still used as-is in Agent
- * Console's own "Provisioning & Environments" tab. The slide-out content is
- * self-contained, so it is only mounted while the panel is open. The
- * slide-out itself is a proper modal: a CDK focus trap with auto-capture
- * moves focus into the panel, keeps Tab cycling inside it, and restores focus
- * to the trigger on close; Escape dismisses it.
+ * agent" affordance opens a slide-out hosting `AgentProvisioningPanelComponent`
+ * — the same route-agnostic provisioning chat + job-status panel that
+ * `AgentProvisioningDashboardComponent` embeds in its own "Provision" tab
+ * (spec §4.1's Stage 1 adaptation caveat: one shared panel, reused by both,
+ * rather than a second copy of the chat config and polling behavior). This
+ * slide-out mounts only the panel, without `AgentProvisioningDashboardComponent`'s
+ * `DashboardShellComponent` page chrome or its `ActivatedRoute`-based
+ * `?jobId=` deep link, neither of which apply on this route. The full
+ * dashboard is untouched and still used as-is in Agent Console's own
+ * "Provisioning & Environments" tab. The panel is self-contained, so it is
+ * only mounted while the slide-out is open. The slide-out itself is a proper
+ * modal: a CDK focus trap with auto-capture moves focus into the panel, keeps
+ * Tab cycling inside it, and restores focus to the trigger on close; Escape
+ * dismisses it.
  */
 @Component({
   selector: 'app-agent-studio-build-agent',
@@ -46,7 +49,7 @@ import { AgentStudioStagePlaceholderComponent } from './agent-studio-stage-place
     MatButtonModule,
     MatIconModule,
     AgentCatalogComponent,
-    AgentProvisionSlideOutComponent,
+    AgentProvisioningPanelComponent,
     AgentStudioStagePlaceholderComponent,
   ],
   changeDetection: ChangeDetectionStrategy.OnPush,

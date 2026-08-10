@@ -12,16 +12,7 @@
         Provision
       </ng-template>
       <div class="tab-content">
-        <app-team-assistant-chat
-          [teamApiUrl]="'/api/agent-provisioning/assistant'"
-          [teamName]="'Agent Provisioning'"
-          [teamDescription]="'Provision agent environments with infrastructure'"
-          [fields]="[
-            {key: 'agent_id', label: 'Agent ID', placeholder: 'Identifier of the agent to provision', required: true},
-            {key: 'manifest_path', label: 'Manifest path', placeholder: 'Path to provisioning manifest'}
-          ]"
-          (workflowLaunched)="onAssistantLaunched($event)"
-        />
+        <app-agent-provisioning-panel />
       </div>
     </mat-tab>
   </mat-tab-group>
