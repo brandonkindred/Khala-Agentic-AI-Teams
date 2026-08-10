@@ -31,6 +31,19 @@ from software_engineering_team.api.coding_team_models import RunRequest
 from software_engineering_team.temporal.coding_team_workflow import CodingTeamWorkflow
 
 
+def test_activities_export_includes_mark_job_cancelled() -> None:
+    """``mark_coding_team_job_cancelled_activity`` must be registered on the
+    coding-team worker (``issue_grooming_workflow.py`` schedules it directly,
+    but relies on this module's ACTIVITIES export -- merged by
+    ``coding_team_worker.py`` -- for worker registration)."""
+    from software_engineering_team.temporal.coding_team_workflow import (
+        ACTIVITIES,
+        mark_coding_team_job_cancelled_activity,
+    )
+
+    assert mark_coding_team_job_cancelled_activity in ACTIVITIES
+
+
 def _patch_execute(monkeypatch: pytest.MonkeyPatch, results: list) -> tuple[list, list]:
     """Patch workflow.execute_activity to return successive ``results`` per call.
 

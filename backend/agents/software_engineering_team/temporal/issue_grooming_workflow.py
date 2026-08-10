@@ -3,9 +3,10 @@
 GitHub issue grooming (Phase A score/template, then Phase B sub-issue split)
 currently runs in thread mode only. This module makes it importable as a
 Temporal package: typed request/result payloads, an ``IssueGroomingWorkflow``
-that schedules ``run_issue_grooming_activity`` and propagates its terminal
-result/failure unchanged, exported as ``WORKFLOWS`` and ``ACTIVITIES`` and
-registered onto the coding-team Temporal worker
+that schedules ``run_issue_grooming_activity`` and, on a terminal failure or
+cancellation, best-effort terminalizes the coding-team job row before
+propagating the outcome unchanged -- exported as ``WORKFLOWS`` and
+``ACTIVITIES`` and registered onto the coding-team Temporal worker
 (``software_engineering_team.temporal.coding_team_worker``). The activity body
 itself remains a stub pending a follow-up change that wraps the real Phase
 A->B grooming runner and job-store progress writes -- so running this
@@ -21,15 +22,34 @@ race the first dispatch.
 
 from __future__ import annotations
 
+import asyncio
+import logging
 from datetime import timedelta
 from typing import Any, Optional
 
 from pydantic import BaseModel
 from temporalio import activity, workflow
+from temporalio.exceptions import is_cancelled_exception
+
+from software_engineering_team.temporal.coding_team_workflow import (
+    mark_coding_team_job_cancelled_activity,
+    mark_coding_team_job_failed_activity,
+)
 
 # Single LLM scoring/decomposition pass -- much shorter-lived than the coding
 # pipeline's 4h timeout.
 _GROOMING_ACTIVITY_TIMEOUT = timedelta(minutes=10)
+# Cheap, idempotent job-store write -- short timeout, matches the analogous
+# mark-failed/mark-cancelled calls in coding_team_workflow.py.
+_TERMINALIZE_ACTIVITY_TIMEOUT = timedelta(minutes=1)
+
+
+def _log_terminalize_failure(message: str) -> None:
+    """Best-effort log from workflow code that may run outside Temporal's runtime."""
+    try:
+        workflow.logger.exception(message)
+    except Exception:
+        logging.getLogger(__name__).exception(message)
 
 
 class IssueGroomingRunRequest(BaseModel):
@@ -102,7 +122,9 @@ class IssueGroomingWorkflow:
             - Validates ``request`` first, raising ``ValidationError``
               synchronously before scheduling anything when it does not
               conform to ``IssueGroomingRunRequest`` -- no activity is
-              scheduled for a malformed request.
+              scheduled for a malformed request, and no job-store write is
+              attempted (a malformed request never named a real job to
+              terminalize).
             - Otherwise schedules ``run_issue_grooming_activity`` with a
               ``_GROOMING_ACTIVITY_TIMEOUT`` start-to-close timeout and no
               custom retry policy (Temporal's default retry applies -- this
@@ -111,22 +133,94 @@ class IssueGroomingWorkflow:
               this package that use a bounded policy).
             - On success, returns the activity's result dict unchanged --
               this method never re-wraps it into ``IssueGroomingRunResult``.
-            - On activity failure, does not catch or re-wrap the exception:
-              it propagates uncaught, so Temporal marks this workflow itself
-              terminally failed. This method makes no job-store writes and
-              posts no GitHub notices -- both remain the activity's (and a
-              follow-up change's) responsibility, not this workflow's.
+            - On a Temporal cancellation, best-effort schedules
+              ``mark_coding_team_job_cancelled_activity`` -- matching
+              ``coding_team_orchestrator``'s cooperative-cancel convention
+              (``status=cancelled``, ``status_text="Cancelled by user"``, no
+              ``error`` write) -- then always re-raises the cancellation
+              unchanged, so Temporal's own workflow outcome still reports
+              cancelled. A bare ``asyncio.CancelledError`` (delivered when
+              this workflow itself is cancelled, e.g. directly via Temporal)
+              needs its own ``except`` clause: unlike
+              ``temporalio.exceptions.CancelledError``/``ActivityError``, it
+              subclasses ``BaseException`` rather than ``Exception`` since
+              Python 3.8, so ``except Exception`` alone would silently miss
+              it. ``is_cancelled_exception`` (checked inside the ``Exception``
+              branch) additionally catches an ``ActivityError``/
+              ``ChildWorkflowError`` whose ``cause`` is a cancellation.
+            - On any other activity failure, best-effort schedules
+              ``mark_coding_team_job_failed_activity`` -- matching
+              ``coding_team_workflow.CodingTeamWorkflow``'s GitHub-notice
+              fallback convention (``status=failed``, a scrubbed ``error``,
+              ``status_text``/``current_activity`` cleared) -- then always
+              re-raises the original exception unchanged.
+            - A failure of the mark-cancelled/mark-failed terminalize call
+              itself is logged only and never masks or replaces the original
+              cancellation/exception being propagated -- mirroring
+              ``CodingTeamWorkflow._best_effort_terminalize_then_reraise``.
+              This method posts no GitHub notices -- that remains the
+              activity's (and a follow-up change's) responsibility, not this
+              workflow's.
         """
         IssueGroomingRunRequest.model_validate(request)
-        return await workflow.execute_activity(
-            run_issue_grooming_activity,
-            request,
-            start_to_close_timeout=_GROOMING_ACTIVITY_TIMEOUT,
-        )
+        job_id = request["job_id"]
+        try:
+            return await workflow.execute_activity(
+                run_issue_grooming_activity,
+                request,
+                start_to_close_timeout=_GROOMING_ACTIVITY_TIMEOUT,
+            )
+        except asyncio.CancelledError:
+            await self._best_effort_terminalize(
+                mark_coding_team_job_cancelled_activity, {"job_id": job_id}
+            )
+            raise
+        except Exception as exc:
+            if is_cancelled_exception(exc):
+                await self._best_effort_terminalize(
+                    mark_coding_team_job_cancelled_activity, {"job_id": job_id}
+                )
+            else:
+                message = str(exc) or "issue grooming run failed"
+                await self._best_effort_terminalize(
+                    mark_coding_team_job_failed_activity,
+                    {"job_id": job_id, "error": message},
+                )
+            raise
+
+    async def _best_effort_terminalize(self, activity_fn: Any, args: dict[str, Any]) -> None:
+        """Run a mark-failed/mark-cancelled activity, logging (not raising) on failure.
+
+        Preconditions:
+            - Called only from the ``except`` branch of :meth:`run`, so the
+              caller always re-raises its own exception right after this
+              returns, regardless of outcome here.
+        Postconditions:
+            - Schedules ``activity_fn`` with ``args`` and
+              ``_TERMINALIZE_ACTIVITY_TIMEOUT``; any exception it raises is
+              caught and logged, never propagated -- a terminalize failure
+              must not replace or mask the original error/cancellation the
+              caller is about to re-raise.
+        """
+        try:
+            await workflow.execute_activity(
+                activity_fn,
+                args,
+                start_to_close_timeout=_TERMINALIZE_ACTIVITY_TIMEOUT,
+            )
+        except Exception:
+            _log_terminalize_failure(
+                f"{activity_fn.__name__} failed while terminalizing issue grooming job"
+            )
 
 
 WORKFLOWS = [IssueGroomingWorkflow]
 ACTIVITIES = [run_issue_grooming_activity]
+# NB: mark_coding_team_job_cancelled_activity/mark_coding_team_job_failed_activity are
+# deliberately NOT listed here even though IssueGroomingWorkflow.run schedules them --
+# they are already registered via coding_team_workflow.ACTIVITIES, and the worker
+# merges ACTIVITIES + GROOMING_ACTIVITIES (coding_team_worker.py); listing the same
+# activity object twice would register it twice on the same worker.
 
 # NB: no worker self-boot at import time -- see module docstring. Boot lives
 # in ``software_engineering_team.temporal.coding_team_worker``, which merges
