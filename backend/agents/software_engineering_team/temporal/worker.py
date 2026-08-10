@@ -24,12 +24,11 @@ from software_engineering_team.temporal.activities import (
 from software_engineering_team.temporal.constants import TASK_QUEUE
 from software_engineering_team.temporal.workflows import (
     RetryFailedWorkflow,
-    RunTeamWorkflow,
     RunTeamWorkflowV2,
     StandaloneJobWorkflow,
 )
 
-WORKFLOWS = [RunTeamWorkflow, RunTeamWorkflowV2, RetryFailedWorkflow, StandaloneJobWorkflow]
+WORKFLOWS = [RunTeamWorkflowV2, RetryFailedWorkflow, StandaloneJobWorkflow]
 ACTIVITIES = [
     run_orchestrator_activity,
     parse_spec_activity,

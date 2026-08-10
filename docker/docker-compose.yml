@@ -1220,6 +1220,25 @@ services:
       timeout: 5s
       retries: 5
 
+  # Concurrent load-test harness for unified-api (see docker/k6/load_test_unified_api.js
+  # and docker/README.md's "Load Testing (k6)" section). Opt-in only via the
+  # `load-test` profile — never starts on a plain `docker compose up`. Run with:
+  #   docker compose -f docker/docker-compose.yml --profile load-test run --rm k6
+  k6:
+    image: grafana/k6:0.55.1
+    container_name: khala-k6
+    profiles: ["load-test"]
+    volumes:
+      - ./k6:/scripts:ro
+    environment:
+      BASE_URL: http://khala:8080
+      VUS: ${K6_VUS:-10}
+      DURATION: ${K6_DURATION:-30s}
+      TEAMS: ${K6_TEAMS:-blogging,personal-assistant,market-research,soc2-compliance,social-marketing,branding}
+    command: run /scripts/load_test_unified_api.js
+    networks:
+      stack: { ipv4_address: 172.28.0.34, aliases: [k6] }
+
 networks:
   stack:
     name: khala-stack

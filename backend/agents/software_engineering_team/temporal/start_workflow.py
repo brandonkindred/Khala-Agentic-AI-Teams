@@ -22,7 +22,6 @@ from software_engineering_team.temporal.constants import (
 )
 from software_engineering_team.temporal.workflows import (
     RetryFailedWorkflow,
-    RunTeamWorkflow,
     RunTeamWorkflowV2,
     StandaloneJobWorkflow,
 )
@@ -43,21 +42,6 @@ def _run_async(coro: Any) -> Any:
     return future.result(timeout=START_WORKFLOW_TIMEOUT)
 
 
-def is_workflow_v2_enabled() -> bool:
-    """Whether SE team starts select ``RunTeamWorkflowV2`` (the default) or fall back to
-    ``RunTeamWorkflow`` (V1, kept only for draining in-flight/legacy jobs).
-
-    Preconditions: none.
-    Postconditions: returns False only when ``SE_WORKFLOW_V2`` is explicitly set to a
-        recognized falsy value ("0"/"false"/"no", case-insensitive, surrounding
-        whitespace ignored); returns True for unset, blank, or any other value.
-    """
-    import os
-
-    raw = os.environ.get("SE_WORKFLOW_V2", "").strip().lower()
-    return raw not in ("0", "false", "no")
-
-
 def start_run_team_workflow(
     job_id: str,
     repo_path: str,
@@ -66,20 +50,19 @@ def start_run_team_workflow(
     planning_only: bool = False,
     sprint_id: Optional[str] = None,
 ) -> None:
-    """Start RunTeamWorkflow. Idempotent for same workflow_id.
+    """Start RunTeamWorkflowV2. Idempotent for same workflow_id.
 
-    ``RunTeamWorkflowV2`` is the default; set ``SE_WORKFLOW_V2`` to a falsy value
-    ("0"/"false"/"no") to select the legacy ``RunTeamWorkflow`` (V1) for draining
-    in-flight/legacy jobs. ``sprint_id`` is forwarded on both paths — ``RunTeamWorkflow``
-    and ``RunTeamWorkflowV2`` both accept it as their trailing positional arg.
+    Preconditions: the Temporal client is available (``get_temporal_client()``
+        returns non-None).
+    Postconditions: a ``RunTeamWorkflowV2`` execution is started (or already running,
+        for a repeated ``job_id``) with workflow id
+        ``f"{WORKFLOW_ID_PREFIX_RUN_TEAM}{job_id}"``; ``sprint_id`` is forwarded as the
+        trailing positional arg. Raises ``RuntimeError`` if no Temporal client is available.
     """
     workflow_id = f"{WORKFLOW_ID_PREFIX_RUN_TEAM}{job_id}"
     client = get_temporal_client()
     if client is None:
         raise RuntimeError("Temporal client not available")
-
-    use_v2 = is_workflow_v2_enabled()
-    workflow_cls = RunTeamWorkflowV2 if use_v2 else RunTeamWorkflow
 
     args: List[Any] = [
         job_id,
@@ -92,13 +75,13 @@ def start_run_team_workflow(
 
     _run_async(
         client.start_workflow(
-            workflow_cls.run,
+            RunTeamWorkflowV2.run,
             args=args,
             id=workflow_id,
             task_queue=TASK_QUEUE,
         )
     )
-    logger.info("Started %s id=%s", workflow_cls.__name__, workflow_id)
+    logger.info("Started RunTeamWorkflowV2 id=%s", workflow_id)
 
 
 def start_retry_failed_workflow(job_id: str) -> None:
