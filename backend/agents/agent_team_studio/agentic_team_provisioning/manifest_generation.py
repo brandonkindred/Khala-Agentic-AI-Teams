@@ -92,6 +92,10 @@ def manifest_agent_id(team_id: str, agent_name: str) -> str:
           possible but negligible far past realistic team/agent counts (see
           ``_HASH_HEX_LEN``). Always starts with :func:`team_id_prefix`.
     """
+    if not team_id:
+        raise ValueError("manifest_agent_id: team_id must be non-empty")
+    if not agent_name:
+        raise ValueError("manifest_agent_id: agent_name must be non-empty")
     pair_hash = hash_suffix(f"{team_id}\x00{agent_name}", _HASH_HEX_LEN)
     return f"{team_id_prefix(team_id)}{slug(agent_name, 40)}-{pair_hash}"
 

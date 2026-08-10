@@ -34,10 +34,15 @@ def test_slug_falls_back_to_agent_for_empty_input() -> None:
     assert slug(None) == "agent"
 
 
-def test_slug_truncates_to_max_len_and_strips_dangling_hyphen() -> None:
+def test_slug_truncates_to_max_len() -> None:
     result = slug("a very long agent name that exceeds the bound", max_len=10)
+    assert result == "a-very-lon"
     assert len(result) <= 10
-    assert not result.endswith("-")
+
+
+def test_slug_strips_dangling_hyphen_after_truncation() -> None:
+    assert slug("abc-def-ghi", max_len=4) == "abc"
+    assert slug("ab-cd-ef", max_len=3) == "ab"
 
 
 def test_slug_rejects_non_positive_max_len() -> None:

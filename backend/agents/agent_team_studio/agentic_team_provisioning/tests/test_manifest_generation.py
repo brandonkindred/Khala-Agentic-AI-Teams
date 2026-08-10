@@ -99,6 +99,16 @@ def test_build_agent_manifest_id_stable_and_unique():
     assert id_a1.startswith("agentic_team_provisioning.")
 
 
+def test_manifest_agent_id_rejects_empty_team_id():
+    with pytest.raises(ValueError, match="team_id must be non-empty"):
+        manifest_agent_id("", "Triage")
+
+
+def test_manifest_agent_id_rejects_empty_agent_name():
+    with pytest.raises(ValueError, match="agent_name must be non-empty"):
+        manifest_agent_id("team-1", "")
+
+
 def test_manifest_id_disambiguates_normalized_slug_clashes():
     # Distinct roster names that normalize to the same slug must stay distinct.
     id_1 = build_agent_manifest("t", "QA Agent", summary="r").id
