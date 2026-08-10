@@ -1308,7 +1308,7 @@ def _truncate_for_log(text: Optional[str], max_len: int = 400) -> str:
     return text[:max_len] + "..."
 
 
-def _build_tools(index: CodebaseIndex) -> List[Callable[..., str]]:
+def _build_tools(index: CodebaseIndex) -> List[Callable[..., Any]]:
     """Build strands tools bound to ``index`` for one verification agent.
 
     Postconditions:
