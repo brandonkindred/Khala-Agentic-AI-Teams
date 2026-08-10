@@ -255,11 +255,11 @@ class TestInjectMarkedBlock:
         assert result == f"Before.\n\n{PHASE_A_START}\nNEW\n{PHASE_A_END}\n\nAfter."
 
     def test_rejects_block_containing_start_marker(self) -> None:
-        with pytest.raises(AssertionError):
+        with pytest.raises(ValueError, match="start_marker"):
             inject_marked_block("Description.", PHASE_A_START, PHASE_A_END, f"oops {PHASE_A_START}")
 
     def test_rejects_block_containing_end_marker(self) -> None:
-        with pytest.raises(AssertionError):
+        with pytest.raises(ValueError, match="end_marker"):
             inject_marked_block("Description.", PHASE_A_START, PHASE_A_END, f"oops {PHASE_A_END}")
 
 

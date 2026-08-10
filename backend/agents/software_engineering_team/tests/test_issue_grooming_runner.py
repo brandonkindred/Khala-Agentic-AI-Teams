@@ -8,6 +8,7 @@ import pytest
 
 from software_engineering_team.github_source.client import GitHubAPIError, Issue, SubIssue
 from software_engineering_team.github_source.issue_grooming_runner import IssueGroomingRunner
+from software_engineering_team.github_source.issue_grooming_split import MAX_SUB_ISSUES
 from software_engineering_team.models import JobStatus
 
 
@@ -186,6 +187,28 @@ class TestPhaseBSplit:
         assert client.created == []
         assert client.linked == []
         assert "sub_issues" not in result
+        assert job["status"] == JobStatus.COMPLETED.value
+
+    def test_caps_sub_issues_at_max_with_remaining_items_tail(self) -> None:
+        body = "\n".join(
+            [
+                "This is a breaking change requiring a database migration and new authentication architecture.",
+                "## Acceptance criteria",
+                *[f"- [ ] step {i}" for i in range(10)],
+            ]
+        )
+        issue = _issue(number=7, title="Huge feature", body=body)
+        client = _FakeGroomingClient(issue)
+        update_job_fn, get_job_fn, job, _calls = _job_store()
+        runner = IssueGroomingRunner(client, update_job_fn=update_job_fn, get_job_fn=get_job_fn)
+
+        result = runner.run("job-1", "acme", "widget", 7)
+
+        assert len(client.created) == MAX_SUB_ISSUES
+        assert len(client.linked) == MAX_SUB_ISSUES
+        assert len(result["sub_issues"]) == MAX_SUB_ISSUES
+        assert "Remaining items" in client.created[-1]["body"]
+        assert "Remaining items" in client.updated[-1]["body"]
         assert job["status"] == JobStatus.COMPLETED.value
 
     def test_small_issue_with_few_checklist_items_is_not_split(self) -> None:

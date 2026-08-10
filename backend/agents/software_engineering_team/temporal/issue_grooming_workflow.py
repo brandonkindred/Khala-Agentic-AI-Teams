@@ -60,8 +60,13 @@ class IssueGroomingRunResult(BaseModel):
 
     Postconditions:
         - ``status`` reports the terminal outcome (``"completed"``/``"cancelled"``,
-          as constructed by ``run_issue_grooming_activity``); ``phase``/``grooming``
-          are populated once a Phase A and/or Phase B pass has run.
+          as constructed by ``run_issue_grooming_activity``).
+        - ``phase`` is a terminal marker, always set on a clean exit: ``"done"``
+          when the job's final status is not ``CANCELLED``, ``"cancelled"``
+          otherwise -- it does not indicate which of Phase A/B actually ran.
+        - ``grooming`` carries the runner's output dict when available; it may
+          be ``None`` or missing ``sub_issues`` when cancellation cut the run
+          short before or during Phase B (see ``IssueGroomingRunner``).
           ``IssueGroomingWorkflow.run`` never constructs this model itself --
           it returns the activity's already-serialized result dict unchanged.
     """
@@ -130,8 +135,10 @@ def run_issue_grooming_activity(request: dict[str, Any]) -> dict[str, Any]:
           ``scrub_token_from_text`` first, matching
           ``mark_coding_team_job_failed_activity``'s scrubbed-error contract --
           a git-remote-URL-embedded token echoed into an exception message must
-          never reach the job store or Temporal history unredacted) and
-          re-raises.
+          never reach the job store or Temporal history unredacted), clears
+          ``status_text`` (mirroring ``mark_coding_team_job_failed_activity``'s
+          terminal-state cleanup so a stale in-progress message doesn't linger
+          on a failed job), and re-raises.
     """
     req = IssueGroomingRunRequest.model_validate(request)
     from software_engineering_team.job_store import get_job, update_job
@@ -181,7 +188,12 @@ def run_issue_grooming_activity(request: dict[str, Any]) -> dict[str, Any]:
         from software_engineering_team.github_source import scrub_token_from_text
 
         logger.exception("run_issue_grooming_activity failed for job %s", req.job_id)
-        update_job(req.job_id, error=scrub_token_from_text(str(e)), status=JobStatus.FAILED.value)
+        update_job(
+            req.job_id,
+            error=scrub_token_from_text(str(e)),
+            status=JobStatus.FAILED.value,
+            status_text=None,
+        )
         raise
 
 

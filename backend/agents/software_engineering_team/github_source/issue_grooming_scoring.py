@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import re
 
-from pydantic import BaseModel, model_validator
+from pydantic import BaseModel, ConfigDict, model_validator
 
 FIBONACCI: tuple[int, ...] = (1, 2, 3, 5, 8, 13, 21)
 
@@ -56,7 +56,12 @@ class ScoreBreakdown(BaseModel):
         - ``conceptual``, ``anticipated_loc``, ``solution_complexity``, and
           ``aggregate`` are each a member of :data:`FIBONACCI`.
         - ``aggregate == nearest_fibonacci(max(conceptual, anticipated_loc, solution_complexity))``.
+        - Frozen (``model_config``) so these invariants, enforced only at
+          construction time by the validator below, cannot be broken by a
+          later field assignment.
     """
+
+    model_config = ConfigDict(frozen=True)
 
     conceptual: int
     conceptual_rationale: str
@@ -245,10 +250,12 @@ def inject_marked_block(body: str, start_marker: str, end_marker: str, block: st
 
     Preconditions:
         - ``start_marker``/``end_marker`` do not themselves appear inside
-          ``block``. Enforced by assertion: a marker leaking into ``block``
-          would make ``body.find(end_marker)`` match inside the freshly
-          injected content instead of (or in addition to) the real closing
-          marker, corrupting a later replace-in-place call.
+          ``block``. Enforced by a raised ``ValueError`` (not ``assert`` -- this
+          guards a call-site programming error that must be caught even when
+          Python runs under ``-O``, which strips assertions): a marker leaking
+          into ``block`` would make ``body.find(end_marker)`` match inside the
+          freshly injected content instead of (or in addition to) the real
+          closing marker, corrupting a later replace-in-place call.
     Postconditions:
         - When both markers are already present (``start_marker`` before
           ``end_marker``), the span between them (inclusive) is replaced with the
@@ -257,8 +264,10 @@ def inject_marked_block(body: str, start_marker: str, end_marker: str, block: st
           ``body`` is non-blank. Idempotent: injecting the same ``block`` twice in
           a row yields the same result as injecting it once.
     """
-    assert start_marker not in block, "start_marker must not appear inside block"
-    assert end_marker not in block, "end_marker must not appear inside block"
+    if start_marker in block:
+        raise ValueError("start_marker must not appear inside block")
+    if end_marker in block:
+        raise ValueError("end_marker must not appear inside block")
     wrapped = f"{start_marker}\n{block}\n{end_marker}"
     start_idx = body.find(start_marker)
     end_idx = body.find(end_marker)

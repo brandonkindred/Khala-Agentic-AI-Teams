@@ -114,10 +114,16 @@ class TestPlanSubIssueItems:
             assert tail_item in planned[-1]
 
     def test_never_drops_an_item(self) -> None:
+        # Deliberately does not parse plan_sub_issue_items's folded-tail string
+        # format (e.g. splitting on ": "/"; ") -- that would couple this test to
+        # the exact separator/label the implementation happens to use today.
+        # Instead it only asserts the documented guarantee: no item's text is
+        # silently dropped from the combined planned output.
         items = [f"item {i}" for i in range(20)]
         planned = plan_sub_issue_items(items)
-        recovered = planned[:-1] + planned[-1].split(": ", 1)[1].split("; ")
-        assert recovered == items
+        combined = "\n".join(planned)
+        for item in items:
+            assert item in combined
 
 
 # ---------------------------------------------------------------------------

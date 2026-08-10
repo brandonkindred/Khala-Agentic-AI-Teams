@@ -287,6 +287,7 @@ def test_activity_exception_path_marks_job_failed_and_reraises(
     job = js.get_job("groom-4")
     assert job["status"] == "failed"
     assert job["error"] == "boom"
+    assert job["status_text"] is None
 
 
 def test_activity_exception_path_scrubs_token_from_error(
