@@ -402,6 +402,16 @@ def test_mark_coding_team_job_cancelled_activity_updates_store(monkeypatch) -> N
     assert out["status"] == "cancelled"
 
 
+def test_mark_coding_team_job_cancelled_activity_rejects_missing_job_id() -> None:
+    """The job_id precondition raises ValueError (not assert, which -O strips)."""
+    from software_engineering_team.temporal.coding_team_workflow import (
+        mark_coding_team_job_cancelled_activity,
+    )
+
+    with pytest.raises(ValueError, match="non-empty job_id"):
+        mark_coding_team_job_cancelled_activity({})
+
+
 def test_github_pipeline_activity_defers_terminal_success(monkeypatch) -> None:
     """GitHub Temporal runs must keep the job non-terminal until publish.
 

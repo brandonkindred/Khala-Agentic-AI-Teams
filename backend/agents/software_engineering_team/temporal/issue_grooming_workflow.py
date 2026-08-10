@@ -197,10 +197,18 @@ class IssueGroomingWorkflow:
               returns, regardless of outcome here.
         Postconditions:
             - Schedules ``activity_fn`` with ``args`` and
-              ``_TERMINALIZE_ACTIVITY_TIMEOUT``; any exception it raises is
-              caught and logged, never propagated -- a terminalize failure
-              must not replace or mask the original error/cancellation the
-              caller is about to re-raise.
+              ``_TERMINALIZE_ACTIVITY_TIMEOUT``; both ``Exception`` and
+              ``asyncio.CancelledError`` raised by that call are caught and
+              logged, never propagated -- a terminalize failure (including
+              the terminalize activity itself being cancelled, e.g. because
+              the whole workflow is concurrently tearing down) must not
+              replace or mask the original error/cancellation the caller is
+              about to re-raise. ``asyncio.CancelledError`` needs its own
+              branch in the ``except`` tuple: it subclasses ``BaseException``
+              rather than ``Exception`` since Python 3.8, so ``except
+              Exception`` alone would let it escape and overwrite ``run``'s
+              original outcome -- the same gotcha ``run`` itself guards
+              against on the outer activity dispatch.
         """
         try:
             await workflow.execute_activity(
@@ -208,7 +216,7 @@ class IssueGroomingWorkflow:
                 args,
                 start_to_close_timeout=_TERMINALIZE_ACTIVITY_TIMEOUT,
             )
-        except Exception:
+        except (Exception, asyncio.CancelledError):
             _log_terminalize_failure(
                 f"{activity_fn.__name__} failed while terminalizing issue grooming job"
             )

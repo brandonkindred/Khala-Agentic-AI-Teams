@@ -73,7 +73,9 @@ def mark_coding_team_job_cancelled_activity(request: dict[str, Any]) -> dict[str
     """Mark a coding-team job cancelled, matching the thread-mode cancel convention.
 
     Preconditions:
-        - ``request["job_id"]`` is a non-empty str naming an existing job row.
+        - ``request["job_id"]`` is a non-empty str naming an existing job row;
+          violated by raising ``ValueError`` (not ``assert``, which
+          ``python -O`` strips) so this boundary check always runs.
     Postconditions:
         - Persists ``status=cancelled`` with ``status_text="Cancelled by user"`` and
           clears ``current_activity`` -- mirrors
@@ -89,9 +91,8 @@ def mark_coding_team_job_cancelled_activity(request: dict[str, Any]) -> dict[str
     from software_engineering_team.models import JobStatus
 
     job_id = request.get("job_id")
-    assert isinstance(job_id, str) and job_id, (
-        "mark_coding_team_job_cancelled_activity requires a non-empty job_id"
-    )
+    if not isinstance(job_id, str) or not job_id:
+        raise ValueError("mark_coding_team_job_cancelled_activity requires a non-empty job_id")
     update_job(
         job_id,
         status=JobStatus.CANCELLED.value,

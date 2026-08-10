@@ -240,6 +240,30 @@ def test_run_terminalize_failure_does_not_mask_original_exception(
         asyncio.run(workflow_obj.run(dict(_VALID_REQUEST)))
 
 
+def test_run_terminalize_cancellation_does_not_mask_original_exception(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A bare ``asyncio.CancelledError`` raised *by the terminalize activity
+    itself* (e.g. the whole workflow tearing down concurrently) must be
+    swallowed too -- it is a ``BaseException``, not caught by ``except
+    Exception`` alone, so ``_best_effort_terminalize`` needs its own explicit
+    branch or this cancellation would replace the original activity error
+    that ``run`` is supposed to re-raise unchanged."""
+
+    async def _fake_exec(fn, request, **_kw):
+        if fn.__name__ == "run_issue_grooming_activity":
+            raise RuntimeError("grooming boom")
+        if fn.__name__ == "mark_coding_team_job_failed_activity":
+            raise asyncio.CancelledError()
+        raise AssertionError(f"unexpected activity {fn.__name__}")
+
+    monkeypatch.setattr("temporalio.workflow.execute_activity", _fake_exec)
+    workflow_obj = IssueGroomingWorkflow()
+
+    with pytest.raises(RuntimeError, match="grooming boom"):
+        asyncio.run(workflow_obj.run(dict(_VALID_REQUEST)))
+
+
 def test_run_validates_before_scheduling_activity(monkeypatch: pytest.MonkeyPatch) -> None:
     """A malformed request raises ``ValidationError`` before any activity is
     scheduled -- fail fast rather than opaquely failing inside a scheduled
