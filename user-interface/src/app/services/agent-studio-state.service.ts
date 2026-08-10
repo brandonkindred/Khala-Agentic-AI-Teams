@@ -26,6 +26,9 @@ const CONFIGURE_SUB_STAGE_INDEX = BUILD_SUB_STAGES.findIndex((s) => s.key === 'c
  *   - `activeStage()` ∈ [0, STAGE_COUNT − 1].
  *   - `maxReachedStage()` ∈ [`activeStage()`, STAGE_COUNT − 1] and never
  *     decreases except via `reset()`.
+ *   - `activeBuildSubStage()` ∈ [0, BUILD_SUB_STAGE_COUNT − 1].
+ *   - `maxReachedBuildSubStage()` ∈ [`activeBuildSubStage()`,
+ *     BUILD_SUB_STAGE_COUNT − 1] and never decreases except via `reset()`.
  */
 @Injectable()
 export class AgentStudioStateService {
