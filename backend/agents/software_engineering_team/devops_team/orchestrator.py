@@ -8,8 +8,9 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Dict, List, Optional
 
-from llm_service import LLMClient
+from llm_service import LLMClient, get_strands_model
 from llm_service.clients.dummy import is_dummy_llm_client_wrapped
+from llm_service.strands_model import resolve_strands_model
 from shared.git.git_utils import (
     abort_merge,
     checkout_branch,
@@ -20,6 +21,7 @@ from shared.git.git_utils import (
     get_head_sha,
     merge_branch,
 )
+from software_engineering_team.qa_agent import QAExpertAgent
 from software_engineering_team.shared.deliver_utils import DeliverGitOps
 from software_engineering_team.shared.repo_writer import write_agent_output
 from software_engineering_team.shared.team_lead_base import BaseTeamLead, TeamLeadSharedState
@@ -46,7 +48,6 @@ from .phases import (
     run_phase5_deliver_merge,
 )
 from .task_clarifier import DevOpsTaskClarifierAgent
-from .test_validation_agent import DevOpsTestValidationAgent
 from .tool_agents import (
     CDKExecutionToolAgent,
     CICDLintPipelineValidationToolAgent,
@@ -227,7 +228,14 @@ class DevOpsTeamLeadAgent(BaseTeamLead):
         self.cicd_agent = CICDPipelineAgent(llm_client)
         self.deployment_agent = DeploymentStrategyAgent(llm_client)
         self.devsecops_review_agent = DevSecOpsReviewAgent(llm_client)
-        self.test_validation_agent = DevOpsTestValidationAgent(llm_client)
+        # Model-routing key preserved as "devops" (not QAExpertAgent's own default
+        # "qa" key) so DevOps acceptance-evidence validation keeps its own model
+        # selection independent of the code-review QA path.
+        self.qa_agent = QAExpertAgent(
+            resolve_strands_model(
+                llm_client, agent_key="devops", get_strands_model_fn=get_strands_model
+            )
+        )
         self.change_review_agent = ChangeReviewAgent(llm_client)
         self.doc_runbook_agent = DocumentationRunbookAgent(llm_client)
 
