@@ -100,7 +100,10 @@ export class AgentStudioBuildAgentComponent {
    * `AgentStudioApiService` (spec §3, Stage 1.1: "Duplicate & refine" — the
    * source registry agent is never mutated). This is the "select" step only —
    * advancing to Stage 2 is the shell's gated "Test this agent →" affordance,
-   * unlocked once the draft is saved (§3, Stage 1.3).
+   * unlocked once the draft is saved (§3, Stage 1.3). On success, a fresh
+   * client-generated id is written to `draftAgentId` — the handoff's
+   * build-in-progress bookkeeping slot (spec §2.4) — since no server-issued
+   * draft id exists until the drafts-persistence story lands.
    */
   onSelectAgent(agentId: string): void {
     if (this.cloning()) return;
@@ -114,6 +117,7 @@ export class AgentStudioBuildAgentComponent {
           this.cloning.set(false);
           this.draftDefinition.set(definition);
           this.selectedSourceAgentId.set(agentId);
+          this.state.setDraftAgentId(crypto.randomUUID());
         },
         error: (err) => {
           this.cloning.set(false);
