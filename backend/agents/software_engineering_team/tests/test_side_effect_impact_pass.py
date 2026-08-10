@@ -687,7 +687,7 @@ def test_runs_when_pre_numbered_with_full_content_supplied() -> None:
     result = find_side_effect_impact_issues(
         _FindingsClient(),
         CodeReviewInput(
-            code="### app/main.py ###\n1: def bar():\n2:     return 1\n",
+            files={"app/main.py": "1: def bar():\n2:     return 1\n"},
             pre_numbered=True,
             full_content={"app/main.py": full},
             task_description="wire up bar",
@@ -712,10 +712,10 @@ def test_stays_disabled_when_full_content_covers_only_some_paths() -> None:
     result = find_side_effect_impact_issues(
         _FailIfAskedClient(),
         CodeReviewInput(
-            code=(
-                "### app/main.py ###\n1: def bar():\n2:     return 1\n"
-                "### app/util.py ###\n1: def helper():\n2:     return 2\n"
-            ),
+            files={
+                "app/main.py": "1: def bar():\n2:     return 1\n",
+                "app/util.py": "1: def helper():\n2:     return 2\n",
+            },
             pre_numbered=True,
             # Covers only app/main.py, not app/util.py -- partial coverage.
             full_content={"app/main.py": "def bar():\n    return 1\n"},

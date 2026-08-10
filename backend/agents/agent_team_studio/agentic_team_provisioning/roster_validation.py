@@ -5,8 +5,9 @@ Checks that:
 1. Every agent referenced in a process step exists on the roster.
 2. Every roster agent is used in at least one process step (no dead weight).
 3. Every process step has at least one assigned agent.
-4. The collective skills, capabilities, tools, and expertise on the roster
-   cover the needs implied by each process step's description/agents.
+4. Manifest-projected skills, tools, and expertise on the roster cover the
+   needs implied by each process step's description/agents (``capabilities``
+   is never projected from AgentManifest, so it is not part of depth checks).
 """
 
 from __future__ import annotations
@@ -18,9 +19,14 @@ from .models import (
     RosterGap,
     RosterValidationResult,
 )
+from .roster_resolve import RosterPersonaView, resolve_persona
 
 
-def validate_roster(team: AgenticTeam) -> RosterValidationResult:
+def validate_roster(
+    team: AgenticTeam,
+    *,
+    personas: dict[str, RosterPersonaView] | None = None,
+) -> RosterValidationResult:
     """Run all roster coverage checks and return a structured result."""
     gaps: list[RosterGap] = []
     roster_map: dict[str, AgenticTeamAgent] = {a.agent_name: a for a in team.agents}
@@ -31,7 +37,7 @@ def validate_roster(team: AgenticTeam) -> RosterValidationResult:
 
     if team.processes:
         gaps.extend(_check_unused_agents(roster_map, used_agent_names))
-    gaps.extend(_check_roster_depth(team.agents))
+    gaps.extend(_check_roster_depth(team.agents, personas=personas))
 
     is_fully_staffed = len(gaps) == 0
     summary = _build_summary(team, gaps, is_fully_staffed)
@@ -113,31 +119,54 @@ def _check_unused_agents(
     return gaps
 
 
-def _check_roster_depth(agents: list[AgenticTeamAgent]) -> list[RosterGap]:
-    """Flag agents that lack detail — they need at least one of skills/capabilities/tools/expertise."""
+def _check_roster_depth(
+    agents: list[AgenticTeamAgent],
+    *,
+    personas: dict[str, RosterPersonaView] | None = None,
+) -> list[RosterGap]:
+    """Flag agents that lack Manifest-projected depth (skills/tools/expertise).
+
+    ``capabilities`` is never projected from ``AgentManifest`` (always empty on
+    the persona view), so it is excluded from the depth check.
+    """
     gaps: list[RosterGap] = []
     for a in agents:
+        if personas is not None and a.manifest_id in personas:
+            persona = personas[a.manifest_id]
+        else:
+            try:
+                persona = resolve_persona(a.manifest_id)
+            except LookupError:
+                gaps.append(
+                    RosterGap(
+                        category="missing_manifest",
+                        detail=(
+                            f"Agent '{a.agent_name}' links to manifest '{a.manifest_id}' "
+                            "which is not in the registry."
+                        ),
+                        agent_name=a.agent_name,
+                    )
+                )
+                continue
         missing: list[str] = []
-        if not a.skills:
+        if not persona.skills:
             missing.append("skills")
-        if not a.capabilities:
-            missing.append("capabilities")
-        if not a.tools:
+        if not persona.tools:
             missing.append("tools")
-        if not a.expertise:
+        if not persona.expertise:
             missing.append("expertise")
-        if len(missing) == 4:
+        if len(missing) == 3:
             gaps.append(
                 RosterGap(
                     category="incomplete_profile",
                     detail=(
-                        f"Agent '{a.agent_name}' has no skills, capabilities, tools, or expertise "
+                        f"Agent '{a.agent_name}' has no skills, tools, or expertise "
                         "defined. The roster cannot validate coverage without this information."
                     ),
                     agent_name=a.agent_name,
                 )
             )
-        elif len(missing) >= 3:
+        elif len(missing) >= 2:
             gaps.append(
                 RosterGap(
                     category="sparse_profile",

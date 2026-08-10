@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import math
 
 import pytest
@@ -444,3 +445,53 @@ def test_config_is_frozen() -> None:
     config = StrategyLabBudgetConfig()
     with pytest.raises(AttributeError):
         config.design_review_rounds = 99  # type: ignore[misc]
+
+
+# ---------------------------------------------------------------------------
+# worst_case_design_llm_calls()
+# ---------------------------------------------------------------------------
+
+
+def test_worst_case_design_llm_calls_matches_readme_default_example() -> None:
+    """At dataclass defaults this must reproduce the README's own worked
+    example under ``STRATEGY_LAB_DESIGN_MAX_LLM_CALLS``: ~9 calls/round ×
+    20 rounds × 3 attempts = 540."""
+    assert StrategyLabBudgetConfig().worst_case_design_llm_calls() == 540
+
+
+@pytest.mark.parametrize(
+    "design_parse_retries, design_self_revision_rounds, design_review_rounds, expected",
+    [
+        # No parse retries, no self-revision, a single review round:
+        # revise = (0+1)*(1+0)+2 = 3; per-round = 3+1 = 4; 4*1*3 = 12.
+        (0, 0, 1, 12),
+        # One extra self-revision round beyond the default, more parse
+        # retries, and more review rounds, worked out independently:
+        # revise = (1+1)*(1+2)+2 = 8; per-round = 8+1 = 9; 9*5*3 = 135.
+        (1, 2, 5, 135),
+        # Matches the README's own documented default fixture.
+        (2, 1, 20, 540),
+    ],
+)
+def test_worst_case_design_llm_calls_matches_hand_computed_fixtures(
+    design_parse_retries: int,
+    design_self_revision_rounds: int,
+    design_review_rounds: int,
+    expected: int,
+) -> None:
+    config = StrategyLabBudgetConfig(
+        design_parse_retries=design_parse_retries,
+        design_self_revision_rounds=design_self_revision_rounds,
+        design_review_rounds=design_review_rounds,
+    )
+    assert config.worst_case_design_llm_calls() == expected
+
+
+def test_from_env_logs_worst_case_design_llm_calls(caplog: pytest.LogCaptureFixture) -> None:
+    caplog.set_level(logging.INFO, logger="investment_team.strategy_lab.budget_config")
+    config = StrategyLabBudgetConfig.from_env()
+    expected = str(config.worst_case_design_llm_calls())
+    assert any(
+        "worst-case design-phase LLM-call count" in record.message and expected in record.message
+        for record in caplog.records
+    )

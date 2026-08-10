@@ -28,6 +28,7 @@ import inspect
 from typing import Any
 
 import pytest
+from unified_api.tests._route_gating import yield_leaf_routes
 
 from agent_team_studio.agentic_team_provisioning.models import (
     PipelineRunStatus,
@@ -296,9 +297,10 @@ def _pipeline_routes(app):
         route fails here with instructions, not as an AttributeError later.
     """
     routes = {
-        (method, route.path): route
+        (method, leaf.path): leaf
         for route in app.routes
-        for method in (getattr(route, "methods", None) or ())
+        for leaf in yield_leaf_routes(route)
+        for method in (getattr(leaf, "methods", None) or ())
     }
     create = routes.get(("POST", "/teams/{team_id}/test-pipeline/runs"))
     poll = routes.get(("GET", "/teams/{team_id}/test-pipeline/runs/{run_id}"))

@@ -580,7 +580,8 @@ def run_coding_team_orchestrator(
                 )
         except Exception as exc:  # noqa: BLE001 - fail the job cleanly with the unsupported stack
             logger.error(
-                "Failed to build coding-team implementation workers: %s",
+                "Job %s: failed to build coding-team implementation workers: %s",
+                job_id,
                 exc,
                 extra={"trace_id": current_trace_id()},
             )

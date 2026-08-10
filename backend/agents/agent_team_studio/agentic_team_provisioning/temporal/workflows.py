@@ -133,7 +133,6 @@ def run_step_activity(
           step is picked up by another worker — recovery, without retrying real errors.
     """
     from agent_team_studio.agentic_team_provisioning.models import (
-        AgenticTeamAgent,
         ProcessDefinition,
     )
     from agent_team_studio.agentic_team_provisioning.runtime.pipeline_runner import PipelineRunner
@@ -158,7 +157,18 @@ def run_step_activity(
     if step is None:  # pragma: no cover - dispatcher only sends known step ids
         raise ValueError(f"step {step_id} not found in process {process.process_id}")
 
-    agents = [AgenticTeamAgent(**a) for a in team_agents_json]
+    # In-flight workflows may still carry pre-thin fat roster JSON (manifest_id
+    # null). Coerce via migrate so ValidationError does not fail the run.
+    from agent_team_studio.agentic_team_provisioning.roster_resolve import coerce_roster_agent
+
+    team_id = str((run or {}).get("team_id") or "")
+    if not team_id:
+        raise ApplicationError(
+            f"pipeline run {run_id} is missing team_id; cannot coerce roster agents",
+            type="MissingTeamId",
+            non_retryable=True,
+        )
+    agents = [coerce_roster_agent(team_id, a) for a in team_agents_json]
     agents_by_name = {a.agent_name: a for a in agents}
 
     runner = PipelineRunner(store, start_sweeper=False)

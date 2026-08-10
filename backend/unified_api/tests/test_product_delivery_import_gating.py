@@ -86,8 +86,10 @@ assert "product_delivery" not in sys.modules, (
 assert "unified_api.routes.product_delivery" not in sys.modules, (
     "disabled product_delivery: unified_api.routes.product_delivery was still imported"
 )
+from unified_api.tests._route_gating import route_serves_prefix
+
 assert not any(
-    getattr(r, "path", "").startswith("/api/product-delivery") for r in unified_api.main.app.routes
+    route_serves_prefix(r, "/api/product-delivery") for r in unified_api.main.app.routes
 ), "disabled product_delivery route was still mounted"
 
 from fastapi.testclient import TestClient
@@ -125,8 +127,10 @@ assert "product_delivery" in sys.modules, "enabled product_delivery was not impo
 assert "unified_api.routes.product_delivery" in sys.modules, (
     "enabled product_delivery: unified_api.routes.product_delivery was not imported"
 )
+from unified_api.tests._route_gating import route_serves_prefix
+
 assert any(
-    getattr(r, "path", "").startswith("/api/product-delivery") for r in unified_api.main.app.routes
+    route_serves_prefix(r, "/api/product-delivery") for r in unified_api.main.app.routes
 ), "enabled product_delivery route was not mounted"
 
 from fastapi.testclient import TestClient

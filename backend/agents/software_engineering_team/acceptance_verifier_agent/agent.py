@@ -40,6 +40,12 @@ logger = logging.getLogger(__name__)
 # one — both failure modes that a category-based tag would have suffered.
 _CRITERION_DELIM = " :: "
 
+# AcceptanceVerifierInput.code is a flat blob with no real path; this sentinel
+# is the single key under which it's submitted to CodeReviewInput.files (which
+# requires a non-empty {path: content} mapping). Mirrors
+# CodebaseIndex.EXISTING_CODEBASE_PATH's naming style.
+_SUBMISSION_PATH = "<submission>"
+
 
 def _normalize(text: str) -> str:
     """Whitespace-collapsed, lower-cased form for exact-match comparison.
@@ -219,7 +225,7 @@ class AcceptanceVerifierAgent:
         try:
             result = CodeReviewAgent(self.llm).run(
                 CodeReviewInput(
-                    code=input_data.code or "",
+                    files={_SUBMISSION_PATH: input_data.code},
                     task_description=input_data.task_description,
                     acceptance_criteria=input_data.acceptance_criteria,
                     spec_content=input_data.spec_content,

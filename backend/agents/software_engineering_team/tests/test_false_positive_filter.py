@@ -20,7 +20,7 @@ import logging
 import re
 import threading
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterable, List, Optional
 
 import pytest
 from code_review_agent.coordinator import run_coordinator
@@ -172,11 +172,10 @@ def test_index_from_input_overlays_full_content_when_it_covers_every_path() -> N
     the index would otherwise hold has it overlaid, and the index reports
     ``full_content_complete=True`` -- so whole-codebase passes reading via the
     index see complete content instead of the bounded pre-numbered excerpt."""
-    code = "### app/main.py ###\n1: def bar():\n2:     return foo()\n"
     full = "def bar():\n    return foo()\n\ndef extra():\n    pass\n"
     idx = CodebaseIndex.from_input(
         CodeReviewInput(
-            code=code,
+            files={"app/main.py": "1: def bar():\n2:     return foo()\n"},
             pre_numbered=True,
             full_content={"app/main.py": full},
             task_description="t",
@@ -192,11 +191,10 @@ def test_index_from_input_ignores_full_content_paths_outside_the_submission() ->
     path into the index -- a whole-codebase pass reading ``index.files`` would
     otherwise treat it as part of this submission's changed-file set even
     though the submission itself never included it."""
-    code = "### app/main.py ###\n1: def bar():\n2:     return foo()\n"
     full = "def bar():\n    return foo()\n\ndef extra():\n    pass\n"
     idx = CodebaseIndex.from_input(
         CodeReviewInput(
-            code=code,
+            files={"app/main.py": "1: def bar():\n2:     return foo()\n"},
             pre_numbered=True,
             full_content={
                 "app/main.py": full,
@@ -217,13 +215,12 @@ def test_index_from_input_does_not_overlay_partial_full_content() -> None:
     bodies, with no way for a downstream pass to tell them apart. Both paths
     keep their original (pre-numbered) content, and the index reports
     ``full_content_complete=False``."""
-    code = (
-        "### app/main.py ###\n1: def bar():\n2:     return foo()\n"
-        "### app/util.py ###\n1: def foo():\n2:     return 1\n"
-    )
     idx = CodebaseIndex.from_input(
         CodeReviewInput(
-            code=code,
+            files={
+                "app/main.py": "1: def bar():\n2:     return foo()",
+                "app/util.py": "1: def foo():\n2:     return 1",
+            },
             pre_numbered=True,
             # Covers only app/main.py, not app/util.py.
             full_content={"app/main.py": "def bar():\n    return foo()\n"},
@@ -269,22 +266,6 @@ def test_codebase_index_is_frozen_and_isolates_files_dict() -> None:
     assert idx.files["a.py"] == "x"
     with pytest.raises(dataclasses.FrozenInstanceError):
         idx.files = {}  # type: ignore[misc]
-
-
-def test_index_from_legacy_code_parses_headers() -> None:
-    """Legacy ``code`` with ``### path ###`` headers splits into path-addressable files."""
-    code = "### app/main.py ###\ndef foo(): pass\n\n### app/util.py ###\ndef bar(): pass"
-    idx = CodebaseIndex.from_input(CodeReviewInput(code=code, task_description="t"))
-    assert set(idx.files) == {"app/main.py", "app/util.py"}
-    assert "def foo" in idx.files["app/main.py"]
-
-
-def test_index_legacy_code_without_headers_has_no_readable_files() -> None:
-    """Headerless legacy code yields no path-addressable files."""
-    idx = CodebaseIndex.from_input(
-        CodeReviewInput(code="just some loose code", task_description="t")
-    )
-    assert idx.files == {}
 
 
 def test_read_file_exact_and_existing_codebase() -> None:
@@ -800,6 +781,28 @@ def test_search_repo_references_respects_max_files_scanned() -> None:
     assert {path for path, _, _ in hits} <= set(reader_files)
 
 
+@pytest.mark.parametrize("raise_error", [True, False])
+def test_search_repo_references_per_file_failure_keeps_other_hits(raise_error: bool) -> None:
+    """One file's read_file failing (raise or None) skips just that file, not the scan.
+
+    Distinct from the ``_BoomReader`` case (list_files itself fails): here the
+    listing succeeds and most files read fine, so the other hits must still
+    surface, with ``truncated`` set to flag the incomplete coverage.
+    """
+    from software_engineering_team.code_review_agent.false_positive_filter import (
+        _search_repo_references,
+    )
+
+    files = {"a.py": "needle\n", "bad.py": "needle\n", "c.py": "needle\n"}
+    idx = CodebaseIndex(
+        files={"sub.py": "other\n"},
+        repo_reader=_PartialFailReader(files, fail_paths=["bad.py"], raise_error=raise_error),
+    )
+    hits, truncated = _search_repo_references(idx, "needle", max_matches=10)
+    assert {path for path, _, _ in hits} == {"a.py", "c.py"}
+    assert truncated is True
+
+
 def test_find_references_no_reader_unchanged() -> None:
     """Without a reader, results stay submission-only and note that explicitly."""
     idx = CodebaseIndex(files={"a.py": "def foo():\n    pass\n"})
@@ -866,6 +869,19 @@ def test_find_references_attaches_enclosing_construct_excerpt() -> None:
     assert "return outer()" in result
     assert "def outer():" in result  # definition hit may also appear
     assert _NO_REPO in result
+
+
+def test_find_references_repo_hit_unreadable_at_format_time_returns_locator_only() -> None:
+    """A repo hit found during the scan but unreadable on the second, format-time read
+    degrades to a bare path:line locator instead of raising or dropping the hit."""
+    idx = CodebaseIndex(
+        files={"sub.py": "other\n"},
+        repo_reader=_FlakyReader({"caller.py": "def caller():\n    return needle()\n"}),
+    )
+    result = idx.find_references("needle")
+    assert result == "caller.py:2"
+    assert "function caller" not in result
+    assert "def caller" not in result
 
 
 def test_find_references_module_level_hit_gets_line_window_fallback() -> None:
@@ -1642,7 +1658,9 @@ def test_filter_skips_when_no_file_paths() -> None:
 
 def test_filter_skips_when_no_readable_files() -> None:
     """A submission exposing no readable files keeps all findings without an LLM call."""
-    inp = CodeReviewInput(code="loose code with no headers", task_description="t")
+    # An empty-string body is dropped by CodebaseIndex.from_input, leaving no
+    # readable files, without relying on the legacy headerless-code fallback.
+    inp = _input(files={"a.py": ""})
     issues = [_issue()]
     out = filter_false_positives(_RaisingStub(), inp, issues)
     assert out == issues
@@ -2137,6 +2155,60 @@ class _BoomReader:
         raise RuntimeError("read boom")
 
 
+class _PartialFailReader:
+    """A reader whose read_file fails for specific paths, succeeds for the rest.
+
+    Models one file's fetch failing mid-scan (e.g. a GitHub-backed reader
+    erroring on a single path) without aborting the whole repo half of
+    ``find_references`` -- distinct from ``_BoomReader``'s total ``list_files``
+    failure, which never gets far enough to scan any file.
+    """
+
+    def __init__(
+        self, files: Dict[str, str], fail_paths: Iterable[str], *, raise_error: bool = True
+    ):
+        self._files = files
+        self._fail_paths = set(fail_paths)
+        self._raise_error = raise_error
+
+    def list_files(self) -> List[str]:
+        return list(self._files)
+
+    def read_file(self, path: str) -> Optional[str]:
+        key = (path or "").strip()
+        if key in self._fail_paths:
+            if self._raise_error:
+                raise RuntimeError(f"read boom: {key}")
+            return None
+        return self._files.get(key)
+
+
+class _FlakyReader:
+    """A reader whose read_file returns ``None`` after the first successful read per path.
+
+    ``find_references`` reads a matched repo file twice: once in
+    ``_search_repo_references`` to find the hit, and again in
+    ``_format_reference_hit`` (via ``CodebaseIndex._read``) to build the
+    excerpt. This models a reader that can serve a file once but not again
+    (e.g. a transient or rate-limited fetch), exercising the locator-only
+    fallback when that second read fails.
+    """
+
+    def __init__(self, files: Dict[str, str]):
+        self._files = files
+        self._served: set = set()
+
+    def list_files(self) -> List[str]:
+        return list(self._files)
+
+    def read_file(self, path: str) -> Optional[str]:
+        key = (path or "").strip()
+        if key in self._served:
+            return None
+        self._served.add(key)
+        return self._files.get(key)
+
+
 def test_index_list_files_appends_reader_paths_deduped() -> None:
     """``list_files`` lists submission paths first, then reader paths, deduped."""
     idx = CodebaseIndex(
@@ -2210,17 +2282,6 @@ def test_filter_drops_finding_for_existing_repo_file() -> None:
         repo_reader=reader,
     )
     assert out == []  # confirmed existing → dropped (not skipped as unresolved)
-
-
-def test_filter_runs_with_reader_even_when_submission_has_no_files() -> None:
-    """A reader lets verification proceed even when the legacy ``code`` blob had
-    no path-headed content (index.files empty), rather than keeping everything."""
-    inp = CodeReviewInput(code="loose code with no headers", task_description="t")
-    reader = _FakeReader({"pkg/models.py": "class Model: ..."})
-    issue = _issue(file_path="pkg/models.py", description="add pkg/models.py")
-    stub = _VerdictStub(verdicts=[{"index": 0, "is_real_issue": False, "confidence": "high"}])
-    out = filter_false_positives(stub, inp, [issue], repo_reader=reader)
-    assert out == []
 
 
 # --------------------------------------------------------------------------- coordinator integration

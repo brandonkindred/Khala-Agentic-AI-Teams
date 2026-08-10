@@ -121,10 +121,11 @@ def recommend_agents_for_step(process_id: str, step_id: str):
 
     Scoring is a simple token-overlap heuristic, not semantic matching:
     lowercased words (length > 2) from the step's ``name``/``description`` are
-    intersected against each roster agent's combined
-    skills/capabilities/tools/expertise; the overlap *count* is the
-    ``match_score``. Agents with zero overlap are omitted entirely, and the
-    remaining ones are sorted by descending score and capped to the top 10.
+    intersected against each roster agent's Manifest-resolved
+    skills/tools/expertise (``capabilities`` is always empty on the persona view);
+    the overlap *count* is the ``match_score``. Agents with zero overlap are
+    omitted entirely, and the remaining ones are sorted by descending score and
+    capped to the top 10.
 
     Preconditions: ``process_id`` and ``step_id`` are non-empty strings.
     Postconditions: ``200`` with a ``RecommendAgentsResponse`` (``recommended_agents``
@@ -151,9 +152,15 @@ def recommend_agents_for_step(process_id: str, step_id: str):
                 t.lower() for t in f"{step.name} {step.description}".split() if len(t) > 2
             }
             for agent in team.agents:
+                try:
+                    persona = _main.resolve_persona(agent.manifest_id)
+                except LookupError:
+                    continue
                 agent_tokens = {
                     t.lower()
-                    for t in (agent.skills + agent.capabilities + agent.tools + agent.expertise)
+                    for t in (
+                        persona.skills + persona.capabilities + persona.tools + persona.expertise
+                    )
                 }
                 overlap = len(search_tokens & agent_tokens)
                 if overlap > 0:
@@ -161,9 +168,9 @@ def recommend_agents_for_step(process_id: str, step_id: str):
                         RecommendedAgent(
                             agent_name=agent.agent_name,
                             source="roster",
-                            role=agent.role,
-                            skills=agent.skills,
-                            tools=agent.tools,
+                            role=persona.role,
+                            skills=persona.skills,
+                            tools=persona.tools,
                             match_score=float(overlap),
                         )
                     )

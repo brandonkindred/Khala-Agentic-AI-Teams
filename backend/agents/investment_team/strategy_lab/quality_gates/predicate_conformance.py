@@ -47,6 +47,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any, ClassVar, Dict, List, Optional, Type
 
+from ..budget_config import StrategyLabBudgetConfig
 from ..runtime_window import STREAMING_WINDOW_BARS
 from ..spec_dsl import EntryRule as _EntryRule
 from ..spec_dsl import Predicate as _Predicate
@@ -77,13 +78,7 @@ def _code_conformance_retries() -> int:
       Returns a non-negative integer. Default 2; garbage values fall
       back to 2.
     """
-    import os
-
-    raw = os.environ.get("STRATEGY_LAB_CODE_CONFORMANCE_RETRIES", "2")
-    try:
-        return max(int(raw), 0)
-    except ValueError:
-        return 2
+    return StrategyLabBudgetConfig.from_env().code_conformance_retries
 
 
 @dataclass

@@ -404,9 +404,18 @@ Per-cycle hard cap on the total number of LLM calls the design phase may make wi
 before every design/review LLM call (generation, each parse-retry, the self-review verdict, each
 self-revision, and each `DesignReviewAgent` round); when it trips the cycle short-circuits with
 `status="failed: budget_exhausted"` (distinct from `failed: design_not_ready`) before runaway cloud
-spend. **Worst-case sizing:** at default settings one design round can cost up to ~9 LLM calls —
-`revise` is up to 8 (3 parse-retries + 1 self-review verdict + 3 self-revision parse-retries + 1
-re-audit verdict) plus 1 `DesignReviewAgent` round — so the uncapped worst case is
-`~9 calls × STRATEGY_LAB_DESIGN_REVIEW_ROUNDS (20) × 3 attempts ≈ 540` calls per design phase; this
-budget ceilings that. Raise it for genuinely hard-but-converging specs; lower it to tighten the
+spend. **Worst-case sizing** is not maintained here as independent prose — it is computed by
+`StrategyLabBudgetConfig.worst_case_design_llm_calls()` (`budget_config.py`), the same enforced
+config object every design-phase knob on this page resolves from, so the number below cannot drift
+out of sync with the code that produces it. One design round costs at most
+`(design_parse_retries + 1) * (1 + design_self_revision_rounds) + 2` revise-path calls (parse-retries
+on the initial generate/revise, the self-review verdict, parse-retries across self-revision, and the
+re-audit verdict) plus 1 `DesignReviewAgent` round; that per-round cost repeats for up to
+`design_review_rounds` rounds, across up to `MAX_DESIGN_REENTRIES + 1` design attempts. At the
+dataclass defaults (`design_parse_retries=2`, `design_self_revision_rounds=1`,
+`design_review_rounds=20`) this evaluates to 9 calls/round × 20 rounds × 3 attempts = **540** calls
+per design phase — `StrategyLabBudgetConfig.from_env()` logs the value actually resolved for the
+running environment's env-var overrides at `INFO` on every resolution, so the current worst case is
+always visible at runtime rather than only in this doc. `STRATEGY_LAB_DESIGN_MAX_LLM_CALLS` ceilings
+that uncapped worst case. Raise it for genuinely hard-but-converging specs; lower it to tighten the
 cost/quota ceiling.
