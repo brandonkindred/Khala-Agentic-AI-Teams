@@ -64,9 +64,11 @@ def run_phase4_quality_gate(
       ``change_review_agent``, and ``qa_agent``.
     Postconditions: runs tool validation, execution verification, the
       debug-patch loop, and independent reviews, returning the assembled
-      ``quality_gates``, ``acceptance_trace``, ``tool_gate_map``, and
-      ``infra_fix_iterations`` (Phase 4.6 attempts consumed; stays 1 when no
-      retry was needed). ``blocked_result`` is set to a failed
+      ``quality_gates`` (``agent.qa_agent.run(..., request_mode="acceptance_evidence")``'s
+      ``quality_gates`` coerced to ``GateStatus`` via ``coerce_gate_status``, then
+      augmented with ``security_review`` and ``change_review``), ``acceptance_trace``,
+      ``tool_gate_map``, and ``infra_fix_iterations`` (Phase 4.6 attempts consumed;
+      stays 1 when no retry was needed). ``blocked_result`` is set to a failed
       ``DevOpsTeamResult`` when any quality gate fails or the injected
       ``build_verifier`` rejects the repo; otherwise ``None`` so Phase 5 runs.
     """
