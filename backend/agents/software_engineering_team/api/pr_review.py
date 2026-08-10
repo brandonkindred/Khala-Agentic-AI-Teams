@@ -57,7 +57,6 @@ from software_engineering_team.job_store import (
     heartbeat_job,
 )
 from software_engineering_team.models import JobStatus
-
 from software_engineering_team.temporal.client import get_temporal_client
 
 logger = logging.getLogger(__name__)
