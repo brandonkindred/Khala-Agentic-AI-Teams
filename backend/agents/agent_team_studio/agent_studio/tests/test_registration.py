@@ -54,6 +54,14 @@ def test_build_manifest_reuses_generated_runtime() -> None:
     assert manifest.cognition.tools == ["web.search"]
 
 
+def test_build_studio_agent_manifest_returns_agent_manifest_not_definition() -> None:
+    # Regression for #5895: the save/register projection must produce the
+    # AgentManifest SoT, never an AgentDefinition-shaped identity.
+    manifest = build_studio_agent_manifest(AgentDefinition(name="Planner", role="r"))
+    assert isinstance(manifest, AgentManifest)
+    assert not isinstance(manifest, AgentDefinition)
+
+
 def test_build_manifest_persists_seeded_states() -> None:
     # The definition's three operating states ride along onto the manifest.
     manifest = build_studio_agent_manifest(AgentDefinition(name="Planner", role="r"))
