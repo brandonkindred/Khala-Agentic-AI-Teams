@@ -48,8 +48,6 @@ import logging
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Literal, Optional, Tuple
 
-from shared.env_config import env_int
-
 from ..execution.benchmarks import benchmark_for_strategy, build_60_40_equity
 from ..execution.metrics import (
     bootstrap_sharpe_ci,
@@ -115,6 +113,7 @@ from .agents.refinement import (
 )
 from .agents.zero_trade_repair import ZeroTradeRepairAgent
 from .alignment_findings import AlignmentFinding
+from .budget_config import StrategyLabBudgetConfig
 from .exceptions import SpecImplementabilityError
 from .market_regime import RegimeSummary, compute_regime_summary
 from .orchestrator_alignment import AlignmentMixin
@@ -185,7 +184,7 @@ def _refinement_stall_rounds() -> int:
     surfaces as ``status="failed: refinement_stalled"``, distinct from
     honest round-cap exhaustion (``"failed: max_refinement_rounds"``).
     """
-    return env_int("STRATEGY_LAB_REFINEMENT_STALL_ROUNDS", 3, floor=1)
+    return StrategyLabBudgetConfig.from_env().refinement_stall_rounds
 
 
 def _design_max_llm_calls() -> int:
@@ -200,10 +199,10 @@ def _design_max_llm_calls() -> int:
     cycle with ``status="failed: budget_exhausted"`` before runaway cloud
     spend rather than burning the full multiplicative worst case.
     """
-    return env_int("STRATEGY_LAB_DESIGN_MAX_LLM_CALLS", 120, floor=1)
+    return StrategyLabBudgetConfig.from_env().design_max_llm_calls
 
 
-MAX_CODE_REFINEMENT_ROUNDS = env_int("STRATEGY_LAB_MAX_CODE_REFINEMENT_ROUNDS", 50, floor=1)
+MAX_CODE_REFINEMENT_ROUNDS = StrategyLabBudgetConfig.from_env().max_code_refinement_rounds
 # ``WINNING_THRESHOLD`` (the S&P-500 amortized benchmark, 8.0%) is imported
 # from ``..models`` and is the single deterministic verdict floor: a valid run
 # is WINNING iff ``annualized_return_pct >= WINNING_THRESHOLD``, on every path.

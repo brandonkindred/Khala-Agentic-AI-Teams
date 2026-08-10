@@ -48,10 +48,6 @@ def test_run_code_review_happy_path(monkeypatch) -> None:
         "software_engineering_team.code_review_agent.CodeReviewAgent",
         lambda llm: MagicMock(run=lambda inp, progress_callback=None: _ReviewResult()),
     )
-    monkeypatch.setattr(
-        "software_engineering_team.shared.context_sizing.compute_code_review_total_chars",
-        lambda llm: 10,
-    )
     result = q.run_code_review(
         spec_content="spec",
         task_description="task",
@@ -169,10 +165,6 @@ def test_run_code_review_default_task_requirements_empty(monkeypatch) -> None:
         "software_engineering_team.code_review_agent.CodeReviewAgent",
         lambda llm: SimpleNamespace(run=_run),
     )
-    monkeypatch.setattr(
-        "software_engineering_team.shared.context_sizing.compute_code_review_total_chars",
-        lambda llm: 1000,
-    )
     result = q.run_code_review(
         spec_content="spec",
         task_description="task",
@@ -220,10 +212,6 @@ def test_run_code_review_exception_returns_failed(monkeypatch) -> None:
     monkeypatch.setattr(
         "software_engineering_team.code_review_agent.CodeReviewAgent",
         lambda llm: SimpleNamespace(run=boom),
-    )
-    monkeypatch.setattr(
-        "software_engineering_team.shared.context_sizing.compute_code_review_total_chars",
-        lambda llm: 1000,
     )
     result = q.run_code_review(
         spec_content="",
@@ -323,19 +311,6 @@ def test_run_linting_exception_non_blocking(monkeypatch, tmp_path) -> None:
     assert result.passed is True
 
 
-def test_run_code_review_sizes_context_with_strands_adapter() -> None:
-    """Regression: the default llm_getter returns a strands LLMClientModel and
-    run_code_review passes it to compute_code_review_total_chars, which calls
-    get_max_context_tokens on it. Without adapter delegation that raised
-    AttributeError and every review failed closed ("Review failed: ...")."""
-    from llm_service.clients.dummy import DummyLLMClient
-    from llm_service.strands_adapter import _get_strands_model as get_strands_model
-    from software_engineering_team.shared.context_sizing import compute_code_review_total_chars
-
-    llm = get_strands_model("code_review", client=DummyLLMClient())
-    assert compute_code_review_total_chars(llm) == 150_000
-
-
 def test_run_code_review_forwards_progress_callback(monkeypatch) -> None:
     """The tool must forward progress_callback into the agent's run (and None when omitted)."""
     from software_engineering_team import quality_gate_tools as q
@@ -352,10 +327,6 @@ def test_run_code_review_forwards_progress_callback(monkeypatch) -> None:
 
     monkeypatch.setattr(
         "software_engineering_team.code_review_agent.CodeReviewAgent", _CapturingAgent
-    )
-    monkeypatch.setattr(
-        "software_engineering_team.shared.context_sizing.compute_code_review_total_chars",
-        lambda llm: 1000,
     )
 
     def _cb(step: str, detail: str, fraction: float) -> None:

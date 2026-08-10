@@ -227,16 +227,16 @@ class CodebaseIndex:
     def from_input(
         cls, input_data: CodeReviewInput, repo_reader: Optional[RepoReader] = None
     ) -> "CodebaseIndex":
-        """Build the index from a review input's ``files`` or legacy ``code``.
+        """Build the index from a review input's ``files``.
+
+        Preconditions:
+            - ``input_data.files`` is a non-empty mapping (enforced by
+              ``CodeReviewInput``'s own validator, so always true here).
 
         Postconditions:
-            - When ``files`` is set, every file whose content is not ``None`` and
-              not ``""`` is included (insertion order preserved), including
-              whitespace-only bodies, with no header parsing.
-            - Otherwise the legacy ``code`` blob is parsed into ``### path ###``
-              blocks via the coordinator's canonical parser; headerless blocks
-              and empty-string bodies are dropped (they cannot be addressed by
-              a path).
+            - Every file whose content is not ``None`` and not ``""`` is included
+              (insertion order preserved), including whitespace-only bodies, with
+              no header parsing.
             - When ``input_data.pre_numbered`` is True and ``input_data.full_content``
               covers EVERY path this index would otherwise hold, each path's bounded
               pre-numbered excerpt is replaced by its full body -- so a whole-codebase
@@ -261,21 +261,11 @@ class CodebaseIndex:
               excerpt (empty string when absent); ``repo_reader`` is stored
               verbatim.
         """
-        if input_data.files is not None:
-            files = {
-                path: content
-                for path, content in input_data.files.items()
-                if content is not None and content != ""
-            }
-        else:
-            # Lazy import keeps this module free of an import cycle with the
-            # coordinator (which imports ``filter_false_positives`` at module load).
-            from .coordinator import parse_code_into_file_blocks
-
-            files = {}
-            for path, content in parse_code_into_file_blocks(input_data.code or ""):
-                if path and content != "":
-                    files[path] = content
+        files = {
+            path: content
+            for path, content in input_data.files.items()
+            if content is not None and content != ""
+        }
         full_content_complete = bool(
             input_data.pre_numbered
             and input_data.full_content

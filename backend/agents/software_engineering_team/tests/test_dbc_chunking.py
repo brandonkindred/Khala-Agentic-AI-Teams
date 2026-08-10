@@ -16,7 +16,6 @@ from __future__ import annotations
 from typing import Any, Dict, List, Union
 
 from llm_service.clients.dummy import DummyLLMClient
-from software_engineering_team.shared.chunking import parse_code_into_file_blocks
 from software_engineering_team.shared.context_sizing import compute_code_review_map_chunk_chars
 from software_engineering_team.technical_writers.dbc_comments_agent import agent as dbc_mod
 from software_engineering_team.technical_writers.dbc_comments_agent.agent import (
@@ -24,6 +23,7 @@ from software_engineering_team.technical_writers.dbc_comments_agent.agent import
 )
 from software_engineering_team.technical_writers.dbc_comments_agent.chunking import (
     build_dbc_chunks,
+    parse_code_into_file_blocks,
 )
 from software_engineering_team.technical_writers.dbc_comments_agent.models import (
     DbcCommentsInput,

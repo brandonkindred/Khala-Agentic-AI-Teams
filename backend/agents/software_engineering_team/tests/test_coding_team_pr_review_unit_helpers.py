@@ -730,7 +730,6 @@ class TestBuildChangeSurfaceForReviewable:
         surface = pr_review._build_change_surface_for_reviewable(files, head)
         assert not surface.is_empty
         assert "mod.py" in surface.blocks
-        assert "### mod.py ###" in surface.code
 
     def test_missing_head_omits_path_empty_surface(self) -> None:
         patch = "@@ -1,2 +1,2 @@\n def f():\n-    return 0\n+    return 1\n"

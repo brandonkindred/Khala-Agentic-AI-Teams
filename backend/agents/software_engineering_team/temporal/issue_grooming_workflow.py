@@ -1,13 +1,16 @@
-"""Temporal Pattern-A export scaffold for GitHub issue grooming.
+"""Temporal Pattern-A export module for GitHub issue grooming.
 
 GitHub issue grooming (Phase A score/template, then Phase B sub-issue split)
-currently runs in thread mode only. This module is the scaffold that makes it
-importable as a Temporal package: typed request/result payloads plus stub
-``@activity.defn``/``@workflow.defn`` registrations, exported as ``WORKFLOWS``
-and ``ACTIVITIES`` for the coding-team Temporal worker
-(``software_engineering_team.temporal.coding_team_worker``) to pick up. Real
-Phase A->B execution, workflow orchestration, and worker registration land in
-follow-up changes -- the stub bodies below only validate shape and raise.
+currently runs in thread mode only. This module makes it importable as a
+Temporal package: typed request/result payloads, an ``IssueGroomingWorkflow``
+that schedules ``run_issue_grooming_activity`` and propagates its terminal
+result/failure unchanged, exported as ``WORKFLOWS`` and ``ACTIVITIES`` and
+registered onto the coding-team Temporal worker
+(``software_engineering_team.temporal.coding_team_worker``). The activity body
+itself remains a stub pending a follow-up change that wraps the real Phase
+A->B grooming runner and job-store progress writes -- so running this
+workflow today still terminates in ``NotImplementedError``, which is the
+expected terminal-failure path, not a bug.
 
 Like ``coding_team_workflow.py``, this module MUST NOT start a worker or read
 ``TEMPORAL_ADDRESS`` at import time: it defines ``IssueGroomingWorkflow``, so
@@ -18,10 +21,15 @@ race the first dispatch.
 
 from __future__ import annotations
 
+from datetime import timedelta
 from typing import Any, Optional
 
 from pydantic import BaseModel
 from temporalio import activity, workflow
+
+# Single LLM scoring/decomposition pass -- much shorter-lived than the coding
+# pipeline's 4h timeout.
+_GROOMING_ACTIVITY_TIMEOUT = timedelta(minutes=10)
 
 
 class IssueGroomingRunRequest(BaseModel):
@@ -76,7 +84,7 @@ def run_issue_grooming_activity(request: dict[str, Any]) -> dict[str, Any]:
 
 @workflow.defn(name="IssueGroomingWorkflow")
 class IssueGroomingWorkflow:
-    """Stub durable workflow for GitHub issue grooming.
+    """Durable orchestrator for a GitHub issue grooming Phase A->B run.
 
     Invariants:
         - Declaring the workflow class here (rather than only once its body
@@ -86,26 +94,41 @@ class IssueGroomingWorkflow:
 
     @workflow.run
     async def run(self, request: dict[str, Any]) -> dict[str, Any]:
-        """Stub run method.
+        """Schedule the grooming activity and propagate its outcome.
 
         Preconditions:
             - ``request`` is a dict conforming to ``IssueGroomingRunRequest``.
         Postconditions:
-            - None yet: always raises ``NotImplementedError``. The real
-              Phase A->B orchestration (scheduling ``run_issue_grooming_activity``
-              and propagating terminal success/failure) is implemented in a
-              follow-up change.
+            - Validates ``request`` first, raising ``ValidationError``
+              synchronously before scheduling anything when it does not
+              conform to ``IssueGroomingRunRequest`` -- no activity is
+              scheduled for a malformed request.
+            - Otherwise schedules ``run_issue_grooming_activity`` with a
+              ``_GROOMING_ACTIVITY_TIMEOUT`` start-to-close timeout and no
+              custom retry policy (Temporal's default retry applies -- this
+              is a plain compute/LLM call with no documented idempotency
+              hazard, unlike the short side-effect activities elsewhere in
+              this package that use a bounded policy).
+            - On success, returns the activity's result dict unchanged --
+              this method never re-wraps it into ``IssueGroomingRunResult``.
+            - On activity failure, does not catch or re-wrap the exception:
+              it propagates uncaught, so Temporal marks this workflow itself
+              terminally failed. This method makes no job-store writes and
+              posts no GitHub notices -- both remain the activity's (and a
+              follow-up change's) responsibility, not this workflow's.
         """
         IssueGroomingRunRequest.model_validate(request)
-        raise NotImplementedError(
-            "issue grooming workflow orchestration is implemented in a follow-up change"
+        return await workflow.execute_activity(
+            run_issue_grooming_activity,
+            request,
+            start_to_close_timeout=_GROOMING_ACTIVITY_TIMEOUT,
         )
 
 
 WORKFLOWS = [IssueGroomingWorkflow]
 ACTIVITIES = [run_issue_grooming_activity]
 
-# NB: no worker self-boot at import time -- see module docstring. Boot will
-# live in ``software_engineering_team.temporal.coding_team_worker`` once
-# these lists are registered onto the coding-team worker (follow-up change),
-# the same place ``CodingTeamWorkflow``'s own boot lives.
+# NB: no worker self-boot at import time -- see module docstring. Boot lives
+# in ``software_engineering_team.temporal.coding_team_worker``, which merges
+# these lists onto the coding-team worker alongside ``CodingTeamWorkflow``'s
+# own ``WORKFLOWS``/``ACTIVITIES``.
