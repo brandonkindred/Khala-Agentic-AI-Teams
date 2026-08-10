@@ -60,14 +60,13 @@ def test_build_manifest_cognition_matches_shared_default_block_except_tools() ->
     manifest = build_studio_agent_manifest(definition)
 
     shared_default = default_cognition_block()
+    assert manifest.cognition is not None
     assert manifest.cognition.tools == ["web.search"]
     assert manifest.cognition.rule_packs == shared_default.rule_packs
     assert manifest.cognition.memory == shared_default.memory
     assert manifest.cognition.requires_idempotency_key == shared_default.requires_idempotency_key
     assert manifest.cognition.knowledge_graph == shared_default.knowledge_graph
-    assert manifest.cognition is not None
     assert manifest.cognition.rule_packs == ["default_guardrails"]
-    assert manifest.cognition.tools == ["web.search"]
 
 
 def test_build_studio_agent_manifest_returns_agent_manifest_not_definition() -> None:
