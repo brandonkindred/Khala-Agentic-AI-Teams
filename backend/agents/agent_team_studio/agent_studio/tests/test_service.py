@@ -66,6 +66,9 @@ def test_start_refine_clones_source() -> None:
     assert state.definition.mode == "refine"
     assert state.definition.cloned_from == "blogging.planner"
     assert state.definition.name == "Planner.copy"
+    # Regression for #5896: starting a refine conversation clones into the
+    # ephemeral definition only — it must never register a second identity.
+    assert registry.registered == {}
 
 
 def test_start_refine_without_source_raises_value_error() -> None:
@@ -177,10 +180,10 @@ def test_clone_from_registry_unknown_raises_lookup_error() -> None:
         svc.clone_from_registry("missing")
 
 
-def test_clone_from_registry_persists_no_second_identity() -> None:
-    # Regression for #5896: clone-from-registry only reads the source manifest
-    # (registry.get) — it must never register anything, so no second persisted
-    # identity is created as a side effect of cloning.
+def test_clone_from_registry_does_not_register_anything() -> None:
+    # Regression for #5896: clone-from-registry projects the manifest into an
+    # editable AgentDefinition view — it must never persist a second identity
+    # (the registry's register() is never called).
     svc, registry = _service()
     registry.seed(seed_manifest())
     draft = svc.clone_from_registry("blogging.planner")
