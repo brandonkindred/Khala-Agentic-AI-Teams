@@ -75,7 +75,12 @@ def _make_fake_phase_activities(calls: list) -> list:
 
     @activity.defn(name="parse_spec_and_analyze")
     def _fake_parse_spec(job_id, repo_path, spec_content_override, trace_id, sprint_id):
-        calls.append(("parse_spec_and_analyze", [job_id, repo_path, spec_content_override, trace_id, sprint_id]))
+        calls.append(
+            (
+                "parse_spec_and_analyze",
+                [job_id, repo_path, spec_content_override, trace_id, sprint_id],
+            )
+        )
         return {"spec": "parsed"}
 
     @activity.defn(name="plan_project")
@@ -84,7 +89,9 @@ def _make_fake_phase_activities(calls: list) -> list:
         return {"plan": "ready"}
 
     @activity.defn(name="execute_coding_team")
-    def _fake_execute_coding_team(job_id, repo_path, plan_result, resolved_questions_override, trace_id):
+    def _fake_execute_coding_team(
+        job_id, repo_path, plan_result, resolved_questions_override, trace_id
+    ):
         calls.append(
             (
                 "execute_coding_team",
@@ -97,7 +104,9 @@ def _make_fake_phase_activities(calls: list) -> list:
 
 @pytest.mark.integration
 @pytest.mark.asyncio
-async def test_run_team_workflow_v2_executes_all_three_phases_in_order_against_real_server() -> None:
+async def test_run_team_workflow_v2_executes_all_three_phases_in_order_against_real_server() -> (
+    None
+):
     """Acceptance: a real Temporal worker/sandbox round-trip drives
     ``RunTeamWorkflowV2`` through all three phases, in order, dispatching to
     each real activity name -- not just the mocked-coroutine shape asserted
@@ -118,7 +127,9 @@ async def test_run_team_workflow_v2_executes_all_three_phases_in_order_against_r
 
 @pytest.mark.integration
 @pytest.mark.asyncio
-async def test_run_team_workflow_v2_planning_only_stops_after_plan_phase_against_real_server() -> None:
+async def test_run_team_workflow_v2_planning_only_stops_after_plan_phase_against_real_server() -> (
+    None
+):
     """Acceptance: ``planning_only=True`` returns after phase 2 in a real
     Temporal run -- ``execute_coding_team`` is never scheduled."""
     calls: list = []
