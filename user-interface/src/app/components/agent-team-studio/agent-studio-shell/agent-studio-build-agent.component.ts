@@ -3,7 +3,7 @@ import { A11yModule } from '@angular/cdk/a11y';
 import { MatButtonModule } from '@angular/material/button';
 import { MatIconModule } from '@angular/material/icon';
 import { AgentCatalogComponent } from '../agent-console/agent-catalog/agent-catalog.component';
-import { AgentProvisioningDashboardComponent } from '../agent-provisioning-dashboard/agent-provisioning-dashboard.component';
+import { AgentProvisionSlideOutComponent } from '../agent-provision-slide-out/agent-provision-slide-out.component';
 import { AgentStudioStateService } from '../../../services/agent-studio-state.service';
 
 /**
@@ -16,11 +16,17 @@ import { AgentStudioStateService } from '../../../services/agent-studio-state.se
  * "Test this agent →" then advances to Stage 2 pre-seeded.
  *
  * Provisioning is folded into this stage (spec §3, Stage 1): a "Provision an
- * agent" affordance opens the existing provisioning dashboard in a slide-out,
- * unchanged. The dashboard is self-contained, so it is only mounted while the
- * panel is open. The slide-out is a proper modal: a CDK focus trap with
- * auto-capture moves focus into the panel, keeps Tab cycling inside it, and
- * restores focus to the trigger on close; Escape dismisses it.
+ * agent" affordance opens `AgentProvisionSlideOutComponent`, a thin,
+ * route-agnostic wrapper (spec §4.1's Stage 1 adaptation caveat) around the
+ * same provisioning chat used by the full `AgentProvisioningDashboardComponent`
+ * — without that component's `DashboardShellComponent` page chrome or its
+ * `ActivatedRoute`-based `?jobId=` deep link, neither of which apply on this
+ * route. The full dashboard is untouched and still used as-is in Agent
+ * Console's own "Provisioning & Environments" tab. The slide-out content is
+ * self-contained, so it is only mounted while the panel is open. The
+ * slide-out itself is a proper modal: a CDK focus trap with auto-capture
+ * moves focus into the panel, keeps Tab cycling inside it, and restores focus
+ * to the trigger on close; Escape dismisses it.
  */
 @Component({
   selector: 'app-agent-studio-build-agent',
@@ -30,7 +36,7 @@ import { AgentStudioStateService } from '../../../services/agent-studio-state.se
     MatButtonModule,
     MatIconModule,
     AgentCatalogComponent,
-    AgentProvisioningDashboardComponent,
+    AgentProvisionSlideOutComponent,
   ],
   changeDetection: ChangeDetectionStrategy.OnPush,
   templateUrl: './agent-studio-build-agent.component.html',
