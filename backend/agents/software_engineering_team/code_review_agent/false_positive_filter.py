@@ -770,6 +770,12 @@ class CodebaseIndex:
               existing-codebase excerpt is searched last under its pseudo-path.
             - A blank query returns no matches (a substring search for "" would
               match every line and is never a useful false-positive check).
+            - When a source's content is pre-numbered (produced by
+              ``render_annotated_hunks``), the returned line number is the
+              original file line (not the physical/storage index) and the
+              ``N: `` prefix is stripped from the returned text — matching
+              every other read method in this class (``read_function``,
+              ``read_function_by_name``, ``find_function_at_line``).
         """
         if max_matches <= 0:
             raise ValueError("max_matches must be positive")
@@ -778,9 +784,11 @@ class CodebaseIndex:
             return []
         results: List[Tuple[str, int, str]] = []
         for path, content in self._readable_sources():
-            for lineno, line in enumerate(content.splitlines(), start=1):
+            stripped, _, mapper = strip_numbered_prefixes(content, 1)
+            for lineno, line in enumerate(stripped.splitlines(), start=1):
                 if needle in line.lower():
-                    results.append((path, lineno, line.rstrip()))
+                    reported_lineno = mapper(lineno) if mapper is not None else lineno
+                    results.append((path, reported_lineno, line.rstrip()))
                     if len(results) >= max_matches:
                         return results
         return results
