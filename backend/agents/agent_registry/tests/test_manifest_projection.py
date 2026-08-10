@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from agent_registry.manifest_projection import filter_marker_tags, hash_suffix, revalidate
+from agent_registry.manifest_projection import filter_marker_tags, hash_suffix, revalidate, slug
 from agent_registry.models import AgentManifest, SourceInfo
 
 
@@ -17,6 +17,25 @@ def _manifest(**overrides) -> AgentManifest:
     )
     base.update(overrides)
     return AgentManifest(**base)
+
+
+def test_slug_lowercases_and_hyphenates() -> None:
+    assert slug("My Cool Agent") == "my-cool-agent"
+
+
+def test_slug_falls_back_to_agent_for_all_symbol_input() -> None:
+    assert slug("!!!") == "agent"
+
+
+def test_slug_falls_back_to_agent_for_empty_input() -> None:
+    assert slug("") == "agent"
+    assert slug(None) == "agent"
+
+
+def test_slug_truncates_to_max_len_and_strips_dangling_hyphen() -> None:
+    result = slug("a very long agent name that exceeds the bound", max_len=10)
+    assert len(result) <= 10
+    assert not result.endswith("-")
 
 
 def test_hash_suffix_is_deterministic() -> None:

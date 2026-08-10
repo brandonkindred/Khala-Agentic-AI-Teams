@@ -21,9 +21,7 @@ worker and the per-invoke sandbox resolve it — not just this process. Local-on
 
 from __future__ import annotations
 
-import re
-
-from agent_registry.manifest_projection import filter_marker_tags, hash_suffix, revalidate
+from agent_registry.manifest_projection import filter_marker_tags, hash_suffix, revalidate, slug
 from agent_registry.models import AgentManifest, AgentStateSpec, CognitionSpec, IOSchema, SourceInfo
 from agent_team_studio.agentic_team_provisioning.generated_runtime import (
     GENERATED_AGENT_ANATOMY_REF,
@@ -65,10 +63,9 @@ def studio_agent_id(name: str) -> str:
     """
     if not name.strip():
         raise ValueError("studio_agent_id: name must be non-empty")
-    slug = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-") or "agent"
     # Non-cryptographic: a short, stable suffix that disambiguates equal slugs.
     digest = hash_suffix(name, 8)
-    return f"{STUDIO_TEAM}.{slug}-{digest}"
+    return f"{STUDIO_TEAM}.{slug(name)}-{digest}"
 
 
 def _io_schema(

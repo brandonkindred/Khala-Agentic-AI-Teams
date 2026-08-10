@@ -17,7 +17,7 @@ from __future__ import annotations
 
 from typing import NamedTuple
 
-from agent_registry.manifest_projection import filter_marker_tags, hash_suffix, revalidate
+from agent_registry.manifest_projection import filter_marker_tags, hash_suffix, revalidate, slug
 from agent_registry.models import (
     AgentManifest,
     CognitionKnowledgeGraphSpec,
@@ -26,7 +26,6 @@ from agent_registry.models import (
     IOSchema,
     SourceInfo,
 )
-from agent_team_studio.agentic_team_provisioning.agent_env_provisioning import _slug
 from agent_team_studio.agentic_team_provisioning.generated_runtime import (
     GENERATED_AGENT_ANATOMY_REF,
     GENERATED_AGENT_ENTRYPOINT,
@@ -75,7 +74,7 @@ def team_id_prefix(team_id: str) -> str:
     count (see ``_HASH_HEX_LEN``), so stale cleanup keyed on this prefix is
     extremely unlikely to touch another team's manifests.
     """
-    return f"{_TEAM_KEY}.{_slug(team_id, 12)}-{hash_suffix(team_id, _HASH_HEX_LEN)}."
+    return f"{_TEAM_KEY}.{slug(team_id, 12)}-{hash_suffix(team_id, _HASH_HEX_LEN)}."
 
 
 def manifest_agent_id(team_id: str, agent_name: str) -> str:
@@ -94,7 +93,7 @@ def manifest_agent_id(team_id: str, agent_name: str) -> str:
           ``_HASH_HEX_LEN``). Always starts with :func:`team_id_prefix`.
     """
     pair_hash = hash_suffix(f"{team_id}\x00{agent_name}", _HASH_HEX_LEN)
-    return f"{team_id_prefix(team_id)}{_slug(agent_name, 40)}-{pair_hash}"
+    return f"{team_id_prefix(team_id)}{slug(agent_name, 40)}-{pair_hash}"
 
 
 def default_cognition_block() -> CognitionSpec:
