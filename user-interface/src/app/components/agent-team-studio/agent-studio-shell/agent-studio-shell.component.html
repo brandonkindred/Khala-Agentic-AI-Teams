@@ -77,8 +77,8 @@
            (same pattern as the Stage-4 "fix an agent" back-loop button). -->
       <span
         class="studio__continue-wrap"
-        [matTooltip]="composeForwardDisabledReason() ?? ''"
-        [matTooltipDisabled]="!composeForwardDisabledReason()"
+        [matTooltip]="forwardDisabledReason() ?? ''"
+        [matTooltipDisabled]="!forwardDisabledReason()"
       >
         <button
           mat-flat-button

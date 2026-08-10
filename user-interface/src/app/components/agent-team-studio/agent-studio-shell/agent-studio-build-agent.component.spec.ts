@@ -93,6 +93,8 @@ describe('AgentStudioBuildAgentComponent', () => {
     expect(api.cloneFromRegistry).toHaveBeenCalledWith('blogging.planner');
     expect(component.draftDefinition()).toEqual(definition());
     expect(state.registryAgentId()).toBeNull();
+    expect(state.draftAgentId()).toEqual(expect.any(String));
+    expect(state.draftAgentId()).not.toBe('');
     const selected = fixture.nativeElement.querySelector('.studio-build__selected');
     expect(selected).toBeTruthy();
     expect(selected.textContent).toContain('blogging.planner');
@@ -105,12 +107,14 @@ describe('AgentStudioBuildAgentComponent', () => {
 
     expect(component.cloneError()).toBe('source agent missing');
     expect(component.draftDefinition()).toBeNull();
+    expect(state.draftAgentId()).toBeNull();
     expect(fixture.nativeElement.querySelector('.error-text').textContent).toContain('source agent missing');
     expect(fixture.nativeElement.querySelector('.studio-build__continue-sub')).toBeNull();
 
     selectAgent('blogging.planner');
     expect(component.cloneError()).toBeNull();
     expect(component.draftDefinition()).toEqual(definition());
+    expect(state.draftAgentId()).toEqual(expect.any(String));
   });
 
   it('falls back to a generic message when a clone error has no detail', () => {
@@ -254,6 +258,7 @@ describe('AgentStudioBuildAgentComponent', () => {
 
     it('saves and registers the draft via AgentStudioApiService, unlocking the journey gate', () => {
       goToConfigure();
+      const draftAgentIdBeforeSave = state.draftAgentId();
 
       fixture.nativeElement.querySelector('.studio-build__save-sub').click();
       fixture.detectChanges();
@@ -271,6 +276,8 @@ describe('AgentStudioBuildAgentComponent', () => {
       });
       expect(state.registryAgentId()).toBe('blogging.planner.v2');
       expect(component.saveError()).toBeNull();
+      // Save doesn't clobber the build-session bookkeeping id.
+      expect(state.draftAgentId()).toBe(draftAgentIdBeforeSave);
     });
 
     it('surfaces a save failure without leaving the sub-stepper in a broken state', () => {
