@@ -95,10 +95,10 @@ def build_scoring_prompt(title: str, body: str, labels: list[str]) -> str:
     Preconditions: ``title``, ``body`` are strings (``body`` may be empty —
         GitHub issues may have no body). ``labels`` is a list of strings (may
         be empty).
-    Postconditions: returns a non-empty prompt embedding ``title`` and
-        ``labels`` verbatim and ``body`` stripped of leading/trailing
-        whitespace (blank body/labels rendered as a literal "(none)"
-        placeholder, never an ambiguous blank section), the exact
+    Postconditions: returns a non-empty prompt embedding ``title`` verbatim,
+        ``labels`` as a comma-separated list, and ``body`` stripped of
+        leading/trailing whitespace (blank body/labels rendered as a literal
+        "(none)" placeholder, never an ambiguous blank section), the exact
         legal values from :data:`FIBONACCI_COMPLEXITY_VALUES`, and a JSON
         response-shape example whose keys exactly match
         :class:`ScoreBreakdown`'s field names, so a well-formed reply
