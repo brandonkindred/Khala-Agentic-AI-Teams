@@ -102,7 +102,7 @@ def get_team_client(team_key: str, timeout: float | None = None) -> httpx.AsyncC
     if team_key not in _team_clients:
         t = timeout or _DEFAULT_TIMEOUT
         limits_config = get_pool_limits(team_key)
-        
+
         # Default timeout applies to non-streaming requests: bounded read-timeout
         # ensures a stalled upstream doesn't hang the proxy indefinitely and that
         # the circuit breaker gets a chance to record the failure. SSE requests
