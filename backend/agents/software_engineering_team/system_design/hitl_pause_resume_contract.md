@@ -632,7 +632,7 @@ while True:
   not a binary Temporal/thread split — a Temporal-mode job is not
   automatically signal-capable:
   - **Native-signal-capable Temporal workflows** (`CodingTeamWorkflow`, and
-    `RunTeamWorkflowV2` when `SE_WORKFLOW_V2` selects it): signal without
+    `RunTeamWorkflowV2`, unconditionally): signal without
     touching the job record's pause envelope (per the idempotency note in
     §1 — clearing it is the orchestrator's job alone, once it actually
     consumes the answer).
@@ -669,13 +669,15 @@ while True:
     - **Thread-mode jobs** (e.g. the still-threaded `run-from-github` flow),
       where `hitl.wait_for_answers`'s poll loop is exactly what the
       store-and-clear write unblocks.
-    - **SE V1 Temporal jobs** — when `SE_WORKFLOW_V2` is unset/false,
-      `/run-team` launches `RunTeamWorkflow` (`temporal/workflows.py:40`),
-      whose activity still blocks in the SE `orchestrator.py`'s own
-      `_wait_for_user_answers` poll loop and whose workflow defines no
-      `submit_answers` signal at all. Signaling a V1 job would target a
-      workflow with no such handler; it must keep writing to the job store
-      like today until V1 is migrated or removed.
+    - **SE V1 Temporal jobs** — `/run-team` can no longer start new
+      `RunTeamWorkflow` (V1) executions (the `SE_WORKFLOW_V2` start-path gate
+      was removed); the class and its worker registration remain only for any
+      still-open V1 histories (see "V1 drain status" below — none are
+      currently open). Any such execution's activity still blocks in the SE
+      `orchestrator.py`'s own `_wait_for_user_answers` poll loop and the
+      workflow defines no `submit_answers` signal at all. Signaling a V1 job
+      would target a workflow with no such handler; it must keep writing to
+      the job store like today until V1 is fully removed.
     The route must check both the job's mode (thread vs. Temporal) *and*,
     for Temporal jobs, whether the actual running workflow is
     signal-capable (V2) before choosing a branch — attempting a signal
@@ -703,18 +705,18 @@ while True:
     through the redesigned Phase 3 activity) takes the signal-only branch;
     a pause with no such envelope (PRA's Phase 1, or SE V1 entirely) takes
     the store-and-clear branch regardless of the workflow's class.
-- **Current status (`SE_WORKFLOW_V2` now defaults to on):** `/run-team` starts
-  select `RunTeamWorkflowV2` unless the operator explicitly opts out for V1
-  drainage. This does **not** change HITL behavior described above — V2's
-  Phase 3 activity (`execute_coding_team_activity`) still calls
+- **Current status (start-path gate removed):** `/run-team` always starts
+  `RunTeamWorkflowV2` — there is no longer an operator opt-out back to V1.
+  This does **not** change HITL behavior described above — V2's Phase 3
+  activity (`execute_coding_team_activity`) still calls
   `run_coding_team_orchestrator` with the default `pause_strategy="block"`,
   not `"return"`, so `/run-team/{job_id}/answers` continues to resume V2 jobs
-  exactly as it resumes V1 jobs today: by writing to the job store and
+  exactly as it resumed V1 jobs before: by writing to the job store and
   relying on `orchestrator._wait_for_user_answers`'s poll loop, with no
   Temporal signal involved. The native-signal branch described in this
   section (`RunTeamWorkflowV2` gaining a `submit_answers` signal, the
   discriminated `resume_token`/`pause_kind` envelope, the per-phase check)
-  remains unimplemented future work, not something the V2-default flip
+  remains unimplemented future work, not something removing the gate
   requires or provides.
 - **V1 drain status (2026-08-10):** no managed environment currently runs
   the SE Temporal worker, so no in-flight `RunTeamWorkflow` (V1) executions
