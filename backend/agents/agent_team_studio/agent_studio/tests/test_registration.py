@@ -13,6 +13,7 @@ from agent_team_studio.agent_studio.registration import (
     clone_from_manifest,
     studio_agent_id,
 )
+from agent_team_studio.manifest_shared import default_cognition_block
 
 
 def test_studio_agent_id_is_stable_and_slugged() -> None:
@@ -49,6 +50,21 @@ def test_build_manifest_reuses_generated_runtime() -> None:
     assert manifest.summary == "Plans things"
     assert "studio" in manifest.tags and "content" in manifest.tags
     assert "agentic_team_provisioning" in manifest.source.entrypoint
+
+
+def test_build_manifest_cognition_matches_shared_default_block_except_tools() -> None:
+    # Regression guard: Studio's cognition must come from the single shared
+    # default_cognition_block(), only overriding tools — never a parallel
+    # CognitionSpec construction that could drift from the agentic side.
+    definition = AgentDefinition(name="Planner", role="r", tools=["web.search"])
+    manifest = build_studio_agent_manifest(definition)
+
+    shared_default = default_cognition_block()
+    assert manifest.cognition.tools == ["web.search"]
+    assert manifest.cognition.rule_packs == shared_default.rule_packs
+    assert manifest.cognition.memory == shared_default.memory
+    assert manifest.cognition.requires_idempotency_key == shared_default.requires_idempotency_key
+    assert manifest.cognition.knowledge_graph == shared_default.knowledge_graph
     assert manifest.cognition is not None
     assert manifest.cognition.rule_packs == ["default_guardrails"]
     assert manifest.cognition.tools == ["web.search"]

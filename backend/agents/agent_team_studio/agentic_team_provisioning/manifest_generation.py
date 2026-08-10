@@ -18,23 +18,16 @@ from __future__ import annotations
 import hashlib
 from typing import NamedTuple
 
-from agent_registry.models import (
-    AgentManifest,
-    CognitionKnowledgeGraphSpec,
-    CognitionMemorySpec,
-    CognitionSpec,
-    IOSchema,
-    SourceInfo,
-)
+from agent_registry.models import AgentManifest, IOSchema, SourceInfo
 from agent_team_studio.agentic_team_provisioning.agent_env_provisioning import _slug
 from agent_team_studio.agentic_team_provisioning.models import SOURCE_GENERATED, AgenticTeamAgent
 
 from ..manifest_shared import (
     AGENT_ANATOMY_REF,
-    DEFAULT_RULE_PACKS,
     GENERATED_AGENT_ENTRYPOINT,
     GENERATED_AGENT_INPUT_REF,
     GENERATED_AGENT_OUTPUT_REF,
+    default_cognition_block,
     strip_marker_tags,
 )
 
@@ -89,31 +82,6 @@ def manifest_agent_id(team_id: str, agent_name: str) -> str:
     """
     pair_hash = _id_hash(f"{team_id}\x00{agent_name}")
     return f"{team_id_prefix(team_id)}{_slug(agent_name, 40)}-{pair_hash}"
-
-
-def default_cognition_block() -> CognitionSpec:
-    """Return the batteries-included Agent Cognition Core defaults.
-
-    Preconditions:
-        * None.
-    Postconditions:
-        * Returns a :class:`CognitionSpec` equal to the batteries-included core:
-          90-day episodic memory (``memory.retention_days_events == 90``), an
-          empty ``tools`` list, ``requires_idempotency_key`` False, a default-on
-          knowledge graph, and exactly one seed pack — ``default_guardrails``.
-
-    ``tools`` is deliberately empty: a roster agent's ``tools`` are free-text
-    labels ("Git", "Slack API") that do not resolve against the cognition tool
-    registries (``LlmToolsService`` + a caller-supplied integration registry + ``agent_git_tools``),
-    so they are never stamped here — that would only break later tool resolution.
-    """
-    return CognitionSpec(
-        memory=CognitionMemorySpec(retention_days_events=90),
-        tools=[],
-        rule_packs=list(DEFAULT_RULE_PACKS),
-        requires_idempotency_key=False,
-        knowledge_graph=CognitionKnowledgeGraphSpec(),
-    )
 
 
 def build_agent_manifest(

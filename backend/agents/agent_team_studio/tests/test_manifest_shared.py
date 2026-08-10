@@ -8,6 +8,7 @@ from agent_team_studio.manifest_shared import (
     GENERATED_AGENT_ENTRYPOINT,
     GENERATED_AGENT_INPUT_REF,
     GENERATED_AGENT_OUTPUT_REF,
+    default_cognition_block,
     strip_marker_tags,
 )
 
@@ -50,3 +51,21 @@ def test_strip_marker_tags_does_not_mutate_input() -> None:
     tags = ["content", "studio"]
     strip_marker_tags(tags, frozenset({"studio"}))
     assert tags == ["content", "studio"]
+
+
+def test_default_cognition_block_is_batteries_included() -> None:
+    block = default_cognition_block()
+    assert block.rule_packs == ["default_guardrails"]
+    assert block.memory.retention_days_events == 90
+    assert block.tools == []
+    assert block.requires_idempotency_key is False
+    assert block.knowledge_graph.enabled is True
+
+
+def test_default_cognition_block_returns_a_fresh_instance_each_call() -> None:
+    # Callers (e.g. build_studio_agent_manifest) mutate a copy via model_copy;
+    # a shared/cached instance would let one caller's override leak to another.
+    a = default_cognition_block()
+    b = default_cognition_block()
+    assert a is not b
+    assert a == b

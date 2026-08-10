@@ -13,6 +13,8 @@ Nothing here performs I/O — these are pure constants and pure functions only.
 
 from __future__ import annotations
 
+from agent_registry.models import CognitionKnowledgeGraphSpec, CognitionMemorySpec, CognitionSpec
+
 # The invokable sandbox entrypoint every generated/authored agent shares: one
 # callable that accepts the roster metadata + message, reconstructs the agent,
 # and runs it through the cognition-aware wrapper.
@@ -46,3 +48,28 @@ def strip_marker_tags(tags: list[str], markers: frozenset[str]) -> list[str]:
           ``markers``, in the same relative order; ``tags`` is not mutated.
     """
     return [t for t in tags if t not in markers]
+
+
+def default_cognition_block() -> CognitionSpec:
+    """Return the batteries-included Agent Cognition Core defaults.
+
+    Preconditions:
+        * None.
+    Postconditions:
+        * Returns a :class:`CognitionSpec` equal to the batteries-included core:
+          90-day episodic memory (``memory.retention_days_events == 90``), an
+          empty ``tools`` list, ``requires_idempotency_key`` False, a default-on
+          knowledge graph, and exactly one seed pack — ``default_guardrails``.
+
+    ``tools`` is deliberately empty here: it's caller-specific (a roster agent's
+    free-text tool labels vs. a Studio agent's resolved tool ids), so every
+    caller starts from this block and overrides ``tools`` itself, e.g. via
+    ``default_cognition_block().model_copy(update={"tools": [...]})``.
+    """
+    return CognitionSpec(
+        memory=CognitionMemorySpec(retention_days_events=90),
+        tools=[],
+        rule_packs=list(DEFAULT_RULE_PACKS),
+        requires_idempotency_key=False,
+        knowledge_graph=CognitionKnowledgeGraphSpec(),
+    )

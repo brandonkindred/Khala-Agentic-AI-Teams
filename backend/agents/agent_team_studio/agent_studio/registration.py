@@ -25,14 +25,14 @@ from __future__ import annotations
 import hashlib
 import re
 
-from agent_registry.models import AgentManifest, AgentStateSpec, CognitionSpec, IOSchema, SourceInfo
+from agent_registry.models import AgentManifest, AgentStateSpec, IOSchema, SourceInfo
 
 from ..manifest_shared import (
     AGENT_ANATOMY_REF,
-    DEFAULT_RULE_PACKS,
     GENERATED_AGENT_ENTRYPOINT,
     GENERATED_AGENT_INPUT_REF,
     GENERATED_AGENT_OUTPUT_REF,
+    default_cognition_block,
     strip_marker_tags,
 )
 from .agent_states import EXECUTING_KEY, STATE_ORDER, normalize_agent_states
@@ -159,7 +159,7 @@ def build_studio_agent_manifest(definition: AgentDefinition) -> AgentManifest:
             ref_description="The agent's response text.",
             inline_description="Authored output schema.",
         ),
-        cognition=CognitionSpec(rule_packs=list(DEFAULT_RULE_PACKS), tools=list(definition.tools)),
+        cognition=default_cognition_block().model_copy(update={"tools": list(definition.tools)}),
         states=_manifest_states(definition),
         source=SourceInfo(entrypoint=GENERATED_AGENT_ENTRYPOINT, anatomy_ref=AGENT_ANATOMY_REF),
     )
