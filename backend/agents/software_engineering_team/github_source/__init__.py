@@ -51,11 +51,13 @@ from .issue_proposals import (
     group_similar_findings,
     proposal_from_findings,
 )
-from .issue_scoring import (
-    FIBONACCI_COMPLEXITY_VALUES,
-    ScoreBreakdown,
-    build_scoring_prompt,
-)
+from .issue_scoring import FIBONACCI_COMPLEXITY_VALUES, build_scoring_prompt
+
+# Aliased: issue_scoring.ScoreBreakdown (the LLM-response schema, unrelated
+# fields) would otherwise collide with issue_grooming_scoring.ScoreBreakdown
+# (the heuristic scorer's own, already re-exported above) at this package's
+# top level.
+from .issue_scoring import ScoreBreakdown as LLMScoreBreakdown
 from .issue_to_plan import issue_to_plan_input
 from .pr_review_mapping import (
     build_review_body,
@@ -83,6 +85,7 @@ __all__ = [
     "Issue",
     "IssueComment",
     "IssueGroomingRunner",
+    "LLMScoreBreakdown",
     "NotAnIssueError",
     "PullRequest",
     "PullRequestDetail",
