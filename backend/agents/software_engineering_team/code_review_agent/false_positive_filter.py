@@ -180,11 +180,20 @@ class CodebaseIndex:
     """In-memory view of all code the verifier may read to check a finding.
 
     Invariants:
-        - ``files`` maps a file path to its FULL content (never a chunk or a
-          truncated excerpt): seeing the whole file is the entire point — the
-          chunk reviewer's partial view is what produced the false positive.
-          Whitespace-only bodies (e.g. a newline-only ``__init__.py``) are kept;
-          only ``None`` / empty-string content is excluded at construction.
+        - ``files`` maps a file path to content whose completeness is reported
+          by ``full_content_complete`` (below): when that flag is True, every
+          value is the FULL file body -- seeing the whole file is the entire
+          point, since the chunk reviewer's partial view is what produced the
+          false positive. When it is False (the common case for a pre-numbered
+          PR-review submission), a value may instead be a bounded, ``"N: "``
+          -prefixed diff excerpt produced by ``render_annotated_hunks``
+          (``github_source/pr_review_mapping.py``), covering only the changed
+          hunks plus context rather than the whole file, with a bare ``"..."``
+          line marking a gap between two hunks that are not adjacent in the
+          real file -- not truncation. Every ``N`` in such a prefix is still
+          the line's real number in the original file. Whitespace-only bodies
+          (e.g. a newline-only ``__init__.py``) are kept; only ``None`` /
+          empty-string content is excluded at construction.
         - ``existing_codebase`` is the full pre-existing-code excerpt passed for
           context; it is exposed as the read-only pseudo-path
           ``<existing codebase>`` so the verifier can consult it like any file.
@@ -1217,7 +1226,10 @@ def _build_tools(index: CodebaseIndex) -> List[Callable[..., str]]:
 
         Prefer this over read_file when you only need a bounded slice. The
         maximum span is 400 lines; use a narrower range or read_function for
-        larger constructs.
+        larger constructs. start/end and the returned line numbers are the
+        file's real (original) line numbers, even though the underlying
+        content itself may be a bounded diff excerpt rather than the whole
+        file.
 
         Args:
             path: File path (same paths accepted by read_file).
@@ -1289,7 +1301,10 @@ def _build_tools(index: CodebaseIndex) -> List[Callable[..., str]]:
         inspect those with ``read_file`` / ``list_files`` instead. Use this to
         find where a symbol is defined, imported, registered, used, or tested
         before deciding whether a finding is real — e.g. search for a function
-        name a finding claims is "never defined".
+        name a finding claims is "never defined". Returned line numbers are
+        the file's real (original) line numbers, even though the underlying
+        content itself may be a bounded diff excerpt rather than the whole
+        file.
 
         Args:
             query: The substring to search for (e.g. a function or class name).
