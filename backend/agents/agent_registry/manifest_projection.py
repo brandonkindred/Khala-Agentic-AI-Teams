@@ -19,7 +19,7 @@ import re
 from .models import AgentManifest
 
 
-def slug(value: str, max_len: int = 40) -> str:
+def slug(value: str | None, max_len: int = 40) -> str:
     """Lowercase, hyphenated slug of ``value``, bounded to ``max_len`` chars.
 
     Preconditions: ``max_len > 0`` (raises ``ValueError`` otherwise).
