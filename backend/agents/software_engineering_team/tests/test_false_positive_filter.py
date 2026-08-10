@@ -1152,11 +1152,6 @@ def test_find_references_construct_exceeding_cap_uses_window(monkeypatch) -> Non
     assert "function big" not in body
 
 
-@pytest.mark.xfail(
-    reason="search() now returns original line numbers; _format_reference_hit's "
-    "double-remap of pre-numbered hits is fixed in a dependent sub-issue.",
-    strict=True,
-)
 def test_find_references_pre_numbered_uses_original_line_and_correct_excerpt() -> None:
     """Annotated hunk hits remap storage indices to original lines and the right construct."""
     src = "100: def earlier():\n101:     pass\n102: \n103: def later():\n104:     return NEEDLE\n"
