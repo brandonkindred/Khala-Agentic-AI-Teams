@@ -4,13 +4,13 @@ GitHub issue grooming (Phase A score/template, then Phase B sub-issue split)
 currently runs in thread mode only. This module makes it importable as a
 Temporal package: typed request/result payloads, an ``IssueGroomingWorkflow``
 that schedules ``run_issue_grooming_activity`` and propagates its terminal
-result/failure unchanged, exported as ``WORKFLOWS`` and ``ACTIVITIES`` for the
-coding-team Temporal worker (``software_engineering_team.temporal.coding_team_worker``)
-to pick up. The activity body itself remains a stub pending a follow-up change
-that wraps the real Phase A->B grooming runner and job-store progress writes --
-so running this workflow today still terminates in ``NotImplementedError``,
-which is the expected terminal-failure path, not a bug. Worker registration
-lands in a separate follow-up change.
+result/failure unchanged, exported as ``WORKFLOWS`` and ``ACTIVITIES`` and
+registered onto the coding-team Temporal worker
+(``software_engineering_team.temporal.coding_team_worker``). The activity body
+itself remains a stub pending a follow-up change that wraps the real Phase
+A->B grooming runner and job-store progress writes -- so running this
+workflow today still terminates in ``NotImplementedError``, which is the
+expected terminal-failure path, not a bug.
 
 Like ``coding_team_workflow.py``, this module MUST NOT start a worker or read
 ``TEMPORAL_ADDRESS`` at import time: it defines ``IssueGroomingWorkflow``, so
@@ -128,7 +128,7 @@ class IssueGroomingWorkflow:
 WORKFLOWS = [IssueGroomingWorkflow]
 ACTIVITIES = [run_issue_grooming_activity]
 
-# NB: no worker self-boot at import time -- see module docstring. Boot will
-# live in ``software_engineering_team.temporal.coding_team_worker`` once
-# these lists are registered onto the coding-team worker (follow-up change),
-# the same place ``CodingTeamWorkflow``'s own boot lives.
+# NB: no worker self-boot at import time -- see module docstring. Boot lives
+# in ``software_engineering_team.temporal.coding_team_worker``, which merges
+# these lists onto the coding-team worker alongside ``CodingTeamWorkflow``'s
+# own ``WORKFLOWS``/``ACTIVITIES``.
