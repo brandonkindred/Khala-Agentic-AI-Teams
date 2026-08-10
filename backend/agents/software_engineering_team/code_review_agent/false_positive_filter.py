@@ -1742,9 +1742,13 @@ def _build_group_prompt(
     """Render the user prompt for verifying one file's findings.
 
     The cited file's content is NOT inlined -- the prompt only names
-    ``file_path`` and directs the model to fetch it via the ``read_file``/
-    ``read_lines`` tools (``_build_tools``) before judging. This keeps the
-    per-call prompt size independent of the cited file's size, with no cap or
+    ``file_path`` and directs the model to fetch it via ``read_file``
+    (``_build_tools``) before judging; other inspection tools such as
+    ``read_lines``/``read_function`` remain available for general code
+    reading but do NOT by themselves satisfy the grounding requirement a
+    drop is checked against (see ``_agent_read_the_cited_file`` -- only a
+    full ``read_file`` of ``file_path`` counts). This keeps the per-call
+    prompt size independent of the cited file's size, with no cap or
     truncation needed: the model still gets the file's full, real content on
     demand, exactly as it does for every other file it inspects. The prompt
     also lists up to ``_MANIFEST_LIMIT`` available paths; other files

@@ -151,6 +151,27 @@ def _final_text_stream_events(text: str) -> List[Dict[str, Any]]:
     ]
 
 
+def _any_tool_use_called(messages: List[Any]) -> bool:
+    """Whether any assistant message in ``messages`` already contains a
+    ``toolUse`` block.
+
+    Used by test stubs that need to tell "first turn" (no tool call yet)
+    apart from "post-tool-call turn" (answer with a verdict). A bare
+    ``"toolUse" in str(messages)`` substring check is fragile -- it would
+    misfire if that literal word ever appeared in ordinary prompt text (a
+    finding description, task text) -- so this inspects the actual message
+    structure instead.
+    """
+    return any(
+        isinstance(message, dict)
+        and any(
+            isinstance(block, dict) and "toolUse" in block
+            for block in (message.get("content") or [])
+        )
+        for message in messages
+    )
+
+
 class _SimulatesFileReadToolCall(DummyLLMClient):
     """``DummyLLMClient`` variant that issues one real, successful ``read_file``
     call for the CITED file before answering a false-positive-verification
@@ -168,14 +189,7 @@ class _SimulatesFileReadToolCall(DummyLLMClient):
     """
 
     async def stream(self, messages, tool_specs=None, system_prompt=None, **kwargs: Any):  # type: ignore[override]
-        already_called = any(
-            isinstance(message, dict)
-            and any(
-                isinstance(block, dict) and "toolUse" in block
-                for block in (message.get("content") or [])
-            )
-            for message in messages
-        )
+        already_called = _any_tool_use_called(messages)
         has_read_file_tool = any(
             isinstance(spec, dict) and spec.get("name") == "read_file"
             for spec in (tool_specs or [])
@@ -2308,7 +2322,7 @@ def test_filter_keeps_drop_when_run_only_called_list_files(caplog) -> None:
 
     class ListFilesOnlyDropStub(DummyLLMClient):
         async def stream(self, messages, tool_specs=None, system_prompt=None, **kwargs: Any):  # type: ignore[override]
-            if "toolUse" not in str(messages):
+            if not _any_tool_use_called(messages):
                 for event in _tool_use_stream_events("t_list", "list_files", {}):
                     yield event
                 return
@@ -2338,7 +2352,7 @@ def test_filter_keeps_drop_when_only_a_different_file_was_read(caplog) -> None:
 
     class ReadsSiblingFileOnlyDropStub(DummyLLMClient):
         async def stream(self, messages, tool_specs=None, system_prompt=None, **kwargs: Any):  # type: ignore[override]
-            if "toolUse" not in str(messages):
+            if not _any_tool_use_called(messages):
                 for event in _tool_use_stream_events(
                     "t_sibling", "read_file", {"path": "app/util.py"}
                 ):
@@ -2376,7 +2390,7 @@ def test_filter_keeps_all_drops_in_a_batch_when_only_a_narrow_slice_was_read(cap
 
     class NarrowSliceOnlyDropStub(DummyLLMClient):
         async def stream(self, messages, tool_specs=None, system_prompt=None, **kwargs: Any):  # type: ignore[override]
-            if "toolUse" not in str(messages):
+            if not _any_tool_use_called(messages):
                 for event in _tool_use_stream_events(
                     "t_slice", "read_lines", {"path": "app/main.py", "start": 1, "end": 1}
                 ):
