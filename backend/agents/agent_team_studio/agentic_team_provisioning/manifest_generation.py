@@ -29,20 +29,12 @@ from agent_registry.models import (
 from agent_team_studio.agentic_team_provisioning.agent_env_provisioning import _slug
 from agent_team_studio.agentic_team_provisioning.models import SOURCE_GENERATED, AgenticTeamAgent
 from agent_team_studio.manifest_shared import (
-    AGENT_ANATOMY_REF as _ANATOMY_REF,
-)
-from agent_team_studio.manifest_shared import (
+    AGENT_ANATOMY_REF,
     DEFAULT_RULE_PACKS,
+    GENERATED_AGENT_ENTRYPOINT,
+    GENERATED_AGENT_INPUT_REF,
+    GENERATED_AGENT_OUTPUT_REF,
     strip_marker_tags,
-)
-from agent_team_studio.manifest_shared import (
-    GENERATED_AGENT_ENTRYPOINT as _ENTRYPOINT,
-)
-from agent_team_studio.manifest_shared import (
-    GENERATED_AGENT_INPUT_REF as _INPUT_SCHEMA_REF,
-)
-from agent_team_studio.manifest_shared import (
-    GENERATED_AGENT_OUTPUT_REF as _OUTPUT_SCHEMA_REF,
 )
 
 # The registry team key for this service (matches TEAM_CONFIGS in
@@ -167,13 +159,15 @@ def build_agent_manifest(
         summary=resolved_summary,
         tags=tags,
         inputs=IOSchema(
-            schema_ref=_INPUT_SCHEMA_REF,
+            schema_ref=GENERATED_AGENT_INPUT_REF,
             description="Roster metadata + user message; a shared entrypoint serves every "
             "generated agent.",
         ),
-        outputs=IOSchema(schema_ref=_OUTPUT_SCHEMA_REF, description="The agent's response text."),
+        outputs=IOSchema(
+            schema_ref=GENERATED_AGENT_OUTPUT_REF, description="The agent's response text."
+        ),
         cognition=default_cognition_block(),
-        source=SourceInfo(entrypoint=_ENTRYPOINT, anatomy_ref=_ANATOMY_REF),
+        source=SourceInfo(entrypoint=GENERATED_AGENT_ENTRYPOINT, anatomy_ref=AGENT_ANATOMY_REF),
     )
     # Round-trip through a JSON-safe dump so the returned object is guaranteed
     # to be a fully validated manifest (and safe to serialize over the API).

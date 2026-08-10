@@ -12,7 +12,7 @@ from agent_team_studio.manifest_shared import (
 )
 
 
-def test_constants_are_non_empty_dotted_refs() -> None:
+def test_constants_are_non_empty_strings() -> None:
     for value in (
         GENERATED_AGENT_ENTRYPOINT,
         GENERATED_AGENT_INPUT_REF,
