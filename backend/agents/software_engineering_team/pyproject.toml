@@ -10,10 +10,15 @@ authors = [{ name = "Khala Agent", email = "dev@example.com" }]
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
-    "pydantic>=2.8,<3.0",
-    "httpx>=0.27,<0.28",
-    "fastapi>=0.115,<0.137",  # <0.137: 0.137 _IncludedRouter routing breaks prometheus-fastapi-instrumentator
-    "uvicorn[standard]>=0.32,<1.0",
+    # Ranges here must match software_engineering_team/requirements.txt exactly —
+    # CI installs both (`pip install -r requirements.txt` then `pip install -e
+    # software_engineering_team`), and a mismatched range here forces pip to
+    # re-resolve (and potentially downgrade) what the first install already set.
+    "pydantic>=2.12,<3.0",
+    "httpx>=0.28,<1.0",
+    "fastapi>=0.137,<1.0",
+    "starlette>=1.0.1,<2.0",  # CVE-2026-48710 ("BadHost"), fixed in 1.0.1
+    "uvicorn[standard]>=0.44,<1.0",
     "jinja2>=3.1,<4.0",
 ]
 

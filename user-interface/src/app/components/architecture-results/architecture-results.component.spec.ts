@@ -1,5 +1,7 @@
 import { ComponentFixture, TestBed } from '@angular/core/testing';
+import { SecurityContext } from '@angular/core';
 import { NoopAnimationsModule } from '@angular/platform-browser/animations';
+import { DomSanitizer } from '@angular/platform-browser';
 import { ArchitectureResultsComponent } from './architecture-results.component';
 
 describe('ArchitectureResultsComponent', () => {
@@ -69,5 +71,32 @@ describe('ArchitectureResultsComponent', () => {
   it('getDecisionDetails returns empty array for non-object', () => {
     expect(component.getDecisionDetails(null)).toEqual([]);
     expect(component.getDecisionDetails('s')).toEqual([]);
+  });
+
+  it('neutralizes malicious HTML in overview/architecture_document while keeping safe markdown', () => {
+    // The rendering effect only reacts to the data present at its first flush
+    // (it reads a plain @Input, not a signal), so this needs a fresh fixture
+    // with the malicious payload set before the first detectChanges() call.
+    const maliciousFixture = TestBed.createComponent(ArchitectureResultsComponent);
+    const maliciousComponent = maliciousFixture.componentInstance;
+    maliciousComponent.data = {
+      overview: '<script>alert(1)</script>\n# Overview Title',
+      architecture_document: '<img src=x onerror="alert(2)">\n## Doc Title',
+      diagrams: {},
+      components: [],
+      decisions: [],
+    } as never;
+    maliciousFixture.detectChanges();
+
+    const sanitizer = TestBed.inject(DomSanitizer);
+    const overview = sanitizer.sanitize(SecurityContext.HTML, maliciousComponent.overviewHtml()) ?? '';
+    const doc = sanitizer.sanitize(SecurityContext.HTML, maliciousComponent.architectureDocHtml()) ?? '';
+
+    expect(overview).not.toContain('<script');
+    expect(overview).not.toContain('alert(1)');
+    expect(overview).toContain('Overview Title');
+
+    expect(doc).not.toContain('onerror');
+    expect(doc).toContain('Doc Title');
   });
 });

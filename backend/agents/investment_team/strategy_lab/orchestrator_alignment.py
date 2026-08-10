@@ -40,8 +40,6 @@ import logging
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from shared.env_config import env_int
-
 from ..market_data_service import OHLCVBar
 from ..models import BacktestConfig, BacktestResult, StrategySpec, TradeRecord
 from ..trading_service.modes.sandbox_compat import StrategyRunResult
@@ -54,6 +52,7 @@ from ._orchestrator_helpers import (
 )
 from .agents._llm_budget import DesignBudgetExhausted
 from .agents.alignment import TradeAlignmentReport
+from .budget_config import StrategyLabBudgetConfig
 from .exceptions import OrchestratorContractError, SpecImplementabilityError
 from .quality_gates.models import QualityGateResult, join_gate_details
 
@@ -66,7 +65,7 @@ PhaseCallback = Callable[[str, Dict[str, Any]], None]
 # alignment agent to rewrite the Python code; the new code is sent back
 # through the sandbox for a fresh backtest. The cap prevents runaway loops
 # when the agent cannot converge.
-MAX_ALIGNMENT_ROUNDS = env_int("STRATEGY_LAB_MAX_ALIGNMENT_ROUNDS", 10, floor=1)
+MAX_ALIGNMENT_ROUNDS = StrategyLabBudgetConfig.from_env().max_alignment_rounds
 
 
 @dataclass

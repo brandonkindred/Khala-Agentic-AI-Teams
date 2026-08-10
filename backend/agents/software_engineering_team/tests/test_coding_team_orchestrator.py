@@ -2141,28 +2141,26 @@ def test_v2_team_kind_accepts_backend_alias_stack_names(stack_name: str) -> None
 
 
 @pytest.mark.parametrize("stack_name", ["default", "Senior Software Engineer"])
-def test_v2_team_kind_accepts_legacy_default_stack_names(stack_name: str) -> None:
-    """Legacy generic stack names now route to backend v2 after removing the Senior SWE worker."""
-    assert _v2_team_kind_for_stack(StackSpec(name=stack_name, tools_services=[])) == "backend"
+def test_v2_team_kind_no_longer_repairs_legacy_default_stack_names(stack_name: str) -> None:
+    """Legacy generic stack names no longer silently route to backend v2 (issue #5487 policy):
+    an unrecognized persisted name is unclassified, same as any other unknown stack."""
+    assert _v2_team_kind_for_stack(StackSpec(name=stack_name, tools_services=[])) is None
 
 
-def test_legacy_default_stack_spec_is_repaired_to_backend_v2() -> None:
-    """Persisted pre-v2 fallback stacks are replaced with the backend v2 team."""
+def test_legacy_default_stack_spec_is_no_longer_repaired() -> None:
+    """Persisted pre-v2 fallback stacks pass through unchanged instead of being silently
+    rewritten to backend_v2 (issue #5487 fail-fast policy)."""
     stacks = orch_mod._ensure_target_team_stack_specs(
         [{"name": "default", "tools_services": ["legacy"]}],
         [],
     )
 
-    assert stacks == [
-        {
-            "name": "backend_v2",
-            "tools_services": ["Java", "Python", "Node.js", "Databases", "APIs", "DevOps"],
-        }
-    ]
+    assert stacks == [{"name": "default", "tools_services": ["legacy"]}]
 
 
-def test_resume_with_legacy_default_stack_builds_backend_v2_worker(tmp_path, monkeypatch):
-    """Old persisted jobs with a default stack still resume after the legacy worker removal."""
+def test_resume_with_legacy_default_stack_fails_fast(tmp_path, monkeypatch):
+    """Resuming a job with a legacy default/Senior-SWE stack fails clearly instead of being
+    silently rewritten to backend_v2 (issue #5487 policy)."""
 
     class ExplodingTL:
         def __init__(self, llm):
@@ -2171,23 +2169,7 @@ def test_resume_with_legacy_default_stack_builds_backend_v2_worker(tmp_path, mon
         def run_plan_to_task_graph(self, plan_input):
             raise AssertionError("planning must not run on resume")
 
-    captured_specs: List[str] = []
-
-    class StubSwarm:
-        def __init__(self, *a, **k):
-            self.graph = k["graph"]
-            self.aborted = False
-
-        def run(self, **kw):
-            pass
-
-    def _build_worker(agent_id, spec, llm_getter, engine_provider, **kwargs):
-        captured_specs.append(spec.name)
-        return StubWorker(agent_id)
-
     monkeypatch.setattr(orch_mod, "TechLeadAgent", ExplodingTL)
-    monkeypatch.setattr(orch_mod, "_build_implementation_worker", _build_worker)
-    monkeypatch.setattr(orch_mod, "CodingTeamSwarm", StubSwarm)
 
     snapshot = {
         "task_graph_snapshot": [
@@ -2207,8 +2189,8 @@ def test_resume_with_legacy_default_stack_builds_backend_v2_worker(tmp_path, mon
         get_llm=lambda key: None,
     )
 
-    assert captured_specs == ["backend_v2"]
-    assert any(update.get("stack_specs") == [_BACKEND_V2_STACK_SPEC] for update in updates)
+    assert updates[-1]["status"] == "failed"
+    assert "default" in updates[-1]["error"]
 
 
 def test_backend_v2_worker_uses_injected_llm_getter():
@@ -4195,9 +4177,10 @@ def test_user_decisions_for_latest_answer_wins_for_same_question(tmp_path):
     assert lines == ["Which DB? → MySQL"], f"latest answer must win, got {lines}"
 
 
-def test_user_decisions_for_falls_back_to_reason_for_legacy_entry(tmp_path):
-    """A user_decision entry predating the structured 'decisions' field (resumed across an upgrade)
-    still surfaces its decision via the rendered 'reason' text, rather than being dropped."""
+def test_user_decisions_for_fails_fast_on_legacy_entry_without_decisions(tmp_path):
+    """A user_decision entry predating the structured 'decisions' field (resumed across an
+    upgrade) raises instead of being auto-parsed from its free-text 'reason' — resume of that
+    legacy shape is unsupported and must fail clearly, identifying the offending task."""
     graph = TaskGraphService(job_id="j1")
     swarm = CodingTeamSwarm(
         tech_lead=StubTechLead(approved=True),
@@ -4214,9 +4197,8 @@ def test_user_decisions_for_falls_back_to_reason_for_legacy_entry(tmp_path):
         revision_feedback=[{"source": "user_decision", "reason": "Use TLS? → Yes"}],
     )
 
-    lines = swarm._user_decisions_for(task)
-
-    assert lines == ["Use TLS? → Yes"]
+    with pytest.raises(ValueError, match="t1"):
+        swarm._user_decisions_for(task)
 
 
 def test_user_decisions_for_empty_decisions_does_not_fall_back_to_reason(tmp_path):
@@ -4278,33 +4260,6 @@ def test_user_decisions_for_handles_answer_only_lines(tmp_path):
     assert "Use TLS" in lines  # rendered as the bare answer (no "→")
     assert "Use SSL" in lines
     assert len(lines) == 2, f"identical answer-only lines must collapse, got {lines}"
-
-
-def test_user_decisions_for_legacy_multiline_reason_extracts_bullets(tmp_path):
-    """A legacy entry whose 'reason' is the full multi-line block contributes clean per-decision
-    lines (the preamble is dropped, the '- q → a' bullets are extracted), not one messy line."""
-    graph = TaskGraphService(job_id="j1")
-    swarm = CodingTeamSwarm(
-        tech_lead=StubTechLead(approved=True),
-        workers=[StubWorker("a1")],
-        graph=graph,
-        path=Path(tmp_path),
-        agent_ids=["a1"],
-        llm_getter=lambda k: None,
-    )
-    reason = (
-        "The user answered the open question(s) you raised. Implement these decisions exactly; "
-        "do not ask again:\n- Which DB? → Postgres\n- Use TLS? → Yes"
-    )
-    task = Task(
-        id="t1",
-        title="T1",
-        revision_feedback=[{"source": "user_decision", "reason": reason}],
-    )
-
-    lines = swarm._user_decisions_for(task)
-
-    assert lines == ["Which DB? → Postgres", "Use TLS? → Yes"]
 
 
 def test_review_and_merge_passes_user_decisions(tmp_path, monkeypatch):

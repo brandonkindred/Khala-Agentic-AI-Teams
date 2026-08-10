@@ -20,9 +20,11 @@ from code_review_agent.models import CodeReviewInput, CodeReviewOutput, CodeRevi
 from llm_service.clients.dummy import DummyLLMClient
 
 
-def _input(code: str = "### app/main.py ###\ndef foo(): pass", **overrides: Any) -> CodeReviewInput:
+def _input(files: Optional[Dict[str, str]] = None, **overrides: Any) -> CodeReviewInput:
+    if files is None:
+        files = {"app/main.py": "def foo(): pass"}
     base = {
-        "code": code,
+        "files": files,
         "task_description": "Add foo() helper",
         "language": "python",
     }
@@ -79,12 +81,10 @@ def test_large_code_routes_through_coordinator() -> None:
     """Code larger than one map chunk is reviewed untruncated across multiple
     chunks. End-to-end with DummyLLMClient, the coordinator reviews each chunk
     and merges their output into one CodeReviewOutput."""
-    big_file_1 = "### app/main.py ###\n" + ("a" * 25_000)
-    big_file_2 = "### app/util.py ###\n" + ("b" * 25_000)
-    code = big_file_1 + "\n\n" + big_file_2
+    files = {"app/main.py": "a" * 25_000, "app/util.py": "b" * 25_000}
 
     agent = CodeReviewAgent(llm_client=DummyLLMClient(), force_in_process=True)
-    result = agent.run(_input(code=code))
+    result = agent.run(_input(files=files))
     assert isinstance(result, CodeReviewOutput)
     assert result.approved is True
     # Dummy returns "Code review passed (dummy)." per chunk; coordinator
@@ -207,7 +207,7 @@ def test_multiple_run_calls_on_same_instance_succeed() -> None:
     """
     agent = CodeReviewAgent(llm_client=DummyLLMClient(), force_in_process=True)
     for i in range(4):
-        result = agent.run(_input(code=f"### app/m{i}.py ###\ndef f{i}(): pass"))
+        result = agent.run(_input(files={f"app/m{i}.py": f"def f{i}(): pass"}))
         assert isinstance(result, CodeReviewOutput)
         assert result.approved is True, f"run {i} failed: {result.summary}"
 
@@ -383,13 +383,11 @@ def test_no_callback_behaves_identically() -> None:
 def test_large_code_forwards_callback_to_coordinator() -> None:
     """Oversized code routes to the coordinator, which must keep reporting —
     including per-chunk 'chunk i/N' details."""
-    big_file_1 = "### app/main.py ###\n" + ("a" * 25_000)
-    big_file_2 = "### app/util.py ###\n" + ("b" * 25_000)
-    code = big_file_1 + "\n\n" + big_file_2
+    files = {"app/main.py": "a" * 25_000, "app/util.py": "b" * 25_000}
 
     calls: list = []
     agent = CodeReviewAgent(llm_client=DummyLLMClient(), force_in_process=True)
-    result = agent.run(_input(code=code), progress_callback=_recording_callback(calls))
+    result = agent.run(_input(files=files), progress_callback=_recording_callback(calls))
     assert isinstance(result, CodeReviewOutput)
     details = [c[1] for c in calls]
     assert any("chunk 1/" in d for d in details), f"expected per-chunk reports, got {details}"

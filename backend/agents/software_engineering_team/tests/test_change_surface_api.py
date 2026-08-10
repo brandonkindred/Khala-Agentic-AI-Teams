@@ -16,7 +16,6 @@ from software_engineering_team.code_review_agent.change_surface import (
     build_change_surface_from_pairs,
     build_change_surface_from_patches,
     expand_touched_ranges,
-    format_change_surface_code,
 )
 
 
@@ -48,41 +47,22 @@ def test_line_range_rejects_non_int_or_bool() -> None:
         LineRange(start_line=1, end_line=False)  # type: ignore[arg-type]
 
 
-def test_format_change_surface_code_empty() -> None:
-    assert format_change_surface_code({}) == ""
-
-
-def test_format_change_surface_code_joins_headers_like_pr_builder() -> None:
-    blocks = OrderedDict(
-        [
-            ("app/a.py", "1: x = 1"),
-            ("app/b.py", "2: y = 2\n3: z = 3"),
-        ]
-    )
-    assert format_change_surface_code(blocks) == (
-        "### app/a.py ###\n1: x = 1\n\n### app/b.py ###\n2: y = 2\n3: z = 3"
-    )
-
-
 def test_change_surface_empty_helpers() -> None:
     surface = ChangeSurface(blocks={})
     assert surface.is_empty
     assert surface.files_reviewed == 0
-    assert surface.code == ""
 
 
-def test_change_surface_derives_code_and_counts() -> None:
+def test_change_surface_derives_counts() -> None:
     surface = ChangeSurface(blocks=OrderedDict([("f.py", "10: pass")]))
     assert not surface.is_empty
     assert surface.files_reviewed == 1
-    assert surface.code == "### f.py ###\n10: pass"
 
 
 def test_build_from_patches_empty_mapping() -> None:
     surface = build_change_surface_from_patches({})
     assert surface.is_empty
     assert surface.blocks == {}
-    assert surface.code == ""
 
 
 def test_build_from_patches_all_blank_patches() -> None:
@@ -98,7 +78,7 @@ def test_build_from_patches_nonempty_assembles_when_content_provided() -> None:
         new_contents={"a.py": content},
     )
     assert not surface.is_empty
-    assert "### a.py ###" in surface.code
+    assert "a.py" in surface.blocks
 
 
 def test_build_from_pairs_empty_new_contents() -> None:

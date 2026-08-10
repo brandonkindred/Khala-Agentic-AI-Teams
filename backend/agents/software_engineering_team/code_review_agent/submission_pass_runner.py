@@ -2,16 +2,15 @@
 
 The additive passes (`architecture_consistency_pass.py`,
 `side_effect_impact_pass.py`, `merged_architecture_side_effect_pass.py`) each
-run a single `strands.Agent` call over the whole changed-file set, on top of
-the map-phase chunk review. Today only the merged pass proactively splits an
-oversized changed-file set into multiple bounded calls, and none of the three
-retries a call that overflows the model's context mid-turn (a batch/call that
-raises is simply skipped). This module is the shared implementation of both:
-context budgeting, proactive file-group chunking, `Agent` construction, and
-reactive overflow recovery — so a pass only supplies its prompt/tools/parser.
+run one or more `strands.Agent` calls over the whole changed-file set, on top
+of the map-phase chunk review. All three now construct those calls only
+through this module: context budgeting, proactive file-group chunking
+(splitting an oversized changed-file set into multiple bounded calls), `Agent`
+construction, and reactive overflow recovery (retrying a call that overflows
+the model's context mid-turn, rather than simply skipping it) — so a pass only
+supplies its prompt/tools/parser.
 
-No pass is migrated onto this runner yet (that is tracked separately); this
-module is self-contained and importable in isolation.
+This module is self-contained and importable in isolation.
 
 Invariants:
 

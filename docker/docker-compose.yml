@@ -1181,6 +1181,16 @@ services:
     # The grafana/tempo image runs as uid 10001; uncomment if Tempo logs a
     # permission error writing /var/tempo on first boot with a fresh volume.
     # user: "0"
+    environment:
+      # GOMEMLIMIT is a soft heap target the Go runtime actively collects
+      # toward, set below the 1G mem_limit/deploy.resources.limits.memory
+      # cap below (~80%) to leave headroom for non-Go-heap memory (mmap'd
+      # WAL segments, etc.) that GOMEMLIMIT doesn't account for. GOGC=50
+      # collects more eagerly than the Go default (100) so the heap doesn't
+      # balloon between collections — together these smooth peak RSS instead
+      # of letting it sawtooth past the cgroup cap and get OOM-killed.
+      GOMEMLIMIT: "800MiB"
+      GOGC: "50"
     volumes:
       - ./tempo/tempo.yaml:/etc/tempo/tempo.yaml:ro
       - tempo_data:/var/tempo

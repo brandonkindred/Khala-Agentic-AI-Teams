@@ -178,9 +178,24 @@ _SHARED_OUTPUT_SECTION = (
     "- State findings directly and confidently, as a finished verdict a developer can act on -- not "
     "as a narrated thought process.\n\n"
     "**THOROUGHNESS REQUIREMENTS:**\n"
-    "- You MUST review EVERY file in the code submission, not just a sample\n"
-    "- For each file, check EVERY function, method, class, and code block\n"
-    '- Do NOT skip files because they "look fine" - examine everything systematically\n'
+    '- Your thoroughness obligation is everything in the code you were given to review (the "Code '
+    'to review" input above), not every file the wider codebase happens to contain. This applies '
+    "whether that input is a diff-derived change surface (added/modified lines plus whatever "
+    "enclosing context -- e.g. the surrounding function/class -- was included so you could judge "
+    "them correctly) or a full file with no change markers: either way, the narrowing to what is "
+    "relevant already happened before you saw it, so treat every line you were shown as in scope. "
+    "Do NOT try to further guess which of those lines were literally touched versus included for "
+    "context and skip the rest\n"
+    "- Within that scope, examine it completely and systematically; do not sample or skip any "
+    'part of it because it "looks fine"\n'
+    "- Do NOT extend that obligation to code shown to you only as background -- the separate "
+    '"Existing codebase" input, or a file outside this task\'s submission -- merely because it was '
+    "included for context. When the criteria above do not restrict which issue types you may "
+    "emit, a genuine, self-evident defect you notice there may still be reported -- mark it "
+    '"pre_existing": true -- but do not go hunting for it as a required task. When the criteria '
+    "above DO restrict which issues you may emit (e.g. exactly one issue per unmet acceptance "
+    "criterion, in the criterion's required shape), follow that restriction instead: never emit an "
+    "issue outside it, even one you are confident is a genuine defect\n"
     "- Your issue descriptions MUST be comprehensive and self-contained:\n"
     "  - Include the EXACT file path and line numbers where possible\n"
     "  - Quote the problematic code snippet directly\n"

@@ -79,10 +79,7 @@ def create_conversation(req: CreateConversationRequest):
     conversation_id = _main._store.create_conversation(team_id=req.team_id)
 
     if req.initial_message:
-        existing_agents = [
-            {"agent_name": a.agent_name, "role": a.role}
-            for a in _main._store.list_team_agents(req.team_id)
-        ] or None
+        existing_agents = _main._chat_context_agents(req.team_id)
 
         reply, process, suggestions, agents_data = _main._agent.respond(
             conversation_history=[],
@@ -134,9 +131,7 @@ def send_message(conversation_id: str, req: SendMessageRequest):
     process_id = _main._store.get_conversation_process_id(conversation_id)
     current_process = _main._store.get_process(process_id) if process_id else None
 
-    existing_agents = [
-        {"agent_name": a.agent_name, "role": a.role} for a in _main._store.list_team_agents(team_id)
-    ] or None
+    existing_agents = _main._chat_context_agents(team_id)
 
     existing_messages = _main._store.get_messages(conversation_id)
     history = [(m.role, m.content) for m in existing_messages]

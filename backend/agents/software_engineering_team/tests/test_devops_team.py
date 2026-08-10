@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import inspect
 import subprocess
 import tempfile
 from pathlib import Path
@@ -18,7 +17,6 @@ from shared.git.git_utils import initialize_new_repo
 from software_engineering_team.devops_team import (
     DevOpsTaskSpec,
     DevOpsTeamLeadAgent,
-    DevOpsTeamResult,
     tool_dispatch,
 )
 from software_engineering_team.devops_team.iac_agent import (
@@ -37,7 +35,6 @@ from software_engineering_team.devops_team.models import (
 from software_engineering_team.devops_team.orchestrator import (
     DEVOPS_REQUIRED_GATE_NAMES,
     ENV_POLICY,
-    MAX_LEGACY_TITLE_LENGTH,
     criterion_traces_from_phase4,
 )
 from software_engineering_team.devops_team.phases.quality_gate import (
@@ -460,6 +457,58 @@ class TestEnforceEnvPolicy:
         spec = _base_task_spec()
         reason = DevOpsTeamLeadAgent._enforce_env_policy(spec)
         assert reason is None
+
+    def test_rejects_plain_string_included(self) -> None:
+        """``scope.included`` as a single string (not an iterable of strings) is rejected."""
+        task_spec = SimpleNamespace(
+            platform_scope=SimpleNamespace(environments=["production"]),
+            scope=SimpleNamespace(included="approval gate"),
+            rollback_requirements=["Rollback"],
+        )
+        with pytest.raises(AssertionError, match="not a single string"):
+            DevOpsTeamLeadAgent._enforce_env_policy(task_spec)  # type: ignore[arg-type]
+
+    def test_rejects_negated_approval_mention(self) -> None:
+        """A negated approval mention ("no approval required") does not satisfy the approval gate."""
+        spec = _base_task_spec(
+            platform_scope={"environments": ["production"]},
+            scope={"included": ["no approval required"], "excluded": []},
+            rollback_requirements=["Rollback"],
+        )
+        reason = DevOpsTeamLeadAgent._enforce_env_policy(spec)
+        assert reason is not None
+        assert "approval" in reason.lower()
+
+    def test_rejects_intervening_negated_approval(self) -> None:
+        """A negation separated from "approval" by an intervening filler word still counts as negated."""
+        spec = _base_task_spec(
+            platform_scope={"environments": ["production"]},
+            scope={"included": ["no formal approval"], "excluded": []},
+            rollback_requirements=["Rollback"],
+        )
+        reason = DevOpsTeamLeadAgent._enforce_env_policy(spec)
+        assert reason is not None
+        assert "approval" in reason.lower()
+
+    def test_rejects_string_environments(self) -> None:
+        """``platform_scope.environments`` as a single string (not an iterable of strings) is rejected."""
+        task_spec = SimpleNamespace(
+            platform_scope=SimpleNamespace(environments="production"),
+            scope=SimpleNamespace(included=["prod approval"]),
+            rollback_requirements=["Rollback"],
+        )
+        with pytest.raises(AssertionError, match="not a string"):
+            DevOpsTeamLeadAgent._enforce_env_policy(task_spec)  # type: ignore[arg-type]
+
+    def test_rejects_non_string_included(self) -> None:
+        """A non-string element in ``scope.included`` is rejected."""
+        task_spec = SimpleNamespace(
+            platform_scope=SimpleNamespace(environments=["production"]),
+            scope=SimpleNamespace(included=[None]),
+            rollback_requirements=["Rollback"],
+        )
+        with pytest.raises(AssertionError, match="scope.included"):
+            DevOpsTeamLeadAgent._enforce_env_policy(task_spec)  # type: ignore[arg-type]
 
 
 # ===========================================================================
@@ -1998,14 +2047,12 @@ class TestDevOpsTeamLeadAgentIntegration:
 
 
 class TestRunTaskStructuredEntrypoint:
-    """``run_task`` is the structured (``DevOpsTaskSpec`` in, no free text)
-    counterpart to ``run_workflow`` — the entry point the coding-team's
-    devops worker adapter uses."""
+    """``run_task`` is the structured, write-capable entry point the
+    coding-team's devops worker adapter uses."""
 
     def test_run_task_accepts_structured_spec_and_merges(self) -> None:
-        """Default ``merge_to_development=True`` behaves exactly like
-        ``run_workflow``: cuts a feature branch, merges it into development,
-        and deletes it."""
+        """Default ``merge_to_development=True`` cuts a feature branch,
+        merges it into development, and deletes it."""
         mock_llm = _scripted_llm_for_happy_path()
         agent = DevOpsTeamLeadAgent(mock_llm)
         spec = _base_task_spec(task_id="devops-run-task-merge")
@@ -2127,31 +2174,6 @@ class TestRunTaskStructuredEntrypoint:
             with pytest.raises(AssertionError):
                 agent.run_task(None, repo_path=Path(tmp))
 
-    def test_run_workflow_unchanged_by_merge_to_development_default(self) -> None:
-        """Regression guard: adding ``merge_to_development`` to the shared
-        pipeline plumbing must not change ``run_workflow``'s existing
-        merge-and-delete behavior."""
-        mock_llm = _scripted_llm_for_happy_path()
-        agent = DevOpsTeamLeadAgent(mock_llm)
-        with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp)
-            init_ok, _ = initialize_new_repo(path)
-            assert init_ok
-            result = agent.run_workflow(
-                repo_path=path,
-                task_description="Add backend deployment automation",
-                requirements="Include prod approval gate and rollback plan",
-                build_verifier=MagicMock(return_value=(True, "")),
-                task_id="devops-run-workflow-regression",
-            )
-            branches = subprocess.run(
-                ["git", "branch"], cwd=path, capture_output=True, text=True, check=True
-            ).stdout
-        assert result.success
-        assert result.completion_package.git_operations.merge is not None
-        assert result.completion_package.git_operations.merge.status == "merged"
-        assert "feature/" not in branches
-
     def test_run_task_cleans_untracked_validation_leftovers_before_delivering(
         self, monkeypatch
     ) -> None:
@@ -2268,424 +2290,10 @@ class TestRunTaskStructuredEntrypoint:
 # ===========================================================================
 
 
-class TestBackwardCompatibility:
-    def test_run_workflow_accepts_legacy_args(self) -> None:
-        mock_llm = _scripted_llm_for_happy_path()
-        agent = DevOpsTeamLeadAgent(mock_llm)
-        with tempfile.TemporaryDirectory() as tmp:
-            init_ok, _ = initialize_new_repo(Path(tmp))
-            assert init_ok
-            result = agent.run_workflow(
-                repo_path=Path(tmp),
-                task_description="Add CI/CD",
-                requirements="Include prod approval gate and rollback plan",
-                target_repo=None,
-                build_verifier=MagicMock(return_value=(True, "")),
-                task_id="devops-legacy",
-                subdir="",
-            )
-        assert isinstance(result, DevOpsTeamResult)
-        assert result.success
-
-    def test_run_workflow_signature_excludes_unused_kwargs(self) -> None:
-        params = inspect.signature(DevOpsTeamLeadAgent.run_workflow).parameters
-        for name in (
-            "architecture",
-            "existing_pipeline",
-            "tech_stack",
-            "max_iterations",
-            "devops_review_agent",
-        ):
-            assert name not in params
-
-    @pytest.mark.parametrize(
-        "removed_kwarg",
-        [
-            "architecture",
-            "existing_pipeline",
-            "tech_stack",
-            "max_iterations",
-            "devops_review_agent",
-        ],
-    )
-    def test_run_workflow_rejects_removed_kwargs(self, removed_kwarg: str) -> None:
-        agent = DevOpsTeamLeadAgent(MagicMock())
-        with pytest.raises(TypeError):
-            agent.run_workflow(
-                repo_path=Path("/tmp"),
-                task_description="Add CI/CD",
-                requirements="staging",
-                **{removed_kwarg: "value"},
-            )
-
-    def test_build_legacy_spec_prod_detection(self) -> None:
-        spec = DevOpsTeamLeadAgent._build_legacy_spec(
-            task_id="devops-1",
-            task_description="Deploy to production",
-            requirements="Prod pipeline needed",
-        )
-        assert spec.environment == "production"
-        assert "production" in spec.platform_scope.environments
-
-    def test_build_legacy_spec_staging_default(self) -> None:
-        spec = DevOpsTeamLeadAgent._build_legacy_spec(
-            task_id="devops-2",
-            task_description="Set up CI",
-            requirements="Run tests on push",
-        )
-        assert spec.environment == "staging"
-
-    def test_build_legacy_spec_does_not_match_produce_as_prod(self) -> None:
-        spec = DevOpsTeamLeadAgent._build_legacy_spec(
-            task_id="devops-2b",
-            task_description="Produce a Dockerfile and CI/CD",
-            requirements="Build and deploy to staging",
-        )
-        assert spec.environment == "staging"
-
-    def test_build_legacy_spec_produce_alone_is_not_production(self) -> None:
-        spec = DevOpsTeamLeadAgent._build_legacy_spec(
-            task_id="devops-produce-alone",
-            task_description="Produce a deployment artifact",
-            requirements="Build and package",
-        )
-        assert spec.environment == "staging"
-
-    @pytest.mark.parametrize(
-        "description",
-        [
-            "Target NON-PRODUCTION only",
-            "Do NOT PROD deploy",
-            "NO PRODUCTION traffic",
-        ],
-    )
-    def test_build_legacy_spec_ignores_case_variants_of_negation(self, description: str) -> None:
-        spec = DevOpsTeamLeadAgent._build_legacy_spec(
-            task_id="devops-neg-case",
-            task_description=description,
-            requirements="Keep staging",
-        )
-        assert spec.environment == "staging"
-
-    def test_build_legacy_spec_ignores_non_production(self) -> None:
-        spec = DevOpsTeamLeadAgent._build_legacy_spec(
-            task_id="devops-neg-1",
-            task_description="Target non-production only",
-            requirements="Keep staging",
-        )
-        assert spec.environment == "staging"
-
-    def test_build_legacy_spec_ignores_not_prod(self) -> None:
-        spec = DevOpsTeamLeadAgent._build_legacy_spec(
-            task_id="devops-neg-2",
-            task_description="Do not prod deploy",
-            requirements="not prod",
-        )
-        assert spec.environment == "staging"
-
-    def test_build_legacy_spec_ignores_no_production(self) -> None:
-        spec = DevOpsTeamLeadAgent._build_legacy_spec(
-            task_id="devops-neg-3",
-            task_description="no production traffic",
-            requirements="staging only",
-        )
-        assert spec.environment == "staging"
-
-    def test_build_legacy_spec_ignores_do_not_deploy_to_production(self) -> None:
-        spec = DevOpsTeamLeadAgent._build_legacy_spec(
-            task_id="devops-neg-phrase-1",
-            task_description="Do not deploy to production",
-            requirements="staging only",
-        )
-        assert spec.environment == "staging"
-
-    def test_build_legacy_spec_ignores_not_for_production(self) -> None:
-        spec = DevOpsTeamLeadAgent._build_legacy_spec(
-            task_id="devops-neg-phrase-2",
-            task_description="Build artifacts not for production",
-            requirements="Use staging environments",
-        )
-        assert spec.environment == "staging"
-
-    def test_build_legacy_spec_ignores_not_in_production(self) -> None:
-        spec = DevOpsTeamLeadAgent._build_legacy_spec(
-            task_id="devops-neg-phrase-4",
-            task_description="Not in production",
-            requirements="Staging only",
-        )
-        assert spec.environment == "staging"
-
-    def test_build_legacy_spec_ignores_not_at_production(self) -> None:
-        spec = DevOpsTeamLeadAgent._build_legacy_spec(
-            task_id="devops-neg-phrase-5",
-            task_description="Not at production",
-            requirements="Staging only",
-        )
-        assert spec.environment == "staging"
-
-    def test_build_legacy_spec_ignores_no_production_access_allowed(self) -> None:
-        spec = DevOpsTeamLeadAgent._build_legacy_spec(
-            task_id="devops-neg-phrase-3",
-            task_description="No production access is allowed; staging only",
-            requirements="Keep all traffic in staging",
-        )
-        assert spec.environment == "staging"
-
-    def test_build_legacy_spec_clause_boundary_no_then_deploy_production(self) -> None:
-        spec = DevOpsTeamLeadAgent._build_legacy_spec(
-            task_id="devops-clause-1",
-            task_description="No. Deploy to production instead",
-            requirements="Include approval gate",
-        )
-        assert spec.environment == "production"
-
-    def test_build_legacy_spec_no_production_downtime_still_production(self) -> None:
-        spec = DevOpsTeamLeadAgent._build_legacy_spec(
-            task_id="devops-attr-1",
-            task_description="No production downtime is acceptable",
-            requirements="Zero-downtime rollout",
-        )
-        assert spec.environment == "production"
-
-    def test_build_legacy_spec_no_production_traffic_interruption_still_production(
-        self,
-    ) -> None:
-        spec = DevOpsTeamLeadAgent._build_legacy_spec(
-            task_id="devops-attr-2",
-            task_description="No production traffic interruption during the rollout",
-            requirements="Keep service available",
-        )
-        assert spec.environment == "production"
-
-    def test_build_legacy_spec_do_not_deploy_until_approved_still_production(self) -> None:
-        spec = DevOpsTeamLeadAgent._build_legacy_spec(
-            task_id="devops-cond-1",
-            task_description="Do not deploy to production until approved",
-            requirements="Gate the prod deploy on approval",
-        )
-        assert spec.environment == "production"
-
-    def test_build_legacy_spec_without_authorization_still_production(self) -> None:
-        spec = DevOpsTeamLeadAgent._build_legacy_spec(
-            task_id="devops-cond-2",
-            task_description="Do not deploy to production without authorization",
-            requirements="Require sign-off before prod",
-        )
-        assert spec.environment == "production"
-
-    def test_build_legacy_spec_pending_authorization_still_production(self) -> None:
-        spec = DevOpsTeamLeadAgent._build_legacy_spec(
-            task_id="devops-cond-3",
-            task_description="Hold production deploy pending authorization",
-            requirements="Wait for approval",
-        )
-        assert spec.environment == "production"
-
-    def test_build_legacy_spec_production_is_not_allowed_is_staging(self) -> None:
-        spec = DevOpsTeamLeadAgent._build_legacy_spec(
-            task_id="devops-post-1",
-            task_description="Production is not allowed; use staging",
-            requirements="Keep all traffic in staging",
-        )
-        assert spec.environment == "staging"
-
-    def test_build_legacy_spec_production_is_prohibited_is_staging(self) -> None:
-        spec = DevOpsTeamLeadAgent._build_legacy_spec(
-            task_id="devops-post-2",
-            task_description="Production is prohibited",
-            requirements="Staging only",
-        )
-        assert spec.environment == "staging"
-
-    def test_build_legacy_spec_production_is_allowed_still_production(self) -> None:
-        spec = DevOpsTeamLeadAgent._build_legacy_spec(
-            task_id="devops-post-3",
-            task_description="Production is allowed",
-            requirements="Approval gate required",
-        )
-        assert spec.environment == "production"
-
-    def test_build_legacy_spec_production_is_allowed_not_required_still_production(
-        self,
-    ) -> None:
-        spec = DevOpsTeamLeadAgent._build_legacy_spec(
-            task_id="devops-post-3b",
-            task_description="Production is allowed, not required",
-            requirements="Approval gate required",
-        )
-        assert spec.environment == "production"
-
-    def test_build_legacy_spec_production_is_permitted_still_production(self) -> None:
-        spec = DevOpsTeamLeadAgent._build_legacy_spec(
-            task_id="devops-post-4",
-            task_description="Production is permitted",
-            requirements="Approval gate required",
-        )
-        assert spec.environment == "production"
-
-    def test_build_legacy_spec_production_is_forbidden_is_staging(self) -> None:
-        spec = DevOpsTeamLeadAgent._build_legacy_spec(
-            task_id="devops-post-5",
-            task_description="Production is forbidden",
-            requirements="Staging only",
-        )
-        assert spec.environment == "staging"
-
-    def test_build_legacy_spec_missing_production_approval_still_production(self) -> None:
-        spec = DevOpsTeamLeadAgent._build_legacy_spec(
-            task_id="devops-neg-safeguard",
-            task_description="No production approval gate is configured; add one",
-            requirements="Add the missing gate and document rollback",
-        )
-        assert spec.environment == "production"
-
-    def test_build_legacy_spec_recognizes_parenthesized_production(self) -> None:
-        spec = DevOpsTeamLeadAgent._build_legacy_spec(
-            task_id="devops-wrap-1",
-            task_description="Deploy to (production)",
-            requirements="Approval gate required",
-        )
-        assert spec.environment == "production"
-
-    def test_build_legacy_spec_recognizes_quoted_prod(self) -> None:
-        spec = DevOpsTeamLeadAgent._build_legacy_spec(
-            task_id="devops-wrap-2",
-            task_description='Target "prod"',
-            requirements="Rollback plan",
-        )
-        assert spec.environment == "production"
-
-    def test_build_legacy_spec_recognizes_backtick_production(self) -> None:
-        spec = DevOpsTeamLeadAgent._build_legacy_spec(
-            task_id="devops-wrap-3",
-            task_description="Deploy to `production`",
-            requirements="Approval gate required",
-        )
-        assert spec.environment == "production"
-
-    def test_build_legacy_spec_recognizes_production_slash_suffix(self) -> None:
-        spec = DevOpsTeamLeadAgent._build_legacy_spec(
-            task_id="devops-sep-1",
-            task_description="Deploy production/blue",
-            requirements="Approval gate required",
-        )
-        assert spec.environment == "production"
-
-    def test_build_legacy_spec_recognizes_markdown_link_production(self) -> None:
-        spec = DevOpsTeamLeadAgent._build_legacy_spec(
-            task_id="devops-sep-2",
-            task_description="Deploy [production](https://example.com)",
-            requirements="Approval gate required",
-        )
-        assert spec.environment == "production"
-
-    def test_build_legacy_spec_recognizes_emdash_production(self) -> None:
-        spec = DevOpsTeamLeadAgent._build_legacy_spec(
-            task_id="devops-sep-3",
-            task_description="production—canary rollout",
-            requirements="Approval gate required",
-        )
-        assert spec.environment == "production"
-
-    def test_build_legacy_spec_always_has_rollback(self) -> None:
-        spec = DevOpsTeamLeadAgent._build_legacy_spec(
-            task_id="devops-3",
-            task_description="Deploy",
-            requirements="Ship it",
-        )
-        assert len(spec.rollback_requirements) > 0
-
-    def test_build_legacy_spec_always_has_acceptance(self) -> None:
-        spec = DevOpsTeamLeadAgent._build_legacy_spec(
-            task_id="devops-4",
-            task_description="Deploy",
-            requirements="Ship it",
-        )
-        assert len(spec.acceptance_criteria) > 0
-
-    def test_build_legacy_spec_truncates_title_to_constant(self) -> None:
-        long_desc = "x" * (MAX_LEGACY_TITLE_LENGTH + 40)
-        spec = DevOpsTeamLeadAgent._build_legacy_spec(
-            task_id="devops-title",
-            task_description=long_desc,
-            requirements="staging",
-        )
-        assert len(spec.title) == MAX_LEGACY_TITLE_LENGTH
-        assert spec.title == long_desc[:MAX_LEGACY_TITLE_LENGTH]
-        assert long_desc.startswith(spec.title)
-
-    def test_build_legacy_spec_whitespace_title_falls_back_to_task_id(self) -> None:
-        spec = DevOpsTeamLeadAgent._build_legacy_spec(
-            task_id="devops-ws-title",
-            task_description="   ",
-            requirements="staging",
-        )
-        assert spec.title == "devops-ws-title"
-
-    def test_enforce_env_policy_rejects_plain_string_included(self) -> None:
-        task_spec = SimpleNamespace(
-            platform_scope=SimpleNamespace(environments=["production"]),
-            scope=SimpleNamespace(included="approval gate"),
-            rollback_requirements=["Rollback"],
-        )
-        with pytest.raises(AssertionError, match="not a single string"):
-            DevOpsTeamLeadAgent._enforce_env_policy(task_spec)  # type: ignore[arg-type]
-
-    def test_enforce_env_policy_rejects_negated_approval_mention(self) -> None:
-        spec = _base_task_spec(
-            platform_scope={"environments": ["production"]},
-            scope={"included": ["no approval required"], "excluded": []},
-            rollback_requirements=["Rollback"],
-        )
-        reason = DevOpsTeamLeadAgent._enforce_env_policy(spec)
-        assert reason is not None
-        assert "approval" in reason.lower()
-
-    def test_enforce_env_policy_rejects_intervening_negated_approval(self) -> None:
-        spec = _base_task_spec(
-            platform_scope={"environments": ["production"]},
-            scope={"included": ["no formal approval"], "excluded": []},
-            rollback_requirements=["Rollback"],
-        )
-        reason = DevOpsTeamLeadAgent._enforce_env_policy(spec)
-        assert reason is not None
-        assert "approval" in reason.lower()
-
-    def test_enforce_env_policy_rejects_string_environments(self) -> None:
-        task_spec = SimpleNamespace(
-            platform_scope=SimpleNamespace(environments="production"),
-            scope=SimpleNamespace(included=["prod approval"]),
-            rollback_requirements=["Rollback"],
-        )
-        with pytest.raises(AssertionError, match="not a string"):
-            DevOpsTeamLeadAgent._enforce_env_policy(task_spec)  # type: ignore[arg-type]
-
-    def test_build_legacy_spec_title_exact_boundary(self) -> None:
-        exact = "y" * MAX_LEGACY_TITLE_LENGTH
-        spec = DevOpsTeamLeadAgent._build_legacy_spec(
-            task_id="devops-title-exact",
-            task_description=exact,
-            requirements="staging",
-        )
-        assert spec.title == exact
-        assert len(spec.title) == MAX_LEGACY_TITLE_LENGTH
-
-    def test_enforce_env_policy_rejects_non_string_included(self) -> None:
-        task_spec = SimpleNamespace(
-            platform_scope=SimpleNamespace(environments=["production"]),
-            scope=SimpleNamespace(included=[None]),
-            rollback_requirements=["Rollback"],
-        )
-        with pytest.raises(AssertionError, match="scope.included"):
-            DevOpsTeamLeadAgent._enforce_env_policy(task_spec)  # type: ignore[arg-type]
-
+class TestRunPipelineCompletionGuard:
     def test_run_pipeline_raises_if_completion_not_assigned(self, monkeypatch) -> None:
         agent = DevOpsTeamLeadAgent(MagicMock())
-        spec = DevOpsTeamLeadAgent._build_legacy_spec(
-            task_id="completion-guard",
-            task_description="deploy",
-            requirements="staging",
-        )
+        spec = _base_task_spec(task_id="completion-guard")
         monkeypatch.setattr(agent, "_run_gated_phases", lambda phases: None)
         with pytest.raises(RuntimeError, match="Phase 5 did not assign a completion package"):
             agent._run_pipeline(

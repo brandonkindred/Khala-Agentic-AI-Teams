@@ -59,8 +59,15 @@ from .tool_agents import (
     TerraformExecutionToolAgent,
 )
 
-# Static defaults for the legacy DevOpsTaskSpec adapter (_build_legacy_spec).
-# Tuples enforce the read-only contract — callers get list(...) copies when needed.
+_NEGATION_TOKENS = frozenset({"not", "no", "non"})
+# Word tokens compatible with the former ``\\b(prod|production)\\b`` matcher.
+_WORD_TOKEN = re.compile(r"[a-z0-9_]+")
+
+# Static defaults for the DevOpsTaskSpec text-inference helpers below. Formerly
+# served only _build_legacy_spec (removed); devops_team_worker.py (the coding-team
+# handoff adapter) is now the sole consumer, via the public re-exports at the end
+# of this block. Tuples enforce the read-only contract -- callers get list(...)
+# copies when needed.
 _DEFAULT_LEGACY_CLOUD = "on-premises"
 _DEFAULT_LEGACY_APP_REPO = "application"
 _DEFAULT_LEGACY_INFRA_REPO = "platform-infra"
@@ -77,10 +84,6 @@ _DEFAULT_LEGACY_SECURITY_CONSTRAINTS = (
     "Least privilege IAM",
 )
 _DEFAULT_LEGACY_COMPLIANCE_CONSTRAINTS = ("Audit trail required",)
-
-MAX_LEGACY_TITLE_LENGTH: int = 120
-
-_NEGATION_TOKENS = frozenset({"not", "no", "non"})
 # Skippable fillers between a negation and a prod token ("not deploy to production",
 # "not in production").
 _NEGATION_INTERVENING_TOKENS = frozenset(
@@ -182,8 +185,6 @@ _PROD_ATTRIBUTE_TOKENS = frozenset(
         "traffic",  # only when paired with interruption-style attrs nearby; see helper
     }
 )
-# Word tokens compatible with the former ``\\b(prod|production)\\b`` matcher.
-_LEGACY_WORD_TOKEN = re.compile(r"[a-z0-9_]+")
 # Split so ``No. Deploy to production`` does not let ``No`` govern the next sentence.
 _LEGACY_CLAUSE_SPLIT = re.compile(r"[.!?;]+")
 _PROD_CONTEXT_LOOKAHEAD = 5
@@ -305,7 +306,7 @@ def _clause_implies_production(clause: str) -> bool:
     Postconditions: True iff a non-excluded ``prod``/``production`` token appears.
     """
     assert isinstance(clause, str), "clause must be a str"
-    tokens = _LEGACY_WORD_TOKEN.findall(clause)
+    tokens = _WORD_TOKEN.findall(clause)
     for i, token in enumerate(tokens):
         if token not in ("prod", "production"):
             continue
@@ -345,11 +346,11 @@ def _legacy_environment_from_text(combined_text: str) -> str:
 
 # Public re-exports for reuse outside this module (see devops_team_worker.py,
 # the coding-team handoff adapter) -- the underscore-prefixed originals above
-# stay the names used within this module (and by run_workflow/_build_legacy_spec),
-# so callers of this module's own API are unaffected. Reusing the same tuples/
-# regex/function objects (not copies) means a change here can never silently
-# drift out of sync with what a public importer sees.
-LEGACY_WORD_TOKEN = _LEGACY_WORD_TOKEN
+# stay the names used within this module, so callers of this module's own API
+# are unaffected. Reusing the same tuples/regex/function objects (not copies)
+# means a change here can never silently drift out of sync with what a public
+# importer sees.
+LEGACY_WORD_TOKEN = _WORD_TOKEN
 NEGATION_TOKENS = _NEGATION_TOKENS
 legacy_environment_from_text = _legacy_environment_from_text
 DEFAULT_LEGACY_CLOUD = _DEFAULT_LEGACY_CLOUD
@@ -391,7 +392,7 @@ def _scope_item_mentions_approval(item: str) -> bool:
           ``non-approval``) or when the word is absent.
     """
     assert isinstance(item, str), "item must be a str"
-    tokens = _LEGACY_WORD_TOKEN.findall(item.lower())
+    tokens = _WORD_TOKEN.findall(item.lower())
     for i, token in enumerate(tokens):
         if token != "approval":
             continue
@@ -589,65 +590,6 @@ class DevOpsTeamLeadAgent(BaseTeamLead):
         self._log_pipeline_status(phase=phase, detail=detail, progress=progress, **extra)
         TeamLeadSharedState._report_status(self, phase, detail=detail, progress=progress, **extra)
 
-    @staticmethod
-    def _build_legacy_spec(
-        *,
-        task_id: str,
-        task_description: str,
-        requirements: str,
-        target_repo: Optional[Any] = None,
-    ) -> DevOpsTaskSpec:
-        """Build a ``DevOpsTaskSpec`` from the legacy free-text workflow args.
-
-        Preconditions:
-            - ``task_id`` is a non-empty string.
-            - ``task_description`` and ``requirements`` are strings (may be empty).
-        Postconditions:
-            - Returns a valid ``DevOpsTaskSpec`` using module-level defaults for
-              all fields not derivable from the arguments.
-            - ``title`` is the stripped ``task_description[:MAX_LEGACY_TITLE_LENGTH]``,
-              or the stripped ``task_id[:MAX_LEGACY_TITLE_LENGTH]`` when that
-              description slice is empty/whitespace-only.
-            - ``environment`` is inferred from the combined text of
-              ``task_description`` and ``requirements`` via
-              ``_legacy_environment_from_text``; defaults to ``\"staging\"``.
-            - Module-level ``_DEFAULT_LEGACY_*`` tuples supply acceptance
-              criteria, rollback requirements, security and compliance
-              constraints, and secret-source defaults; each call receives a
-              fresh ``list(...)`` copy of the mutable fields.
-        """
-        assert isinstance(task_id, str) and task_id, "task_id must be a non-empty string"
-        assert isinstance(task_description, str), "task_description must be a string"
-        assert isinstance(requirements, str), "requirements must be a string"
-        repo_name = (
-            target_repo.value
-            if hasattr(target_repo, "value")
-            else (str(target_repo) if target_repo else "")
-        )
-        combined_text = f"{task_description} {requirements}".lower()
-        env = _legacy_environment_from_text(combined_text)
-        return DevOpsTaskSpec(
-            task_id=task_id,
-            title=(
-                (task_description[:MAX_LEGACY_TITLE_LENGTH]).strip()
-                or (task_id[:MAX_LEGACY_TITLE_LENGTH]).strip()
-            ),
-            platform_scope={"cloud": _DEFAULT_LEGACY_CLOUD, "environments": ["dev", env]},
-            repo_context={
-                "app_repo": repo_name or _DEFAULT_LEGACY_APP_REPO,
-                "infra_repo": _DEFAULT_LEGACY_INFRA_REPO,
-                "pipeline_repo": repo_name or _DEFAULT_LEGACY_APP_REPO,
-            },
-            goal={"summary": task_description},
-            scope={"included": [requirements], "excluded": []},
-            constraints={"secrets": {"source": _DEFAULT_LEGACY_SECRETS_SOURCE}},
-            acceptance_criteria=list(_DEFAULT_LEGACY_ACCEPTANCE_CRITERIA),
-            rollback_requirements=list(_DEFAULT_LEGACY_ROLLBACK_REQUIREMENTS),
-            security_constraints=list(_DEFAULT_LEGACY_SECURITY_CONSTRAINTS),
-            compliance_constraints=list(_DEFAULT_LEGACY_COMPLIANCE_CONSTRAINTS),
-            environment=env,
-        )
-
     def run(self, input_data: DevOpsTaskSpec) -> DevOpsCompletionPackage:
         """Execute a contract-first model run without orchestrator artifact writes.
 
@@ -674,43 +616,6 @@ class DevOpsTeamLeadAgent(BaseTeamLead):
             raise ValueError(result.failure_reason or "DevOps team run failed")
         return result.completion_package
 
-    def run_workflow(
-        self,
-        *,
-        repo_path: Path,
-        task_description: str,
-        requirements: str,
-        target_repo: Optional[Any] = None,
-        build_verifier: Optional[Any] = None,
-        task_id: str = "devops",
-        subdir: str = "",
-    ) -> DevOpsTeamResult:
-        """Legacy adapter: repo/task free-text → ``_build_legacy_spec`` → ``run_task``.
-
-        Preconditions:
-            - ``repo_path`` is a path to an existing directory initialised as a git repo.
-            - ``task_description`` and ``requirements`` are strings (may be empty).
-            - ``task_id`` is a non-empty string when provided; defaults to ``"devops"``.
-            - ``build_verifier``, when provided, is callable and returns ``(bool, str)``.
-        Postconditions:
-            - Returns a ``DevOpsTeamResult`` reflecting the full pipeline outcome.
-            - Artifacts are written to the repo on a feature branch and merged into
-              ``development`` when the pipeline completes successfully.
-        """
-        assert isinstance(task_id, str) and task_id, "task_id must be a non-empty string"
-        task_spec = DevOpsTeamLeadAgent._build_legacy_spec(
-            task_id=task_id,
-            task_description=task_description,
-            requirements=requirements,
-            target_repo=target_repo,
-        )
-        return self.run_task(
-            task_spec,
-            repo_path=repo_path,
-            build_verifier=build_verifier,
-            subdir=subdir,
-        )
-
     def run_task(
         self,
         task_spec: DevOpsTaskSpec,
@@ -720,18 +625,19 @@ class DevOpsTeamLeadAgent(BaseTeamLead):
         merge_to_development: bool = True,
         subdir: str = "",
     ) -> DevOpsTeamResult:
-        """Structured entry point: run the full pipeline against a real repo.
+        """Execute a structured task spec against a real repo, writing and (by default) merging changes.
 
-        The write-capable counterpart to ``run``, and the structured
-        counterpart to ``run_workflow``: takes a pre-built ``DevOpsTaskSpec``
-        directly instead of free text, and (unlike ``run()``) writes, commits,
-        and by default merges the result. ``merge_to_development=False`` commits
-        the feature branch and leaves it unmerged for an external Tech Lead
-        review — the mode the coding-team swarm uses when dispatching a
-        ``target_team="devops"`` task from a per-task git worktree.
+        This is the current structured entry point for callers that need real
+        repo I/O (unlike ``run()``, which is model-only and cannot target an
+        arbitrary checked-out repo). ``merge_to_development=False`` commits the
+        feature branch and leaves it unmerged for an external Tech Lead review
+        instead — the mode the coding-team swarm uses when dispatching a
+        ``target_team="devops"`` task from a per-task git worktree, where
+        merging back into ``development`` is not possible (the worktree runs
+        detached from it).
 
         Preconditions:
-            - ``task_spec`` is a valid ``DevOpsTaskSpec``.
+            - ``task_spec`` is a non-None ``DevOpsTaskSpec``.
             - ``repo_path`` is a path to an existing directory initialised as a git repo.
             - ``build_verifier``, when provided, is callable and returns ``(bool, str)``.
         Postconditions:
@@ -890,7 +796,8 @@ class DevOpsTeamLeadAgent(BaseTeamLead):
               completion package (internal contract violation).
             - ``merge_to_development`` only matters when ``write_changes=True``:
               ``True`` (default) merges and deletes the feature branch, matching
-              ``run_workflow``'s existing behavior; ``False`` commits the branch
+              ``run_task``'s original behavior before the coding-team handoff
+              needed an unmerged alternative; ``False`` commits the branch
               and leaves it in place for external review (required when running
               from a detached per-task git worktree, where merging back into
               ``development`` is not possible).

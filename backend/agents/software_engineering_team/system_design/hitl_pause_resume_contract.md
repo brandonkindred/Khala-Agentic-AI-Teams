@@ -703,6 +703,19 @@ while True:
     through the redesigned Phase 3 activity) takes the signal-only branch;
     a pause with no such envelope (PRA's Phase 1, or SE V1 entirely) takes
     the store-and-clear branch regardless of the workflow's class.
+- **Current status (`SE_WORKFLOW_V2` now defaults to on):** `/run-team` starts
+  select `RunTeamWorkflowV2` unless the operator explicitly opts out for V1
+  drainage. This does **not** change HITL behavior described above — V2's
+  Phase 3 activity (`execute_coding_team_activity`) still calls
+  `run_coding_team_orchestrator` with the default `pause_strategy="block"`,
+  not `"return"`, so `/run-team/{job_id}/answers` continues to resume V2 jobs
+  exactly as it resumes V1 jobs today: by writing to the job store and
+  relying on `orchestrator._wait_for_user_answers`'s poll loop, with no
+  Temporal signal involved. The native-signal branch described in this
+  section (`RunTeamWorkflowV2` gaining a `submit_answers` signal, the
+  discriminated `resume_token`/`pause_kind` envelope, the per-phase check)
+  remains unimplemented future work, not something the V2-default flip
+  requires or provides.
 - `POST /run/{job_id}/resume` is Temporal-native only: it requires a
   `resume_token` and `waiting_for_user`, then signals `CodingTeamWorkflow`.
   The old cross-worker claim lease (`resume_claim_at` / `resume_claim_seq`)

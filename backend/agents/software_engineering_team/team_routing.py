@@ -104,8 +104,8 @@ _BACKEND_TEAM_ALIASES = {
     "servers",
     "service",
     "services",
-    # The entries above are legacy generic aliases (e.g. "service", "data") kept for
-    # backward compatibility. The entries below are concrete backend languages/frameworks
+    # The entries above are generic aliases (e.g. "service", "data") kept as intentional
+    # Tech Lead vocabulary. The entries below are concrete backend languages/frameworks
     # a Tech Lead may name as the target_team instead of the canonical "backend_v2"; new
     # additions should stay unambiguous tech tokens (never generic words like "build").
     "python",
@@ -153,8 +153,8 @@ _FRONTEND_TEAM_ALIASES = {
     "webapp",
     "web_app",
     "client",
-    # The entries above are legacy generic aliases (e.g. "client", "webapp") kept for
-    # backward compatibility. The entries below are concrete frontend languages/frameworks
+    # The entries above are generic aliases (e.g. "client", "webapp") kept as intentional
+    # Tech Lead vocabulary. The entries below are concrete frontend languages/frameworks
     # a Tech Lead may name as the target_team instead of the canonical "frontend_v2"; new
     # additions should stay unambiguous tech tokens only.
     "angular",
@@ -178,12 +178,6 @@ _FRONTEND_TEAM_ALIASES = {
     # ambiguous — this team's backend_v2 stack includes Node.js — so a "TypeScript"/
     # "JavaScript" target_team must not be hard-routed to frontend. The Tech Lead should
     # emit the canonical frontend_v2/backend_v2 (or a specific framework) for those.
-}
-_LEGACY_BACKEND_STACK_ALIASES = {
-    "default",
-    "senior_software_engineer",
-    "senior_software_engineer_legacy",
-    "software_engineer",
 }
 _BACKEND_V2_STACK_SPEC = {
     "name": "backend_v2",
@@ -247,11 +241,6 @@ def _team_key(value: Optional[str]) -> str:
     return text
 
 
-def _legacy_stack_key(value: Optional[str]) -> str:
-    """Normalize legacy stack labels that predate frontend/backend v2 routing."""
-    return (value or "").strip().lower().replace("-", "_").replace(" ", "_")
-
-
 def _stack_hint_tokens(spec: StackSpec) -> set[str]:
     """Return normalized stack hint tokens without substring false positives."""
     tokens: set[str] = set()
@@ -288,8 +277,6 @@ def _v2_team_kind_for_stack(spec: StackSpec) -> Optional[str]:
     # separate flag check needed here.
     if canonical_key == "devops":
         return "devops"
-    if _legacy_stack_key(spec.name) in _LEGACY_BACKEND_STACK_ALIASES:
-        return "backend"
     if hint_tokens & _FRONTEND_HINTS:
         return "frontend"
     if hint_tokens & _BACKEND_HINTS:
@@ -353,15 +340,7 @@ def _ensure_target_team_stack_specs(
     tasks: List[Task],
 ) -> List[Dict[str, Any]]:
     """Ensure targeted frontend/backend tasks have matching v2 team workers in the roster."""
-    stacks = []
-    for entry in list(stacks_raw) if isinstance(stacks_raw, list) else []:
-        if not isinstance(entry, dict):
-            stacks.append(entry)
-            continue
-        if _legacy_stack_key(entry.get("name")) in _LEGACY_BACKEND_STACK_ALIASES:
-            stacks.append(dict(_BACKEND_V2_STACK_SPEC))
-        else:
-            stacks.append(entry)
+    stacks = list(stacks_raw) if isinstance(stacks_raw, list) else []
     present = {_v2_team_kind_for_stack(_stack_spec_from_raw(entry)) for entry in stacks}
     target_keys = {_team_key(task.target_team) for task in tasks if task.target_team}
 

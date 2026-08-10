@@ -15,23 +15,23 @@ jsonschema>=4.23,<5.0
 pyyaml>=6.0,<7.0
 httpx>=0.28,<1.0
 beautifulsoup4>=4.14,<5.0
-# <0.137: FastAPI 0.137 added _IncludedRouter route nodes that prometheus-fastapi-instrumentator (<8) can't resolve (route.path)
-fastapi>=0.135,<0.137
+fastapi>=0.137,<1.0
+# Explicit direct pin (not just transitive via fastapi): CVE-2026-48710 ("BadHost")
+# is a Host-header auth bypass affecting Starlette 0.8.3-1.0.0, fixed in 1.0.1.
+starlette>=1.0.1,<2.0
 uvicorn[standard]>=0.44,<1.0
 python-multipart>=0.0.26,<1.0
 python-dotenv>=1.2,<2.0
 
 # Crypto / DB / infra
-cryptography>=46.0,<47.0
+cryptography>=50.0,<51.0
 psycopg[binary]>=3.3,<4.0
 psycopg_pool>=3.3,<4.0
-docker>=7.1,<8.0
 
 # Workflow + LLM stack
 temporalio>=1.25,<2.0
 strands-agents>=1.35,<2.0
 strands-agents-tools>=0.4,<1.0
-ollama>=0.6,<1.0
 
 # Blogging-specific extras
 jinja2>=3.1,<4.0
@@ -46,7 +46,7 @@ yfinance>=1.2,<2.0
 
 # Observability (OTEL_SDK_DISABLED=1 in the image, but shared.observability
 # imports must not fail — keep the SDK installed for graceful no-op path).
-prometheus-fastapi-instrumentator>=7.1,<8.0
+prometheus-fastapi-instrumentator>=8.1,<9.0
 opentelemetry-api>=1.41,<2.0
 opentelemetry-sdk>=1.41,<2.0
 opentelemetry-exporter-otlp-proto-http>=1.41,<2.0

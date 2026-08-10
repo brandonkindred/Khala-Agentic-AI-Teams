@@ -19,6 +19,7 @@ This module remains the owning namespace for collaborators the test suite
 monkeypatches (``_store``, ``_agent``, ``_test_store``, ``_pipeline_runner``,
 ``_save_agents_from_llm``, ``_save_agents_and_process``, ``_after_process_saved``,
 ``_get_infra_or_404``, ``_get_team_or_404``, ``_roster_agent_from_manifest``,
+``enrich_roster_agent``, ``resolve_persona``, ``_chat_context_agents``,
 ``_build_test_agent``, ``_call_test_agent``, …). Route and
 service modules dereference those names through ``main`` at call time.
 """
@@ -42,13 +43,24 @@ from agent_team_studio.agentic_team_provisioning.infrastructure import (
     get_team_infrastructure,
     provision_team,  # noqa: F401 — re-export: tests monkeypatch via main
 )
-from agent_team_studio.agentic_team_provisioning.manifest_generation import register_team_manifests
+from agent_team_studio.agentic_team_provisioning.manifest_generation import (
+    manifest_agent_id,
+    register_team_manifests,
+)
 from agent_team_studio.agentic_team_provisioning.models import (
+    SOURCE_GENERATED,
     AgenticTeam,
     AgenticTeamAgent,
+    EnrichedRosterAgent,
     ProcessDefinition,
 )
 from agent_team_studio.agentic_team_provisioning.postgres import SCHEMA as AGENTIC_POSTGRES_SCHEMA
+from agent_team_studio.agentic_team_provisioning.roster_resolve import (
+    EMPTY_ROSTER_PERSONA,
+    llm_persona_lists_explicitly_empty,
+    persona_tags_from_fat_raw,
+    resolve_persona,
+)
 from agent_team_studio.agentic_team_provisioning.runtime.agent_builder import (
     build_agent as _build_test_agent,  # noqa: F401 — hub alias: services.testing + tests
 )
@@ -186,6 +198,45 @@ DEFAULT_SUGGESTIONS = [
 ]
 
 
+def enrich_roster_agent(agent: AgenticTeamAgent) -> EnrichedRosterAgent:
+    """Flatten a thin roster ref with persona fields from its linked manifest.
+
+    Preconditions: ``agent`` is a valid ``AgenticTeamAgent``.
+    Postconditions: returns an ``EnrichedRosterAgent`` with thin-ref fields intact.
+        When ``agent.manifest_id`` resolves in the registry, persona fields equal
+        ``resolve_persona(agent.manifest_id)``; when the manifest is missing, persona
+        fields are empty (soft enrich — one orphan must not fail a list endpoint).
+    """
+    try:
+        persona = resolve_persona(agent.manifest_id)
+    except LookupError:
+        persona = EMPTY_ROSTER_PERSONA
+    return EnrichedRosterAgent(
+        agent_name=agent.agent_name,
+        source=agent.source,
+        manifest_id=agent.manifest_id,
+        **persona.model_dump(),
+    )
+
+
+def _chat_context_agents(team_id: str) -> list[dict[str, str]] | None:
+    """Serialize roster agents for the process-designer LLM context.
+
+    Preconditions: ``team_id`` is a non-empty string.
+    Postconditions: returns ``None`` when the roster is empty; otherwise a list of
+        ``{"agent_name", "role"}`` dicts with ``role`` resolved from each agent's
+        linked ``AgentManifest``.
+    """
+    agents = _store.list_team_agents(team_id)
+    if not agents:
+        return None
+    out: list[dict[str, str]] = []
+    for a in agents:
+        enriched = enrich_roster_agent(a)
+        out.append({"agent_name": enriched.agent_name, "role": enriched.role})
+    return out
+
+
 def _save_agents_from_llm(team_id: str, agents_data: list[dict[str, Any]] | None) -> None:
     """Persist the LLM ``agents`` block, preserving any registry-source roster entries.
 
@@ -195,6 +246,13 @@ def _save_agents_from_llm(team_id: str, agents_data: list[dict[str, Any]] | None
     the LLM's generated agents are layered on top — a generated agent that collides
     by name with a preserved registry agent is dropped, so the explicitly-added
     registry agent wins.
+
+    Each LLM agent is stored as a thin ref (``manifest_id`` stamped) while its
+    persona is written to the registry via ``register_team_manifests`` (summary from
+    the LLM ``role`` field; free-text ``skills`` / ``tools`` / ``capabilities`` /
+    ``expertise`` folded into Manifest skill tags — same mapping as legacy migrate).
+    Explicit empty persona lists (e.g. ``"skills": []``) replace prior tags;
+    omitted or whitespace-only lists preserve them.
 
     Concurrency: the read-merge-write is delegated to ``merge_generated_agents``,
     which runs it in a single transaction under a ``SELECT ... FOR UPDATE`` lock on
@@ -208,18 +266,32 @@ def _save_agents_from_llm(team_id: str, agents_data: list[dict[str, Any]] | None
     if not agents_data:
         return
     generated: list[AgenticTeamAgent] = []
+    summaries: dict[str, str] = {}
+    skill_tags: dict[str, list[str]] = {}
     for a in agents_data:
         name = a.get("agent_name", "")
         if not name:
             continue
+        role = str(a.get("role") or "").strip()
+        if role:
+            summaries[name] = role
+        # Fold skills/tools/capabilities/expertise into tags (migrate parity).
+        # Non-blank tags replace prior Manifest tags. An explicitly empty list
+        # (e.g. ``"skills": []`` with no non-blank persona tags) clears prior
+        # tags. Absent / malformed persona keys, or whitespace-only values,
+        # omit the skill_tags entry so register_team_manifests preserves prior
+        # Manifest tags.
+        raw = a if isinstance(a, dict) else {}
+        folded = persona_tags_from_fat_raw(raw)
+        if folded:
+            skill_tags[name] = folded
+        elif llm_persona_lists_explicitly_empty(raw):
+            skill_tags[name] = []
         generated.append(
             AgenticTeamAgent(
                 agent_name=name,
-                role=a.get("role", ""),
-                skills=a.get("skills", []),
-                capabilities=a.get("capabilities", []),
-                tools=a.get("tools", []),
-                expertise=a.get("expertise", []),
+                source=SOURCE_GENERATED,
+                manifest_id=manifest_agent_id(team_id, name),
             )
         )
     if not generated:
@@ -234,7 +306,9 @@ def _save_agents_from_llm(team_id: str, agents_data: list[dict[str, Any]] | None
         # roster + registry back together. Raises on registry failure so
         # merge_generated_agents rolls back the roster write and keeps both
         # stores consistent.
-        register_team_manifests(team_id, merged, conn=conn)
+        register_team_manifests(
+            team_id, merged, summaries=summaries, skill_tags=skill_tags, conn=conn
+        )
 
     # Merge under a team-row lock so the read (preserve registry agents), the write,
     # and the registry register all happen in one atomic, serialized transaction.

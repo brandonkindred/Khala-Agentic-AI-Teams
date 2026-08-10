@@ -61,12 +61,12 @@ logger = logging.getLogger(__name__)
 _TEAM_LABEL = "devops"
 
 # DevOpsTaskSpec fields the coding-team Task model does not carry use the same
-# static defaults devops_team/orchestrator.py's _build_legacy_spec already uses
-# for the same problem (imported above as the module's public re-exports, so
-# there is exactly one copy of each value). Deliberate scope cut: no rich
-# platform_scope/repo_context/constraints planning yet (see the plan's "Scope
-# cuts" section) -- this can grow richer once the Tech Lead's planning phase
-# threads real repo/platform context through.
+# static defaults devops_team/orchestrator.py's (now-removed) legacy free-text
+# spec builder used for the same problem (imported above as the module's public
+# re-exports, so there is exactly one copy of each value). Deliberate scope cut:
+# no rich platform_scope/repo_context/constraints planning yet (see the plan's
+# "Scope cuts" section) -- this can grow richer once the Tech Lead's planning
+# phase threads real repo/platform context through.
 
 
 _ENV_NAME = r"(?:production|prod|staging|stage|dev|development)"
@@ -138,30 +138,27 @@ def _environment_resolution_text(task: Any) -> str:
 def _derive_environment(task: Any) -> str:
     """Infer the target environment from ``_environment_resolution_text(task)``.
 
-    Reuses ``legacy_environment_from_text`` -- the same inference
-    ``_build_legacy_spec`` already applies for free-text ``run_workflow``
-    callers -- rather than pinning every coding-team-dispatched task to
-    ``"dev"``. Pinning would silently strip the production approval-gate
-    check (``_enforce_env_policy``) and leave ``release_readiness.
-    required_approvals``/``handoff.prod_approval_required`` empty even when
-    the task is explicitly about production infrastructure (e.g. "add a
-    production deployment workflow"), letting production-targeting config
-    merge without the scrutiny DevOps normally enforces for it.
+    Reuses ``legacy_environment_from_text`` -- devops_team/orchestrator.py's
+    text-based production/staging inference, formerly private to its own
+    (now-removed) free-text spec builder -- rather than pinning every
+    coding-team-dispatched task to ``"dev"``. Pinning would silently strip
+    the production approval-gate check (``_enforce_env_policy``) and leave
+    ``release_readiness.required_approvals``/``handoff.prod_approval_required``
+    empty even when the task is explicitly about production infrastructure
+    (e.g. "add a production deployment workflow"), letting production-targeting
+    config merge without the scrutiny DevOps normally enforces for it.
 
     Preconditions: none.
     Postconditions:
         - Returns ``"production"`` or ``"staging"`` per
           ``legacy_environment_from_text``'s rules (defaults to
-          ``"staging"`` absent an explicit production signal -- matching
-          ``_build_legacy_spec``'s existing default for the same problem;
-          also the value returned for a dev-only task, since the model has no
-          distinct "dev" environment enum -- ``_platform_environments``
-          separately excludes staging from the environments list for that
-          case).
+          ``"staging"`` absent an explicit production signal; also the value
+          returned for a dev-only task, since the model has no distinct "dev"
+          environment enum -- ``_platform_environments`` separately excludes
+          staging from the environments list for that case).
         - A task that IS production-scoped but whose description carries no
           explicit approval-gate language will correctly fail Phase 1's
-          environment-policy gate rather than silently proceeding -- the
-          same trade-off ``run_workflow`` callers already accept.
+          environment-policy gate rather than silently proceeding.
     """
     return legacy_environment_from_text(_environment_resolution_text(task))
 
@@ -298,9 +295,8 @@ def _to_devops_task_spec(task: Any) -> DevOpsTaskSpec:
           production environment-policy/approval-gate checks instead of
           silently losing them.
         - Fields the coding-team ``Task`` model does not carry (cloud/runtime,
-          repo_context, constraints) use the same ``DEFAULT_LEGACY_*`` constants
-          ``_build_legacy_spec`` uses for the same problem (imported from
-          ``devops_team.orchestrator``, not re-declared here).
+          repo_context, constraints) use the ``DEFAULT_LEGACY_*`` constants
+          imported from ``devops_team.orchestrator`` (not re-declared here).
         - When ``task.revision_feedback`` is non-empty, a rendered note is
           appended to both ``scope.included`` and ``acceptance_criteria`` (see
           ``_revision_feedback_scope_note``) so every Phase 2 specialist agent

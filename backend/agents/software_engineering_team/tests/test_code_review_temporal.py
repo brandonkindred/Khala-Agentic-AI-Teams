@@ -33,7 +33,7 @@ from __future__ import annotations
 
 import contextlib
 import os
-from typing import Any, Dict, NoReturn
+from typing import Any, Dict, NoReturn, Optional
 
 import pytest
 from code_review_agent import CodeReviewAgent
@@ -47,10 +47,12 @@ from code_review_agent.temporal import phase_models as pm
 from llm_service.clients.dummy import DummyLLMClient
 
 
-def _input(
-    code: str = "### app/main.py ###\ndef foo():\n    return 1", **overrides: Any
-) -> CodeReviewInput:
-    base: Dict[str, Any] = {"code": code, "task_description": "Add foo()", "language": "python"}
+def _input(files: Optional[Dict[str, str]] = None, **overrides: Any) -> CodeReviewInput:
+    base: Dict[str, Any] = {
+        "files": files if files is not None else {"app/main.py": "def foo():\n    return 1"},
+        "task_description": "Add foo()",
+        "language": "python",
+    }
     base.update(overrides)
     return CodeReviewInput(**base)  # type: ignore[arg-type]
 
@@ -289,9 +291,9 @@ def test_activity_pipeline_matches_coordinator_verdict_multi_chunk() -> None:
     # multi-file/multi-chunk path: multiple ``review_chunk_activity`` fan-outs, the
     # dedupe/reconcile reduce, and the >1-summary synthesis branch. The durable
     # pipeline's verdict must still match ``run_coordinator``'s for the same input.
-    big_1 = "### app/main.py ###\n" + ("a" * 25_000)
-    big_2 = "### app/util.py ###\n" + ("b" * 25_000)
-    review_input = _input(code=big_1 + "\n\n" + big_2)
+    big_main = "a" * 25_000
+    big_util = "b" * 25_000
+    review_input = _input(files={"app/main.py": big_main, "app/util.py": big_util})
 
     # Confirm the input really does split into more than one chunk (otherwise the
     # test would silently degrade to the single-chunk path it means to complement).
@@ -312,7 +314,7 @@ def test_activity_pipeline_matches_coordinator_verdict_multi_chunk() -> None:
 def test_prepare_activity_reports_no_code_for_empty_files() -> None:
     from code_review_agent.temporal import activities as A
 
-    prep = A.prepare_review_activity(_input(code="").model_dump(mode="json"))
+    prep = A.prepare_review_activity(_input(files={"app/main.py": ""}).model_dump(mode="json"))
     assert prep["no_code"] is True
 
 
@@ -710,7 +712,7 @@ def test_consolidation_activity_enabled_merges_same_function_issues(
     from code_review_agent.temporal import activities as A
 
     content = "def foo():\n    x = 1\n    return x\n"
-    inp = _input(code=f"### a.py ###\n{content}")
+    inp = _input(files={"a.py": content})
     payload = inp.model_dump(mode="json")
     issues = [
         {
@@ -947,7 +949,9 @@ def test_run_rebuilds_reader_from_repo_root_when_no_live_reader(
         return CodeReviewOutput(approved=True)
 
     monkeypatch.setattr("code_review_agent.agent.run_coordinator", _capture)
-    CodeReviewAgent(llm_client=DummyLLMClient(), force_in_process=True).run(_input(repo_root=str(tmp_path)))
+    CodeReviewAgent(llm_client=DummyLLMClient(), force_in_process=True).run(
+        _input(repo_root=str(tmp_path))
+    )
     assert isinstance(captured["repo_reader"], DiskRepoReader)
 
 
@@ -2131,9 +2135,9 @@ async def test_workflow_fails_on_map_chunk_failure_without_abandoning_siblings()
     from temporalio import activity as activity_module
     from temporalio.client import WorkflowFailureError
 
-    big_1 = "### app/main.py ###\n" + ("a" * 25_000)
-    big_2 = "### app/util.py ###\n" + ("b" * 25_000)
-    review_input = _input(code=big_1 + "\n\n" + big_2)
+    big_main = "a" * 25_000
+    big_util = "b" * 25_000
+    review_input = _input(files={"app/main.py": big_main, "app/util.py": big_util})
     prep = A.prepare_review_activity(review_input.model_dump(mode="json"))
     assert len(prep["chunks"]) > 1, "expected a multi-chunk submission"
 

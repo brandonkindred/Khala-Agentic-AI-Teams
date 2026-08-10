@@ -245,6 +245,7 @@ def _chat_session_wiring_fakes(monkeypatch: pytest.MonkeyPatch) -> tuple[str, st
     """Shared session/roster fakes so send-message probes reach the agent hub aliases."""
     from agent_team_studio.agentic_team_provisioning.api import main as main_mod
     from agent_team_studio.agentic_team_provisioning.models import AgenticTeamAgent
+    from agent_team_studio.agentic_team_provisioning.roster_resolve import RosterPersonaView
 
     session_id = "sess-wiring"
     team_id = "team-wiring"
@@ -268,7 +269,14 @@ def _chat_session_wiring_fakes(monkeypatch: pytest.MonkeyPatch) -> tuple[str, st
     monkeypatch.setattr(
         main_mod,
         "_find_agent_in_roster",
-        lambda tid, name: AgenticTeamAgent(agent_name=name, role="probe"),
+        lambda tid, name: AgenticTeamAgent(
+            agent_name=name, source="generated", manifest_id="probe.manifest"
+        ),
+    )
+    monkeypatch.setattr(
+        main_mod,
+        "resolve_persona",
+        lambda _mid: RosterPersonaView(role="probe"),
     )
     return team_id, session_id
 
@@ -365,7 +373,11 @@ def test_testing_service_dispatch_uses_hub_pipeline_runner(
     with pytest.raises(RuntimeError, match="hub-pipeline-runner-hit"):
         testing_svc._dispatch_pipeline_run(
             "run-wiring",
-            [AgenticTeamAgent(agent_name="worker", role="doer")],
+            [
+                AgenticTeamAgent(
+                    agent_name="worker", source="generated", manifest_id="worker.manifest"
+                )
+            ],
             process,
             None,
             temporal_owned=False,

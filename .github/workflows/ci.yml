@@ -1039,6 +1039,19 @@ jobs:
               --cov-fail-under=90
           fi
 
+      # Strategy Lab's real-WorkflowEnvironment cancellation regression
+      # (drives an actual embedded Temporal test server, so it's marked
+      # `integration` and kept out of the `-m "not integration"` run above,
+      # same reasoning as the code-review/coding-team integration slice
+      # below). Needs only the ephemeral temporalio test-server binary, not
+      # Postgres/job-service, so it runs here rather than in the Postgres
+      # integration job. Skips itself if that binary cannot be fetched.
+      - if: matrix.source == 'investment_team'
+        name: Strategy Lab Temporal cancellation (integration)
+        run: |
+          pytest investment_team/tests/test_strategy_lab_temporal_cancellation.py \
+            -v --tb=short -m integration
+
       # Ship the union coverage data (team + shared_*) to combine-shared-infra.
       # if: always() so a failed own-gate still preserves the artifact; the mv
       # above guarantees the file exists whenever pytest itself passed.
@@ -1220,6 +1233,11 @@ jobs:
           POSTGRES_HOST: localhost
           POSTGRES_PORT: "5432"
           POSTGRES_USER: postgres
+          # The service container above uses POSTGRES_HOST_AUTH_METHOD: trust,
+          # so this value is never actually checked — but job_service/db.py
+          # requires POSTGRES_PASSWORD to be set (no default), so it must be
+          # present here too. Matches the sibling integration-tests job.
+          POSTGRES_PASSWORD: postgres
           POSTGRES_DB: postgres
           JOB_SERVICE_URL: http://127.0.0.1:8085
         run: |

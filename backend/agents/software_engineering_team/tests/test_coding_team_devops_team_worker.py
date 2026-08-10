@@ -139,8 +139,8 @@ def test_devops_worker_builds_spec_from_task() -> None:
     assert "Add CI/CD pipeline" in spec.acceptance_criteria[0]
     assert "cluster provisioning" not in spec.acceptance_criteria[0]
     assert spec.dependencies == ["other"]
-    # No explicit production language in the task text -> staging (matches
-    # _build_legacy_spec's existing default for the same "no signal" case).
+    # No explicit production language in the task text -> staging (the default
+    # for the same "no signal" case).
     assert spec.environment == "staging"
     assert spec.platform_scope.environments == ["dev", "staging"]
     assert spec.scope.excluded == ["cluster provisioning"]

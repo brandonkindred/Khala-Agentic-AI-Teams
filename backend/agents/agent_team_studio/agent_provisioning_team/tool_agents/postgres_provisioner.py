@@ -32,7 +32,25 @@ except ImportError:
 
 
 class PostgresProvisionerTool(BaseToolProvisioner):
-    """Tool agent for PostgreSQL database provisioning."""
+    """Tool agent for PostgreSQL database provisioning.
+
+    Preconditions:
+        - ``psycopg`` must be importable (checked via the module-level ``HAS_PSYCOPG``
+          flag); every public method degrades to a soft error result/raise instead of
+          an ``ImportError`` when it is not.
+        - Connection parameters (``host``/``port``/``admin_user``/``admin_password``)
+          are supplied via constructor args or fall back to the ``POSTGRES_HOST`` /
+          ``POSTGRES_PORT`` / ``POSTGRES_USER`` / ``POSTGRES_PASSWORD`` environment
+          variables; the admin credentials must have privileges to create/drop roles
+          and databases on the target server.
+    Invariants:
+        - No connection returned by ``_get_admin_connection`` outlives the method call
+          that opened it — every method that opens one closes it (cursor then
+          connection) via try/finally before returning, including on error paths.
+        - Provisioning state (which agent owns which database/role) is durable via
+          ``self._state`` (a ``ProvisionerStateStore``), so ``verify_access`` and
+          ``deprovision`` reflect prior ``provision`` calls across process restarts.
+    """
 
     tool_name = "postgresql"
 
@@ -101,44 +119,46 @@ class PostgresProvisionerTool(BaseToolProvisioner):
 
         conn = self._get_admin_connection()
         conn.autocommit = True
-        cursor = conn.cursor()
-
-        role_existed = False
         try:
-            cursor.execute(
-                sql.SQL("CREATE USER {} WITH PASSWORD %s").format(sql.Identifier(username)),
-                [password],
-            )
-        except psycopg.errors.DuplicateObject:
-            role_existed = True
-            cursor.execute(
-                sql.SQL("ALTER USER {} WITH PASSWORD %s").format(sql.Identifier(username)),
-                [password],
-            )
-        if not role_existed:
-            # We created the role, so we own the rollback for it.
-            register_compensation("postgres.drop_role", {"username": username})
+            cursor = conn.cursor()
+            try:
+                role_existed = False
+                try:
+                    cursor.execute(
+                        sql.SQL("CREATE USER {} WITH PASSWORD %s").format(sql.Identifier(username)),
+                        [password],
+                    )
+                except psycopg.errors.DuplicateObject:
+                    role_existed = True
+                    cursor.execute(
+                        sql.SQL("ALTER USER {} WITH PASSWORD %s").format(sql.Identifier(username)),
+                        [password],
+                    )
+                if not role_existed:
+                    # We created the role, so we own the rollback for it.
+                    register_compensation("postgres.drop_role", {"username": username})
 
-        db_existed = False
-        try:
-            cursor.execute(
-                sql.SQL("CREATE DATABASE {} OWNER {}").format(
-                    sql.Identifier(db_name),
-                    sql.Identifier(username),
-                )
-            )
-        except psycopg.errors.DuplicateDatabase:
-            db_existed = True
-        if not db_existed:
-            # Registered second so LIFO replay drops the DB before the role
-            # (the DB is owned by the role — required ordering).
-            register_compensation("postgres.drop_database", {"database": db_name})
+                db_existed = False
+                try:
+                    cursor.execute(
+                        sql.SQL("CREATE DATABASE {} OWNER {}").format(
+                            sql.Identifier(db_name),
+                            sql.Identifier(username),
+                        )
+                    )
+                except psycopg.errors.DuplicateDatabase:
+                    db_existed = True
+                if not db_existed:
+                    # Registered second so LIFO replay drops the DB before the role
+                    # (the DB is owned by the role — required ordering).
+                    register_compensation("postgres.drop_database", {"database": db_name})
 
-        permissions = list(_FULL_POSTGRES_PERMISSIONS)
-        self._apply_permissions(cursor, db_name, username, permissions)
-
-        cursor.close()
-        conn.close()
+                permissions = list(_FULL_POSTGRES_PERMISSIONS)
+                self._apply_permissions(cursor, db_name, username, permissions)
+            finally:
+                cursor.close()
+        finally:
+            conn.close()
 
         connection_string = f"postgresql://{username}:{password}@{self.host}:{self.port}/{db_name}"
 
@@ -242,19 +262,21 @@ class PostgresProvisionerTool(BaseToolProvisioner):
                 details={"message": "No database to remove"},
             )
 
+        db_name = prov_info["database"]
+        username = prov_info["username"]
+
         try:
             conn = self._get_admin_connection()
-            conn.autocommit = True
-            cursor = conn.cursor()
-
-            db_name = prov_info["database"]
-            username = prov_info["username"]
-
-            self._drop_database(cursor, db_name)
-            self._drop_role(cursor, username)
-
-            cursor.close()
-            conn.close()
+            try:
+                conn.autocommit = True
+                cursor = conn.cursor()
+                try:
+                    self._drop_database(cursor, db_name)
+                    self._drop_role(cursor, username)
+                finally:
+                    cursor.close()
+            finally:
+                conn.close()
 
             self._state.delete(agent_id, fencing_token=fencing_token)
 
