@@ -1,6 +1,9 @@
 import { Component, EventEmitter, Input, Output } from '@angular/core';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { NoopAnimationsModule } from '@angular/platform-browser/animations';
+import { of } from 'rxjs';
+import { vi } from 'vitest';
+import { AgentStudioApiService } from '../../../services/agent-studio-api.service';
 import { AgentCatalogComponent } from '../agent-console/agent-catalog/agent-catalog.component';
 import { AgentProvisioningDashboardComponent } from '../agent-provisioning-dashboard/agent-provisioning-dashboard.component';
 import { AgentRunnerComponent } from '../agent-console/agent-runner/agent-runner.component';
@@ -45,6 +48,15 @@ describe('AgentStudioShellComponent', () => {
   beforeEach(async () => {
     await TestBed.configureTestingModule({
       imports: [AgentStudioShellComponent, NoopAnimationsModule],
+      providers: [
+        // Build stage isn't stubbed at the shell level (only its catalog/provisioning
+        // children are), so it injects the real AgentStudioApiService — fake it here
+        // so no HTTP client is required; none of these shell tests exercise clone/save.
+        {
+          provide: AgentStudioApiService,
+          useValue: { cloneFromRegistry: vi.fn().mockReturnValue(of({})), saveAgent: vi.fn().mockReturnValue(of({})) },
+        },
+      ],
     })
       .overrideComponent(AgentStudioTestAgentComponent, {
         remove: { imports: [AgentRunnerComponent] },
