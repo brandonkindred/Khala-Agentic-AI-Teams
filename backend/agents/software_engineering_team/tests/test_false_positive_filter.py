@@ -393,6 +393,21 @@ def test_read_lines_rejects_non_positive_bounds() -> None:
     assert "positive integer" in idx.read_lines("app/main.py", 1, True)  # type: ignore[arg-type]
 
 
+def test_read_lines_pre_numbered_single_hunk_header_matches_body() -> None:
+    """Pre-numbered single-hunk excerpt: header's claimed range must match the
+    body's own embedded original line numbers (the exact bug-report fixture)."""
+    content = "100: def earlier():\n101:     pass\n102: \n"
+    idx = CodebaseIndex(files={"app/main.py": content})
+    result = idx.read_lines("app/main.py", 100, 102)
+    assert result.startswith("app/main.py lines 100–102 (3 lines):")
+    assert "100| def earlier():" in result
+    assert "101|     pass" in result
+    assert "102| " in result
+    # No physical/stripped line numbers (1-3) leak into the header or body.
+    assert "lines 1–3" not in result
+    assert "1| def earlier():" not in result
+
+
 def test_read_function_returns_method_in_class_body() -> None:
     """Line inside a method returns only that method's construct body."""
     src = "class C:\n    def m(self):\n        return 1\n\ndef other():\n    return 2\n"
