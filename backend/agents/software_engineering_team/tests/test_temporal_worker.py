@@ -23,9 +23,8 @@ def test_workflows_and_activities_are_registered() -> None:
     assert RunTeamWorkflowV2 in worker.WORKFLOWS
     assert RetryFailedWorkflow in worker.WORKFLOWS
     assert StandaloneJobWorkflow in worker.WORKFLOWS
-    assert len(worker.ACTIVITIES) == 8
+    assert len(worker.ACTIVITIES) == 7
     names = {getattr(a, "__name__", "") for a in worker.ACTIVITIES}
-    assert "run_orchestrator_activity" in names
     assert "parse_spec_activity" in names
     assert "plan_project_activity" in names
     assert "execute_coding_team_activity" in names
