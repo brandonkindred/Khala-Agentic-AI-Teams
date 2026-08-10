@@ -205,19 +205,8 @@ Temporal namespace.
 Temporal task queue name.
 
 ### SE_WORKFLOW_V2
-Selects which Temporal workflow class the SE team's `/run-team` endpoints
-use when starting a run, on the `software-engineering` task queue. Default
-(unset, blank, or any value other than the recognized falsy ones below)
-selects the current multi-phase `RunTeamWorkflowV2`. Set to `"0"`, `"false"`,
-or `"no"` (case-insensitive) to opt back into the legacy single-activity
-`RunTeamWorkflow` (V1), which the worker keeps registered solely to let any
-still-open V1 histories keep running or be drained — see the
-[HITL pause/resume contract](../backend/agents/software_engineering_team/system_design/hitl_pause_resume_contract.md)'s
-"V1 drain status" note for the current inventory of open V1 executions and
-the go/no-go call on removing V1 entirely. HITL `submit_answers`/pause-resume
-behavior is identical on both paths today (both block on the same job-store
-poll loop; neither defines a Temporal signal), so flipping this var does not
-change pause/resume semantics.
+Removed. `/run-team` always starts `RunTeamWorkflowV2`; this variable no
+longer has any effect and may be safely unset from any environment.
 
 ### Investment team Temporal queues
 The investment team runs three Temporal queues, all booted from
