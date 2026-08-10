@@ -670,6 +670,37 @@ Absolute ceiling on chars of code per review map call, independent of model
 context. Default `80000`, floor `10000`. Lower it for models that degrade on
 large prompts; raise it to cut the number of map calls per large review.
 
+### CODE_REVIEW_TAIL_PASS_CHUNK_CHARS
+Absolute ceiling on chars of changed-file code inlined per call of the
+in-process coordinator's merged architecture/side-effect tail pass
+(`merged_architecture_side_effect_pass.py`, via `submission_pass_runner.py`'s
+`compute_code_review_merged_pass_budgets`/`run_submission_pass`) — see
+`CODE_REVIEW_ARCHITECTURE_CONSISTENCY_PASS` / `CODE_REVIEW_SIDE_EFFECT_IMPACT_PASS`
+below for what that pass does. Default `80000`, floor `10000` — the same
+numbers `CODE_REVIEW_MAP_CHUNK_CHARS` uses, so an unset value behaves exactly
+like today. A dedicated knob, independent of `CODE_REVIEW_MAP_CHUNK_CHARS`:
+before this var existed the tail pass silently reused the map phase's cap, so
+tuning one for the map phase's chunk size also (as an unintended side effect)
+retuned the tail pass's batching threshold. The two are now separately
+adjustable.
+
+When a submission's changed-file set is estimated to exceed this budget,
+`run_submission_pass` proactively packs it into multiple bounded batches (one
+LLM call per batch, each folding its findings into the same
+`architecture_findings`/`side_effect_findings` output) instead of one
+unbounded call; a batch that still overflows mid-call is reactively bisected
+or shrunk and retried. A submission under the budget still makes exactly one
+call — no behavior change for typical-size submissions. Whenever more than
+one batch is produced, an INFO log line names the batch count and the
+effective budget: `"<pass>: changed-file set split into N batches
+(budget=B chars/call, CODE_REVIEW_TAIL_PASS_CHUNK_CHARS)"`.
+
+The false-positive verifier's own tail-pass batching (`filter_false_positives`)
+is governed separately by `CODE_REVIEW_VERIFY_MAX_FINDINGS_PER_GROUP` below — a
+cap on *findings per call*, not chars, since that pass never inlines the cited
+file's content into the prompt at all (see `CODE_REVIEW_FALSE_POSITIVE_FILTER`);
+this var has no effect on it.
+
 ### CODE_REVIEW_SPEC_EXCERPT_CHARS / CODE_REVIEW_ARCH_OVERVIEW_CHARS / CODE_REVIEW_EXISTING_CHARS
 Absolute ceilings on the spec / architecture-overview / existing-codebase
 excerpts repeated in every review map call. Defaults `16000` / `4000` / `8000`,
