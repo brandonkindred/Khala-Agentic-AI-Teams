@@ -71,7 +71,6 @@ pip install -r agents/blogging/requirements.txt
 
 # For development (pytest, etc.)
 pip install -e agents/software_engineering_team
-pip install -e agents/blogging
 ```
 
 ### 2. Node.js / UI

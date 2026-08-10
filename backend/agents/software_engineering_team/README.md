@@ -52,10 +52,14 @@ context-formatting scaffolding; see
 [`docs/PROMPT_TEMPLATE_MIGRATION_METRICS.md`](docs/PROMPT_TEMPLATE_MIGRATION_METRICS.md)
 for the before/after line-count report from that migration.
 
-Work removing the legacy stack-alias repair and legacy HITL reason parsing
-from routing, the Tech Lead, and `swarm_review` must follow the resume
-policy in
-[`docs/LEGACY_STACK_RESUME_POLICY_DECISION.md`](docs/LEGACY_STACK_RESUME_POLICY_DECISION.md).
+Legacy stack-alias repair and legacy free-text HITL reason parsing have
+been removed from routing, the Tech Lead, and `swarm_review`. Resuming a
+job whose persisted state still carries one of those old shapes (a legacy
+stack alias, a task missing `target_team`, or a `user_decision` entry
+without structured `decisions`) now fails fast with a field-identifying
+error instead of being silently repaired or migrated — see
+[`docs/LEGACY_STACK_RESUME_POLICY_DECISION.md`](docs/LEGACY_STACK_RESUME_POLICY_DECISION.md)
+for the decision and pre-deploy audit.
 
 ## Sub-teams and SDLC
 
@@ -622,7 +626,7 @@ notes:
 
 ### Backward Compatibility
 
-`DevOpsTeamLeadAgent` exposes three entry points: `run(spec)` (skips orchestrator-managed artifact writes/branch commits, but Phase 4.5 validation/execution tools such as `terraform init` or `cdk synth` may still write under the working directory as side effects), `run_task(spec, repo_path=...)` (the current structured entry point — writes artifacts to a real repo on a feature branch and merges them into `development`), and a legacy free-text `run_workflow(...)` adapter kept for backward compatibility, which internally builds a `DevOpsTaskSpec` via `_build_legacy_spec` (adding defaults for rollback, security, approval gates) and delegates to `run_task`. No production caller currently invokes any of these — `DevOpsTeamLeadAgent` is registered in the SE orchestrator's agent registry but not yet wired into the Tech Lead handoff; DevOps/infrastructure work is routed to `backend_v2` today.
+`DevOpsTeamLeadAgent` exposes two structured entry points: `run(spec)` (skips orchestrator-managed artifact writes/branch commits, but Phase 4.5 validation/execution tools such as `terraform init` or `cdk synth` may still write under the working directory as side effects) and `run_task(spec, repo_path=...)` (writes artifacts to a real repo on a feature branch and merges them into `development`). Both take a `DevOpsTaskSpec` directly — the free-text `run_workflow(...)` adapter has been removed. No production caller currently invokes either — `DevOpsTeamLeadAgent` is registered in the SE orchestrator's agent registry but not yet wired into the Tech Lead handoff; DevOps/infrastructure work is routed to `backend_v2` today.
 
 ### Expanded Team (Phase 2, not yet implemented)
 

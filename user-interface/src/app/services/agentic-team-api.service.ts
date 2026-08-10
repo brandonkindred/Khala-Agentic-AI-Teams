@@ -21,7 +21,6 @@ import type {
   TestChatSessionDetail,
   TestChatMessage,
   TestPipelineRun,
-  UpdateAgentRequest,
 } from '../models';
 
 @Injectable({ providedIn: 'root' })
@@ -66,14 +65,6 @@ export class AgenticTeamApiService {
   /** Remove a single agent from the team roster by name. */
   removeTeamAgent(teamId: string, agentName: string): Observable<void> {
     return this.http.delete<void>(`${this.base}/teams/${teamId}/agents/${encodeURIComponent(agentName)}`);
-  }
-
-  /** Inline-edit a roster agent's fields for this team (only supplied fields change). */
-  updateTeamAgent(teamId: string, agentName: string, updates: UpdateAgentRequest): Observable<AgenticTeamAgent> {
-    return this.http.put<AgenticTeamAgent>(
-      `${this.base}/teams/${teamId}/agents/${encodeURIComponent(agentName)}`,
-      updates,
-    );
   }
 
   // Processes

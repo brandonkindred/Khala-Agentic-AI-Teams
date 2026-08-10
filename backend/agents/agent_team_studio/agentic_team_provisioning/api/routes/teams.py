@@ -10,9 +10,9 @@ from fastapi import APIRouter
 from agent_team_studio.agentic_team_provisioning.api.services import teams as teams_svc
 from agent_team_studio.agentic_team_provisioning.models import (
     AddAgentFromRegistryRequest,
-    AgenticTeamAgent,
     CreateTeamRequest,
     CreateTeamResponse,
+    EnrichedRosterAgent,
     GeneratedManifestsResponse,
     RosterValidationResult,
     TeamDetailResponse,
@@ -45,7 +45,7 @@ def get_team(team_id: str):
     return teams_svc.get_team(team_id)
 
 
-@router.get("/teams/{team_id}/agents", response_model=list[AgenticTeamAgent])
+@router.get("/teams/{team_id}/agents", response_model=list[EnrichedRosterAgent])
 def list_team_agents(team_id: str):
     """Return the named agents pool (roster) for this team.
 
@@ -69,7 +69,7 @@ def validate_team_roster(team_id: str):
 
 
 @router.post(
-    "/teams/{team_id}/agents/from-registry", response_model=AgenticTeamAgent, status_code=201
+    "/teams/{team_id}/agents/from-registry", response_model=EnrichedRosterAgent, status_code=201
 )
 def add_agent_from_registry(team_id: str, req: AddAgentFromRegistryRequest):
     return teams_svc.add_agent_from_registry(team_id, req)
@@ -80,6 +80,6 @@ def remove_agent_from_roster(team_id: str, agent_name: str):
     return teams_svc.remove_agent_from_roster(team_id, agent_name)
 
 
-@router.put("/teams/{team_id}/agents/{agent_name:path}", response_model=AgenticTeamAgent)
+@router.put("/teams/{team_id}/agents/{agent_name:path}", response_model=EnrichedRosterAgent)
 def update_roster_agent(team_id: str, agent_name: str, req: UpdateAgentRequest):
     return teams_svc.update_roster_agent(team_id, agent_name, req)

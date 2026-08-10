@@ -1557,9 +1557,7 @@ def test_create_custom_provisioner_no_overrides_works(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_postgres_provision_returns_error_when_psycopg_missing(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_postgres_provision_returns_error_when_psycopg_missing(tmp_path: Path, monkeypatch) -> None:
     from agent_team_studio.agent_provisioning_team.tool_agents import postgres_provisioner as pgm
     from agent_team_studio.agent_provisioning_team.tool_agents.postgres_provisioner import (
         PostgresProvisionerTool,
@@ -1685,7 +1683,9 @@ def test_postgres_provision_full_path(tmp_path: Path, monkeypatch) -> None:
 
 
 def test_postgres_provision_handles_duplicate_role(tmp_path: Path, monkeypatch) -> None:
-    psycopg = pytest.importorskip("psycopg")
+    # psycopg is a required dependency (agent_provisioning_team/requirements.txt),
+    # not optional, so this imports directly rather than pytest.importorskip-guarding.
+    import psycopg
 
     from agent_team_studio.agent_provisioning_team.tool_agents import postgres_provisioner as pgm
     from agent_team_studio.agent_provisioning_team.tool_agents.postgres_provisioner import (

@@ -155,6 +155,17 @@ def _build_workflow_runner() -> Any:
         # above: workflow run() bodies never call into market_data_service
         # themselves, only reach it as a side effect of this import chain.
         "investment_team.market_data_service",
+        # Same import chain, same failure class: quality_gates/__init__.py's
+        # eager quality-gate imports reach predicate_conformance.py, which
+        # imports StrategyLabBudgetConfig from budget_config.py, which imports
+        # llm_service.config for resolve_timeout(). llm_service/config.py does
+        # ``_warned_lock = threading.Lock()`` at module scope, which the
+        # sandbox's re-import forbids (`RestrictedWorkflowAccessError` on
+        # ``threading.Lock.__call__``). Passing budget_config through is safe
+        # on the same grounds as market_data_service above: workflow run()
+        # bodies never call StrategyLabBudgetConfig themselves, only reach it
+        # as a side effect of this import chain.
+        "investment_team.strategy_lab.budget_config",
     )
     return SandboxedWorkflowRunner(restrictions=restrictions)
 

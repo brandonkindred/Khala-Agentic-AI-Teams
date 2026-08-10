@@ -80,7 +80,6 @@ class SECodeEngineProvider:
     def run_pr_code_review(
         self,
         *,
-        code: str = "",
         pre_numbered: bool = False,
         task_description: str,
         task_requirements: str,
@@ -93,9 +92,9 @@ class SECodeEngineProvider:
         """Run the PR code-review agent over a pull request's changes.
 
         Preconditions:
-            - Exactly one code source is supplied: ``files`` (the preferred
-              ``{path: content}`` whole-file mapping) OR ``code`` (the legacy
-              diff-hunk blob). ``pre_numbered`` describes ``code`` only.
+            - ``files`` is a non-empty ``{path: content}`` mapping. ``pre_numbered``
+              describes whether its content already carries ``N: `` line-number
+              prefixes (diff-hunk submissions) or is whole-file content.
             - ``repo_reader`` is None or a duck-typed ``RepoReader`` (``list_files``
               /``read_file``) giving the false-positive verifier read access to
               existing repository files outside the diff.
@@ -107,7 +106,6 @@ class SECodeEngineProvider:
 
         review_input = build_code_review_input(
             files=files,
-            code=None if files is not None else code,
             pre_numbered=pre_numbered,
             task_description=task_description,
             task_requirements=task_requirements,

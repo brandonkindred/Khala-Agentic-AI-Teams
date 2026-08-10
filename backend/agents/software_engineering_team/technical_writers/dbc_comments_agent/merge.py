@@ -42,9 +42,9 @@ import ast
 import logging
 from typing import Dict, List, Optional, Set, Tuple
 
-from software_engineering_team.shared.chunking import parse_code_into_file_blocks
 from software_engineering_team.shared.code_completeness import reject_invalid_python
 
+from .chunking import parse_code_into_file_blocks
 from .models import DbcCommentInsertion
 
 logger = logging.getLogger(__name__)

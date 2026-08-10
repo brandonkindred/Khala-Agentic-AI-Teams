@@ -93,9 +93,9 @@ def test_single_call_threads_line() -> None:
             }
         ]
     )
-    code = "### app/main.py ###\n" + "\n".join(f"x{i} = {i}" for i in range(50))
+    code = "\n".join(f"x{i} = {i}" for i in range(50))
     agent = CodeReviewAgent(llm_client=client, force_in_process=True)
-    result = agent.run(CodeReviewInput(code=code, language="python"))
+    result = agent.run(CodeReviewInput(files={"app/main.py": code}, language="python"))
     assert len(result.issues) == 1
     assert result.issues[0].line == 42
 
@@ -125,7 +125,7 @@ def test_single_call_bad_line_becomes_none() -> None:
         ]
     )
     agent = CodeReviewAgent(llm_client=client, force_in_process=True)
-    result = agent.run(CodeReviewInput(code="### app/main.py ###\nx=1", language="python"))
+    result = agent.run(CodeReviewInput(files={"app/main.py": "x=1"}, language="python"))
     assert result.issues[0].line is None
 
 
@@ -135,7 +135,7 @@ def test_single_call_bad_line_becomes_none() -> None:
 
 
 def test_coordinator_threads_line() -> None:
-    big = "### app/main.py ###\n" + "\n".join(f"x{i} = {i}" for i in range(100))
+    big = "\n".join(f"x{i} = {i}" for i in range(100))
     client = _ScriptedClient(
         [
             {
@@ -156,7 +156,7 @@ def test_coordinator_threads_line() -> None:
         ]
     )
     agent = CodeReviewAgent(llm_client=client, force_in_process=True)
-    result = agent.run(CodeReviewInput(code=big, language="python"))
+    result = agent.run(CodeReviewInput(files={"app/main.py": big}, language="python"))
     assert len(result.issues) == 1
     assert result.issues[0].line == 13
 

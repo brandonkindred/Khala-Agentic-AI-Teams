@@ -412,9 +412,10 @@ def _maybe_build_change_surface_from_pairs(
 ) -> Optional[ChangeSurface]:
     """Call the shared change-surface builder only when a meaningful diff exists.
 
-    Consumed by the ``CodeReviewInput`` ``code=``/``pre_numbered=True`` wiring
-    (a separate change): this function only decides *whether* a surface is
-    worth building from SE-style old/new content maps, not how it is used.
+    Consumed by the ``CodeReviewInput`` ``files=<surface.blocks>``/
+    ``pre_numbered=True`` wiring (a separate change): this function only
+    decides *whether* a surface is worth building from SE-style old/new
+    content maps, not how it is used.
 
     Preconditions:
         - ``new_contents`` maps path -> new file text (may be empty).
@@ -625,9 +626,9 @@ def _code_review_step(
         - Returns a :class:`_ReviewStepResult`: ``issues`` from the agent or LLM fallback,
           and ``raw_issue_count`` from the LLM fallback when it ran (``None`` when the
           external agent succeeded or a bare-list stub reported no count).
-        - The external agent's ``CodeReviewInput`` is built with ``code=<surface>,
-          pre_numbered=True, full_content=<surface's own paths>`` (no ``files=``) when
-          a change surface can be resolved for ``files`` -- from caller-supplied
+        - The external agent's ``CodeReviewInput`` is built with
+          ``files=<surface.blocks>, pre_numbered=True, full_content=<surface's own
+          paths>`` when a change surface can be resolved for ``files`` -- from caller-supplied
           ``old_contents``, or auto-resolved from ``repo_path``'s pre-task ``HEAD`` when
           ``old_contents`` is ``None`` -- and every genuinely-changed path is fully
           represented in it (see ``_resolve_change_surface_for_review``). ``full_content``
@@ -683,11 +684,11 @@ def _code_review_step(
                 spec_content=ctx.spec_content,
                 repo_root=str(repo_path),
             )
-            # code= (pre-numbered diff surface) when a fully-represented base diff
-            # resolves (caller-supplied old_contents, or auto-resolved from repo_path's
-            # HEAD); otherwise files= (per-file attribution, no header parsing, no
-            # upstream truncation) — see _resolve_change_surface_for_review for the
-            # fallback contract. full_content rides along with the surface so the
+            # files=<surface.blocks> (bounded, pre-numbered diff surface) when a
+            # fully-represented base diff resolves (caller-supplied old_contents, or
+            # auto-resolved from repo_path's HEAD); otherwise files=files (whole-file
+            # attribution, not pre-numbered) — see _resolve_change_surface_for_review
+            # for the fallback contract. full_content rides along with the surface so the
             # coordinator's whole-codebase side-effect/architecture passes still see
             # real full bodies for the changed paths (CodeReviewInput.full_content)
             # instead of being silently disabled by pre_numbered=True -- scoped to
@@ -699,7 +700,7 @@ def _code_review_step(
             surface = _resolve_change_surface_for_review(files, repo_path, old_contents)
             if surface is not None:
                 cr_input = _build_cr_input(
-                    code=surface.code,
+                    files=dict(surface.blocks),
                     pre_numbered=True,
                     full_content={path: files[path] for path in surface.blocks},
                     **common_kwargs,

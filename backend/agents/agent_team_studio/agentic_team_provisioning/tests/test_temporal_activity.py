@@ -14,6 +14,10 @@ from datetime import datetime, timezone
 
 import pytest
 
+from agent_team_studio.agentic_team_provisioning.manifest_generation import (
+    build_agent_manifest,
+    manifest_agent_id,
+)
 from agent_team_studio.agentic_team_provisioning.temporal import workflows as wf
 from agent_team_studio.agentic_team_provisioning.testing.store import (
     AgenticTestStore,
@@ -28,6 +32,7 @@ def fake_pg(monkeypatch: pytest.MonkeyPatch) -> dict:
 
 
 def _seed_team(db: dict, team_id: str = "t1") -> None:
+    _ensure_worker_manifest()
     now = datetime.now(tz=timezone.utc)
     db["teams"][team_id] = {
         "team_id": team_id,
@@ -70,7 +75,23 @@ _ACTION_PROCESS = {
         }
     ],
 }
-_TEAM_AGENTS = [{"agent_name": "worker", "role": "doer"}]
+_TEAM_ID = "t1"
+_WORKER_MANIFEST_ID = manifest_agent_id(_TEAM_ID, "worker")
+_TEAM_AGENTS = [
+    {
+        "agent_name": "worker",
+        "source": "generated",
+        "manifest_id": _WORKER_MANIFEST_ID,
+    }
+]
+
+
+def _ensure_worker_manifest() -> None:
+    from agent_registry import get_registry
+
+    registry = get_registry()
+    if registry.get(_WORKER_MANIFEST_ID) is None:
+        registry.register(build_agent_manifest(_TEAM_ID, "worker", summary="doer"))
 
 
 # ---------------------------------------------------------------------------
@@ -101,6 +122,35 @@ def test_run_step_activity_action_records_and_returns(
     assert len(row["step_results"]) == 1
     assert row["step_results"][0]["status"] == "completed"
     assert row["step_results"][0]["output"] == "hello output"
+
+
+def test_run_step_activity_coerces_fat_history_agents(
+    fake_pg: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """In-flight Temporal payloads may still serialize fat roster rows with null manifest_id."""
+    _seed_team(fake_pg)
+    store = AgenticTestStore()
+    store.create_pipeline_run("r1", "t1", "p1")
+    _stub_llm(monkeypatch, "coerced ok")
+
+    fat_agents = [
+        {
+            "agent_name": "worker",
+            "role": "doer",
+            "skills": ["legacy"],
+            "capabilities": [],
+            "tools": [],
+            "expertise": [],
+            "source": "generated",
+            "manifest_id": None,
+        }
+    ]
+    out = wf.run_step_activity("r1", fat_agents, _ACTION_PROCESS, "s1", "prev")
+    assert out == "coerced ok"
+    row = store.get_pipeline_run("r1")
+    assert len(row["step_results"]) == 1
+    assert row["step_results"][0]["status"] == "completed"
+    assert row["step_results"][0]["output"] == "coerced ok"
 
 
 def test_run_step_activity_is_idempotent_per_step(

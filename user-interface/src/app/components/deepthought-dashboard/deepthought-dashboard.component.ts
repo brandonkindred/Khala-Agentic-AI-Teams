@@ -18,10 +18,10 @@ import { MatTooltipModule } from '@angular/material/tooltip';
 import { MatSliderModule } from '@angular/material/slider';
 import { MatSelectModule } from '@angular/material/select';
 import { Subscription } from 'rxjs';
-import { marked } from 'marked';
 
 import { DeepthoughtApiService, StreamEvent } from '../../services/deepthought-api.service';
 import { DashboardShellComponent } from '../../shared/dashboard-shell/dashboard-shell.component';
+import { MarkdownRendererService } from '../../shared/markdown-renderer.service';
 import type {
   AgentResult,
   ChatMessage,
@@ -58,6 +58,7 @@ export class DeepthoughtDashboardComponent implements AfterViewChecked, OnDestro
   @ViewChild('messagesContainer') messagesContainer!: ElementRef<HTMLDivElement>;
 
   private readonly api = inject(DeepthoughtApiService);
+  private readonly markdownRenderer = inject(MarkdownRendererService);
   private streamSub: Subscription | null = null;
 
   // Chat state
@@ -251,8 +252,7 @@ export class DeepthoughtDashboardComponent implements AfterViewChecked, OnDestro
   }
 
   renderMarkdown(content: string): string {
-    if (!content) return '';
-    return marked.parse(content, { async: false }) as string;
+    return this.markdownRenderer.renderToHtmlString(content);
   }
 
   countAgents(node: AgentResult): number {

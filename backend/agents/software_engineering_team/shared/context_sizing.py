@@ -443,14 +443,3 @@ def compute_repo_summary_chars(llm: LLMClient) -> int:
 def compute_requirement_mapping_chars(llm: LLMClient) -> int:
     """Max chars for requirement-task mapping in prompts."""
     return _scale_with_context(llm, 2_000)
-
-
-def compute_code_review_total_chars(llm: LLMClient) -> int:
-    """Max total code chars for code review (fits within 256K context when available).
-
-    Legacy: only the deprecated frontend team's single-call review path still
-    truncates input with this. Live callers must pass code to ``CodeReviewAgent``
-    untruncated — the coordinator bounds every per-call prompt itself and its
-    coverage guarantee only holds when it sees the full input.
-    """
-    return _scale_with_context(llm, 150_000)

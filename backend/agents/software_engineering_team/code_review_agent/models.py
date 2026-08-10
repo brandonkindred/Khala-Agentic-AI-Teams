@@ -796,21 +796,15 @@ class CodeReviewInput(BaseModel):
     """Input for the Code Review agent.
 
     Preconditions (enforced at construction):
-        - The code under review is provided either via ``files`` (non-empty
-          mapping) or via an explicitly passed ``code`` string. Constructing
-          the input with neither, or with ``files={}``, raises ``ValueError``
-          so a caller bug never silently becomes an approved empty review.
+        - The code under review is provided via ``files`` (a non-empty
+          ``{path: content}`` mapping). Constructing the input with
+          ``files=None`` or ``files={}`` raises ``ValueError`` so a caller
+          bug never silently becomes an approved empty review.
     """
 
-    code: str = Field(
-        default="",
-        description="Legacy input: code to review, concatenated with ### path ### file headers. "
-        "Ignored when ``files`` is provided.",
-    )
     files: Optional[Dict[str, str]] = Field(
         default=None,
-        description="Preferred input: mapping of file path to file content. "
-        "When set, ``code`` is ignored and no header parsing happens.",
+        description="Mapping of file path to file content. Required and must be non-empty.",
     )
     pre_numbered: bool = Field(
         default=False,
@@ -821,7 +815,7 @@ class CodeReviewInput(BaseModel):
     full_content: Optional[Dict[str, str]] = Field(
         default=None,
         description="Optional full (non-numbered) content for some or all of the changed paths, "
-        "supplied alongside a bounded ``pre_numbered=True`` ``code=`` submission. Overlaid onto "
+        "supplied alongside a bounded ``pre_numbered=True`` ``files=`` submission. Overlaid onto "
         "``CodebaseIndex.files`` (see ``CodebaseIndex.from_input``) so whole-codebase passes that "
         "need complete file bodies -- the side-effect/blast-radius pass, and the merged "
         "architecture/side-effect pass's side-effect half -- can still run their full analysis "
@@ -830,8 +824,8 @@ class CodeReviewInput(BaseModel):
         "this re-enables them without changing what the chunk reviewer is bounded to. ``None`` "
         "(the default) preserves today's behavior for every existing ``pre_numbered=True`` "
         "caller (PR-review hunk fallback has no fuller content to offer). Ignored when "
-        "``pre_numbered`` is False (those passes already read full content from ``files``/"
-        "``code`` directly).",
+        "``pre_numbered`` is False (those passes already read full content from ``files`` "
+        "directly).",
     )
     spec_content: str = Field(
         default="",
@@ -906,20 +900,15 @@ class CodeReviewInput(BaseModel):
     )
 
     @model_validator(mode="after")
-    def _require_code_or_files(self) -> "CodeReviewInput":
+    def _require_non_empty_files(self) -> "CodeReviewInput":
         """Reject inputs that carry no code source at all.
 
-        ``files={}`` and a fully-defaulted ``code`` are caller bugs (e.g. a glob
-        miss or a dropped kwarg), not empty reviews; per DbC they must raise here
-        rather than fail open downstream. An explicitly passed empty ``code``
-        string remains valid (the review then reports nothing to review).
+        ``files=None`` and ``files={}`` are caller bugs (e.g. a glob miss or a
+        dropped kwarg), not empty reviews; per DbC they must raise here rather
+        than fail open downstream.
         """
-        if self.files is not None:
-            if not self.files:
-                raise ValueError("CodeReviewInput.files must be a non-empty mapping when provided")
-            return self
-        if "code" not in self.model_fields_set:
-            raise ValueError("CodeReviewInput requires either 'files' or an explicit 'code' value")
+        if not self.files:
+            raise ValueError("CodeReviewInput.files must be a non-empty mapping")
         return self
 
 
@@ -957,23 +946,15 @@ class CodeReviewOutput(BaseModel):
 def build_code_review_input(
     *,
     files: Optional[Dict[str, str]] = None,
-    code: Optional[str] = None,
     **fields: Any,
 ) -> CodeReviewInput:
-    """Construct a :class:`CodeReviewInput` passing exactly the source channel given.
+    """Construct a :class:`CodeReviewInput` from ``files`` and the remaining fields.
 
-    ``files`` (the preferred ``{path: content}`` mapping) and ``code`` (the legacy
-    path-headered blob) are forwarded only when not None, so an explicitly-passed
-    empty ``code`` still counts as provided and ``files`` takes precedence —
-    matching the model's own ``_require_code_or_files`` validation. Callers supply
-    the remaining fields (spec_content, task_description, ...) via *fields*.
+    Callers supply the remaining fields (spec_content, task_description, ...) via
+    *fields*. ``files`` must be a non-empty mapping -- ``CodeReviewInput``'s own
+    ``_require_non_empty_files`` validator rejects ``None``/``{}``.
 
-    Single source of truth for the files/code selection that backend_agent,
+    Single source of truth for constructing review input that backend_agent,
     orchestrator, and quality_gate_tools each used to duplicate.
     """
-    kwargs: Dict[str, Any] = dict(fields)
-    if files is not None:
-        kwargs["files"] = files
-    if code is not None:
-        kwargs["code"] = code
-    return CodeReviewInput(**kwargs)
+    return CodeReviewInput(files=files, **fields)

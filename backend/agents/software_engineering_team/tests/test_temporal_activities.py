@@ -634,6 +634,58 @@ def test_execute_coding_team_activity_passes_band_and_default_llm_getter(
     )
 
 
+def test_execute_coding_team_activity_stays_on_block_pause_strategy(
+    monkeypatch, tmp_path, patched_job_store
+) -> None:
+    """RunTeamWorkflowV2's Phase 3 activity must not opt into pause_strategy="return":
+    neither RunTeamWorkflow (V1) nor RunTeamWorkflowV2 defines a submit_answers Temporal
+    signal, so a pause under "return" would raise _ActivityPauseSignal with nothing to
+    resume it — POST /run-team/{job_id}/answers only ever writes to the job store, it
+    never signals a workflow. Regression guard: this pins the "V2 HITL == V1 HITL"
+    equivalence this codebase currently relies on for job-store-poll-based resume."""
+    from software_engineering_team.shared import job_store as js
+    from software_engineering_team.temporal import activities
+
+    js.create_job("ec-pause-strategy", repo_path=str(tmp_path))
+
+    captured: Dict[str, Any] = {}
+
+    def fake_orchestrator(job_id, repo_path, plan_input, **kwargs):
+        captured.update(kwargs)
+
+    import software_engineering_team.coding_team_orchestrator as coding_orch
+
+    monkeypatch.setattr(coding_orch, "run_coding_team_orchestrator", fake_orchestrator)
+
+    from planning_adapter import PlanningAdapterResult
+
+    from shared.dev_models.models import ProductRequirements
+
+    adapter_dict = PlanningAdapterResult(
+        requirements=ProductRequirements(
+            title="T",
+            description="d",
+            acceptance_criteria=[],
+            constraints=[],
+            priority="medium",
+            metadata={},
+        ),
+        project_overview={},
+        open_questions=[],
+        assumptions=[],
+    ).to_dict()
+    activities.execute_coding_team_activity(
+        "ec-pause-strategy",
+        str(tmp_path),
+        {"adapter_result_dict": adapter_dict, "spec_content_for_planning": "s"},
+    )
+
+    assert captured.get("pause_strategy", "block") == "block", (
+        'execute_coding_team_activity must not pass pause_strategy="return" until '
+        "RunTeamWorkflowV2 defines a submit_answers signal to resume it"
+    )
+
+
 def test_temporal_pra_and_planning_updaters_are_the_shared_band_factories(monkeypatch) -> None:
     """The Temporal activities must use the same updater factories as the thread
     path so sub-agent 0-100 progress is rescaled onto the phase bands — a raw

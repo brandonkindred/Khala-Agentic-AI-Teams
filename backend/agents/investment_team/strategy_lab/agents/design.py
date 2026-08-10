@@ -29,7 +29,6 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 from strands import Agent
 
 from llm_service.interface import LLMSemanticExhaustionError
-from shared.env_config import env_int
 
 from ...models import StrategyLabRecord
 from ...signal_intelligence_agent import brief_to_prompt_block
@@ -39,6 +38,7 @@ from ...strategy_lab_context import (
     format_prior_attribution,
     format_prior_results,
 )
+from ..budget_config import StrategyLabBudgetConfig
 from ..exceptions import StrategyLabLLMError
 from ..market_regime import RegimeSummary, regime_to_prompt_block
 from . import _structured_output as so
@@ -49,7 +49,6 @@ from ._parse_helpers import (
     StrategySpecParseError,
     build_json_correction_prompt,
     extract_json_object,
-    parse_retry_budget,
     validate_structured_rules,
 )
 from ._response_schemas import CRITIQUE_SCHEMA, DESIGN_SPEC_SCHEMA
@@ -580,7 +579,7 @@ class DesignAgent:
         instead of re-deriving cleanly from ``user_prompt``, as this loop
         has always done.
         """
-        retries = parse_retry_budget("STRATEGY_LAB_DESIGN_PARSE_RETRIES")
+        retries = StrategyLabBudgetConfig.from_env().design_parse_retries
         # ``run_json_with_parse_retry`` only returns the validated dict; the
         # rationale is smuggled out via this mutable box because ``_validate``
         # must still return a plain ``Dict`` to match the driver's callback
@@ -858,7 +857,7 @@ def _design_self_revision_rounds() -> int:
     Pre: none.
     Post: returns an ``int >= 0``.
     """
-    return env_int("STRATEGY_LAB_DESIGN_SELF_REVISION_ROUNDS", 1, floor=0)
+    return StrategyLabBudgetConfig.from_env().design_self_revision_rounds
 
 
 _CORRECTION_PREAMBLE = """\

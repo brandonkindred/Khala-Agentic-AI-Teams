@@ -1,8 +1,8 @@
-"""Compile an AgenticTeamAgent roster definition into a live strands.Agent.
+"""Compile resolved persona fields into a live strands.Agent.
 
-Used by the interactive testing mode to turn declarative agent
-definitions (role, skills, capabilities, tools, expertise) into
-runnable agents that can respond to user messages.
+Used by the interactive testing mode and pipeline runner to turn
+join-at-read persona fields (role, skills, capabilities, tools, expertise)
+into runnable agents that can respond to user messages.
 
 The strands SDK is a hard dependency. The system will fail fast if it is not installed.
 """
