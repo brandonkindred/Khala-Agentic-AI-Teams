@@ -952,16 +952,22 @@ class OllamaLLMClient(LLMClient):
             response_preview=text[:500],
         )
 
-    def _resolve_think(self, think: "bool | str | None") -> "bool | str":
+    def _resolve_think(
+        self, think: "bool | str | None", *, response_format: str = "text"
+    ) -> "bool | str":
         """Resolve the caller's think request into the wire value for this model.
 
         Delegates to ``llm_config.resolve_think_for_model``: explicit values
         win (string level verbatim, False off); True/None upgrade to the
         model's highest registered thinking level ("max thinking"), or plain
         True for models with no registered levels; None respects the
-        LLM_ENABLE_THINKING global default.
+        LLM_ENABLE_THINKING global default. ``response_format="json"`` with no
+        explicit ``think`` and no per-agent pin resolves to False instead of
+        the model's max tier — see ``resolve_think_for_model``.
         """
-        return llm_config.resolve_think_for_model(self.model, think)
+        return llm_config.resolve_think_for_model(
+            self.model, think, response_format=response_format
+        )
 
     def _parse_response_content(self, data: dict) -> str:
         """Extract content or tool_calls from OpenAI-compatible response.
@@ -1747,7 +1753,7 @@ class OllamaLLMClient(LLMClient):
         think: "bool | str | None" = None,
         **kwargs: Any,
     ) -> Dict[str, Any]:
-        think = self._resolve_think(think)
+        think = self._resolve_think(think, response_format="json")
         max_retries, backoff_base, backoff_max = _parse_retry_config()
         rl_max_retries, rl_initial, rl_cap = self._rate_limit_retry_config()
         sem = get_llm_semaphore()
@@ -2307,7 +2313,7 @@ class OllamaLLMClient(LLMClient):
     ) -> Any:
         if response_format not in ("json", "text"):
             raise ValueError(f"response_format must be 'json' or 'text', got {response_format!r}")
-        think = self._resolve_think(think)
+        think = self._resolve_think(think, response_format=response_format)
         max_retries, backoff_base, backoff_max = _parse_retry_config()
         rl_max_retries, rl_initial, rl_cap = self._rate_limit_retry_config()
         sem = get_llm_semaphore()

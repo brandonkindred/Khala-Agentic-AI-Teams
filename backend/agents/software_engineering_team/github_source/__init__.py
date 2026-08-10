@@ -2,7 +2,8 @@
 GitHub source integrations for the coding team.
 
 Includes issue selection for issue-driven runs, PR review comment mapping,
-existing-comment handling, issue-proposal generation, and repository reading.
+existing-comment handling, issue-proposal generation, LLM Fibonacci-scoring
+prompt/schema contract, and repository reading.
 """
 
 from .client import (
@@ -50,6 +51,11 @@ from .issue_proposals import (
     group_similar_findings,
     proposal_from_findings,
 )
+from .issue_scoring import (
+    FIBONACCI_COMPLEXITY_VALUES,
+    ScoreBreakdown,
+    build_scoring_prompt,
+)
 from .issue_to_plan import issue_to_plan_input
 from .pr_review_mapping import (
     build_review_body,
@@ -66,6 +72,7 @@ from .pr_review_mapping import (
 from .repo_reader import GitHubRepoReader
 
 __all__ = [
+    "FIBONACCI_COMPLEXITY_VALUES",
     "MAX_ISSUES_TRAVERSED",
     "MAX_REVIEW_COMMENTS_TRAVERSED",
     "MAX_REVIEW_THREADS_TRAVERSED",
@@ -90,6 +97,7 @@ __all__ = [
     "build_issue_from_proposal",
     "build_review_body",
     "build_sub_issue",
+    "build_scoring_prompt",
     "choose_event",
     "complexity_label",
     "duplicate_check_max_open_issues",
