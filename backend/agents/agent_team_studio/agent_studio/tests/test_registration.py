@@ -126,6 +126,15 @@ def _manifest(**overrides) -> AgentManifest:
     return AgentManifest(**base)
 
 
+def test_clone_from_manifest_returns_agent_definition_not_manifest() -> None:
+    # Regression for #5896: clone-from-registry must project the AgentManifest SoT
+    # into the editable AgentDefinition view-model, never return (or leak) a second
+    # AgentManifest-shaped identity as the draft.
+    draft = clone_from_manifest(_manifest())
+    assert isinstance(draft, AgentDefinition)
+    assert not isinstance(draft, AgentManifest)
+
+
 def test_clone_from_manifest_produces_refine_draft() -> None:
     manifest = _manifest()
     draft = clone_from_manifest(manifest)

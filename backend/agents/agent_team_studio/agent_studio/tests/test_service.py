@@ -177,6 +177,18 @@ def test_clone_from_registry_unknown_raises_lookup_error() -> None:
         svc.clone_from_registry("missing")
 
 
+def test_clone_from_registry_persists_no_second_identity() -> None:
+    # Regression for #5896: clone-from-registry only reads the source manifest
+    # (registry.get) — it must never register anything, so no second persisted
+    # identity is created as a side effect of cloning.
+    svc, registry = _service()
+    registry.seed(seed_manifest())
+    draft = svc.clone_from_registry("blogging.planner")
+    assert isinstance(draft, AgentDefinition)
+    assert not isinstance(draft, AgentManifest)
+    assert registry.registered == {}
+
+
 # ── save_agent ───────────────────────────────────────────────────────────────
 
 
