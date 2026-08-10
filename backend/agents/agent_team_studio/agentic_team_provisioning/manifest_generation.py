@@ -26,13 +26,13 @@ from agent_registry.models import (
     IOSchema,
     SourceInfo,
 )
-from agent_team_studio.agentic_team_provisioning.generated_runtime import (
+from agent_team_studio.agentic_team_provisioning.models import SOURCE_GENERATED, AgenticTeamAgent
+from agent_team_studio.generated_runtime import (
     GENERATED_AGENT_ANATOMY_REF,
     GENERATED_AGENT_ENTRYPOINT,
     GENERATED_AGENT_INPUT_REF,
     GENERATED_AGENT_OUTPUT_REF,
 )
-from agent_team_studio.agentic_team_provisioning.models import SOURCE_GENERATED, AgenticTeamAgent
 
 # The registry team key for this service (matches TEAM_CONFIGS in
 # unified_api/config.py). This is the manifest ``team`` value — distinct from the

@@ -23,7 +23,7 @@ from __future__ import annotations
 
 from agent_registry.manifest_projection import filter_marker_tags, hash_suffix, revalidate, slug
 from agent_registry.models import AgentManifest, AgentStateSpec, CognitionSpec, IOSchema, SourceInfo
-from agent_team_studio.agentic_team_provisioning.generated_runtime import (
+from agent_team_studio.generated_runtime import (
     GENERATED_AGENT_ANATOMY_REF,
     GENERATED_AGENT_ENTRYPOINT,
     GENERATED_AGENT_INPUT_REF,

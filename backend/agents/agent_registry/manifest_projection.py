@@ -22,7 +22,7 @@ from .models import AgentManifest
 def slug(value: str, max_len: int = 40) -> str:
     """Lowercase, hyphenated slug of ``value``, bounded to ``max_len`` chars.
 
-    Preconditions: ``max_len > 0``.
+    Preconditions: ``max_len > 0`` (raises ``ValueError`` otherwise).
     Postconditions: returns ``value`` lowercased with runs of non-alphanumeric
         characters collapsed to a single ``-``, leading/trailing ``-`` stripped,
         and truncated to at most ``max_len`` characters (with any ``-`` left
@@ -30,6 +30,8 @@ def slug(value: str, max_len: int = 40) -> str:
         ``value`` is ``None``, empty, or slugs to nothing (e.g. all-symbol
         input).
     """
+    if max_len <= 0:
+        raise ValueError("slug: max_len must be positive")
     cleaned = re.sub(r"[^a-zA-Z0-9]+", "-", (value or "").strip().lower()).strip("-")
     return (cleaned[:max_len] if cleaned else "agent").rstrip("-")
 
@@ -37,11 +39,14 @@ def slug(value: str, max_len: int = 40) -> str:
 def hash_suffix(value: str, length: int) -> str:
     """Stable hex digest prefix of ``value``.
 
-    Preconditions: ``value`` is a string; ``0 < length <= 64``.
+    Preconditions: ``value`` is a string; ``0 < length <= 64`` (raises
+        ``ValueError`` otherwise).
     Postconditions: returns ``hashlib.sha256(value.encode("utf-8")).hexdigest()[:length]``
         — deterministic for a given ``value``, and callers choose their own
         ``length`` (and their own slug/id format around it).
     """
+    if not 0 < length <= 64:
+        raise ValueError("hash_suffix: length must satisfy 0 < length <= 64")
     return hashlib.sha256(value.encode("utf-8")).hexdigest()[:length]
 
 

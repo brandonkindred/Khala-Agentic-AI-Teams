@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from agent_registry.manifest_projection import filter_marker_tags, hash_suffix, revalidate, slug
 from agent_registry.models import AgentManifest, SourceInfo
 
@@ -38,6 +40,13 @@ def test_slug_truncates_to_max_len_and_strips_dangling_hyphen() -> None:
     assert not result.endswith("-")
 
 
+def test_slug_rejects_non_positive_max_len() -> None:
+    with pytest.raises(ValueError):
+        slug("Agent", max_len=0)
+    with pytest.raises(ValueError):
+        slug("Agent", max_len=-1)
+
+
 def test_hash_suffix_is_deterministic() -> None:
     assert hash_suffix("Router Agent", 8) == hash_suffix("Router Agent", 8)
 
@@ -49,6 +58,15 @@ def test_hash_suffix_respects_length() -> None:
 
 def test_hash_suffix_differs_for_different_inputs() -> None:
     assert hash_suffix("Router Agent", 8) != hash_suffix("Resolution Agent", 8)
+
+
+def test_hash_suffix_rejects_out_of_range_length() -> None:
+    with pytest.raises(ValueError):
+        hash_suffix("Agent", 0)
+    with pytest.raises(ValueError):
+        hash_suffix("Agent", -1)
+    with pytest.raises(ValueError):
+        hash_suffix("Agent", 65)
 
 
 def test_filter_marker_tags_removes_markers_and_preserves_order() -> None:

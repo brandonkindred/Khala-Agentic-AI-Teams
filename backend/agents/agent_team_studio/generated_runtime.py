@@ -1,11 +1,15 @@
 """Single source for the generated-agent runtime-binding contract.
 
 Every manifest that points at the shared generated-agent invoke shim —
-whether built for a provisioned team's roster (``manifest_generation.py``) or
-for an agent saved from the Agent Studio UI
+whether built for a provisioned team's roster
+(``agent_team_studio.agentic_team_provisioning.manifest_generation``) or for
+an agent saved from the Agent Studio UI
 (``agent_team_studio.agent_studio.registration``) — must bind to the same
-entrypoint, invoke schemas, and anatomy doc. Both authoring surfaces import
-these constants rather than restating them.
+entrypoint, invoke schemas, and anatomy doc.
+
+This module lives directly under ``agent_team_studio`` — a neutral, sibling-
+level home owned by neither authoring surface — so importing it never creates
+a dependency of one surface's package on the other's.
 """
 
 from __future__ import annotations
