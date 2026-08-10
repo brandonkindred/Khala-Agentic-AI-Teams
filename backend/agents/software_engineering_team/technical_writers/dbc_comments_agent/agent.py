@@ -6,10 +6,9 @@ import logging
 from typing import Callable, List, Optional
 
 from llm_service import LLMClient, complete_validated, get_client
-from software_engineering_team.shared.chunking import parse_code_into_file_blocks
 from software_engineering_team.shared.context_sizing import compute_code_review_map_chunk_chars
 
-from .chunking import DbcChunk, build_dbc_chunks
+from .chunking import DbcChunk, build_dbc_chunks, parse_code_into_file_blocks
 from .merge import apply_dbc_insertions
 from .models import (
     DEFAULT_SUGGESTED_COMMIT_MESSAGE,

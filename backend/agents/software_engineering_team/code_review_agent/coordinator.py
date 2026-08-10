@@ -123,7 +123,6 @@ from .chunking import (
     build_review_chunks,
     cap_chunk_content,
     cap_review_chunk,
-    parse_code_into_file_blocks,
     split_block_into_segments,
 )
 from .false_positive_filter import CodebaseIndex, filter_false_positives
@@ -175,7 +174,6 @@ __all__ = [
     "clear_submission_outcome_cache",
     "_submission_fingerprint",
     "MIN_SPLIT_SEGMENT_CHARS",
-    "parse_code_into_file_blocks",
     "split_block_into_segments",
     "build_review_chunks",
     "cap_chunk_content",
