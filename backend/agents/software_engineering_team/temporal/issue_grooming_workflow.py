@@ -4,10 +4,10 @@ GitHub issue grooming (Phase A score/template, then Phase B sub-issue split)
 currently runs in thread mode only. This module is the scaffold that makes it
 importable as a Temporal package: typed request/result payloads plus stub
 ``@activity.defn``/``@workflow.defn`` registrations, exported as ``WORKFLOWS``
-and ``ACTIVITIES`` for the coding-team Temporal worker
-(``software_engineering_team.temporal.coding_team_worker``) to pick up. Real
-Phase A->B execution, workflow orchestration, and worker registration land in
-follow-up changes -- the stub bodies below only validate shape and raise.
+and ``ACTIVITIES`` and registered onto the coding-team Temporal worker
+(``software_engineering_team.temporal.coding_team_worker``). Real Phase A->B
+execution and workflow orchestration land in follow-up changes -- the stub
+bodies below only validate shape and raise.
 
 Like ``coding_team_workflow.py``, this module MUST NOT start a worker or read
 ``TEMPORAL_ADDRESS`` at import time: it defines ``IssueGroomingWorkflow``, so
@@ -105,7 +105,7 @@ class IssueGroomingWorkflow:
 WORKFLOWS = [IssueGroomingWorkflow]
 ACTIVITIES = [run_issue_grooming_activity]
 
-# NB: no worker self-boot at import time -- see module docstring. Boot will
-# live in ``software_engineering_team.temporal.coding_team_worker`` once
-# these lists are registered onto the coding-team worker (follow-up change),
-# the same place ``CodingTeamWorkflow``'s own boot lives.
+# NB: no worker self-boot at import time -- see module docstring. Boot lives
+# in ``software_engineering_team.temporal.coding_team_worker``, which merges
+# these lists onto the coding-team worker alongside ``CodingTeamWorkflow``'s
+# own ``WORKFLOWS``/``ACTIVITIES``.
