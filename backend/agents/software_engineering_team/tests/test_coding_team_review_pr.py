@@ -11,8 +11,7 @@ import asyncio
 import json
 from pathlib import Path
 from typing import Any, Callable, Optional
-from unittest.mock import AsyncMock
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import httpx
 import pytest
