@@ -68,6 +68,13 @@ describe('DeepthoughtDashboardComponent', () => {
     expect(component.showSettings).toBe(false);
   });
 
+  it('neutralizes malicious HTML when rendering markdown', () => {
+    const html = component.renderMarkdown('<script>alert(1)</script>\n# Safe Title');
+    expect(html).not.toContain('<script');
+    expect(html).not.toContain('alert(1)');
+    expect(html).toContain('Safe Title');
+  });
+
   it('should clear state on new conversation', () => {
     component.messages = [{ role: 'user', content: 'test', timestamp: '2024-01-01' }];
     component.newConversation();
