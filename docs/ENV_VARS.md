@@ -799,7 +799,7 @@ calls (and therefore cost/latency) for files with many findings; raising it
 trades that against a larger prompt per call. This is a cap on how many
 *findings* share one verification call — it has no counterpart for the cited
 *file*'s content, because that content is never inlined into the prompt at
-all (see `CODE_REVIEW_FALSE_POSITIVE_FILTER` above): the model always fetches
+all (see `CODE_REVIEW_FALSE_POSITIVE_FILTER` below): the model always fetches
 it via the unbounded `read_file` tool, so there is nothing to cap.
 
 ### CODE_REVIEW_MAX_CONCURRENT_ACTIVITIES
