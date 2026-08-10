@@ -54,6 +54,7 @@ from .function_boundaries import (
     EnclosingConstruct,
     enclosing_construct,
     enclosing_construct_start_heuristic,
+    hunk_segment_bounds,
     iter_constructs,
     segment_containing_line,
     strip_numbered_prefixes,
@@ -986,7 +987,11 @@ def _format_reference_hit(index: CodebaseIndex, path: str, lineno: int) -> str:
           is found (module-level hit, non-Python file, unparsable content),
           appends a bounded ``_EXCERPT_WINDOW_LINES``-line window around the
           hit instead, via ``_format_line_window`` -- excerpt payloads stay
-          bounded even when no construct can be resolved.
+          bounded even when no construct can be resolved. When the content is
+          pre-numbered (``mapper is not None``), the no-construct window is
+          additionally clipped to ``hunk_segment_bounds``' gap-bounded segment
+          so it can never cross a bare ``"..."`` separator into a different,
+          non-contiguous hunk; plain content is unaffected.
         - Returns only the locator when the file content itself is
           unreadable.
         - Never raises.
@@ -1028,7 +1033,12 @@ def _format_reference_hit(index: CodebaseIndex, path: str, lineno: int) -> str:
             hi=construct.end_line,
         )
         return f"{loc}\n{excerpt}"
-    excerpt = _format_line_window(display, body_lines, lineno, mapper=mapper)
+    if mapper is not None:
+        bounds = hunk_segment_bounds(stripped, lineno, annotated_hunks=True)
+        lo, hi = bounds if bounds is not None else (1, None)
+    else:
+        lo, hi = 1, None
+    excerpt = _format_line_window(display, body_lines, lineno, mapper=mapper, lo=lo, hi=hi)
     return f"{loc}\n{excerpt}"
 
 
