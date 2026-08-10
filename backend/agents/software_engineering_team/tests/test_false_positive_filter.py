@@ -16,6 +16,7 @@ chunk review and the verification call in an end-to-end run.
 from __future__ import annotations
 
 import dataclasses
+import json
 import logging
 import re
 import threading
@@ -29,6 +30,7 @@ from code_review_agent.false_positive_filter import (
     DEFAULT_VERIFY_MAX_FINDINGS_PER_GROUP,
     DEFAULT_VERIFY_TIMEOUT_SECONDS,
     CodebaseIndex,
+    _agent_read_the_cited_file,
     _build_group_prompt,
     _build_tools,
     _code_fence_for,
@@ -79,7 +81,142 @@ def _input(files: Optional[Dict[str, str]] = None, **overrides: Any) -> CodeRevi
     return CodeReviewInput(**base)
 
 
-class _VerdictStub(DummyLLMClient):
+_READ_FILE_CALL_RE = re.compile(r'read_file\("([^"]+)"\)')
+
+
+def _first_user_text(messages: List[Any]) -> str:
+    """Extract the text of the *first* user message in a Strands message list.
+
+    Unlike ``DummyLLMClient``'s own ``_last_user_text`` (which returns the
+    *latest* user turn -- the tool-result turn after a simulated tool call),
+    this returns the original verification prompt so a stub can keep routing
+    on it after the tool round-trip.
+    """
+    for msg in messages:
+        if not isinstance(msg, dict) or msg.get("role") != "user":
+            continue
+        parts = []
+        for block in msg.get("content") or []:
+            if isinstance(block, dict) and "text" in block:
+                parts.append(str(block["text"]))
+            elif isinstance(block, str):
+                parts.append(block)
+        return "\n".join(parts)
+    return ""
+
+
+def _tool_use_stream_events(
+    tool_use_id: str, name: str, tool_input: Dict[str, Any]
+) -> List[Dict[str, Any]]:
+    """Build the Strands stream-event sequence for one simulated tool-use turn."""
+    return [
+        {"messageStart": {"role": "assistant"}},
+        {
+            "contentBlockStart": {
+                "contentBlockIndex": 0,
+                "start": {"toolUse": {"toolUseId": tool_use_id, "name": name}},
+            },
+        },
+        {
+            "contentBlockDelta": {
+                "contentBlockIndex": 0,
+                "delta": {"toolUse": {"input": json.dumps(tool_input)}},
+            },
+        },
+        {"contentBlockStop": {"contentBlockIndex": 0}},
+        {
+            "messageStop": {"stopReason": "tool_use"},
+            "metadata": {
+                "usage": {"inputTokens": 0, "outputTokens": 0, "totalTokens": 0},
+                "metrics": {"latencyMs": 1},
+            },
+        },
+    ]
+
+
+def _final_text_stream_events(text: str) -> List[Dict[str, Any]]:
+    """Build the Strands stream-event sequence for one simulated final-text turn."""
+    return [
+        {"messageStart": {"role": "assistant"}},
+        {"contentBlockStart": {"contentBlockIndex": 0, "start": {}}},
+        {"contentBlockDelta": {"contentBlockIndex": 0, "delta": {"text": text}}},
+        {"contentBlockStop": {"contentBlockIndex": 0}},
+        {
+            "messageStop": {"stopReason": "end_turn"},
+            "metadata": {
+                "usage": {"inputTokens": 0, "outputTokens": 0, "totalTokens": 0},
+                "metrics": {"latencyMs": 1},
+            },
+        },
+    ]
+
+
+def _any_tool_use_called(messages: List[Any]) -> bool:
+    """Whether any assistant message in ``messages`` already contains a
+    ``toolUse`` block.
+
+    Used by test stubs that need to tell "first turn" (no tool call yet)
+    apart from "post-tool-call turn" (answer with a verdict). A bare
+    ``"toolUse" in str(messages)`` substring check is fragile -- it would
+    misfire if that literal word ever appeared in ordinary prompt text (a
+    finding description, task text) -- so this inspects the actual message
+    structure instead.
+    """
+    return any(
+        isinstance(message, dict)
+        and any(
+            isinstance(block, dict) and "toolUse" in block
+            for block in (message.get("content") or [])
+        )
+        for message in messages
+    )
+
+
+class _SimulatesFileReadToolCall(DummyLLMClient):
+    """``DummyLLMClient`` variant that issues one real, successful ``read_file``
+    call for the CITED file before answering a false-positive-verification
+    prompt, mirroring a well-behaved model. ``_build_group_prompt`` never
+    inlines the cited file's content (only names it and directs the model to
+    read it), and ``_verify_group`` discards any false-positive verdict from a
+    run that never obtained that exact file's full content via a successful
+    ``read_file`` call (see ``_agent_read_the_cited_file``) -- stubs that want
+    a drop honored must actually exercise that tool-call turn instead of
+    answering on the first turn, exactly as this mixin does (it extracts the
+    cited path from the prompt's ``read_file("...")`` directive, so it always
+    targets the right file). Subclasses still customize the final verdict via
+    ``complete_json``, called with the *original* prompt text once the
+    simulated tool call has round-tripped.
+    """
+
+    async def stream(self, messages, tool_specs=None, system_prompt=None, **kwargs: Any):  # type: ignore[override]
+        already_called = _any_tool_use_called(messages)
+        has_read_file_tool = any(
+            isinstance(spec, dict) and spec.get("name") == "read_file"
+            for spec in (tool_specs or [])
+        )
+        first_text = _first_user_text(messages)
+        if has_read_file_tool and "verdicts" in first_text.lower():
+            if not already_called:
+                match = _READ_FILE_CALL_RE.search(first_text)
+                path = match.group(1) if match else "unknown.py"
+                for event in _tool_use_stream_events("sim_read_file", "read_file", {"path": path}):
+                    yield event
+                return
+            self._request_count += 1
+            response_data = self.complete_json(first_text, system_prompt=system_prompt)
+            response_text = (
+                json.dumps(response_data) if isinstance(response_data, dict) else str(response_data)
+            )
+            for event in _final_text_stream_events(response_text):
+                yield event
+            return
+        async for event in super().stream(
+            messages, tool_specs=tool_specs, system_prompt=system_prompt, **kwargs
+        ):
+            yield event
+
+
+class _VerdictStub(_SimulatesFileReadToolCall):
     """Returns canned verdicts for the verification call.
 
     Optionally serves a configured chunk-review response when ``chunk_issues`` is
@@ -132,7 +269,7 @@ class _BadJsonStub(DummyLLMClient):
         return super().complete_json(prompt, **kwargs)
 
 
-class _FencedJsonVerdictStub(DummyLLMClient):
+class _FencedJsonVerdictStub(_SimulatesFileReadToolCall):
     """Returns a verdicts JSON payload wrapped in a ```json fence with leading
     prose from complete_json, simulating an LLM response that still contains
     markdown fencing around its structured output."""
@@ -393,6 +530,71 @@ def test_read_lines_rejects_non_positive_bounds() -> None:
     assert "positive integer" in idx.read_lines("app/main.py", 1, True)  # type: ignore[arg-type]
 
 
+def test_read_lines_pre_numbered_single_hunk_header_matches_body() -> None:
+    """Pre-numbered single-hunk excerpt: header's claimed range must match the
+    body's own embedded original line numbers (the exact bug-report fixture)."""
+    content = "100: def earlier():\n101:     pass\n102: \n"
+    idx = CodebaseIndex(files={"app/main.py": content})
+    result = idx.read_lines("app/main.py", 100, 102)
+    assert result.startswith("app/main.py lines 100–102 (3 lines):")
+    assert "100| def earlier():" in result
+    assert "101|     pass" in result
+    assert "102| " in result
+    # No physical/stripped line numbers (1-3) leak into the header or body.
+    assert "lines 1–3" not in result
+    assert "1| def earlier():" not in result
+
+
+def test_read_lines_pre_numbered_start_outside_coverage_errors() -> None:
+    """A start outside the excerpt's real coverage errors instead of returning
+    a self-contradictory header (the literal read_lines(path, 1, 3) repro)."""
+    content = "100: def earlier():\n101:     pass\n102: \n"
+    idx = CodebaseIndex(files={"app/main.py": content})
+    msg = idx.read_lines("app/main.py", 1, 3)
+    assert msg.startswith("Error:")
+    assert "start line 1" in msg
+    assert "100-102" in msg
+    assert "lines 1-3" not in msg  # no self-contradictory header claiming 1-3
+    assert "lines 1–3" not in msg
+
+
+def test_read_lines_pre_numbered_cross_hunk_gap_errors() -> None:
+    """A start/end pair spanning two non-contiguous hunk segments errors,
+    naming both segments' real coverage, and never leaks the gap marker or
+    the unrelated hunk's content."""
+    content = "100: def earlier():\n101:     pass\n...\n200: def later():\n201:     pass\n"
+    idx = CodebaseIndex(files={"app/main.py": content})
+    msg = idx.read_lines("app/main.py", 100, 201)
+    assert msg.startswith("Error:")
+    assert "100-101" in msg
+    assert "200-201" in msg
+    assert "..." not in msg
+    assert "def later" not in msg
+
+
+def test_read_lines_pre_numbered_clamps_end_past_hunk() -> None:
+    """end far beyond a pre-numbered hunk's last real line clamps to that
+    last line, mirroring the plain-content 'end past EOF clamps' behavior."""
+    content = "100: def earlier():\n101:     pass\n102: \n"
+    idx = CodebaseIndex(files={"app/main.py": content})
+    result = idx.read_lines("app/main.py", 100, 199)
+    assert result.startswith("app/main.py lines 100–102 (3 lines):")
+    assert "100| def earlier():" in result
+    assert "102| " in result
+
+
+def test_read_lines_pre_numbered_missing_line_falls_back() -> None:
+    """A start/end citing a line absent from the excerpt (e.g. a removed diff
+    line) falls back to the nearest preceding available line."""
+    content = "100: def earlier():\n101:     pass\n103:     return None\n"
+    idx = CodebaseIndex(files={"app/main.py": content})
+    result = idx.read_lines("app/main.py", 102, 103)
+    assert not result.startswith("Error:")
+    assert result.startswith("app/main.py lines 101–103 (2 lines):")
+    assert "101|     pass" in result
+    assert "103|     return None" in result
+
+
 def test_read_function_returns_method_in_class_body() -> None:
     """Line inside a method returns only that method's construct body."""
     src = "class C:\n    def m(self):\n        return 1\n\ndef other():\n    return 2\n"
@@ -643,6 +845,28 @@ def test_search_rejects_nonpositive_max(bad_max: int) -> None:
         CodebaseIndex(files={"a.py": "x"}).search("x", max_matches=bad_max)
 
 
+def test_search_pre_numbered_returns_original_line_and_stripped_text() -> None:
+    """``search`` on pre-numbered hunk content reports the original file line
+    number, not the physical/storage index, and strips the ``N: `` prefix."""
+    content = "500: EARLIER = 1\n501: NEEDLE_A = 2\n"
+    idx = CodebaseIndex(files={"mod.py": content})
+    hits = idx.search("NEEDLE_A")
+    assert hits == [("mod.py", 501, "NEEDLE_A = 2")]
+
+
+def test_search_mixed_pre_numbered_and_plain_sources_resolve_independently() -> None:
+    """``search`` resolves a pre-numbered file and a plain file independently
+    in the same index -- one file's numbering never affects the other's."""
+    pre_numbered = "700: EARLIER = 1\n701: NEEDLE_B = 2\n"
+    plain = "OTHER = 1\nNEEDLE_B = 3\n"
+    idx = CodebaseIndex(files={"pre.py": pre_numbered, "plain.py": plain})
+    hits = idx.search("NEEDLE_B")
+    assert hits == [
+        ("pre.py", 701, "NEEDLE_B = 2"),
+        ("plain.py", 2, "NEEDLE_B = 3"),
+    ]
+
+
 _NO_REPO = "No repository access is available beyond this submission."
 
 _HIT_LOC_RE = re.compile(r"^.+:\d+$")
@@ -884,6 +1108,20 @@ def test_find_references_repo_hit_unreadable_at_format_time_returns_locator_only
     assert "def caller" not in result
 
 
+def test_find_references_repo_hit_construct_excerpt_unaffected_by_lineno_fix() -> None:
+    """Repo-half hits (always plain content, never pre-numbered) still resolve their
+    enclosing construct correctly -- the ``lineno``-as-original-line fix for
+    submission hits must not regress the plain-content (``mapper is None``) path."""
+    idx = CodebaseIndex(
+        files={"sub.py": "other\n"},
+        repo_reader=_FakeReader({"caller.py": "def caller():\n    return needle()\n"}),
+    )
+    result = idx.find_references("needle")
+    assert "caller.py:2" in _hit_locs(result)
+    assert "function caller" in result
+    assert "return needle()" in result
+
+
 def test_find_references_module_level_hit_gets_line_window_fallback() -> None:
     """Module-level hits (no enclosing construct) get a bounded raw-line window."""
     src = "A = 1\nB = 2\nNEEDLE = 3\nC = 4\nD = 5\n"
@@ -961,6 +1199,64 @@ def test_find_references_pre_numbered_uses_original_line_and_correct_excerpt() -
     assert _NO_REPO in result
 
 
+def test_find_references_pre_numbered_second_hunk_resolves_correct_construct() -> None:
+    """A hit inside the second hunk of a multi-hunk excerpt resolves to that hunk's
+    own construct, not the first hunk's."""
+    src = "10: def first():\n11:     return 1\n...\n50: def second():\n51:     return NEEDLE\n"
+    idx = CodebaseIndex(files={"mod.py": src})
+    result = idx.find_references("NEEDLE")
+    assert _hit_locs(result) == ["mod.py:51"]
+    assert "function second" in result
+    assert "return NEEDLE" in result
+    assert "function first" not in result
+    assert "return 1" not in result
+    assert _NO_REPO in result
+
+
+def test_find_references_no_construct_window_never_crosses_hunk_gap(monkeypatch) -> None:
+    """A no-construct hit near the end of hunk1 gets a window clipped to hunk1 only --
+    it must not cross the "..." gap marker into unrelated hunk2 content."""
+    import code_review_agent.false_positive_filter as fpf
+
+    monkeypatch.setattr(fpf, "_EXCERPT_WINDOW_LINES", 6)
+    src = (
+        "100: A = 1\n"
+        "101: B = 2\n"
+        "102: C = 3\n"
+        "103: NEEDLE = 4\n"
+        "...\n"
+        "200: D = 1\n"
+        "201: E = 2\n"
+        "202: F = 3\n"
+        "203: G = 4\n"
+    )
+    idx = CodebaseIndex(files={"mod.py": src})
+    result = idx.find_references("NEEDLE")
+    assert _hit_locs(result) == ["mod.py:103"]
+    body = _hit_body(result)
+    assert "window" in body
+    assert "NEEDLE = 4" in body
+    assert "..." not in body
+    assert "D = 1" not in body
+
+
+def test_find_references_no_construct_window_plain_content_not_clipped(monkeypatch) -> None:
+    """The equivalent window on plain, non-pre-numbered content is deliberately NOT clipped --
+    a literal "..." line in ordinary content carries no gap-marker meaning."""
+    import code_review_agent.false_positive_filter as fpf
+
+    monkeypatch.setattr(fpf, "_EXCERPT_WINDOW_LINES", 6)
+    src = "A = 1\nB = 2\nC = 3\nNEEDLE = 4\n...\nD = 1\nE = 2\nF = 3\nG = 4\n"
+    idx = CodebaseIndex(files={"notes.txt": src})
+    result = idx.find_references("NEEDLE")
+    assert _hit_locs(result) == ["notes.txt:4"]
+    body = _hit_body(result)
+    assert "window" in body
+    assert "NEEDLE = 4" in body
+    assert "..." in body
+    assert "D = 1" in body
+
+
 # --------------------------------------------------------------------------- tools
 
 
@@ -993,7 +1289,8 @@ def test_build_tools_delegate_to_index() -> None:
         "find_function_at_line",
         "find_references",
     }
-    assert read_file("app/main.py") == "def foo(): pass\n"
+    read_result = read_file("app/main.py")
+    assert read_result == {"status": "success", "content": [{"text": "def foo(): pass\n"}]}
     listed = list_files()
     assert "app/main.py" in listed and CodebaseIndex.EXISTING_CODEBASE_PATH in listed
     assert "app/main.py:1: def foo(): pass" in search_codebase("foo")
@@ -1003,6 +1300,24 @@ def test_build_tools_delegate_to_index() -> None:
     assert "1| def foo(): pass" in slice_text
     assert "app/main.py:1" in find_references("foo")
     assert "No references" in find_references("zzz-not-there")
+
+
+def test_search_codebase_tool_pre_numbered_reports_original_line_no_leak() -> None:
+    """search_codebase's "path:line: text" output uses the real original line
+    number and never leaks the raw "N: " prefix into the displayed text."""
+    content = "300: NEEDLE_C = 1\n"
+    idx = CodebaseIndex(files={"svc.py": content})
+    (
+        _read_file,
+        _read_lines,
+        _read_function,
+        _list_files,
+        search_codebase,
+        _find_function_at_line,
+        _find_references,
+    ) = _build_tools(idx)
+    result = search_codebase("NEEDLE_C")
+    assert result == "svc.py:300: NEEDLE_C = 1"
 
 
 def test_build_tools_includes_find_references() -> None:
@@ -1046,7 +1361,7 @@ def test_build_tools_never_raise_on_index_errors(monkeypatch) -> None:
         _build_tools(idx)
     )
 
-    def _boom_read(_self: CodebaseIndex, path: str) -> str:
+    def _boom_read(_self: CodebaseIndex, path: str):
         raise RuntimeError("index boom")
 
     def _boom_read_lines(_self: CodebaseIndex, path: str, start: int, end: int) -> str:
@@ -1064,14 +1379,16 @@ def test_build_tools_never_raise_on_index_errors(monkeypatch) -> None:
     def _boom_search(_self: CodebaseIndex, query: str, max_matches: int = 60):
         raise RuntimeError("index boom")
 
-    monkeypatch.setattr(CodebaseIndex, "read_file", _boom_read)
+    monkeypatch.setattr(CodebaseIndex, "_read", _boom_read)
     monkeypatch.setattr(CodebaseIndex, "read_lines", _boom_read_lines)
     monkeypatch.setattr(CodebaseIndex, "read_function", _boom_read_function)
     monkeypatch.setattr(CodebaseIndex, "read_function_by_name", _boom_read_function_by_name)
     monkeypatch.setattr(CodebaseIndex, "list_files", _boom_list)
     monkeypatch.setattr(CodebaseIndex, "search", _boom_search)
 
-    assert read_file("a.py").startswith("Error:")
+    read_result = read_file("a.py")
+    assert read_result["status"] == "error"
+    assert read_result["content"][0]["text"].startswith("Error:")
     assert read_lines("a.py", 1, 1).startswith("Error:")
     assert read_function("a.py", 1).startswith("Error:")
     assert read_function("a.py", "f").startswith("Error:")
@@ -1560,16 +1877,18 @@ def test_render_finding_block_neutralizes_prompt_metacharacters() -> None:
     assert block[0].count("---") == 2
 
 
-def test_group_prompt_has_anchor_indices_and_full_file_body() -> None:
-    """``_build_group_prompt`` emits per-finding anchor indices, the task description, and the full file body."""
+def test_group_prompt_has_anchor_indices_and_directs_to_read_tool() -> None:
+    """``_build_group_prompt`` emits per-finding anchor indices, the task
+    description, and a directive to fetch the cited file via tools -- it
+    never inlines the file's content."""
     idx = CodebaseIndex(files={"app/main.py": "X" * 50}, existing_codebase="old")
     issues = [_issue(description="d0"), _issue(description="d1", line=None)]
     prompt = _build_group_prompt(idx, "app/main.py", issues, _input())
     assert "verdicts" in prompt.lower()
     assert "Finding index 0" in prompt and "Finding index 1" in prompt
     assert "wire up foo" in prompt  # task description
-    assert "X" * 50 in prompt  # full file body, not truncated
-    assert "first 10 characters" not in prompt
+    assert "X" * 50 not in prompt  # file body never inlined
+    assert 'read_file("app/main.py")' in prompt
 
 
 def test_group_prompt_caps_oversized_task_and_acceptance_fields() -> None:
@@ -1595,11 +1914,13 @@ def test_group_prompt_caps_oversized_task_and_acceptance_fields() -> None:
     assert "short ok" in prompt
 
 
-def test_group_prompt_unreadable_file_uses_placeholder() -> None:
-    """``_build_group_prompt`` never raises when the cited path is unreadable."""
+def test_group_prompt_names_file_without_reading_it() -> None:
+    """``_build_group_prompt`` never reads or resolves ``file_path`` itself --
+    it just names it in the read-tool directive -- so an unresolvable path
+    never raises and is still named."""
     idx = CodebaseIndex(files={"app/main.py": "x = 1\n"})
     prompt = _build_group_prompt(idx, "missing.py", [_issue()], _input())
-    assert "(file content unavailable)" in prompt
+    assert "missing.py" in prompt
     assert "Finding index 0" in prompt
     assert "verdicts" in prompt.lower()
 
@@ -1623,14 +1944,17 @@ def test_code_fence_for_grows_past_backtick_runs() -> None:
     assert _code_fence_for("```") == "````"
 
 
-def test_group_prompt_uses_safe_fence_for_backtick_content() -> None:
-    """A file body containing a ``` fence is wrapped in a longer fence so it cannot close early."""
-    idx = CodebaseIndex(files={"app/doc.md": "before\n```python\nx = 1\n```\nafter\n"})
-    prompt = _build_group_prompt(idx, "app/doc.md", [_issue(file_path="app/doc.md")], _input())
-    # The wrapping fence is four backticks (one longer than the body's run); the
-    # body's own ``` survives intact between them.
-    assert "````" in prompt
-    assert "```python" in prompt
+def test_group_prompt_size_independent_of_file_size() -> None:
+    """``_build_group_prompt`` never inlines the cited file, so its output is
+    byte-identical regardless of how large that file's real content is --
+    there is no budget/cap to exercise because nothing scales with it."""
+    issues = [_issue(description="d0")]
+    small_idx = CodebaseIndex(files={"app/main.py": "x = 1\n"})
+    huge_idx = CodebaseIndex(files={"app/main.py": "y = 2\n" * 100_000})  # ~600KB
+    small_prompt = _build_group_prompt(small_idx, "app/main.py", issues, _input())
+    huge_prompt = _build_group_prompt(huge_idx, "app/main.py", issues, _input())
+    assert small_prompt == huge_prompt
+    assert "y = 2" not in huge_prompt
 
 
 # --------------------------------------------------------------------------- filter behavior
@@ -1857,6 +2181,38 @@ def test_filter_removes_confirmed_false_positive() -> None:
     assert out == [keep]
 
 
+def test_verify_group_disables_strands_tool_result_truncation(monkeypatch) -> None:
+    """_verify_group must construct its Agent with
+    SlidingWindowConversationManager(should_truncate_results=False) so
+    Strands' default overflow-recovery path -- silently truncating an
+    oversized toolResult in place while leaving status="success" -- can
+    never run for this agent. That is what lets
+    _agent_read_the_cited_file trust status=="success" alone: there is no
+    partially-truncated-but-successful shape left for it to have to detect
+    and distinguish from a real, complete read (including one that merely
+    mentions truncation-like text as incidental content)."""
+    import code_review_agent.false_positive_filter as fpf
+    from strands.agent.conversation_manager import SlidingWindowConversationManager
+
+    captured: Dict[str, Any] = {}
+    real_agent_cls = fpf.Agent
+
+    class _CapturingAgent(real_agent_cls):
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            captured.update(kwargs)
+            super().__init__(*args, **kwargs)
+
+    monkeypatch.setattr(fpf, "Agent", _CapturingAgent)
+
+    keep = _issue(description="real bug", line=5)
+    stub = _VerdictStub(verdicts=[{"index": 0, "is_real_issue": True, "confidence": "high"}])
+    filter_false_positives(stub, _input(), [keep])
+
+    manager = captured.get("conversation_manager")
+    assert isinstance(manager, SlidingWindowConversationManager)
+    assert manager.should_truncate_results is False
+
+
 def test_filter_drop_log_truncates_description(caplog) -> None:
     """Drop INFO logs truncate oversized description and reasoning fields."""
     keep = _issue(description="real", line=5)
@@ -1934,6 +2290,533 @@ def test_filter_keeps_on_low_confidence_false() -> None:
     assert out == issues
 
 
+def test_filter_keeps_ungrounded_drop_from_a_run_with_no_tool_call(caplog) -> None:
+    """A high-confidence false-positive verdict is discarded (finding kept) when
+    the run that produced it never called any tool -- the cited file's content
+    is never inlined (``_build_group_prompt``), so an answer given on the first
+    turn was never grounded in real code, however confident the JSON claims to
+    be. Uses a plain ``DummyLLMClient`` (not ``_SimulatesFileReadToolCall``):
+    the whole point is that no tool call happens."""
+    issues = [_issue()]
+
+    class NoToolCallDropStub(DummyLLMClient):
+        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:  # type: ignore[override]
+            if "verdicts" in prompt.lower():
+                return {"verdicts": [{"index": 0, "is_real_issue": False, "confidence": "high"}]}
+            return super().complete_json(prompt, **kwargs)
+
+    with caplog.at_level(logging.WARNING):
+        out = filter_false_positives(NoToolCallDropStub(), _input(), issues)
+    assert out == issues  # the drop is discarded -- kept, not removed
+    assert any(
+        "without ever successfully reading that file's full content" in r.message
+        for r in caplog.records
+    )
+
+
+def test_filter_keeps_drop_when_run_only_called_list_files(caplog) -> None:
+    """A run that calls only list_files() (no code content) before a confident
+    drop is treated the same as no tool call at all -- listing paths is not
+    evidence of having read the cited file."""
+    issues = [_issue()]
+
+    class ListFilesOnlyDropStub(DummyLLMClient):
+        async def stream(self, messages, tool_specs=None, system_prompt=None, **kwargs: Any):  # type: ignore[override]
+            if not _any_tool_use_called(messages):
+                for event in _tool_use_stream_events("t_list", "list_files", {}):
+                    yield event
+                return
+            text = json.dumps(
+                {"verdicts": [{"index": 0, "is_real_issue": False, "confidence": "high"}]}
+            )
+            for event in _final_text_stream_events(text):
+                yield event
+
+    with caplog.at_level(logging.WARNING):
+        out = filter_false_positives(ListFilesOnlyDropStub(), _input(), issues)
+    assert out == issues
+    assert any(
+        "without ever successfully reading that file's full content" in r.message
+        for r in caplog.records
+    )
+
+
+def test_filter_keeps_drop_when_only_a_different_file_was_read(caplog) -> None:
+    """A run that successfully reads a DIFFERENT file than the one cited --
+    e.g. confirming "foo is defined in util.py" -- but never reads the cited
+    file itself does NOT have its drop honored: file identity IS enforced for
+    the cited file specifically (unlike merely-related files, which remain
+    useful for cross-file reasoning but are never sufficient on their own --
+    see test_filter_honors_drop_when_cited_file_and_a_related_file_are_both_read)."""
+    issues = [_issue(file_path="app/main.py")]
+
+    class ReadsSiblingFileOnlyDropStub(DummyLLMClient):
+        async def stream(self, messages, tool_specs=None, system_prompt=None, **kwargs: Any):  # type: ignore[override]
+            if not _any_tool_use_called(messages):
+                for event in _tool_use_stream_events(
+                    "t_sibling", "read_file", {"path": "app/util.py"}
+                ):
+                    yield event
+                return
+            text = json.dumps(
+                {"verdicts": [{"index": 0, "is_real_issue": False, "confidence": "high"}]}
+            )
+            for event in _final_text_stream_events(text):
+                yield event
+
+    inp = _input(
+        files={
+            "app/main.py": "def bar():\n    return foo()\n",
+            "app/util.py": "def foo():\n    return 1\n",
+        }
+    )
+    with caplog.at_level(logging.WARNING):
+        out = filter_false_positives(ReadsSiblingFileOnlyDropStub(), inp, issues)
+    assert out == issues
+    assert any(
+        "without ever successfully reading that file's full content" in r.message
+        for r in caplog.records
+    )
+
+
+def test_filter_keeps_all_drops_in_a_batch_when_only_a_narrow_slice_was_read(caplog) -> None:
+    """The exact scenario the batch-level check exists to close: a batch with
+    MULTIPLE findings on the cited file, where the run calls read_lines() for
+    only a narrow region (never the full file via read_file) before confidently
+    dropping every finding. None of those drops is honored -- a partial slice
+    never satisfies the ``read_file``-on-the-whole-cited-file bar, regardless
+    of how many findings are in the batch."""
+    issues = [_issue(description=f"finding-{i}") for i in range(3)]
+
+    class NarrowSliceOnlyDropStub(DummyLLMClient):
+        async def stream(self, messages, tool_specs=None, system_prompt=None, **kwargs: Any):  # type: ignore[override]
+            if not _any_tool_use_called(messages):
+                for event in _tool_use_stream_events(
+                    "t_slice", "read_lines", {"path": "app/main.py", "start": 1, "end": 1}
+                ):
+                    yield event
+                return
+            text = json.dumps(
+                {
+                    "verdicts": [
+                        {"index": i, "is_real_issue": False, "confidence": "high"} for i in range(3)
+                    ]
+                }
+            )
+            for event in _final_text_stream_events(text):
+                yield event
+
+    with caplog.at_level(logging.WARNING):
+        out = filter_false_positives(NarrowSliceOnlyDropStub(), _input(), issues)
+    assert out == issues  # every drop in the batch discarded, not just some
+    assert any(
+        "without ever successfully reading that file's full content" in r.message
+        for r in caplog.records
+    )
+
+
+def test_filter_honors_drop_when_run_did_call_a_tool() -> None:
+    """The mirror of the above: the same high-confidence drop IS honored once
+    the run actually issued a successful read_file() call on the cited file
+    first (``_SimulatesFileReadToolCall``), confirming the new check is about
+    grounded-read evidence, not confidence level (which was already high in
+    the discarded cases above)."""
+    issues = [_issue()]
+    stub = _VerdictStub(verdicts=[{"index": 0, "is_real_issue": False, "confidence": "high"}])
+    out = filter_false_positives(stub, _input(), issues)
+    assert out == []
+
+
+def test_filter_honors_drop_when_cited_file_is_genuinely_empty() -> None:
+    """A drop for a genuinely empty cited file (e.g. an unchanged, zero-byte
+    __init__.py) is still honored end to end: the simulated read_file() call
+    succeeds with empty content, and that must count as grounded (not be
+    mistaken for "never read"), so a finding wrongly claiming the file is
+    missing can still be dropped. Uses a repo_reader-backed empty file rather
+    than an empty submission ``files`` entry, since CodebaseIndex.from_input
+    drops truly-empty-string diff content (see
+    test_index_from_files_keeps_whitespace_only); an existing empty repo file
+    is a distinct, legitimately-present case (mirrors
+    test_reader_existing_empty_file_is_present)."""
+    issue = _issue(file_path="pkg/__init__.py", description="pkg/__init__.py must be created")
+    reader = _FakeReader({"pkg/__init__.py": ""})
+    stub = _VerdictStub(verdicts=[{"index": 0, "is_real_issue": False, "confidence": "high"}])
+    out = filter_false_positives(
+        stub,
+        _input(files={"app/main.py": "import pkg\n"}),
+        [issue],
+        repo_reader=reader,
+    )
+    assert out == []
+
+
+def test_filter_honors_drop_when_cited_file_content_starts_with_error() -> None:
+    """A drop for a cited file whose real content legitimately starts with the
+    text "Error:" (e.g. a checked-in log fixture) is still honored end to
+    end: the simulated read_file() call succeeds with that exact content, and
+    it must not be mistaken for this module's own error-sentinel convention."""
+    issue = _issue(
+        file_path="tests/fixtures/log_sample.txt", description="stray debug print left in"
+    )
+    stub = _VerdictStub(verdicts=[{"index": 0, "is_real_issue": False, "confidence": "high"}])
+    out = filter_false_positives(
+        stub,
+        _input(files={"tests/fixtures/log_sample.txt": "Error: connection refused\n"}),
+        [issue],
+    )
+    assert out == []
+
+
+def test_filter_honors_all_drops_in_a_multi_finding_batch_after_full_cited_file_read() -> None:
+    """The positive mirror of the narrow-slice test above: one successful
+    read_file() call for the WHOLE cited file grounds drops for EVERY finding
+    in that batch, not just the one nearest whatever the model happened to
+    inspect first -- the bar is per-batch (all findings share one cited
+    file), by design, once it is actually met."""
+    issues = [_issue(description=f"finding-{i}") for i in range(3)]
+    stub = _VerdictStub(
+        verdicts=[{"index": i, "is_real_issue": False, "confidence": "high"} for i in range(3)]
+    )
+    out = filter_false_positives(stub, _input(), issues)
+    assert out == []
+
+
+def test_filter_honors_drop_when_cited_file_and_a_related_file_are_both_read() -> None:
+    """A run that reads BOTH the cited file (satisfying the required bar) AND
+    a related file for cross-file verification (e.g. confirming a symbol is
+    defined in util.py) still has its drop honored -- reading related files
+    remains useful and encouraged, it is just never a SUBSTITUTE for reading
+    the cited file itself."""
+    issues = [_issue(file_path="app/main.py")]
+
+    class ReadsCitedThenSiblingDropStub(DummyLLMClient):
+        async def stream(self, messages, tool_specs=None, system_prompt=None, **kwargs: Any):  # type: ignore[override]
+            # Branch on how many read_file toolUse blocks have already
+            # appeared, rather than matching path substrings in str(messages):
+            # once Strands parses a streamed toolUse back into a real message,
+            # its "input" dict renders with Python's single-quote repr, so a
+            # double-quoted substring check (matching this stub's own earlier
+            # bug) silently never matches and loops the tool call forever.
+            read_file_calls = sum(
+                1
+                for message in messages
+                for block in (message.get("content") or [])
+                if isinstance(block, dict)
+                and isinstance(block.get("toolUse"), dict)
+                and block["toolUse"].get("name") == "read_file"
+            )
+            if read_file_calls == 0:
+                for event in _tool_use_stream_events(
+                    "t_cited", "read_file", {"path": "app/main.py"}
+                ):
+                    yield event
+                return
+            if read_file_calls == 1:
+                for event in _tool_use_stream_events(
+                    "t_sibling2", "read_file", {"path": "app/util.py"}
+                ):
+                    yield event
+                return
+            text = json.dumps(
+                {"verdicts": [{"index": 0, "is_real_issue": False, "confidence": "high"}]}
+            )
+            for event in _final_text_stream_events(text):
+                yield event
+
+    inp = _input(
+        files={
+            "app/main.py": "def bar():\n    return foo()\n",
+            "app/util.py": "def foo():\n    return 1\n",
+        }
+    )
+    out = filter_false_positives(ReadsCitedThenSiblingDropStub(), inp, issues)
+    assert out == []
+
+
+def _fake_agent(messages: List[Dict[str, Any]]) -> Any:
+    """Build a minimal duck-typed stand-in for a Strands ``Agent`` exposing
+    only the ``.messages`` attribute ``_agent_read_the_cited_file`` reads."""
+
+    class _FakeAgent:
+        pass
+
+    agent = _FakeAgent()
+    agent.messages = messages  # type: ignore[attr-defined]
+    return agent
+
+
+def _tool_use_message(
+    role: str, tool_use_id: str, name: str, path: Optional[str] = None
+) -> Dict[str, Any]:
+    """Build one assistant-style message containing a single toolUse block."""
+    tool_input: Dict[str, Any] = {"path": path} if path is not None else {}
+    return {
+        "role": role,
+        "content": [{"toolUse": {"toolUseId": tool_use_id, "name": name, "input": tool_input}}],
+    }
+
+
+def _tool_result_message(tool_use_id: str, text: str, status: str = "success") -> Dict[str, Any]:
+    """Build one user-style message containing a single toolResult block."""
+    return {
+        "role": "user",
+        "content": [
+            {
+                "toolResult": {
+                    "toolUseId": tool_use_id,
+                    "status": status,
+                    "content": [{"text": text}],
+                }
+            }
+        ],
+    }
+
+
+def test_agent_read_the_cited_file_false_with_no_tool_call() -> None:
+    """No toolUse block at all -> not grounded."""
+    idx = CodebaseIndex(files={"app/main.py": "x = 1\n"})
+    agent = _fake_agent(
+        [
+            {"role": "user", "content": [{"text": "hi"}]},
+            {"role": "assistant", "content": [{"text": "ok"}]},
+        ]
+    )
+    assert _agent_read_the_cited_file(agent, idx, "app/main.py") is False
+
+
+def test_agent_read_the_cited_file_false_for_non_read_file_tools() -> None:
+    """A toolUse for list_files/read_lines/read_function/search_codebase --
+    anything other than a whole-file read_file() call -- does not count, even
+    with a "successful" toolResult."""
+    idx = CodebaseIndex(files={"app/main.py": "x = 1\n"})
+    for tool_name in ("list_files", "read_lines", "read_function", "search_codebase"):
+        agent = _fake_agent(
+            [
+                _tool_use_message("assistant", "t1", tool_name, path="app/main.py"),
+                _tool_result_message("t1", "def foo():\n    return 1\n"),
+            ]
+        )
+        assert _agent_read_the_cited_file(agent, idx, "app/main.py") is False, tool_name
+
+
+def test_agent_read_the_cited_file_false_for_a_framework_level_tool_failure() -> None:
+    """A read_file() toolUse for the cited file whose matching toolResult has
+    status "error" (a genuine framework-level tool failure, distinct from our
+    own "Error: ..." string convention) is not grounded evidence."""
+    idx = CodebaseIndex(files={"app/main.py": "x = 1\n"})
+    agent = _fake_agent(
+        [
+            _tool_use_message("assistant", "t1", "read_file", path="app/main.py"),
+            _tool_result_message("t1", "tool crashed", status="error"),
+        ]
+    )
+    assert _agent_read_the_cited_file(agent, idx, "app/main.py") is False
+
+
+def test_agent_read_the_cited_file_true_when_real_content_starts_with_error() -> None:
+    """A successful read_file() whose real file content happens to start with
+    the literal text "Error:" (e.g. a checked-in log fixture or diagnostic
+    output) still counts as grounded -- success is judged from the index and
+    the toolResult's own status, never by sniffing the returned text, so this
+    can no longer be confused with this module's own "Error: ..." sentinel
+    convention (see CodebaseIndex._read)."""
+    log_fixture = "Error: connection refused\nError: retrying...\n"
+    idx = CodebaseIndex(files={"tests/fixtures/log_sample.txt": log_fixture})
+    agent = _fake_agent(
+        [
+            _tool_use_message("assistant", "t1", "read_file", path="tests/fixtures/log_sample.txt"),
+            _tool_result_message("t1", log_fixture),
+        ]
+    )
+    assert _agent_read_the_cited_file(agent, idx, "tests/fixtures/log_sample.txt") is True
+
+
+def test_agent_read_the_cited_file_trusts_status_over_an_independent_index_probe() -> None:
+    """Grounding is judged ENTIRELY from the specific invocation's own recorded
+    toolResult, never from a fresh, independent ``index`` re-read: even when
+    ``index`` itself cannot read ``file_path`` (e.g. a repo-reader-backed file
+    whose transient failure has since cleared, or one that fails now after
+    having succeeded during the model's actual call), a toolResult the run
+    actually received with ``status="success"`` is still honored -- and,
+    conversely, is never invented from ``index`` alone without a matching
+    toolResult (see ``test_agent_read_the_cited_file_false_with_no_tool_call``).
+    This is what makes the check immune to a flaky reader disagreeing with
+    what the model was actually shown."""
+    idx = CodebaseIndex(files={"app/main.py": "x = 1\n"})
+    agent = _fake_agent(
+        [
+            _tool_use_message("assistant", "t1", "read_file", path="app/missing.py"),
+            _tool_result_message("t1", "class M:\n    pass\n", status="success"),
+        ]
+    )
+    # index has no knowledge of "app/missing.py" at all -- yet the actual
+    # recorded tool call succeeded, so it is trusted.
+    assert _agent_read_the_cited_file(agent, idx, "app/missing.py") is True
+
+
+def test_agent_read_the_cited_file_true_with_a_reasoning_block_before_the_tool_use() -> None:
+    """A thinking-enabled model's turn can prepend a ``reasoningContent``
+    block before its ``toolUse`` (``strands_adapter.py`` lines 564-570), so
+    the toolUse is not necessarily at content index 0 -- and Strands appends
+    only toolResult blocks in the following message (no reasoning echoed
+    back), so a bare same-index positional match would look at the wrong
+    block and miss a real success. Matching by toolUseId within the next
+    message (rather than raw index) finds it regardless of where in either
+    message's content list it sits."""
+    idx = CodebaseIndex(files={"app/main.py": "x = 1\n"})
+    agent = _fake_agent(
+        [
+            {"role": "user", "content": [{"text": "hi"}]},
+            {
+                "role": "assistant",
+                "content": [
+                    {"reasoningContent": {"text": "I should read the cited file first."}},
+                    {
+                        "toolUse": {
+                            "toolUseId": "t1",
+                            "name": "read_file",
+                            "input": {"path": "app/main.py"},
+                        }
+                    },
+                ],
+            },
+            _tool_result_message("t1", "x = 1\n"),
+        ]
+    )
+    assert _agent_read_the_cited_file(agent, idx, "app/main.py") is True
+
+
+def test_agent_read_the_cited_file_false_for_a_different_file() -> None:
+    """A successful read_file() for a DIFFERENT (but real) path than the
+    cited one does not ground it -- file identity is enforced for the exact
+    cited file, unlike the coarser "any real code" check this replaced."""
+    idx = CodebaseIndex(files={"app/main.py": "x = 1\n", "app/util.py": "y = 2\n"})
+    agent = _fake_agent(
+        [
+            _tool_use_message("assistant", "t1", "read_file", path="app/util.py"),
+            _tool_result_message("t1", "y = 2\n"),
+        ]
+    )
+    assert _agent_read_the_cited_file(agent, idx, "app/main.py") is False
+
+
+def test_agent_read_the_cited_file_true_for_successful_read_file() -> None:
+    """A read_file() toolUse for the exact cited path whose matching
+    toolResult has real (non-error) text is grounded evidence."""
+    idx = CodebaseIndex(files={"app/main.py": "x = 1\n"})
+    agent = _fake_agent(
+        [
+            _tool_use_message("assistant", "t1", "read_file", path="app/main.py"),
+            _tool_result_message("t1", "x = 1\n"),
+        ]
+    )
+    assert _agent_read_the_cited_file(agent, idx, "app/main.py") is True
+
+
+def test_agent_read_the_cited_file_true_when_content_is_large() -> None:
+    """Large content grounds normally -- this function no longer inspects
+    the result text for a truncation signature at all. Instead, the caller
+    (_verify_group) configures the Agent's conversation manager with
+    should_truncate_results=False, so Strands' in-place tool-result
+    truncation can never run for this agent in the first place; there is no
+    partially-truncated-but-status-success shape left for this function to
+    have to distinguish from a real, complete read."""
+    idx = CodebaseIndex(files={"app/main.py": "x" * 100_000})
+    agent = _fake_agent(
+        [
+            _tool_use_message("assistant", "t1", "read_file", path="app/main.py"),
+            _tool_result_message("t1", "x" * 100_000, status="success"),
+        ]
+    )
+    assert _agent_read_the_cited_file(agent, idx, "app/main.py") is True
+
+
+def test_agent_read_the_cited_file_true_for_a_genuinely_empty_file() -> None:
+    """A successful read_file() whose result is the empty string -- a real
+    zero-byte cited file, e.g. an unchanged __init__.py -- still counts as
+    grounded. read_file never raises, so an empty result can only mean "the
+    file genuinely has no content", never "the read failed silently"; treating
+    it as ungrounded would make every drop for a blank file impossible."""
+    idx = CodebaseIndex(files={"pkg/__init__.py": ""})
+    agent = _fake_agent(
+        [
+            _tool_use_message("assistant", "t1", "read_file", path="pkg/__init__.py"),
+            _tool_result_message("t1", ""),
+        ]
+    )
+    assert _agent_read_the_cited_file(agent, idx, "pkg/__init__.py") is True
+
+
+def test_agent_read_the_cited_file_true_for_a_resolvable_near_miss_path() -> None:
+    """A read_file() call using a bare/near-miss name that still resolves
+    (via index.resolve_path) to the cited canonical path still counts -- the
+    model is not required to echo the exact quoted string back verbatim."""
+    idx = CodebaseIndex(files={"app/services/main.py": "x = 1\n"})
+    agent = _fake_agent(
+        [
+            _tool_use_message("assistant", "t1", "read_file", path="main.py"),
+            _tool_result_message("t1", "x = 1\n"),
+        ]
+    )
+    assert _agent_read_the_cited_file(agent, idx, "app/services/main.py") is True
+
+
+def test_agent_read_the_cited_file_ignores_a_reused_fallback_id_from_a_later_call() -> None:
+    """When a backend omits real tool-call IDs, the Strands adapter
+    synthesizes a fallback ("{tool_name}_{idx}", strands_adapter.py) that
+    resets to 0 every turn -- so a single-tool-call-per-turn conversation can
+    reuse the identical ID on every turn. A failed read_file() for the cited
+    file must not be credited with a LATER, unrelated read_file() success
+    that happens to carry the same reused ID: this checks message/block
+    POSITION (the toolResult immediately following its toolUse), not the ID,
+    so the two calls -- despite sharing an ID -- are correctly told apart."""
+    idx = CodebaseIndex(files={"cited.py": "x = 1\n", "other.py": "y = 2\n"})
+    agent = _fake_agent(
+        [
+            _tool_use_message("assistant", "read_file_0", "read_file", path="cited.py"),
+            _tool_result_message("read_file_0", "Error: boom", status="error"),
+            _tool_use_message("assistant", "read_file_0", "read_file", path="other.py"),
+            _tool_result_message("read_file_0", "y = 2\n", status="success"),
+        ]
+    )
+    assert _agent_read_the_cited_file(agent, idx, "cited.py") is False
+    # The later call's success is still correctly credited to ITS OWN file.
+    assert _agent_read_the_cited_file(agent, idx, "other.py") is True
+
+
+def test_agent_read_the_cited_file_false_when_tool_use_has_no_following_message() -> None:
+    """A read_file() toolUse for the cited file with no message after it
+    (the run ended mid-call, or the result was never appended) is not
+    grounded -- there is no toolResult to check at all."""
+    idx = CodebaseIndex(files={"app/main.py": "x = 1\n"})
+    agent = _fake_agent(
+        [
+            _tool_use_message("assistant", "t1", "read_file", path="app/main.py"),
+        ]
+    )
+    assert _agent_read_the_cited_file(agent, idx, "app/main.py") is False
+
+
+def test_agent_read_the_cited_file_is_failsafe_on_malformed_messages() -> None:
+    """A malformed/empty ``messages`` never raises -- degrades to False (no
+    grounded read), so the caller's fail-safe keeps rather than drops on
+    ambiguity."""
+    idx = CodebaseIndex(files={"app/main.py": "x = 1\n"})
+
+    class _EmptyAgent:
+        def __init__(self) -> None:
+            self.messages: List[Any] = []
+
+    assert _agent_read_the_cited_file(_EmptyAgent(), idx, "app/main.py") is False  # type: ignore[arg-type]
+
+    class _BrokenAgent:
+        @property
+        def messages(self):
+            raise RuntimeError("boom")
+
+    assert _agent_read_the_cited_file(_BrokenAgent(), idx, "app/main.py") is False  # type: ignore[arg-type]
+
+
 @pytest.mark.parametrize("parallelism", ["1", "4"])
 def test_filter_groups_by_file_and_removes_across_groups(monkeypatch, parallelism) -> None:
     """Findings are verified per file group; a confirmed drop in one group leaves
@@ -1945,21 +2828,21 @@ def test_filter_groups_by_file_and_removes_across_groups(monkeypatch, parallelis
     b = _issue(file_path="b.py", description="b-real")
 
     # Both groups send index 0; the stub marks index 0 false → both would drop,
-    # but b's verdict says real, so only a drops. Route on each file's own
-    # inlined body (a stable invariant of _build_group_prompt) rather than the
-    # "Full content of `<path>`" header wording, so rewording that header
-    # can't silently break this.
-    class PerFileStub(DummyLLMClient):
+    # but b's verdict says real, so only a drops. Route on the group's own
+    # read_file(...) directive rather than a bare "a.py"/"b.py" substring: the
+    # manifest lists every file in the submission (including the other
+    # group's), so a bare filename would match both groups' prompts.
+    class PerFileStub(_SimulatesFileReadToolCall):
         def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:  # type: ignore[override]
             if "verdicts" not in prompt.lower():
                 return super().complete_json(prompt, **kwargs)
-            if "SENTINEL_A" in prompt:
+            if 'read_file("a.py")' in prompt:
                 return {"verdicts": [{"index": 0, "is_real_issue": False, "confidence": "high"}]}
-            if "SENTINEL_B" in prompt:
+            if 'read_file("b.py")' in prompt:
                 return {"verdicts": [{"index": 0, "is_real_issue": True, "confidence": "high"}]}
             return super().complete_json(prompt, **kwargs)
 
-    inp = _input(files={"a.py": "SENTINEL_A\n", "b.py": "SENTINEL_B\n"})
+    inp = _input(files={"a.py": "content-a\n", "b.py": "content-b\n"})
     out = filter_false_positives(PerFileStub(), inp, [a, b])
     assert out == [b]
 
@@ -2018,7 +2901,7 @@ def test_filter_merges_verdicts_across_split_batches(monkeypatch) -> None:
     monkeypatch.setenv("CODE_REVIEW_VERIFY_MAX_FINDINGS_PER_GROUP", "2")
     issues = [_issue(description=f"finding-{i}") for i in range(4)]
 
-    class AlwaysDropFirstStub(DummyLLMClient):
+    class AlwaysDropFirstStub(_SimulatesFileReadToolCall):
         def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:  # type: ignore[override]
             if "verdicts" not in prompt.lower():
                 return super().complete_json(prompt, **kwargs)
@@ -2063,20 +2946,19 @@ def test_filter_timeout_keeps_group_findings_without_hanging(monkeypatch) -> Non
     a = _issue(file_path="a.py", description="a-fp")
     b = _issue(file_path="b.py", description="b-real")
 
-    # Route on each file's own inlined body (see PerFileStub above) rather
-    # than the "Full content of `<path>`" header wording.
-    class SlowStub(DummyLLMClient):
+    # Route on the group's own read_file(...) directive (see PerFileStub above).
+    class SlowStub(_SimulatesFileReadToolCall):
         def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:  # type: ignore[override]
             if "verdicts" not in prompt.lower():
                 return super().complete_json(prompt, **kwargs)
-            if "SENTINEL_A" in prompt:
+            if 'read_file("a.py")' in prompt:
                 time.sleep(3)  # exceeds the 1s timeout set above
                 return {"verdicts": [{"index": 0, "is_real_issue": False, "confidence": "high"}]}
-            if "SENTINEL_B" in prompt:
+            if 'read_file("b.py")' in prompt:
                 return {"verdicts": [{"index": 0, "is_real_issue": True, "confidence": "high"}]}
             return super().complete_json(prompt, **kwargs)
 
-    inp = _input(files={"a.py": "SENTINEL_A\n", "b.py": "SENTINEL_B\n"})
+    inp = _input(files={"a.py": "content-a\n", "b.py": "content-b\n"})
     start = time.monotonic()
     out = filter_false_positives(SlowStub(), inp, [a, b])
     elapsed = time.monotonic() - start

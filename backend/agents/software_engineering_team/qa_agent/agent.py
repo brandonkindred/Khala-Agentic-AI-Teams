@@ -96,9 +96,14 @@ class QAExpertAgent:
 
         def _fallback(exc: Exception) -> QAOutput:
             logger.warning("QA: structured_output failed (%s); returning fallback", exc)
+            # In acceptance_evidence mode a parse failure must still fail closed with
+            # an explicit failing gate, since this mode's consumers block on gate
+            # values rather than reading ``approved`` directly.
+            quality_gates = {"acceptance_evidence": "fail"} if mode == "acceptance_evidence" else {}
             return QAOutput(
                 bugs_found=[],
                 approved=False,
+                quality_gates=quality_gates,
                 summary=f"QA could not parse model response: {exc}",
                 integration_tests="",
                 unit_tests="",
@@ -116,11 +121,17 @@ class QAExpertAgent:
             # Only applied to a genuine model result — the fallback above is
             # already a final, safe ``approved=False``.
             if mode == "acceptance_evidence":
-                # ``.strip().lower()`` mirrors ``DevOpsTestValidationAgent._coerce_gate_status``
-                # so a whitespace-padded ``" fail "`` from the model still blocks approval.
+                gates_lower = {
+                    k: (v or "").strip().lower() for k, v in result.quality_gates.items()
+                }
                 result.approved = bool(result.approved) and not any(
-                    (v or "").strip().lower() == "fail" for v in result.quality_gates.values()
+                    v == "fail" for v in gates_lower.values()
                 )
+                # Fail closed: an unapproved verdict with no explicit failing gate
+                # (e.g. an LLM verdict of false but an all-pass/empty gate map) must
+                # still surface a blocking gate, since consumers key off gate values.
+                if not result.approved and not any(v == "fail" for v in gates_lower.values()):
+                    result.quality_gates["acceptance_evidence"] = "fail"
             else:
                 result.approved = derive_approved(result.bugs_found, llm_approved=None)
             return result

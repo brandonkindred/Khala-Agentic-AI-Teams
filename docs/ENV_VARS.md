@@ -204,6 +204,10 @@ Temporal namespace.
 ### TEMPORAL_TASK_QUEUE
 Temporal task queue name.
 
+### SE_WORKFLOW_V2
+Removed. `/run-team` always starts `RunTeamWorkflowV2`; this variable no
+longer has any effect and may be safely unset from any environment.
+
 ### Investment team Temporal queues
 The investment team runs three Temporal queues, all booted from
 `investment_team.temporal.worker.start_investment_temporal_worker_thread` (each on
@@ -666,6 +670,37 @@ Absolute ceiling on chars of code per review map call, independent of model
 context. Default `80000`, floor `10000`. Lower it for models that degrade on
 large prompts; raise it to cut the number of map calls per large review.
 
+### CODE_REVIEW_TAIL_PASS_CHUNK_CHARS
+Absolute ceiling on chars of changed-file code inlined per call of the
+in-process coordinator's merged architecture/side-effect tail pass
+(`merged_architecture_side_effect_pass.py`, via `submission_pass_runner.py`'s
+`compute_code_review_merged_pass_budgets`/`run_submission_pass`) — see
+`CODE_REVIEW_ARCHITECTURE_CONSISTENCY_PASS` / `CODE_REVIEW_SIDE_EFFECT_IMPACT_PASS`
+below for what that pass does. Default `80000`, floor `10000` — the same
+numbers `CODE_REVIEW_MAP_CHUNK_CHARS` uses, so an unset value behaves exactly
+like today. A dedicated knob, independent of `CODE_REVIEW_MAP_CHUNK_CHARS`:
+before this var existed the tail pass silently reused the map phase's cap, so
+tuning one for the map phase's chunk size also (as an unintended side effect)
+retuned the tail pass's batching threshold. The two are now separately
+adjustable.
+
+When a submission's changed-file set is estimated to exceed this budget,
+`run_submission_pass` proactively packs it into multiple bounded batches (one
+LLM call per batch, each folding its findings into the same
+`architecture_findings`/`side_effect_findings` output) instead of one
+unbounded call; a batch that still overflows mid-call is reactively bisected
+or shrunk and retried. A submission under the budget still makes exactly one
+call — no behavior change for typical-size submissions. Whenever more than
+one batch is produced, an INFO log line names the batch count and the
+effective budget: `"<pass>: changed-file set split into N batches
+(budget=B chars/call, CODE_REVIEW_TAIL_PASS_CHUNK_CHARS)"`.
+
+The false-positive verifier's own tail-pass batching (`filter_false_positives`)
+is governed separately by `CODE_REVIEW_VERIFY_MAX_FINDINGS_PER_GROUP` below — a
+cap on *findings per call*, not chars, since that pass never inlines the cited
+file's content into the prompt at all (see `CODE_REVIEW_FALSE_POSITIVE_FILTER`);
+this var has no effect on it.
+
 ### CODE_REVIEW_SPEC_EXCERPT_CHARS / CODE_REVIEW_ARCH_OVERVIEW_CHARS / CODE_REVIEW_EXISTING_CHARS
 Absolute ceilings on the spec / architecture-overview / existing-codebase
 excerpts repeated in every review map call. Defaults `16000` / `4000` / `8000`,
@@ -797,9 +832,10 @@ within-batch index) confirmed a false positive does not change which finding
 gets dropped. Lowering this cap increases the number of verification LLM
 calls (and therefore cost/latency) for files with many findings; raising it
 trades that against a larger prompt per call. This is a cap on how many
-*findings* share one verification call — separate from any cap on how much
-*file content* a single tool read can return (out of scope here; tracked in
-a separate sub-issue).
+*findings* share one verification call — it has no counterpart for the cited
+*file*'s content, because that content is never inlined into the prompt at
+all (see `CODE_REVIEW_FALSE_POSITIVE_FILTER` below): the model always fetches
+it via the unbounded `read_file` tool, so there is nothing to cap.
 
 ### CODE_REVIEW_MAX_CONCURRENT_ACTIVITIES
 Int (default `8`, floor `1`). Two things, both governed by this one knob (see
@@ -1021,6 +1057,35 @@ Fail-safe: a finding is removed only on an explicit, confident false-positive
 verdict; any ambiguity or verifier error keeps the finding, and the not-reviewed
 coverage findings are never removed. Set to `false`/`0`/`no` to disable the pass
 (any other value, or unset, leaves it enabled).
+
+The verification prompt (`_build_group_prompt`) never inlines the cited
+file's content — it only names the file and directs the model to fetch it via
+`read_file`. This keeps the per-call prompt size independent of the cited
+file's size with no cap or truncation involved: the model always sees the
+file's full, current content on demand instead of a possibly-stale or
+size-limited inline copy. Because nothing is inlined, `_verify_group` also
+enforces that the run made a *successful* `read_file` call for that exact
+cited file before honoring any false-positive verdict from it
+(`_agent_read_the_cited_file`) — since every finding in one verification call
+cites the same file, this is a per-batch bar, restoring the guarantee the
+original inlined design had (the whole cited file was visible before any
+drop in that batch was accepted). A narrow `read_lines`/`read_function`
+slice, a successful read of only a *related* file, calling only
+`list_files()` (no code content), or a `read_file` call that errors
+(unknown/ambiguous path), does not count as grounded. The verification
+`Agent` is also constructed with
+`SlidingWindowConversationManager(should_truncate_results=False)`, so
+Strands' own default conversation manager can never silently truncate an
+oversized `read_file` result in place (keeping only the first/last 200
+chars) while still marking it `status="success"` on a context-window
+overflow — that recovery path is disabled outright rather than trying to
+detect its output after the fact, since any text-based detection risks
+either missing a real truncation or misfiring on legitimate content that
+happens to share its shape. On overflow the conversation is trimmed instead;
+if the cited file's read survives, its content is always the complete
+original, and if it doesn't survive, the grounding check simply finds no
+matching read and fails safe. A false-positive verdict from a run that never
+met this bar is discarded (the finding is kept) rather than trusted.
 
 When the review is invoked with a repository reader (the GitHub PR-review path
 fetches whole files at the PR head and supplies a reader; the software-engineering

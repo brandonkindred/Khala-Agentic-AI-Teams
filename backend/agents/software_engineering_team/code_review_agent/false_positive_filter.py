@@ -13,7 +13,7 @@ access to every file under review via tools (``read_file``, ``list_files``,
 ``search_codebase``, ``find_function_at_line``), so it can pull up exactly the
 code needed to confirm or refute a finding rather than guessing from a single chunk.
 
-Two invariants hold:
+Three invariants hold:
 
     - **Fail-safe.** A finding is dropped ONLY on an explicit, confident
       false-positive verdict. Anything the verifier cannot assess — a finding
@@ -23,6 +23,22 @@ Two invariants hold:
       invents a finding, upgrades a severity, or breaks the review. Dropping a
       real issue is far worse than keeping a questionable one, so every
       ambiguous case keeps the issue.
+
+    - **Grounded-only drops.** The cited file's content is never inlined into
+      the verification prompt (see ``_build_group_prompt``) -- the verifier
+      must call ``read_file`` on it to see it. A batch's false-positive
+      verdicts are trusted only when the run made a *successful* ``read_file``
+      call for that exact cited file -- a narrow ``read_lines``/
+      ``read_function`` slice, a successful read of a merely *related* file,
+      calling only ``list_files()`` (no code content), or a ``read_file`` call
+      that errored (unknown/ambiguous path), do not count. Since every
+      finding in one batch cites the same file, this is a per-batch bar, not
+      per-finding, but it still restores the guarantee the original inlined
+      design had: the whole cited file was visible before any drop in that
+      batch is honored. ``_verify_group`` discards any false-positive verdict
+      from a run that never met this bar (see ``_agent_read_the_cited_file``)
+      rather than trusting an ungrounded guess (an absent verdict means
+      "keep", per the fail-safe invariant above).
 
     - **Coverage/safety findings never reach this module.** The coordinator
       passes only genuine reviewer findings here; the "not reviewed" degraded
@@ -39,9 +55,10 @@ import os
 import re
 from collections import OrderedDict
 from dataclasses import dataclass
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from strands import Agent, tool
+from strands.agent.conversation_manager import SlidingWindowConversationManager
 from strands.models.model import Model as _StrandsModel
 
 from llm_service import LLMClient
@@ -54,6 +71,7 @@ from .function_boundaries import (
     EnclosingConstruct,
     enclosing_construct,
     enclosing_construct_start_heuristic,
+    hunk_segment_bounds,
     iter_constructs,
     segment_containing_line,
     strip_numbered_prefixes,
@@ -104,10 +122,11 @@ _EXCERPT_WINDOW_LINES = 12
 _MANIFEST_LIMIT = 300
 
 # Cap on the task description / each acceptance criterion inlined into the
-# verification prompt. Unlike the cited file body (deliberately kept in full
-# -- see _build_group_prompt), there is no tool the model can call to read the
-# rest of an oversized task field, so an unbounded field has no fallback path
-# at all if it blows the prompt past context.
+# verification prompt. Unlike the cited file (never inlined at all -- see
+# _build_group_prompt, which only names it and directs the model to
+# read_file/read_lines), there is no tool the model can call to read the rest
+# of an oversized task field, so an unbounded field has no fallback path at
+# all if it blows the prompt past context.
 _CONTEXT_FIELD_CHARS = 4_000
 _CONTEXT_FIELD_TRUNCATION_MARKER = "\n... (truncated)"
 
@@ -180,11 +199,20 @@ class CodebaseIndex:
     """In-memory view of all code the verifier may read to check a finding.
 
     Invariants:
-        - ``files`` maps a file path to its FULL content (never a chunk or a
-          truncated excerpt): seeing the whole file is the entire point — the
-          chunk reviewer's partial view is what produced the false positive.
-          Whitespace-only bodies (e.g. a newline-only ``__init__.py``) are kept;
-          only ``None`` / empty-string content is excluded at construction.
+        - ``files`` maps a file path to content whose completeness is reported
+          by ``full_content_complete`` (below): when that flag is True, every
+          value is the FULL file body -- seeing the whole file is the entire
+          point, since the chunk reviewer's partial view is what produced the
+          false positive. When it is False (the common case for a pre-numbered
+          PR-review submission), a value may instead be a bounded, ``"N: "``
+          -prefixed diff excerpt produced by ``render_annotated_hunks``
+          (``github_source/pr_review_mapping.py``), covering only the changed
+          hunks plus context rather than the whole file, with a bare ``"..."``
+          line marking a gap between two hunks that are not adjacent in the
+          real file -- not truncation. Every ``N`` in such a prefix is still
+          the line's real number in the original file. Whitespace-only bodies
+          (e.g. a newline-only ``__init__.py``) are kept; only ``None`` /
+          empty-string content is excluded at construction.
         - ``existing_codebase`` is the full pre-existing-code excerpt passed for
           context; it is exposed as the read-only pseudo-path
           ``<existing codebase>`` so the verifier can consult it like any file.
@@ -571,6 +599,25 @@ class CodebaseIndex:
               followed by ``N| content`` body lines for the inclusive slice.
             - When ``end`` exceeds file length and ``start`` is in range, clamps
               ``end`` to the last line.
+            - When ``content`` is pre-numbered (``render_annotated_hunks`` output),
+              ``start``/``end`` are resolved as *original file* line numbers via
+              ``strip_numbered_prefixes``, never as physical excerpt positions:
+              - When both resolve into the same gap-bounded hunk segment, the
+                header and body are built entirely from the mapper — the
+                header's claimed range always matches the body's own embedded
+                numbers. A line absent from the excerpt (e.g. a removed diff
+                line) falls back to the nearest preceding available line.
+                ``end`` beyond the segment's last available line clamps to
+                that last line.
+              - A ``start`` outside its resolved segment's real coverage
+                (e.g. requesting original line 1 against a 100–102 excerpt)
+                returns ``Error: ...`` naming that segment's real coverage
+                instead of a self-contradictory header.
+              - A ``start``/``end`` pair whose physical positions resolve into
+                two different hunk segments returns ``Error: ...`` naming
+                both segments' real coverage; a successful response never
+                contains the ``"..."`` gap marker or the other segment's
+                content.
             - Path resolution matches ``read_file``.
         """
         if not isinstance(start, int) or isinstance(start, bool) or start < 1:
@@ -589,6 +636,67 @@ class CodebaseIndex:
         content, error = self._read(path)
         if content is None:
             return error if error is not None else f"Error: file not found: {path}."
+
+        stripped, start_physical, mapper = strip_numbered_prefixes(content, start)
+        if mapper is not None:
+            _, end_physical, _ = strip_numbered_prefixes(content, end)
+            display = self.resolve_path(path) or path
+            if display == self.EXISTING_CODEBASE_PATH:
+                display = path
+
+            # Resolve segment bounds against the raw pre-numbered ``content``, not
+            # ``stripped``: ``strip_numbered_prefixes`` rebuilds ``stripped`` via
+            # ``"\n".join(...)``, and ``str.splitlines()`` silently drops a
+            # trailing blank line from that reconstruction (e.g. a hunk's last
+            # numbered line being empty) — an artifact ``content`` doesn't have.
+            # Bare ``...`` separators are untouched by prefix-stripping, so they
+            # sit at the same physical positions in both strings either way.
+            start_seg = hunk_segment_bounds(content, start_physical, annotated_hunks=True)
+            if start_seg is None:
+                return f"Error: line {start} has no resolvable coverage in {display}'s excerpt."
+
+            # ``strip_numbered_prefixes`` falls back to the *nearest preceding*
+            # numbered line when ``start`` has no exact match, defaulting to the
+            # excerpt's very first physical line when nothing precedes it either
+            # (e.g. requesting original line 1 against a 100-102 excerpt) — check
+            # the requested ``start`` against the segment's real coverage rather
+            # than trusting that fallback blindly, or the header would silently
+            # claim a range the caller never asked for.
+            real_start, real_end = mapper(start_seg[0]), mapper(start_seg[1])
+            if start < real_start or start > real_end:
+                return (
+                    f"Error: start line {start} is outside {display}'s excerpt coverage "
+                    f"(excerpt covers lines {real_start}-{real_end})."
+                )
+
+            end_seg = hunk_segment_bounds(content, end_physical, annotated_hunks=True)
+            if end_seg != start_seg:
+                if end_seg is None:
+                    return (
+                        f"Error: end line {end} has no resolvable coverage in {display}'s "
+                        f"excerpt (nearest hunk covers lines {real_start}-{real_end})."
+                    )
+                other_start, other_end = mapper(end_seg[0]), mapper(end_seg[1])
+                return (
+                    f"Error: requested range {start}-{end} spans two separate hunks in "
+                    f"{display}: lines {real_start}-{real_end} and lines "
+                    f"{other_start}-{other_end}. Narrow the request to a single hunk."
+                )
+
+            # ``str.split("\n")`` is the exact inverse of the ``"\n".join(...)``
+            # that built ``stripped``, so it preserves a trailing blank line
+            # that ``.splitlines()`` would drop (see note above).
+            stripped_lines = stripped.split("\n")
+            end_eff_physical = min(end_physical, start_seg[1])
+            n = end_eff_physical - start_physical + 1
+            display_start = mapper(start_physical)
+            display_end = mapper(end_eff_physical)
+            header = f"{display} lines {display_start}–{display_end} ({n} lines):"
+            body = "\n".join(
+                f"{mapper(i)}| {stripped_lines[i - 1]}"
+                for i in range(start_physical, end_eff_physical + 1)
+            )
+            return f"{header}\n{body}"
 
         lines = content.splitlines()
         n_lines = len(lines)
@@ -719,6 +827,12 @@ class CodebaseIndex:
               existing-codebase excerpt is searched last under its pseudo-path.
             - A blank query returns no matches (a substring search for "" would
               match every line and is never a useful false-positive check).
+            - When a source's content is pre-numbered (produced by
+              ``render_annotated_hunks``), the returned line number is the
+              original file line (not the physical/storage index) and the
+              ``N: `` prefix is stripped from the returned text — matching
+              every other read method in this class (``read_function``,
+              ``read_function_by_name``, ``find_function_at_line``).
         """
         if max_matches <= 0:
             raise ValueError("max_matches must be positive")
@@ -727,9 +841,11 @@ class CodebaseIndex:
             return []
         results: List[Tuple[str, int, str]] = []
         for path, content in self._readable_sources():
-            for lineno, line in enumerate(content.splitlines(), start=1):
+            stripped, _, mapper = strip_numbered_prefixes(content, 1)
+            for lineno, line in enumerate(stripped.splitlines(), start=1):
                 if needle in line.lower():
-                    results.append((path, lineno, line.rstrip()))
+                    reported_lineno = mapper(lineno) if mapper is not None else lineno
+                    results.append((path, reported_lineno, line.rstrip()))
                     if len(results) >= max_matches:
                         return results
         return results
@@ -962,22 +1078,29 @@ def _format_reference_hit(index: CodebaseIndex, path: str, lineno: int) -> str:
     """Format one find_references hit as path:line plus a bounded excerpt.
 
     Preconditions:
-        - ``lineno`` >= 1 and is a 1-based storage index from ``search`` /
-          ``_search_repo_references`` (physical line in the stored blob).
+        - ``lineno`` >= 1 and is the line number as reported by ``search()``/
+          ``_search_repo_references`` -- for pre-numbered (hunk-annotated)
+          content that is already the *original* file line (``search()``
+          remaps storage/physical hits back to their ``N: `` prefix before
+          returning them), matching every other read method in this class;
+          for plain content it is the ordinary physical line.
 
     Postconditions:
-        - Always starts with ``{path}:{display_line}`` where ``display_line`` is
-          the original ``N:`` file line when content is pre-numbered, else
-          ``lineno``.
+        - Always starts with ``{path}:{lineno}`` (``lineno`` is already the
+          correct display line by the precondition above).
         - When readable ``.py``/``.pyi`` content has an enclosing construct at
-          the physical hit line spanning at most ``_EXCERPT_MAX_LINES``,
+          the hit's physical line spanning at most ``_EXCERPT_MAX_LINES``,
           appends a full construct slice from ``_format_construct_slice``
           (same shape as ``read_function``).
         - When the construct exceeds ``_EXCERPT_MAX_LINES``, or no construct
           is found (module-level hit, non-Python file, unparsable content),
           appends a bounded ``_EXCERPT_WINDOW_LINES``-line window around the
           hit instead, via ``_format_line_window`` -- excerpt payloads stay
-          bounded even when no construct can be resolved.
+          bounded even when no construct can be resolved. When the content is
+          pre-numbered (``mapper is not None``), the no-construct window is
+          additionally clipped to ``hunk_segment_bounds``' gap-bounded segment
+          so it can never cross a bare ``"..."`` separator into a different,
+          non-contiguous hunk; plain content is unaffected.
         - Returns only the locator when the file content itself is
           unreadable.
         - Never raises.
@@ -991,14 +1114,15 @@ def _format_reference_hit(index: CodebaseIndex, path: str, lineno: int) -> str:
         display = path
     _, ext = os.path.splitext(display)
     try:
-        # ``lineno`` from search is a storage/physical index. ``strip_numbered_prefixes``
-        # remaps an *original* file line; pass a dummy original and keep ``lineno``
-        # as the physical index (same pattern as ``read_function_by_name``).
-        stripped, _, mapper = strip_numbered_prefixes(content, 1)
-        if mapper is not None:
-            loc = f"{path}:{mapper(lineno)}"
+        # ``lineno`` is already the original/display line (see precondition
+        # above) -- passing it as ``strip_numbered_prefixes``'s target resolves
+        # the matching *physical* index into ``stripped``/``body_lines``, the
+        # same reverse lookup ``read_function_by_name`` relies on. For plain
+        # (non-prefixed) content this is a no-op: ``physical`` comes back
+        # equal to ``lineno``.
+        stripped, physical, mapper = strip_numbered_prefixes(content, lineno)
         construct = (
-            enclosing_construct(stripped, lineno, annotated_hunks=mapper is not None)
+            enclosing_construct(stripped, physical, annotated_hunks=mapper is not None)
             if ext.lower() in (".py", ".pyi")
             else None
         )
@@ -1013,13 +1137,18 @@ def _format_reference_hit(index: CodebaseIndex, path: str, lineno: int) -> str:
         excerpt = _format_line_window(
             display,
             body_lines,
-            lineno,
+            physical,
             mapper=mapper,
             lo=construct.start_line,
             hi=construct.end_line,
         )
         return f"{loc}\n{excerpt}"
-    excerpt = _format_line_window(display, body_lines, lineno, mapper=mapper)
+    if mapper is not None:
+        bounds = hunk_segment_bounds(stripped, physical, annotated_hunks=True)
+        lo, hi = bounds if bounds is not None else (1, None)
+    else:
+        lo, hi = 1, None
+    excerpt = _format_line_window(display, body_lines, physical, mapper=mapper, lo=lo, hi=hi)
     return f"{loc}\n{excerpt}"
 
 
@@ -1179,19 +1308,29 @@ def _truncate_for_log(text: Optional[str], max_len: int = 400) -> str:
     return text[:max_len] + "..."
 
 
-def _build_tools(index: CodebaseIndex) -> List[Callable[..., str]]:
+def _build_tools(index: CodebaseIndex) -> List[Callable[..., Any]]:
     """Build strands tools bound to ``index`` for one verification agent.
 
     Postconditions:
         - Returns seven tools (``read_file``, ``read_lines``, ``read_function``,
           ``list_files``, ``search_codebase``, ``find_function_at_line``,
-          ``find_references``) that delegate to ``index``; each returns a
-          string and never raises, so a bad model-supplied argument becomes a
-          tool message rather than an error that aborts the agent loop.
+          ``find_references``) that delegate to ``index`` and never raise, so
+          a bad model-supplied argument becomes a self-correcting tool
+          message rather than an error that aborts the agent loop. Every tool
+          but ``read_file`` returns a plain string. ``read_file`` returns a
+          Strands ``ToolResult``-shaped dict (``{"status": ...,
+          "content": [...]}``) instead: unlike the others, its result is
+          inspected after the run by ``_agent_read_the_cited_file`` to decide
+          whether a false-positive verdict is grounded, so it needs an
+          accurate ``status`` -- a plain string return is always wrapped by
+          Strands as ``status="success"`` regardless of content, which cannot
+          be told apart from a genuine read failure reported as an
+          "Error: ..." string (see ``_agent_read_the_cited_file`` for why
+          that distinction matters).
     """
 
     @tool
-    def read_file(path: str) -> str:
+    def read_file(path: str) -> Dict[str, Any]:
         """Read the full contents of a file in the code under review.
 
         Use this to inspect the real code a finding refers to (and any related
@@ -1203,13 +1342,25 @@ def _build_tools(index: CodebaseIndex) -> List[Callable[..., str]]:
                 "<existing codebase>" returns the pre-existing-code excerpt.
 
         Returns:
-            The file's full text, or an "Error: ..." message if the path is
-            unknown or ambiguous.
+            A Strands ``ToolResult``-shaped dict: ``status="success"`` with
+            the file's full text, or ``status="error"`` with an
+            "Error: ..." message if the path is unknown or ambiguous. Never
+            raises (returning ``status="error"`` instead of raising keeps a
+            bad path a self-correcting tool message rather than an error that
+            aborts the agent loop).
         """
         try:
-            return index.read_file(path)
+            content, error = index._read(path)
         except Exception as exc:
-            return f"Error: could not read {path!r}: {type(exc).__name__}: {exc}"
+            return {
+                "status": "error",
+                "content": [
+                    {"text": f"Error: could not read {path!r}: {type(exc).__name__}: {exc}"}
+                ],
+            }
+        if content is not None:
+            return {"status": "success", "content": [{"text": content}]}
+        return {"status": "error", "content": [{"text": error}]}
 
     @tool
     def read_lines(path: str, start: int, end: int) -> str:
@@ -1217,7 +1368,10 @@ def _build_tools(index: CodebaseIndex) -> List[Callable[..., str]]:
 
         Prefer this over read_file when you only need a bounded slice. The
         maximum span is 400 lines; use a narrower range or read_function for
-        larger constructs.
+        larger constructs. start/end and the returned line numbers are the
+        file's real (original) line numbers, even though the underlying
+        content itself may be a bounded diff excerpt rather than the whole
+        file.
 
         Args:
             path: File path (same paths accepted by read_file).
@@ -1289,7 +1443,10 @@ def _build_tools(index: CodebaseIndex) -> List[Callable[..., str]]:
         inspect those with ``read_file`` / ``list_files`` instead. Use this to
         find where a symbol is defined, imported, registered, used, or tested
         before deciding whether a finding is real — e.g. search for a function
-        name a finding claims is "never defined".
+        name a finding claims is "never defined". Returned line numbers are
+        the file's real (original) line numbers, even though the underlying
+        content itself may be a bounded diff excerpt rather than the whole
+        file.
 
         Args:
             query: The substring to search for (e.g. a function or class name).
@@ -1584,26 +1741,34 @@ def _build_group_prompt(
 ) -> str:
     """Render the user prompt for verifying one file's findings.
 
-    The prompt inlines the cited file's full content (so the model has the
-    primary evidence even without a tool call) and lists up to
-    ``_MANIFEST_LIMIT`` available paths; other files (including any manifest
-    overflow) and the existing-codebase excerpt remain reachable through the
-    tools. The wording is a stable anchor for the verdict contract: it names
-    the file, indexes each finding, and asks for a ``verdicts`` array.
+    The cited file's content is NOT inlined -- the prompt only names
+    ``file_path`` and directs the model to fetch it via ``read_file``
+    (``_build_tools``) before judging; other inspection tools such as
+    ``read_lines``/``read_function`` remain available for general code
+    reading but do NOT by themselves satisfy the grounding requirement a
+    drop is checked against (see ``_agent_read_the_cited_file`` -- only a
+    full ``read_file`` of ``file_path`` counts). This keeps the per-call
+    prompt size independent of the cited file's size, with no cap or
+    truncation needed: the model still gets the file's full, real content on
+    demand, exactly as it does for every other file it inspects. The prompt
+    also lists up to ``_MANIFEST_LIMIT`` available paths; other files
+    (including any manifest overflow) and the existing-codebase excerpt remain
+    reachable through the tools. The wording is a stable anchor for the
+    verdict contract: it names the file, indexes each finding, and asks for a
+    ``verdicts`` array.
 
     Preconditions:
         - ``file_path`` is a canonical key previously returned by
           ``index.resolve_path`` (the production filter only groups resolved
-          paths). Unreadable keys still degrade to a placeholder rather than
-          raising.
+          paths); this function itself never reads or resolves it, so an
+          unresolvable path is simply named as-is without raising.
 
     Postconditions:
         - The returned text contains one indexed block per finding (index 0..n-1
-          matching ``issues`` order) and inlines the cited file's full body
-          when readable, otherwise a ``(file content unavailable)`` placeholder.
-          The task description and each acceptance criterion are capped at
-          ``_CONTEXT_FIELD_CHARS`` so an oversized task field cannot dominate
-          the prompt.
+          matching ``issues`` order) and names ``file_path`` with a directive
+          to read it via tools, never the file's content. The task description
+          and each acceptance criterion are capped at ``_CONTEXT_FIELD_CHARS``
+          so an oversized task field cannot dominate the prompt.
         - Never raises.
     """
     parts: List[str] = []
@@ -1624,14 +1789,16 @@ def _build_group_prompt(
         parts.append(f"... and {len(manifest) - _MANIFEST_LIMIT} more (call list_files()).")
     parts.append("")
 
-    body = index.read_file_or_none(file_path)
-    if body is None:
-        body = "(file content unavailable)"
-    fence = _code_fence_for(body)
-    parts.append(f"**Full content of `{file_path}` (the file the findings below are about):**")
-    parts.append(fence)
-    parts.append(body)
-    parts.append(fence)
+    parts.append(
+        f"**File the findings below are about: `{file_path}`.** Its content is NOT "
+        f'inlined here — you MUST call read_file("{file_path}") FIRST to see the '
+        "real, current code before judging any finding below. A false-positive "
+        "verdict for ANY finding below will be ignored (that finding kept) unless "
+        "you successfully call read_file on this exact path first — reading a "
+        "different file, or any partial slice via read_lines or read_function, "
+        "does not satisfy this requirement, even if you also inspect other "
+        "related files."
+    )
     parts.append("")
 
     parts.append(
@@ -1650,6 +1817,134 @@ def _build_group_prompt(
         "dropping a real issue is worse than keeping a questionable one."
     )
     return "\n".join(parts)
+
+
+def _agent_read_the_cited_file(agent: Agent, index: CodebaseIndex, file_path: str) -> bool:
+    """Whether ``agent``'s just-finished run obtained ``file_path``'s full
+    content via a successful ``read_file`` call.
+
+    Every finding in one ``_verify_group`` batch cites the same ``file_path``
+    (batches are grouped by file; see ``_verify_and_filter``). Requiring only
+    *some* successful code-reading tool call anywhere in the run is not
+    enough: a narrow ``read_lines`` call for one finding's line, or a
+    successful ``read_file`` of a merely *related* file, would still let the
+    model confidently drop every OTHER finding in the batch without ever
+    having seen their code. Requiring a full ``read_file`` of ``file_path``
+    itself restores the guarantee the original inlined-body design had (the
+    whole cited file was always visible) while still fetching it on demand
+    rather than inlining it unconditionally (see ``_build_group_prompt``).
+
+    The model may still additionally read other related files for cross-file
+    verification (e.g. confirming a symbol is defined in ``util.py``) -- that
+    remains encouraged and does not disqualify a drop -- but it is never
+    SUFFICIENT on its own; the cited file itself must also have been read in
+    full, via ``read_file`` specifically (not a partial ``read_lines``/
+    ``read_function`` slice, which does not cover findings outside that slice).
+
+    "Success" is read directly off ``read_file``'s own ``toolResult.status``
+    -- never by sniffing the returned text for our own conventions, and never
+    by an independent ``index`` re-read. The ``read_file`` *tool* itself
+    (``_build_tools``) sets ``status`` accurately from ``CodebaseIndex._read``'s
+    ``(content, error)`` outcome for THIS call, so status alone is
+    trustworthy: it cannot mistake real content that happens to start with
+    "Error: ..." (a checked-in log fixture, diagnostic output) for a failed
+    read, and it does not depend on an independent, later ``index`` probe
+    that could disagree with what THIS call actually returned -- e.g. a
+    repo-reader backed by a network call that fails transiently during the
+    model's tool call but happens to succeed on a later, separate check. Only
+    the specific invocation's own recorded result counts.
+
+    No separate truncation check is needed on top of ``status``: Strands'
+    default ``SlidingWindowConversationManager`` would otherwise recover from
+    a context-window overflow by truncating an oversized toolResult in place
+    (keeping only the first/last 200 chars) while explicitly leaving
+    ``status`` as ``"success"`` (``sliding_window_conversation_manager.py``,
+    ``_truncate_tool_results``: "The tool result status is not changed.") --
+    which would let a drop through on a sliver of the file. Rather than
+    trying to detect that after the fact (any text-based signal, however
+    precise, risks either missing a real truncation or misfiring on
+    legitimate content that happens to share its shape -- e.g. a fixture file
+    whose exact bytes are a snapshot of that format), ``_verify_group``
+    constructs its ``Agent`` with
+    ``SlidingWindowConversationManager(should_truncate_results=False)``, so
+    that recovery path can never run for this agent: on overflow it falls
+    straight to trimming whole messages instead of truncating a tool result
+    in place. If the cited file's read survives trimming, its content is
+    always the complete, untouched original; if it doesn't survive, the
+    correlation search below simply finds no matching toolUse/toolResult
+    pair and this function returns ``False`` (fail-safe, same as any other
+    "never grounded" case). Either way there is no code path left that could
+    accept a partial read as if it were complete.
+
+    Correlating a toolUse with its toolResult is done by matching
+    ``toolUseId``, but scoped to the very next message only (never a global
+    search across the whole conversation): when a backend omits real
+    tool-call IDs, the Strands adapter synthesizes a fallback
+    (``strands_adapter.py``, ``f"{tool_name}_{idx}"`` where ``idx`` resets to
+    0 each turn) that is only unique *within* one turn -- a
+    single-tool-call-per-turn conversation (the common case) reuses the
+    identical fallback ID on every turn. A *global* ID search would then
+    credit a *later, unrelated* call's success (e.g. a successful read of a
+    different file two turns later) to an *earlier* failed read of the cited
+    file, since both calls share the same ID string; scoping the search to
+    "the message immediately following this toolUse's own message" avoids
+    that collision (Strands never assigns the same id to two calls that
+    round-trip together) while still tolerating non-toolUse content
+    interleaved in either message -- e.g. the ``reasoningContent`` block a
+    thinking-enabled model emits alongside its tool call
+    (``strands_adapter.py`` lines 564-570), which would misalign a bare
+    same-index positional match, since the following toolResult message
+    contains only toolResult blocks.
+
+    Preconditions:
+        - ``agent`` has already completed a run (``agent(prompt)`` returned),
+          so ``agent.messages`` holds the full conversation for that run.
+        - ``file_path`` is the canonical path this ``_verify_group`` call was
+          given (already resolved by the caller); ``index`` is the same
+          index the run's tools were bound to.
+
+    Postconditions:
+        - Returns ``True`` iff some ``read_file`` toolUse (at message index
+          ``i``) whose input path equals ``file_path`` (or resolves to it via
+          ``index.resolve_path``, covering a near-miss the model typed instead
+          of the exact quoted path) has a toolResult with a matching
+          ``toolUseId`` in the message at index ``i + 1``, with
+          ``status == "success"``. A genuinely empty result (a real
+          zero-byte file, e.g. an unchanged ``__init__.py``) still counts.
+          Never raises: a malformed/empty message list, or a toolUse with no
+          following message or no matching success result, yields ``False``
+          (fail-safe: treated as "not grounded", so the caller keeps rather
+          than drops on ambiguity).
+    """
+    try:
+        messages = agent.messages
+        for i, message in enumerate(messages):
+            for block in message.get("content") or []:
+                if not isinstance(block, dict):
+                    continue
+                tool_use = block.get("toolUse")
+                if not isinstance(tool_use, dict) or tool_use.get("name") != "read_file":
+                    continue
+                candidate = (tool_use.get("input") or {}).get("path")
+                if not isinstance(candidate, str):
+                    continue
+                if candidate != file_path and index.resolve_path(candidate) != file_path:
+                    continue
+                tool_use_id = tool_use.get("toolUseId")
+                if tool_use_id is None or i + 1 >= len(messages):
+                    continue
+                for result_block in messages[i + 1].get("content") or []:
+                    if not isinstance(result_block, dict):
+                        continue
+                    result = result_block.get("toolResult")
+                    if not isinstance(result, dict) or result.get("toolUseId") != tool_use_id:
+                        continue
+                    if result.get("status") != "success":
+                        continue
+                    return True
+        return False
+    except Exception:
+        return False
 
 
 def _verify_group(
@@ -1673,16 +1968,38 @@ def _verify_group(
           position of the finding within ``issues`` (i.e. a valid index into
           the ``issues``/``group`` list the caller passed in), so callers may
           index back into their own list with it.
+        - A false-positive verdict from a run that never obtained the cited
+          file's full content via a successful ``read_file`` call
+          (``_agent_read_the_cited_file`` is False) is dropped from the
+          result rather than returned -- the caller treats an absent index as
+          "keep", so an ungrounded drop never reaches the merge (see
+          ``_agent_read_the_cited_file``).
     """
     prompt = _build_group_prompt(index, file_path, issues, input_data)
     agent = Agent(
         model=model,
         system_prompt=FALSE_POSITIVE_VERIFY_PROMPT,
         tools=_build_tools(index),
+        # Disabled so a large cited file can never be silently truncated to a
+        # sliver in place (with status left as "success") and mistaken for a
+        # complete read; see _agent_read_the_cited_file for the full rationale.
+        conversation_manager=SlidingWindowConversationManager(should_truncate_results=False),
     )
     raw = str(agent(prompt)).strip()
     data = extract_json_from_response(raw)
-    return _parse_verdicts(data, len(issues))
+    verdicts = _parse_verdicts(data, len(issues))
+    if not _agent_read_the_cited_file(agent, index, file_path):
+        false_positive_count = sum(1 for v in verdicts.values() if v.is_false_positive)
+        if false_positive_count:
+            logger.warning(
+                "FalsePositiveFilter: verification call for %s returned %s false-positive "
+                "verdict(s) without ever successfully reading that file's full content via "
+                "read_file; discarding them and keeping those findings",
+                file_path,
+                false_positive_count,
+            )
+            verdicts = {idx: v for idx, v in verdicts.items() if not v.is_false_positive}
+    return verdicts
 
 
 def filter_false_positives(
