@@ -1,11 +1,13 @@
 # Core dependencies
 pydantic>=2.12,<3.0
-# <0.137: FastAPI 0.137 added _IncludedRouter route nodes that prometheus-fastapi-instrumentator (<8) can't resolve (route.path)
-fastapi>=0.135,<0.137
-uvicorn>=0.44,<1.0
+fastapi>=0.137,<1.0
+# Explicit direct pin (not just transitive via fastapi): CVE-2026-48710 ("BadHost")
+# is a Host-header auth bypass affecting Starlette 0.8.3-1.0.0, fixed in 1.0.1.
+starlette>=1.0.1,<2.0
+uvicorn[standard]>=0.44,<1.0
 httpx>=0.28,<1.0
 
-# Google APIs (Gmail, Calendar)
+# Google APIs (Gmail, Calendar). Email uses the stdlib imaplib, not a third-party client.
 google-auth>=2.49,<3.0
 google-api-python-client>=2.194,<3.0
 
@@ -14,7 +16,7 @@ strands-agents>=1.35,<2.0
 strands-agents-tools>=0.4,<1.0
 
 # Credential encryption
-cryptography>=46.0,<47.0
+cryptography>=50.0,<51.0
 
 # Date/time parsing
 python-dateutil>=2.9,<3.0

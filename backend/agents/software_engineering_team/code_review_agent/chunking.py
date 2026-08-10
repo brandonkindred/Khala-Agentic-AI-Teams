@@ -15,7 +15,6 @@ from __future__ import annotations
 import re
 from typing import List, Optional, Tuple
 
-from software_engineering_team.shared.chunking import parse_code_into_file_blocks
 from software_engineering_team.shared.context_sizing import parse_env_int
 
 from .code_boundaries import preferred_break_lines
@@ -98,30 +97,20 @@ def _blocks_from_input(input_data: CodeReviewInput) -> Tuple[List[Tuple[str, str
 
     Preconditions:
         - ``input_data`` is a valid ``CodeReviewInput`` (its validator already
-          guarantees a code source is present).
+          guarantees ``files`` is a non-empty mapping).
 
     Postconditions:
-        - When ``files`` is set: one block per file with non-blank content,
-          insertion order preserved, no header parsing of ``code``.
-        - Otherwise blocks come from ``parse_code_into_file_blocks(code)``.
+        - One block per file with non-blank content, insertion order preserved.
         - No returned block has blank content; the second element names every
           non-blank path whose content was blank, so the caller can report the
           skip instead of silently dropping the file.
     """
     skipped: List[str] = []
-    if input_data.files is not None:
-        blocks = []
-        for path, content in input_data.files.items():
-            if content and content.strip():
-                blocks.append((path, content))
-            else:
-                skipped.append(path)
-        return blocks, skipped
     blocks = []
-    for path, content in parse_code_into_file_blocks(input_data.code or ""):
-        if content.strip():
+    for path, content in input_data.files.items():
+        if content and content.strip():
             blocks.append((path, content))
-        elif path:
+        else:
             skipped.append(path)
     return blocks, skipped
 

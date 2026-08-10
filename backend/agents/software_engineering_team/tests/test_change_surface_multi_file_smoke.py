@@ -25,7 +25,6 @@ from llm_service.clients.dummy import DummyLLMClient
 from software_engineering_team.code_review_agent.change_surface import (
     build_change_surface_from_patches,
 )
-from software_engineering_team.shared.chunking import parse_code_into_file_blocks
 
 # Two distinct fixtures so cross-file mixing is actually detectable: each
 # file's pre-numbered body carries different content and different line
@@ -58,19 +57,9 @@ def _multi_file_surface():
     )
 
 
-def test_multi_file_surface_code_round_trips_through_chunker_header_parser() -> None:
-    """A surface spanning two files parses back into both blocks, in order,
-    via the chunker's own ``### path ###`` header parser."""
-    surface = _multi_file_surface()
-    assert surface.files_reviewed == 2
-    parsed = parse_code_into_file_blocks(surface.code)
-    assert parsed == list(surface.blocks.items())
-    assert [path for path, _ in parsed] == ["mod_a.py", "mod_b.py"]
-
-
 def test_blocks_from_input_accepts_multi_file_surface_verbatim() -> None:
     surface = _multi_file_surface()
-    input_data = CodeReviewInput(code=surface.code, pre_numbered=True, language="python")
+    input_data = CodeReviewInput(files=dict(surface.blocks), pre_numbered=True, language="python")
     blocks, skipped = _blocks_from_input(input_data)
     assert blocks == list(surface.blocks.items())
     assert skipped == []
@@ -143,7 +132,7 @@ def test_multi_file_surface_through_coordinator_preserves_per_file_line_citation
 
     result = run_coordinator(
         client,
-        CodeReviewInput(code=surface.code, pre_numbered=True, language="python"),
+        CodeReviewInput(files=dict(surface.blocks), pre_numbered=True, language="python"),
     )
 
     issues_by_path = {issue.file_path: issue for issue in result.issues}

@@ -259,7 +259,7 @@ def test_engine_threads_profile_to_chunk_reviewer(profile: ReviewProfile, anchor
     the chunk reviewer."""
     probe = _SystemPromptProbe()
     CodeReviewAgent(probe, force_in_process=True).run(
-        CodeReviewInput(code="def f():\n    return 1", profile=profile)
+        CodeReviewInput(files={"main.py": "def f():\n    return 1"}, profile=profile)
     )
     assert probe.system_prompts, "expected at least one chunk-review call"
     assert any(anchor in sp for sp in probe.system_prompts)
@@ -326,10 +326,16 @@ def test_default_dispatch_prompt_covers_eight_criteria_and_drops_retired_mandate
     path every production caller (PR review, SE v2_review) takes -- still
     delivers a system prompt carrying all eight criteria and none of the
     retired every-file/every-function thoroughness mandate. Offline only: no
-    live LLM, ``_SystemPromptProbe`` is a scripted ``DummyLLMClient``."""
+    live LLM, ``_SystemPromptProbe`` is a scripted ``DummyLLMClient``.
+
+    ``skip_tail_passes=True`` keeps this probe capturing only chunk-review
+    system prompts -- the thing under test -- rather than also picking up the
+    merged architecture/side-effect pass's own differently-shaped prompt,
+    which now runs because a real ``files`` path makes the submission's
+    file readable to that pass."""
     probe = _SystemPromptProbe()
     CodeReviewAgent(probe, force_in_process=True).run(
-        CodeReviewInput(code="def f():\n    return 1")
+        CodeReviewInput(files={"main.py": "def f():\n    return 1"}, skip_tail_passes=True)
     )
     assert probe.system_prompts, "expected at least one chunk-review call"
     for prompt in probe.system_prompts:
@@ -338,8 +344,10 @@ def test_default_dispatch_prompt_covers_eight_criteria_and_drops_retired_mandate
 
 def test_skip_false_positive_filter_field_default_off() -> None:
     """The skip_false_positive_filter input field defaults to False and is settable."""
-    assert CodeReviewInput(code="x").skip_false_positive_filter is False
-    assert CodeReviewInput(code="x", skip_false_positive_filter=True).skip_false_positive_filter
+    assert CodeReviewInput(files={"main.py": "x"}).skip_false_positive_filter is False
+    assert CodeReviewInput(
+        files={"main.py": "x"}, skip_false_positive_filter=True
+    ).skip_false_positive_filter
 
 
 class _IssueProbe(DummyLLMClient):
@@ -395,8 +403,8 @@ def test_skip_false_positive_filter_bypasses_verifier(monkeypatch) -> None:
 
 def test_skip_tail_passes_field_default_off() -> None:
     """The skip_tail_passes input field defaults to False and is settable."""
-    assert CodeReviewInput(code="x").skip_tail_passes is False
-    assert CodeReviewInput(code="x", skip_tail_passes=True).skip_tail_passes
+    assert CodeReviewInput(files={"main.py": "x"}).skip_tail_passes is False
+    assert CodeReviewInput(files={"main.py": "x"}, skip_tail_passes=True).skip_tail_passes
 
 
 def test_skip_tail_passes_bypasses_both_tail_passes(monkeypatch) -> None:

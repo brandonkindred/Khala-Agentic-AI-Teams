@@ -48,16 +48,12 @@ def test_run_code_review_happy_path(monkeypatch) -> None:
         "software_engineering_team.code_review_agent.CodeReviewAgent",
         lambda llm: MagicMock(run=lambda inp, progress_callback=None: _ReviewResult()),
     )
-    monkeypatch.setattr(
-        "software_engineering_team.shared.context_sizing.compute_code_review_total_chars",
-        lambda llm: 10,
-    )
     result = q.run_code_review(
-        code="x" * 50,
         spec_content="spec",
         task_description="task",
         language="python",
         task_requirements="reqs as string",
+        files={"a.py": "x" * 50},
         llm_getter=lambda k: MagicMock(),
     )
     assert result.approved is True
@@ -81,12 +77,12 @@ def test_run_code_review_forwards_user_decisions(monkeypatch) -> None:
         lambda llm: SimpleNamespace(run=_run),
     )
     q.run_code_review(
-        code="x" * 50,
         spec_content="spec",
         task_description="task",
         language="python",
         task_requirements="reqs",
         user_decisions=["Which DB? → Postgres"],
+        files={"a.py": "x" * 50},
         llm_getter=lambda k: MagicMock(),
     )
     assert captured["input"].user_decisions == ["Which DB? → Postgres"]
@@ -113,12 +109,12 @@ def test_run_code_review_forwards_repo_root_and_repo_reader(monkeypatch, tmp_pat
     )
     repo_path = str(tmp_path)
     q.run_code_review(
-        code="x" * 50,
         spec_content="spec",
         task_description="task",
         language="python",
         task_requirements="reqs",
         repo_path=repo_path,
+        files={"a.py": "x" * 50},
         llm_getter=lambda k: MagicMock(),
     )
     assert captured["input"].repo_root == repo_path
@@ -142,11 +138,11 @@ def test_run_code_review_without_repo_path_passes_no_reader(monkeypatch) -> None
         lambda llm: SimpleNamespace(run=_run),
     )
     q.run_code_review(
-        code="x" * 50,
         spec_content="spec",
         task_description="task",
         language="python",
         task_requirements="reqs",
+        files={"a.py": "x" * 50},
         llm_getter=lambda k: MagicMock(),
     )
     assert captured["input"].repo_root is None
@@ -169,15 +165,11 @@ def test_run_code_review_default_task_requirements_empty(monkeypatch) -> None:
         "software_engineering_team.code_review_agent.CodeReviewAgent",
         lambda llm: SimpleNamespace(run=_run),
     )
-    monkeypatch.setattr(
-        "software_engineering_team.shared.context_sizing.compute_code_review_total_chars",
-        lambda llm: 1000,
-    )
     result = q.run_code_review(
-        code="x",
         spec_content="spec",
         task_description="task",
         language="python",
+        files={"a.py": "x"},
         llm_getter=lambda k: MagicMock(),
     )
     assert result.approved is True
@@ -199,11 +191,11 @@ def test_run_code_review_list_task_requirements_joined(monkeypatch) -> None:
         lambda llm: SimpleNamespace(run=_run),
     )
     result = q.run_code_review(
-        code="x",
         spec_content="spec",
         task_description="task",
         language="python",
         task_requirements=["req a", "req b"],
+        files={"a.py": "x"},
         llm_getter=lambda k: MagicMock(),
     )
     assert result.approved is True
@@ -221,15 +213,11 @@ def test_run_code_review_exception_returns_failed(monkeypatch) -> None:
         "software_engineering_team.code_review_agent.CodeReviewAgent",
         lambda llm: SimpleNamespace(run=boom),
     )
-    monkeypatch.setattr(
-        "software_engineering_team.shared.context_sizing.compute_code_review_total_chars",
-        lambda llm: 1000,
-    )
     result = q.run_code_review(
-        code="x",
         spec_content="",
         task_description="",
         language="python",
+        files={"a.py": "x"},
         llm_getter=lambda k: MagicMock(),
     )
     assert result.approved is False
@@ -323,19 +311,6 @@ def test_run_linting_exception_non_blocking(monkeypatch, tmp_path) -> None:
     assert result.passed is True
 
 
-def test_run_code_review_sizes_context_with_strands_adapter() -> None:
-    """Regression: the default llm_getter returns a strands LLMClientModel and
-    run_code_review passes it to compute_code_review_total_chars, which calls
-    get_max_context_tokens on it. Without adapter delegation that raised
-    AttributeError and every review failed closed ("Review failed: ...")."""
-    from llm_service.clients.dummy import DummyLLMClient
-    from llm_service.strands_adapter import _get_strands_model as get_strands_model
-    from software_engineering_team.shared.context_sizing import compute_code_review_total_chars
-
-    llm = get_strands_model("code_review", client=DummyLLMClient())
-    assert compute_code_review_total_chars(llm) == 150_000
-
-
 def test_run_code_review_forwards_progress_callback(monkeypatch) -> None:
     """The tool must forward progress_callback into the agent's run (and None when omitted)."""
     from software_engineering_team import quality_gate_tools as q
@@ -353,20 +328,16 @@ def test_run_code_review_forwards_progress_callback(monkeypatch) -> None:
     monkeypatch.setattr(
         "software_engineering_team.code_review_agent.CodeReviewAgent", _CapturingAgent
     )
-    monkeypatch.setattr(
-        "software_engineering_team.shared.context_sizing.compute_code_review_total_chars",
-        lambda llm: 1000,
-    )
 
     def _cb(step: str, detail: str, fraction: float) -> None:
         pass
 
     result = q.run_code_review(
-        code="x",
         spec_content="",
         task_description="t",
         language="python",
         task_requirements="reqs",
+        files={"a.py": "x"},
         llm_getter=lambda k: MagicMock(),
         progress_callback=_cb,
     )
@@ -374,19 +345,18 @@ def test_run_code_review_forwards_progress_callback(monkeypatch) -> None:
     assert captured["progress_callback"] is _cb
 
     q.run_code_review(
-        code="x",
         spec_content="",
         task_description="t",
         language="python",
         task_requirements="reqs",
+        files={"a.py": "x"},
         llm_getter=lambda k: MagicMock(),
     )
     assert captured["progress_callback"] is None
 
 
 def test_run_code_review_forwards_files_dict(monkeypatch) -> None:
-    """When ``files`` is supplied it reaches CodeReviewInput.files and the legacy
-    ``code`` string is ignored (the agent bounds its own per-call prompts)."""
+    """When ``files`` is supplied it reaches CodeReviewInput.files."""
     from software_engineering_team import quality_gate_tools as q
 
     captured: dict = {}
@@ -397,7 +367,6 @@ def test_run_code_review_forwards_files_dict(monkeypatch) -> None:
 
         def run(self, inp, progress_callback=None):
             captured["files"] = inp.files
-            captured["code"] = inp.code
             return _ReviewResult()
 
     monkeypatch.setattr(
@@ -406,7 +375,6 @@ def test_run_code_review_forwards_files_dict(monkeypatch) -> None:
 
     files = {"app/main.py": "print('hi')", "app/util.py": "x = 1"}
     result = q.run_code_review(
-        code="ignored whole-repo blob",
         spec_content="",
         task_description="t",
         language="python",
@@ -416,36 +384,3 @@ def test_run_code_review_forwards_files_dict(monkeypatch) -> None:
     )
     assert result.approved is True
     assert captured["files"] == files
-    # ``code`` was not passed through; CodeReviewInput leaves it at its default.
-    assert captured["code"] == ""
-
-
-def test_run_code_review_uses_code_when_no_files(monkeypatch) -> None:
-    """Without ``files`` the legacy ``code`` string is passed as the review input."""
-    from software_engineering_team import quality_gate_tools as q
-
-    captured: dict = {}
-
-    class _CapturingAgent:
-        def __init__(self, llm) -> None:
-            pass
-
-        def run(self, inp, progress_callback=None):
-            captured["files"] = inp.files
-            captured["code"] = inp.code
-            return _ReviewResult()
-
-    monkeypatch.setattr(
-        "software_engineering_team.code_review_agent.CodeReviewAgent", _CapturingAgent
-    )
-
-    q.run_code_review(
-        code="### a.py ###\nx = 1",
-        spec_content="",
-        task_description="t",
-        language="python",
-        task_requirements="reqs",
-        llm_getter=lambda k: MagicMock(),
-    )
-    assert captured["files"] is None
-    assert captured["code"] == "### a.py ###\nx = 1"

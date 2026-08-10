@@ -406,7 +406,7 @@ def test_side_effect_half_runs_when_pre_numbered_with_full_content_supplied() ->
     arch, side = find_architecture_and_side_effect_issues(
         _FindingsClient(),
         CodeReviewInput(
-            code="### app/main.py ###\n4242: def bar():\n4243:     return 1\n",
+            files={"app/main.py": "4242: def bar():\n4243:     return 1\n"},
             pre_numbered=True,
             full_content={"app/main.py": "def bar():\n    return 1\n"},
             task_description="wire up bar",
@@ -448,10 +448,10 @@ def test_side_effect_half_stays_off_when_full_content_covers_only_some_paths() -
     arch, side = find_architecture_and_side_effect_issues(
         _FindingsClient(),
         CodeReviewInput(
-            code=(
-                "### app/main.py ###\n4242: def bar():\n4243:     return 1\n"
-                "### app/util.py ###\n1: def helper():\n2:     return 2\n"
-            ),
+            files={
+                "app/main.py": "4242: def bar():\n4243:     return 1\n",
+                "app/util.py": "1: def helper():\n2:     return 2\n",
+            },
             pre_numbered=True,
             # Covers only app/main.py, not app/util.py -- partial coverage.
             full_content={"app/main.py": "def bar():\n    return 1\n"},

@@ -24,11 +24,9 @@ import pytest
 from investment_team.models import RiskLimits, StrategySpec
 from investment_team.strategy_lab.agents import _structured_output as so_mod
 from investment_team.strategy_lab.agents import refinement as mod
-from investment_team.strategy_lab.agents._parse_helpers import (
-    build_json_correction_prompt,
-    parse_retry_budget,
-)
+from investment_team.strategy_lab.agents._parse_helpers import build_json_correction_prompt
 from investment_team.strategy_lab.agents.refinement import RefinementAgent
+from investment_team.strategy_lab.budget_config import StrategyLabBudgetConfig
 
 
 def _spec() -> StrategySpec:
@@ -301,7 +299,7 @@ def test_logs_warning_on_each_unparseable_attempt(
 
 def test_parse_retries_default(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("STRATEGY_LAB_REFINEMENT_PARSE_RETRIES", raising=False)
-    assert parse_retry_budget("STRATEGY_LAB_REFINEMENT_PARSE_RETRIES") == 2
+    assert StrategyLabBudgetConfig.from_env().refinement_parse_retries == 2
 
 
 @pytest.mark.parametrize(
@@ -318,7 +316,7 @@ def test_parse_retries_env_parsing(
     monkeypatch: pytest.MonkeyPatch, raw: str, expected: int
 ) -> None:
     monkeypatch.setenv("STRATEGY_LAB_REFINEMENT_PARSE_RETRIES", raw)
-    assert parse_retry_budget("STRATEGY_LAB_REFINEMENT_PARSE_RETRIES") == expected
+    assert StrategyLabBudgetConfig.from_env().refinement_parse_retries == expected
 
 
 def test_refinement_keys_hint_names_both_output_keys() -> None:

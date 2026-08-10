@@ -30,7 +30,6 @@ from llm_service.clients.dummy import DummyLLMClient
 from software_engineering_team.code_review_agent.change_surface import (
     build_change_surface_from_patches,
 )
-from software_engineering_team.shared.chunking import parse_code_into_file_blocks
 
 # Same fixture shape as ``test_change_surface_from_patches.py``: touching the
 # body line of ``outer`` expands (via AST) to the enclosing function.
@@ -59,18 +58,9 @@ def _single_file_surface():
     )
 
 
-def test_change_surface_code_round_trips_through_chunker_header_parser() -> None:
-    """``surface.code`` parses back into exactly ``surface.blocks`` via the
-    chunker's own ``### path ###`` header parser (the function
-    ``_blocks_from_input`` delegates to for the legacy ``code=`` channel)."""
+def test_blocks_from_input_accepts_surface_blocks_verbatim() -> None:
     surface = _single_file_surface()
-    parsed = parse_code_into_file_blocks(surface.code)
-    assert parsed == list(surface.blocks.items())
-
-
-def test_blocks_from_input_accepts_surface_code_verbatim() -> None:
-    surface = _single_file_surface()
-    input_data = CodeReviewInput(code=surface.code, pre_numbered=True, language="python")
+    input_data = CodeReviewInput(files=dict(surface.blocks), pre_numbered=True, language="python")
     blocks, skipped = _blocks_from_input(input_data)
     assert blocks == list(surface.blocks.items())
     assert skipped == []
@@ -133,7 +123,7 @@ def test_change_surface_through_coordinator_preserves_original_line_citations() 
 
     result = run_coordinator(
         client,
-        CodeReviewInput(code=surface.code, pre_numbered=True, language="python"),
+        CodeReviewInput(files=dict(surface.blocks), pre_numbered=True, language="python"),
     )
 
     assert len(result.issues) == 1

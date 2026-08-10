@@ -10,14 +10,12 @@ from typing import Any, Dict, List, Optional, Tuple
 from llm_service.interface import LLMSemanticExhaustionError
 
 from ...models import BacktestResult, StrategySpec
+from ..budget_config import StrategyLabBudgetConfig
 from ..exceptions import StrategyLabLLMError
 from . import _structured_output as so
 from ._agent_runner import run_json_with_parse_retry
 from ._llm_budget import charge_active_budget
-from ._parse_helpers import (
-    build_json_correction_prompt,
-    parse_retry_budget,
-)
+from ._parse_helpers import build_json_correction_prompt
 from ._prompt_context import render_prior_attempts, spec_prompt_fields
 from ._response_schemas import REFINEMENT_SCHEMA
 
@@ -268,7 +266,7 @@ class RefinementAgent:
                 )
                 return result
 
-        retries = parse_retry_budget("STRATEGY_LAB_REFINEMENT_PARSE_RETRIES")
+        retries = StrategyLabBudgetConfig.from_env().refinement_parse_retries
         attempt_box = {"n": 0}
 
         def _on_parse_error(_base_prompt: str, exc: ValueError) -> str:

@@ -52,10 +52,14 @@ context-formatting scaffolding; see
 [`docs/PROMPT_TEMPLATE_MIGRATION_METRICS.md`](docs/PROMPT_TEMPLATE_MIGRATION_METRICS.md)
 for the before/after line-count report from that migration.
 
-Work removing the legacy stack-alias repair and legacy HITL reason parsing
-from routing, the Tech Lead, and `swarm_review` must follow the resume
-policy in
-[`docs/LEGACY_STACK_RESUME_POLICY_DECISION.md`](docs/LEGACY_STACK_RESUME_POLICY_DECISION.md).
+Legacy stack-alias repair and legacy free-text HITL reason parsing have
+been removed from routing, the Tech Lead, and `swarm_review`. Resuming a
+job whose persisted state still carries one of those old shapes (a legacy
+stack alias, a task missing `target_team`, or a `user_decision` entry
+without structured `decisions`) now fails fast with a field-identifying
+error instead of being silently repaired or migrated — see
+[`docs/LEGACY_STACK_RESUME_POLICY_DECISION.md`](docs/LEGACY_STACK_RESUME_POLICY_DECISION.md)
+for the decision and pre-deploy audit.
 
 ## Sub-teams and SDLC
 

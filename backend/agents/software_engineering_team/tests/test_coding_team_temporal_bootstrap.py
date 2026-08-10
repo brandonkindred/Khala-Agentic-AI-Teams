@@ -101,3 +101,41 @@ def test_worker_start_is_no_op_when_temporal_disabled(monkeypatch):
     )
 
     assert start_coding_team_temporal_worker_thread() is False
+
+
+def test_worker_registers_grooming_workflows_and_activities(monkeypatch):
+    """Issue grooming's WORKFLOWS/ACTIVITIES must be merged onto the
+    coding-team worker alongside CodingTeamWorkflow's own, per
+    ``coding_team_worker.py``'s module docstring."""
+    monkeypatch.setenv("TEMPORAL_ADDRESS", "localhost:7233")
+    import shared.temporal
+    from software_engineering_team.temporal.coding_team_constants import TASK_QUEUE
+    from software_engineering_team.temporal.coding_team_worker import (
+        start_coding_team_temporal_worker_thread,
+    )
+    from software_engineering_team.temporal.coding_team_workflow import (
+        ACTIVITIES as CODING_TEAM_ACTIVITIES,
+    )
+    from software_engineering_team.temporal.coding_team_workflow import (
+        WORKFLOWS as CODING_TEAM_WORKFLOWS,
+    )
+    from software_engineering_team.temporal.issue_grooming_workflow import (
+        ACTIVITIES as GROOMING_ACTIVITIES,
+    )
+    from software_engineering_team.temporal.issue_grooming_workflow import (
+        WORKFLOWS as GROOMING_WORKFLOWS,
+    )
+
+    with mock.patch.object(shared.temporal, "start_team_worker", return_value=True) as patched:
+        result = start_coding_team_temporal_worker_thread()
+
+    assert result is True
+    patched.assert_called_once()
+    args, kwargs = patched.call_args
+    team, workflows, activities = args
+    assert team == "coding_team"
+    assert kwargs.get("task_queue") == TASK_QUEUE
+    assert workflows == CODING_TEAM_WORKFLOWS + GROOMING_WORKFLOWS
+    assert activities == CODING_TEAM_ACTIVITIES + GROOMING_ACTIVITIES
+    assert set(GROOMING_WORKFLOWS).issubset(set(workflows))
+    assert set(GROOMING_ACTIVITIES).issubset(set(activities))

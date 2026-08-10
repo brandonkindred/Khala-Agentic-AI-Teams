@@ -1,21 +1,26 @@
-"""Thin integration coverage locking the additive-pass runner-only construction invariant.
+"""Thin integration coverage locking the additive-pass runner-only invariant.
 
 The three once-per-submission additive code-review passes
 (``architecture_consistency_pass``, ``side_effect_impact_pass``,
 ``merged_architecture_side_effect_pass``) were migrated onto the shared
 ``submission_pass_runner`` so budgeting, chunking, ``Agent`` construction, and
 overflow recovery live in one place. This file does not re-test that
-mechanics (``test_submission_pass_runner.py`` and each pass's own
-"...through_public_entry_point" tests already do); it locks in the migration
-invariant so a future change cannot silently reintroduce a direct ``Agent``
-construction or a duplicated recovery helper in a pass module without failing
-a test.
+mechanics: ``test_submission_pass_runner.py`` covers the runner's own
+budgeting/chunking/recovery in isolation, and each pass's own
+"...through_public_entry_point" test already exercises its overflow-recovery
+path end to end. Instead, this file locks in the migration invariant so a
+future change cannot silently reintroduce a direct ``Agent`` construction, a
+duplicated recovery helper, or a call path that bypasses
+``run_submission_pass`` in a pass module without failing a test.
+
+No network/LLM: every test here uses ``DummyLLMClient`` subclasses or a
+spied-in ``Agent`` stand-in, matching the runner's own unit-test posture.
 """
 
 from __future__ import annotations
 
 import inspect
-from typing import Any, Callable, List, Tuple
+from typing import Any, Callable, Dict, List, Tuple
 
 import code_review_agent.architecture_consistency_pass as arch_mod
 import code_review_agent.merged_architecture_side_effect_pass as merged_mod
@@ -23,29 +28,32 @@ import code_review_agent.side_effect_impact_pass as side_mod
 import code_review_agent.submission_pass_runner as runner_mod
 import pytest
 from code_review_agent.models import CodeReviewInput
-from strands.types.exceptions import ContextWindowOverflowException
 
 from llm_service.clients.dummy import DummyLLMClient
 from shared.dev_models.models import SystemArchitecture
 
 _PASS_MODULES = (arch_mod, side_mod, merged_mod)
 
-# Private helpers that own overflow detection / bisect / shrink recovery.
-# These must live only on the runner -- a pass module redefining any of them
-# would be exactly the duplication issue #5504 guards against.
-_RECOVERY_HELPER_NAMES = (
+# Names the shared runner owns; a migrated pass module must not (re-)define
+# or import any of them locally -- that would mean Agent construction or
+# recovery mechanics leaked back out of the runner during a future edit.
+_RUNNER_OWNED_NAMES = (
+    "Agent",
+    "_call_agent",
     "_is_overflow_shaped",
+    "_run_batch_with_recovery",
     "_recover_from_overflow",
     "_shrink_items",
     "_shrink_budgets",
     "_pack_batches",
+    "_MAX_BATCH_BISECT_DEPTH",
 )
 
 
 def _arch() -> SystemArchitecture:
     return SystemArchitecture(
         overview="Layered service architecture.",
-        architecture_document="Documented boundaries between layers.",
+        architecture_document="All writes MUST go through the repository layer.",
     )
 
 
@@ -57,13 +65,30 @@ def _input(**overrides: Any) -> CodeReviewInput:
 # --------------------------------------------------------------------------- static checks
 
 
-def test_pass_modules_do_not_import_or_construct_agent() -> None:
-    """No additive pass module imports or constructs ``strands.Agent`` directly.
+@pytest.mark.parametrize("module", _PASS_MODULES, ids=lambda m: m.__name__)
+def test_pass_module_holds_none_of_the_runner_owned_names(module: Any) -> None:
+    """A migrated pass module defines/imports none of the runner-owned names.
 
-    The runner's own source must still contain the construction site --
-    otherwise this test would pass vacuously if that site ever moved
-    somewhere this grep does not look.
+    ``Agent`` is the crux of the runner-only-construction invariant: if a
+    pass module ever imported ``strands.Agent``, it could construct one
+    directly, bypassing the runner's budgeting/chunking/recovery entirely.
+    The remaining names are the runner's private recovery helpers -- their
+    presence here would mean a duplicate implementation, not delegation.
     """
+    for name in _RUNNER_OWNED_NAMES:
+        assert getattr(runner_mod, name, None) is not None, (
+            f"sanity check failed: submission_pass_runner no longer defines {name!r}"
+        )
+        assert not hasattr(module, name), (
+            f"{module.__name__} must not define/import {name!r} -- that belongs "
+            "solely to submission_pass_runner"
+        )
+
+
+def test_agent_construction_appears_only_in_the_shared_runner() -> None:
+    """Source-level lock: no additive pass module constructs or imports
+    ``strands.Agent`` directly -- among the runner and the three migrated
+    pass modules, only the runner's source may reference it."""
     runner_source = inspect.getsource(runner_mod)
     assert "Agent(" in runner_source, (
         "sanity check failed: submission_pass_runner no longer appears to construct Agent anywhere"
@@ -76,21 +101,67 @@ def test_pass_modules_do_not_import_or_construct_agent() -> None:
         assert "strands.Agent" not in source, f"{module.__name__} must not reference strands.Agent"
 
 
-def test_recovery_helpers_live_only_in_the_runner() -> None:
-    """The runner's private overflow/bisect/shrink helpers are not duplicated in any pass module."""
-    for name in _RECOVERY_HELPER_NAMES:
-        assert getattr(runner_mod, name, None) is not None, f"runner is missing {name}"
-        for module in _PASS_MODULES:
-            assert getattr(module, name, None) is None, (
-                f"{module.__name__} must not define its own {name}; it should come only "
-                "from submission_pass_runner"
-            )
+# ------------------------------------------------------------ delegates to runner
 
 
-# --------------------------------------------------------------------------- dynamic checks
+def test_architecture_pass_delegates_to_shared_runner(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: List[str] = []
+    original = arch_mod.run_submission_pass
+
+    def _spy(llm, **kwargs):
+        calls.append("architecture")
+        return original(llm, **kwargs)
+
+    monkeypatch.setattr(arch_mod, "run_submission_pass", _spy)
+
+    class _Client(DummyLLMClient):
+        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+            return {"findings": []}
+
+    arch_mod.find_architecture_and_redundancy_issues(_Client(), _input(architecture=_arch()))
+    assert calls == ["architecture"]
 
 
-def _agent_spy_class(reply: str, calls: List[Tuple[Any, str, list]]) -> type:
+def test_side_effect_pass_delegates_to_shared_runner(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: List[str] = []
+    original = side_mod.run_submission_pass
+
+    def _spy(llm, **kwargs):
+        calls.append("side_effect")
+        return original(llm, **kwargs)
+
+    monkeypatch.setattr(side_mod, "run_submission_pass", _spy)
+
+    class _Client(DummyLLMClient):
+        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+            return {"findings": []}
+
+    side_mod.find_side_effect_impact_issues(_Client(), _input())
+    assert calls == ["side_effect"]
+
+
+def test_merged_pass_delegates_to_shared_runner(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: List[str] = []
+    original = merged_mod.run_submission_pass
+
+    def _spy(llm, **kwargs):
+        calls.append("merged")
+        return original(llm, **kwargs)
+
+    monkeypatch.setattr(merged_mod, "run_submission_pass", _spy)
+
+    class _Client(DummyLLMClient):
+        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+            return {"architecture_findings": [], "side_effect_findings": []}
+
+    merged_mod.find_architecture_and_side_effect_issues(_Client(), _input(architecture=_arch()))
+    assert calls == ["merged"]
+
+
+# ------------------------------------------------------- dynamic Agent-symbol checks
+
+
+def _agent_spy_class(reply: str, calls: List[Tuple[Any, str, List[Any]]]) -> type:
     """Build a `strands.Agent` stand-in that records construction and returns ``reply``."""
 
     class _Spy:
@@ -132,38 +203,9 @@ def test_agent_construction_routes_through_the_shared_runner(
     build_input: Callable[[], CodeReviewInput],
 ) -> None:
     """Each pass's real public entry point constructs its Agent only via the runner's ``Agent`` symbol."""
-    calls: List[Tuple[Any, str, list]] = []
+    calls: List[Tuple[Any, str, List[Any]]] = []
     monkeypatch.setattr(runner_mod, "Agent", _agent_spy_class(reply, calls))
 
     entry_point(DummyLLMClient(), build_input())
 
     assert calls, "expected the pass to construct at least one Agent via the shared runner"
-
-
-def test_overflow_recovery_reaches_the_shared_runner(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A pass's real public entry point recovers from an overflow-shaped failure via the runner.
-
-    A thin, single overflow-recovery path through this consolidated file --
-    the exhaustive bisect/shrink matrix stays owned by
-    ``test_submission_pass_runner.py`` and each pass's own
-    "...through_public_entry_point" test.
-    """
-    calls: List[Tuple[Any, str, list]] = []
-
-    class _FlakyOnceSpy:
-        def __init__(self, *, model: Any, system_prompt: str, tools: list) -> None:
-            calls.append((model, system_prompt, tools))
-
-        def __call__(self, prompt: str) -> str:
-            if len(calls) == 1:
-                raise ContextWindowOverflowException("simulated overflow")
-            return '{"findings": []}'
-
-    monkeypatch.setattr(runner_mod, "Agent", _FlakyOnceSpy)
-
-    result = arch_mod.find_architecture_and_redundancy_issues(
-        DummyLLMClient(), _input(architecture=_arch())
-    )
-
-    assert result == []
-    assert len(calls) > 1, "expected the shared runner to retry after the simulated overflow"
