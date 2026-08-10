@@ -79,3 +79,53 @@ def test_groom_marks_job_failed_and_503_when_temporal_dispatch_raises(monkeypatc
     assert kw["status"] == "failed"
     assert "Temporal dispatch failed" in kw["error"]
     assert "worker unreachable" in kw["error"]
+
+
+# --------------------------------------------------------------------------- /status grooming parity
+
+
+def _job(**over):
+    base = {
+        "job_id": "j1",
+        "status": "running",
+        "phase": "phase_a",
+        "task_graph_snapshot": [],
+    }
+    base.update(over)
+    return base
+
+
+def test_status_surfaces_in_flight_grooming_score(monkeypatch):
+    """Phase A completes before Phase B runs (or is skipped): grooming carries only
+    'score', same dict IssueGroomingRunner passes to update_job(grooming=...)."""
+    grooming = {"score": {"conceptual": 2, "loc": 2, "solution": 2, "aggregate": 2}}
+    monkeypatch.setattr(api, "get_job", lambda jid: _job(grooming=grooming))
+    r = client.get("/status/j1")
+    assert r.status_code == 200
+    assert r.json()["grooming"] == grooming
+
+
+def test_status_surfaces_terminal_grooming_sub_issues(monkeypatch):
+    """A successful run that split the issue: grooming adds 'sub_issues' and the job
+    is terminal -- both surface unchanged through the status endpoint."""
+    grooming = {
+        "score": {"conceptual": 5, "loc": 5, "solution": 8, "aggregate": 8},
+        "sub_issues": [{"number": 101, "title": "Part 1"}, {"number": 102, "title": "Part 2"}],
+    }
+    monkeypatch.setattr(
+        api, "get_job", lambda jid: _job(status="completed", phase="done", grooming=grooming)
+    )
+    r = client.get("/status/j1")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["status"] == "completed"
+    assert body["grooming"] == grooming
+
+
+def test_status_grooming_absent_is_null(monkeypatch):
+    """A non-grooming job (or a grooming job before Phase A writes anything) has no
+    'grooming' key -- the field defaults to null, not an error or empty dict."""
+    monkeypatch.setattr(api, "get_job", lambda jid: _job())
+    r = client.get("/status/j1")
+    assert r.status_code == 200
+    assert r.json()["grooming"] is None
