@@ -1,6 +1,8 @@
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { NoopAnimationsModule } from '@angular/platform-browser/animations';
+import { MatDialog } from '@angular/material/dialog';
 import { PrReviewDetailComponent } from './pr-review-detail.component';
+import { CodeReviewTranscriptDialogComponent } from '../code-review-transcript-dialog/code-review-transcript-dialog.component';
 import type { GitHubPullRequestItem } from '../../../models/integrations.model';
 import type { PendingIssueProposal } from '../../../models/coding-team.model';
 import type { PrReviewRecord } from '../pr-review-record.model';
@@ -63,11 +65,14 @@ function terminalRecordWith(proposals: PendingIssueProposal[]): PrReviewRecord {
 describe('PrReviewDetailComponent', () => {
   let component: PrReviewDetailComponent;
   let fixture: ComponentFixture<PrReviewDetailComponent>;
+  let dialogOpen: ReturnType<typeof vi.fn>;
 
   /** Create the component with sensible defaults, applying any per-test input overrides. */
   async function setup(inputs: Partial<PrReviewDetailComponent> = {}): Promise<void> {
+    dialogOpen = vi.fn();
     await TestBed.configureTestingModule({
       imports: [PrReviewDetailComponent, NoopAnimationsModule],
+      providers: [{ provide: MatDialog, useValue: { open: dialogOpen } }],
     }).compileComponents();
 
     fixture = TestBed.createComponent(PrReviewDetailComponent);
@@ -198,9 +203,9 @@ describe('PrReviewDetailComponent', () => {
     const sevChips = Array.from(done.querySelectorAll('[class*="cr-chip--sev-"]'));
     expect(sevChips.map((c) => c.textContent?.trim())).toEqual(['1 critical', '2 medium']);
     expect(done.querySelector('.cr-chip--sev-high')).toBeNull();
-    // The last cell (Duration) shows the computed elapsed time.
+    // Columns: Status | Outcome | Findings | Severity | Started | Duration | Transcript.
     const doneCells = done.querySelectorAll('td');
-    expect(doneCells[doneCells.length - 1].textContent?.trim()).toBe('2m 0s');
+    expect(doneCells[doneCells.length - 2].textContent?.trim()).toBe('2m 0s'); // duration
     // The per-run link column is gone; the PR link is hoisted to the header.
     expect(done.querySelector('a[aria-label="Open PR"]')).toBeNull();
 
@@ -212,7 +217,8 @@ describe('PrReviewDetailComponent', () => {
     expect(live.querySelector('.cr-findings')).toBeNull();
     expect(live.querySelector('[class*="cr-chip--sev-"]')).toBeNull();
     const liveCells = live.querySelectorAll('td');
-    expect(liveCells[liveCells.length - 1].textContent?.trim()).toBe('—'); // duration
+    expect(liveCells[liveCells.length - 2].textContent?.trim()).toBe('—'); // duration
+    expect(liveCells[liveCells.length - 1].textContent?.trim()).toBe('—'); // transcript (non-terminal)
   });
 
   it('hoists a single PR link into the detail header and drops the per-row link', async () => {
@@ -304,6 +310,32 @@ describe('PrReviewDetailComponent', () => {
     button.click();
 
     expect(emitted).toEqual([{ record: rec, ids: ['p0'] }]);
+  });
+
+  // -------------------------------------------------------------------------
+  // View Transcript action
+  // -------------------------------------------------------------------------
+
+  it('shows a View Transcript button only for terminal runs', async () => {
+    const completed = record({ jobId: 'done', status: 'completed' });
+    const running = record({ jobId: 'live', status: 'running' });
+    await setup({ reviews: [completed, running] });
+    const rows = el().querySelectorAll('.cr-reviews-table tbody tr');
+    expect(rows[0].querySelector('button[aria-label="View review transcript"]')).toBeTruthy();
+    expect(rows[1].querySelector('button[aria-label="View review transcript"]')).toBeNull();
+  });
+
+  it('opens the transcript dialog with the record owner/repo/jobId on click', async () => {
+    const rec = record({ jobId: 'j9', owner: 'acme', repo: 'widgets', status: 'completed' });
+    await setup({ reviews: [rec] });
+    const button = el().querySelector(
+      '.cr-reviews-table tbody tr button[aria-label="View review transcript"]',
+    ) as HTMLButtonElement;
+    button.click();
+    expect(dialogOpen).toHaveBeenCalledWith(
+      CodeReviewTranscriptDialogComponent,
+      expect.objectContaining({ data: { owner: 'acme', repo: 'widgets', jobId: 'j9' } }),
+    );
   });
 
   // -------------------------------------------------------------------------

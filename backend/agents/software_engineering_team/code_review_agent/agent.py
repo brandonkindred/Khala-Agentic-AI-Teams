@@ -26,7 +26,7 @@ from __future__ import annotations
 import logging
 import uuid
 
-from llm_service import get_client
+from llm_service import get_client, llm_attribution
 
 from .coordinator import run_coordinator
 from .models import (
@@ -208,9 +208,23 @@ class CodeReviewAgent:
         effective_reader = repo_reader
         if effective_reader is None:
             effective_reader = disk_repo_reader_from_root(input_data.repo_root)
-        return run_coordinator(
-            self.llm, input_data, progress_callback=progress_callback, repo_reader=effective_reader
-        )
+        # Binds job_id for the whole in-process run so every LLM call site can
+        # record its prompt/response into that job's durable transcript (see
+        # ``transcript.record_transcript_entry``); ``shared.concurrency.parallel_map``
+        # propagates this context into the map phase's and tail passes' worker
+        # threads by default, so no call site below needs job_id threaded through
+        # its own parameters. A blank ``input_data.job_id`` (no caller-tracked job)
+        # makes every record a no-op. Not honored on the Temporal-dispatched path:
+        # attribution is a contextvar and does not cross the activity boundary.
+        with llm_attribution(
+            job_id=input_data.job_id, team="software_engineering_team", agent_key="code_review"
+        ):
+            return run_coordinator(
+                self.llm,
+                input_data,
+                progress_callback=progress_callback,
+                repo_reader=effective_reader,
+            )
 
     def _run_via_temporal(
         self,

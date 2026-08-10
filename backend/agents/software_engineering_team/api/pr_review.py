@@ -838,6 +838,7 @@ def _run_reviewer(
         task_description=f"Review pull request #{pr_number}: {pr.title}",
         language=_infer_review_language(files),
         progress_callback=pr_bridge,
+        job_id=job_id,
     )
     # One reviewer call per non-empty source; see the docstring above.
     attempts: List[Dict[str, Any]] = []

@@ -2216,6 +2216,86 @@ class TestReviewPersistence:
         )
 
 
+class TestReviewTranscript:
+    """GET /reviews/{job_id}/transcript: 200 with entries, 404s, owner/repo gate."""
+
+    def test_returns_entries_in_order(self, review_app, monkeypatch) -> None:
+        api_main = review_app["api"]
+        monkeypatch.setattr(
+            api_main,
+            "get_review",
+            lambda job_id: {"job_id": job_id, "owner": "o", "repo": "r"},
+        )
+        entries = [
+            {
+                "stage": "chunk_review",
+                "target": "a.py",
+                "model": "m",
+                "prompt": "p1",
+                "response": "r1",
+                "started_at": "2024-01-01T00:00:00+00:00",
+                "duration_ms": 10,
+            },
+            {
+                "stage": "synthesis",
+                "target": "",
+                "model": "m",
+                "prompt": "p2",
+                "response": "r2",
+                "started_at": "2024-01-01T00:00:01+00:00",
+                "duration_ms": 5,
+            },
+        ]
+        monkeypatch.setattr(api_main, "get_review_transcript", lambda job_id: entries)
+        resp = review_app["client"].get("/reviews/j1/transcript")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["job_id"] == "j1"
+        assert [e["stage"] for e in data["entries"]] == ["chunk_review", "synthesis"]
+
+    def test_404_when_review_unknown(self, review_app, monkeypatch) -> None:
+        api_main = review_app["api"]
+        monkeypatch.setattr(api_main, "get_review", lambda job_id: None)
+        resp = review_app["client"].get("/reviews/does-not-exist/transcript")
+        assert resp.status_code == 404
+
+    def test_404_when_transcript_not_yet_recorded(self, review_app, monkeypatch) -> None:
+        api_main = review_app["api"]
+        monkeypatch.setattr(
+            api_main,
+            "get_review",
+            lambda job_id: {"job_id": job_id, "owner": "o", "repo": "r"},
+        )
+        monkeypatch.setattr(api_main, "get_review_transcript", lambda job_id: None)
+        resp = review_app["client"].get("/reviews/j1/transcript")
+        assert resp.status_code == 404
+
+    def test_409_on_owner_repo_mismatch(self, review_app, monkeypatch) -> None:
+        api_main = review_app["api"]
+        monkeypatch.setattr(
+            api_main,
+            "get_review",
+            lambda job_id: {"job_id": job_id, "owner": "o", "repo": "r"},
+        )
+        resp = review_app["client"].get(
+            "/reviews/j1/transcript", params={"owner": "other", "repo": "r"}
+        )
+        assert resp.status_code == 409
+
+    def test_owner_repo_match_is_case_insensitive(self, review_app, monkeypatch) -> None:
+        api_main = review_app["api"]
+        monkeypatch.setattr(
+            api_main,
+            "get_review",
+            lambda job_id: {"job_id": job_id, "owner": "Owner", "repo": "Repo"},
+        )
+        monkeypatch.setattr(api_main, "get_review_transcript", lambda job_id: [])
+        resp = review_app["client"].get(
+            "/reviews/j1/transcript", params={"owner": "owner", "repo": "repo"}
+        )
+        assert resp.status_code == 200
+
+
 # ---------------------------------------------------------------------------
 # BUG CONDITION REGRESSION TESTS
 #

@@ -1,13 +1,18 @@
-import { Component, EventEmitter, Input, Output } from '@angular/core';
+import { Component, EventEmitter, Input, Output, inject } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { MatIconModule } from '@angular/material/icon';
 import { MatButtonModule } from '@angular/material/button';
+import { MatDialog } from '@angular/material/dialog';
 import { MatProgressSpinnerModule } from '@angular/material/progress-spinner';
 import type { GitHubPullRequestItem } from '../../../models/integrations.model';
 import type { CodeReviewSummary } from '../../../models/coding-team.model';
 import { isCodingTeamTerminalStatus } from '../../../models/job-status.model';
 import { InlineBannerComponent } from '../../../shared/inline-banner/inline-banner.component';
 import { PendingIssueProposalsComponent } from '../pending-issue-proposals/pending-issue-proposals.component';
+import {
+  CodeReviewTranscriptDialogComponent,
+  type CodeReviewTranscriptDialogData,
+} from '../code-review-transcript-dialog/code-review-transcript-dialog.component';
 import type { PrReviewRecord } from '../pr-review-record.model';
 import { reviewDuration, severityEntries } from '../review-metrics';
 
@@ -51,6 +56,7 @@ import { reviewDuration, severityEntries } from '../review-metrics';
   styleUrl: './pr-review-detail.component.scss',
 })
 export class PrReviewDetailComponent {
+  private readonly dialog = inject(MatDialog);
   /** The pull request this panel details. */
   @Input({ required: true }) pull!: GitHubPullRequestItem;
 
@@ -157,5 +163,26 @@ export class PrReviewDetailComponent {
    */
   onCreateIssues(record: PrReviewRecord, ids: string[]): void {
     this.createIssuesRequested.emit({ record, ids });
+  }
+
+  /**
+   * Open the read-only transcript dialog for a terminal review run.
+   *
+   * Preconditions: `record` is one of this PR's runs and `isRecordTerminal(record)`
+   * is true (the "View Transcript" action is only rendered once a run completes).
+   * Postconditions: opens `CodeReviewTranscriptDialogComponent`, which fetches and
+   * renders the run's durable transcript itself; this method has no return value.
+   */
+  onViewTranscript(record: PrReviewRecord): void {
+    const data: CodeReviewTranscriptDialogData = {
+      owner: record.owner,
+      repo: record.repo,
+      jobId: record.jobId,
+    };
+    this.dialog.open(CodeReviewTranscriptDialogComponent, {
+      data,
+      width: '800px',
+      maxWidth: '95vw',
+    });
   }
 }

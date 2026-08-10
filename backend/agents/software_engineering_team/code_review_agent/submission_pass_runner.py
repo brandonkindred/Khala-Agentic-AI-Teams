@@ -33,6 +33,7 @@ Invariants:
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass, replace
 from typing import Callable, List, Optional, Tuple, TypeVar, Union
 
@@ -47,6 +48,7 @@ from software_engineering_team.shared.context_sizing import (
 )
 
 from .model_resolution import resolve_code_review_model
+from .transcript import model_label, record_transcript_entry
 
 logger = logging.getLogger(__name__)
 
@@ -297,14 +299,36 @@ def _call_agent(
     tools: list,
     prompt: str,
     parse: Callable[[str], T],
+    *,
+    pass_label: str = "",
+    batch_target: str = "",
 ) -> T:
     """Construct one fresh ``Agent``, run ``prompt``, and parse the reply.
 
+    Preconditions:
+        - ``pass_label``/``batch_target``, when non-blank, identify this call for
+          the durable transcript (see ``transcript.record_transcript_entry``) —
+          the calling pass's label and a short description of the batch (e.g.
+          ``"batch 1/2"``). Blank values (a caller that predates this parameter,
+          e.g. a direct test) simply record under an empty stage/target.
+
     Postconditions: returns ``parse``'s result. Raises whatever the ``Agent``
         call or ``parse`` raises — recovery is entirely the caller's concern.
+        Records this call's prompt/reply into the durable transcript before
+        ``parse`` runs, so a reply that ``parse`` goes on to reject is still
+        captured.
     """
     agent = Agent(model=model, system_prompt=system_prompt, tools=tools)
+    started = time.monotonic()
     raw = str(agent(prompt)).strip()
+    record_transcript_entry(
+        pass_label,
+        batch_target,
+        prompt,
+        raw,
+        model=model_label(model),
+        duration_ms=(time.monotonic() - started) * 1000,
+    )
     return parse(raw)
 
 
@@ -335,7 +359,15 @@ def _run_batch_with_recovery(
     """
     try:
         prompt = build_prompt(batch, budgets)
-        result = _call_agent(model, system_prompt, tools, prompt, parse)
+        result = _call_agent(
+            model,
+            system_prompt,
+            tools,
+            prompt,
+            parse,
+            pass_label=pass_label,
+            batch_target=f"batch {batch.index}/{batch.total}",
+        )
     except Exception as exc:  # noqa: BLE001 - fail-safe: recover or skip, never raise
         if not _is_overflow_shaped(exc):
             logger.warning(
@@ -453,7 +485,15 @@ def _recover_from_overflow(
     shrink_budgets = _shrink_budgets(budgets)
     try:
         prompt = build_prompt(shrink_batch, shrink_budgets)
-        result = _call_agent(model, system_prompt, tools, prompt, parse)
+        result = _call_agent(
+            model,
+            system_prompt,
+            tools,
+            prompt,
+            parse,
+            pass_label=pass_label,
+            batch_target=f"batch {shrink_batch.index}/{shrink_batch.total} (shrunk)",
+        )
     except Exception as retry_exc:  # noqa: BLE001 - one shrink attempt only
         logger.warning(
             "%s: batch %s/%s still failed after shrink (%s: %s); skipping",

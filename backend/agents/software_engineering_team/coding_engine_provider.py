@@ -88,6 +88,7 @@ class SECodeEngineProvider:
         files: Any = None,
         existing_codebase: Any = None,
         repo_reader: Any = None,
+        job_id: str = "",
     ) -> Any:
         """Run the PR code-review agent over a pull request's changes.
 
@@ -98,6 +99,11 @@ class SECodeEngineProvider:
             - ``repo_reader`` is None or a duck-typed ``RepoReader`` (``list_files``
               /``read_file``) giving the false-positive verifier read access to
               existing repository files outside the diff.
+            - ``job_id``, when non-blank, is the caller's persisted review job id
+              (e.g. a ``code_review_runs`` row) — forwarded so the reviewer's LLM
+              calls can record into that job's durable transcript. ``""`` (the
+              default) means no caller-tracked job; transcript recording is then
+              a no-op.
 
         Postconditions: returns the reviewer's output (carries an ``issues`` list).
         """
@@ -111,6 +117,7 @@ class SECodeEngineProvider:
             task_requirements=task_requirements,
             language=language,
             existing_codebase=existing_codebase,
+            job_id=job_id,
         )
         run_kwargs: dict = {"progress_callback": progress_callback}
         # Forward the reader only when present: passing ``repo_reader=None`` is a

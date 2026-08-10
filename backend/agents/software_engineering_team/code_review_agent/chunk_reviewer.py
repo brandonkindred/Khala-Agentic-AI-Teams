@@ -35,12 +35,14 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 from typing import Optional, Union
 
 from llm_service import LLMClient, complete_validated
 
 from .models import ChunkReviewInput, ChunkReviewLLMResponse, ChunkReviewOutput
 from .profiles import build_review_system_prompt
+from .transcript import model_label, record_transcript_entry
 
 logger = logging.getLogger(__name__)
 
@@ -325,6 +327,7 @@ def _run_chunk_review(
     )
 
     prompt = "\n".join(context_parts)
+    started = time.monotonic()
     response = complete_validated(
         llm,
         prompt,
@@ -333,6 +336,14 @@ def _run_chunk_review(
         system_prompt=build_review_system_prompt(input_data.profile),
         temperature=0.0,
         think=think,
+    )
+    record_transcript_entry(
+        "chunk_review",
+        input_data.file_path_or_label,
+        prompt,
+        response.model_dump_json(),
+        model=model_label(llm),
+        duration_ms=(time.monotonic() - started) * 1000,
     )
 
     # Issue dicts are passed through raw: normalization (defaults, line

@@ -15,6 +15,8 @@ from software_engineering_team.api.coding_team_models import (
     ReviewPrRequest,
     ReviewPrResponse,
     ReviewRunItem,
+    TranscriptEntry,
+    TranscriptResponse,
 )
 from software_engineering_team.api.routes._common import resolve_github_token
 from software_engineering_team.github_source import (
@@ -107,6 +109,44 @@ def get_reviews(
     """
     rows = _main.list_reviews(owner, repo, pr_number, limit=limit)
     return [ReviewRunItem.model_validate(row) for row in rows]
+
+
+@router.get("/reviews/{job_id}/transcript", response_model=TranscriptResponse)
+def get_review_transcript(
+    job_id: str,
+    owner: Optional[str] = None,
+    repo: Optional[str] = None,
+) -> TranscriptResponse:
+    """Return one review's full durable transcript (every LLM call it made).
+
+    Preconditions:
+        - ``job_id`` names a review that was started via ``POST /review-pr``.
+        - ``owner``/``repo``, when both supplied, are checked (case-insensitively)
+          against the stored review's repository — the same repo-mismatch guard
+          ``POST /reviews/{job_id}/issues`` applies — so a job id belonging to a
+          different (PAT-accessible) repository is refused rather than leaking
+          its transcript.
+    Postconditions:
+        - Returns the transcript's entries in call order. Returns 404 when
+          ``job_id`` names no known review, or when the review is known but has
+          not yet recorded a transcript (never started, or predates this
+          feature); 409 on an ``owner``/``repo`` mismatch.
+    """
+    review = _main.get_review(job_id)
+    if review is None:
+        raise HTTPException(status_code=404, detail=f"no review found for job {job_id}")
+    if owner is not None and repo is not None:
+        if review["owner"].lower() != owner.lower() or review["repo"].lower() != repo.lower():
+            raise HTTPException(
+                status_code=409,
+                detail="The requested repository does not match the reviewed repository.",
+            )
+    entries = _main.get_review_transcript(job_id)
+    if entries is None:
+        raise HTTPException(status_code=404, detail=f"no transcript recorded for job {job_id}")
+    return TranscriptResponse(
+        job_id=job_id, entries=[TranscriptEntry.model_validate(e) for e in entries]
+    )
 
 
 @router.post("/reviews/{job_id}/issues", response_model=CreateReviewIssuesResponse)

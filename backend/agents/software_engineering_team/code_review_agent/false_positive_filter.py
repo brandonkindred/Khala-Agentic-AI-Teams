@@ -37,6 +37,7 @@ import ast
 import logging
 import os
 import re
+import time
 from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional, Tuple
@@ -63,6 +64,7 @@ from .model_resolution import resolve_code_review_verify_model
 from .models import CodeReviewInput, CodeReviewIssue
 from .prompts import FALSE_POSITIVE_VERIFY_PROMPT
 from .repo_reader import DEFAULT_MAX_LISTED_FILES, DiskRepoReader, RepoReader
+from .transcript import model_label, record_transcript_entry
 
 logger = logging.getLogger(__name__)
 
@@ -1789,7 +1791,16 @@ def _verify_group(
         system_prompt=FALSE_POSITIVE_VERIFY_PROMPT,
         tools=_build_tools(index),
     )
+    started = time.monotonic()
     raw = str(agent(prompt)).strip()
+    record_transcript_entry(
+        "false_positive_filter",
+        file_path,
+        prompt,
+        raw,
+        model=model_label(model),
+        duration_ms=(time.monotonic() - started) * 1000,
+    )
     data = extract_json_from_response(raw)
     return _parse_verdicts(data, len(issues))
 

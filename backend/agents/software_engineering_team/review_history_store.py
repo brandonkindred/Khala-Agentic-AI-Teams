@@ -204,6 +204,61 @@ def update_review(
     _best_effort_write("update_review", _write)
 
 
+@timed_query(store=_STORE, op="append_review_transcript_entry")
+def append_review_transcript_entry(job_id: str, entry: dict[str, Any]) -> None:
+    """Append one LLM-call entry to a review's durable transcript (best-effort).
+
+    Preconditions:
+        - ``job_id`` is a review job's id; ``entry`` is a JSON-serializable dict
+          (stage/target/model/prompt/response/started_at/duration_ms — see
+          ``code_review_agent.transcript.record_transcript_entry``).
+    Postconditions:
+        - On success, ``entry`` is appended to the end of that job's
+          ``code_review_transcripts.entries`` array, creating the row (starting
+          from an empty array) on the first call for a given ``job_id``. Never
+          raises; no-op without Postgres. Concurrent callers for the same
+          ``job_id`` (the map phase reviews chunks in parallel) each append
+          exactly their own entry — the ``||`` (JSONB concatenation) read-modify-write
+          happens server-side in one statement, so no entry is lost to a
+          last-writer-wins race.
+    """
+    if not is_postgres_enabled():
+        return
+
+    def _write() -> None:
+        with get_conn() as conn, conn.cursor() as cur:
+            cur.execute(
+                """INSERT INTO code_review_transcripts (job_id, entries)
+                       VALUES (%s, %s)
+                   ON CONFLICT (job_id) DO UPDATE
+                       SET entries = code_review_transcripts.entries || EXCLUDED.entries""",
+                (job_id, Json([entry])),
+            )
+
+    _best_effort_write("append_review_transcript_entry", _write)
+
+
+@timed_query(store=_STORE, op="get_review_transcript")
+@_readonly_query(default=None)
+def get_review_transcript(job_id: str) -> Optional[list[dict[str, Any]]]:
+    """Return one review's durable transcript entries, or None.
+
+    Preconditions:
+        - ``job_id`` is a review job's id.
+    Postconditions:
+        - Returns the job's ``code_review_transcripts.entries`` array (possibly
+          empty, when the review made no LLM calls at all) in append order, or
+          None when no transcript row exists for ``job_id`` (no caller-tracked
+          job, the review hasn't made its first recordable call yet, Postgres is
+          unavailable, or the query fails — never raises).
+    """
+    query = "SELECT entries FROM code_review_transcripts WHERE job_id = %s"
+    with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(query, (job_id,))
+        row = cur.fetchone()
+        return row["entries"] if row else None
+
+
 @timed_query(store=_STORE, op="get_review")
 @_readonly_query(default=None)
 def get_review(job_id: str) -> Optional[dict[str, Any]]:

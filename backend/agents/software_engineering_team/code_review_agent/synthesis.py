@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from typing import List, Optional
 
 from pydantic import BaseModel, Field
@@ -35,6 +36,7 @@ from llm_service import LLMClient
 from .model_resolution import resolve_code_review_model
 from .models import CodeReviewInput, CodeReviewIssue
 from .prompts import REVIEW_SYNTHESIS_PROMPT, SPEC_COMPLIANCE_PASS_PROMPT
+from .transcript import model_label, record_transcript_entry
 
 logger = logging.getLogger(__name__)
 
@@ -179,8 +181,18 @@ def synthesize_review_findings(
 
         _model = resolve_code_review_model(llm)
         agent = Agent(model=_model, system_prompt=REVIEW_SYNTHESIS_PROMPT)
+        started = time.monotonic()
         result = agent(prompt)
-        data = json.loads(str(result).strip())
+        raw = str(result).strip()
+        record_transcript_entry(
+            "synthesis",
+            "",
+            prompt,
+            raw,
+            model=model_label(_model),
+            duration_ms=(time.monotonic() - started) * 1000,
+        )
+        data = json.loads(raw)
 
         if not isinstance(data, dict):
             logger.warning("ReviewSynthesis: model returned non-object JSON; falling back")
@@ -280,8 +292,18 @@ def synthesize_spec_compliance(
 
         _model = resolve_code_review_model(llm)
         agent = Agent(model=_model, system_prompt=SPEC_COMPLIANCE_PASS_PROMPT)
+        started = time.monotonic()
         result = agent(prompt)
-        data = json.loads(str(result).strip())
+        raw = str(result).strip()
+        record_transcript_entry(
+            "spec_compliance",
+            "",
+            prompt,
+            raw,
+            model=model_label(_model),
+            duration_ms=(time.monotonic() - started) * 1000,
+        )
+        data = json.loads(raw)
 
         if not isinstance(data, dict):
             logger.warning("SpecCompliancePass: model returned non-object JSON; skipping")
