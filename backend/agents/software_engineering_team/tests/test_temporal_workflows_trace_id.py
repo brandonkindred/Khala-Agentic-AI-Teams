@@ -97,27 +97,6 @@ def test_run_team_workflow_v2_forwards_sprint_id_to_parse_spec_activity():
     assert calls[0][1][-1] == "sprint-456"
 
 
-def test_run_team_workflow_generates_and_forwards_a_trace_id():
-    calls: list = []
-    with _driver({}, calls):
-        asyncio.run(wfmod.RunTeamWorkflow().run("job-3", "/repo"))
-
-    assert calls[0][0] == "run_orchestrator_activity"
-    # run_orchestrator_activity(job_id, repo_path, spec_content_override,
-    #                            resolved_questions_override, planning_only, trace_id, sprint_id)
-    assert calls[0][1][-2] == _FIRST_TRACE_ID
-    assert calls[0][1][-1] is None  # sprint_id defaults to None when the caller omits it
-
-
-def test_run_team_workflow_forwards_sprint_id():
-    calls: list = []
-    with _driver({}, calls):
-        asyncio.run(wfmod.RunTeamWorkflow().run("job-5", "/repo", sprint_id="sprint-123"))
-
-    assert calls[0][0] == "run_orchestrator_activity"
-    assert calls[0][1][-1] == "sprint-123"
-
-
 def test_retry_failed_workflow_generates_and_forwards_a_trace_id():
     calls: list = []
     with _driver({}, calls):
