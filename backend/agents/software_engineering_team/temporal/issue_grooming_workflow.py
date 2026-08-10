@@ -122,7 +122,12 @@ def run_issue_grooming_activity(request: dict[str, Any]) -> dict[str, Any]:
           so this activity does not re-write it; it only reads the final status
           back to report an accurate result.
         - On any exception (missing token, a GitHub API failure, a runner bug),
-          marks the job ``FAILED`` with the error message and re-raises.
+          marks the job ``FAILED`` with the error message (passed through
+          ``scrub_token_from_text`` first, matching
+          ``mark_coding_team_job_failed_activity``'s scrubbed-error contract --
+          a git-remote-URL-embedded token echoed into an exception message must
+          never reach the job store or Temporal history unredacted) and
+          re-raises.
     """
     req = IssueGroomingRunRequest.model_validate(request)
     from software_engineering_team.job_store import get_job, update_job
@@ -169,8 +174,10 @@ def run_issue_grooming_activity(request: dict[str, Any]) -> dict[str, Any]:
             grooming=grooming,
         ).model_dump()
     except Exception as e:
+        from software_engineering_team.github_source import scrub_token_from_text
+
         logger.exception("run_issue_grooming_activity failed for job %s", req.job_id)
-        update_job(req.job_id, error=str(e), status=JobStatus.FAILED.value)
+        update_job(req.job_id, error=scrub_token_from_text(str(e)), status=JobStatus.FAILED.value)
         raise
 
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pytest
+from pydantic import ValidationError
 
 from software_engineering_team.github_source.issue_grooming_scoring import (
     FIBONACCI,
@@ -185,6 +186,35 @@ def _sample_score() -> ScoreBreakdown:
     )
 
 
+class TestScoreBreakdownInvariants:
+    def test_valid_score_constructs(self) -> None:
+        _sample_score()  # must not raise
+
+    def test_rejects_non_fibonacci_dimension(self) -> None:
+        with pytest.raises(ValidationError):
+            ScoreBreakdown(
+                conceptual=4,
+                conceptual_rationale="r",
+                anticipated_loc=2,
+                anticipated_loc_rationale="r",
+                solution_complexity=2,
+                solution_complexity_rationale="r",
+                aggregate=4,
+            )
+
+    def test_rejects_aggregate_not_matching_nearest_fibonacci_of_max(self) -> None:
+        with pytest.raises(ValidationError):
+            ScoreBreakdown(
+                conceptual=2,
+                conceptual_rationale="r",
+                anticipated_loc=8,
+                anticipated_loc_rationale="r",
+                solution_complexity=2,
+                solution_complexity_rationale="r",
+                aggregate=2,  # should be 8 (max of dims)
+            )
+
+
 class TestRenderComplexityMarkdown:
     def test_matches_expected_shape(self) -> None:
         rendered = render_complexity_markdown(_sample_score())
@@ -223,6 +253,14 @@ class TestInjectMarkedBlock:
         body = f"Before.\n\n{PHASE_A_START}\nOLD\n{PHASE_A_END}\n\nAfter."
         result = inject_marked_block(body, PHASE_A_START, PHASE_A_END, "NEW")
         assert result == f"Before.\n\n{PHASE_A_START}\nNEW\n{PHASE_A_END}\n\nAfter."
+
+    def test_rejects_block_containing_start_marker(self) -> None:
+        with pytest.raises(AssertionError):
+            inject_marked_block("Description.", PHASE_A_START, PHASE_A_END, f"oops {PHASE_A_START}")
+
+    def test_rejects_block_containing_end_marker(self) -> None:
+        with pytest.raises(AssertionError):
+            inject_marked_block("Description.", PHASE_A_START, PHASE_A_END, f"oops {PHASE_A_END}")
 
 
 class TestInjectComplexityBlock:

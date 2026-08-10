@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import re
 
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 
 FIBONACCI: tuple[int, ...] = (1, 2, 3, 5, 8, 13, 21)
 
@@ -65,6 +65,32 @@ class ScoreBreakdown(BaseModel):
     solution_complexity: int
     solution_complexity_rationale: str
     aggregate: int
+
+    @model_validator(mode="after")
+    def _enforce_fibonacci_invariants(self) -> "ScoreBreakdown":
+        """Enforce this class's own documented invariants at construction time.
+
+        Preconditions:
+            - None (runs on every construction, including ``model_validate``).
+        Postconditions:
+            - Raises ``ValueError`` when any of ``conceptual``/``anticipated_loc``/
+              ``solution_complexity``/``aggregate`` is not a member of
+              :data:`FIBONACCI`, or when ``aggregate`` does not equal
+              ``nearest_fibonacci(max(conceptual, anticipated_loc, solution_complexity))``.
+              Returns ``self`` unchanged otherwise.
+        """
+        for field_name in ("conceptual", "anticipated_loc", "solution_complexity", "aggregate"):
+            value = getattr(self, field_name)
+            if value not in FIBONACCI:
+                raise ValueError(f"{field_name}={value} is not a member of FIBONACCI")
+        expected = nearest_fibonacci(
+            max(self.conceptual, self.anticipated_loc, self.solution_complexity)
+        )
+        if self.aggregate != expected:
+            raise ValueError(
+                f"aggregate={self.aggregate} does not match expected nearest_fibonacci {expected}"
+            )
+        return self
 
 
 def nearest_fibonacci(n: int) -> int:
@@ -218,7 +244,11 @@ def inject_marked_block(body: str, start_marker: str, end_marker: str, block: st
     """Replace-or-append a marker-delimited block in ``body``.
 
     Preconditions:
-        - ``start_marker``/``end_marker`` do not themselves appear inside ``block``.
+        - ``start_marker``/``end_marker`` do not themselves appear inside
+          ``block``. Enforced by assertion: a marker leaking into ``block``
+          would make ``body.find(end_marker)`` match inside the freshly
+          injected content instead of (or in addition to) the real closing
+          marker, corrupting a later replace-in-place call.
     Postconditions:
         - When both markers are already present (``start_marker`` before
           ``end_marker``), the span between them (inclusive) is replaced with the
@@ -227,6 +257,8 @@ def inject_marked_block(body: str, start_marker: str, end_marker: str, block: st
           ``body`` is non-blank. Idempotent: injecting the same ``block`` twice in
           a row yields the same result as injecting it once.
     """
+    assert start_marker not in block, "start_marker must not appear inside block"
+    assert end_marker not in block, "end_marker must not appear inside block"
     wrapped = f"{start_marker}\n{block}\n{end_marker}"
     start_idx = body.find(start_marker)
     end_idx = body.find(end_marker)

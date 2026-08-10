@@ -218,6 +218,38 @@ def test_activity_exception_path_marks_job_failed_and_reraises(
     assert job["error"] == "boom"
 
 
+def test_activity_exception_path_scrubs_token_from_error(
+    monkeypatch: pytest.MonkeyPatch, patched_coding_job_store
+) -> None:
+    """A leaked-credential-shaped exception message must not reach the job store raw."""
+    import software_engineering_team.github_source.issue_grooming_runner as runner_module
+    from software_engineering_team import job_store as js
+
+    monkeypatch.setenv("GITHUB_TOKEN", "fake-token")
+    js.create_job("groom-5", repo_path="n/a")
+
+    leaky_message = (
+        "fatal: unable to access 'https://x-access-token:ghp_secret123@github.com/acme/widget.git/'"
+    )
+
+    class _LeakyStubRunner:
+        def __init__(self, client, *, update_job_fn=None, get_job_fn=None) -> None:
+            pass
+
+        def run(self, job_id: str, owner: str, repo: str, issue_number: int) -> Dict[str, Any]:
+            raise RuntimeError(leaky_message)
+
+    monkeypatch.setattr(runner_module, "IssueGroomingRunner", _LeakyStubRunner)
+
+    with pytest.raises(RuntimeError):
+        run_issue_grooming_activity({**_VALID_REQUEST, "job_id": "groom-5"})
+
+    job = js.get_job("groom-5")
+    assert job["status"] == "failed"
+    assert "ghp_secret123" not in job["error"]
+    assert "https://***@github.com" in job["error"]
+
+
 def test_grooming_heartbeat_interval_env(monkeypatch: pytest.MonkeyPatch) -> None:
     """Valid float honored; a parseable below-floor value clamps to 0.1; garbage/unset fall back to 30s."""
     monkeypatch.setenv("GITHUB_ISSUE_GROOMING_HEARTBEAT_INTERVAL_S", "12.5")

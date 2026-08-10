@@ -15,7 +15,12 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from software_engineering_team.models import JobStatus
 
 from .client import GitHubClient
-from .issue_grooming_scoring import inject_complexity_block, merge_complexity_label, score_issue
+from .issue_grooming_scoring import (
+    ScoreBreakdown,
+    inject_complexity_block,
+    merge_complexity_label,
+    score_issue,
+)
 from .issue_grooming_split import (
     build_sub_issue,
     extract_checklist_items,
@@ -71,6 +76,13 @@ class IssueGroomingRunner:
         job = self._get_job_fn(job_id)
         return bool(job and job.get(_CANCEL_KEY))
 
+    @staticmethod
+    def _grooming_dict(score: ScoreBreakdown, children: List[Tuple[int, str]]) -> Dict[str, Any]:
+        return {
+            "score": score.model_dump(),
+            "sub_issues": [{"number": number, "title": title} for number, title in children],
+        }
+
     def run(self, job_id: str, owner: str, repo: str, issue_number: int) -> Dict[str, Any]:
         """Run Phase A then (conditionally) Phase B grooming for one issue.
 
@@ -90,7 +102,14 @@ class IssueGroomingRunner:
               issue has no sub-issues yet (:meth:`GitHubClient.list_sub_issues`
               -- the one non-idempotent guard: a re-run against an
               already-split issue leaves Phase B untouched rather than creating
-              duplicate children), then marks the job ``COMPLETED``.
+              duplicate children). Phase B also polls ``cancel_requested``
+              before creating each sub-issue (not just once before the loop)
+              and reports progress after every child created, so a cancellation
+              mid-split stops promptly -- with whatever children were already
+              created kept in the returned ``grooming`` -- instead of finishing
+              the whole batch, and a long split no longer looks stuck between
+              Phase A's 40% and the post-loop 90%. Marks the job ``COMPLETED``
+              once Phase B (or the decision to skip it) is done.
             - Returns the final ``grooming`` dict: ``{"score": ...}`` when Phase
               B did not run, or ``{"score": ..., "sub_issues": [...]}`` when it
               did -- the same shape written via the last ``update_job_fn(grooming=...)``
@@ -127,18 +146,30 @@ class IssueGroomingRunner:
             planned_items = plan_sub_issue_items(checklist_items)
             total = len(planned_items)
             for index, item_text in enumerate(planned_items, start=1):
+                if self._cancel_requested(job_id):
+                    grooming = self._grooming_dict(score, children)
+                    update(
+                        status=JobStatus.CANCELLED.value,
+                        phase="cancelled",
+                        status_text="Cancelled by user",
+                        grooming=grooming,
+                    )
+                    return grooming
                 child_title, child_body = build_sub_issue(
                     issue, item_text, index=index, total=total
                 )
                 child = self._client.create_issue(owner, repo, title=child_title, body=child_body)
                 self._client.add_sub_issue(owner, repo, issue_number, sub_issue_id=child.id)
                 children.append((child.number, child.title))
+                update(
+                    phase="phase_b",
+                    status_text=f"Creating sub-issue {index}/{total}",
+                    progress=40 + 50 * index // total,
+                    grooming=self._grooming_dict(score, children),
+                )
             split_body = inject_sub_issues_block(scored_body, children)
             self._client.update_issue(owner, repo, issue_number, body=split_body)
-            grooming = {
-                "score": score.model_dump(),
-                "sub_issues": [{"number": number, "title": title} for number, title in children],
-            }
+            grooming = self._grooming_dict(score, children)
             update(
                 phase="phase_b",
                 status_text=f"Split into {len(children)} sub-issue(s)",

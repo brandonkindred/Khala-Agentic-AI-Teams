@@ -233,6 +233,43 @@ class TestCancellation:
         assert job["status"] == JobStatus.CANCELLED.value
         assert job["phase"] == "cancelled"
 
+    def test_stops_mid_phase_b_loop_when_cancel_requested(self) -> None:
+        issue = _big_issue()
+        client = _FakeGroomingClient(issue)
+        update_job_fn, _get_job_fn, job, _calls = _job_store()
+
+        def get_job_fn(_job_id: str) -> Dict[str, Any]:
+            return {"cancel_requested": len(client.created) >= 2}
+
+        runner = IssueGroomingRunner(client, update_job_fn=update_job_fn, get_job_fn=get_job_fn)
+        result = runner.run("job-1", "acme", "widget", 7)
+
+        assert len(client.created) == 2
+        assert len(result["sub_issues"]) == 2
+        assert job["status"] == JobStatus.CANCELLED.value
+        assert job["phase"] == "cancelled"
+        # Only Phase A's body/labels PATCH happened -- cancellation short-circuits
+        # before the post-loop sub-issues-block write.
+        assert len(client.updated) == 1
+
+    def test_emits_incremental_progress_during_phase_b_loop(self) -> None:
+        issue = _big_issue()
+        client = _FakeGroomingClient(issue)
+        update_job_fn, get_job_fn, _job, calls = _job_store()
+        runner = IssueGroomingRunner(client, update_job_fn=update_job_fn, get_job_fn=get_job_fn)
+
+        runner.run("job-1", "acme", "widget", 7)
+
+        phase_b_calls = [c for c in calls if c.get("phase") == "phase_b"]
+        # 5 children (from _big_issue's 5 checklist items) -> 5 per-child updates
+        # plus the final "Split into N" summary update.
+        assert len(phase_b_calls) == 6
+        progress_values = [c["progress"] for c in phase_b_calls]
+        assert progress_values == sorted(progress_values)
+        assert progress_values[0] > 40  # strictly past Phase A's 40%
+        assert progress_values[-1] == 90
+        assert "Creating sub-issue 1/5" in phase_b_calls[0]["status_text"]
+
 
 class TestPropagatesGitHubErrors:
     def test_get_issue_failure_propagates(self) -> None:

@@ -142,6 +142,13 @@ class TestBuildSubIssue:
         assert title.endswith("— short item")
         assert "…" in title
 
+    def test_caps_title_even_when_item_text_alone_exceeds_title_max(self) -> None:
+        parent = _parent(title="Short parent title")
+        long_item = "Y" * 200
+        title, _ = build_sub_issue(parent, long_item, index=1, total=1)
+        assert len(title) <= 120
+        assert title.endswith("…")
+
 
 # ---------------------------------------------------------------------------
 # render_sub_issues_block / inject_sub_issues_block

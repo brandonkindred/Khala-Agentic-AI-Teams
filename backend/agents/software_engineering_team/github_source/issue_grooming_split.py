@@ -90,12 +90,15 @@ def build_sub_issue(parent: Issue, item_text: str, index: int, total: int) -> tu
     Preconditions:
         - ``index`` is 1-based; ``1 <= index <= total``.
     Postconditions:
-        - ``title`` is ``"{parent.title} — {item_text}"`` truncated to
-          ``_TITLE_MAX`` characters (an ellipsis replaces the tail when it would
-          overflow), matching ``issue_proposals._proposal_title``'s
-          budget-then-ellipsis truncation convention. ``body`` carries a
-          provenance line naming the parent and the single checklist item
-          rendered as this sub-issue's own acceptance criterion.
+        - ``title`` is ``"{parent.title} — {item_text}"`` truncated to at most
+          ``_TITLE_MAX`` characters, matching ``issue_proposals._proposal_title``'s
+          budget-then-ellipsis truncation convention (an ellipsis replaces the
+          tail when it would overflow). This bound holds even when ``item_text``
+          alone is longer than ``_TITLE_MAX`` -- the whole assembled string
+          (suffix included) is re-truncated as a final guard, not just
+          ``parent.title``. ``body`` carries a provenance line naming the
+          parent and the single checklist item rendered as this sub-issue's
+          own acceptance criterion.
     """
     suffix = f" — {item_text}"
     budget = _TITLE_MAX - len(suffix)
@@ -105,6 +108,8 @@ def build_sub_issue(parent: Issue, item_text: str, index: int, total: int) -> tu
         else parent.title[: max(0, budget - 1)].rstrip() + "…"
     )
     title = f"{base_title}{suffix}"
+    if len(title) > _TITLE_MAX:
+        title = title[: _TITLE_MAX - 1].rstrip() + "…"
     body = "\n".join(
         [
             f"Split from #{parent.number} ({parent.html_url}) by automated grooming ({index}/{total}).",
