@@ -179,6 +179,21 @@ class RunFromGitHubResponse(BaseModel):
     message: str = "Job started. Poll GET /status/{job_id} for progress."
 
 
+class GroomGithubIssuesRequest(BaseModel):
+    """Request body for POST /groom-github-issues."""
+
+    owner: str = Field(..., description="GitHub repository owner (user or org)")
+    repo: str = Field(..., description="GitHub repository name")
+    issue_number: int = Field(..., description="Issue to groom")
+
+
+class GroomGithubIssuesResponse(BaseModel):
+    job_id: str
+    issue_number: int
+    status: str = "pending"
+    message: str = "Job started. Poll GET /status/{job_id} for progress."
+
+
 class ReviewPrRequest(BaseModel):
     """Request body for POST /review-pr."""
 
