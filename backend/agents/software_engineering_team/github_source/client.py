@@ -71,6 +71,14 @@ KHALA_COMMENT_MARKER = "<!-- khala-generated -->"
 
 @dataclass(frozen=True)
 class Issue:
+    """Metadata for a GitHub issue.
+
+    ``number`` is the repository-local issue number used by most endpoints.
+    ``id`` is GitHub's global numeric issue id -- distinct from ``number`` and
+    intentionally named to match the API field -- required for native
+    sub-issue linkage via :meth:`GitHubClient.add_sub_issue`.
+    """
+
     number: int
     title: str
     body: str

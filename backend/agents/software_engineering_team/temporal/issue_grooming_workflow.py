@@ -117,11 +117,12 @@ def run_issue_grooming_activity(request: dict[str, Any]) -> dict[str, Any]:
     """Run GitHub issue grooming (Phase A, then conditionally Phase B) for one issue.
 
     Preconditions:
-        - ``request`` is a dict conforming to ``IssueGroomingRunRequest``.
-        - ``GITHUB_TOKEN`` is set in the environment -- the only token source this
-          activity resolves; ``IssueGroomingRunRequest`` carries no token field,
-          so there is no per-job encrypted-token path here (that is dispatch-layer
-          territory, out of scope for this activity).
+        - ``request`` is a dict conforming to ``IssueGroomingRunRequest`` and
+          carries no ``token`` field -- the token is resolved activity-side from
+          the job's ``github_token_encrypted`` (set by ``post_groom_github_issues``)
+          or the ``GITHUB_TOKEN`` env fallback, via the same
+          ``_require_activity_github_token`` helper the other coding-team GitHub
+          activities use (``coding_team_github_activities.py``).
     Postconditions:
         - Validates ``request`` before touching the job store or GitHub (a
           malformed request has no reliable ``job_id`` to mark failed against).
@@ -131,31 +132,31 @@ def run_issue_grooming_activity(request: dict[str, Any]) -> dict[str, Any]:
           so this activity does not re-write it; it only reads the final status
           back to report an accurate result.
         - On any exception (missing token, a GitHub API failure, a runner bug),
-          marks the job ``FAILED`` with the error message (passed through
-          ``scrub_token_from_text`` first, matching
-          ``mark_coding_team_job_failed_activity``'s scrubbed-error contract --
-          a git-remote-URL-embedded token echoed into an exception message must
-          never reach the job store or Temporal history unredacted), clears
-          ``status_text`` (mirroring ``mark_coding_team_job_failed_activity``'s
-          terminal-state cleanup so a stale in-progress message doesn't linger
-          on a failed job), and re-raises.
+          scrubs the error via ``scrub_token_from_text`` once and reuses that
+          scrubbed message for both the log line and the job-store write --
+          matching ``mark_coding_team_job_failed_activity``'s scrubbed-error
+          contract, since a git-remote-URL-embedded token echoed into an
+          exception message must never reach logs, the job store, or Temporal
+          history unredacted. Also clears ``status_text`` (mirroring
+          ``mark_coding_team_job_failed_activity``'s terminal-state cleanup so
+          a stale in-progress message doesn't linger on a failed job), and
+          re-raises.
     """
     req = IssueGroomingRunRequest.model_validate(request)
     from software_engineering_team.job_store import get_job, update_job
     from software_engineering_team.models import JobStatus
 
     try:
-        import os
-
         from shared.concurrency import BackgroundHeartbeat
         from software_engineering_team.github_source.client import GitHubClient
         from software_engineering_team.github_source.issue_grooming_runner import (
             IssueGroomingRunner,
         )
+        from software_engineering_team.temporal.coding_team_github_activities import (
+            _require_activity_github_token,
+        )
 
-        token = os.environ.get("GITHUB_TOKEN")
-        if not token:
-            raise ValueError("GITHUB_TOKEN not configured")
+        token = _require_activity_github_token(request)
 
         # Single liveness mechanism: a background beater emits activity.heartbeat()
         # on a fixed interval for the whole run (mirrors execute_coding_team_activity).
@@ -187,10 +188,14 @@ def run_issue_grooming_activity(request: dict[str, Any]) -> dict[str, Any]:
     except Exception as e:
         from software_engineering_team.github_source import scrub_token_from_text
 
-        logger.exception("run_issue_grooming_activity failed for job %s", req.job_id)
+        scrubbed = scrub_token_from_text(str(e))
+        # Log the scrubbed message, not the raw exception/traceback: an unredacted
+        # token embedded in a git-remote URL or API error must never reach log
+        # aggregation, mirroring the job-store write below.
+        logger.error("run_issue_grooming_activity failed for job %s: %s", req.job_id, scrubbed)
         update_job(
             req.job_id,
-            error=scrub_token_from_text(str(e)),
+            error=scrubbed,
             status=JobStatus.FAILED.value,
             status_text=None,
         )

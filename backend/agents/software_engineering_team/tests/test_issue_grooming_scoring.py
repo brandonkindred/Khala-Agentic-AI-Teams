@@ -89,6 +89,11 @@ class TestScoreIssueAnticipatedLoc:
         score = score_issue("T", body)
         assert score.anticipated_loc >= 3
 
+    def test_dotted_method_calls_are_not_counted_as_file_references(self) -> None:
+        body = "See `self.foo` and `json.dumps` for context. " + ("word " * 100)
+        score = score_issue("T", body)
+        assert "0 file reference(s)" in score.anticipated_loc_rationale
+
     def test_medium_body_scores_five(self) -> None:
         score = score_issue("T", "word " * 500)
         assert score.anticipated_loc == 5

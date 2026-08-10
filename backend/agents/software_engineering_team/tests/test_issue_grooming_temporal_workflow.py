@@ -188,12 +188,12 @@ def test_activity_missing_github_token_marks_job_failed(
     monkeypatch.delenv("GITHUB_TOKEN", raising=False)
     js.create_job("groom-1", repo_path="n/a")
 
-    with pytest.raises(ValueError, match="GITHUB_TOKEN"):
+    with pytest.raises(ValueError, match="no usable GitHub token"):
         run_issue_grooming_activity({**_VALID_REQUEST, "job_id": "groom-1"})
 
     job = js.get_job("groom-1")
     assert job["status"] == "failed"
-    assert "GITHUB_TOKEN" in job["error"]
+    assert "GitHub token" in job["error"]
 
 
 def test_activity_success_path_returns_result(

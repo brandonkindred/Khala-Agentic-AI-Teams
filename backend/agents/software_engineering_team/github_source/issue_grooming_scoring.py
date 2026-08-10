@@ -136,9 +136,38 @@ def _score_conceptual(title: str, body: str) -> tuple[int, str]:
     return score, rationale
 
 
+_FILE_EXTENSIONS = (
+    ".py",
+    ".ts",
+    ".tsx",
+    ".js",
+    ".jsx",
+    ".md",
+    ".yaml",
+    ".yml",
+    ".json",
+    ".toml",
+    ".ini",
+    ".cfg",
+    ".sh",
+    ".sql",
+)
+
+
 def _count_file_references(body: str) -> int:
+    """Count distinct inline-code spans in ``body`` that look like file paths.
+
+    Preconditions:
+        - None.
+    Postconditions:
+        - Returns the number of unique inline-code spans (`` `...` ``, under 200
+          chars) containing a path separator ("/") or ending in a recognized
+          file extension (:data:`_FILE_EXTENSIONS`). A bare dotted identifier
+          like ``self.foo`` or ``json.dumps`` -- a method call, not a file --
+          does not count, unlike a plain "any dot" check would.
+    """
     spans = _INLINE_CODE_RE.findall(body)
-    refs = {s for s in spans if len(s) < 200 and ("/" in s or "." in s)}
+    refs = {s for s in spans if len(s) < 200 and ("/" in s or s.lower().endswith(_FILE_EXTENSIONS))}
     return len(refs)
 
 
