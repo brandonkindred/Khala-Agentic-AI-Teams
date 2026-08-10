@@ -331,9 +331,8 @@ def test_default_dispatch_prompt_covers_eight_criteria_and_drops_retired_mandate
     ``skip_tail_passes=True`` keeps this probe capturing only chunk-review
     system prompts -- the thing under test -- rather than also picking up the
     merged architecture/side-effect pass's own differently-shaped prompt,
-    which (unlike the legacy headerless ``code=`` input this test used before
-    the ``files=``-only migration) now runs because a real ``files`` path
-    makes the submission's file readable to that pass."""
+    which now runs because a real ``files`` path makes the submission's
+    file readable to that pass."""
     probe = _SystemPromptProbe()
     CodeReviewAgent(probe, force_in_process=True).run(
         CodeReviewInput(files={"main.py": "def f():\n    return 1"}, skip_tail_passes=True)
