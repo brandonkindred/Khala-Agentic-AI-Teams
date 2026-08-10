@@ -222,7 +222,7 @@ app = create_team_app(
 # a fully-populated hub.
 from software_engineering_team.api.routes import coding_team_hitl as hitl_routes  # noqa: E402
 from software_engineering_team.api.routes import coding_team_jobs as jobs  # noqa: E402
-from software_engineering_team.api.routes import github, reviews  # noqa: E402
+from software_engineering_team.api.routes import github, issue_grooming, reviews  # noqa: E402
 from software_engineering_team.api.routes._common import (  # noqa: E402
     register_job_service_unavailable_handlers,
 )
@@ -232,6 +232,7 @@ register_job_service_unavailable_handlers(app)
 app.include_router(jobs.router)
 app.include_router(hitl_routes.router)
 app.include_router(github.router)
+app.include_router(issue_grooming.router)
 app.include_router(reviews.router)
 
 # A few route handlers are also invoked directly (not only over HTTP) by sibling

@@ -5,7 +5,7 @@ from __future__ import annotations
 from enum import Enum
 from typing import Final, Literal, Optional
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field
 
 from agent_registry.models import AgentManifest
 
@@ -136,14 +136,14 @@ SOURCE_REGISTRY: Final = "registry"
 class AgenticTeamAgent(BaseModel):
     """Thin roster reference to a registry AgentManifest.
 
-    Non-SoT fields (pending demotion): ``role``, ``skills``, ``capabilities``,
-    ``tools``, and ``expertise`` duplicate identity that belongs on the
-    registered ``AgentManifest`` (see ``agent_registry.models.AgentManifest``).
-    They remain the persisted/API shape today, but the target roster shape is
-    the thin ``AgenticTeamAgentRef`` below — see this package's README
-    ("Roster identity: thin refs vs. Manifest SoT") for the field mapping and
-    migration notes. Only ``agent_name``, ``source``, and ``manifest_id`` are
-    expected to survive as roster-persisted identity.
+    A roster entry is identity only: which manifest fills this team-local slot,
+    and how it got there. Persona (``role``, ``skills``, ``capabilities``,
+    ``tools``, ``expertise``) is not a field on this model — it lives solely on
+    the registered ``AgentManifest`` (see ``agent_registry.models.AgentManifest``)
+    and is joined at read time via ``roster_resolve.resolve_persona`` into
+    ``EnrichedRosterAgent``. See this package's README ("Roster identity: thin
+    refs, Manifest SoT") for the resolution path and the from-registry field
+    mapping.
 
     Invariants:
         * ``manifest_id`` is always set for persisted rows (enforced after migrate).
@@ -175,49 +175,6 @@ class EnrichedRosterAgent(BaseModel):
     capabilities: list[str] = Field(default_factory=list)
     tools: list[str] = Field(default_factory=list)
     expertise: list[str] = Field(default_factory=list)
-
-
-class AgenticTeamAgentRef(BaseModel):
-    """Thin roster reference to an ``AgentManifest`` identity (target roster shape).
-
-    This is the id-plus-projection-metadata shape the roster is migrating
-    toward: ``AgentManifest`` is the sole writable source of truth for a
-    registered agent's persona (``role``/``summary``, ``skills``/``tags``,
-    ``tools``/``cognition.tools``, etc.), and a roster entry need only
-    reference it. See this package's README ("Roster identity: thin refs vs.
-    Manifest SoT") for the full field-mapping cheat sheet.
-
-    Not yet the persisted/API roster row — ``AgenticTeamAgent`` above remains
-    that shape until the store/API/consumers are migrated in a later change.
-    Defining this type does not change any read/write path.
-
-    Preconditions: none beyond field types.
-    Postconditions: constructing an instance with ``source == "registry"``
-        guarantees ``manifest_id`` is a non-empty string.
-    Invariants: ``source == "registry"`` implies ``manifest_id`` is set and
-        non-empty.
-    """
-
-    agent_name: str = Field(
-        ...,
-        description="Team-unique local slot key. May differ from manifest.name; not a persona override.",
-    )
-    source: Literal[SOURCE_GENERATED, SOURCE_REGISTRY] = Field(
-        default=SOURCE_GENERATED,
-        description="Provenance of this roster entry: 'generated' (LLM-authored on this team) "
-        "or 'registry' (added from a registered AgentManifest via Agent Studio).",
-    )
-    manifest_id: Optional[str] = Field(
-        default=None,
-        description="Join to the AgentManifest SoT. Required when source == 'registry'; "
-        "None for a 'generated' entry that has not yet been registered as a manifest.",
-    )
-
-    @model_validator(mode="after")
-    def _manifest_id_required_for_registry(self) -> "AgenticTeamAgentRef":
-        if self.source == SOURCE_REGISTRY and not self.manifest_id:
-            raise ValueError("manifest_id is required when source == 'registry'")
-        return self
 
 
 class AddAgentFromRegistryRequest(BaseModel):

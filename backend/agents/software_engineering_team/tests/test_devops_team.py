@@ -214,7 +214,7 @@ def _base_task_spec(**overrides) -> DevOpsTaskSpec:
 def _scripted_llm_for_happy_path(*, alerting_configured: bool = True) -> _ScriptedClient:
     """Script a full DevOps pipeline run: one response per sub-agent call in
     orchestrator order (task_clarifier, iac, cicd, deployment, infra_debug,
-    devsecops, change_review, test_validation, doc_runbook).
+    devsecops, change_review, qa_agent, doc_runbook).
 
     ``alerting_configured`` is set only on the deployment-strategy response.
     The doc_runbook LLM payload intentionally omits it — the doc agent uses a
@@ -1104,177 +1104,16 @@ class TestDevSecOpsReviewAgent:
         assert "DevSecOps review failed" in out.summary
 
 
-class TestDevOpsTestValidationAgent:
-    def test_aggregates_gates(self) -> None:
-        from software_engineering_team.devops_team.test_validation_agent import (
-            DevOpsTestValidationAgent,
-            DevOpsTestValidationInput,
-        )
-
-        client = _StubClient(
-            {
-                "approved": True,
-                "quality_gates": {"iac_validate": "pass", "pipeline_lint": "pass"},
-                "acceptance_trace": [],
-                "summary": "ok",
-            }
-        )
-        agent = DevOpsTestValidationAgent(client)
-        out = agent.run(
-            DevOpsTestValidationInput(
-                acceptance_criteria=["test"],
-                tool_results={"iac": {"iac_validate": "pass"}},
-            )
-        )
-        assert out.approved
-        assert out.quality_gates["iac_validate"] == "pass"
-
-    def test_rejects_on_fail_gate(self) -> None:
-        from software_engineering_team.devops_team.test_validation_agent import (
-            DevOpsTestValidationAgent,
-            DevOpsTestValidationInput,
-        )
-
-        client = _StubClient(
-            {
-                "approved": True,
-                "quality_gates": {"iac_validate": "fail"},
-                "summary": "failed",
-            }
-        )
-        agent = DevOpsTestValidationAgent(client)
-        out = agent.run(DevOpsTestValidationInput(acceptance_criteria=[], tool_results={}))
-        assert not out.approved
-
-    def test_delegates_to_unified_qa_agent(self) -> None:
-        from software_engineering_team.devops_team.test_validation_agent import (
-            DevOpsTestValidationAgent,
-        )
-        from software_engineering_team.qa_agent import QAExpertAgent
-
-        agent = DevOpsTestValidationAgent(_StubClient({"approved": True}))
-        assert isinstance(agent._qa, QAExpertAgent)
-
-    def test_preserves_devops_model_routing_key(self, monkeypatch) -> None:
-        """A non-Strands client resolves the model under the 'devops' routing
-        key (the pre-refactor key), not the QA agent's default 'qa'."""
-        from software_engineering_team.devops_team.test_validation_agent import (
-            DevOpsTestValidationAgent,
-        )
-        from software_engineering_team.devops_team.test_validation_agent import agent as agent_mod
-
-        captured: Dict[str, Any] = {}
-
-        def _fake_get_strands_model(key: str, **_kwargs: Any) -> Any:
-            captured["key"] = key
-            return DummyLLMClient()  # a Strands Model — used directly downstream
-
-        monkeypatch.setattr(agent_mod, "get_strands_model", _fake_get_strands_model)
-        DevOpsTestValidationAgent(object())  # non-None, non-Strands -> resolves via key
-        assert captured["key"] == "devops"
-
-    def test_qa_delegation_exception_fails_closed(self) -> None:
-        """If the delegated QA agent raises, the shim returns a fail-closed
-        result instead of propagating the exception to the orchestrator."""
-        from software_engineering_team.devops_team.test_validation_agent import (
-            DevOpsTestValidationAgent,
-            DevOpsTestValidationInput,
-        )
-
-        agent = DevOpsTestValidationAgent(_StubClient({"approved": True}))
-
-        def _boom(_inp: Any) -> Any:
-            raise RuntimeError("LLM unavailable")
-
-        agent._qa.run = _boom  # type: ignore[assignment]
-        out = agent.run(DevOpsTestValidationInput(acceptance_criteria=["c1"], tool_results={}))
-        assert out.approved is False
-        assert out.quality_gates.get("test_validation") == "fail"
-        assert "LLM unavailable" in out.summary
-
-    def test_maps_evidence_and_trace_through(self) -> None:
-        from software_engineering_team.devops_team.test_validation_agent import (
-            DevOpsTestValidationAgent,
-            DevOpsTestValidationInput,
-        )
-
-        client = _StubClient(
-            {
-                "approved": True,
-                "quality_gates": {"unit_tests": "pass"},
-                "acceptance_trace": [
-                    {"criterion": "c1", "implementation_refs": ["app.py"], "tests": []}
-                ],
-                "validation_evidence": [
-                    {"gate": "unit_tests", "status": "pass", "detail": "12 passed"}
-                ],
-                "summary": "ok",
-            }
-        )
-        out = DevOpsTestValidationAgent(client).run(
-            DevOpsTestValidationInput(acceptance_criteria=["c1"], tool_results={})
-        )
-        assert out.acceptance_trace and out.acceptance_trace[0]["criterion"] == "c1"
-        assert out.evidence and out.evidence[0].gate == "unit_tests"
-        assert out.evidence[0].status == "pass"
-
+class TestGateStatusCoercion:
     def test_unknown_gate_status_coerced_to_not_run(self) -> None:
-        from software_engineering_team.devops_team.test_validation_agent import (
-            DevOpsTestValidationAgent,
-            DevOpsTestValidationInput,
-        )
+        from software_engineering_team.devops_team.models import coerce_gate_status
 
-        client = _StubClient(
-            {
-                "approved": True,
-                "quality_gates": {"unit_tests": "flaky"},  # not a valid GateStatus
-                "summary": "ok",
-            }
-        )
-        out = DevOpsTestValidationAgent(client).run(
-            DevOpsTestValidationInput(acceptance_criteria=[], tool_results={})
-        )
-        assert out.quality_gates["unit_tests"] == "not_run"
+        assert coerce_gate_status("flaky") == "not_run"
 
-    def test_unapproved_without_fail_gate_fails_closed(self) -> None:
-        """An unapproved validation with no failing gate must synthesize one so
-        the gate-only DevOps pipeline still blocks (fail closed)."""
-        from software_engineering_team.devops_team.test_validation_agent import (
-            DevOpsTestValidationAgent,
-            DevOpsTestValidationInput,
-        )
+    def test_known_gate_status_passes_through_after_normalization(self) -> None:
+        from software_engineering_team.devops_team.models import coerce_gate_status
 
-        client = _StubClient(
-            {
-                "approved": False,  # unapproved but no "fail" gate present
-                "quality_gates": {"unit_tests": "not_run"},
-                "summary": "could not validate",
-            }
-        )
-        out = DevOpsTestValidationAgent(client).run(
-            DevOpsTestValidationInput(acceptance_criteria=["c1"], tool_results={})
-        )
-        assert not out.approved
-        assert any(v == "fail" for v in out.quality_gates.values())
-
-    def test_approved_does_not_synthesize_fail_gate(self) -> None:
-        from software_engineering_team.devops_team.test_validation_agent import (
-            DevOpsTestValidationAgent,
-            DevOpsTestValidationInput,
-        )
-
-        client = _StubClient(
-            {
-                "approved": True,
-                "quality_gates": {"unit_tests": "pass"},
-                "summary": "ok",
-            }
-        )
-        out = DevOpsTestValidationAgent(client).run(
-            DevOpsTestValidationInput(acceptance_criteria=["c1"], tool_results={})
-        )
-        assert out.approved
-        assert "test_validation" not in out.quality_gates
+        assert coerce_gate_status(" FAIL ") == "fail"
 
 
 class TestChangeReviewAgent:
@@ -1585,6 +1424,23 @@ class TestCriterionTracesFromPhase4:
         assert {"validation": "pass"} not in traces[0].tests
 
 
+class TestDevOpsTeamLeadAgentModelRouting:
+    def test_qa_agent_preserves_devops_model_routing_key(self, monkeypatch) -> None:
+        """A non-Strands client resolves the DevOps-facing QA agent's model
+        under the 'devops' routing key, not QAExpertAgent's own default 'qa'."""
+        from software_engineering_team.devops_team import orchestrator as orchestrator_mod
+
+        captured: Dict[str, Any] = {}
+
+        def _fake_get_strands_model(key: str, **_kwargs: Any) -> Any:
+            captured["key"] = key
+            return DummyLLMClient()  # a Strands Model — used directly downstream
+
+        monkeypatch.setattr(orchestrator_mod, "get_strands_model", _fake_get_strands_model)
+        DevOpsTeamLeadAgent(object())  # non-None, non-Strands -> resolves via key
+        assert captured["key"] == "devops"
+
+
 # ===========================================================================
 # INTEGRATION TESTS -- ORCHESTRATOR
 # ===========================================================================
@@ -1743,9 +1599,7 @@ class TestDevOpsTeamLeadAgentIntegration:
         assert result.completion_package.quality_gates["security_review"] == "fail"
 
     def test_completion_package_has_acceptance_trace(self) -> None:
-        from software_engineering_team.devops_team.test_validation_agent.models import (
-            DevOpsTestValidationOutput,
-        )
+        from software_engineering_team.qa_agent.models import QAOutput
 
         mock_llm = _scripted_llm_for_happy_path()
         agent = DevOpsTeamLeadAgent(mock_llm)
@@ -1755,8 +1609,8 @@ class TestDevOpsTeamLeadAgentIntegration:
         # QA acceptance_evidence call, so a scripted ``acceptance_trace`` on the
         # LLM client does not reach the orchestrator. This test targets Phase 5
         # wiring, not that adapter quirk.
-        agent.test_validation_agent.run = (  # type: ignore[method-assign]
-            lambda _inp: DevOpsTestValidationOutput(
+        agent.qa_agent.run = (  # type: ignore[method-assign]
+            lambda _inp: QAOutput(
                 approved=True,
                 quality_gates={"iac_validate": "pass", "policy_checks": "pass"},
                 acceptance_trace=[
