@@ -16,8 +16,6 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from typing import Any, Dict, List, NamedTuple, Optional
 
-from temporal.client import connect_temporal_client
-
 from software_engineering_team.activity import ActivityBridge
 from software_engineering_team.api import coding_team_main as _main
 from software_engineering_team.api.advisory_lock import advisory_lock
@@ -59,6 +57,8 @@ from software_engineering_team.job_store import (
     heartbeat_job,
 )
 from software_engineering_team.models import JobStatus
+
+from software_engineering_team.temporal.client import get_temporal_client
 
 logger = logging.getLogger(__name__)
 
@@ -485,7 +485,7 @@ async def _start_pr_review_temporal(job_id: str, request: ReviewPrRequest, token
     """
     # Initialize or retrieve your Temporal client
     # client = await Client.connect("localhost:7233") or get_temporal_client()
-    client = await connect_temporal_client()
+    client = await get_temporal_client()
 
     await client.execute_workflow(
         "PrReviewWorkflow",  # Replace with your actual Workflow class or string name
