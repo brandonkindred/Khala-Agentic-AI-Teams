@@ -2,12 +2,25 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, Dict, List, Literal, Optional, cast, get_args
 
 from pydantic import BaseModel, Field, field_validator
 
 RiskLevel = Literal["low", "medium", "high", "critical"]
 GateStatus = Literal["pass", "fail", "skipped", "not_run"]
+
+_VALID_GATE_STATUSES = frozenset(get_args(GateStatus))
+
+
+def coerce_gate_status(value: object) -> GateStatus:
+    """Map an arbitrary status value onto the ``GateStatus`` literal.
+
+    Preconditions: ``value`` is any object (typically a str from an upstream agent).
+    Postconditions: returns a member of ``GateStatus``; unrecognized values
+    collapse to ``"not_run"`` so callers never violate the literal contract.
+    """
+    text = str(value).strip().lower()
+    return cast(GateStatus, text) if text in _VALID_GATE_STATUSES else "not_run"
 
 
 class PlatformScope(BaseModel):
