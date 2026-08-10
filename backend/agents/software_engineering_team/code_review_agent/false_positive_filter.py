@@ -54,6 +54,7 @@ from .function_boundaries import (
     EnclosingConstruct,
     enclosing_construct,
     enclosing_construct_start_heuristic,
+    hunk_segment_bounds,
     iter_constructs,
     segment_containing_line,
     strip_numbered_prefixes,
@@ -180,11 +181,20 @@ class CodebaseIndex:
     """In-memory view of all code the verifier may read to check a finding.
 
     Invariants:
-        - ``files`` maps a file path to its FULL content (never a chunk or a
-          truncated excerpt): seeing the whole file is the entire point — the
-          chunk reviewer's partial view is what produced the false positive.
-          Whitespace-only bodies (e.g. a newline-only ``__init__.py``) are kept;
-          only ``None`` / empty-string content is excluded at construction.
+        - ``files`` maps a file path to content whose completeness is reported
+          by ``full_content_complete`` (below): when that flag is True, every
+          value is the FULL file body -- seeing the whole file is the entire
+          point, since the chunk reviewer's partial view is what produced the
+          false positive. When it is False (the common case for a pre-numbered
+          PR-review submission), a value may instead be a bounded, ``"N: "``
+          -prefixed diff excerpt produced by ``render_annotated_hunks``
+          (``github_source/pr_review_mapping.py``), covering only the changed
+          hunks plus context rather than the whole file, with a bare ``"..."``
+          line marking a gap between two hunks that are not adjacent in the
+          real file -- not truncation. Every ``N`` in such a prefix is still
+          the line's real number in the original file. Whitespace-only bodies
+          (e.g. a newline-only ``__init__.py``) are kept; only ``None`` /
+          empty-string content is excluded at construction.
         - ``existing_codebase`` is the full pre-existing-code excerpt passed for
           context; it is exposed as the read-only pseudo-path
           ``<existing codebase>`` so the verifier can consult it like any file.
@@ -571,6 +581,25 @@ class CodebaseIndex:
               followed by ``N| content`` body lines for the inclusive slice.
             - When ``end`` exceeds file length and ``start`` is in range, clamps
               ``end`` to the last line.
+            - When ``content`` is pre-numbered (``render_annotated_hunks`` output),
+              ``start``/``end`` are resolved as *original file* line numbers via
+              ``strip_numbered_prefixes``, never as physical excerpt positions:
+              - When both resolve into the same gap-bounded hunk segment, the
+                header and body are built entirely from the mapper — the
+                header's claimed range always matches the body's own embedded
+                numbers. A line absent from the excerpt (e.g. a removed diff
+                line) falls back to the nearest preceding available line.
+                ``end`` beyond the segment's last available line clamps to
+                that last line.
+              - A ``start`` outside its resolved segment's real coverage
+                (e.g. requesting original line 1 against a 100–102 excerpt)
+                returns ``Error: ...`` naming that segment's real coverage
+                instead of a self-contradictory header.
+              - A ``start``/``end`` pair whose physical positions resolve into
+                two different hunk segments returns ``Error: ...`` naming
+                both segments' real coverage; a successful response never
+                contains the ``"..."`` gap marker or the other segment's
+                content.
             - Path resolution matches ``read_file``.
         """
         if not isinstance(start, int) or isinstance(start, bool) or start < 1:
@@ -589,6 +618,67 @@ class CodebaseIndex:
         content, error = self._read(path)
         if content is None:
             return error if error is not None else f"Error: file not found: {path}."
+
+        stripped, start_physical, mapper = strip_numbered_prefixes(content, start)
+        if mapper is not None:
+            _, end_physical, _ = strip_numbered_prefixes(content, end)
+            display = self.resolve_path(path) or path
+            if display == self.EXISTING_CODEBASE_PATH:
+                display = path
+
+            # Resolve segment bounds against the raw pre-numbered ``content``, not
+            # ``stripped``: ``strip_numbered_prefixes`` rebuilds ``stripped`` via
+            # ``"\n".join(...)``, and ``str.splitlines()`` silently drops a
+            # trailing blank line from that reconstruction (e.g. a hunk's last
+            # numbered line being empty) — an artifact ``content`` doesn't have.
+            # Bare ``...`` separators are untouched by prefix-stripping, so they
+            # sit at the same physical positions in both strings either way.
+            start_seg = hunk_segment_bounds(content, start_physical, annotated_hunks=True)
+            if start_seg is None:
+                return f"Error: line {start} has no resolvable coverage in {display}'s excerpt."
+
+            # ``strip_numbered_prefixes`` falls back to the *nearest preceding*
+            # numbered line when ``start`` has no exact match, defaulting to the
+            # excerpt's very first physical line when nothing precedes it either
+            # (e.g. requesting original line 1 against a 100-102 excerpt) — check
+            # the requested ``start`` against the segment's real coverage rather
+            # than trusting that fallback blindly, or the header would silently
+            # claim a range the caller never asked for.
+            real_start, real_end = mapper(start_seg[0]), mapper(start_seg[1])
+            if start < real_start or start > real_end:
+                return (
+                    f"Error: start line {start} is outside {display}'s excerpt coverage "
+                    f"(excerpt covers lines {real_start}-{real_end})."
+                )
+
+            end_seg = hunk_segment_bounds(content, end_physical, annotated_hunks=True)
+            if end_seg != start_seg:
+                if end_seg is None:
+                    return (
+                        f"Error: end line {end} has no resolvable coverage in {display}'s "
+                        f"excerpt (nearest hunk covers lines {real_start}-{real_end})."
+                    )
+                other_start, other_end = mapper(end_seg[0]), mapper(end_seg[1])
+                return (
+                    f"Error: requested range {start}-{end} spans two separate hunks in "
+                    f"{display}: lines {real_start}-{real_end} and lines "
+                    f"{other_start}-{other_end}. Narrow the request to a single hunk."
+                )
+
+            # ``str.split("\n")`` is the exact inverse of the ``"\n".join(...)``
+            # that built ``stripped``, so it preserves a trailing blank line
+            # that ``.splitlines()`` would drop (see note above).
+            stripped_lines = stripped.split("\n")
+            end_eff_physical = min(end_physical, start_seg[1])
+            n = end_eff_physical - start_physical + 1
+            display_start = mapper(start_physical)
+            display_end = mapper(end_eff_physical)
+            header = f"{display} lines {display_start}–{display_end} ({n} lines):"
+            body = "\n".join(
+                f"{mapper(i)}| {stripped_lines[i - 1]}"
+                for i in range(start_physical, end_eff_physical + 1)
+            )
+            return f"{header}\n{body}"
 
         lines = content.splitlines()
         n_lines = len(lines)
@@ -719,6 +809,12 @@ class CodebaseIndex:
               existing-codebase excerpt is searched last under its pseudo-path.
             - A blank query returns no matches (a substring search for "" would
               match every line and is never a useful false-positive check).
+            - When a source's content is pre-numbered (produced by
+              ``render_annotated_hunks``), the returned line number is the
+              original file line (not the physical/storage index) and the
+              ``N: `` prefix is stripped from the returned text — matching
+              every other read method in this class (``read_function``,
+              ``read_function_by_name``, ``find_function_at_line``).
         """
         if max_matches <= 0:
             raise ValueError("max_matches must be positive")
@@ -727,9 +823,11 @@ class CodebaseIndex:
             return []
         results: List[Tuple[str, int, str]] = []
         for path, content in self._readable_sources():
-            for lineno, line in enumerate(content.splitlines(), start=1):
+            stripped, _, mapper = strip_numbered_prefixes(content, 1)
+            for lineno, line in enumerate(stripped.splitlines(), start=1):
                 if needle in line.lower():
-                    results.append((path, lineno, line.rstrip()))
+                    reported_lineno = mapper(lineno) if mapper is not None else lineno
+                    results.append((path, reported_lineno, line.rstrip()))
                     if len(results) >= max_matches:
                         return results
         return results
@@ -962,22 +1060,27 @@ def _format_reference_hit(index: CodebaseIndex, path: str, lineno: int) -> str:
     """Format one find_references hit as path:line plus a bounded excerpt.
 
     Preconditions:
-        - ``lineno`` >= 1 and is a 1-based storage index from ``search`` /
-          ``_search_repo_references`` (physical line in the stored blob).
+        - ``lineno`` >= 1 and is the original/display file line number from
+          ``search`` / ``_search_repo_references`` -- for pre-numbered content
+          this is the ``N:`` file line, not the physical index in the stored
+          blob (matching ``read_function``'s ``line`` contract).
 
     Postconditions:
-        - Always starts with ``{path}:{display_line}`` where ``display_line`` is
-          the original ``N:`` file line when content is pre-numbered, else
-          ``lineno``.
+        - Always starts with ``{path}:{lineno}`` -- ``lineno`` is already the
+          display line, so no further remap is applied to the locator.
         - When readable ``.py``/``.pyi`` content has an enclosing construct at
-          the physical hit line spanning at most ``_EXCERPT_MAX_LINES``,
-          appends a full construct slice from ``_format_construct_slice``
-          (same shape as ``read_function``).
+          the hit line spanning at most ``_EXCERPT_MAX_LINES``, appends a full
+          construct slice from ``_format_construct_slice`` (same shape as
+          ``read_function``).
         - When the construct exceeds ``_EXCERPT_MAX_LINES``, or no construct
           is found (module-level hit, non-Python file, unparsable content),
           appends a bounded ``_EXCERPT_WINDOW_LINES``-line window around the
           hit instead, via ``_format_line_window`` -- excerpt payloads stay
-          bounded even when no construct can be resolved.
+          bounded even when no construct can be resolved. When the content is
+          pre-numbered (``mapper is not None``), the no-construct window is
+          additionally clipped to ``hunk_segment_bounds``' gap-bounded segment
+          so it can never cross a bare ``"..."`` separator into a different,
+          non-contiguous hunk; plain content is unaffected.
         - Returns only the locator when the file content itself is
           unreadable.
         - Never raises.
@@ -991,14 +1094,9 @@ def _format_reference_hit(index: CodebaseIndex, path: str, lineno: int) -> str:
         display = path
     _, ext = os.path.splitext(display)
     try:
-        # ``lineno`` from search is a storage/physical index. ``strip_numbered_prefixes``
-        # remaps an *original* file line; pass a dummy original and keep ``lineno``
-        # as the physical index (same pattern as ``read_function_by_name``).
-        stripped, _, mapper = strip_numbered_prefixes(content, 1)
-        if mapper is not None:
-            loc = f"{path}:{mapper(lineno)}"
+        stripped, physical, mapper = strip_numbered_prefixes(content, lineno)
         construct = (
-            enclosing_construct(stripped, lineno, annotated_hunks=mapper is not None)
+            enclosing_construct(stripped, physical, annotated_hunks=mapper is not None)
             if ext.lower() in (".py", ".pyi")
             else None
         )
@@ -1013,13 +1111,18 @@ def _format_reference_hit(index: CodebaseIndex, path: str, lineno: int) -> str:
         excerpt = _format_line_window(
             display,
             body_lines,
-            lineno,
+            physical,
             mapper=mapper,
             lo=construct.start_line,
             hi=construct.end_line,
         )
         return f"{loc}\n{excerpt}"
-    excerpt = _format_line_window(display, body_lines, lineno, mapper=mapper)
+    if mapper is not None:
+        bounds = hunk_segment_bounds(stripped, physical, annotated_hunks=True)
+        lo, hi = bounds if bounds is not None else (1, None)
+    else:
+        lo, hi = 1, None
+    excerpt = _format_line_window(display, body_lines, physical, mapper=mapper, lo=lo, hi=hi)
     return f"{loc}\n{excerpt}"
 
 
@@ -1217,7 +1320,10 @@ def _build_tools(index: CodebaseIndex) -> List[Callable[..., str]]:
 
         Prefer this over read_file when you only need a bounded slice. The
         maximum span is 400 lines; use a narrower range or read_function for
-        larger constructs.
+        larger constructs. start/end and the returned line numbers are the
+        file's real (original) line numbers, even though the underlying
+        content itself may be a bounded diff excerpt rather than the whole
+        file.
 
         Args:
             path: File path (same paths accepted by read_file).
@@ -1289,7 +1395,10 @@ def _build_tools(index: CodebaseIndex) -> List[Callable[..., str]]:
         inspect those with ``read_file`` / ``list_files`` instead. Use this to
         find where a symbol is defined, imported, registered, used, or tested
         before deciding whether a finding is real — e.g. search for a function
-        name a finding claims is "never defined".
+        name a finding claims is "never defined". Returned line numbers are
+        the file's real (original) line numbers, even though the underlying
+        content itself may be a bounded diff excerpt rather than the whole
+        file.
 
         Args:
             query: The substring to search for (e.g. a function or class name).

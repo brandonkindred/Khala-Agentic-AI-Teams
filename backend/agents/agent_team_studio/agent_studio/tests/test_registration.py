@@ -54,6 +54,14 @@ def test_build_manifest_reuses_generated_runtime() -> None:
     assert manifest.cognition.tools == ["web.search"]
 
 
+def test_build_studio_agent_manifest_returns_agent_manifest_not_definition() -> None:
+    # Regression for #5895: the save/register projection must produce the
+    # AgentManifest SoT, never an AgentDefinition-shaped identity.
+    manifest = build_studio_agent_manifest(AgentDefinition(name="Planner", role="r"))
+    assert isinstance(manifest, AgentManifest)
+    assert not isinstance(manifest, AgentDefinition)
+
+
 def test_build_manifest_persists_seeded_states() -> None:
     # The definition's three operating states ride along onto the manifest.
     manifest = build_studio_agent_manifest(AgentDefinition(name="Planner", role="r"))
@@ -130,6 +138,15 @@ def test_clone_from_manifest_produces_refine_draft() -> None:
     assert draft.tools == ["web.search"]
     # Plumbing tags are stripped; real tags survive.
     assert draft.tags == ["content"]
+
+
+def test_clone_from_manifest_returns_agent_definition_not_manifest() -> None:
+    # Regression for #5896: the clone projection must produce the ephemeral
+    # AgentDefinition view-model, never an AgentManifest (no second persisted
+    # identity type).
+    draft = clone_from_manifest(_manifest())
+    assert isinstance(draft, AgentDefinition)
+    assert not isinstance(draft, AgentManifest)
 
 
 def test_clone_from_manifest_handles_no_cognition() -> None:

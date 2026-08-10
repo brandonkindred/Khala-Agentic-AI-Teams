@@ -257,8 +257,7 @@ def test_qa_expert_agent_acceptance_evidence_gate_fail_forces_unapproved() -> No
 
 
 def test_qa_expert_agent_acceptance_evidence_whitespace_fail_forces_unapproved() -> None:
-    """A whitespace-padded ``" fail "`` gate must still block approval, matching
-    the DevOps shim's strip-then-lower normalization."""
+    """A whitespace-padded ``" fail "`` gate must still block approval."""
 
     class _PaddedFailClient(DummyLLMClient):
         def complete_json(
@@ -296,3 +295,63 @@ def test_qa_expert_agent_acceptance_evidence_all_pass_approves() -> None:
     result = agent.run(_input(request_mode="acceptance_evidence", acceptance_criteria=["c1"]))
     assert result.approved is True
     assert result.validation_evidence[0]["gate"] == "unit_tests"
+
+
+def test_qa_expert_agent_acceptance_evidence_unapproved_without_fail_gate_synthesizes_one() -> None:
+    """An unapproved verdict with no failing gate must synthesize one so a
+    gate-only downstream consumer (e.g. the DevOps quality gate) still blocks."""
+
+    class _UnapprovedNoFailGateClient(DummyLLMClient):
+        def complete_json(
+            self, prompt, *, temperature=0.0, system_prompt=None, tools=None, think=False, **kwargs
+        ):  # type: ignore[override]
+            return {
+                "approved": False,  # unapproved but no "fail" gate present
+                "quality_gates": {"unit_tests": "not_run"},
+                "acceptance_trace": [],
+                "validation_evidence": [],
+                "bugs_found": [],
+                "summary": "could not validate",
+            }
+
+    agent = QAExpertAgent(_UnapprovedNoFailGateClient())
+    result = agent.run(_input(request_mode="acceptance_evidence", acceptance_criteria=["c1"]))
+    assert result.approved is False
+    assert any(v == "fail" for v in result.quality_gates.values())
+
+
+def test_qa_expert_agent_acceptance_evidence_approved_does_not_synthesize_fail_gate() -> None:
+    class _AllPassClient(DummyLLMClient):
+        def complete_json(
+            self, prompt, *, temperature=0.0, system_prompt=None, tools=None, think=False, **kwargs
+        ):  # type: ignore[override]
+            return {
+                "approved": True,
+                "quality_gates": {"unit_tests": "pass"},
+                "acceptance_trace": [],
+                "validation_evidence": [],
+                "bugs_found": [],
+                "summary": "ok",
+            }
+
+    agent = QAExpertAgent(_AllPassClient())
+    result = agent.run(_input(request_mode="acceptance_evidence", acceptance_criteria=["c1"]))
+    assert result.approved is True
+    assert "acceptance_evidence" not in result.quality_gates
+
+
+def test_qa_expert_agent_acceptance_evidence_fallback_fails_closed(monkeypatch) -> None:
+    """A structured-output failure in acceptance_evidence mode must fail
+    closed with a synthesized failing gate, not an empty gate map."""
+    import qa_agent.agent as agent_mod
+
+    class _RaisingAgent:
+        def __call__(self, *a: object, **kw: object) -> object:
+            raise RuntimeError("boom")
+
+    monkeypatch.setattr(agent_mod, "Agent", lambda *, model, system_prompt: _RaisingAgent())
+
+    agent = QAExpertAgent(DummyLLMClient())
+    result = agent.run(_input(request_mode="acceptance_evidence", acceptance_criteria=["c1"]))
+    assert result.approved is False
+    assert result.quality_gates.get("acceptance_evidence") == "fail"

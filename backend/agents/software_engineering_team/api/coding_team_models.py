@@ -82,6 +82,19 @@ class StatusResponse(BaseModel):
             "comment_findings, comments_failed, files_reviewed, event."
         ),
     )
+    grooming: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description=(
+            "Set by the GitHub issue grooming flow (IssueGroomingRunner) via the same "
+            "generic update_job(job_id, **fields) convention every coding-team job uses "
+            "for phase/status_text/progress -- there is no separate grooming-specific "
+            "status path. Holds {'score': {...}} once Phase A (complexity scoring) "
+            "completes, and adds 'sub_issues': [{'number', 'title'}, ...] once Phase B "
+            "(sub-issue split) runs. There is no thread-mode grooming implementation to "
+            "diverge from, so this field is the sole surface for grooming progress/stats "
+            "on either execution engine -- full parity by construction."
+        ),
+    )
     pending_questions: List[PendingQuestion] = Field(
         default_factory=list,
         description="Decisions awaiting a user answer before the job can proceed.",
@@ -175,6 +188,21 @@ class RunFromGitHubResponse(BaseModel):
     job_id: str
     issue_number: int
     issue_url: str
+    status: str = "pending"
+    message: str = "Job started. Poll GET /status/{job_id} for progress."
+
+
+class GroomGithubIssuesRequest(BaseModel):
+    """Request body for POST /groom-github-issues."""
+
+    owner: str = Field(..., description="GitHub repository owner (user or org)")
+    repo: str = Field(..., description="GitHub repository name")
+    issue_number: int = Field(..., description="Issue to groom")
+
+
+class GroomGithubIssuesResponse(BaseModel):
+    job_id: str
+    issue_number: int
     status: str = "pending"
     message: str = "Job started. Poll GET /status/{job_id} for progress."
 
