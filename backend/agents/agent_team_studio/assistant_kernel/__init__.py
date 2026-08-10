@@ -14,9 +14,10 @@ importable home for those primitives:
 * :mod:`.turn_lock` — the generic ``ConversationTurn`` snapshot type, an
   in-memory keyed turn lock, and the ``TurnStore`` protocol.
 
-Nothing in ``agent_studio`` or ``agentic_team_provisioning`` imports from here
-yet — this module is extraction only. Existing call sites keep their own
-local copies of this logic until they are migrated.
+``agent_studio`` (the Agent designer) now imports these primitives directly —
+its local fenced-JSON parsers, states-merge overlay, turn-lock, and message DTO
+are gone. ``agentic_team_provisioning`` (the Process Designer) still carries its
+own local copies; migrating it is a follow-up.
 """
 
 from __future__ import annotations

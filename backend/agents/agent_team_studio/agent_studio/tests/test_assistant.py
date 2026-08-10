@@ -3,13 +3,14 @@
 A scripted completion fn replaces the live LLM so the parsing/merge contract is
 exercised deterministically.
 
-The fenced-block parsers and the merge helper (``_parse_agent_block``,
-``_parse_suggestions``, ``_strip_code_blocks``, ``_merge_definition``,
-``_neutralize``) are unit-tested **directly**: this module's whole job is to
-extract structured blocks from free-form LLM prose, so the parsers' many edge
-cases (malformed JSON, wrong types, forged delimiters) are far cheaper and more
-precise to pin down at the function boundary than by round-tripping every case
-through ``respond``. ``respond`` itself is also covered end-to-end below.
+Fenced-block extraction/stripping is now delegated to
+``agent_team_studio.assistant_kernel.fenced_json`` and covered there directly
+(see ``assistant_kernel/tests/test_fenced_json.py``). This module unit-tests
+the pieces still local to Agent Studio — the merge helper (``_merge_definition``)
+and the delimiter-forgery defense (``_neutralize``, exercised via
+``_build_prompt``) — far cheaper and more precise to pin down at the function
+boundary than by round-tripping every case through ``respond``. ``respond``
+itself is also covered end-to-end below.
 """
 
 from __future__ import annotations
@@ -21,9 +22,6 @@ from agent_team_studio.agent_studio.assistant import (
     _CONTENT_FIELDS,
     AgentDesignerAgent,
     _merge_definition,
-    _parse_agent_block,
-    _parse_suggestions,
-    _strip_code_blocks,
 )
 from agent_team_studio.agent_studio.models import AgentDefinition
 
@@ -57,46 +55,6 @@ Here's a draft for you.
 ["Add a word_count input?", "Target an industry?"]
 ```
 """
-
-
-def test_parse_agent_block_extracts_object() -> None:
-    block = _parse_agent_block(_FULL_REPLY)
-    assert block is not None
-    assert block["name"] == "blogging.planner"
-
-
-def test_parse_agent_block_none_when_absent() -> None:
-    assert _parse_agent_block("just prose, no block") is None
-
-
-def test_parse_agent_block_none_on_bad_json() -> None:
-    assert _parse_agent_block("```agent\n{not json}\n```") is None
-
-
-def test_parse_agent_block_none_when_not_object() -> None:
-    assert _parse_agent_block('```agent\n["a", "b"]\n```') is None
-
-
-def test_parse_suggestions_extracts_list() -> None:
-    assert _parse_suggestions(_FULL_REPLY) == ["Add a word_count input?", "Target an industry?"]
-
-
-def test_parse_suggestions_empty_when_absent() -> None:
-    assert _parse_suggestions("no block here") == []
-
-
-def test_parse_suggestions_empty_on_bad_json() -> None:
-    assert _parse_suggestions("```suggestions\n{bad}\n```") == []
-
-
-def test_parse_suggestions_empty_when_not_list() -> None:
-    assert _parse_suggestions('```suggestions\n{"a": 1}\n```') == []
-
-
-def test_strip_code_blocks_removes_both() -> None:
-    stripped = _strip_code_blocks(_FULL_REPLY)
-    assert "```" not in stripped
-    assert stripped.startswith("Here's a draft")
 
 
 def test_merge_definition_overlays_and_preserves_server_fields() -> None:

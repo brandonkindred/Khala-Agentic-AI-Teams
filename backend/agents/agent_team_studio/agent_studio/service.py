@@ -133,13 +133,11 @@ class AgentStudioService:
         rolls back / no-ops (consistent state on failure / retry).
         """
         with self._store.turn(conversation_id) as turn:
-            reply, updated, suggestions = self._assistant.respond(
-                turn.history, turn.definition, message
-            )
+            reply, updated, suggestions = self._assistant.respond(turn.history, turn.draft, message)
             turn.append_message("user", message)
             turn.append_message("assistant", reply)
             if updated is not None:
-                turn.set_definition(updated)
+                turn.set_draft(updated)
         return self._state(conversation_id, suggestions=suggestions)
 
     # ── Clone / Save ───────────────────────────────────────────────────────────
