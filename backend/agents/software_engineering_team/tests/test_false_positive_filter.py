@@ -1087,6 +1087,20 @@ def test_find_references_repo_hit_unreadable_at_format_time_returns_locator_only
     assert "def caller" not in result
 
 
+def test_find_references_repo_hit_construct_excerpt_unaffected_by_lineno_fix() -> None:
+    """Repo-half hits (always plain content, never pre-numbered) still resolve their
+    enclosing construct correctly -- the ``lineno``-as-original-line fix for
+    submission hits must not regress the plain-content (``mapper is None``) path."""
+    idx = CodebaseIndex(
+        files={"sub.py": "other\n"},
+        repo_reader=_FakeReader({"caller.py": "def caller():\n    return needle()\n"}),
+    )
+    result = idx.find_references("needle")
+    assert "caller.py:2" in _hit_locs(result)
+    assert "function caller" in result
+    assert "return needle()" in result
+
+
 def test_find_references_module_level_hit_gets_line_window_fallback() -> None:
     """Module-level hits (no enclosing construct) get a bounded raw-line window."""
     src = "A = 1\nB = 2\nNEEDLE = 3\nC = 4\nD = 5\n"
@@ -1161,6 +1175,20 @@ def test_find_references_pre_numbered_uses_original_line_and_correct_excerpt() -
     assert "function later" in result
     assert "return NEEDLE" in result
     assert "function earlier" not in result
+    assert _NO_REPO in result
+
+
+def test_find_references_pre_numbered_second_hunk_resolves_correct_construct() -> None:
+    """A hit inside the second hunk of a multi-hunk excerpt resolves to that hunk's
+    own construct, not the first hunk's."""
+    src = "10: def first():\n11:     return 1\n...\n50: def second():\n51:     return NEEDLE\n"
+    idx = CodebaseIndex(files={"mod.py": src})
+    result = idx.find_references("NEEDLE")
+    assert _hit_locs(result) == ["mod.py:51"]
+    assert "function second" in result
+    assert "return NEEDLE" in result
+    assert "function first" not in result
+    assert "return 1" not in result
     assert _NO_REPO in result
 
 
