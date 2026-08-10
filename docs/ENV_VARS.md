@@ -801,9 +801,10 @@ within-batch index) confirmed a false positive does not change which finding
 gets dropped. Lowering this cap increases the number of verification LLM
 calls (and therefore cost/latency) for files with many findings; raising it
 trades that against a larger prompt per call. This is a cap on how many
-*findings* share one verification call — separate from any cap on how much
-*file content* a single tool read can return (out of scope here; tracked in
-a separate sub-issue).
+*findings* share one verification call — it has no counterpart for the cited
+*file*'s content, because that content is never inlined into the prompt at
+all (see `CODE_REVIEW_FALSE_POSITIVE_FILTER` below): the model always fetches
+it via the unbounded `read_file` tool, so there is nothing to cap.
 
 ### CODE_REVIEW_MAX_CONCURRENT_ACTIVITIES
 Int (default `8`, floor `1`). Two things, both governed by this one knob (see
@@ -1025,6 +1026,35 @@ Fail-safe: a finding is removed only on an explicit, confident false-positive
 verdict; any ambiguity or verifier error keeps the finding, and the not-reviewed
 coverage findings are never removed. Set to `false`/`0`/`no` to disable the pass
 (any other value, or unset, leaves it enabled).
+
+The verification prompt (`_build_group_prompt`) never inlines the cited
+file's content — it only names the file and directs the model to fetch it via
+`read_file`. This keeps the per-call prompt size independent of the cited
+file's size with no cap or truncation involved: the model always sees the
+file's full, current content on demand instead of a possibly-stale or
+size-limited inline copy. Because nothing is inlined, `_verify_group` also
+enforces that the run made a *successful* `read_file` call for that exact
+cited file before honoring any false-positive verdict from it
+(`_agent_read_the_cited_file`) — since every finding in one verification call
+cites the same file, this is a per-batch bar, restoring the guarantee the
+original inlined design had (the whole cited file was visible before any
+drop in that batch was accepted). A narrow `read_lines`/`read_function`
+slice, a successful read of only a *related* file, calling only
+`list_files()` (no code content), or a `read_file` call that errors
+(unknown/ambiguous path), does not count as grounded. The verification
+`Agent` is also constructed with
+`SlidingWindowConversationManager(should_truncate_results=False)`, so
+Strands' own default conversation manager can never silently truncate an
+oversized `read_file` result in place (keeping only the first/last 200
+chars) while still marking it `status="success"` on a context-window
+overflow — that recovery path is disabled outright rather than trying to
+detect its output after the fact, since any text-based detection risks
+either missing a real truncation or misfiring on legitimate content that
+happens to share its shape. On overflow the conversation is trimmed instead;
+if the cited file's read survives, its content is always the complete
+original, and if it doesn't survive, the grounding check simply finds no
+matching read and fails safe. A false-positive verdict from a run that never
+met this bar is discarded (the finding is kept) rather than trusted.
 
 When the review is invoked with a repository reader (the GitHub PR-review path
 fetches whole files at the PR head and supplies a reader; the software-engineering
