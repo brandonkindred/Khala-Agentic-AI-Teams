@@ -54,6 +54,7 @@ from .function_boundaries import (
     EnclosingConstruct,
     enclosing_construct,
     enclosing_construct_start_heuristic,
+    hunk_segment_bounds,
     iter_constructs,
     segment_containing_line,
     strip_numbered_prefixes,
@@ -580,6 +581,12 @@ class CodebaseIndex:
               followed by ``N| content`` body lines for the inclusive slice.
             - When ``end`` exceeds file length and ``start`` is in range, clamps
               ``end`` to the last line.
+            - When ``content`` is pre-numbered (``render_annotated_hunks`` output)
+              and ``start``/``end`` land in the same gap-bounded hunk segment, the
+              header and body are built entirely from ``strip_numbered_prefixes``'s
+              mapper — the header's claimed range always matches the body's own
+              embedded numbers. Cross-hunk/out-of-coverage pre-numbered requests
+              fall back to the plain-content path below (not yet remapped).
             - Path resolution matches ``read_file``.
         """
         if not isinstance(start, int) or isinstance(start, bool) or start < 1:
@@ -598,6 +605,41 @@ class CodebaseIndex:
         content, error = self._read(path)
         if content is None:
             return error if error is not None else f"Error: file not found: {path}."
+
+        stripped, start_physical, mapper = strip_numbered_prefixes(content, start)
+        if mapper is not None:
+            _, end_physical, _ = strip_numbered_prefixes(content, end)
+            # Resolve segment bounds against the raw pre-numbered ``content``, not
+            # ``stripped``: ``strip_numbered_prefixes`` rebuilds ``stripped`` via
+            # ``"\n".join(...)``, and ``str.splitlines()`` silently drops a
+            # trailing blank line from that reconstruction (e.g. a hunk's last
+            # numbered line being empty) — an artifact ``content`` doesn't have.
+            # Bare ``...`` separators are untouched by prefix-stripping, so they
+            # sit at the same physical positions in both strings either way.
+            seg_bounds = hunk_segment_bounds(content, start_physical, annotated_hunks=True)
+            if seg_bounds is not None and seg_bounds[0] <= end_physical <= seg_bounds[1]:
+                # ``str.split("\n")`` is the exact inverse of the ``"\n".join(...)``
+                # that built ``stripped``, so it preserves a trailing blank line
+                # that ``.splitlines()`` would drop (see note above).
+                stripped_lines = stripped.split("\n")
+                display = self.resolve_path(path) or path
+                if display == self.EXISTING_CODEBASE_PATH:
+                    display = path
+                if start_physical > len(stripped_lines):
+                    return (
+                        f"Error: start line {start} is beyond the end of {display} "
+                        f"(file has {len(stripped_lines)} lines)."
+                    )
+                end_eff_physical = min(end_physical, seg_bounds[1])
+                n = end_eff_physical - start_physical + 1
+                display_start = mapper(start_physical)
+                display_end = mapper(end_eff_physical)
+                header = f"{display} lines {display_start}–{display_end} ({n} lines):"
+                body = "\n".join(
+                    f"{mapper(i)}| {stripped_lines[i - 1]}"
+                    for i in range(start_physical, end_eff_physical + 1)
+                )
+                return f"{header}\n{body}"
 
         lines = content.splitlines()
         n_lines = len(lines)
