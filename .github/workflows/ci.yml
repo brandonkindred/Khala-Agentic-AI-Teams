@@ -595,7 +595,7 @@ jobs:
         image: postgres:16-alpine
         env:
           POSTGRES_USER: postgres
-          POSTGRES_PASSWORD: postgres
+          POSTGRES_PASSWORD: please-change-me
           POSTGRES_DB: postgres
         ports:
           - 5432:5432
@@ -608,7 +608,7 @@ jobs:
       POSTGRES_HOST: localhost
       POSTGRES_PORT: "5432"
       POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
+      POSTGRES_PASSWORD: please-change-me
       POSTGRES_DB: postgres
     steps:
       - uses: actions/checkout@v4
@@ -825,7 +825,7 @@ jobs:
         image: postgres:16-alpine
         env:
           POSTGRES_USER: postgres
-          POSTGRES_PASSWORD: postgres
+          POSTGRES_PASSWORD: please-change-me
           POSTGRES_DB: postgres
         ports:
           - 5432:5432
@@ -839,7 +839,7 @@ jobs:
       POSTGRES_HOST: localhost
       POSTGRES_PORT: "5432"
       POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
+      POSTGRES_PASSWORD: please-change-me
       POSTGRES_DB: postgres
     steps:
       - uses: actions/checkout@v4
@@ -878,7 +878,7 @@ jobs:
         image: postgres:16-alpine
         env:
           POSTGRES_USER: postgres
-          POSTGRES_PASSWORD: postgres
+          POSTGRES_PASSWORD: please-change-me
           POSTGRES_DB: postgres
         ports:
           - 5432:5432
@@ -892,7 +892,7 @@ jobs:
       POSTGRES_HOST: localhost
       POSTGRES_PORT: "5432"
       POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
+      POSTGRES_PASSWORD: please-change-me
       POSTGRES_DB: postgres
     steps:
       - uses: actions/checkout@v4
@@ -1100,7 +1100,7 @@ jobs:
         image: postgres:16-alpine
         env:
           POSTGRES_USER: postgres
-          POSTGRES_PASSWORD: postgres
+          POSTGRES_PASSWORD: please-change-me
           POSTGRES_DB: postgres
         ports:
           - 5432:5432
@@ -1114,7 +1114,7 @@ jobs:
       POSTGRES_HOST: localhost
       POSTGRES_PORT: "5432"
       POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
+      POSTGRES_PASSWORD: please-change-me
       POSTGRES_DB: postgres
     steps:
       - uses: actions/checkout@v4
@@ -1141,7 +1141,7 @@ jobs:
           POSTGRES_HOST: localhost
           POSTGRES_PORT: "5432"
           POSTGRES_USER: postgres
-          POSTGRES_PASSWORD: postgres
+          POSTGRES_PASSWORD: please-change-me
           POSTGRES_DB: postgres
           JOB_SERVICE_URL: http://127.0.0.1:8085
         run: |
@@ -1248,7 +1248,7 @@ jobs:
           # so this value is never actually checked — but job_service/db.py
           # requires POSTGRES_PASSWORD to be set (no default), so it must be
           # present here too. Matches the sibling integration-tests job.
-          POSTGRES_PASSWORD: postgres
+          POSTGRES_PASSWORD: please-change-me
           POSTGRES_DB: postgres
           JOB_SERVICE_URL: http://127.0.0.1:8085
         run: |
