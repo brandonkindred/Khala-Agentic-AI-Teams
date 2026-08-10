@@ -552,7 +552,8 @@ def run_submission_pass(
     total = len(batches)
     if total > 1:
         logger.info(
-            "%s: changed-file set split into %s batches (budget=%s chars/call)",
+            "%s: changed-file set split into %s batches (budget=%s chars/call, "
+            "CODE_REVIEW_TAIL_PASS_CHUNK_CHARS)",
             pass_label,
             total,
             budgets.max_inline_code_chars,

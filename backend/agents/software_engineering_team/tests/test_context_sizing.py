@@ -19,6 +19,7 @@ from software_engineering_team.shared.context_sizing import (
     CODE_REVIEW_EXISTING_ABS_CHARS,
     CODE_REVIEW_MERGED_PASS_RESPONSE_TOKENS,
     CODE_REVIEW_SPEC_EXCERPT_ABS_CHARS,
+    code_review_tail_pass_chunk_chars_cap,
     compute_code_review_arch_overview_chars,
     compute_code_review_chunk_chars,
     compute_code_review_existing_codebase_chars,
@@ -98,6 +99,58 @@ def test_map_chunk_cap_is_env_overridable(monkeypatch) -> None:
     assert compute_code_review_chunk_chars(llm) == CODE_REVIEW_ABS_CHUNK_CHARS
     monkeypatch.setenv("CODE_REVIEW_MAP_CHUNK_CHARS", "5")
     assert compute_code_review_chunk_chars(llm) == 10_000  # clamped to the floor
+
+
+def test_tail_pass_chunk_cap_defaults_to_map_chunk_default() -> None:
+    """Unset, the tail-pass cap must equal today's shared value so batching
+    behavior for typical-size submissions is unchanged (AC3 of #4376)."""
+    assert code_review_tail_pass_chunk_chars_cap() == CODE_REVIEW_ABS_CHUNK_CHARS
+
+
+def test_tail_pass_chunk_cap_is_env_overridable(monkeypatch) -> None:
+    monkeypatch.setenv("CODE_REVIEW_TAIL_PASS_CHUNK_CHARS", "120000")
+    assert code_review_tail_pass_chunk_chars_cap() == 120_000
+    monkeypatch.setenv("CODE_REVIEW_TAIL_PASS_CHUNK_CHARS", "garbage")
+    assert code_review_tail_pass_chunk_chars_cap() == CODE_REVIEW_ABS_CHUNK_CHARS
+    monkeypatch.setenv("CODE_REVIEW_TAIL_PASS_CHUNK_CHARS", "5")
+    assert code_review_tail_pass_chunk_chars_cap() == 10_000  # clamped to the floor
+
+
+def test_tail_pass_chunk_cap_is_decoupled_from_map_chunk_cap(monkeypatch) -> None:
+    """Setting one knob must never move the other's effective cap."""
+    monkeypatch.setenv("CODE_REVIEW_MAP_CHUNK_CHARS", "150000")
+    assert code_review_tail_pass_chunk_chars_cap() == CODE_REVIEW_ABS_CHUNK_CHARS
+    monkeypatch.delenv("CODE_REVIEW_MAP_CHUNK_CHARS", raising=False)
+
+    monkeypatch.setenv("CODE_REVIEW_TAIL_PASS_CHUNK_CHARS", "150000")
+    llm = _StubLLM(1000000)
+    assert compute_code_review_chunk_chars(llm) == CODE_REVIEW_ABS_CHUNK_CHARS
+
+
+def test_merged_pass_budgets_code_cap_uses_tail_pass_knob(monkeypatch) -> None:
+    """The merged pass's ``max_inline_code_chars`` must track
+    ``CODE_REVIEW_TAIL_PASS_CHUNK_CHARS`` (not ``CODE_REVIEW_MAP_CHUNK_CHARS``)."""
+    llm = _StubLLM(1000000)
+    monkeypatch.setenv("CODE_REVIEW_TAIL_PASS_CHUNK_CHARS", "30000")
+    budgets = compute_code_review_merged_pass_budgets(
+        llm,
+        architecture_chars=0,
+        system_prompt_chars=5_000,
+        finding_array_count=1,
+    )
+    assert budgets is not None
+    assert budgets.max_inline_code_chars == 30_000
+    monkeypatch.delenv("CODE_REVIEW_TAIL_PASS_CHUNK_CHARS", raising=False)
+
+    monkeypatch.setenv("CODE_REVIEW_MAP_CHUNK_CHARS", "30000")
+    unaffected = compute_code_review_merged_pass_budgets(
+        llm,
+        architecture_chars=0,
+        system_prompt_chars=5_000,
+        finding_array_count=1,
+    )
+    assert unaffected is not None
+    assert unaffected.max_inline_code_chars == CODE_REVIEW_ABS_CHUNK_CHARS
 
 
 def test_parse_env_int_defensive_parsing(monkeypatch) -> None:

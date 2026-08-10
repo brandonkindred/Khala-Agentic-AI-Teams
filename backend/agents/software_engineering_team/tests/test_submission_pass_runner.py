@@ -260,6 +260,42 @@ def test_splits_into_multiple_batches_and_preserves_order(
     assert result == [{"paths": "a.py"}, {"paths": "b.py"}, {"paths": "c.py"}]
 
 
+def test_split_batches_log_names_the_tail_pass_budget_knob(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The batch-split telemetry log must name CODE_REVIEW_TAIL_PASS_CHUNK_CHARS
+    so an operator tuning that knob can find the log line that reports it."""
+    items = [("a.py", "x" * 100), ("b.py", "y" * 100)]
+    per_file = _estimated_file_block_chars(*items[0])
+    monkeypatch.setattr(
+        runner_mod,
+        "compute_code_review_merged_pass_budgets",
+        lambda *a, **k: _fixed_budgets(max_inline_code_chars=per_file + 10),
+    )
+
+    class _Client(DummyLLMClient):
+        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+            return {"paths": prompt.replace("PATHS:", "")}
+
+    with caplog.at_level("INFO", logger=runner_mod.logger.name):
+        run_submission_pass(
+            _Client(),
+            changed_files=items,
+            system_prompt="sys",
+            build_prompt=_paths_prompt,
+            tools=[],
+            parse=json.loads,
+            pass_label="TestTailPass",
+        )
+
+    split_logs = [r.message for r in caplog.records if "split into" in r.message]
+    assert len(split_logs) == 1
+    assert "CODE_REVIEW_TAIL_PASS_CHUNK_CHARS" in split_logs[0]
+    assert "TestTailPass" in split_logs[0]
+    assert "2 batches" in split_logs[0]
+
+
 def test_max_extra_body_chars_propagates_from_computed_architecture_budget(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
