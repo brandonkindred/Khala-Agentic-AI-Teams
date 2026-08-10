@@ -976,6 +976,50 @@ def test_find_references_pre_numbered_uses_original_line_and_correct_excerpt() -
     assert _NO_REPO in result
 
 
+def test_find_references_no_construct_window_never_crosses_hunk_gap(monkeypatch) -> None:
+    """A no-construct hit near the end of hunk1 gets a window clipped to hunk1 only --
+    it must not cross the "..." gap marker into unrelated hunk2 content."""
+    import code_review_agent.false_positive_filter as fpf
+
+    monkeypatch.setattr(fpf, "_EXCERPT_WINDOW_LINES", 6)
+    src = (
+        "100: A = 1\n"
+        "101: B = 2\n"
+        "102: C = 3\n"
+        "103: NEEDLE = 4\n"
+        "...\n"
+        "200: D = 1\n"
+        "201: E = 2\n"
+        "202: F = 3\n"
+        "203: G = 4\n"
+    )
+    idx = CodebaseIndex(files={"mod.py": src})
+    result = idx.find_references("NEEDLE")
+    assert _hit_locs(result) == ["mod.py:103"]
+    body = _hit_body(result)
+    assert "window" in body
+    assert "NEEDLE = 4" in body
+    assert "..." not in body
+    assert "D = 1" not in body
+
+
+def test_find_references_no_construct_window_plain_content_not_clipped(monkeypatch) -> None:
+    """The equivalent window on plain, non-pre-numbered content is deliberately NOT clipped --
+    a literal "..." line in ordinary content carries no gap-marker meaning."""
+    import code_review_agent.false_positive_filter as fpf
+
+    monkeypatch.setattr(fpf, "_EXCERPT_WINDOW_LINES", 6)
+    src = "A = 1\nB = 2\nC = 3\nNEEDLE = 4\n...\nD = 1\nE = 2\nF = 3\nG = 4\n"
+    idx = CodebaseIndex(files={"notes.txt": src})
+    result = idx.find_references("NEEDLE")
+    assert _hit_locs(result) == ["notes.txt:4"]
+    body = _hit_body(result)
+    assert "window" in body
+    assert "NEEDLE = 4" in body
+    assert "..." in body
+    assert "D = 1" in body
+
+
 # --------------------------------------------------------------------------- tools
 
 
