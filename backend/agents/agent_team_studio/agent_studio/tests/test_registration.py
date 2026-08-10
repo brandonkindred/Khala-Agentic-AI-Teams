@@ -140,6 +140,15 @@ def test_clone_from_manifest_produces_refine_draft() -> None:
     assert draft.tags == ["content"]
 
 
+def test_clone_from_manifest_returns_agent_definition_not_manifest() -> None:
+    # Regression for #5896: the clone projection must produce the ephemeral
+    # AgentDefinition view-model, never an AgentManifest (no second persisted
+    # identity type).
+    draft = clone_from_manifest(_manifest())
+    assert isinstance(draft, AgentDefinition)
+    assert not isinstance(draft, AgentManifest)
+
+
 def test_clone_from_manifest_handles_no_cognition() -> None:
     draft = clone_from_manifest(_manifest(cognition=None, tags=[]))
     assert draft.tools == []
