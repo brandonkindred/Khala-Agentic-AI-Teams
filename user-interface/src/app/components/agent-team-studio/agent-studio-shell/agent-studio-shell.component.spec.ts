@@ -229,4 +229,27 @@ describe('AgentStudioShellComponent', () => {
     expect(component.forwardDisabled()).toBe(false);
     expect(button.disabled).toBe(false);
   });
+
+  it('surfaces what\'s missing for the disabled Build "Test this agent →" tooltip, step by step', () => {
+    expect(component.activeStageDef().key).toBe('build');
+    expect(component.buildForwardDisabledReason()).toBe('Select or clone an agent to begin');
+    expect(component.forwardDisabledReason()).toBe('Select or clone an agent to begin');
+
+    component.state.setDraftAgentId('draft-1');
+    fixture.detectChanges();
+    expect(component.buildForwardDisabledReason()).toBe('Save the agent to continue');
+    expect(component.forwardDisabledReason()).toBe('Save the agent to continue');
+
+    component.state.setRegistryAgentId('reg-1');
+    fixture.detectChanges();
+    expect(component.buildForwardDisabledReason()).toBeNull();
+    expect(component.forwardDisabledReason()).toBeNull();
+  });
+
+  it('buildForwardDisabledReason is null off the Build stage', () => {
+    component.state.navigateToStage(1);
+    fixture.detectChanges();
+    expect(component.activeStageDef().key).toBe('test');
+    expect(component.buildForwardDisabledReason()).toBeNull();
+  });
 });
