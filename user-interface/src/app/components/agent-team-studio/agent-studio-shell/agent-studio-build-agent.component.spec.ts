@@ -2,10 +2,14 @@ import { Component, EventEmitter, Output } from '@angular/core';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { By } from '@angular/platform-browser';
 import { NoopAnimationsModule } from '@angular/platform-browser/animations';
+import { Subject, of, throwError } from 'rxjs';
+import { vi } from 'vitest';
 import { AgentStudioStateService } from '../../../services/agent-studio-state.service';
+import { AgentStudioApiService } from '../../../services/agent-studio-api.service';
 import { AgentCatalogComponent } from '../agent-console/agent-catalog/agent-catalog.component';
 import { AgentProvisioningDashboardComponent } from '../agent-provisioning-dashboard/agent-provisioning-dashboard.component';
 import { AgentStudioBuildAgentComponent } from './agent-studio-build-agent.component';
+import type { AgentDefinition } from '../../../models/agent-studio.model';
 
 /** Stand-in for the catalog: same selector + the one output Stage 1 wires, so
  *  no catalog HTTP fetch runs in these unit tests. */
@@ -19,15 +23,34 @@ class StubAgentCatalogComponent {
 @Component({ selector: 'app-agent-provisioning-dashboard', standalone: true, template: '' })
 class StubProvisioningDashboardComponent {}
 
+const definition = (overrides: Partial<AgentDefinition> = {}): AgentDefinition => ({
+  name: 'blogging.planner.v2',
+  role: 'Plans SEO-aware outlines',
+  description: null,
+  tags: [],
+  tools: [],
+  system_prompt: '',
+  input_schema: null,
+  output_schema: null,
+  states: [],
+  mode: 'refine',
+  cloned_from: 'blogging.planner',
+  ...overrides,
+});
+
 describe('AgentStudioBuildAgentComponent', () => {
   let fixture: ComponentFixture<AgentStudioBuildAgentComponent>;
   let component: AgentStudioBuildAgentComponent;
   let state: AgentStudioStateService;
+  let api: {
+    cloneFromRegistry: ReturnType<typeof vi.fn>;
+    saveAgent: ReturnType<typeof vi.fn>;
+  };
 
-  beforeEach(async () => {
-    await TestBed.configureTestingModule({
+  function configure(): void {
+    TestBed.configureTestingModule({
       imports: [AgentStudioBuildAgentComponent, NoopAnimationsModule],
-      providers: [AgentStudioStateService],
+      providers: [AgentStudioStateService, { provide: AgentStudioApiService, useValue: api }],
     })
       .overrideComponent(AgentStudioBuildAgentComponent, {
         remove: { imports: [AgentCatalogComponent, AgentProvisioningDashboardComponent] },
@@ -39,6 +62,20 @@ describe('AgentStudioBuildAgentComponent', () => {
     component = fixture.componentInstance;
     state = TestBed.inject(AgentStudioStateService);
     fixture.detectChanges();
+  }
+
+  function selectAgent(id = 'blogging.planner'): void {
+    const catalog = fixture.debugElement.query(By.directive(StubAgentCatalogComponent));
+    (catalog.componentInstance as StubAgentCatalogComponent).requestRun.emit(id);
+    fixture.detectChanges();
+  }
+
+  beforeEach(async () => {
+    api = {
+      cloneFromRegistry: vi.fn().mockReturnValue(of(definition())),
+      saveAgent: vi.fn().mockReturnValue(of({ agent_id: 'blogging.planner.v2', manifest: {}, created: true })),
+    };
+    configure();
   });
 
   afterEach(() => TestBed.resetTestingModule());
@@ -50,16 +87,54 @@ describe('AgentStudioBuildAgentComponent', () => {
     expect(fixture.nativeElement.querySelector('.studio-build__selected')).toBeNull();
   });
 
-  it('records the catalog selection as the journey agent and shows the selected bar', () => {
-    const catalog = fixture.debugElement.query(By.directive(StubAgentCatalogComponent));
-    (catalog.componentInstance as StubAgentCatalogComponent).requestRun.emit('blogging.planner');
-    fixture.detectChanges();
+  it('clones the catalog selection via AgentStudioApiService and shows the cloned bar', () => {
+    selectAgent('blogging.planner');
 
-    expect(state.registryAgentId()).toBe('blogging.planner');
+    expect(api.cloneFromRegistry).toHaveBeenCalledWith('blogging.planner');
+    expect(component.draftDefinition()).toEqual(definition());
+    expect(state.registryAgentId()).toBeNull();
     const selected = fixture.nativeElement.querySelector('.studio-build__selected');
     expect(selected).toBeTruthy();
     expect(selected.textContent).toContain('blogging.planner');
     expect(fixture.nativeElement.querySelector('.studio-build__hint')).toBeNull();
+  });
+
+  it('surfaces a clone failure without breaking the sub-stepper, and allows retry', () => {
+    api.cloneFromRegistry.mockReturnValueOnce(throwError(() => ({ error: { detail: 'source agent missing' } })));
+    selectAgent('blogging.planner');
+
+    expect(component.cloneError()).toBe('source agent missing');
+    expect(component.draftDefinition()).toBeNull();
+    expect(fixture.nativeElement.querySelector('.error-text').textContent).toContain('source agent missing');
+    expect(fixture.nativeElement.querySelector('.studio-build__continue-sub')).toBeNull();
+
+    selectAgent('blogging.planner');
+    expect(component.cloneError()).toBeNull();
+    expect(component.draftDefinition()).toEqual(definition());
+  });
+
+  it('falls back to a generic message when a clone error has no detail', () => {
+    api.cloneFromRegistry.mockReturnValueOnce(throwError(() => ({})));
+    selectAgent('blogging.planner');
+    expect(component.cloneError()).toBe('Could not clone this agent — try again.');
+  });
+
+  it('ignores a repeat clone request while one is already in flight', () => {
+    const pending = new Subject<AgentDefinition>();
+    api.cloneFromRegistry.mockReturnValue(pending.asObservable());
+
+    component.onSelectAgent('blogging.planner');
+    component.onSelectAgent('blogging.planner');
+    expect(api.cloneFromRegistry).toHaveBeenCalledTimes(1);
+
+    pending.next(definition());
+    pending.complete();
+    expect(component.draftDefinition()).toEqual(definition());
+  });
+
+  it('does not save without a cloned draft', () => {
+    component.saveAgent();
+    expect(api.saveAgent).not.toHaveBeenCalled();
   });
 
   it('keeps the provisioning slide-out closed until requested', () => {
@@ -124,19 +199,16 @@ describe('AgentStudioBuildAgentComponent', () => {
       expect(fixture.nativeElement.querySelector('.studio-build__substepper button')).toBeNull();
     });
 
-    it('hides the Continue-to-Define action until an agent is selected', () => {
+    it('hides the Continue-to-Define action until an agent is cloned', () => {
       expect(fixture.nativeElement.querySelector('.studio-build__continue-sub')).toBeNull();
 
-      const catalog = fixture.debugElement.query(By.directive(StubAgentCatalogComponent));
-      (catalog.componentInstance as StubAgentCatalogComponent).requestRun.emit('blogging.planner');
-      fixture.detectChanges();
+      selectAgent('blogging.planner');
 
       expect(fixture.nativeElement.querySelector('.studio-build__continue-sub')).toBeTruthy();
     });
 
     it('advances Start → Define → Configure via the explicit Continue actions, and back via ◂ back to Define', () => {
-      state.setRegistryAgentId('blogging.planner');
-      fixture.detectChanges();
+      selectAgent('blogging.planner');
 
       fixture.nativeElement.querySelector('.studio-build__continue-sub').click();
       fixture.detectChanges();
@@ -162,13 +234,87 @@ describe('AgentStudioBuildAgentComponent', () => {
       expect(steps[0].getAttribute('aria-current')).toBe('step');
       expect(steps[1].getAttribute('aria-current')).toBeNull();
 
-      state.setRegistryAgentId('blogging.planner');
-      fixture.detectChanges();
+      selectAgent('blogging.planner');
       fixture.nativeElement.querySelector('.studio-build__continue-sub').click();
       fixture.detectChanges();
 
       expect(steps[0].getAttribute('aria-current')).toBeNull();
       expect(steps[1].getAttribute('aria-current')).toBe('step');
+    });
+  });
+
+  describe('1.3 Configure — save + register', () => {
+    function goToConfigure(): void {
+      selectAgent('blogging.planner');
+      fixture.nativeElement.querySelector('.studio-build__continue-sub').click();
+      fixture.detectChanges();
+      fixture.nativeElement.querySelector('.studio-build__continue-sub').click();
+      fixture.detectChanges();
+    }
+
+    it('saves and registers the draft via AgentStudioApiService, unlocking the journey gate', () => {
+      goToConfigure();
+
+      fixture.nativeElement.querySelector('.studio-build__save-sub').click();
+      fixture.detectChanges();
+
+      expect(api.saveAgent).toHaveBeenCalledWith({
+        name: 'blogging.planner.v2',
+        role: 'Plans SEO-aware outlines',
+        description: null,
+        tags: [],
+        tools: [],
+        system_prompt: '',
+        input_schema: null,
+        output_schema: null,
+        states: [],
+      });
+      expect(state.registryAgentId()).toBe('blogging.planner.v2');
+      expect(component.saveError()).toBeNull();
+    });
+
+    it('surfaces a save failure without leaving the sub-stepper in a broken state', () => {
+      api.saveAgent.mockReturnValueOnce(throwError(() => ({ error: { detail: 'name already taken' } })));
+      goToConfigure();
+
+      fixture.nativeElement.querySelector('.studio-build__save-sub').click();
+      fixture.detectChanges();
+
+      expect(component.saveError()).toBe('name already taken');
+      expect(state.registryAgentId()).toBeNull();
+      expect(component.activeSubStageDef().key).toBe('configure');
+      expect(component.draftDefinition()).toEqual(definition());
+      expect(fixture.nativeElement.querySelector('.error-text').textContent).toContain('name already taken');
+
+      // Retry succeeds without re-cloning or losing the draft.
+      fixture.nativeElement.querySelector('.studio-build__save-sub').click();
+      fixture.detectChanges();
+      expect(state.registryAgentId()).toBe('blogging.planner.v2');
+      expect(component.saveError()).toBeNull();
+    });
+
+    it('falls back to a generic message when a save error has no detail', () => {
+      api.saveAgent.mockReturnValueOnce(throwError(() => ({})));
+      goToConfigure();
+
+      fixture.nativeElement.querySelector('.studio-build__save-sub').click();
+      fixture.detectChanges();
+
+      expect(component.saveError()).toBe('Could not save this agent — try again.');
+    });
+
+    it('ignores a repeat save request while one is already in flight', () => {
+      const pending = new Subject<{ agent_id: string; manifest: unknown; created: boolean }>();
+      api.saveAgent.mockReturnValue(pending.asObservable());
+      goToConfigure();
+
+      component.saveAgent();
+      component.saveAgent();
+      expect(api.saveAgent).toHaveBeenCalledTimes(1);
+
+      pending.next({ agent_id: 'blogging.planner.v2', manifest: {}, created: true });
+      pending.complete();
+      expect(state.registryAgentId()).toBe('blogging.planner.v2');
     });
   });
 });
