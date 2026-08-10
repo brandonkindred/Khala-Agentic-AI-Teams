@@ -1060,17 +1060,18 @@ def _format_reference_hit(index: CodebaseIndex, path: str, lineno: int) -> str:
     """Format one find_references hit as path:line plus a bounded excerpt.
 
     Preconditions:
-        - ``lineno`` >= 1 and is a 1-based storage index from ``search`` /
-          ``_search_repo_references`` (physical line in the stored blob).
+        - ``lineno`` >= 1 and is the original/display file line number from
+          ``search`` / ``_search_repo_references`` -- for pre-numbered content
+          this is the ``N:`` file line, not the physical index in the stored
+          blob (matching ``read_function``'s ``line`` contract).
 
     Postconditions:
-        - Always starts with ``{path}:{display_line}`` where ``display_line`` is
-          the original ``N:`` file line when content is pre-numbered, else
-          ``lineno``.
+        - Always starts with ``{path}:{lineno}`` -- ``lineno`` is already the
+          display line, so no further remap is applied to the locator.
         - When readable ``.py``/``.pyi`` content has an enclosing construct at
-          the physical hit line spanning at most ``_EXCERPT_MAX_LINES``,
-          appends a full construct slice from ``_format_construct_slice``
-          (same shape as ``read_function``).
+          the hit line spanning at most ``_EXCERPT_MAX_LINES``, appends a full
+          construct slice from ``_format_construct_slice`` (same shape as
+          ``read_function``).
         - When the construct exceeds ``_EXCERPT_MAX_LINES``, or no construct
           is found (module-level hit, non-Python file, unparsable content),
           appends a bounded ``_EXCERPT_WINDOW_LINES``-line window around the
@@ -1093,14 +1094,9 @@ def _format_reference_hit(index: CodebaseIndex, path: str, lineno: int) -> str:
         display = path
     _, ext = os.path.splitext(display)
     try:
-        # ``lineno`` from search is a storage/physical index. ``strip_numbered_prefixes``
-        # remaps an *original* file line; pass a dummy original and keep ``lineno``
-        # as the physical index (same pattern as ``read_function_by_name``).
-        stripped, _, mapper = strip_numbered_prefixes(content, 1)
-        if mapper is not None:
-            loc = f"{path}:{mapper(lineno)}"
+        stripped, physical, mapper = strip_numbered_prefixes(content, lineno)
         construct = (
-            enclosing_construct(stripped, lineno, annotated_hunks=mapper is not None)
+            enclosing_construct(stripped, physical, annotated_hunks=mapper is not None)
             if ext.lower() in (".py", ".pyi")
             else None
         )
@@ -1115,18 +1111,18 @@ def _format_reference_hit(index: CodebaseIndex, path: str, lineno: int) -> str:
         excerpt = _format_line_window(
             display,
             body_lines,
-            lineno,
+            physical,
             mapper=mapper,
             lo=construct.start_line,
             hi=construct.end_line,
         )
         return f"{loc}\n{excerpt}"
     if mapper is not None:
-        bounds = hunk_segment_bounds(stripped, lineno, annotated_hunks=True)
+        bounds = hunk_segment_bounds(stripped, physical, annotated_hunks=True)
         lo, hi = bounds if bounds is not None else (1, None)
     else:
         lo, hi = 1, None
-    excerpt = _format_line_window(display, body_lines, lineno, mapper=mapper, lo=lo, hi=hi)
+    excerpt = _format_line_window(display, body_lines, physical, mapper=mapper, lo=lo, hi=hi)
     return f"{loc}\n{excerpt}"
 
 
