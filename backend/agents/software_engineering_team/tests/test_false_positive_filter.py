@@ -408,6 +408,56 @@ def test_read_lines_pre_numbered_single_hunk_header_matches_body() -> None:
     assert "1| def earlier():" not in result
 
 
+def test_read_lines_pre_numbered_start_outside_coverage_errors() -> None:
+    """A start outside the excerpt's real coverage errors instead of returning
+    a self-contradictory header (the literal read_lines(path, 1, 3) repro)."""
+    content = "100: def earlier():\n101:     pass\n102: \n"
+    idx = CodebaseIndex(files={"app/main.py": content})
+    msg = idx.read_lines("app/main.py", 1, 3)
+    assert msg.startswith("Error:")
+    assert "start line 1" in msg
+    assert "100-102" in msg
+    assert "lines 1-3" not in msg  # no self-contradictory header claiming 1-3
+    assert "lines 1–3" not in msg
+
+
+def test_read_lines_pre_numbered_cross_hunk_gap_errors() -> None:
+    """A start/end pair spanning two non-contiguous hunk segments errors,
+    naming both segments' real coverage, and never leaks the gap marker or
+    the unrelated hunk's content."""
+    content = "100: def earlier():\n101:     pass\n...\n200: def later():\n201:     pass\n"
+    idx = CodebaseIndex(files={"app/main.py": content})
+    msg = idx.read_lines("app/main.py", 100, 201)
+    assert msg.startswith("Error:")
+    assert "100-101" in msg
+    assert "200-201" in msg
+    assert "..." not in msg
+    assert "def later" not in msg
+
+
+def test_read_lines_pre_numbered_clamps_end_past_hunk() -> None:
+    """end far beyond a pre-numbered hunk's last real line clamps to that
+    last line, mirroring the plain-content 'end past EOF clamps' behavior."""
+    content = "100: def earlier():\n101:     pass\n102: \n"
+    idx = CodebaseIndex(files={"app/main.py": content})
+    result = idx.read_lines("app/main.py", 100, 199)
+    assert result.startswith("app/main.py lines 100–102 (3 lines):")
+    assert "100| def earlier():" in result
+    assert "102| " in result
+
+
+def test_read_lines_pre_numbered_missing_line_falls_back() -> None:
+    """A start/end citing a line absent from the excerpt (e.g. a removed diff
+    line) falls back to the nearest preceding available line."""
+    content = "100: def earlier():\n101:     pass\n103:     return None\n"
+    idx = CodebaseIndex(files={"app/main.py": content})
+    result = idx.read_lines("app/main.py", 102, 103)
+    assert not result.startswith("Error:")
+    assert result.startswith("app/main.py lines 101–103 (2 lines):")
+    assert "101|     pass" in result
+    assert "103|     return None" in result
+
+
 def test_read_function_returns_method_in_class_body() -> None:
     """Line inside a method returns only that method's construct body."""
     src = "class C:\n    def m(self):\n        return 1\n\ndef other():\n    return 2\n"

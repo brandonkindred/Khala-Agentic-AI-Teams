@@ -581,12 +581,25 @@ class CodebaseIndex:
               followed by ``N| content`` body lines for the inclusive slice.
             - When ``end`` exceeds file length and ``start`` is in range, clamps
               ``end`` to the last line.
-            - When ``content`` is pre-numbered (``render_annotated_hunks`` output)
-              and ``start``/``end`` land in the same gap-bounded hunk segment, the
-              header and body are built entirely from ``strip_numbered_prefixes``'s
-              mapper — the header's claimed range always matches the body's own
-              embedded numbers. Cross-hunk/out-of-coverage pre-numbered requests
-              fall back to the plain-content path below (not yet remapped).
+            - When ``content`` is pre-numbered (``render_annotated_hunks`` output),
+              ``start``/``end`` are resolved as *original file* line numbers via
+              ``strip_numbered_prefixes``, never as physical excerpt positions:
+              - When both resolve into the same gap-bounded hunk segment, the
+                header and body are built entirely from the mapper — the
+                header's claimed range always matches the body's own embedded
+                numbers. A line absent from the excerpt (e.g. a removed diff
+                line) falls back to the nearest preceding available line.
+                ``end`` beyond the segment's last available line clamps to
+                that last line.
+              - A ``start`` outside its resolved segment's real coverage
+                (e.g. requesting original line 1 against a 100–102 excerpt)
+                returns ``Error: ...`` naming that segment's real coverage
+                instead of a self-contradictory header.
+              - A ``start``/``end`` pair whose physical positions resolve into
+                two different hunk segments returns ``Error: ...`` naming
+                both segments' real coverage; a successful response never
+                contains the ``"..."`` gap marker or the other segment's
+                content.
             - Path resolution matches ``read_file``.
         """
         if not isinstance(start, int) or isinstance(start, bool) or start < 1:
@@ -609,6 +622,10 @@ class CodebaseIndex:
         stripped, start_physical, mapper = strip_numbered_prefixes(content, start)
         if mapper is not None:
             _, end_physical, _ = strip_numbered_prefixes(content, end)
+            display = self.resolve_path(path) or path
+            if display == self.EXISTING_CODEBASE_PATH:
+                display = path
+
             # Resolve segment bounds against the raw pre-numbered ``content``, not
             # ``stripped``: ``strip_numbered_prefixes`` rebuilds ``stripped`` via
             # ``"\n".join(...)``, and ``str.splitlines()`` silently drops a
@@ -616,30 +633,52 @@ class CodebaseIndex:
             # numbered line being empty) — an artifact ``content`` doesn't have.
             # Bare ``...`` separators are untouched by prefix-stripping, so they
             # sit at the same physical positions in both strings either way.
-            seg_bounds = hunk_segment_bounds(content, start_physical, annotated_hunks=True)
-            if seg_bounds is not None and seg_bounds[0] <= end_physical <= seg_bounds[1]:
-                # ``str.split("\n")`` is the exact inverse of the ``"\n".join(...)``
-                # that built ``stripped``, so it preserves a trailing blank line
-                # that ``.splitlines()`` would drop (see note above).
-                stripped_lines = stripped.split("\n")
-                display = self.resolve_path(path) or path
-                if display == self.EXISTING_CODEBASE_PATH:
-                    display = path
-                if start_physical > len(stripped_lines):
-                    return (
-                        f"Error: start line {start} is beyond the end of {display} "
-                        f"(file has {len(stripped_lines)} lines)."
-                    )
-                end_eff_physical = min(end_physical, seg_bounds[1])
-                n = end_eff_physical - start_physical + 1
-                display_start = mapper(start_physical)
-                display_end = mapper(end_eff_physical)
-                header = f"{display} lines {display_start}–{display_end} ({n} lines):"
-                body = "\n".join(
-                    f"{mapper(i)}| {stripped_lines[i - 1]}"
-                    for i in range(start_physical, end_eff_physical + 1)
+            start_seg = hunk_segment_bounds(content, start_physical, annotated_hunks=True)
+            if start_seg is None:
+                return f"Error: line {start} has no resolvable coverage in {display}'s excerpt."
+
+            # ``strip_numbered_prefixes`` falls back to the *nearest preceding*
+            # numbered line when ``start`` has no exact match, defaulting to the
+            # excerpt's very first physical line when nothing precedes it either
+            # (e.g. requesting original line 1 against a 100-102 excerpt) — check
+            # the requested ``start`` against the segment's real coverage rather
+            # than trusting that fallback blindly, or the header would silently
+            # claim a range the caller never asked for.
+            real_start, real_end = mapper(start_seg[0]), mapper(start_seg[1])
+            if start < real_start or start > real_end:
+                return (
+                    f"Error: start line {start} is outside {display}'s excerpt coverage "
+                    f"(excerpt covers lines {real_start}-{real_end})."
                 )
-                return f"{header}\n{body}"
+
+            end_seg = hunk_segment_bounds(content, end_physical, annotated_hunks=True)
+            if end_seg != start_seg:
+                if end_seg is None:
+                    return (
+                        f"Error: end line {end} has no resolvable coverage in {display}'s "
+                        f"excerpt (nearest hunk covers lines {real_start}-{real_end})."
+                    )
+                other_start, other_end = mapper(end_seg[0]), mapper(end_seg[1])
+                return (
+                    f"Error: requested range {start}-{end} spans two separate hunks in "
+                    f"{display}: lines {real_start}-{real_end} and lines "
+                    f"{other_start}-{other_end}. Narrow the request to a single hunk."
+                )
+
+            # ``str.split("\n")`` is the exact inverse of the ``"\n".join(...)``
+            # that built ``stripped``, so it preserves a trailing blank line
+            # that ``.splitlines()`` would drop (see note above).
+            stripped_lines = stripped.split("\n")
+            end_eff_physical = min(end_physical, start_seg[1])
+            n = end_eff_physical - start_physical + 1
+            display_start = mapper(start_physical)
+            display_end = mapper(end_eff_physical)
+            header = f"{display} lines {display_start}–{display_end} ({n} lines):"
+            body = "\n".join(
+                f"{mapper(i)}| {stripped_lines[i - 1]}"
+                for i in range(start_physical, end_eff_physical + 1)
+            )
+            return f"{header}\n{body}"
 
         lines = content.splitlines()
         n_lines = len(lines)
