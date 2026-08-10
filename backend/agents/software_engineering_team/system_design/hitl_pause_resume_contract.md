@@ -716,6 +716,16 @@ while True:
   discriminated `resume_token`/`pause_kind` envelope, the per-phase check)
   remains unimplemented future work, not something the V2-default flip
   requires or provides.
+- **V1 drain status (2026-08-10):** no managed environment currently runs
+  the SE Temporal worker, so no in-flight `RunTeamWorkflow` (V1) executions
+  exist anywhere today — there is nothing to drain, complete, or cancel.
+  **Go/no-go for deleting V1 (5.3/5.4): GO**, with one contingency — if a
+  managed environment (staging/prod with `TEMPORAL_ADDRESS` set) is stood up
+  before 5.3/5.4 land, whoever deploys it must first re-check for open V1
+  executions (Temporal UI/CLI visibility query:
+  `WorkflowType = 'RunTeamWorkflow' AND ExecutionStatus = 'Running'` against
+  the `software-engineering` task queue) and drain/cancel any found before
+  the `RunTeamWorkflow` class and its worker registration are removed.
 - `POST /run/{job_id}/resume` is Temporal-native only: it requires a
   `resume_token` and `waiting_for_user`, then signals `CodingTeamWorkflow`.
   The old cross-worker claim lease (`resume_claim_at` / `resume_claim_seq`)

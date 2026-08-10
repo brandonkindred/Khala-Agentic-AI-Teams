@@ -54,7 +54,7 @@ This is a **review and recommendation document**, not a full implementation. The
 **Structure.**
 - Entry: `phase4_fanout`
 - Parallel branches: `iac_validation_tool`, `policy_tool`, `cicd_lint_tool`, `deploy_dry_run_tool`, `execution_tools` (internally a sub-graph by tool type: terraform, cdk, compose, helm), `devsecops_review_agent`, `change_review_agent`
-- Join: `quality_gate_aggregator` → conditional edge to `debug_patch_subgraph` (bounded cycle: `infra_debug_agent → infra_patch_agent → re-run execution_tools`, max 3) or to `test_validation_agent → done`.
+- Join: `quality_gate_aggregator` → conditional edge to `debug_patch_subgraph` (bounded cycle: `infra_debug_agent → infra_patch_agent → re-run execution_tools`, max 3) or to `qa_agent (acceptance_evidence) → done`.
 
 **Expected outcome.** 50–70% wall-clock latency reduction on Phase 4. Also gives Phase 4 explicit per-node observability (currently buried in comments). The existing debug-patch loop maps onto a bounded Graph cycle.
 

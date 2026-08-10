@@ -448,6 +448,38 @@ def segment_containing_line(
     return content
 
 
+def hunk_segment_bounds(
+    content: str, line_number: int, *, annotated_hunks: bool = False
+) -> Optional[Tuple[int, int]]:
+    """1-based ``(start, end)`` bounds of the gap-bounded segment containing ``line_number``.
+
+    The bounds counterpart of :func:`segment_containing_line`: same gap-scan
+    over :func:`_hunk_segments`, but returns the segment's endpoints instead
+    of its joined text, for callers that need to clip a range rather than
+    re-parse a snippet.
+
+    Preconditions:
+        - ``content`` is a string (may be empty).
+        - ``line_number`` >= 1.
+
+    Postconditions:
+        - When ``annotated_hunks`` is False, or ``content`` has no bare
+          ``...`` gap markers, returns ``(1, len(lines))`` where ``lines`` is
+          ``content.splitlines()``, or ``None`` when ``content`` is empty.
+        - When ``annotated_hunks`` is True and gap markers are present,
+          returns the 1-based ``(start, end)`` of the single hunk segment
+          containing ``line_number``, or ``None`` when no segment contains it.
+        - Never raises.
+    """
+    lines = content.splitlines()
+    if annotated_hunks and any(line == _HUNK_SEPARATOR for line in lines):
+        for seg_start, seg_end, _seg_lines in _hunk_segments(lines):
+            if seg_start <= line_number <= seg_end:
+                return (seg_start, seg_end)
+        return None
+    return (1, len(lines)) if lines else None
+
+
 def enclosing_construct_start_heuristic(content: str, line_number: int) -> Optional[int]:
     """Best-guess construct start line for non-Python content.
 

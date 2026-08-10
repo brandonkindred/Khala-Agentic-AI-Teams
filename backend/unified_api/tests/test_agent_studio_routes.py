@@ -267,6 +267,18 @@ def test_clone_from_registry_unknown_is_404(client: TestClient) -> None:
     assert resp.status_code == 404
 
 
+def test_clone_from_registry_persists_no_second_identity(client: TestClient, registry: FakeRegistry) -> None:
+    """Regression for #5896: cloning must never register anything on the registry.
+
+    The endpoint only projects the source manifest into a draft — it must leave
+    `registry.registered` untouched, so no second persisted identity is created
+    as a side effect of a clone.
+    """
+    resp = client.post("/api/agent-studio/agents/from-registry/blogging.planner")
+    assert resp.status_code == 200
+    assert registry.registered == {}
+
+
 def test_save_agent_registers(client: TestClient, registry: FakeRegistry) -> None:
     """Saving a ready definition registers it and reports ``created`` true."""
     resp = client.post(
