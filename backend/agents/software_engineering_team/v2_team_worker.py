@@ -266,6 +266,23 @@ def _prepare_feature_branch(path: Path, task: Any) -> tuple[bool, str]:
     return create_feature_branch(path, DEVELOPMENT_BRANCH, _task_feature_name(task))
 
 
+# Public re-exports for reuse by sibling coding-team worker adapters outside this
+# module (see devops_team_worker.py) -- the generic coding-team worker contract
+# (task validation, feature-branch naming/preparation, failure-result shaping,
+# feedback rendering, changes-summary rendering) isn't v2-team-specific, but the
+# underscore-prefixed names above stay the ones this module's own v2 workers use,
+# so callers of this module's own API are unaffected. Reusing the same function
+# objects (not copies) means a change here can never silently drift out of sync
+# with what a public importer sees.
+feedback_lines = _feedback_lines
+augment_description = _augment_description
+changes_summary = _changes_summary
+validate_task_interface = _validate_task_interface
+task_feature_name = _task_feature_name
+failed_result = _failed_result
+prepare_feature_branch = _prepare_feature_branch
+
+
 def _ensure_development_ready(path: Path) -> tuple[bool, str]:
     """Ensure git and development exist before creating a no-merge handoff branch.
 

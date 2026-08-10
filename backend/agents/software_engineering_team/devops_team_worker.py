@@ -47,13 +47,13 @@ from software_engineering_team.devops_team.orchestrator import (
 )
 from software_engineering_team.models import StackSpec
 from software_engineering_team.v2_team_worker import (
-    _augment_description,
-    _changes_summary,
-    _failed_result,
-    _feedback_lines,
-    _prepare_feature_branch,
-    _task_feature_name,
-    _validate_task_interface,
+    augment_description,
+    changes_summary,
+    failed_result,
+    feedback_lines,
+    prepare_feature_branch,
+    task_feature_name,
+    validate_task_interface,
 )
 
 logger = logging.getLogger(__name__)
@@ -109,7 +109,7 @@ def _latest_feedback_environment_text(task: Any) -> Optional[str]:
           feedback line does -- callers should fall back to the original task
           text in that case.
     """
-    for line in reversed(_feedback_lines(list(task.revision_feedback or []))):
+    for line in reversed(feedback_lines(list(task.revision_feedback or []))):
         if _ENV_REDIRECT_TOKEN.search(line):
             return line.lower()
     return None
@@ -267,7 +267,7 @@ def _revision_feedback_scope_note(task: Any) -> Optional[str]:
     ``CICDPipelineAgent``, ``DeploymentStrategyAgent``) read
     ``DevOpsTaskSpec.goal.summary`` -- only ``scope.included`` (IaC) and
     ``acceptance_criteria`` (CI/CD, Deployment). Folding feedback only into
-    ``goal.summary``, as ``_augment_description`` does, would leave every
+    ``goal.summary``, as ``augment_description`` does, would leave every
     specialist agent blind to it on a revision round -- likely regenerating
     the same rejected output until the revision cap. This note is additionally
     injected into both ``scope.included`` and ``acceptance_criteria`` (see
@@ -275,7 +275,7 @@ def _revision_feedback_scope_note(task: Any) -> Optional[str]:
 
     Returns ``None`` when there is no revision feedback to report.
     """
-    feedback = _feedback_lines(list(task.revision_feedback or []))
+    feedback = feedback_lines(list(task.revision_feedback or []))
     if not feedback:
         return None
     return "REVISION FEEDBACK TO ADDRESS: " + "; ".join(feedback)
@@ -286,7 +286,7 @@ def _to_devops_task_spec(task: Any) -> DevOpsTaskSpec:
 
     Preconditions:
         - ``task`` satisfies the coding-team worker task interface (validated
-          by the caller via ``_validate_task_interface`` before this runs).
+          by the caller via ``validate_task_interface`` before this runs).
     Postconditions:
         - ``title`` is exactly ``task.title`` (or ``task.id`` when blank),
           never truncated -- it must match what ``make_branch_suffix`` hashes
@@ -322,7 +322,7 @@ def _to_devops_task_spec(task: Any) -> DevOpsTaskSpec:
           ``_task_scope_note``'s docstring for why folding an exclusion in here
           would let it satisfy the production approval-gate policy check.
     """
-    goal_summary = _augment_description(task, _TEAM_LABEL)
+    goal_summary = augment_description(task, _TEAM_LABEL)
     environment = _derive_environment(task)
     platform_environments = _platform_environments(task, environment)
     scope_excluded = [task.out_of_scope] if getattr(task, "out_of_scope", "") else []
@@ -397,7 +397,7 @@ def _reset_prepared_branch_to_development(path: Path, task_id: str) -> tuple[boo
     file left over from a prior round -- including one the new round correctly
     omits -- would otherwise leak into the eventual diff unreviewed.
 
-    Must be called AFTER ``_prepare_feature_branch`` has already checked out
+    Must be called AFTER ``prepare_feature_branch`` has already checked out
     the branch this task will use (whether newly created or reused/existing):
     ``reset_hard_to`` resets whatever is CURRENTLY checked out, so calling it
     before that checkout would reset the wrong branch (e.g. a different task's
@@ -408,7 +408,7 @@ def _reset_prepared_branch_to_development(path: Path, task_id: str) -> tuple[boo
     ``reset_hard_to`` also cleans untracked files.
 
     Preconditions:
-        - ``_prepare_feature_branch(path, task)`` returned success; ``path``
+        - ``prepare_feature_branch(path, task)`` returned success; ``path``
           is currently checked out on the branch that call prepared.
     Postconditions:
         - Returns ``(True, message)`` on success. On failure returns
@@ -464,25 +464,25 @@ class DevOpsTeamWorker:
         path = Path(repo_path).resolve()
         task_id = str(getattr(task, "id", "") or "unknown-task")
         try:
-            _validate_task_interface(task)
+            validate_task_interface(task)
         except ValueError as exc:
             logger.warning("devops worker received malformed task %s: %s", task_id, exc)
-            return _failed_result(
-                getattr(task, "feature_branch", None) or f"feature/{_task_feature_name(task)}",
+            return failed_result(
+                getattr(task, "feature_branch", None) or f"feature/{task_feature_name(task)}",
                 str(exc),
             )
-        branch_ok, prepared_branch = _prepare_feature_branch(path, task)
+        branch_ok, prepared_branch = prepare_feature_branch(path, task)
         if not branch_ok:
             logger.warning(
                 "devops worker could not prepare branch for task %s: %s", task_id, prepared_branch
             )
-            return _failed_result(
-                getattr(task, "feature_branch", None) or f"feature/{_task_feature_name(task)}",
+            return failed_result(
+                getattr(task, "feature_branch", None) or f"feature/{task_feature_name(task)}",
                 f"failed to prepare feature branch: {prepared_branch}",
             )
         reset_ok, reset_msg = _reset_prepared_branch_to_development(path, task_id)
         if not reset_ok:
-            return _failed_result(
+            return failed_result(
                 prepared_branch, f"failed to reset stale branch state: {reset_msg}"
             )
         spec = _to_devops_task_spec(task)
@@ -490,7 +490,7 @@ class DevOpsTeamWorker:
             result = self.team_lead.run_task(spec, repo_path=path, merge_to_development=False)
         except Exception as exc:  # noqa: BLE001 - worker failure is task-local
             logger.exception("devops worker failed for task %s", task_id)
-            return _failed_result(prepared_branch, str(exc))
+            return failed_result(prepared_branch, str(exc))
 
         pkg = result.completion_package
         branch = (pkg.git_operations.branch_created if pkg is not None else "") or prepared_branch
@@ -546,7 +546,7 @@ class DevOpsTeamWorker:
             # label (with the actionable findings stranded in changes_summary) would leave
             # the next attempt with nothing concrete to act on.
             error_detail = f"{reason}\n\n{summary}" if summary else reason
-            return _failed_result(
+            return failed_result(
                 branch,
                 error_detail,
                 changes_summary=summary,
@@ -556,7 +556,7 @@ class DevOpsTeamWorker:
         return {
             "status": "in_review",
             "feature_branch": branch,
-            "changes_summary": _changes_summary(
+            "changes_summary": changes_summary(
                 team_label=_TEAM_LABEL,
                 branch=branch,
                 result_summary=_devops_result_summary(pkg),
