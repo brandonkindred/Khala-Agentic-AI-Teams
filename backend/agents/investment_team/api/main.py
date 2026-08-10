@@ -4847,42 +4847,8 @@ def _run_paper_trading_background(
         if not isinstance(exc, Exception):
             raise
         logger.exception("Paper trade %s: background worker crashed", session_id)
-        # Nested try/except: parse_persisted() below can itself raise (e.g. a
-        # corrupt persisted record) — that secondary exception is not caught by
-        # this handler's own `except Exception as exc` clause (Python doesn't
-        # let an except block catch its own body's exceptions), so left
-        # unguarded it would escape the worker, contradicting this function's
-        # documented "Raises: None" contract. Catch and log it here instead;
-        # the record is left unparseable/unupdated rather than crashing the
-        # worker over a failure to report a failure.
-        try:
-            with _lock:
-                if _paper_trading_session_already_terminal(session_id):
-                    logger.warning(
-                        "Paper trade %s: session already terminal when the crash "
-                        "handler's write was about to run; leaving it untouched "
-                        "(a concurrent writer already finalized it).",
-                        session_id,
-                    )
-                else:
-                    raw = _paper_trading_sessions.get(session_id)
-                    if raw is not None:
-                        session = PaperTradingSession.parse_persisted(raw)
-                        session.status = PaperTradingStatus.FAILED
-                        # User-facing fields must not leak raw exception text (internal
-                        # paths, dependency names) to API consumers; the full exception
-                        # is already captured above via logger.exception.
-                        user_message = "Paper trading crashed due to an internal error."
-                        session.error = user_message
-                        session.divergence_analysis = user_message
-                        session.completed_at = datetime.now(tz=timezone.utc).isoformat()
-                        _paper_trading_sessions[session_id] = session
-        except Exception:
-            logger.exception(
-                "Paper trade %s: failed to persist FAILED status for the crashed "
-                "session (record may be unparseable, or the store rejected the write)",
-                session_id,
-            )
+        safe_error = "Paper trading crashed due to an internal error."
+        _fail_paper_trading_session(session_id, error=safe_error, divergence_analysis=safe_error)
 
 
 @app.post("/strategy-lab/paper-trade", response_model=PaperTradingResponse)
@@ -5243,7 +5209,7 @@ def _apply_paper_trading_failure(
         session.divergence_analysis = session.error
 
 
-def _fail_paper_trading_session(session_id: str, error: str) -> None:
+def _fail_paper_trading_session(session_id: str, error: str, divergence_analysis: str = None) -> None:
     """Mark a paper-trading session ``failed`` (best-effort, idempotent).
 
     Preconditions:
@@ -5275,6 +5241,8 @@ def _fail_paper_trading_session(session_id: str, error: str) -> None:
             return
         try:
             _apply_paper_trading_failure(session, error)
+            if divergence_analysis:
+                session.divergence_analysis = divergence_analysis
             _paper_trading_sessions[session_id] = session
         except Exception:
             # The mutations above and the dict write (which round-trips
@@ -5494,38 +5462,7 @@ def _run_live_paper_trading_background(
         )
     except Exception as exc:
         logger.exception("Live paper trade %s: background worker crashed", session_id)
-        # Nested try/except: parse_persisted() below can itself raise (e.g. a
-        # corrupt persisted record) — that secondary exception is not caught by
-        # this handler's own `except Exception as exc` clause (Python doesn't
-        # let an except block catch its own body's exceptions), so left
-        # unguarded it would escape the worker, contradicting this function's
-        # documented "Raises: None" contract. Catch and log it here instead;
-        # the record is left unparseable/unupdated rather than crashing the
-        # worker over a failure to report a failure.
-        try:
-            with _lock:
-                if _paper_trading_session_already_terminal(session_id):
-                    logger.warning(
-                        "Live paper trade %s: session already terminal when the crash "
-                        "handler's write was about to run; leaving it untouched (a "
-                        "concurrent writer already finalized it).",
-                        session_id,
-                    )
-                else:
-                    raw = _paper_trading_sessions.get(session_id)
-                    if raw is not None:
-                        session = PaperTradingSession.parse_persisted(raw)
-                        session.status = PaperTradingStatus.FAILED
-                        session.error = str(exc)
-                        session.completed_at = datetime.now(tz=timezone.utc).isoformat()
-                        _paper_trading_sessions[session_id] = session
-        except Exception:
-            logger.exception(
-                "Live paper trade %s: failed to persist FAILED status for the "
-                "crashed session (record may be unparseable, or the store "
-                "rejected the write)",
-                session_id,
-            )
+        _fail_paper_trading_session(session_id, str(exc))
     finally:
         with _lock:
             _live_paper_stop_controllers.pop(session_id, None)

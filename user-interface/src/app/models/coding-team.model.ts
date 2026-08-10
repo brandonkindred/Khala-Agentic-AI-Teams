@@ -22,6 +22,16 @@ export interface CodingTeamJobStatus {
   github_pr_url?: string;
   /** Set by the PR-review flow with the posted-review stats. */
   review_summary?: CodeReviewSummary;
+  /**
+   * Set by the GitHub issue grooming flow: `score` once Phase A (complexity scoring)
+   * completes, `sub_issues` added once Phase B (sub-issue split) runs. There is no
+   * thread-mode grooming path to diverge from -- this is the sole surface for
+   * grooming progress/stats on either execution engine.
+   */
+  grooming?: {
+    score?: Record<string, unknown>;
+    sub_issues?: { number: number; title: string }[];
+  } | null;
   task_graph_snapshot?: TaskSnapshot[];
   /** Fine-grained activity of the currently running sub-agent (e.g. code review sub-steps). */
   current_activity?: CurrentActivityEntry;
