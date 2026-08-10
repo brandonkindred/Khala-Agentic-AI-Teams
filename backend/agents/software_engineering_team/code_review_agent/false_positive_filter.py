@@ -1060,19 +1060,18 @@ def _format_reference_hit(index: CodebaseIndex, path: str, lineno: int) -> str:
     """Format one find_references hit as path:line plus a bounded excerpt.
 
     Preconditions:
-        - ``lineno`` >= 1 and is a 1-based line number from ``search`` /
-          ``_search_repo_references`` -- for pre-numbered (annotated-hunk)
-          content this is already the *original* file line (``search``'s own
-          contract), not a physical/storage index; for plain content the two
-          coincide.
+        - ``lineno`` >= 1 and is the original/display file line number from
+          ``search`` / ``_search_repo_references`` -- for pre-numbered content
+          this is the ``N:`` file line, not the physical index in the stored
+          blob (matching ``read_function``'s ``line`` contract).
 
     Postconditions:
-        - Always starts with ``{path}:{lineno}`` (``lineno`` is already the
-          display line either way -- see Preconditions).
+        - Always starts with ``{path}:{lineno}`` -- ``lineno`` is already the
+          display line, so no further remap is applied to the locator.
         - When readable ``.py``/``.pyi`` content has an enclosing construct at
-          the physical hit line spanning at most ``_EXCERPT_MAX_LINES``,
-          appends a full construct slice from ``_format_construct_slice``
-          (same shape as ``read_function``).
+          the hit line spanning at most ``_EXCERPT_MAX_LINES``, appends a full
+          construct slice from ``_format_construct_slice`` (same shape as
+          ``read_function``).
         - When the construct exceeds ``_EXCERPT_MAX_LINES``, or no construct
           is found (module-level hit, non-Python file, unparsable content),
           appends a bounded ``_EXCERPT_WINDOW_LINES``-line window around the
@@ -1095,16 +1094,6 @@ def _format_reference_hit(index: CodebaseIndex, path: str, lineno: int) -> str:
         display = path
     _, ext = os.path.splitext(display)
     try:
-        # ``lineno`` is the *original* file line for pre-numbered content (see
-        # Preconditions), so it must be passed as the target ``line_number`` here
-        # -- strip_numbered_prefixes() remaps it to the physical index into
-        # ``stripped`` that every downstream lookup (enclosing_construct,
-        # hunk_segment_bounds, body_lines indexing) actually needs. Reusing
-        # ``lineno`` itself as that physical index (as if it were a storage
-        # index) would look up a position far past the pre-numbered content's
-        # short physical length, missing every segment/construct match and
-        # silently falling back to the whole-file span. For plain (non-numbered)
-        # content the physical index and ``lineno`` coincide either way.
         stripped, physical, mapper = strip_numbered_prefixes(content, lineno)
         construct = (
             enclosing_construct(stripped, physical, annotated_hunks=mapper is not None)
