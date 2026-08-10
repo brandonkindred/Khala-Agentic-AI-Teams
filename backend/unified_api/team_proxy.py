@@ -25,13 +25,11 @@ Usage from a mount function::
     async def _proxy(request: Request, path: str):
         return await proxy_request(request, "http://my-team:8090", path, team_key="my_team")
 """
-
 from __future__ import annotations
 
 import json
 import logging
 import uuid
-from typing import Dict
 
 import httpx
 from fastapi import Request, Response
@@ -58,9 +56,9 @@ _DEFAULT_TIMEOUT = 60.0
 # Connection Pool Configuration
 # -----------------------------------------------------------------------------
 
-# Default pool limits for teams without specific data. 
+# Default pool limits for teams without specific data.
 # Reduced from the legacy 20/10 flat default to establish a conservative memory baseline.
-DEFAULT_POOL_LIMITS: Dict[str, int] = {
+DEFAULT_POOL_LIMITS: dict[str, int] = {
     "max_connections": 10,
     "max_keepalive_connections": 5
 }
@@ -71,7 +69,7 @@ DEFAULT_POOL_LIMITS: Dict[str, int] = {
 # - billing_team: Moderate traffic. Legacy defaults were mostly appropriate.
 # - reporting_team: Low-traffic background job processing. Significantly reduced limits.
 # - ops_tooling: Very low-frequency internal admin pings. Bare minimum limits.
-TEAM_POOL_CONFIG: Dict[str, Dict[str, int]] = {
+TEAM_POOL_CONFIG: dict[str, dict[str, int]] = {
     "auth_team": {
         "max_connections": 30,
         "max_keepalive_connections": 15
@@ -90,7 +88,7 @@ TEAM_POOL_CONFIG: Dict[str, Dict[str, int]] = {
     }
 }
 
-def get_pool_limits(team_key: str) -> Dict[str, int]:
+def get_pool_limits(team_key: str) -> dict[str, int]:
     """Retrieves connection pool limits tailored to a specific team's profile."""
     return TEAM_POOL_CONFIG.get(team_key, DEFAULT_POOL_LIMITS)
 
@@ -118,7 +116,6 @@ def get_team_client(team_key: str, timeout: float | None = None) -> httpx.AsyncC
             ),
         )
     return _team_clients[team_key]
-
 
 async def proxy_request(
     request: Request,
