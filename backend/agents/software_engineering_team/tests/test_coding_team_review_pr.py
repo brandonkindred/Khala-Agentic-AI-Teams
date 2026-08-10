@@ -806,12 +806,27 @@ def review_app(monkeypatch: pytest.MonkeyPatch, tmp_path):
 
     holder: dict[str, Any] = {"client": _FakeReviewClient()}
     monkeypatch.setattr(api_main, "GitHubClient", lambda **_kw: holder["client"])
-    async def mock_start_temporal(*args, **kwargs):
-        api_main._run_pr_review(*args, **kwargs)
+    async def execute_workflow_side_effect(workflow, args=None, id=None, task_queue=None, **kwargs):
+        # Safely pass the intercepted arguments into the underlying PR review logic
+        if args:
+            result = api_main._run_pr_review(*args)
+        else:
+            result = api_main._run_pr_review()
+            
+        if asyncio.iscoroutine(result):
+            return await result
+        return result
+
+    # 2. Wire up the AsyncMocks
+    mock_execute = AsyncMock(side_effect=execute_workflow_side_effect)
+    mock_client = AsyncMock()
+    mock_client.execute_workflow = mock_execute
+
+    # 3. Patch the Temporal client connection in the pr_review module where it gets imported
     monkeypatch.setattr(
-        api_main,
-        "_start_pr_review_temporal",
-        mock_start_temporal,
+        "software_engineering_team.api.pr_review.connect_temporal_client",
+        AsyncMock(return_value=mock_client),
+        raising=False # Added raising=False in case the import path shifts slightly during your refactoring
     )
 
     # Install a fake engine provider so no LLM stack loads. The PR-review path
@@ -838,6 +853,7 @@ def review_app(monkeypatch: pytest.MonkeyPatch, tmp_path):
         "repo_path": str(tmp_path),
         "github": holder,
         "jobs": fake_jobs,
+        "temporal_execute": mock_execute,
     }
 
 
