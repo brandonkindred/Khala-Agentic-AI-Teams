@@ -343,6 +343,25 @@ def _legacy_environment_from_text(combined_text: str) -> str:
     return "staging"
 
 
+# Public re-exports for reuse outside this module (see devops_team_worker.py,
+# the coding-team handoff adapter) -- the underscore-prefixed originals above
+# stay the names used within this module (and by run_workflow/_build_legacy_spec),
+# so callers of this module's own API are unaffected. Reusing the same tuples/
+# regex/function objects (not copies) means a change here can never silently
+# drift out of sync with what a public importer sees.
+LEGACY_WORD_TOKEN = _LEGACY_WORD_TOKEN
+NEGATION_TOKENS = _NEGATION_TOKENS
+legacy_environment_from_text = _legacy_environment_from_text
+DEFAULT_LEGACY_CLOUD = _DEFAULT_LEGACY_CLOUD
+DEFAULT_LEGACY_APP_REPO = _DEFAULT_LEGACY_APP_REPO
+DEFAULT_LEGACY_INFRA_REPO = _DEFAULT_LEGACY_INFRA_REPO
+DEFAULT_LEGACY_SECRETS_SOURCE = _DEFAULT_LEGACY_SECRETS_SOURCE
+DEFAULT_LEGACY_ACCEPTANCE_CRITERIA = _DEFAULT_LEGACY_ACCEPTANCE_CRITERIA
+DEFAULT_LEGACY_ROLLBACK_REQUIREMENTS = _DEFAULT_LEGACY_ROLLBACK_REQUIREMENTS
+DEFAULT_LEGACY_SECURITY_CONSTRAINTS = _DEFAULT_LEGACY_SECURITY_CONSTRAINTS
+DEFAULT_LEGACY_COMPLIANCE_CONSTRAINTS = _DEFAULT_LEGACY_COMPLIANCE_CONSTRAINTS
+
+
 # Fillers allowed between a negation and ``approval`` (``no formal approval``).
 _APPROVAL_INTERVENING_TOKENS = frozenset(
     {

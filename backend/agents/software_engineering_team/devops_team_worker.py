@@ -33,12 +33,21 @@ from software_engineering_team.devops_team.models import (
     TaskScope,
 )
 from software_engineering_team.devops_team.orchestrator import (
-    _LEGACY_WORD_TOKEN,
-    _NEGATION_TOKENS,
-    _legacy_environment_from_text,
+    DEFAULT_LEGACY_ACCEPTANCE_CRITERIA,
+    DEFAULT_LEGACY_APP_REPO,
+    DEFAULT_LEGACY_CLOUD,
+    DEFAULT_LEGACY_COMPLIANCE_CONSTRAINTS,
+    DEFAULT_LEGACY_INFRA_REPO,
+    DEFAULT_LEGACY_ROLLBACK_REQUIREMENTS,
+    DEFAULT_LEGACY_SECRETS_SOURCE,
+    DEFAULT_LEGACY_SECURITY_CONSTRAINTS,
+    LEGACY_WORD_TOKEN,
+    NEGATION_TOKENS,
+    legacy_environment_from_text,
 )
 from software_engineering_team.models import StackSpec
 from software_engineering_team.v2_team_worker import (
+    _augment_description,
     _changes_summary,
     _failed_result,
     _feedback_lines,
@@ -51,39 +60,13 @@ logger = logging.getLogger(__name__)
 
 _TEAM_LABEL = "devops"
 
-# Static defaults mirroring devops_team/orchestrator.py's _build_legacy_spec, for
-# DevOpsTaskSpec fields the coding-team Task model does not carry. Deliberate
-# scope cut: no rich platform_scope/repo_context/constraints planning yet (see
-# the plan's "Scope cuts" section) -- this can grow richer once the Tech Lead's
-# planning phase threads real repo/platform context through.
-_DEFAULT_CLOUD = "on-premises"
-_DEFAULT_APP_REPO = "application"
-_DEFAULT_INFRA_REPO = "platform-infra"
-_DEFAULT_SECRETS_SOURCE = "managed_secret_store"
-_DEFAULT_ACCEPTANCE_CRITERIA = (
-    "CI/CD workflow exists and validates",
-    "Deployment strategy and rollback documented",
-    "Security and policy review executed",
-)
-_DEFAULT_ROLLBACK_REQUIREMENTS = ("Rollback to previous known good release",)
-_DEFAULT_SECURITY_CONSTRAINTS = ("No plaintext credentials", "Least privilege IAM")
-_DEFAULT_COMPLIANCE_CONSTRAINTS = ("Audit trail required",)
-
-
-def _augment_goal_summary(task: Any) -> str:
-    """Fold coding-team Tech Lead revision feedback into the DevOps goal summary."""
-    summary = task.description or task.title or task.id
-    feedback = _feedback_lines(list(task.revision_feedback or []))
-    if not feedback:
-        return summary
-    rendered = "\n".join(f"- {line}" for line in feedback)
-    return (
-        f"{summary}\n\n"
-        f"CODING TEAM TECH LEAD FEEDBACK FOR {_TEAM_LABEL}:\n"
-        f"Address every item below on the existing task before sending the branch back "
-        f"for Tech Lead review. Include a short summary of how each item was addressed.\n"
-        f"{rendered}"
-    )
+# DevOpsTaskSpec fields the coding-team Task model does not carry use the same
+# static defaults devops_team/orchestrator.py's _build_legacy_spec already uses
+# for the same problem (imported above as the module's public re-exports, so
+# there is exactly one copy of each value). Deliberate scope cut: no rich
+# platform_scope/repo_context/constraints planning yet (see the plan's "Scope
+# cuts" section) -- this can grow richer once the Tech Lead's planning phase
+# threads real repo/platform context through.
 
 
 _ENV_NAME = r"(?:production|prod|staging|stage|dev|development)"
@@ -105,7 +88,7 @@ def _latest_feedback_environment_text(task: Any) -> Optional[str]:
     production" and a later round's "actually, staging only" (or "make this
     dev-only") both persist in the list. Blending every entry into one
     combined-text scan means a stale early mention can never be overridden --
-    ``_legacy_environment_from_text`` returns ``"production"`` if ANY clause
+    ``legacy_environment_from_text`` returns ``"production"`` if ANY clause
     across the combined text implies it. Scanning newest-first and stopping at
     the first line that carries an explicit redirect lets the latest
     instruction win instead.
@@ -155,7 +138,7 @@ def _environment_resolution_text(task: Any) -> str:
 def _derive_environment(task: Any) -> str:
     """Infer the target environment from ``_environment_resolution_text(task)``.
 
-    Reuses ``_legacy_environment_from_text`` -- the same inference
+    Reuses ``legacy_environment_from_text`` -- the same inference
     ``_build_legacy_spec`` already applies for free-text ``run_workflow``
     callers -- rather than pinning every coding-team-dispatched task to
     ``"dev"``. Pinning would silently strip the production approval-gate
@@ -168,7 +151,7 @@ def _derive_environment(task: Any) -> str:
     Preconditions: none.
     Postconditions:
         - Returns ``"production"`` or ``"staging"`` per
-          ``_legacy_environment_from_text``'s rules (defaults to
+          ``legacy_environment_from_text``'s rules (defaults to
           ``"staging"`` absent an explicit production signal -- matching
           ``_build_legacy_spec``'s existing default for the same problem;
           also the value returned for a dev-only task, since the model has no
@@ -180,7 +163,7 @@ def _derive_environment(task: Any) -> str:
           environment-policy gate rather than silently proceeding -- the
           same trade-off ``run_workflow`` callers already accept.
     """
-    return _legacy_environment_from_text(_environment_resolution_text(task))
+    return legacy_environment_from_text(_environment_resolution_text(task))
 
 
 _STAGING_INTERVENING_TOKENS = frozenset(
@@ -200,14 +183,14 @@ def _excludes_staging(text: str) -> bool:
     """
     if _DEV_ONLY_PATTERN.search(text):
         return True
-    tokens = _LEGACY_WORD_TOKEN.findall(text.lower())
+    tokens = LEGACY_WORD_TOKEN.findall(text.lower())
     for i, token in enumerate(tokens):
         if token not in ("staging", "stage"):
             continue
         j = i - 1
         while j >= 0 and tokens[j] in _STAGING_INTERVENING_TOKENS:
             j -= 1
-        if j >= 0 and tokens[j] in _NEGATION_TOKENS:
+        if j >= 0 and tokens[j] in NEGATION_TOKENS:
             return True
     return False
 
@@ -284,7 +267,7 @@ def _revision_feedback_scope_note(task: Any) -> Optional[str]:
     ``CICDPipelineAgent``, ``DeploymentStrategyAgent``) read
     ``DevOpsTaskSpec.goal.summary`` -- only ``scope.included`` (IaC) and
     ``acceptance_criteria`` (CI/CD, Deployment). Folding feedback only into
-    ``goal.summary``, as ``_augment_goal_summary`` does, would leave every
+    ``goal.summary``, as ``_augment_description`` does, would leave every
     specialist agent blind to it on a revision round -- likely regenerating
     the same rejected output until the revision cap. This note is additionally
     injected into both ``scope.included`` and ``acceptance_criteria`` (see
@@ -315,9 +298,9 @@ def _to_devops_task_spec(task: Any) -> DevOpsTaskSpec:
           production environment-policy/approval-gate checks instead of
           silently losing them.
         - Fields the coding-team ``Task`` model does not carry (cloud/runtime,
-          repo_context, constraints) use the static ``_DEFAULT_*`` module
-          constants, mirroring ``_build_legacy_spec``'s existing defaulting
-          pattern for the same problem.
+          repo_context, constraints) use the same ``DEFAULT_LEGACY_*`` constants
+          ``_build_legacy_spec`` uses for the same problem (imported from
+          ``devops_team.orchestrator``, not re-declared here).
         - When ``task.revision_feedback`` is non-empty, a rendered note is
           appended to both ``scope.included`` and ``acceptance_criteria`` (see
           ``_revision_feedback_scope_note``) so every Phase 2 specialist agent
@@ -339,11 +322,13 @@ def _to_devops_task_spec(task: Any) -> DevOpsTaskSpec:
           ``_task_scope_note``'s docstring for why folding an exclusion in here
           would let it satisfy the production approval-gate policy check.
     """
-    goal_summary = _augment_goal_summary(task)
+    goal_summary = _augment_description(task, _TEAM_LABEL)
     environment = _derive_environment(task)
     platform_environments = _platform_environments(task, environment)
     scope_excluded = [task.out_of_scope] if getattr(task, "out_of_scope", "") else []
-    acceptance_criteria = list(task.acceptance_criteria or []) or list(_DEFAULT_ACCEPTANCE_CRITERIA)
+    acceptance_criteria = list(task.acceptance_criteria or []) or list(
+        DEFAULT_LEGACY_ACCEPTANCE_CRITERIA
+    )
     scope_note = _task_scope_note(task)
     if scope_note:
         acceptance_criteria = [scope_note] + acceptance_criteria
@@ -356,20 +341,24 @@ def _to_devops_task_spec(task: Any) -> DevOpsTaskSpec:
         task_id=task.id,
         title=task.title or task.id,
         priority=str(getattr(task, "priority", "") or "medium"),
-        platform_scope=PlatformScope(cloud=_DEFAULT_CLOUD, environments=platform_environments),
+        platform_scope=PlatformScope(
+            cloud=DEFAULT_LEGACY_CLOUD, environments=platform_environments
+        ),
         repo_context=RepoContext(
-            app_repo=_DEFAULT_APP_REPO,
-            infra_repo=_DEFAULT_INFRA_REPO,
-            pipeline_repo=_DEFAULT_APP_REPO,
+            app_repo=DEFAULT_LEGACY_APP_REPO,
+            infra_repo=DEFAULT_LEGACY_INFRA_REPO,
+            pipeline_repo=DEFAULT_LEGACY_APP_REPO,
         ),
         goal=TaskGoal(summary=goal_summary),
         scope=TaskScope(included=scope_included, excluded=scope_excluded),
-        constraints=DevOpsConstraints(secrets=SecretsConstraints(source=_DEFAULT_SECRETS_SOURCE)),
+        constraints=DevOpsConstraints(
+            secrets=SecretsConstraints(source=DEFAULT_LEGACY_SECRETS_SOURCE)
+        ),
         acceptance_criteria=acceptance_criteria,
         dependencies=list(task.dependencies or []),
-        rollback_requirements=list(_DEFAULT_ROLLBACK_REQUIREMENTS),
-        security_constraints=list(_DEFAULT_SECURITY_CONSTRAINTS),
-        compliance_constraints=list(_DEFAULT_COMPLIANCE_CONSTRAINTS),
+        rollback_requirements=list(DEFAULT_LEGACY_ROLLBACK_REQUIREMENTS),
+        security_constraints=list(DEFAULT_LEGACY_SECURITY_CONSTRAINTS),
+        compliance_constraints=list(DEFAULT_LEGACY_COMPLIANCE_CONSTRAINTS),
         environment=environment,
     )
 
@@ -461,7 +450,16 @@ class DevOpsTeamWorker:
         Returns:
             A dict containing status, feature_branch, changes_summary,
             files_to_create_or_edit, commands_run, open_questions, and error --
-            the same generic shape ``V2TeamWorker.run_implement`` returns.
+            the same generic shape ``V2TeamWorker.run_implement`` returns, used
+            for both outcomes rather than raising on failure. On success,
+            ``status`` is ``"in_review"`` and ``error`` is ``None``. On failure
+            (malformed task, branch prep/reset failure, a DevOps exception, or a
+            blocked/incomplete/no-diff DevOps result), ``status`` is
+            ``"failed"``, ``error`` is a non-empty descriptive string, and
+            ``feature_branch``/``changes_summary``/``files_to_create_or_edit``/
+            ``commands_run`` may still be partially populated (e.g. the branch
+            that was prepared, or files/gates from a blocked DevOps package) so
+            Tech Lead revision feedback stays actionable.
         """
         path = Path(repo_path).resolve()
         task_id = str(getattr(task, "id", "") or "unknown-task")

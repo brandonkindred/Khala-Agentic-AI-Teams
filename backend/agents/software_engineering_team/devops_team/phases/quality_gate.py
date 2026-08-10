@@ -75,6 +75,17 @@ def run_phase4_quality_gate(
       ``_run_execution_tools``, ``_debug_patch_once``,
       ``_run_bounded_retry_loop``, ``devsecops_review_agent``,
       ``change_review_agent``, and ``test_validation_agent``.
+      ``devsecops_review_agent.run()`` returns a ``DevSecOpsReviewOutput``
+      (``.approved: bool``, ``.summary: str``, ``.findings: list[ReviewFinding]``
+      where each finding has ``.blocking: bool`` and ``.issue: str``);
+      ``change_review_agent.run()`` returns a ``ChangeReviewOutput`` with the
+      same ``.approved``/``.summary``/``.findings`` shape;
+      ``test_validation_agent.run()`` returns a ``DevOpsTestValidationOutput``
+      (``.acceptance_trace: list[dict]``, ``.quality_gates: dict[str, GateStatus]``,
+      ``.summary: str``). ``build_verifier``, if not ``None``, is a callable
+      ``(repo_path: Path, team: str, task_id: str) -> tuple[bool, str | None]``
+      where the bool indicates verification success and the string (if any)
+      carries the failure reason.
     Postconditions: runs tool validation, execution verification, the
       debug-patch loop, and independent reviews, returning the assembled
       ``quality_gates``, ``acceptance_trace``, ``tool_gate_map``, and

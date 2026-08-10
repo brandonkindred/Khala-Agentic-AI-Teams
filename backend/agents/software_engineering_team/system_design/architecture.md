@@ -4,8 +4,8 @@
 
 The **coding team** is a Software Engineering sub-team that owns implementation
 after planning. It receives a `CodingTeamPlanInput`, builds a Task Graph, routes
-tasks through a Tech Lead, and executes work only through the Software
-Engineering v2 implementation teams:
+tasks through a Tech Lead, and by default executes work only through the
+Software Engineering v2 implementation teams:
 
 - `frontend_v2` for Angular, TypeScript, React, JavaScript, CSS, SCSS, HTML,
   UI, UX, accessibility, state management, and browser-facing clients.
@@ -15,13 +15,27 @@ Engineering v2 implementation teams:
 There is no legacy implementation worker in the coding team. Unsupported stacks
 fail fast during worker construction instead of falling back to a generic coder.
 
+When the opt-in `CODING_TEAM_DEVOPS_ROUTING` flag is set, a third path is
+available: `devops`-labeled tasks route to a `DevOpsTeamWorker` backed by
+`DevOpsTeamLeadAgent` (`devops_team/orchestrator.py`) instead of `backend_v2`.
+This worker is not a v2 team and is not built through `CodeEngineProvider` (which
+only covers `frontend_v2`/`backend_v2`) — `worker_factory.py` constructs it
+directly. It follows the same handoff contract (commits a feature branch via
+`run_task(..., merge_to_development=False)`, never merges, returns the branch
+for Tech Lead review) via `DevOpsTaskSpec`/`DevOpsCompletionPackage` instead of
+v2's free-text workflow. With the flag off (the default), `devops`/`infra`/`ci`/
+`cicd` labels normalize to `backend_v2` exactly as described below, and behavior
+is unchanged. See `software_engineering_team/README.md` for the full flag
+reference.
+
 ## Core Roles
 
 | Role | Implementation | Responsibility |
 |------|----------------|----------------|
-| **Tech Lead** | `tech_lead_agent/agent.py` | Converts the plan into tasks, sets `target_team`, assigns ready tasks to free v2 workers, reviews returned branches, and routes rejection feedback back to the producing team. |
+| **Tech Lead** | `tech_lead_agent/agent.py` | Converts the plan into tasks, sets `target_team`, assigns ready tasks to free v2 (or, when opted in, DevOps) workers, reviews returned branches, and routes rejection feedback back to the producing team. |
 | **frontend_v2 worker** | `v2_team_worker.py` → `frontend_code_v2_team` | Runs the frontend v2 workflow, commits a feature branch without merging it, and returns the branch plus summary for Tech Lead review. |
 | **backend_v2 worker** | `v2_team_worker.py` → `backend_code_v2_team` | Runs the backend v2 workflow, commits a feature branch without merging it, and returns the branch plus summary for Tech Lead review. |
+| **devops worker** (opt-in) | `devops_team_worker.py` → `devops_team.DevOpsTeamLeadAgent` | Only constructed when `CODING_TEAM_DEVOPS_ROUTING` is set. Runs the DevOps pipeline via `run_task`, commits a feature branch without merging it, and returns the branch plus summary for Tech Lead review. |
 | **Task Graph** | `task_graph.py` | Stores tasks, dependencies, statuses, assignments, target teams, branches, and revision feedback. |
 
 ## Routing
@@ -32,14 +46,20 @@ time:
 
 - `target_team="frontend_v2"` can only be assigned to the frontend v2 worker.
 - `target_team="backend_v2"` can only be assigned to the backend v2 worker.
+- `target_team="devops"` can only be assigned to the devops worker, and only
+  when `CODING_TEAM_DEVOPS_ROUTING` is set.
 - Mismatched Tech Lead assignments are ignored.
 - If a ready task already has a target team but the assignment response omits it,
   the scheduler deterministically assigns it to a matching free worker.
-- Missing v2 stack specs are repaired from targeted tasks before worker creation.
+- Missing v2 (or devops) stack specs are repaired from targeted tasks before
+  worker creation.
 
 Generic stack names such as `frontend`, `backend`, `devops`, `api`, or
-`infrastructure` normalize into one of the two v2 teams. Anything that cannot be
-classified as frontend or backend/platform work fails the job with a clear
+`infrastructure` normalize into one of the two v2 teams. With
+`CODING_TEAM_DEVOPS_ROUTING` set, `devops`/`infra`/`infrastructure`/`ci`/`cicd`
+instead normalize to the devops worker; `frontend`/`backend`/`api` are
+unaffected by the flag. Anything that cannot be classified as frontend,
+backend/platform, or (when opted in) devops work fails the job with a clear
 unsupported-stack error.
 
 ## Branch Handoff
