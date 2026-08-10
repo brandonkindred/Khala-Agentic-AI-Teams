@@ -822,16 +822,15 @@ def review_app(monkeypatch: pytest.MonkeyPatch, tmp_path):
         return result
 
     # 2. Wire up the AsyncMocks
+    temporal_client_mod = sys.modules["software_engineering_team.temporal.client"]
+    mock_client = temporal_client_mod.get_temporal_client.return_value
+    
+    # 3. Attach our real logic to the execute_workflow call
     mock_execute = AsyncMock(side_effect=execute_workflow_side_effect)
-    mock_client = AsyncMock()
     mock_client.execute_workflow = mock_execute
 
     # 3. Patch the Temporal client connection in the pr_review module where it gets imported
-    monkeypatch.setattr(
-        "software_engineering_team.api.pr_review.connect_temporal_client",
-        AsyncMock(return_value=mock_client),
-        raising=False # Added raising=False in case the import path shifts slightly during your refactoring
-    )
+    
 
     # Install a fake engine provider so no LLM stack loads. The PR-review path
     # calls provider.run_pr_code_review(...) via coding_team.engine_provider; the
