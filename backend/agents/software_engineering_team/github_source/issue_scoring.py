@@ -1,31 +1,30 @@
-"""LLM Fibonacci-scoring prompt and response-parse contract for GitHub issue grooming.
+"""LLM Fibonacci-scoring prompt and schema contract for GitHub issue grooming.
 
-Prompt/parse contract only: this module never calls an LLM (no ``get_client``,
+Prompt/schema contract only: this module never calls an LLM (no ``get_client``,
 no provider list, no ``Agent``/``Model``) and never wires into Phase A
-orchestration. It gives callers two pure functions:
+orchestration. It gives callers:
 
-- ``build_scoring_prompt`` — render a scoring prompt from an issue's
-  title/body/labels.
-- ``parse_score_response`` — parse a model's raw text response into a
-  validated :class:`ScoreBreakdown`, or an explicit, typed
-  :class:`ScoreParseFailure` — never a silently coerced best-effort guess.
+- ``build_scoring_prompt`` — a pure function rendering a scoring prompt from
+  an issue's title/body/labels.
+- ``ScoreBreakdown`` — the Pydantic schema a model response must satisfy.
+
+A future call site that actually invokes the LLM should pass both straight
+into the shared client's canonical structured-output entrypoint, e.g.
+``generate_structured(build_scoring_prompt(title, body, labels),
+schema=ScoreBreakdown, ...)`` — that entrypoint already owns JSON-mode
+enforcement, schema validation, and a self-correction retry, so this module
+does not duplicate a hand-rolled parse/validate path on top of it.
 
 :data:`FIBONACCI_COMPLEXITY_VALUES` is the canonical Fibonacci scale for
 issue-grooming complexity scores, exported so a future heuristic scorer and
-Phase A wiring reuse this exact set rather than redefining it. This module
+Phase A wiring reuse this exact set rather than redefining it. ``ScoreBreakdown``
 deliberately does not clamp an out-of-set score to the nearest legal value —
-a non-Fibonacci score is a parse failure here, not a rounding problem.
+a non-Fibonacci score fails validation, it is not rounded.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from enum import Enum
-from typing import Union
-
-from pydantic import BaseModel, Field, ValidationError, field_validator
-
-from llm_service import LLMJsonParseError, extract_json_from_response
+from pydantic import BaseModel, Field, field_validator
 
 # Canonical Fibonacci complexity scale for issue-grooming scoring. Matches the
 # upper bound already used by TaskPlan.complexity_points
@@ -45,17 +44,13 @@ _RATIONALE_FIELDS = (
     "aggregate_rationale",
 )
 
-# Passed to extract_json_from_response so its last-resort key-matching fallback
-# is scoped to this contract's fields, not that function's own unrelated
-# default expected-key set.
-_EXPECTED_KEYS = frozenset(_SCORE_FIELDS)
-
 
 class ScoreBreakdown(BaseModel):
     """Validated LLM Fibonacci-scoring output for one GitHub issue.
 
     Preconditions: constructed only via ``ScoreBreakdown(**data)`` /
-        ``model_validate(data)`` from :func:`parse_score_response` — never
+        ``model_validate(data)`` from a schema-validated LLM call (e.g.
+        ``generate_structured(..., schema=ScoreBreakdown)``) — never
         hand-built from unvalidated input elsewhere.
     Postconditions: ``conceptual_score``, ``loc_score``,
         ``code_complexity_score``, and ``aggregate_score`` are each
@@ -94,28 +89,6 @@ class ScoreBreakdown(BaseModel):
         return text
 
 
-class ScoreParseFailureReason(str, Enum):
-    """Classifies why :func:`parse_score_response` could not produce a ScoreBreakdown."""
-
-    MALFORMED_JSON = "malformed_json"
-    INVALID_SHAPE = "invalid_shape"
-    VALIDATION_ERROR = "validation_error"
-
-
-@dataclass(frozen=True)
-class ScoreParseFailure:
-    """Explicit parse-failure result for :func:`parse_score_response`.
-
-    Postconditions: ``reason`` classifies the failure; ``detail`` is a
-        human-readable explanation (pydantic ``ValidationError`` text,
-        ``LLMJsonParseError`` message, or a fixed string for
-        ``INVALID_SHAPE``).
-    """
-
-    reason: ScoreParseFailureReason
-    detail: str
-
-
 def build_scoring_prompt(title: str, body: str, labels: list[str]) -> str:
     """Build the Fibonacci-scoring prompt for one GitHub issue.
 
@@ -128,8 +101,8 @@ def build_scoring_prompt(title: str, body: str, labels: list[str]) -> str:
         legal values from :data:`FIBONACCI_COMPLEXITY_VALUES`, and a JSON
         response-shape example whose keys exactly match
         :class:`ScoreBreakdown`'s field names, so a well-formed reply
-        round-trips through :func:`parse_score_response`. Pure string
-        formatting — no I/O, no LLM call.
+        validates against that schema. Pure string formatting — no I/O, no
+        LLM call.
     """
     allowed = ", ".join(str(v) for v in FIBONACCI_COMPLEXITY_VALUES)
     body_text = body.strip() if body and body.strip() else "(none)"
@@ -171,40 +144,3 @@ Respond with ONLY a single JSON object (no markdown fences, no commentary) with 
 "suggested_labels" is optional -- return [] if you have no suggestions.
 All four *_score fields are required and each must be one of: {allowed}.
 """
-
-
-def parse_score_response(raw: str) -> Union[ScoreBreakdown, ScoreParseFailure]:
-    """Parse a raw LLM response into a validated ScoreBreakdown, or an explicit failure.
-
-    Preconditions: ``raw`` is a string (the LLM's raw text response; may
-        include markdown code fences / stray prose per
-        ``extract_json_from_response``'s recovery ladder).
-    Postconditions:
-        - Unrecoverable JSON -> ``ScoreParseFailure(MALFORMED_JSON, ...)``.
-        - Recovered JSON whose top-level value isn't a dict ->
-          ``ScoreParseFailure(INVALID_SHAPE, ...)``.
-        - A dict missing a required field, with a wrong-typed field, a
-          ``*_score`` outside :data:`FIBONACCI_COMPLEXITY_VALUES`, or a blank
-          ``*_rationale`` -> ``ScoreParseFailure(VALIDATION_ERROR, ...)``
-          carrying pydantic's ``ValidationError`` text verbatim in
-          ``.detail``.
-        - Otherwise -> a validated :class:`ScoreBreakdown`.
-        - Never raises. Never silently coerces an invalid response into a
-          "best effort" ScoreBreakdown -- in particular, a non-Fibonacci
-          score is REJECTED, not clamped to the nearest legal value.
-    """
-    try:
-        data = extract_json_from_response(raw, expected_keys=_EXPECTED_KEYS)
-    except LLMJsonParseError as e:
-        return ScoreParseFailure(ScoreParseFailureReason.MALFORMED_JSON, str(e))
-
-    if not isinstance(data, dict):
-        return ScoreParseFailure(
-            ScoreParseFailureReason.INVALID_SHAPE,
-            f"expected a JSON object, got {type(data).__name__}",
-        )
-
-    try:
-        return ScoreBreakdown.model_validate(data)
-    except ValidationError as e:
-        return ScoreParseFailure(ScoreParseFailureReason.VALIDATION_ERROR, str(e))

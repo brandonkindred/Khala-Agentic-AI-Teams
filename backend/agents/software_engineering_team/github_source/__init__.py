@@ -3,7 +3,7 @@ GitHub source integrations for the coding team.
 
 Includes issue selection for issue-driven runs, PR review comment mapping,
 existing-comment handling, issue-proposal generation, LLM Fibonacci-scoring
-prompt/parse contract, and repository reading.
+prompt/schema contract, and repository reading.
 """
 
 from .client import (
@@ -41,10 +41,7 @@ from .issue_proposals import (
 from .issue_scoring import (
     FIBONACCI_COMPLEXITY_VALUES,
     ScoreBreakdown,
-    ScoreParseFailure,
-    ScoreParseFailureReason,
     build_scoring_prompt,
-    parse_score_response,
 )
 from .issue_to_plan import issue_to_plan_input
 from .pr_review_mapping import (
@@ -80,8 +77,6 @@ __all__ = [
     "Repo",
     "ReviewComment",
     "ScoreBreakdown",
-    "ScoreParseFailure",
-    "ScoreParseFailureReason",
     "SubIssue",
     "annotate_duplicate_proposals",
     "build_existing_comments",
@@ -100,7 +95,6 @@ __all__ = [
     "issue_to_plan_input",
     "map_issues_to_comments",
     "match_existing_comment",
-    "parse_score_response",
     "parse_valid_lines",
     "partition_issues_by_existing_comments",
     "pick_ready_issue",
