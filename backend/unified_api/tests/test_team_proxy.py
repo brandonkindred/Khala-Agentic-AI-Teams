@@ -3,11 +3,9 @@
 from __future__ import annotations
 
 import pytest
-from unified_api.team_proxy import (
-    get_team_client,
-    _team_clients,
-    DEFAULT_POOL_LIMITS
-)
+
+from unified_api.team_proxy import DEFAULT_POOL_LIMITS, _team_clients, get_team_client
+
 
 @pytest.fixture(autouse=True)
 def _reset_team_clients():
