@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import pytest
 
+from agent_registry.models import AgentManifest
 from agent_team_studio.agent_studio.assistant import AgentDesignerAgent
 from agent_team_studio.agent_studio.models import AgentDefinition
 from agent_team_studio.agent_studio.service import AgentStudioService
@@ -207,3 +208,15 @@ def test_save_agent_not_ready_raises_value_error() -> None:
         svc.save_agent(AgentDefinition(name="OnlyName"))
     assert "role" in str(exc.value)
     assert registry.registered == {}
+
+
+def test_save_agent_persists_only_agent_manifest_type() -> None:
+    # Regression for #5895: AgentManifest is the sole persisted catalog identity
+    # — save_agent must never register an AgentDefinition (or any other second
+    # identity type) alongside or instead of the manifest.
+    svc, registry = _service()
+    manifest, _created = svc.save_agent(AgentDefinition(name="Saver", role="Saves things"))
+    stored = registry.registered[manifest.id]
+    assert isinstance(stored, AgentManifest)
+    assert not isinstance(stored, AgentDefinition)
+    assert all(isinstance(v, AgentManifest) for v in registry.registered.values())

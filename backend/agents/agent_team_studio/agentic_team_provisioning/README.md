@@ -11,49 +11,43 @@ Conversational service for designing **agentic teams**: named **rosters** of AI 
 
 See [AGENTIC_TEAM_ARCHITECTURE.md](AGENTIC_TEAM_ARCHITECTURE.md) for the required structure (API layer, orchestrator, agents pool, processes pool, infrastructure).
 
-## Roster and staffing validation
+## Roster identity: thin refs, Manifest SoT
 
-Each team has a **roster** of thin refs (`AgenticTeamAgent`: `agent_name`, `source`, `manifest_id`). Persona fields (`role`, `skills`, `capabilities`, `tools`, `expertise`) live on the linked `AgentManifest` and are joined at read time via `roster_resolve.resolve_persona`. The process designer LLM emits roster JSON alongside process JSON; generated agents are stamped with `manifest_id` and registered via `register_team_manifests`.
+Each team has a **roster** of thin refs (`AgenticTeamAgent`: `agent_name`, `source`,
+`manifest_id`). The registered `AgentManifest` (see `agent_registry.models.AgentManifest`)
+is the sole writable source of truth for an agent's persona — a roster row only
+references it. `agent_name` is a team-local slot key (may differ from `manifest.name`);
+it is not a persona override.
+
+Persona fields (`role`, `skills`, `capabilities`, `tools`, `expertise`) are never
+persisted on the roster row. They're joined at read time via `roster_resolve.resolve_persona`
+into an `EnrichedRosterAgent`, and consumed the same way by `roster_validation.py`
+(staffing/depth checks), `runtime/agent_builder.py` (system-prompt construction), and
+`runtime/pipeline_runner.py` (execution). Roster `PUT` rejects any body that supplies a
+persona field with `400` — edit the linked `AgentManifest` instead.
+
+The process designer LLM emits roster JSON alongside process JSON; generated agents are
+stamped with `manifest_id` and registered via `register_team_manifests`. Older roster
+rows written before this model was thinned may still carry the legacy fat JSON shape —
+`roster_resolve.migrate_roster_row` eagerly coerces those to thin refs (stamping a
+generated `manifest_id` when needed) the first time they're read.
 
 - **`GET /teams/{team_id}/agents`** — roster
 - **`GET /teams/{team_id}/roster/validation`** — `RosterValidationResult` (gaps: unrostered agents, unused roster entries, unstaffed steps, incomplete profiles)
 
 Validation logic lives in `roster_validation.py`.
 
-## Roster identity: thin refs vs. Manifest SoT
+Field mapping for the from-registry projection (`api/services/teams.py::_roster_agent_from_manifest`)
+and for folding a legacy fat row's persona into the target manifest during migration:
 
-`AgenticTeamAgent` (`models.py`) is the thin, sole persisted/API roster shape —
-only `agent_name`, `source`, `manifest_id`. The registered `AgentManifest` (see
-`agent_registry.models.AgentManifest`) is the sole writable source of truth for
-an agent's persona; nothing writes `role`/`skills`/`capabilities`/`tools`/
-`expertise` onto a roster row. `agent_name` is a team-local slot key (may differ
-from `manifest.name`); it is not a persona override.
-
-Persona fields are resolved live from the linked manifest at read time via
-`roster_resolve.persona_from_manifest`/`resolve_persona`, and joined into the
-API response shape `EnrichedRosterAgent` (`models.py`) by
-`api/main.py::enrich_roster_agent` — never persisted. `roster_validation.py`,
-`runtime/agent_builder.py`, and `runtime/pipeline_runner.py` all consume the
-resolved persona, not stored fields. Legacy rows persisted before this
-migration (still carrying fat JSON in `assistant/store.py`) self-heal on first
-read via `roster_resolve.migrate_roster_row`, which folds any fat fields into
-the linked (or newly generated) `AgentManifest` and rewrites the row thin.
-`PUT /teams/{team_id}/agents/{agent_name}` rejects any persona field in the
-request body with a 400 (`api/services/teams.py::update_roster_agent`) — the
-API boundary enforces that Manifest is the only writable persona identity.
-
-Field mapping, as implemented by the from-registry projection
-(`api/services/teams.py::_roster_agent_from_manifest`) and the read-time join
-(`roster_resolve.persona_from_manifest`):
-
-| `EnrichedRosterAgent` field (read view) | Manifest (SoT) | Notes |
+| Legacy roster field | Manifest (SoT) | Notes |
 |---|---|---|
 | `agent_name` | `name` | thin ref only; not resolved from the manifest at read time |
 | `role` | `summary` | falls back to `name` when `summary` is empty |
 | `skills` | `tags` | marker tags (`"generated"`, team key) stripped |
 | `tools` | `cognition.tools` | empty when the manifest has no `cognition` block |
 | `expertise` | `[team]` | single-element list: the manifest's home team |
-| `capabilities` | *(none)* | never populated from a manifest — no Manifest field carries this concept |
+| `capabilities` | *(none)* | never populated from a manifest — open gap |
 
 ## Pipeline test runs (execution)
 

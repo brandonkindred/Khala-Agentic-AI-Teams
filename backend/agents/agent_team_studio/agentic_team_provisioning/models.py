@@ -136,14 +136,14 @@ SOURCE_REGISTRY: Final = "registry"
 class AgenticTeamAgent(BaseModel):
     """Thin roster reference to a registry AgentManifest.
 
-    The sole persisted/API roster shape: ``agent_name``, ``source``, and
-    ``manifest_id`` only. ``AgentManifest`` (see
-    ``agent_registry.models.AgentManifest``) is the sole writable source of
-    truth for a registered agent's persona (``role``, ``skills``,
-    ``capabilities``, ``tools``, ``expertise``) — see this package's README
-    ("Roster identity: thin refs vs. Manifest SoT") for the field mapping.
-    Persona is resolved live from the linked Manifest at read time via
-    ``roster_resolve``, never persisted here.
+    A roster entry is identity only: which manifest fills this team-local slot,
+    and how it got there. Persona (``role``, ``skills``, ``capabilities``,
+    ``tools``, ``expertise``) is not a field on this model — it lives solely on
+    the registered ``AgentManifest`` (see ``agent_registry.models.AgentManifest``)
+    and is joined at read time via ``roster_resolve.resolve_persona`` into
+    ``EnrichedRosterAgent``. See this package's README ("Roster identity: thin
+    refs, Manifest SoT") for the resolution path and the from-registry field
+    mapping.
 
     Invariants:
         * ``manifest_id`` is always set for persisted rows (enforced after migrate).
