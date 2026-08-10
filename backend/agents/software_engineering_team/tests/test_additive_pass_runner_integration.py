@@ -5,14 +5,13 @@ The three once-per-submission additive code-review passes
 ``merged_architecture_side_effect_pass``) were migrated onto the shared
 ``submission_pass_runner`` so budgeting, chunking, ``Agent`` construction, and
 overflow recovery live in one place. This file does not re-test that
-mechanics (``test_submission_pass_runner.py`` and each pass's own
-"...through_public_entry_point" tests already do); it locks in the migration
-invariant so a future change cannot silently reintroduce a direct ``Agent``
-construction, a duplicated recovery helper, or a call path that bypasses
-``run_submission_pass`` in a pass module without failing a test -- and proves
-that a context-overflow on the only batch a submission needs still yields
-findings via the runner's reactive recovery, for all three passes, not a
-silent empty result.
+mechanics: ``test_submission_pass_runner.py`` covers the runner's own
+budgeting/chunking/recovery in isolation, and each pass's own
+"...through_public_entry_point" test already exercises its overflow-recovery
+path end to end. Instead, this file locks in the migration invariant so a
+future change cannot silently reintroduce a direct ``Agent`` construction, a
+duplicated recovery helper, or a call path that bypasses
+``run_submission_pass`` in a pass module without failing a test.
 
 No network/LLM: every test here uses ``DummyLLMClient`` subclasses or a
 spied-in ``Agent`` stand-in, matching the runner's own unit-test posture.
@@ -29,11 +28,9 @@ import code_review_agent.side_effect_impact_pass as side_mod
 import code_review_agent.submission_pass_runner as runner_mod
 import pytest
 from code_review_agent.models import CodeReviewInput
-from strands.types.exceptions import ContextWindowOverflowException
 
 from llm_service.clients.dummy import DummyLLMClient
 from shared.dev_models.models import SystemArchitecture
-from software_engineering_team.shared.context_sizing import MergedPassBudgets
 
 _PASS_MODULES = (arch_mod, side_mod, merged_mod)
 
@@ -63,10 +60,6 @@ def _arch() -> SystemArchitecture:
 def _input(**overrides: Any) -> CodeReviewInput:
     files = overrides.pop("files", {"app/main.py": "def bar():\n    return 1\n"})
     return CodeReviewInput(files=files, task_description="wire up bar", **overrides)
-
-
-def _two_files() -> Dict[str, str]:
-    return {"a.py": "x = 1\n", "b.py": "y = 2\n"}
 
 
 # --------------------------------------------------------------------------- static checks
@@ -168,7 +161,7 @@ def test_merged_pass_delegates_to_shared_runner(monkeypatch: pytest.MonkeyPatch)
 # ------------------------------------------------------- dynamic Agent-symbol checks
 
 
-def _agent_spy_class(reply: str, calls: List[Tuple[Any, str, list]]) -> type:
+def _agent_spy_class(reply: str, calls: List[Tuple[Any, str, List[Any]]]) -> type:
     """Build a `strands.Agent` stand-in that records construction and returns ``reply``."""
 
     class _Spy:
@@ -210,122 +203,9 @@ def test_agent_construction_routes_through_the_shared_runner(
     build_input: Callable[[], CodeReviewInput],
 ) -> None:
     """Each pass's real public entry point constructs its Agent only via the runner's ``Agent`` symbol."""
-    calls: List[Tuple[Any, str, list]] = []
+    calls: List[Tuple[Any, str, List[Any]]] = []
     monkeypatch.setattr(runner_mod, "Agent", _agent_spy_class(reply, calls))
 
     entry_point(DummyLLMClient(), build_input())
 
     assert calls, "expected the pass to construct at least one Agent via the shared runner"
-
-
-# ------------------------------------------------------- overflow-alone recovery
-
-
-def _overflow_budgets() -> MergedPassBudgets:
-    # Generous per-call allowance: both files fit into one proactive batch,
-    # so the overflow below is triggered explicitly by the scripted client
-    # (mid-turn context overflow on the combined call), not by budgeting --
-    # DummyLLMClient's real context window is otherwise consumed almost
-    # entirely by the merged pass's larger combined (Part 1 + Part 2)
-    # system prompt, leaving too little manifest/content budget to even
-    # render either file's heading.
-    return MergedPassBudgets(
-        max_architecture_chars=100_000,
-        max_inline_code_chars=100_000,
-        max_manifest_chars=2_000,
-        reserved_response_tokens=4096,
-    )
-
-
-def _finding(path: str, category: str) -> Dict[str, Any]:
-    return {
-        "severity": "medium",
-        "category": category,
-        "file_path": path,
-        "description": f"finding for {path}",
-        "suggestion": "n/a",
-    }
-
-
-def test_architecture_pass_overflow_alone_still_returns_findings(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Overflow on the combined batch, with nothing else wrong, must recover
-    via the shared runner's bisect and still return findings -- a silent
-    empty result here would be the pre-runner regression this pass migrated
-    away from."""
-    monkeypatch.setattr(
-        runner_mod, "compute_code_review_merged_pass_budgets", lambda *a, **k: _overflow_budgets()
-    )
-    call_count = {"n": 0}
-
-    class _Client(DummyLLMClient):
-        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
-            call_count["n"] += 1
-            if "### a.py ###" in prompt and "### b.py ###" in prompt:
-                raise ContextWindowOverflowException("combined batch too large")
-            for path in ("a.py", "b.py"):
-                if f"### {path} ###" in prompt:
-                    return {"findings": [_finding(path, "architecture")]}
-            return {"findings": []}
-
-    result = arch_mod.find_architecture_and_redundancy_issues(
-        _Client(), _input(files=_two_files(), architecture=_arch())
-    )
-
-    assert {f.description for f in result} == {"finding for a.py", "finding for b.py"}
-    assert call_count["n"] > 1  # proves the overflowing call was retried, not skipped
-
-
-def test_side_effect_pass_overflow_alone_still_returns_findings(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(
-        runner_mod, "compute_code_review_merged_pass_budgets", lambda *a, **k: _overflow_budgets()
-    )
-    call_count = {"n": 0}
-
-    class _Client(DummyLLMClient):
-        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
-            call_count["n"] += 1
-            if "### a.py ###" in prompt and "### b.py ###" in prompt:
-                raise ContextWindowOverflowException("combined batch too large")
-            for path in ("a.py", "b.py"):
-                if f"### {path} ###" in prompt:
-                    return {"findings": [_finding(path, "side-effects")]}
-            return {"findings": []}
-
-    result = side_mod.find_side_effect_impact_issues(_Client(), _input(files=_two_files()))
-
-    assert {f.description for f in result} == {"finding for a.py", "finding for b.py"}
-    assert call_count["n"] > 1
-
-
-def test_merged_pass_overflow_alone_still_returns_findings(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(
-        runner_mod, "compute_code_review_merged_pass_budgets", lambda *a, **k: _overflow_budgets()
-    )
-    call_count = {"n": 0}
-
-    class _Client(DummyLLMClient):
-        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
-            call_count["n"] += 1
-            if "### a.py ###" in prompt and "### b.py ###" in prompt:
-                raise ContextWindowOverflowException("combined batch too large")
-            for path in ("a.py", "b.py"):
-                if f"### {path} ###" in prompt:
-                    return {
-                        "architecture_findings": [_finding(path, "architecture")],
-                        "side_effect_findings": [],
-                    }
-            return {"architecture_findings": [], "side_effect_findings": []}
-
-    arch_findings, side_findings = merged_mod.find_architecture_and_side_effect_issues(
-        _Client(), _input(files=_two_files(), architecture=_arch())
-    )
-
-    assert {f.description for f in arch_findings} == {"finding for a.py", "finding for b.py"}
-    assert side_findings == []
-    assert call_count["n"] > 1
