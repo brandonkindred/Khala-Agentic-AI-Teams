@@ -20,6 +20,12 @@ catalog/get (except fail-closed callers that set `require_store` /
 `require_persist`). The HTTP catalog routes remain read-only; writers are
 in-process registry APIs used by teams that generate agents.
 
+Agent Studio's save/register path is one such writer: it projects its editable
+`AgentDefinition` view-model into an `AgentManifest` before calling
+`AgentRegistry.register`. See
+[`agent_team_studio/agent_studio/README.md`](../agent_team_studio/agent_studio/README.md#identity-agentdefinition-view-model-vs-agentmanifest-sot)
+for the full `AgentDefinition` ↔ `AgentManifest` field mapping.
+
 ## Why it exists
 
 Historically, Khala had a flat, team-level roster in
