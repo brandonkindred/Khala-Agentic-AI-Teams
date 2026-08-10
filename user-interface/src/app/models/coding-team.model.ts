@@ -30,7 +30,7 @@ export interface CodingTeamJobStatus {
    */
   grooming?: {
     score?: Record<string, unknown>;
-    sub_issues?: Array<{ number: number; title: string }>;
+    sub_issues?: { number: number; title: string }[];
   } | null;
   task_graph_snapshot?: TaskSnapshot[];
   /** Fine-grained activity of the currently running sub-agent (e.g. code review sub-steps). */
