@@ -1791,8 +1791,9 @@ def _build_group_prompt(
         "real, current code before judging any finding below. A false-positive "
         "verdict for ANY finding below will be ignored (that finding kept) unless "
         "you successfully call read_file on this exact path first — reading a "
-        "different file, or only a partial slice via read_lines, is not enough on "
-        "its own, even if you also inspect other related files."
+        "different file, or any partial slice via read_lines or read_function, "
+        "does not satisfy this requirement, even if you also inspect other "
+        "related files."
     )
     parts.append("")
 

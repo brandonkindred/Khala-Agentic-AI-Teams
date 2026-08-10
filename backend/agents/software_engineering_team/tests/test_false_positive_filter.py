@@ -168,7 +168,14 @@ class _SimulatesFileReadToolCall(DummyLLMClient):
     """
 
     async def stream(self, messages, tool_specs=None, system_prompt=None, **kwargs: Any):  # type: ignore[override]
-        already_called = "toolUse" in str(messages)
+        already_called = any(
+            isinstance(message, dict)
+            and any(
+                isinstance(block, dict) and "toolUse" in block
+                for block in (message.get("content") or [])
+            )
+            for message in messages
+        )
         has_read_file_tool = any(
             isinstance(spec, dict) and spec.get("name") == "read_file"
             for spec in (tool_specs or [])
