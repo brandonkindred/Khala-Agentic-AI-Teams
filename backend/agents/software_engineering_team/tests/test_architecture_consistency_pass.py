@@ -1042,8 +1042,8 @@ def test_coordinator_merges_side_effect_findings_into_final_output() -> None:
 def test_coordinator_runs_pass_with_no_architecture() -> None:
     """No architecture on the input -> the merged additive pass still runs
     (document is optional); it must not be short-circuited before the LLM call.
-    Uses ``files=`` (not ``code=``) so ``CodebaseIndex`` has readable submission
-    files — the same shape production reviews use for this pass."""
+    Uses ``files=`` so ``CodebaseIndex`` has readable submission files — the
+    same shape production reviews use for this pass."""
     prompts: list = []
 
     class _CountingClient(DummyLLMClient):

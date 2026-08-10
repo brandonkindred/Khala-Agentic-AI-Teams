@@ -479,7 +479,7 @@ def test_symbol_surface_is_not_capped_at_sixty() -> None:
 
 def test_symbol_surface_finds_symbols_in_pre_numbered_content() -> None:
     """Pre-numbered content (``FileSegment.pre_numbered`` / a diff-first
-    ``code=`` submission's ``N: `` prefixes) must not blind symbol extraction
+    ``files=`` submission's ``N: `` prefixes) must not blind symbol extraction
     -- the anchored patterns match column zero, so a raw ``"12: def foo():"``
     line would otherwise never match ``def`` at all, silently emptying the
     sibling surface for every pre-numbered submission."""
