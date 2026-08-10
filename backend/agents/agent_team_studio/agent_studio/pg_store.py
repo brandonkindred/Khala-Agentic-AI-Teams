@@ -175,7 +175,7 @@ class PostgresAgentStudioConversationStore:
         """Serialize a whole authoring turn with a row lock held across the LLM call.
 
         Opens one transaction, takes a ``SELECT … FOR UPDATE`` row lock on the
-        conversation row, snapshots its definition + messages, and yields a
+        conversation row, snapshots its draft + messages, and yields a
         :class:`ConversationTurn` whose writes run on the **same** connection. The
         lock is held until the block commits, so a concurrent ``send_message`` on
         the same conversation blocks in its own ``FOR UPDATE`` until this turn
@@ -191,7 +191,7 @@ class PostgresAgentStudioConversationStore:
             * ``conversation_id`` names an existing conversation.
         Postconditions / Exceptions:
             * Yields a :class:`ConversationTurn` snapshotting the current history +
-              definition; its ``append_message`` / ``set_definition`` run on the
+              draft; its ``append_message`` / ``set_draft`` run on the
               locked transaction and commit atomically on clean block exit.
             * Raises :class:`LookupError` (→ 404) if the conversation is unknown.
             * A Postgres error (raised through the ``@timed_query``-wrapped inner

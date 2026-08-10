@@ -99,6 +99,7 @@ class AgentStudioConversationStore:
               **least-recently-used** record is evicted (see eviction note).
         """
         conversation_id = str(uuid.uuid4())
+        evicted_ids: list[str] = []
         with self._lock:
             self._records[conversation_id] = ConversationRecord(
                 conversation_id=conversation_id,
@@ -108,7 +109,12 @@ class AgentStudioConversationStore:
             )
             while len(self._records) > self._max:
                 evicted_id, _ = self._records.popitem(last=False)  # front == least-recently-used
-                self._turn_locks.discard(evicted_id)
+                evicted_ids.append(evicted_id)
+        # Drop the evicted ids' turn-lock entries after releasing ``self._lock`` —
+        # matching discard()'s pattern — so this never holds the store lock while
+        # touching InMemoryTurnLocks.
+        for evicted_id in evicted_ids:
+            self._turn_locks.discard(evicted_id)
         return conversation_id
 
     def get(self, conversation_id: str) -> ConversationRecord | None:
