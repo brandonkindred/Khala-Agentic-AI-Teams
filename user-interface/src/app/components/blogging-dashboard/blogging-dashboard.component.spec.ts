@@ -2,6 +2,8 @@ import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { of } from 'rxjs';
 import { provideRouter } from '@angular/router';
 import { provideHttpClient } from '@angular/common/http';
+import { SecurityContext } from '@angular/core';
+import { DomSanitizer } from '@angular/platform-browser';
 import { BloggingApiService } from '../../services/blogging-api.service';
 import { BloggingDashboardComponent } from './blogging-dashboard.component';
 import { NoopAnimationsModule } from '@angular/platform-browser/animations';
@@ -76,5 +78,24 @@ describe('BloggingDashboardComponent', () => {
       { gap_round: 0, role: 'assistant', content: 'second' },
     ] as typeof status.story_chat_history;
     expect(component.getStoryAgentMessages().length).toBe(2); // reflects the update
+  });
+
+  it('neutralizes malicious HTML in the artifact view modal markdown', () => {
+    const sanitizer = TestBed.inject(DomSanitizer);
+    component.viewArtifactModal = {
+      name: 'notes.md',
+      content: '<script>alert(1)</script>\n# Safe Title',
+    };
+
+    const html = sanitizer.sanitize(SecurityContext.HTML, component.getViewModalMarkdownHtml()) ?? '';
+
+    expect(html).not.toContain('<script');
+    expect(html).not.toContain('alert(1)');
+    expect(html).toContain('Safe Title');
+  });
+
+  it('returns empty markdown html when the artifact is not markdown', () => {
+    component.viewArtifactModal = { name: 'notes.json', content: '<script>alert(1)</script>' };
+    expect(component.getViewModalMarkdownHtml()).toBe('');
   });
 });
