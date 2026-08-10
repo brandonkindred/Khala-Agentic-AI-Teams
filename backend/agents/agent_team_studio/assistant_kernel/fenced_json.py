@@ -131,7 +131,10 @@ def merge_list_by_key(current: list[dict], incoming: list[dict], *, key: str) ->
           calling) — this function does not coerce or skip bad entries.
     Postconditions:
         * Returns a new list; neither ``current`` nor ``incoming`` is
-          mutated.
+          mutated. The merge is shallow — kept/overlaid/appended entries are
+          the same dict objects from ``current``/``incoming``, not deep
+          copies, so mutating an entry in the returned list also mutates it
+          in whichever input list it came from.
     """
     assert all(key in item for item in current), f"every current entry must contain {key!r}"
     assert all(key in item for item in incoming), f"every incoming entry must contain {key!r}"

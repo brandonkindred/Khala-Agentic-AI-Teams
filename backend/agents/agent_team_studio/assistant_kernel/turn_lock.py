@@ -49,13 +49,20 @@ class ConversationTurn(Generic[D]):
     per-conversation lock (an in-memory ``threading.Lock`` or a Postgres row
     lock), so the whole read -> LLM -> write sequence of a service's
     message-handling method is serialized against a concurrent turn on the
-    same conversation. ``history`` / ``draft`` are a snapshot from the start
-    of the turn; ``append_message`` / ``set_draft`` perform the writes bound
+    same conversation. ``history`` / ``draft`` are read at turn start via
+    ``read()``; ``append_message`` / ``set_draft`` perform the writes bound
     to the locked context.
 
     Invariants:
         * The bound write callables are only valid for the lifetime of the
           enclosing ``with store.turn(...)`` block that produced this object.
+        * ``history`` is the *live* list reference ``read()`` returned, not an
+          independent snapshot — :meth:`InMemoryTurnLocks.turn` only clones it
+          for its own rollback bookkeeping. Since ``append_message`` mutates
+          that same list in place (via the caller-supplied ``on_message``),
+          ``turn.history`` visibly grows over the course of the turn; treat it
+          as read-only and use :meth:`append_message` for writes rather than
+          mutating it directly.
         * ``draft`` must be treated as read-only unless the enclosing
           ``turn()`` call was given a ``clone`` function (see
           :meth:`InMemoryTurnLocks.turn`) — mutating it in place rather than

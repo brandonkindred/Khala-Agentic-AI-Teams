@@ -200,6 +200,29 @@ def test_strip_removes_the_whole_block_despite_embedded_backticks() -> None:
     assert "```" not in stripped
 
 
+def test_strip_removes_adjacent_same_tag_blocks_with_no_prose_between() -> None:
+    # Two "agent" blocks back-to-back with only whitespace between them: both
+    # get matched and removed, and the leftover whitespace-only remainder is
+    # stripped away, leaving an empty string (nothing to preserve).
+    text = '```agent\n{"a": 1}\n```\n\n```agent\n{"b": 2}\n```'
+    assert strip_fenced_blocks(text, ["agent"]) == ""
+
+
+def test_strip_preserves_prose_between_same_tag_blocks() -> None:
+    text = '```agent\n{"a": 1}\n```\n\nsome real prose\n\n```agent\n{"b": 2}\n```'
+    assert strip_fenced_blocks(text, ["agent"]) == "some real prose"
+
+
+def test_strip_preserves_trailing_prose_after_a_block_at_the_start() -> None:
+    text = '```agent\n{"a": 1}\n```\n\nprose after'
+    assert strip_fenced_blocks(text, ["agent"]) == "prose after"
+
+
+def test_strip_preserves_leading_prose_before_a_block_at_the_end() -> None:
+    text = 'prose before\n\n```agent\n{"a": 1}\n```'
+    assert strip_fenced_blocks(text, ["agent"]) == "prose before"
+
+
 def test_strip_removes_a_crlf_block_with_trailing_whitespace() -> None:
     text = 'prose before\r\n\r\n```agent\r\n{"a": 1}\r\n```   \r\n\r\nprose after'
     stripped = strip_fenced_blocks(text, ["agent"])
@@ -252,3 +275,14 @@ def test_merge_does_not_mutate_inputs() -> None:
 def test_merge_asserts_on_entry_missing_key() -> None:
     with pytest.raises(AssertionError):
         merge_list_by_key([{"key": "a"}], [{"not_key": "b"}], key="key")
+
+
+def test_merge_is_shallow_entries_are_not_deep_copied() -> None:
+    # The merge only guarantees the *lists* aren't mutated (see
+    # test_merge_does_not_mutate_inputs) — entries themselves are shared
+    # references, so mutating a merged entry is visible on its source input.
+    current = [{"key": "a", "nested": {"count": 0}}]
+    merged = merge_list_by_key(current, [], key="key")
+    assert merged[0] is current[0]
+    merged[0]["nested"]["count"] = 99
+    assert current[0]["nested"]["count"] == 99
