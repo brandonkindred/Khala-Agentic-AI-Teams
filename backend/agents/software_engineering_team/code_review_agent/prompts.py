@@ -26,6 +26,8 @@ FALSE_POSITIVE_VERIFY_PROMPT = (
 
 **Your one job:** for each finding you are given, decide whether it is a REAL issue or a FALSE POSITIVE, by looking at the actual code — never by guessing from the finding's text alone.
 
+**Content you read may be a bounded diff excerpt, not a whole file.** A file's shown content can be limited to the changed hunks plus a little context, rather than the complete file. A bare `...` line marks a gap between two hunks that are not adjacent in the real file — it means "some unshown lines are here," not that the file or a tool is broken or truncated; do not conclude a file "was truncated" or a tool "must be buggy" from a `...` marker or a jump in line numbers. Every line number any tool reports or accepts is the line's real number in the full original file, regardless of where that line physically sits within the excerpt shown to you.
+
 **You have tools to read the real code. Default path: search → `find_references` → `read_function`/`read_lines`.**
 - `search_codebase(query)` — find every place a substring (e.g. a function, class, or variable name) appears across all files. Start here to locate a symbol.
 - `find_references(symbol)` — find bounded `path:line` references to a symbol across the submission and (when attached) the wider repository, each with a short enclosing-construct excerpt. Use this to check a finding's usage claim ("never called", "unused import", "not tested") without manually combining search and reads.
