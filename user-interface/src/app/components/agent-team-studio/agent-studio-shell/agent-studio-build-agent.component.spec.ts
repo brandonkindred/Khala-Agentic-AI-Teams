@@ -106,4 +106,70 @@ describe('AgentStudioBuildAgentComponent', () => {
     fixture.detectChanges();
     expect(component.provisionOpen()).toBe(false);
   });
+
+  describe('1.1-1.3 sub-stepper', () => {
+    it('renders one sub-step indicator per sub-stage with Start active', () => {
+      const steps = fixture.nativeElement.querySelectorAll('.studio-build__substep');
+      expect(steps.length).toBe(3);
+      expect(steps[0].classList.contains('is-active')).toBe(true);
+      expect(steps[1].classList.contains('is-active')).toBe(false);
+      expect(steps[2].classList.contains('is-active')).toBe(false);
+      expect(component.activeSubStageDef().key).toBe('start');
+    });
+
+    it('sub-step indicators are not buttons — there is no backward or skip navigation', () => {
+      const steps = fixture.nativeElement.querySelectorAll('.studio-build__substep');
+      for (const step of Array.from(steps)) {
+        expect((step as HTMLElement).tagName).toBe('DIV');
+      }
+      expect(fixture.nativeElement.querySelector('.studio-build__substepper button')).toBeNull();
+    });
+
+    it('hides the Continue-to-Define action until an agent is selected', () => {
+      expect(fixture.nativeElement.querySelector('.studio-build__continue-sub')).toBeNull();
+
+      const catalog = fixture.debugElement.query(By.directive(StubAgentCatalogComponent));
+      (catalog.componentInstance as StubAgentCatalogComponent).requestRun.emit('blogging.planner');
+      fixture.detectChanges();
+
+      expect(fixture.nativeElement.querySelector('.studio-build__continue-sub')).toBeTruthy();
+    });
+
+    it('advances Start → Define → Configure via the explicit Continue actions, and back via ◂ back to Define', () => {
+      state.setRegistryAgentId('blogging.planner');
+      fixture.detectChanges();
+
+      fixture.nativeElement.querySelector('.studio-build__continue-sub').click();
+      fixture.detectChanges();
+      expect(component.activeSubStageDef().key).toBe('define');
+      expect(fixture.nativeElement.querySelector('app-agent-studio-stage-placeholder')).toBeTruthy();
+      expect(fixture.nativeElement.querySelector('app-agent-catalog')).toBeNull();
+
+      fixture.nativeElement.querySelector('.studio-build__continue-sub').click();
+      fixture.detectChanges();
+      expect(component.activeSubStageDef().key).toBe('configure');
+      expect(state.maxReachedBuildSubStage()).toBe(2);
+      expect(fixture.nativeElement.querySelector('.studio-build__continue-sub')).toBeNull();
+
+      fixture.nativeElement.querySelector('.studio-build__back-sub').click();
+      fixture.detectChanges();
+      expect(component.activeSubStageDef().key).toBe('define');
+      // Explicit back-loop, not a reset — the furthest sub-stage reached is preserved.
+      expect(state.maxReachedBuildSubStage()).toBe(2);
+    });
+
+    it('marks only the active sub-step with aria-current="step"', () => {
+      const steps = fixture.nativeElement.querySelectorAll('.studio-build__substep');
+      expect(steps[0].getAttribute('aria-current')).toBe('step');
+      expect(steps[1].getAttribute('aria-current')).toBeNull();
+
+      state.setRegistryAgentId('blogging.planner');
+      fixture.detectChanges();
+      fixture.nativeElement.querySelector('.studio-build__continue-sub').click();
+      fixture.detectChanges();
+
+      expect(steps[0].getAttribute('aria-current')).toBeNull();
+      expect(steps[1].getAttribute('aria-current')).toBe('step');
+    });
+  });
 });
