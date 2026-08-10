@@ -2804,7 +2804,8 @@ def test_agent_read_the_cited_file_is_failsafe_on_malformed_messages() -> None:
     idx = CodebaseIndex(files={"app/main.py": "x = 1\n"})
 
     class _EmptyAgent:
-        messages: List[Any] = []
+        def __init__(self) -> None:
+            self.messages: List[Any] = []
 
     assert _agent_read_the_cited_file(_EmptyAgent(), idx, "app/main.py") is False  # type: ignore[arg-type]
 
