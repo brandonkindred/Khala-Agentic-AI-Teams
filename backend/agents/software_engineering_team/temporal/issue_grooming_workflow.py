@@ -1,13 +1,12 @@
-"""Temporal activity + Pattern-A export scaffold for GitHub issue grooming.
+"""Temporal Pattern-A export module for GitHub issue grooming.
 
 ``run_issue_grooming_activity`` wraps ``IssueGroomingRunner`` (Phase A heuristic
 Fibonacci scoring, then Phase B sub-issue splitting -- see
 ``software_engineering_team.github_source.issue_grooming_runner``) with a
-background heartbeat and job-store failure marking, and is registered (with
-``IssueGroomingWorkflow``) onto the coding-team Temporal worker
-(``software_engineering_team.temporal.coding_team_worker``). ``IssueGroomingWorkflow``
-orchestration is a follow-up change -- its stub body only validates shape and
-raises.
+background heartbeat and job-store failure marking. ``IssueGroomingWorkflow``
+schedules that activity and propagates its terminal result/failure unchanged.
+Both are registered (as ``WORKFLOWS``/``ACTIVITIES``) onto the coding-team
+Temporal worker (``software_engineering_team.temporal.coding_team_worker``).
 
 Like ``coding_team_workflow.py``, this module MUST NOT start a worker or read
 ``TEMPORAL_ADDRESS`` at import time: it defines ``IssueGroomingWorkflow``, so
@@ -23,12 +22,17 @@ activities.
 from __future__ import annotations
 
 import logging
+from datetime import timedelta
 from typing import Any, Callable, Optional
 
 from pydantic import BaseModel
 from temporalio import activity, workflow
 
 logger = logging.getLogger(__name__)
+
+# Single LLM scoring/decomposition pass -- much shorter-lived than the coding
+# pipeline's 4h timeout.
+_GROOMING_ACTIVITY_TIMEOUT = timedelta(minutes=10)
 
 
 class IssueGroomingRunRequest(BaseModel):
@@ -58,8 +62,8 @@ class IssueGroomingRunResult(BaseModel):
         - ``status`` reports the terminal outcome (``"completed"``/``"cancelled"``,
           as constructed by ``run_issue_grooming_activity``); ``phase``/``grooming``
           are populated once a Phase A and/or Phase B pass has run.
-          ``IssueGroomingWorkflow.run``'s stub body never constructs this model --
-          it raises before producing one.
+          ``IssueGroomingWorkflow.run`` never constructs this model itself --
+          it returns the activity's already-serialized result dict unchanged.
     """
 
     status: str
@@ -183,7 +187,7 @@ def run_issue_grooming_activity(request: dict[str, Any]) -> dict[str, Any]:
 
 @workflow.defn(name="IssueGroomingWorkflow")
 class IssueGroomingWorkflow:
-    """Stub durable workflow for GitHub issue grooming.
+    """Durable orchestrator for a GitHub issue grooming Phase A->B run.
 
     Invariants:
         - Declaring the workflow class here (rather than only once its body
@@ -193,19 +197,34 @@ class IssueGroomingWorkflow:
 
     @workflow.run
     async def run(self, request: dict[str, Any]) -> dict[str, Any]:
-        """Stub run method.
+        """Schedule the grooming activity and propagate its outcome.
 
         Preconditions:
             - ``request`` is a dict conforming to ``IssueGroomingRunRequest``.
         Postconditions:
-            - None yet: always raises ``NotImplementedError``. The real
-              Phase A->B orchestration (scheduling ``run_issue_grooming_activity``
-              and propagating terminal success/failure) is implemented in a
-              follow-up change.
+            - Validates ``request`` first, raising ``ValidationError``
+              synchronously before scheduling anything when it does not
+              conform to ``IssueGroomingRunRequest`` -- no activity is
+              scheduled for a malformed request.
+            - Otherwise schedules ``run_issue_grooming_activity`` with a
+              ``_GROOMING_ACTIVITY_TIMEOUT`` start-to-close timeout and no
+              custom retry policy (Temporal's default retry applies -- this
+              is a plain compute/LLM call with no documented idempotency
+              hazard, unlike the short side-effect activities elsewhere in
+              this package that use a bounded policy).
+            - On success, returns the activity's result dict unchanged --
+              this method never re-wraps it into ``IssueGroomingRunResult``.
+            - On activity failure, does not catch or re-wrap the exception:
+              it propagates uncaught, so Temporal marks this workflow itself
+              terminally failed. This method makes no job-store writes and
+              posts no GitHub notices -- both remain the activity's (and a
+              follow-up change's) responsibility, not this workflow's.
         """
         IssueGroomingRunRequest.model_validate(request)
-        raise NotImplementedError(
-            "issue grooming workflow orchestration is implemented in a follow-up change"
+        return await workflow.execute_activity(
+            run_issue_grooming_activity,
+            request,
+            start_to_close_timeout=_GROOMING_ACTIVITY_TIMEOUT,
         )
 
 
