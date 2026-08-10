@@ -28,7 +28,8 @@ from agent_registry.models import (
 )
 from agent_team_studio.agentic_team_provisioning.agent_env_provisioning import _slug
 from agent_team_studio.agentic_team_provisioning.models import SOURCE_GENERATED, AgenticTeamAgent
-from agent_team_studio.manifest_shared import (
+
+from ..manifest_shared import (
     AGENT_ANATOMY_REF,
     DEFAULT_RULE_PACKS,
     GENERATED_AGENT_ENTRYPOINT,
