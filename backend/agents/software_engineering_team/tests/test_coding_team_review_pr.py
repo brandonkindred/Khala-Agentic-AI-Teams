@@ -793,6 +793,8 @@ def review_app(monkeypatch: pytest.MonkeyPatch, tmp_path):
     - ``jobs``: fake job service client recording job-store calls
     """
     _stub_heavy_modules(monkeypatch)
+    monkeypatch.setitem(sys.modules, "temporal", MagicMock())
+    monkeypatch.setitem(sys.modules, "temporal.client", MagicMock())
 
     from job_service_client_fake import FakeJobServiceClient
 
