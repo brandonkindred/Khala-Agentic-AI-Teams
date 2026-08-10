@@ -23,7 +23,13 @@ from .. import tool_dispatch
 from ..change_review_agent import ChangeReviewInput
 from ..debug_patch import MAX_INFRA_FIX_ITERATIONS, _DebugPatchState
 from ..devsecops_review_agent import DevSecOpsReviewInput
-from ..models import DevOpsCompletionPackage, DevOpsTaskSpec, DevOpsTeamResult, coerce_gate_status
+from ..models import (
+    DevOpsCompletionPackage,
+    DevOpsTaskSpec,
+    DevOpsTeamResult,
+    GateStatus,
+    coerce_gate_status,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -32,7 +38,7 @@ logger = logging.getLogger(__name__)
 class Phase4QualityGateResult:
     """Outcome of Phase 4 (tool validation, reviews, quality-gate assembly)."""
 
-    quality_gates: Dict[str, str] = field(default_factory=dict)
+    quality_gates: Dict[str, GateStatus] = field(default_factory=dict)
     acceptance_trace: List[Dict[str, object]] = field(default_factory=list)
     tool_gate_map: Dict[str, str] = field(default_factory=dict)
     infra_fix_iterations: int = 1
