@@ -97,8 +97,8 @@ _BACKEND_TEAM_ALIASES = {
     "servers",
     "service",
     "services",
-    # The entries above are legacy generic aliases (e.g. "service", "data") kept for
-    # backward compatibility. The entries below are concrete backend languages/frameworks
+    # The entries above are generic aliases (e.g. "service", "data") kept as intentional
+    # Tech Lead vocabulary. The entries below are concrete backend languages/frameworks
     # a Tech Lead may name as the target_team instead of the canonical "backend_v2"; new
     # additions should stay unambiguous tech tokens (never generic words like "build").
     "python",
@@ -146,8 +146,8 @@ _FRONTEND_TEAM_ALIASES = {
     "webapp",
     "web_app",
     "client",
-    # The entries above are legacy generic aliases (e.g. "client", "webapp") kept for
-    # backward compatibility. The entries below are concrete frontend languages/frameworks
+    # The entries above are generic aliases (e.g. "client", "webapp") kept as intentional
+    # Tech Lead vocabulary. The entries below are concrete frontend languages/frameworks
     # a Tech Lead may name as the target_team instead of the canonical "frontend_v2"; new
     # additions should stay unambiguous tech tokens only.
     "angular",

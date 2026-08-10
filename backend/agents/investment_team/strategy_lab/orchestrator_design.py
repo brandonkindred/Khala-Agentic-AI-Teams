@@ -43,8 +43,6 @@ from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 from pydantic import ValidationError
 
-from shared.env_config import env_int
-
 from ..market_data_service import OHLCVBar
 from ..models import (
     BacktestConfig,
@@ -68,6 +66,7 @@ from .agents.alignment import AlignmentIssue, TradeAlignmentReport
 from .agents.design_review import CritiqueIssue, CritiqueLedger, LedgerDelta, SpecCritique
 from .alignment_findings import AlignmentFinding
 from .backtest_cache import BacktestCache
+from .budget_config import StrategyLabBudgetConfig
 from .exceptions import OrchestratorContractError, SpecImplementabilityError
 from .market_regime import RegimeSummary
 from .mechanical_repair import RepairAction, demote_code_path, repair_spec, select_code_path
@@ -246,7 +245,7 @@ def _design_review_rounds() -> int:
     completeness issues; a sub-1 override floors to 1 so the loop runs at
     least once.
     """
-    return env_int("STRATEGY_LAB_DESIGN_REVIEW_ROUNDS", 20, floor=1)
+    return StrategyLabBudgetConfig.from_env().design_review_rounds
 
 
 def _design_review_stall_rounds() -> int:
@@ -261,7 +260,7 @@ def _design_review_stall_rounds() -> int:
     ``status="failed: design_stalled"`` so oscillation aborts are observable
     apart from specs that simply ran out of rounds.
     """
-    return env_int("STRATEGY_LAB_DESIGN_REVIEW_STALL_ROUNDS", 3, floor=1)
+    return StrategyLabBudgetConfig.from_env().design_review_stall_rounds
 
 
 def _mechanical_repair_enabled() -> bool:

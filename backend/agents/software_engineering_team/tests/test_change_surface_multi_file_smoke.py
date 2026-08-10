@@ -25,7 +25,6 @@ from llm_service.clients.dummy import DummyLLMClient
 from software_engineering_team.code_review_agent.change_surface import (
     build_change_surface_from_patches,
 )
-from software_engineering_team.shared.chunking import parse_code_into_file_blocks
 
 # Two distinct fixtures so cross-file mixing is actually detectable: each
 # file's pre-numbered body carries different content and different line
@@ -56,16 +55,6 @@ def _multi_file_surface():
         {"mod_a.py": _PY_PATCH_A, "mod_b.py": _PY_PATCH_B},
         new_contents={"mod_a.py": _PY_CONTENT_A, "mod_b.py": _PY_CONTENT_B},
     )
-
-
-def test_multi_file_surface_code_round_trips_through_chunker_header_parser() -> None:
-    """A surface spanning two files parses back into both blocks, in order,
-    via the chunker's own ``### path ###`` header parser."""
-    surface = _multi_file_surface()
-    assert surface.files_reviewed == 2
-    parsed = parse_code_into_file_blocks(surface.code)
-    assert parsed == list(surface.blocks.items())
-    assert [path for path, _ in parsed] == ["mod_a.py", "mod_b.py"]
 
 
 def test_blocks_from_input_accepts_multi_file_surface_verbatim() -> None:

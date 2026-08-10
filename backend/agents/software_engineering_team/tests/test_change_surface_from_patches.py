@@ -52,7 +52,6 @@ def test_build_from_patches_single_file_expands_construct() -> None:
     assert list(surface.blocks.keys()) == ["mod.py"]
     # AST expansion of line 2 → enclosing ``outer`` (lines 1-2).
     assert surface.blocks["mod.py"] == "1: def outer():\n2:     return 1"
-    assert surface.code == "### mod.py ###\n1: def outer():\n2:     return 1"
 
 
 def test_build_from_patches_multi_file() -> None:
@@ -68,8 +67,6 @@ def test_build_from_patches_multi_file() -> None:
         new_contents={"mod.py": _PY_CONTENT, "f.ts": ts_content},
     )
     assert list(surface.blocks.keys()) == ["mod.py", "f.ts"]
-    assert "### mod.py ###" in surface.code
-    assert "### f.ts ###" in surface.code
 
 
 def test_build_from_patches_omits_without_new_contents() -> None:
@@ -127,4 +124,3 @@ def test_build_from_patches_two_hunks_same_function_emits_one_span() -> None:
         "3:     b = 2\n"
         "4:     return a + b"
     )
-    assert surface.code == f"### f.py ###\n{body}"

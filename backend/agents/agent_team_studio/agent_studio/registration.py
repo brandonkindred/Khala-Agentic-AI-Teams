@@ -8,8 +8,9 @@ without a YAML file.
 
 Runtime-binding caveat (inherited from generated agents): the generated runtime
 reconstructs the persona from the *invoke request body*, not the stored manifest,
-so a saved agent's persisted ``role`` / ``system_prompt`` are advertised but not
-yet bound at invoke time. Binding is the same tracked follow-up generated team
+so a saved agent's persisted ``role`` / ``system_prompt`` (the latter via the
+``executing`` state — see :func:`build_studio_agent_manifest`) are advertised but
+not yet bound at invoke time. Binding is the same tracked follow-up generated team
 agents carry; out of scope for this Stage-1 backend slice.
 
 Registration scope tracks ``AgentRegistry.register()``'s own write-through: when a
@@ -30,7 +31,7 @@ from agent_team_studio.generated_runtime import (
     GENERATED_AGENT_OUTPUT_REF,
 )
 
-from .agent_states import STATE_ORDER
+from .agent_states import EXECUTING_KEY, STATE_ORDER, normalize_agent_states
 from .models import AgentDefinition, AgentState
 
 # The registry "team" Studio agents are filed under (must match a TEAM_CONFIGS key).
@@ -94,6 +95,30 @@ def _io_schema(
     return IOSchema(schema_ref=schema_ref, description=ref_description)
 
 
+def _manifest_states(definition: AgentDefinition) -> list[AgentStateSpec]:
+    """Project the definition's operating states, folding in the top-level prompt.
+
+    Postconditions:
+        * Returns one :class:`AgentStateSpec` per ``definition.states`` entry.
+        * When ``definition.system_prompt`` is non-blank, it replaces the
+          ``executing``-keyed entry's ``system_prompt`` (the top-level field is the
+          assistant's quick-edit channel and wins over a stale per-state value).
+        * A blank ``system_prompt`` leaves every entry's prompt untouched — it never
+          overwrites a real per-state prompt with emptiness.
+    """
+    top_level_prompt = definition.system_prompt.strip()
+    return [
+        AgentStateSpec(
+            key=s.key,
+            label=s.label,
+            system_prompt=definition.system_prompt
+            if (top_level_prompt and s.key == EXECUTING_KEY)
+            else s.system_prompt,
+        )
+        for s in definition.states
+    ]
+
+
 def build_studio_agent_manifest(definition: AgentDefinition) -> AgentManifest:
     """Build a validated, invokable ``agent_registry`` manifest for a definition.
 
@@ -111,7 +136,9 @@ def build_studio_agent_manifest(definition: AgentDefinition) -> AgentManifest:
           through the shared generated-agent entrypoint regardless — runtime
           binding of the authored schema is the separate deferred follow-up.)
         * The definition's operating ``states`` are persisted onto ``manifest.states``
-          (inert metadata — see :class:`AgentStateSpec`).
+          (inert metadata — see :class:`AgentStateSpec`), with the top-level
+          ``system_prompt`` folded into the ``executing`` state (see
+          :func:`_manifest_states`).
     """
     if not definition.name.strip():
         raise ValueError("build_studio_agent_manifest: name must be non-empty")
@@ -135,10 +162,7 @@ def build_studio_agent_manifest(definition: AgentDefinition) -> AgentManifest:
             inline_description="Authored output schema.",
         ),
         cognition=CognitionSpec(rule_packs=["default_guardrails"], tools=list(definition.tools)),
-        states=[
-            AgentStateSpec(key=s.key, label=s.label, system_prompt=s.system_prompt)
-            for s in definition.states
-        ],
+        states=_manifest_states(definition),
         source=SourceInfo(entrypoint=_GEN_ENTRYPOINT, anatomy_ref=_ANATOMY_REF),
     )
     # Round-trip so the returned object is guaranteed fully validated and serializable.
@@ -156,9 +180,9 @@ def clone_from_manifest(manifest: AgentManifest) -> AgentDefinition:
     is transferred back from ``IOSchema.inline_schema`` when the source manifest
     carries one (the generic shared-entrypoint ``schema_ref`` is not — it describes
     the runtime envelope, not an authored contract). The top-level
-    ``AgentDefinition.system_prompt`` is still not transferred (the manifest does
-    not store it) — the refine conversation re-elicits it. Each *state's* own
-    ``system_prompt`` is a different field and IS transferred, per-state, below.
+    ``AgentDefinition.system_prompt`` is restored from the cloned ``executing``
+    state's ``system_prompt`` (the inverse of :func:`_manifest_states`), so a
+    refine draft starts with the same quick-edit prompt that was last saved.
 
     The operating ``states`` ARE transferred (the manifest persists them). Cloning
     a legacy manifest saved before states existed (empty ``states``), or one whose
@@ -174,24 +198,30 @@ def clone_from_manifest(manifest: AgentManifest) -> AgentDefinition:
     tags = filter_marker_tags(manifest.tags, _PLUMBING_TAGS)
     # Keep only canonical keys: AgentState.key is a Literal, so a manifest carrying
     # an unsupported (permissive-str) key would raise here and surface as a 500.
-    # Dropped/missing keys are backfilled by the AgentDefinition states normalizer.
-    states = [
-        AgentState(key=s.key, label=s.label, system_prompt=s.system_prompt)
-        for s in manifest.states
-        if s.key in _KNOWN_STATE_KEYS
-    ]
+    # Normalize up front (not just left to the AgentDefinition field validator) so
+    # the executing-state lookup below sees the backfilled default when a legacy
+    # manifest carries no (or an incomplete) states list.
+    states = normalize_agent_states(
+        [
+            AgentState(key=s.key, label=s.label, system_prompt=s.system_prompt)
+            for s in manifest.states
+            if s.key in _KNOWN_STATE_KEYS
+        ]
+    )
     # Avoid a confusing "name.copy.copy" when cloning an already-cloned name.
     # Per-team disambiguation (".copy-2", …) is the frontend's job — it knows the
     # team's existing names; the backend only avoids the doubled suffix here.
     name = manifest.name if manifest.name.endswith(".copy") else f"{manifest.name}.copy"
     input_schema = manifest.inputs.inline_schema if manifest.inputs else None
     output_schema = manifest.outputs.inline_schema if manifest.outputs else None
+    system_prompt = next((s.system_prompt for s in states if s.key == EXECUTING_KEY), "")
     return AgentDefinition(
         name=name,
         role=manifest.summary,
         description=manifest.description,
         tags=tags,
         tools=tools,
+        system_prompt=system_prompt,
         input_schema=input_schema,
         output_schema=output_schema,
         states=states,
