@@ -243,6 +243,51 @@ usage. See the concurrent-load validation script in the PR description for
 the querier + query_frontend sub-issue for how these values were checked
 under load.
 
+## Load Testing (k6)
+
+`docker/k6/load_test_unified_api.js` is a [Grafana k6](https://k6.io) script that fans out
+concurrent GET requests across a rotation of unified-api's *proxied* teams, hitting each team's
+forwarded `/health` endpoint through `khala:8080`. It's the repeatable, concurrency-controlled
+alternative to the one-off curl loop in the Verification section below — use it whenever you need
+sustained load rather than a quick sanity ping (e.g. to validate memory/right-sizing changes under
+realistic traffic). k6 was chosen over a hand-rolled script because it already reports
+throughput/latency out of the box and pairs naturally with the Prometheus + Grafana stack above;
+see `system_design/adr/ADR-011-grafana-k6-load-testing.md` for the full decision record.
+
+The k6 service is opt-in via the `load-test` Compose profile, so it never starts on a plain
+`docker compose up`:
+
+```bash
+docker compose -f docker/docker-compose.yml --env-file docker/.env up -d --build
+docker compose -f docker/docker-compose.yml --profile load-test run --rm k6
+```
+
+Concurrency (virtual users) and duration default to 10 VUs / 30s and are configurable via env vars
+or k6's native CLI flags:
+
+```bash
+# Env vars (picked up by the compose service definition)
+K6_VUS=20 K6_DURATION=60s docker compose -f docker/docker-compose.yml --profile load-test run --rm k6
+
+# Native k6 flags (override the script's `options`, or run k6 directly against the stack
+# without Docker if you have k6 installed locally)
+docker compose -f docker/docker-compose.yml --profile load-test run --rm k6 run --vus 20 --duration 60s /scripts/load_test_unified_api.js
+k6 run docker/k6/load_test_unified_api.js -e BASE_URL=http://localhost:8888 --vus 20 --duration 60s
+```
+
+`K6_TEAMS` (comma-separated team URL segments, default `blogging,personal-assistant,market-research,soc2-compliance,social-marketing,branding`)
+picks which proxied teams to target — pick from any team listed in the Port summary above except
+`user-profile`, `product-delivery`, and `agent-studio` (in-process, never proxied, so hitting them
+wouldn't exercise the proxy path this harness is for).
+
+k6 prints throughput and latency automatically at the end of every run — no extra flags needed:
+
+```
+     http_req_duration..............: avg=12.4ms min=3.1ms med=9.8ms max=118ms p(90)=22ms p(95)=31ms
+     http_req_failed.................: 0.00%  ✓ 0        ✗ 5412
+     http_reqs.......................: 5412   180.4/s
+```
+
 ## Verification
 
 After starting the stack:
@@ -253,7 +298,7 @@ After starting the stack:
 4. **Logs API** – With `ENABLE_LOG_API=1` in `.env`, `curl "http://localhost:8888/api/software-engineering/logs?service=sw_api&lines=100"` should return 200 and log content. With `ENABLE_LOG_API` unset, the same URL should return 404.
 5. **Metrics endpoints** – `curl -sf http://localhost:8888/metrics | head` and the same on `:8585` (job service) and `:8090`–`:8110` (team services) should return Prometheus text-format output (`# HELP ...`).
 6. **Prometheus targets** – Open http://localhost:9090/targets; all rows should be green (`UP`). Or run `curl -s 'http://localhost:9090/api/v1/query?query=up' | jq '.data.result[] | {service:.metric.service, up:.value[1]}'`.
-7. **Grafana datasource** – `curl -sf -u admin:admin http://localhost:3000/api/datasources | jq` should list one `Prometheus` datasource. Then open http://localhost:3000 → Dashboards → Khala → **Khala FastAPI Overview** and confirm the panels render live data after generating some traffic (e.g. `for i in {1..20}; do curl -sf http://localhost:8888/health > /dev/null; done`).
+7. **Grafana datasource** – `curl -sf -u admin:admin http://localhost:3000/api/datasources | jq` should list one `Prometheus` datasource. Then open http://localhost:3000 → Dashboards → Khala → **Khala FastAPI Overview** and confirm the panels render live data after generating some traffic (e.g. `for i in {1..20}; do curl -sf http://localhost:8888/health > /dev/null; done`, or for a repeatable, concurrency-controlled load run see the "Load Testing (k6)" section above).
 8. **Tempo tracing** – `curl -sf http://localhost:3200/ready` should return `ready`. Generate a few traces by calling an opted-in service a few times through `khala:8888` (e.g. an `se-service` route), wait ~10s for `ingester.trace_idle_period` to flush, then `curl -s 'http://localhost:3200/api/search?tags=' | jq '.traces | length'` should return a non-zero count. Pick a `traceID` from that response and confirm `curl -s http://localhost:3200/api/traces/<traceID> | jq '.batches | length'` returns non-zero. Finally, in Grafana open **Explore** → **Tempo** datasource and confirm the same trace is browsable via search and via trace-by-ID lookup.
 
 ## Security

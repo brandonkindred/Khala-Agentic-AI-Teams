@@ -13,7 +13,6 @@ WORKFLOW_ID_PREFIX_RETRY_FAILED = "se-retry-failed-"
 WORKFLOW_ID_PREFIX_STANDALONE = "se-standalone-"
 
 # Workflow type names (as registered with the worker)
-WORKFLOW_RUN_TEAM = "RunTeamWorkflow"
 WORKFLOW_RETRY_FAILED = "RetryFailedWorkflow"
 WORKFLOW_STANDALONE_JOB = "StandaloneJobWorkflow"
 

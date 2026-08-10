@@ -676,7 +676,7 @@ def test_ollama_empty_content_downgrades_boolean_think(
         mock_client, captured = _capturing_multi_client(cms)
         mock_client_cls.return_value = mock_client
         client = OllamaLLMClient(model="test", base_url="http://localhost:9999", timeout=5)
-        result = client.complete_json("hello", objective="test", temperature=0)
+        result = client.complete_json("hello", objective="test", temperature=0, think=True)
     assert result == {"ok": 1}
     assert waits == []  # the changed payload is the proof of change — no backoff
     assert captured[0]["think"] is True
@@ -1240,9 +1240,22 @@ def _captured_payload_client(monkeypatch: pytest.MonkeyPatch, model: str) -> tup
     return client, captured
 
 
-def test_complete_json_resolves_default_think_to_max_level(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_complete_json_resolves_default_think_to_false_for_json_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """complete_json is always JSON mode; with no explicit think and no agent
+    pin, extended thinking competes with strict JSON decoding for the content
+    channel, so the default resolves to thinking off."""
     client, captured = _captured_payload_client(monkeypatch, "deepseek-v4-pro:cloud")
     client.complete_json("hi", objective="test")
+    assert captured["think"] is False
+
+
+def test_complete_json_explicit_think_true_resolves_to_max_level(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, captured = _captured_payload_client(monkeypatch, "deepseek-v4-pro:cloud")
+    client.complete_json("hi", objective="test", think=True)
     assert captured["think"] == "max"
 
 
@@ -1258,17 +1271,39 @@ def test_complete_resolves_default_think_to_max_level(monkeypatch: pytest.Monkey
     assert captured["think"] == "max"
 
 
-def test_chat_resolves_default_think_to_max_level(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_chat_resolves_default_think_to_false_for_json_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """chat() defaults to response_format='json'; with no explicit think and no
+    agent pin, the default resolves to thinking off, same as complete_json."""
     client, captured = _captured_payload_client(monkeypatch, "deepseek-v4-pro:cloud")
     client.chat([{"role": "user", "content": "hi"}], objective="test")
+    assert captured["think"] is False
+
+
+def test_chat_text_mode_resolves_default_think_to_max_level(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """response_format='text' is not JSON mode, so None still upgrades to the
+    model's max registered thinking level."""
+    client, captured = _captured_payload_client(monkeypatch, "deepseek-v4-pro:cloud")
+    client.chat([{"role": "user", "content": "hi"}], objective="test", response_format="text")
     assert captured["think"] == "max"
 
 
-def test_complete_json_boolean_think_for_unregistered_model(
+def test_complete_json_default_think_false_for_unregistered_model(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     client, captured = _captured_payload_client(monkeypatch, "qwen3.5:cloud")
     client.complete_json("hi", objective="test")
+    assert captured["think"] is False
+
+
+def test_complete_json_explicit_think_true_boolean_for_unregistered_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, captured = _captured_payload_client(monkeypatch, "qwen3.5:cloud")
+    client.complete_json("hi", objective="test", think=True)
     assert captured["think"] is True
 
 
@@ -1277,7 +1312,7 @@ def test_payload_maps_thinking_level_to_reasoning_effort(monkeypatch: pytest.Mon
     controls reasoning via reasoning_effort; the native think field is kept
     for proxies that honor it, but levels must also reach reasoning_effort."""
     client, captured = _captured_payload_client(monkeypatch, "deepseek-v4-pro:cloud")
-    client.complete_json("hi", objective="test")
+    client.complete_json("hi", objective="test", think=True)
     assert captured["think"] == "max"
     assert captured["reasoning_effort"] == "max"
 
@@ -1285,14 +1320,14 @@ def test_payload_maps_thinking_level_to_reasoning_effort(monkeypatch: pytest.Mon
 def test_payload_omits_reasoning_effort_for_boolean_think(monkeypatch: pytest.MonkeyPatch) -> None:
     """reasoning_effort has no boolean form; unregistered models keep think only."""
     client, captured = _captured_payload_client(monkeypatch, "qwen3.5:cloud")
-    client.complete_json("hi", objective="test")
+    client.complete_json("hi", objective="test", think=True)
     assert captured["think"] is True
     assert "reasoning_effort" not in captured
 
 
 def test_chat_and_complete_also_map_reasoning_effort(monkeypatch: pytest.MonkeyPatch) -> None:
     client, captured = _captured_payload_client(monkeypatch, "deepseek-v4-pro:cloud")
-    client.chat([{"role": "user", "content": "hi"}], objective="test")
+    client.chat([{"role": "user", "content": "hi"}], objective="test", think=True)
     assert captured["reasoning_effort"] == "max"
     client2, captured2 = _captured_payload_client(monkeypatch, "deepseek-v4-pro:cloud")
     client2.complete("hi", objective="test")
@@ -1396,7 +1431,7 @@ def test_reasoning_only_downgrades_one_thinking_level(monkeypatch: pytest.Monkey
         client = OllamaLLMClient(
             model="deepseek-v4-pro:cloud", base_url="http://localhost:9999", timeout=5
         )
-        result = client.complete_json("q", objective="test", temperature=0)
+        result = client.complete_json("q", objective="test", temperature=0, think=True)
     assert result == {"ok": 1}
     assert captured[0]["think"] == "max"
     assert captured[0]["reasoning_effort"] == "max"
@@ -1429,7 +1464,7 @@ def test_ladder_exhausts_after_downgrade_then_thinking_off(
             model="deepseek-v4-pro:cloud", base_url="http://localhost:9999", timeout=5
         )
         with pytest.raises(LLMSemanticExhaustionError) as exc_info:
-            client.complete_json("q", objective="test", temperature=0)
+            client.complete_json("q", objective="test", temperature=0, think=True)
     err = exc_info.value
     assert isinstance(err, LLMTemporaryError)  # outer pause/degrade handlers still work
     assert err.failure_class == "semantic_exhaustion"
@@ -1468,7 +1503,7 @@ def test_downgrade_retry_logged_at_warning(
         client = OllamaLLMClient(
             model="deepseek-v4-pro:cloud", base_url="http://localhost:9999", timeout=5
         )
-        client.complete_json("q", objective="test", temperature=0)
+        client.complete_json("q", objective="test", temperature=0, think=True)
     warnings = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
     assert any("proof-of-change retry" in m and "'max'" in m and "'high'" in m for m in warnings)
 
@@ -1563,7 +1598,7 @@ def test_transient_5xx_before_downgrade_keeps_schedule_and_payload(
         client = OllamaLLMClient(
             model="deepseek-v4-pro:cloud", base_url="http://localhost:9999", timeout=5
         )
-        result = client.complete_json("q", objective="test", temperature=0)
+        result = client.complete_json("q", objective="test", temperature=0, think=True)
     assert result == {"ok": 1}
     assert captured[0]["reasoning_effort"] == "max"
     assert captured[1]["reasoning_effort"] == "max"  # 5xx retry: identical payload
@@ -1592,7 +1627,7 @@ def test_transient_5xx_after_downgrade_retries_downgraded_payload(
         client = OllamaLLMClient(
             model="deepseek-v4-pro:cloud", base_url="http://localhost:9999", timeout=5
         )
-        result = client.complete_json("q", objective="test", temperature=0)
+        result = client.complete_json("q", objective="test", temperature=0, think=True)
     assert result == {"ok": 1}
     assert captured[0]["reasoning_effort"] == "max"
     assert captured[1]["reasoning_effort"] == "high"
@@ -1617,7 +1652,7 @@ def test_kill_switch_restores_legacy_transient_retries(monkeypatch: pytest.Monke
             model="deepseek-v4-pro:cloud", base_url="http://localhost:9999", timeout=5
         )
         with pytest.raises(LLMTemporaryError) as exc_info:
-            client.complete_json("q", objective="test", temperature=0)
+            client.complete_json("q", objective="test", temperature=0, think=True)
     assert not isinstance(exc_info.value, LLMSemanticExhaustionError)
     assert len(captured) == 3
     assert all(p["reasoning_effort"] == "max" for p in captured)
@@ -1638,7 +1673,7 @@ def test_length_empty_is_semantic_exhaustion_with_finish_reason(
             model="deepseek-v4-pro:cloud", base_url="http://localhost:9999", timeout=5
         )
         with pytest.raises(LLMSemanticExhaustionError) as exc_info:
-            client.complete_json("q", objective="test", temperature=0)
+            client.complete_json("q", objective="test", temperature=0, think=True)
     assert exc_info.value.finish_reason == "length"
     assert [c["reasoning_effort"] for c in captured] == ["max", "high", "none"]
 
@@ -1823,7 +1858,7 @@ def test_continuation_resumes_at_downgraded_thinking_level(
         client = OllamaLLMClient(
             model="deepseek-v4-pro:cloud", base_url="http://localhost:9999", timeout=5
         )
-        result = client.complete_json("q", objective="test", temperature=0)
+        result = client.complete_json("q", objective="test", temperature=0, think=True)
     assert result == {"ok": 1}
     assert captured[0]["reasoning_effort"] == "max"
     assert captured[1]["reasoning_effort"] == "high"
