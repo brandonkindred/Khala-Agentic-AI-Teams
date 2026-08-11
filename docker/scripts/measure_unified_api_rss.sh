@@ -5,18 +5,23 @@
 # shell-out. See docker/README.md's "Memory / RSS Measurement" section for the full methodology,
 # including the two-boot recipe needed to isolate the Temporal client's incremental cost.
 #
+# --- usage begin ---
 # Usage:
 #   ./measure_unified_api_rss.sh idle
 #   ./measure_unified_api_rss.sh db-pool-warm
 #   ./measure_unified_api_rss.sh temporal-active
 #   ./measure_unified_api_rss.sh peak-burst
 #
-# Each subcommand appends timestamped samples to the same CSV (default
-# rss_measurements_<timestamp>.csv, override with OUTPUT_CSV) so a full run across container
-# restarts accumulates one reproducible dataset, and prints a per-invocation median/max summary.
+# Each subcommand appends timestamped samples, labeled with the exact subcommand name in the
+# CSV's "state" column, to the same CSV (default rss_measurements.csv in the current directory,
+# override with OUTPUT_CSV) so a full run across container restarts accumulates one reproducible
+# dataset, and prints a per-invocation median/max summary. Since the default filename has no
+# timestamp, move or rename it (or set OUTPUT_CSV) between unrelated measurement sessions so they
+# don't mix in one file.
 #
 # Requires: a running docker-compose stack (docker/docker-compose.yml) with Prometheus scraping
 # unified-api, curl, jq. peak-burst additionally requires `docker compose` (for the k6 harness).
+# --- usage end ---
 
 set -euo pipefail
 
@@ -30,13 +35,17 @@ DB_WARM_SETTLE_SECONDS="${DB_WARM_SETTLE_SECONDS:-5}"
 PEAK_VUS="${PEAK_VUS:-50}"
 PEAK_DURATION="${PEAK_DURATION:-60s}"
 PEAK_SAMPLE_INTERVAL_SECONDS="${PEAK_SAMPLE_INTERVAL_SECONDS:-2}"
-OUTPUT_CSV="${OUTPUT_CSV:-rss_measurements_$(date -u +%Y%m%d_%H%M%S).csv}"
+OUTPUT_CSV="${OUTPUT_CSV:-rss_measurements.csv}"
 
 _here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 _compose_file="${_here}/../docker-compose.yml"
 
+# Extracts the header comment between the --- usage begin/end --- markers, rather than a
+# hardcoded line range, so the usage text can't silently drift out of sync as the header comment
+# is edited.
 usage() {
-  sed -n '2,20p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  awk '/--- usage begin ---/{flag=1;next} /--- usage end ---/{flag=0} flag' "${BASH_SOURCE[0]}" \
+    | sed 's/^# \{0,1\}//'
   exit 1
 }
 
@@ -80,11 +89,15 @@ summarize_state() {
   awk -F, -v state="$state" '
     $2 == state && $4 != "" { print $4 }
   ' "${OUTPUT_CSV}" | sort -n | awk '
-    { values[NR] = $1; sum += $1 }
+    { values[NR] = $1 }
     END {
       if (NR == 0) { print "  (no samples)"; exit }
-      mid = int((NR + 1) / 2)
-      median_mib = values[mid] / 1048576
+      if (NR % 2 == 1) {
+        median_bytes = values[(NR + 1) / 2]
+      } else {
+        median_bytes = (values[NR / 2] + values[NR / 2 + 1]) / 2
+      }
+      median_mib = median_bytes / 1048576
       max_mib = values[NR] / 1048576
       printf "  median=%.1f MiB  max=%.1f MiB  (n=%d)\n", median_mib, max_mib, NR
     }
@@ -103,16 +116,28 @@ cmd_idle() {
 cmd_db_pool_warm() {
   wait_for_health
   echo "Firing ${DB_WARM_CONCURRENCY} concurrent /health requests to grow the Postgres pool ..." >&2
-  local pids=()
+  local pids=() pid succeeded=0 failed=0
   for ((i = 1; i <= DB_WARM_CONCURRENCY; i++)); do
     curl -sf "${BASE_URL}/health" > /dev/null &
     pids+=("$!")
   done
-  wait "${pids[@]}" || echo "one or more warm-up requests failed (non-fatal, continuing)" >&2
+  for pid in "${pids[@]}"; do
+    if wait "${pid}"; then
+      succeeded=$((succeeded + 1))
+    else
+      failed=$((failed + 1))
+    fi
+  done
+  echo "Warm-up requests: ${succeeded} succeeded, ${failed} failed." >&2
+  if ((succeeded * 2 < DB_WARM_CONCURRENCY)); then
+    echo "ERROR: fewer than half the warm-up requests succeeded; the pool is likely not warmed." >&2
+    echo "Aborting db-pool-warm measurement rather than report misleading numbers." >&2
+    return 1
+  fi
   sleep "${DB_WARM_SETTLE_SECONDS}"
   ensure_csv_header
-  record_samples "db_pool_warm" "${SAMPLE_COUNT}"
-  echo "db_pool_warm summary:"; summarize_state "db_pool_warm"
+  record_samples "db-pool-warm" "${SAMPLE_COUNT}"
+  echo "db-pool-warm summary:"; summarize_state "db-pool-warm"
 }
 
 cmd_temporal_active() {
@@ -124,8 +149,8 @@ cmd_temporal_active() {
   wait_for_health
   sleep "${WARMUP_SECONDS}"
   ensure_csv_header
-  record_samples "temporal_client_active" "${SAMPLE_COUNT}"
-  echo "temporal_client_active summary:"; summarize_state "temporal_client_active"
+  record_samples "temporal-active" "${SAMPLE_COUNT}"
+  echo "temporal-active summary:"; summarize_state "temporal-active"
 }
 
 cmd_peak_burst() {
@@ -135,16 +160,17 @@ cmd_peak_burst() {
   docker compose -f "${_compose_file}" --profile load-test run --rm \
     -e VUS="${PEAK_VUS}" -e DURATION="${PEAK_DURATION}" k6 &
   local k6_pid=$!
-  local ts rss
+  local ts rss i=0
   while kill -0 "${k6_pid}" 2> /dev/null; do
+    i=$((i + 1))
     ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     rss="$(sample_rss || true)"
-    echo "${ts},peak_concurrency_burst,,${rss}" >> "${OUTPUT_CSV}"
-    echo "  [peak_concurrency_burst] rss_bytes=${rss:-<none>}" >&2
+    echo "${ts},peak-burst,${i},${rss}" >> "${OUTPUT_CSV}"
+    echo "  [peak-burst ${i}] rss_bytes=${rss:-<none>}" >&2
     sleep "${PEAK_SAMPLE_INTERVAL_SECONDS}"
   done
   wait "${k6_pid}" || echo "k6 exited non-zero (check its threshold output above); RSS samples above are still valid" >&2
-  echo "peak_concurrency_burst summary:"; summarize_state "peak_concurrency_burst"
+  echo "peak-burst summary:"; summarize_state "peak-burst"
 }
 
 main() {
@@ -159,4 +185,8 @@ main() {
   echo "Raw samples: ${OUTPUT_CSV}" >&2
 }
 
-main "$@"
+# Guarded so tests can `source` this file for direct function-level testing without triggering
+# a real run.
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+  main "$@"
+fi

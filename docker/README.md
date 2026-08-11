@@ -313,7 +313,9 @@ Observability section above — no new endpoint or `docker stats` shell-out need
 - **`db-pool-warm`**: fires 12 concurrent `/health` requests (`DB_WARM_CONCURRENCY`, above the
   pool's default 10-connection max) to force the Postgres pool to grow beyond min size, waits 5s
   to settle (`DB_WARM_SETTLE_SECONDS`, comfortably inside psycopg_pool's ~300s default idle-reclaim
-  window), then samples — isolating the incremental RSS cost of a fully-grown pool.
+  window), then samples — isolating the incremental RSS cost of a fully-grown pool. Aborts with an
+  error instead of sampling if fewer than half the warm-up requests succeeded, since that would
+  produce a misleading "pool-warm" measurement against a pool that never actually warmed.
 - **`temporal-active`**: sampled identically to `idle`, because the Temporal client isn't
   toggleable at runtime — it's a boot-time decision. To isolate its incremental cost, run the
   script twice across two container boots: once with `UNIFIED_API_AGENT_STUDIO_TEMPORAL_WORKER=false`
@@ -335,10 +337,20 @@ docker compose -f docker/docker-compose.yml --env-file docker/.env up -d --build
 ./docker/scripts/measure_unified_api_rss.sh peak-burst
 ```
 
-All four subcommands append to the same CSV (default `rss_measurements_<timestamp>.csv`, override
-with `OUTPUT_CSV`) with columns `timestamp,state,sample_index,rss_bytes`, and each prints a
-median/max-in-MiB summary as it runs. Attach or link that CSV, along with the printed summaries,
-wherever you're recording the measurement results for reproducibility.
+All four subcommands append to the same CSV (default `rss_measurements.csv` in the current
+directory, override with `OUTPUT_CSV`) with columns `timestamp,state,sample_index,rss_bytes`, and
+the `state` column always matches the subcommand name exactly (`idle`, `db-pool-warm`,
+`temporal-active`, `peak-burst`). Each invocation prints a median/max-in-MiB summary as it runs.
+Since the default filename has no timestamp, move or rename it (or set `OUTPUT_CSV` explicitly)
+between unrelated measurement sessions so they don't mix in one file. Attach or link the CSV,
+along with the printed summaries, wherever you're recording the measurement results for
+reproducibility.
+
+**Tests**: `docker/scripts/tests/test_measure_unified_api_rss.sh` covers the median/max math (odd
+and even sample counts), state-label consistency, `sample_index` sequencing, usage/bad-argument
+handling, and — via local mock HTTP servers standing in for `/health` and Prometheus, no live
+stack required — an end-to-end run of the `idle` and `db-pool-warm` subcommands. Run it with
+`bash docker/scripts/tests/test_measure_unified_api_rss.sh`.
 
 ## Verification
 
