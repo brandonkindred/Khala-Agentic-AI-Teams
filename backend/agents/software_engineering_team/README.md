@@ -254,6 +254,8 @@ Ensure Ollama is running with the model (e.g. `ollama run kimi-k2.7-code:cloud`)
 
 **Faster runs:** Set `SW_SKIP_PLANNING_AGENTS=observability,performance_doc` to skip specific planning agents, or `SW_MINIMAL_PLANNING=1` to skip all domain planning (spec → Tech Lead ↔ Architecture → consolidation → execution).
 
+**GitHub issue grooming — Fibonacci scoring mode (`github_source/issue_scorer.py`):** `ISSUE_GROOMING_SCORING_MODE` selects how Phase A scores an issue's complexity — default `auto` tries the LLM scorer (`issue_llm_scorer.score_issue_via_llm`) first and falls back to the heuristic scorer (`issue_heuristic_scorer.score_issue_heuristically`) on any `LLMError` (no provider configured, a client/provider failure, or a response that fails to parse/validate); `heuristic_only` never calls the LLM scorer. An explicit `mode=` argument to `score_issue(...)` overrides the environment variable.
+
 ### Faster runs summary
 
 - **Parallel planning:** Domain planning agents (API Contract, Data Arch, UI/UX, Infra, etc.) run in dependency tiers with internal parallelism (Tier 1 → Tier 2 → Tier 3).
