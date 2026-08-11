@@ -12,11 +12,20 @@ import logging
 from typing import Any, Dict
 
 import pytest
+from temporalio.common import RetryPolicy
 
 
 @pytest.fixture(autouse=True)
 def _autouse_patched_job_store(patched_job_store):
     return patched_job_store
+
+
+def _fake_activity_info(attempt: int, maximum_attempts: int = 3):
+    return type(
+        "I",
+        (),
+        {"retry_policy": RetryPolicy(maximum_attempts=maximum_attempts), "attempt": attempt},
+    )()
 
 
 def test_retry_failed_activity_success(monkeypatch) -> None:
@@ -80,6 +89,54 @@ def test_run_backend_code_v2_activity_failure(monkeypatch, tmp_path, patched_job
         activities.run_backend_code_v2_activity("bv2-j", str(tmp_path), {"id": "t1"})
     job = js.get_job("bv2-j")
     assert job["status"] == js.JOB_STATUS_FAILED
+
+
+def test_run_frontend_code_v2_activity_non_final_attempt_does_not_mark_failed(
+    monkeypatch, tmp_path, patched_job_store
+) -> None:
+    """On a non-final Temporal attempt, a transient failure does NOT mark the job
+    FAILED (Temporal will retry) — only the final attempt marks it, so a retry
+    that later succeeds never leaves a transient FAILED status behind."""
+    from software_engineering_team.shared import job_store as js
+    from software_engineering_team.temporal import activities
+
+    js.create_job("fv2-retry", repo_path=str(tmp_path))
+
+    monkeypatch.setattr(activities.activity, "in_activity", lambda: True)
+    monkeypatch.setattr(activities.activity, "info", lambda: _fake_activity_info(attempt=1))
+
+    def boom(*a, **kw):
+        raise RuntimeError("transient frontend failure")
+
+    monkeypatch.setattr(activities, "_run_frontend_code_v2_impl", boom)
+    with pytest.raises(RuntimeError, match="transient frontend failure"):
+        activities.run_frontend_code_v2_activity("fv2-retry", str(tmp_path), {"id": "t1"})
+
+    job = js.get_job("fv2-retry")
+    assert job["status"] != js.JOB_STATUS_FAILED
+
+
+def test_run_backend_code_v2_activity_non_final_attempt_does_not_mark_failed(
+    monkeypatch, tmp_path, patched_job_store
+) -> None:
+    """Mirror of the frontend non-final-attempt test for the backend activity."""
+    from software_engineering_team.shared import job_store as js
+    from software_engineering_team.temporal import activities
+
+    js.create_job("bv2-retry", repo_path=str(tmp_path))
+
+    monkeypatch.setattr(activities.activity, "in_activity", lambda: True)
+    monkeypatch.setattr(activities.activity, "info", lambda: _fake_activity_info(attempt=1))
+
+    def boom(*a, **kw):
+        raise RuntimeError("transient backend failure")
+
+    monkeypatch.setattr(activities, "_run_backend_code_v2_impl", boom)
+    with pytest.raises(RuntimeError, match="transient backend failure"):
+        activities.run_backend_code_v2_activity("bv2-retry", str(tmp_path), {"id": "t1"})
+
+    job = js.get_job("bv2-retry")
+    assert job["status"] != js.JOB_STATUS_FAILED
 
 
 def test_run_product_analysis_activity_failure(monkeypatch, tmp_path, patched_job_store) -> None:
