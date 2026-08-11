@@ -29,8 +29,10 @@
         @if (selectedAgentId(); as id) {
           <span class="studio-build__selected">
             <mat-icon aria-hidden="true">check_circle</mat-icon>
-            <span>selected:&nbsp;<strong>{{ id }}</strong> — ready to test</span>
+            <span>cloned:&nbsp;<strong>{{ id }}</strong> — ready to define</span>
           </span>
+        } @else if (cloning()) {
+          <span class="studio-build__hint">Cloning agent…</span>
         } @else {
           <span class="studio-build__hint">Pick an agent below to work on, then test it in the next step.</span>
         }
@@ -39,6 +41,10 @@
           Provision an agent
         </button>
       </div>
+
+      @if (cloneError(); as message) {
+        <p class="error-text">{{ message }}</p>
+      }
 
       <app-agent-catalog (requestRun)="onSelectAgent($event)" />
 
@@ -80,6 +86,9 @@
         icon="fact_check"
         [handoff]="state.handoff()"
       />
+      @if (saveError(); as message) {
+        <p class="error-text">{{ message }}</p>
+      }
       <div class="studio-build__substage-actions">
         <button
           mat-stroked-button
@@ -88,6 +97,15 @@
           (click)="backToDefine()"
         >
           ◂ back to Define
+        </button>
+        <button
+          mat-flat-button
+          type="button"
+          class="studio-build__save-sub"
+          [disabled]="saving()"
+          (click)="saveAgent()"
+        >
+          {{ saving() ? 'Saving…' : 'Save agent' }}
         </button>
       </div>
     }

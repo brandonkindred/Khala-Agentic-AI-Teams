@@ -563,9 +563,19 @@ class _ImplementationMixin:
               ``True`` (default) keeps today's live per-phase progress for the serial/solo path.
         Postconditions:
             - Returns True if the gates passed, or if they were skipped because no engine
-              provider is configured. Returns False if returned for revision — because a gate
-              failed (build or lint) or a gate tool raised an exception.
+              provider is configured, or because the worker is a devops worker (see below).
+              Returns False if returned for revision — because a gate failed (build or lint) or
+              a gate tool raised an exception.
         """
+        if getattr(swe, "team_kind", None) == "devops":
+            # DevOps already runs its own 8 internal hard gates as part of its pipeline
+            # (iac_validate, policy_checks, pipeline_lint, deployment_dry_run,
+            # security_review, change_review, ...; see DEVOPS_REQUIRED_GATE_NAMES in
+            # devops_team/orchestrator.py) before ever returning a branch here. The
+            # generic build/lint gate below targets application code and has nothing
+            # to check against IaC/pipeline artifacts. getattr (not attribute access):
+            # some test stubs have no team_kind at all.
+            return True
         # The gate *tools* (build/lint) run inside the try so a tool crash never aborts the
         # swarm. The revision bookkeeping (_return_for_revision, which mutates the task graph)
         # is deliberately kept OUT of that try: if it raised inside the broad except, a build

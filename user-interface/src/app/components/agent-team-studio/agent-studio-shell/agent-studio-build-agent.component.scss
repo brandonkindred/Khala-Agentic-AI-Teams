@@ -84,9 +84,11 @@
   &__substage-actions {
     display: flex;
     justify-content: flex-end;
+    gap: var(--kh-space-2);
   }
 
-  &__continue-sub {
+  &__continue-sub,
+  &__save-sub {
     --mdc-filled-button-container-color: var(--kh-accent);
     --mdc-filled-button-label-text-color: #000;
   }
@@ -166,4 +168,10 @@
     overflow: auto;
     padding: var(--kh-space-4) var(--kh-space-5);
   }
+}
+
+.error-text {
+  color: var(--kh-error);
+  font-size: var(--kh-text-sm);
+  margin: 0;
 }
