@@ -105,7 +105,10 @@ def _build_implementation_worker(
     ``V2TeamWorker``.
 
     Preconditions:
-        - ``engine_provider`` is a live ``CodeEngineProvider``.
+        - For a frontend_v2/backend_v2 stack, ``engine_provider`` is a live
+          ``CodeEngineProvider``. For a devops stack, ``engine_provider`` is
+          ignored and may be ``None`` (``DevOpsTeamLeadAgent`` is constructed
+          directly; see below).
         - ``review_context`` bundles the plan's system architecture and project
           specification, when available; ``None`` means "nothing to add" so a
           caller without this context yet is unaffected.

@@ -359,6 +359,28 @@ def _to_devops_task_spec(task: Any) -> DevOpsTaskSpec:
     )
 
 
+def _safe_fallback_branch(task: Any) -> str:
+    """Best-effort fallback branch name for a failure result, never itself raising.
+
+    ``task_feature_name(task)`` reads ``task.title``/``task.description`` --
+    exactly the fields likely absent on a malformed task -- so calling it from
+    an error path that exists BECAUSE the task is malformed risks a second,
+    unhandled exception masking the original failure. Falls back to
+    ``task.id`` (present on every real ``Task`` even when title/description
+    are not) or a fixed placeholder if even that is unavailable.
+
+    Postconditions: always returns a non-empty ``str``; never raises.
+    """
+    explicit_branch = getattr(task, "feature_branch", None)
+    if explicit_branch:
+        return explicit_branch
+    try:
+        return f"feature/{task_feature_name(task)}"
+    except Exception:
+        task_id = getattr(task, "id", None)
+        return f"feature/{task_id}" if task_id else "feature/unknown-task"
+
+
 def _devops_result_summary(pkg: Optional[DevOpsCompletionPackage]) -> str:
     """Render a completion package's gates/readiness/notes as review prose."""
     if pkg is None:
@@ -463,17 +485,14 @@ class DevOpsTeamWorker:
             validate_task_interface(task)
         except ValueError as exc:
             logger.warning("devops worker received malformed task %s: %s", task_id, exc)
-            return failed_result(
-                getattr(task, "feature_branch", None) or f"feature/{task_feature_name(task)}",
-                str(exc),
-            )
+            return failed_result(_safe_fallback_branch(task), str(exc))
         branch_ok, prepared_branch = prepare_feature_branch(path, task)
         if not branch_ok:
             logger.warning(
                 "devops worker could not prepare branch for task %s: %s", task_id, prepared_branch
             )
             return failed_result(
-                getattr(task, "feature_branch", None) or f"feature/{task_feature_name(task)}",
+                _safe_fallback_branch(task),
                 f"failed to prepare feature branch: {prepared_branch}",
             )
         reset_ok, reset_msg = _reset_prepared_branch_to_development(path, task_id)
@@ -481,8 +500,8 @@ class DevOpsTeamWorker:
             return failed_result(
                 prepared_branch, f"failed to reset stale branch state: {reset_msg}"
             )
-        spec = _to_devops_task_spec(task)
         try:
+            spec = _to_devops_task_spec(task)
             result = self.team_lead.run_task(spec, repo_path=path, merge_to_development=False)
         except Exception as exc:  # noqa: BLE001 - worker failure is task-local
             logger.exception("devops worker failed for task %s", task_id)

@@ -350,9 +350,11 @@ def clean_untracked_files(repo_path: str | Path) -> Tuple[bool, str]:
     Postconditions:
         - On success, no untracked, non-ignored files/directories remain in
           the working tree; returns ``(True, message)``.
-        - On failure (not a repo, or the ``git clean`` invocation itself
-          fails) returns ``(False, message)`` and leaves the working tree
-          unchanged.
+        - On failure, returns ``(False, message)``. When the failure is "not a
+          repo", the working tree is untouched; when the ``git clean``
+          invocation itself fails partway through, some untracked files may
+          already have been removed before the error -- callers must not
+          assume the working tree is unchanged on that failure path.
     """
     path = Path(repo_path).resolve()
     if not (path / ".git").exists():

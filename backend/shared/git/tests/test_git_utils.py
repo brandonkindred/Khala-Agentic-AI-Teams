@@ -508,6 +508,24 @@ def test_clean_untracked_files_removes_untracked_but_preserves_tracked(repo: Pat
     assert (repo / "tracked.txt").exists()
 
 
+def test_clean_untracked_files_preserves_gitignored_paths(repo: Path) -> None:
+    """No ``-x`` flag is passed to ``git clean``, so gitignored paths (caches, build
+    output) must survive -- only genuinely untracked-and-not-ignored files are
+    removed. This is a documented guarantee (see the docstring) with no direct test
+    coverage otherwise."""
+    (repo / ".gitignore").write_text("*.ignored\n", encoding="utf-8")
+    subprocess.run(["git", "add", "-A"], cwd=repo, capture_output=True, check=True)
+    subprocess.run(["git", "commit", "-m", "add gitignore"], cwd=repo, capture_output=True, check=True)
+    (repo / "ignored.ignored").write_text("build output", encoding="utf-8")
+    (repo / "regular.lock").write_text("leftover from a validation tool", encoding="utf-8")
+
+    ok, msg = clean_untracked_files(repo)
+
+    assert ok, msg
+    assert not (repo / "regular.lock").exists()
+    assert (repo / "ignored.ignored").exists()
+
+
 def test_clean_untracked_files_fails_honestly_for_non_repo(tmp_path: Path) -> None:
     not_a_repo = tmp_path / "plain"
     not_a_repo.mkdir()

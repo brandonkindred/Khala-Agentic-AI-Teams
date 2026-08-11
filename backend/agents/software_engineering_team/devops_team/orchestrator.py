@@ -803,12 +803,10 @@ class DevOpsTeamLeadAgent(BaseTeamLead):
             - Raises ``RuntimeError`` if Phase 5 returns without assigning the
               completion package (internal contract violation).
             - ``merge_to_development`` only matters when ``write_changes=True``:
-              ``True`` (default) merges and deletes the feature branch, matching
-              ``run_task``'s original behavior before the coding-team handoff
-              needed an unmerged alternative; ``False`` commits the branch
-              and leaves it in place for external review (required when running
-              from a detached per-task git worktree, where merging back into
-              ``development`` is not possible).
+              ``True`` (default) merges and deletes the feature branch; ``False``
+              leaves the committed feature branch in place for external review
+              (required when running from a detached per-task git worktree,
+              where merging back into ``development`` is not possible).
         Invariants:
             - ``task_spec`` is not mutated by this method or its phase closures.
         """

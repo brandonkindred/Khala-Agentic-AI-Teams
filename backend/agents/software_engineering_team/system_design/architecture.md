@@ -23,10 +23,10 @@ only covers `frontend_v2`/`backend_v2`) — `worker_factory.py` constructs it
 directly. It follows the same handoff contract (commits a feature branch via
 `run_task(..., merge_to_development=False)`, never merges, returns the branch
 for Tech Lead review) via `DevOpsTaskSpec`/`DevOpsCompletionPackage` instead of
-v2's free-text workflow. With the flag off (the default), `devops`/`infra`/`ci`/
-`cicd` labels normalize to `backend_v2` exactly as described below, and behavior
-is unchanged. See `software_engineering_team/README.md` for the full flag
-reference.
+v2's free-text workflow. With the flag off (the default), `devops`/`dev_ops`/
+`infra`/`infrastructure`/`ci`/`ci_cd`/`cicd` labels normalize to `backend_v2`
+exactly as described below, and behavior is unchanged. See
+`software_engineering_team/README.md` for the full flag reference.
 
 ## Core Roles
 
@@ -56,11 +56,13 @@ time:
 
 Generic stack names such as `frontend`, `backend`, `devops`, `api`, or
 `infrastructure` normalize into one of the two v2 teams. With
-`CODING_TEAM_DEVOPS_ROUTING` set, `devops`/`infra`/`infrastructure`/`ci`/`cicd`
-instead normalize to the devops worker; `frontend`/`backend`/`api` are
-unaffected by the flag. Anything that cannot be classified as frontend,
-backend/platform, or (when opted in) devops work fails the job with a clear
-unsupported-stack error.
+`CODING_TEAM_DEVOPS_ROUTING` set, `devops`/`dev_ops`/`infra`/`infrastructure`/
+`ci`/`ci_cd`/`cicd` instead normalize to the devops worker (both the bare and
+underscore-separated forms are recognized, matching the convention already
+used for other multi-word stack aliases like `next_js`/`nextjs`); `frontend`/
+`backend`/`api` are unaffected by the flag. Anything that cannot be classified
+as frontend, backend/platform, or (when opted in) devops work fails the job
+with a clear unsupported-stack error.
 
 ## Branch Handoff
 

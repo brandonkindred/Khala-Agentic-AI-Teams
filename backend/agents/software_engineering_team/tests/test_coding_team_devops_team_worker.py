@@ -61,7 +61,16 @@ def _patch_branch_handoff(
     reset (real git operations never run against a bare ``tmp_path``, so it must be a
     harmless no-op here), and the post-completion diff check (defaults to reporting a
     non-empty diff so existing happy-path tests don't have to know about it; override
-    ``diff=([], [])`` for tests specifically exercising the no-diff rejection path)."""
+    ``diff=([], [])`` for tests specifically exercising the no-diff rejection path).
+
+    Preconditions: ``monkeypatch`` is pytest's ``monkeypatch`` fixture; ``worker_mod``
+        and ``devops_worker_mod`` (this file's module-level imports) are the real
+        ``v2_team_worker``/``devops_team_worker`` modules.
+    Postconditions: ``_ensure_development_ready``, ``create_feature_branch``, and
+        ``checkout_branch`` (on ``worker_mod``) and ``reset_hard_to`` and
+        ``list_changed_and_deleted`` (on ``devops_worker_mod``) are replaced with
+        deterministic stubs for the remainder of the test.
+    """
 
     def _ensure_development_ready(repo_path):
         return True, "development ready"
@@ -87,6 +96,19 @@ def _base_task(**overrides: Any) -> Task:
     )
     defaults.update(overrides)
     return Task(**defaults)
+
+
+def _devops_worker(lead: Optional[Any] = None) -> DevOpsTeamWorker:
+    """Build a ``DevOpsTeamWorker`` with the standard test stack spec.
+
+    Postconditions: returns a worker whose ``team_lead`` is ``lead`` (or a
+        fresh ``_FakeDevOpsLead()`` when omitted).
+    """
+    return DevOpsTeamWorker(
+        agent_id="devops_worker",
+        stack_spec=StackSpec(name="devops", tools_services=[]),
+        team_lead=lead if lead is not None else _FakeDevOpsLead(),
+    )
 
 
 def test_devops_worker_team_kind_is_fixed() -> None:
@@ -191,6 +213,30 @@ def test_devops_worker_spec_respects_non_production_exclusion() -> None:
     assert spec.environment == "staging"
 
 
+def test_devops_worker_spec_derives_staging_for_empty_title_and_description() -> None:
+    """No text at all is the same "no signal" case as text with no production
+    mention -- must default to staging, not raise or misclassify."""
+    task = _base_task(title="", description="", acceptance_criteria=[])
+    spec = _to_devops_task_spec(task)
+    assert spec.environment == "staging"
+    assert spec.platform_scope.environments == ["dev", "staging"]
+
+
+def test_devops_worker_spec_mixed_signals_prefer_production() -> None:
+    """_legacy_environment_from_text scans clause-by-clause and returns "production"
+    as soon as ANY clause carries an unnegated production mention -- a negation in
+    one clause (e.g. the description) does not suppress a separate, unguarded
+    production mention in another clause (e.g. the title). This is a deliberate
+    fail-open bias toward keeping the production approval-gate check rather than
+    silently dropping it on a genuinely mixed-signal task."""
+    task = _base_task(
+        title="Add production deployment workflow",
+        description="This pipeline is explicitly not for production; staging only.",
+    )
+    spec = _to_devops_task_spec(task)
+    assert spec.environment == "production"
+
+
 def test_devops_worker_derives_environment_from_acceptance_criteria() -> None:
     """A groomed task commonly carries its production signal in a criterion
     ("Production deploy requires explicit approval") rather than the title/
@@ -280,6 +326,79 @@ def test_devops_worker_translates_completed_package(tmp_path, monkeypatch) -> No
     assert "Provisioned infra." in out["changes_summary"]
 
 
+def test_devops_worker_translates_multiple_commits(tmp_path, monkeypatch) -> None:
+    """commands_run must include every commit's message, not just the first/last,
+    when a completion package's git_operations carries more than one commit."""
+    _patch_branch_handoff(monkeypatch)
+    multi_commit = DevOpsTeamResult(
+        success=True,
+        completion_package=DevOpsCompletionPackage(
+            task_id="provision",
+            status="completed",
+            files_changed=["infra/main.tf", "infra/variables.tf"],
+            git_operations=GitOperationsMetadata(
+                branch_created="feature/provision",
+                commits=[
+                    GitCommitMetadata(hash="a1", message="feat(devops): plan"),
+                    GitCommitMetadata(hash="a2", message="feat(devops): apply"),
+                ],
+            ),
+        ),
+    )
+    worker = _devops_worker(_FakeDevOpsLead(multi_commit))
+
+    out = worker.run_implement(_base_task(), tmp_path)
+
+    assert out["status"] == "in_review"
+    assert out["commands_run"] == ["feat(devops): plan", "feat(devops): apply"]
+
+
+def test_devops_worker_translates_empty_commits_list(tmp_path, monkeypatch) -> None:
+    """An empty (but present) commits list must degrade to an empty commands_run,
+    not raise."""
+    _patch_branch_handoff(monkeypatch)
+    no_commits = DevOpsTeamResult(
+        success=True,
+        completion_package=DevOpsCompletionPackage(
+            task_id="provision",
+            status="completed",
+            files_changed=["infra/main.tf"],
+            git_operations=GitOperationsMetadata(branch_created="feature/provision", commits=[]),
+        ),
+    )
+    worker = _devops_worker(_FakeDevOpsLead(no_commits))
+
+    out = worker.run_implement(_base_task(), tmp_path)
+
+    assert out["status"] == "in_review"
+    assert out["commands_run"] == []
+
+
+def test_devops_worker_translates_default_git_operations(tmp_path, monkeypatch) -> None:
+    """``DevOpsCompletionPackage.git_operations`` is a non-Optional field defaulting
+    to a fresh ``GitOperationsMetadata()`` -- Pydantic rejects ``git_operations=None``
+    outright (a completion package can never omit it). A package that leaves it at
+    that default (blank ``branch_created``, empty ``commits``) must still translate
+    cleanly: falling back to the worker's own prepared branch and an empty
+    commands_run, not raise on the absent metadata."""
+    _patch_branch_handoff(monkeypatch, branch="feature/provision")
+    default_git_ops = DevOpsTeamResult(
+        success=True,
+        completion_package=DevOpsCompletionPackage(
+            task_id="provision",
+            status="completed",
+            files_changed=["infra/main.tf"],
+        ),
+    )
+    worker = _devops_worker(_FakeDevOpsLead(default_git_ops))
+
+    out = worker.run_implement(_base_task(), tmp_path)
+
+    assert out["status"] == "in_review"
+    assert out["feature_branch"] == "feature/provision"
+    assert out["commands_run"] == []
+
+
 def test_devops_worker_translates_blocked_package(tmp_path, monkeypatch) -> None:
     _patch_branch_handoff(monkeypatch)
     blocked = DevOpsTeamResult(
@@ -350,6 +469,43 @@ def test_devops_worker_contains_run_task_exception(tmp_path, monkeypatch) -> Non
 
     assert out["status"] == "failed"
     assert "boom" in out["error"]
+
+
+def test_devops_worker_contains_non_runtime_error_exceptions(tmp_path, monkeypatch) -> None:
+    """The ``except Exception`` handler around ``run_task`` must not be narrowed to
+    RuntimeError in practice -- a ValueError (e.g. from DevOpsTaskSpec/pydantic
+    validation deeper in the pipeline) must be caught and surfaced the same way,
+    not escape and crash the worker."""
+    _patch_branch_handoff(monkeypatch, branch="feature/provision")
+
+    class _RaisingLead:
+        def run_task(self, spec, **kwargs):
+            raise ValueError("invalid spec")
+
+    worker = _devops_worker(_RaisingLead())
+
+    out = worker.run_implement(_base_task(), tmp_path)
+
+    assert out["status"] == "failed"
+    assert "invalid spec" in out["error"]
+
+
+def test_devops_worker_contains_spec_building_exception(tmp_path, monkeypatch) -> None:
+    """``_to_devops_task_spec`` runs inside the same try/except as ``run_task`` (not
+    before it): a spec-building failure that ``validate_task_interface`` didn't catch
+    must still return a failed_result instead of an unhandled crash."""
+    _patch_branch_handoff(monkeypatch, branch="feature/provision")
+
+    def _raise(task):
+        raise TypeError("cannot build spec")
+
+    monkeypatch.setattr(devops_worker_mod, "_to_devops_task_spec", _raise)
+    worker = _devops_worker()
+
+    out = worker.run_implement(_base_task(), tmp_path)
+
+    assert out["status"] == "failed"
+    assert "cannot build spec" in out["error"]
 
 
 def test_devops_worker_falls_back_to_task_branch_when_git_operations_omit_it(
@@ -887,18 +1043,7 @@ def test_devops_worker_spec_scope_note_falls_back_to_title_without_description()
 
 
 def test_devops_worker_spec_scope_note_omitted_without_description_or_exclusion() -> None:
-    from types import SimpleNamespace
-
-    task = SimpleNamespace(
-        id="t1",
-        title="",
-        description="",
-        acceptance_criteria=["a criterion"],
-        dependencies=[],
-        out_of_scope="",
-        revision_feedback=[],
-        feature_branch=None,
-    )
+    task = _base_task(title="", description="", out_of_scope="", acceptance_criteria=["a criterion"])
 
     spec = _to_devops_task_spec(task)
 
