@@ -16,6 +16,8 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from typing import Any, Dict, List, NamedTuple, Optional
 
+from shared.temporal.client import get_temporal_client
+
 from software_engineering_team.activity import ActivityBridge
 from software_engineering_team.api import coding_team_main as _main
 from software_engineering_team.api.advisory_lock import advisory_lock
@@ -57,7 +59,6 @@ from software_engineering_team.job_store import (
     heartbeat_job,
 )
 from software_engineering_team.models import JobStatus
-from software_engineering_team.temporal.client import get_temporal_client
 
 logger = logging.getLogger(__name__)
 
