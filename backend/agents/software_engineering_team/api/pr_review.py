@@ -17,7 +17,6 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, NamedTuple, Optional
 
 from shared.temporal.client import get_temporal_client
-
 from software_engineering_team.activity import ActivityBridge
 from software_engineering_team.api import coding_team_main as _main
 from software_engineering_team.api.advisory_lock import advisory_lock
