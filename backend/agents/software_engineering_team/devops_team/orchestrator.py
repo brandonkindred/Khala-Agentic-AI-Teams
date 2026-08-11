@@ -64,6 +64,305 @@ _NEGATION_TOKENS = frozenset({"not", "no", "non"})
 # Word tokens compatible with the former ``\\b(prod|production)\\b`` matcher.
 _WORD_TOKEN = re.compile(r"[a-z0-9_]+")
 
+# Static defaults for the DevOpsTaskSpec text-inference helpers below. Formerly
+# served only _build_legacy_spec (removed); devops_team_worker.py (the coding-team
+# handoff adapter) is now the sole consumer, via the public re-exports at the end
+# of this block. Tuples enforce the read-only contract -- callers get list(...)
+# copies when needed.
+_DEFAULT_LEGACY_CLOUD = "on-premises"
+_DEFAULT_LEGACY_APP_REPO = "application"
+_DEFAULT_LEGACY_INFRA_REPO = "platform-infra"
+_DEFAULT_LEGACY_SECRETS_SOURCE = "managed_secret_store"
+
+_DEFAULT_LEGACY_ACCEPTANCE_CRITERIA = (
+    "CI/CD workflow exists and validates",
+    "Deployment strategy and rollback documented",
+    "Security and policy review executed",
+)
+_DEFAULT_LEGACY_ROLLBACK_REQUIREMENTS = ("Rollback to previous known good release",)
+_DEFAULT_LEGACY_SECURITY_CONSTRAINTS = (
+    "No plaintext credentials",
+    "Least privilege IAM",
+)
+_DEFAULT_LEGACY_COMPLIANCE_CONSTRAINTS = ("Audit trail required",)
+# Skippable fillers between a negation and a prod token ("not deploy to production",
+# "not in production").
+_NEGATION_INTERVENING_TOKENS = frozenset(
+    {
+        "to",
+        "for",
+        "into",
+        "on",
+        "in",
+        "at",
+        "with",
+        "by",
+        "from",
+        "deploy",
+        "deploying",
+        "deployment",
+        "the",
+        "a",
+        "an",
+    }
+)
+# After a ``no``/``not`` + prod token, these may indicate a production *control*
+# under discussion rather than excluding production as a target.
+_PROD_SAFEGUARD_TOKENS = frozenset(
+    {
+        "approval",
+        "approvals",
+        "gate",
+        "gates",
+        "credential",
+        "credentials",
+        "access",
+        "policy",
+        "policies",
+        "check",
+        "checks",
+        "control",
+        "controls",
+        "requirement",
+        "requirements",
+        "signoff",
+        "authorization",
+        "authorized",
+        "permission",
+        "permissions",
+    }
+)
+# Negative prohibition predicates (``production is forbidden``).
+_PROD_NEGATIVE_PROHIBITION_TOKENS = frozenset(
+    {
+        "forbidden",
+        "denied",
+        "prohibited",
+        "excluded",
+        "exclude",
+    }
+)
+# Positive permission words — exclusion only when negated
+# (``production is not allowed`` vs ``production is allowed``).
+_PROD_POSITIVE_PERMISSION_TOKENS = frozenset(
+    {
+        "allowed",
+        "allow",
+        "permitted",
+        "permit",
+    }
+)
+# Union used by environment-negation safeguard logic.
+_PROD_PROHIBITION_TOKENS = _PROD_NEGATIVE_PROHIBITION_TOKENS | _PROD_POSITIVE_PERMISSION_TOKENS
+# With a safeguard noun, these mark a missing/absent control → production work.
+_PROD_MISSING_CONTROL_TOKENS = frozenset(
+    {
+        "configured",
+        "missing",
+        "absent",
+        "needed",
+        "need",
+        "add",
+        "adds",
+        "require",
+        "requires",
+        "required",
+        "lacking",
+        "lack",
+    }
+)
+# ``no production <attribute>`` negates the attribute, not the environment.
+_PROD_ATTRIBUTE_TOKENS = frozenset(
+    {
+        "downtime",
+        "interruption",
+        "interruptions",
+        "outage",
+        "outages",
+        "latency",
+        "degradation",
+        "impact",
+        "disruption",
+        "traffic",  # only when paired with interruption-style attrs nearby; see helper
+    }
+)
+# Split so ``No. Deploy to production`` does not let ``No`` govern the next sentence.
+_LEGACY_CLAUSE_SPLIT = re.compile(r"[.!?;]+")
+_PROD_CONTEXT_LOOKAHEAD = 5
+
+
+def _negation_token_before(tokens: List[str], prod_index: int) -> Optional[str]:
+    """Return the negation token governing ``tokens[prod_index]``, if any.
+
+    Preconditions:
+        - ``tokens`` is a list of lowercase word tokens from a single clause.
+        - ``0 <= prod_index < len(tokens)``.
+    Postconditions:
+        - Returns ``non`` / ``no`` / ``not`` when that token immediately
+          precedes the prod token, or when only intervening fillers from
+          ``_NEGATION_INTERVENING_TOKENS`` sit between them
+          (e.g. ``not deploy to production``, ``not for production``).
+        - Returns ``None`` when no such negation governs the prod token.
+    """
+    assert 0 <= prod_index < len(tokens), "prod_index out of range"
+    j = prod_index - 1
+    while j >= 0 and tokens[j] in _NEGATION_INTERVENING_TOKENS:
+        j -= 1
+    if j >= 0 and tokens[j] in _NEGATION_TOKENS:
+        return tokens[j]
+    return None
+
+
+def _is_environment_negation(tokens: List[str], prod_index: int) -> bool:
+    """Return True when ``tokens[prod_index]`` is an excluded-environment phrase.
+
+    Preconditions:
+        - ``tokens`` is a list of lowercase word tokens from a single clause.
+        - ``0 <= prod_index < len(tokens)`` and ``tokens[prod_index]`` is
+          ``prod`` or ``production``.
+    Postconditions:
+        - ``non`` governing the prod token always counts as negation.
+        - ``no`` / ``not`` governing the prod token (allowing intervening
+          fillers) counts as negation unless following context shows:
+          a missing production control, a conditional approval gate
+          (``until`` / ``unless``), or a negated production *attribute*
+          (``downtime``, ``interruption``, …) rather than excluding production.
+        - Explicit prohibitions after a safeguard noun
+          (``no production access is allowed``) remain negation / staging.
+        - Otherwise returns False.
+    """
+    assert 0 <= prod_index < len(tokens), "prod_index out of range"
+    assert tokens[prod_index] in ("prod", "production"), "token must be prod|production"
+    neg = _negation_token_before(tokens, prod_index)
+    if neg is None:
+        return False
+    if neg == "non":
+        return True
+    window = tokens[prod_index + 1 : prod_index + 1 + _PROD_CONTEXT_LOOKAHEAD]
+    # Conditional gate: "do not deploy to production until/unless approved"
+    # or "… without/pending authorization".
+    if any(t in ("until", "unless") for t in window):
+        return False
+    if any(t in ("without", "pending") for t in window) and any(
+        t in _PROD_SAFEGUARD_TOKENS for t in window
+    ):
+        return False
+    # Attribute negation: "no production downtime" / "no production traffic interruption".
+    if any(t in _PROD_ATTRIBUTE_TOKENS for t in window) and not any(
+        t in _PROD_PROHIBITION_TOKENS for t in window
+    ):
+        # "no production traffic" alone (exclusion) vs "traffic interruption" (attribute).
+        if window and window[0] == "traffic" and not any(
+            t in {"interruption", "interruptions", "disruption", "impact"} for t in window[1:]
+        ):
+            return True
+        return False
+    has_safeguard = any(t in _PROD_SAFEGUARD_TOKENS for t in window)
+    if not has_safeguard:
+        return True
+    if any(t in _PROD_PROHIBITION_TOKENS for t in window):
+        return True
+    if any(t in _PROD_MISSING_CONTROL_TOKENS for t in window):
+        return False
+    # Safeguard noun without prohibition/missing cue: treat as production concern.
+    return False
+
+
+def _is_post_token_exclusion(tokens: List[str], prod_index: int) -> bool:
+    """Return True when production is excluded by a following prohibition predicate.
+
+    Preconditions:
+        - ``tokens`` is a list of lowercase word tokens from a single clause.
+        - ``0 <= prod_index < len(tokens)`` and ``tokens[prod_index]`` is
+          ``prod`` or ``production``.
+    Postconditions:
+        - True for negative prohibitions (``production is prohibited``,
+          ``prod is forbidden``).
+        - True for positive permission words only when negated
+          (``production is not allowed``); ``production is allowed`` is False.
+        - False when no such post-token prohibition is present.
+    """
+    assert 0 <= prod_index < len(tokens), "prod_index out of range"
+    assert tokens[prod_index] in ("prod", "production"), "token must be prod|production"
+    after = tokens[prod_index + 1 : prod_index + 1 + _PROD_CONTEXT_LOOKAHEAD]
+    if not after:
+        return False
+    if any(t in _PROD_NEGATIVE_PROHIBITION_TOKENS for t in after):
+        return True
+    if any(t in _PROD_POSITIVE_PERMISSION_TOKENS for t in after):
+        first_perm_idx = next(
+            i for i, t in enumerate(after) if t in _PROD_POSITIVE_PERMISSION_TOKENS
+        )
+        # Negation must govern the permission word ("is not allowed"), not
+        # appear after it ("is allowed, not required").
+        if any(t in _NEGATION_TOKENS for t in after[:first_perm_idx]):
+            return True
+    return False
+
+
+def _clause_implies_production(clause: str) -> bool:
+    """Return True when a single clause positively implies production.
+
+    Preconditions: ``clause`` is a lowercase str (may be empty).
+    Postconditions: True iff a non-excluded ``prod``/``production`` token appears.
+    """
+    assert isinstance(clause, str), "clause must be a str"
+    tokens = _WORD_TOKEN.findall(clause)
+    for i, token in enumerate(tokens):
+        if token not in ("prod", "production"):
+            continue
+        if _is_environment_negation(tokens, i):
+            continue
+        if _is_post_token_exclusion(tokens, i):
+            continue
+        return True
+    return False
+
+
+def _legacy_environment_from_text(combined_text: str) -> str:
+    """Infer ``production`` vs ``staging`` from legacy free text.
+
+    Preconditions:
+        - ``combined_text`` is a str (may be empty); caller lowercases input.
+    Postconditions:
+        - Splits on clause boundaries (``.`` / ``!`` / ``?`` / ``;``) so a
+          standalone ``No.`` cannot negate a later ``Deploy to production``.
+        - Returns ``\"production\"`` iff any clause positively implies production
+          (see :func:`_clause_implies_production` / :func:`_is_environment_negation`).
+        - Exclusion phrases include ``non-production``, ``not prod``,
+          ``no production traffic``, ``do not deploy to production``,
+          ``not for production``, and ``no production access is allowed``.
+        - Still production: missing-control wording, conditional
+          ``until approved``, and attribute constraints like
+          ``no production downtime``.
+        - Otherwise returns ``\"staging\"``. Does not treat ``produce`` as prod.
+    """
+    assert isinstance(combined_text, str), "combined_text must be a str"
+    assert combined_text == combined_text.lower(), "combined_text must be lowercase"
+    for clause in _LEGACY_CLAUSE_SPLIT.split(combined_text):
+        if _clause_implies_production(clause.strip()):
+            return "production"
+    return "staging"
+
+
+# Public re-exports for reuse outside this module (see devops_team_worker.py,
+# the coding-team handoff adapter) -- the underscore-prefixed originals above
+# stay the names used within this module, so callers of this module's own API
+# are unaffected. Reusing the same tuples/regex/function objects (not copies)
+# means a change here can never silently drift out of sync with what a public
+# importer sees.
+LEGACY_WORD_TOKEN = _WORD_TOKEN
+NEGATION_TOKENS = _NEGATION_TOKENS
+legacy_environment_from_text = _legacy_environment_from_text
+DEFAULT_LEGACY_CLOUD = _DEFAULT_LEGACY_CLOUD
+DEFAULT_LEGACY_APP_REPO = _DEFAULT_LEGACY_APP_REPO
+DEFAULT_LEGACY_INFRA_REPO = _DEFAULT_LEGACY_INFRA_REPO
+DEFAULT_LEGACY_SECRETS_SOURCE = _DEFAULT_LEGACY_SECRETS_SOURCE
+DEFAULT_LEGACY_ACCEPTANCE_CRITERIA = _DEFAULT_LEGACY_ACCEPTANCE_CRITERIA
+DEFAULT_LEGACY_ROLLBACK_REQUIREMENTS = _DEFAULT_LEGACY_ROLLBACK_REQUIREMENTS
+DEFAULT_LEGACY_SECURITY_CONSTRAINTS = _DEFAULT_LEGACY_SECURITY_CONSTRAINTS
+DEFAULT_LEGACY_COMPLIANCE_CONSTRAINTS = _DEFAULT_LEGACY_COMPLIANCE_CONSTRAINTS
+
 
 # Fillers allowed between a negation and ``approval`` (``no formal approval``).
 _APPROVAL_INTERVENING_TOKENS = frozenset(
@@ -331,13 +630,19 @@ class DevOpsTeamLeadAgent(BaseTeamLead):
         *,
         repo_path: Path,
         build_verifier: Optional[Any] = None,
+        merge_to_development: bool = True,
         subdir: str = "",
     ) -> DevOpsTeamResult:
-        """Execute a structured task spec against a real repo, writing and merging changes.
+        """Execute a structured task spec against a real repo, writing and (by default) merging changes.
 
         This is the current structured entry point for callers that need real
         repo I/O (unlike ``run()``, which is model-only and cannot target an
-        arbitrary checked-out repo).
+        arbitrary checked-out repo). ``merge_to_development=False`` commits the
+        feature branch and leaves it unmerged for an external Tech Lead review
+        instead — the mode the coding-team swarm uses when dispatching a
+        ``target_team="devops"`` task from a per-task git worktree, where
+        merging back into ``development`` is not possible (the worktree runs
+        detached from it).
 
         Preconditions:
             - ``task_spec`` is a non-None ``DevOpsTaskSpec``.
@@ -345,8 +650,9 @@ class DevOpsTeamLeadAgent(BaseTeamLead):
             - ``build_verifier``, when provided, is callable and returns ``(bool, str)``.
         Postconditions:
             - Returns a ``DevOpsTeamResult`` reflecting the full pipeline outcome.
-            - Artifacts are written to the repo on a feature branch and merged into
-              ``development`` when the pipeline completes successfully.
+            - Artifacts are written to the repo on a feature branch; the branch is
+              merged into ``development`` when ``merge_to_development`` is ``True``
+              (the default) and left in place otherwise.
         """
         assert task_spec is not None, "task_spec is required"
         repo_path_obj = Path(repo_path).resolve()
@@ -358,6 +664,7 @@ class DevOpsTeamLeadAgent(BaseTeamLead):
             task_spec=task_spec,
             build_verifier=build_verifier,
             write_changes=True,
+            merge_to_development=merge_to_development,
             subdir=subdir,
         )
 
@@ -467,6 +774,7 @@ class DevOpsTeamLeadAgent(BaseTeamLead):
         task_spec: DevOpsTaskSpec,
         build_verifier: Optional[Any],
         write_changes: bool,
+        merge_to_development: bool = True,
         subdir: str = "",
     ) -> DevOpsTeamResult:
         """Sequence the 5 DevOps phases via the shared gated-phase framework.
@@ -494,6 +802,11 @@ class DevOpsTeamLeadAgent(BaseTeamLead):
               ``success=False`` and ``failure_reason`` set.
             - Raises ``RuntimeError`` if Phase 5 returns without assigning the
               completion package (internal contract violation).
+            - ``merge_to_development`` only matters when ``write_changes=True``:
+              ``True`` (default) merges and deletes the feature branch; ``False``
+              leaves the committed feature branch in place for external review
+              (required when running from a detached per-task git worktree,
+              where merging back into ``development`` is not possible).
         Invariants:
             - ``task_spec`` is not mutated by this method or its phase closures.
         """
@@ -664,6 +977,7 @@ class DevOpsTeamLeadAgent(BaseTeamLead):
                 doc_runbook_agent=self.doc_runbook_agent,
                 git_ops=_git_ops(),
                 get_head_sha=get_head_sha,
+                merge_to_development=merge_to_development,
             )
             if result.blocked_result is not None:
                 return result.blocked_result
