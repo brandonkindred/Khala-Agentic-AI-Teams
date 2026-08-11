@@ -60,6 +60,15 @@ class IssueGroomingRunner:
         """
         Preconditions:
             - ``client`` is a constructed ``GitHubClient`` (token already resolved).
+            - ``update_job_fn``, when given, is already bound to this run's
+              ``job_id`` (mirrors ``_grooming_update_callback`` -- ``run()`` never
+              passes ``job_id`` itself) and accepts arbitrary keyword-only
+              arguments forwarded verbatim to the job store's ``update_job``. In
+              this class the kwargs it is actually called with are a subset of
+              ``phase``, ``status_text``, ``progress``, ``grooming`` (a dict),
+              and ``status`` (a ``JobStatus`` value, only on the terminal
+              ``CANCELLED``/``COMPLETED`` calls) -- never positional args, and
+              never all five on every call.
         Postconditions:
             - Stores ``client``/``update_job_fn``/``get_job_fn`` for ``run()``. A
               missing ``update_job_fn`` makes progress reporting a no-op (useful

@@ -25,7 +25,7 @@ import logging
 from datetime import timedelta
 from typing import Any, Callable, Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 from temporalio import activity, workflow
 
 logger = logging.getLogger(__name__)
@@ -44,10 +44,13 @@ class IssueGroomingRunRequest(BaseModel):
         - ``owner``/``repo`` identify an accessible GitHub repository.
         - ``issue_number`` is a positive int naming an open issue in that repo.
     Postconditions:
-        - Instances are immutable data; they cross the activity/workflow
-          boundary as JSON-native dicts via ``model_dump(mode="json")`` and
-          are rebuilt on the other side with ``model_validate``.
+        - Instances are immutable data (``model_config`` is frozen); they cross
+          the activity/workflow boundary as JSON-native dicts via
+          ``model_dump(mode="json")`` and are rebuilt on the other side with
+          ``model_validate``.
     """
+
+    model_config = ConfigDict(frozen=True)
 
     job_id: str
     owner: str
