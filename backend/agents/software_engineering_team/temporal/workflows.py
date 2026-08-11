@@ -22,7 +22,6 @@ with workflow.unsafe.imports_passed_through():
         TASK_QUEUE,
     )
 
-RUN_ORCHESTRATOR_TIMEOUT = timedelta(seconds=48 * 3600)
 RETRY_FAILED_TIMEOUT = timedelta(seconds=24 * 3600)
 STANDALONE_TIMEOUT = timedelta(seconds=12 * 3600)
 
@@ -34,42 +33,6 @@ DEFAULT_RETRY_POLICY = RetryPolicy(
     maximum_interval=timedelta(minutes=2),
     backoff_coefficient=2.0,
 )
-
-
-@workflow.defn(name="RunTeamWorkflow")
-class RunTeamWorkflow:
-    """Runs the main Tech Lead orchestrator (run_orchestrator) as an activity."""
-
-    @workflow.run
-    async def run(
-        self,
-        job_id: str,
-        repo_path: str,
-        spec_content_override: Optional[str] = None,
-        resolved_questions_override: Optional[List[Dict[str, Any]]] = None,
-        planning_only: bool = False,
-        sprint_id: Optional[str] = None,
-    ) -> None:
-        # Generated via workflow.uuid4() (Temporal's replay-safe UUID source), not
-        # shared.observability.new_trace_id()/uuid.uuid4() directly — workflow code
-        # must be deterministic across replays. ``.hex[:12]`` mirrors new_trace_id()'s
-        # documented shape, so both runtime modes emit the same id format.
-        trace_id = workflow.uuid4().hex[:12]
-        await workflow.execute_activity(
-            _activities.run_orchestrator_activity,
-            args=[
-                job_id,
-                repo_path,
-                spec_content_override,
-                resolved_questions_override,
-                planning_only,
-                trace_id,
-                sprint_id,
-            ],
-            task_queue=TASK_QUEUE,
-            schedule_to_close_timeout=RUN_ORCHESTRATOR_TIMEOUT,
-            retry_policy=DEFAULT_RETRY_POLICY,
-        )
 
 
 @workflow.defn(name="RetryFailedWorkflow")

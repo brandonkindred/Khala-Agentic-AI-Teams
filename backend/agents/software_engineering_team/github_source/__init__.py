@@ -2,7 +2,8 @@
 GitHub source integrations for the coding team.
 
 Includes issue selection for issue-driven runs, PR review comment mapping,
-existing-comment handling, issue-proposal generation, and repository reading.
+existing-comment handling, issue-proposal generation, LLM Fibonacci-scoring
+prompt/schema contract and scorer, and repository reading.
 """
 
 from .client import (
@@ -29,6 +30,7 @@ from .existing_comments import (
     match_existing_comment,
     partition_issues_by_existing_comments,
 )
+from .issue_llm_scorer import score_issue_via_llm
 from .issue_proposals import (
     annotate_duplicate_proposals,
     build_issue_from_proposal,
@@ -36,6 +38,11 @@ from .issue_proposals import (
     find_matching_open_issue,
     group_similar_findings,
     proposal_from_findings,
+)
+from .issue_scoring import (
+    FIBONACCI_COMPLEXITY_VALUES,
+    ScoreBreakdown,
+    build_scoring_prompt,
 )
 from .issue_to_plan import issue_to_plan_input
 from .pr_review_mapping import (
@@ -53,6 +60,7 @@ from .pr_review_mapping import (
 from .repo_reader import GitHubRepoReader
 
 __all__ = [
+    "FIBONACCI_COMPLEXITY_VALUES",
     "MAX_ISSUES_TRAVERSED",
     "MAX_REVIEW_COMMENTS_TRAVERSED",
     "MAX_REVIEW_THREADS_TRAVERSED",
@@ -69,11 +77,13 @@ __all__ = [
     "ReadyCheckResult",
     "Repo",
     "ReviewComment",
+    "ScoreBreakdown",
     "SubIssue",
     "annotate_duplicate_proposals",
     "build_existing_comments",
     "build_issue_from_proposal",
     "build_review_body",
+    "build_scoring_prompt",
     "choose_event",
     "duplicate_check_max_open_issues",
     "find_matching_open_issue",
@@ -91,6 +101,7 @@ __all__ = [
     "pick_ready_issue",
     "proposal_from_findings",
     "render_annotated_hunks",
+    "score_issue_via_llm",
     "scrub_token_from_text",
     "split_review_comments",
 ]
