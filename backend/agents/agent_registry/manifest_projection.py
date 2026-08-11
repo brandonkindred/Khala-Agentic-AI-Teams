@@ -1,14 +1,15 @@
 """Shared, model-shape-agnostic mechanics for projecting to/from ``AgentManifest``.
 
 Both the Studio (`agent_team_studio.agent_studio`) and agentic
-(`agent_team_studio.agentic_team_provisioning`) authoring surfaces build and
-tear down :class:`~agent_registry.models.AgentManifest` instances using the
-same handful of primitives (slugging, hashed-slug ids, marker-tag filtering,
-round-trip validation). This module single-sources those primitives — as a
-public, stable home independent of either surface's internals — so each
-surface only owns its own team-specific data (marker sets, digest lengths, id
-formats), not the mechanics themselves, and neither has to reach into the
-other's private helpers to get them.
+(`agent_team_studio.agentic_team_provisioning`) authoring surfaces build
+:class:`~agent_registry.models.AgentManifest` instances using the same
+handful of id-construction primitives (slugging, hashed-slug ids, round-trip
+validation). This module single-sources those primitives — as a public,
+stable home independent of either surface's internals — so each surface only
+owns its own team-specific data (digest lengths, id formats), not the
+mechanics themselves. Marker-tag filtering and the other generated-agent
+runtime constants shared by both surfaces live in
+:mod:`agent_team_studio.manifest_shared`.
 """
 
 from __future__ import annotations
@@ -48,16 +49,6 @@ def hash_suffix(value: str, length: int) -> str:
     if not 0 < length <= 64:
         raise ValueError("hash_suffix: length must satisfy 0 < length <= 64")
     return hashlib.sha256(value.encode("utf-8")).hexdigest()[:length]
-
-
-def filter_marker_tags(tags: list[str] | None, markers: frozenset[str]) -> list[str]:
-    """Strip internal bookkeeping tags out of a manifest's ``tags``.
-
-    Preconditions: ``markers`` is the set of marker/plumbing tag values to drop.
-    Postconditions: returns ``tags`` (or ``[]`` when ``tags`` is ``None``) with
-        any value in ``markers`` removed, order preserved.
-    """
-    return [t for t in (tags or []) if t not in markers]
 
 
 def revalidate(manifest: AgentManifest) -> AgentManifest:

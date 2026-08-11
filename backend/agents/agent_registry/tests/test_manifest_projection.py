@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from agent_registry.manifest_projection import filter_marker_tags, hash_suffix, revalidate, slug
+from agent_registry.manifest_projection import hash_suffix, revalidate, slug
 from agent_registry.models import AgentManifest, SourceInfo
 
 
@@ -72,25 +72,6 @@ def test_hash_suffix_rejects_out_of_range_length() -> None:
         hash_suffix("Agent", -1)
     with pytest.raises(ValueError):
         hash_suffix("Agent", 65)
-
-
-def test_filter_marker_tags_removes_markers_and_preserves_order() -> None:
-    tags = ["content", "studio", "generated", "seo"]
-    assert filter_marker_tags(tags, frozenset({"studio", "generated"})) == ["content", "seo"]
-
-
-def test_filter_marker_tags_handles_none() -> None:
-    assert filter_marker_tags(None, frozenset({"generated"})) == []
-
-
-def test_filter_marker_tags_no_markers_matched_is_no_op() -> None:
-    tags = ["content", "seo"]
-    assert filter_marker_tags(tags, frozenset({"generated"})) == tags
-
-
-def test_filter_marker_tags_all_matched_yields_empty() -> None:
-    tags = ["studio", "generated"]
-    assert filter_marker_tags(tags, frozenset({"studio", "generated"})) == []
 
 
 def test_revalidate_round_trips_to_an_equal_manifest() -> None:

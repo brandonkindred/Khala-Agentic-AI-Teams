@@ -17,42 +17,23 @@ from __future__ import annotations
 
 from typing import NamedTuple
 
-from agent_registry.manifest_projection import filter_marker_tags, hash_suffix, revalidate, slug
-from agent_registry.models import (
-    AgentManifest,
-    CognitionKnowledgeGraphSpec,
-    CognitionMemorySpec,
-    CognitionSpec,
-    IOSchema,
-    SourceInfo,
-)
+from agent_registry.manifest_projection import hash_suffix, revalidate, slug
+from agent_registry.models import AgentManifest, IOSchema, SourceInfo
 from agent_team_studio.agentic_team_provisioning.models import SOURCE_GENERATED, AgenticTeamAgent
-from agent_team_studio.generated_runtime import (
-    GENERATED_AGENT_ANATOMY_REF,
+
+from ..manifest_shared import (
+    AGENT_ANATOMY_REF,
     GENERATED_AGENT_ENTRYPOINT,
     GENERATED_AGENT_INPUT_REF,
     GENERATED_AGENT_OUTPUT_REF,
+    default_cognition_block,
+    strip_marker_tags,
 )
 
 # The registry team key for this service (matches TEAM_CONFIGS in
 # unified_api/config.py). This is the manifest ``team`` value — distinct from the
 # per-instance team UUID, which only feeds the slugged manifest id.
 _TEAM_KEY = "agentic_team_provisioning"
-
-# Where the canonical agent-anatomy contract lives, repo-relative per SourceInfo.
-_ANATOMY_REF = GENERATED_AGENT_ANATOMY_REF
-
-# The invokable sandbox entrypoint: a single callable that accepts one request
-# body (carrying the roster metadata + message), reconstructs the agent, and runs
-# it through the cognition-aware wrapper. The dispatch shim calls it as
-# ``entrypoint(body)``, so it must take exactly the request body.
-_ENTRYPOINT = GENERATED_AGENT_ENTRYPOINT
-
-# Dotted refs to the Pydantic models describing the invoke contract (resolved
-# lazily by the registry, never imported at load time).
-_INPUT_SCHEMA_REF = GENERATED_AGENT_INPUT_REF
-_OUTPUT_SCHEMA_REF = GENERATED_AGENT_OUTPUT_REF
-
 
 # Hex length of the id-disambiguating digest. 16 hex chars = 64 bits: accidental
 # collisions stay negligible far past any realistic team/agent count, and an
@@ -100,31 +81,6 @@ def manifest_agent_id(team_id: str, agent_name: str) -> str:
     return f"{team_id_prefix(team_id)}{slug(agent_name, 40)}-{pair_hash}"
 
 
-def default_cognition_block() -> CognitionSpec:
-    """Return the batteries-included Agent Cognition Core defaults.
-
-    Preconditions:
-        * None.
-    Postconditions:
-        * Returns a :class:`CognitionSpec` equal to the batteries-included core:
-          90-day episodic memory (``memory.retention_days_events == 90``), an
-          empty ``tools`` list, ``requires_idempotency_key`` False, a default-on
-          knowledge graph, and exactly one seed pack — ``default_guardrails``.
-
-    ``tools`` is deliberately empty: a roster agent's ``tools`` are free-text
-    labels ("Git", "Slack API") that do not resolve against the cognition tool
-    registries (``LlmToolsService`` + a caller-supplied integration registry + ``agent_git_tools``),
-    so they are never stamped here — that would only break later tool resolution.
-    """
-    return CognitionSpec(
-        memory=CognitionMemorySpec(retention_days_events=90),
-        tools=[],
-        rule_packs=["default_guardrails"],
-        requires_idempotency_key=False,
-        knowledge_graph=CognitionKnowledgeGraphSpec(),
-    )
-
-
 def build_agent_manifest(
     team_id: str,
     agent_name: str,
@@ -169,13 +125,15 @@ def build_agent_manifest(
         summary=resolved_summary,
         tags=tags,
         inputs=IOSchema(
-            schema_ref=_INPUT_SCHEMA_REF,
+            schema_ref=GENERATED_AGENT_INPUT_REF,
             description="Roster metadata + user message; a shared entrypoint serves every "
             "generated agent.",
         ),
-        outputs=IOSchema(schema_ref=_OUTPUT_SCHEMA_REF, description="The agent's response text."),
+        outputs=IOSchema(
+            schema_ref=GENERATED_AGENT_OUTPUT_REF, description="The agent's response text."
+        ),
         cognition=default_cognition_block(),
-        source=SourceInfo(entrypoint=_ENTRYPOINT, anatomy_ref=_ANATOMY_REF),
+        source=SourceInfo(entrypoint=GENERATED_AGENT_ENTRYPOINT, anatomy_ref=AGENT_ANATOMY_REF),
     )
     # Round-trip through a JSON-safe dump so the returned object is guaranteed
     # to be a fully validated manifest (and safe to serialize over the API).
@@ -189,7 +147,7 @@ def skill_tags_from_manifest(manifest: AgentManifest) -> list[str]:
     Postconditions: returns tags excluding the ``"generated"`` and team-key markers
         stamped by :func:`build_agent_manifest`, order preserved.
     """
-    return filter_marker_tags(manifest.tags, frozenset({"generated", _TEAM_KEY}))
+    return strip_marker_tags(manifest.tags or [], frozenset({"generated", _TEAM_KEY}))
 
 
 def is_generated_manifest(manifest: AgentManifest) -> bool:
