@@ -15,11 +15,10 @@ is active, persists them so other workers and sandboxes can resolve them.
 
 from __future__ import annotations
 
-import hashlib
 from typing import NamedTuple
 
+from agent_registry.manifest_projection import hash_suffix, revalidate, slug
 from agent_registry.models import AgentManifest, IOSchema, SourceInfo
-from agent_team_studio.agentic_team_provisioning.agent_env_provisioning import _slug
 from agent_team_studio.agentic_team_provisioning.models import SOURCE_GENERATED, AgenticTeamAgent
 
 from ..manifest_shared import (
@@ -36,7 +35,6 @@ from ..manifest_shared import (
 # per-instance team UUID, which only feeds the slugged manifest id.
 _TEAM_KEY = "agentic_team_provisioning"
 
-
 # Hex length of the id-disambiguating digest. 16 hex chars = 64 bits: accidental
 # collisions stay negligible far past any realistic team/agent count, and an
 # attacker who controls agent names can't cheaply force a within-team clash (an
@@ -44,11 +42,6 @@ _TEAM_KEY = "agentic_team_provisioning"
 # multi-tenant cleanup prefix). Keep it well short of the full digest so ids stay
 # readable in URLs / the catalog.
 _HASH_HEX_LEN = 16
-
-
-def _id_hash(s: str) -> str:
-    """Stable, practically collision-resistant hex digest for derived ids."""
-    return hashlib.sha256(s.encode()).hexdigest()[:_HASH_HEX_LEN]
 
 
 def team_id_prefix(team_id: str) -> str:
@@ -62,7 +55,7 @@ def team_id_prefix(team_id: str) -> str:
     count (see ``_HASH_HEX_LEN``), so stale cleanup keyed on this prefix is
     extremely unlikely to touch another team's manifests.
     """
-    return f"{_TEAM_KEY}.{_slug(team_id, 12)}-{_id_hash(team_id)}."
+    return f"{_TEAM_KEY}.{slug(team_id, 12)}-{hash_suffix(team_id, _HASH_HEX_LEN)}."
 
 
 def manifest_agent_id(team_id: str, agent_name: str) -> str:
@@ -80,8 +73,12 @@ def manifest_agent_id(team_id: str, agent_name: str) -> str:
           possible but negligible far past realistic team/agent counts (see
           ``_HASH_HEX_LEN``). Always starts with :func:`team_id_prefix`.
     """
-    pair_hash = _id_hash(f"{team_id}\x00{agent_name}")
-    return f"{team_id_prefix(team_id)}{_slug(agent_name, 40)}-{pair_hash}"
+    if not team_id:
+        raise ValueError("manifest_agent_id: team_id must be non-empty")
+    if not agent_name:
+        raise ValueError("manifest_agent_id: agent_name must be non-empty")
+    pair_hash = hash_suffix(f"{team_id}\x00{agent_name}", _HASH_HEX_LEN)
+    return f"{team_id_prefix(team_id)}{slug(agent_name, 40)}-{pair_hash}"
 
 
 def build_agent_manifest(
@@ -140,7 +137,7 @@ def build_agent_manifest(
     )
     # Round-trip through a JSON-safe dump so the returned object is guaranteed
     # to be a fully validated manifest (and safe to serialize over the API).
-    return AgentManifest.model_validate(manifest.model_dump(mode="json"))
+    return revalidate(manifest)
 
 
 def skill_tags_from_manifest(manifest: AgentManifest) -> list[str]:
