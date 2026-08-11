@@ -37,6 +37,9 @@ from software_engineering_team.devops_team.orchestrator import (
     ENV_POLICY,
     criterion_traces_from_phase4,
 )
+from software_engineering_team.devops_team.phases.quality_gate import (
+    _describe_task_with_exclusions,
+)
 from software_engineering_team.devops_team.task_clarifier import (
     DevOpsTaskClarifierAgent,
     DevOpsTaskClarifierInput,
@@ -884,6 +887,20 @@ class TestCICDPipelineAgent:
         assert "source map" in lowered
         assert "frontend.yml" in lowered
 
+    def test_build_context_surfaces_scope_exclusions(self) -> None:
+        """This agent never reads task_spec.scope directly (only
+        InfrastructureAsCodeAgent does), so an explicit exclusion must reach it
+        through the prompt context instead, or a generated pipeline could
+        violate it with the agent never having been told about it."""
+        from software_engineering_team.devops_team.cicd_pipeline_agent import (
+            CICDPipelineAgent,
+            CICDPipelineAgentInput,
+        )
+
+        agent = CICDPipelineAgent(_StubClient({}))
+        context = agent.build_context(CICDPipelineAgentInput(task_spec=_base_task_spec()))
+        assert "cluster provisioning" in context
+
 
 class TestDeploymentStrategyAgent:
     def test_run_returns_strategy(self) -> None:
@@ -974,6 +991,21 @@ class TestDeploymentStrategyAgent:
             {"alerting_configured": "TRUE"},
         )
         assert out.alerting_configured is True
+
+    def test_build_context_surfaces_scope_exclusions(self) -> None:
+        """This agent never reads task_spec.scope directly (only
+        InfrastructureAsCodeAgent does) and doesn't even read title, so an
+        explicit exclusion must reach it through the prompt context instead,
+        or a chosen rollout strategy could violate it with the agent never
+        having been told about it."""
+        from software_engineering_team.devops_team.deployment_strategy_agent import (
+            DeploymentStrategyAgent,
+            DeploymentStrategyAgentInput,
+        )
+
+        agent = DeploymentStrategyAgent(_StubClient({}))
+        context = agent.build_context(DeploymentStrategyAgentInput(task_spec=_base_task_spec()))
+        assert "cluster provisioning" in context
 
 
 class TestDevSecOpsReviewAgent:
@@ -1442,6 +1474,45 @@ class TestDevOpsTeamLeadAgentModelRouting:
 
 
 # ===========================================================================
+# UNIT TESTS -- PHASE 4 REVIEW-INPUT SCOPE EXCLUSIONS
+# ===========================================================================
+
+
+class TestDescribeTaskWithExclusions:
+    """Unit tests for the Phase 4 devsecops/change-review exclusion propagation.
+
+    Neither DevSecOpsReviewInput.requirements (task_spec.goal.summary) nor
+    ChangeReviewInput.task_description (task_spec.title) otherwise carries
+    task_spec.scope.excluded, so an explicit exclusion could be violated by
+    generated artifacts with neither reviewer ever having been told about it.
+    """
+
+    def test_appends_exclusions_when_present(self) -> None:
+        spec = _base_task_spec(
+            scope={"included": ["build"], "excluded": ["legacy Jenkins pipeline"]}
+        )
+        result = _describe_task_with_exclusions(spec, "base text")
+        assert "base text" in result
+        assert "legacy Jenkins pipeline" in result
+
+    def test_returns_base_unchanged_when_no_exclusions(self) -> None:
+        spec = _base_task_spec(scope={"included": ["build"], "excluded": []})
+        result = _describe_task_with_exclusions(spec, "base text")
+        assert result == "base text"
+
+    def test_joins_multiple_exclusions(self) -> None:
+        spec = _base_task_spec(
+            scope={
+                "included": ["build"],
+                "excluded": ["legacy Jenkins pipeline", "blue-green rollout"],
+            }
+        )
+        result = _describe_task_with_exclusions(spec, "base text")
+        assert "legacy Jenkins pipeline" in result
+        assert "blue-green rollout" in result
+
+
+# ===========================================================================
 # INTEGRATION TESTS -- ORCHESTRATOR
 # ===========================================================================
 
@@ -1822,6 +1893,250 @@ class TestDevOpsTeamLeadAgentIntegration:
             )
         assert not result.success
         assert "feature branch" in (result.failure_reason or "")
+
+
+# ===========================================================================
+# STRUCTURED, WRITE-CAPABLE ENTRY POINT -- run_task
+# ===========================================================================
+
+
+class TestRunTaskStructuredEntrypoint:
+    """``run_task`` is the structured, write-capable entry point the
+    coding-team's devops worker adapter uses."""
+
+    def test_run_task_accepts_structured_spec_and_merges(self) -> None:
+        """Default ``merge_to_development=True`` cuts a feature branch,
+        merges it into development, and deletes it."""
+        mock_llm = _scripted_llm_for_happy_path()
+        agent = DevOpsTeamLeadAgent(mock_llm)
+        spec = _base_task_spec(task_id="devops-run-task-merge")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp)
+            init_ok, _ = initialize_new_repo(path)
+            assert init_ok
+            result = agent.run_task(
+                spec, repo_path=path, build_verifier=MagicMock(return_value=(True, ""))
+            )
+            branches = subprocess.run(
+                ["git", "branch"], cwd=path, capture_output=True, text=True, check=True
+            ).stdout
+            rev = subprocess.run(
+                ["git", "rev-parse", "development"],
+                cwd=path,
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            dev_head = rev.stdout.strip()
+        assert result.success
+        assert result.completion_package is not None
+        assert result.completion_package.status == "completed"
+        gitops = result.completion_package.git_operations
+        assert gitops.branch_created.startswith("feature/")
+        assert gitops.merge is not None
+        assert gitops.merge.status == "merged"
+        assert gitops.merge.merge_commit_hash == dev_head
+        assert "feature/" not in branches
+
+    def test_run_task_handoff_mode_leaves_branch_unmerged(self) -> None:
+        """``merge_to_development=False`` commits the feature branch and
+        leaves it in place — the mode the coding-team worker uses — instead
+        of merging/deleting it."""
+        mock_llm = _scripted_llm_for_happy_path()
+        agent = DevOpsTeamLeadAgent(mock_llm)
+        spec = _base_task_spec(task_id="devops-run-task-handoff")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp)
+            init_ok, _ = initialize_new_repo(path)
+            assert init_ok
+            rev_before = subprocess.run(
+                ["git", "rev-parse", "development"],
+                cwd=path,
+                capture_output=True,
+                text=True,
+                check=True,
+            ).stdout.strip()
+            result = agent.run_task(spec, repo_path=path, merge_to_development=False)
+            branches = subprocess.run(
+                ["git", "branch"], cwd=path, capture_output=True, text=True, check=True
+            ).stdout
+            rev_after = subprocess.run(
+                ["git", "rev-parse", "development"],
+                cwd=path,
+                capture_output=True,
+                text=True,
+                check=True,
+            ).stdout.strip()
+        assert result.success
+        assert result.completion_package is not None
+        assert result.completion_package.status == "completed"
+        gitops = result.completion_package.git_operations
+        assert gitops.branch_created.startswith("feature/")
+        assert gitops.merge is None
+        assert len(result.completion_package.files_changed) > 0
+        # The branch is still there, and development never advanced.
+        assert gitops.branch_created in branches
+        assert rev_after == rev_before
+
+    def test_run_task_handoff_branch_matches_make_branch_suffix(self) -> None:
+        """The branch name the pipeline actually cuts must match what a
+        caller (the coding-team devops worker) independently computes via
+        ``make_branch_suffix`` — otherwise the Tech Lead review diffs the
+        wrong branch."""
+        from shared.git.branch_utils import make_branch_suffix
+
+        mock_llm = _scripted_llm_for_happy_path()
+        agent = DevOpsTeamLeadAgent(mock_llm)
+        spec = _base_task_spec(task_id="devops-branch-name", title="Add deploy workflow")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp)
+            init_ok, _ = initialize_new_repo(path)
+            assert init_ok
+            result = agent.run_task(spec, repo_path=path, merge_to_development=False)
+        expected = f"feature/{make_branch_suffix(spec.task_id, spec.title)}"
+        assert result.completion_package.git_operations.branch_created == expected
+
+    def test_run_task_reports_delivery_failure_in_handoff_mode(self, monkeypatch) -> None:
+        """A commit failure in handoff mode still reports a blocked package
+        with ``merge=None`` (no merge was even attempted)."""
+        import software_engineering_team.devops_team.orchestrator as orch
+
+        monkeypatch.setattr(orch, "commit_working_tree", lambda *a, **k: (False, "boom"))
+        mock_llm = _scripted_llm_for_happy_path()
+        agent = DevOpsTeamLeadAgent(mock_llm)
+        spec = _base_task_spec(task_id="devops-handoff-fail")
+        with tempfile.TemporaryDirectory() as tmp:
+            init_ok, _ = initialize_new_repo(Path(tmp))
+            assert init_ok
+            result = agent.run_task(spec, repo_path=Path(tmp), merge_to_development=False)
+        assert not result.success
+        assert result.completion_package is not None
+        assert result.completion_package.status == "blocked"
+        assert result.completion_package.git_operations.merge is None
+
+    def test_run_task_rejects_missing_repo_path(self) -> None:
+        mock_llm = _scripted_llm_for_happy_path()
+        agent = DevOpsTeamLeadAgent(mock_llm)
+        spec = _base_task_spec(task_id="devops-missing-repo")
+        with pytest.raises(AssertionError):
+            agent.run_task(spec, repo_path=Path("/nonexistent/does/not/exist"))
+
+    def test_run_task_requires_task_spec(self) -> None:
+        mock_llm = _scripted_llm_for_happy_path()
+        agent = DevOpsTeamLeadAgent(mock_llm)
+        with tempfile.TemporaryDirectory() as tmp:
+            with pytest.raises(AssertionError):
+                agent.run_task(None, repo_path=Path(tmp))
+
+    def test_run_task_cleans_untracked_validation_leftovers_before_delivering(
+        self, monkeypatch
+    ) -> None:
+        """A Phase 4/4.5 validation tool (e.g. `terraform init` leaving
+        `.terraform.lock.hcl`) can leave untracked files in the working tree
+        AFTER Phase 3 has already written+committed the generated artifacts.
+        deliver_inline_merge/prepare_handoff_branch both commit via `git add
+        -A`, which would otherwise sweep those files into the delivered
+        commit even though they were never part of the generated artifact
+        map. Simulate that leftover as a Phase 4 validation-tool side effect
+        (planting it before Phase 3 runs would just get it committed by
+        Phase 3's own git-add-A, which doesn't exercise this fix) and prove
+        it never reaches the delivered branch."""
+        import software_engineering_team.devops_team.tool_dispatch as tool_dispatch_mod
+
+        real_run_validation_tools = tool_dispatch_mod.run_validation_tools
+
+        def _run_validation_tools_with_leftover(agent, repo_path):
+            (Path(repo_path) / "untracked.leftover").write_text(
+                "validation tool side effect", encoding="utf-8"
+            )
+            return real_run_validation_tools(agent, repo_path)
+
+        monkeypatch.setattr(
+            tool_dispatch_mod, "run_validation_tools", _run_validation_tools_with_leftover
+        )
+        mock_llm = _scripted_llm_for_happy_path()
+        agent = DevOpsTeamLeadAgent(mock_llm)
+        spec = _base_task_spec(task_id="devops-clean-untracked")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp)
+            init_ok, _ = initialize_new_repo(path)
+            assert init_ok
+
+            result = agent.run_task(spec, repo_path=path, merge_to_development=False)
+
+            assert not (path / "untracked.leftover").exists()
+        assert result.success
+        assert "untracked.leftover" not in result.completion_package.files_changed
+
+    def test_run_task_blocks_delivery_when_untracked_cleanup_fails(self, monkeypatch) -> None:
+        """If the pre-delivery reset_hard_to(repo_path, "HEAD") itself fails (e.g. a
+        permissions error), delivery must block rather than merely warn and proceed:
+        continuing into deliver_inline_merge/prepare_handoff_branch would let exactly
+        the leftover this reset exists to catch slip into the commit via git add -A
+        unreviewed."""
+        import software_engineering_team.devops_team.phases.deliver_merge as deliver_merge_mod
+
+        monkeypatch.setattr(
+            deliver_merge_mod,
+            "reset_hard_to",
+            lambda repo_path, ref: (False, "permission denied"),
+        )
+        mock_llm = _scripted_llm_for_happy_path()
+        agent = DevOpsTeamLeadAgent(mock_llm)
+        spec = _base_task_spec(task_id="devops-cleanup-fail")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp)
+            init_ok, _ = initialize_new_repo(path)
+            assert init_ok
+            result = agent.run_task(spec, repo_path=path, merge_to_development=False)
+
+        assert not result.success
+        assert result.completion_package is not None
+        assert result.completion_package.status == "blocked"
+        assert "reset" in (result.failure_reason or "").lower()
+
+    def test_run_task_reverts_tracked_validation_side_effects_before_delivering(
+        self, monkeypatch
+    ) -> None:
+        """A validator can MODIFY an already-tracked file (e.g. terraform init
+        updating a committed .terraform.lock.hcl after provider constraints change)
+        -- git clean alone would not touch that, only reset_hard_to would. Simulate
+        that as a Phase 4 validation-tool side effect and confirm the modification
+        never reaches the delivered branch."""
+        import software_engineering_team.devops_team.tool_dispatch as tool_dispatch_mod
+
+        real_run_validation_tools = tool_dispatch_mod.run_validation_tools
+
+        def _run_validation_tools_with_tracked_mutation(agent, repo_path):
+            tracked = Path(repo_path) / "tracked.lock"
+            if tracked.exists():
+                tracked.write_text("mutated by a validation tool", encoding="utf-8")
+            return real_run_validation_tools(agent, repo_path)
+
+        monkeypatch.setattr(
+            tool_dispatch_mod, "run_validation_tools", _run_validation_tools_with_tracked_mutation
+        )
+        mock_llm = _scripted_llm_for_happy_path()
+        agent = DevOpsTeamLeadAgent(mock_llm)
+        spec = _base_task_spec(task_id="devops-revert-tracked")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp)
+            init_ok, _ = initialize_new_repo(path)
+            assert init_ok
+            (path / "tracked.lock").write_text("committed content", encoding="utf-8")
+            subprocess.run(["git", "add", "-A"], cwd=path, capture_output=True, check=True)
+            subprocess.run(
+                ["git", "commit", "-m", "seed tracked.lock"],
+                cwd=path,
+                capture_output=True,
+                check=True,
+            )
+
+            result = agent.run_task(spec, repo_path=path, merge_to_development=False)
+
+            assert (path / "tracked.lock").read_text(encoding="utf-8") == "committed content"
+        assert result.success
+        assert "tracked.lock" not in result.completion_package.files_changed
 
 
 # ===========================================================================
