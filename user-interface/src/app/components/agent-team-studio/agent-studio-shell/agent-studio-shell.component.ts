@@ -87,6 +87,25 @@ export class AgentStudioShellComponent {
   });
 
   /**
+   * What's missing for the disabled Build forward step ("Test this agent →"),
+   * shown as the button's tooltip (spec §3, Stage 1: "disabled ... with a
+   * tooltip listing what's missing", same pattern as Compose). `draftAgentId`
+   * distinguishes "nothing cloned yet" from "cloned but not saved";
+   * `registryAgentId` is the final "saved" gate. `null` once satisfied.
+   */
+  readonly buildForwardDisabledReason = computed(() => {
+    if (this.activeStageDef().key !== 'build') return null;
+    if (!this.state.draftAgentId()) return 'Select or clone an agent to begin';
+    if (!this.state.registryAgentId()) return 'Save the agent to continue';
+    return null;
+  });
+
+  /** The active stage's forward-disabled tooltip text, whichever stage it is. */
+  readonly forwardDisabledReason = computed(
+    () => this.composeForwardDisabledReason() ?? this.buildForwardDisabledReason(),
+  );
+
+  /**
    * Temporary scaffold control: advance to the next stage. Real stages will
    * each own their forward gate (Build's and Stage 2's is `forwardDisabled`).
    */

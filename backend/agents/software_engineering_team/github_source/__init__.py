@@ -3,7 +3,7 @@ GitHub source integrations for the coding team.
 
 Includes issue selection for issue-driven runs, PR review comment mapping,
 existing-comment handling, issue-proposal generation, LLM Fibonacci-scoring
-prompt/schema contract, and repository reading.
+prompt/schema contract and scorer, and repository reading.
 """
 
 from .client import (
@@ -43,6 +43,7 @@ from .issue_grooming_split import (
     extract_checklist_items,
     should_split,
 )
+from .issue_llm_scorer import score_issue_via_llm
 from .issue_proposals import (
     annotate_duplicate_proposals,
     build_issue_from_proposal,
@@ -123,6 +124,7 @@ __all__ = [
     "proposal_from_findings",
     "render_annotated_hunks",
     "score_issue",
+    "score_issue_via_llm",
     "scrub_token_from_text",
     "should_split",
     "split_review_comments",
