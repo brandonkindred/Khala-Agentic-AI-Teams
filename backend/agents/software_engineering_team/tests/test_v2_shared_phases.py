@@ -1031,11 +1031,11 @@ _EXPECTED_PROMPT_DIGESTS = {
     (
         "backend",
         "EXECUTION_PROMPT",
-    ): "3d8e69ceda009a143a2af73a0ebbe9e44247d222a7bacf88553d558a2837d062",
+    ): "09aee4531ca79f0c99088cdd14cf4c799fe8eb29aa50d64c7c5ff3ae2f54e4b1",
     (
         "backend",
         "PROBLEM_SOLVING_SINGLE_ISSUE_PROMPT",
-    ): "be85517553575e102470ad987d8d18a19aa8e28e546a8ee1fe5877b85b1070ed",
+    ): "c9ace258417f3dd641023de0cd1e230da3b3aaebd1026822c03d7294b2dc95a2",
     (
         "frontend",
         "PLANNING_PROMPT",
