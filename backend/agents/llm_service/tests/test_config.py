@@ -292,6 +292,8 @@ def test_agent_pin_only_replaces_the_none_default(clean_thinking_env) -> None:
         ("0", False),
         ("no", False),
         ("No", False),
+        ("off", False),
+        ("OFF", False),
     ],
 )
 def test_env_flag_enabled(

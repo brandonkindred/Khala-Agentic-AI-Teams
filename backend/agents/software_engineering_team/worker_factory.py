@@ -55,6 +55,41 @@ def _v2_text_mode_llm(llm: Any) -> Any:
     return llm
 
 
+def _devops_raw_llm_client(llm: Any) -> Any:
+    """Unwrap a Strands-wrapped LLM handle back to the raw ``LLMClient`` DevOps needs.
+
+    Most ``devops_team`` specialist agents resolve whatever they're given through
+    ``resolve_strands_model`` and call it via a Strands ``Agent`` — they accept a
+    pre-built Strands model natively, like the v2 teams. Two specialists
+    (``DevSecOpsReviewAgent``, ``ChangeReviewAgent``) instead call
+    ``client.complete_json(...)`` directly, which only exists on a raw ``LLMClient``;
+    handing them the production ``llm_getter``'s ``LLMClientModel`` (no such method)
+    raises ``AttributeError`` deep in that call path, which those agents' broad
+    ``except Exception`` catches and turns into a silent gate failure (or, for
+    ``ChangeReviewAgent``, a silent fail-open) instead of ever surfacing the error.
+    Unwrapping once here, before ``DevOpsTeamLeadAgent`` construction, is simpler
+    and lower-risk than fixing each call site.
+
+    Preconditions: none — ``llm`` may be ``None``, a raw ``LLMClient``, or an
+        opaque wrapper.
+    Postconditions:
+        - A raw ``LLMClient`` (or ``None``) passes through unchanged.
+        - A wrapper exposing a public ``client`` accessor (e.g. ``LLMClientModel``)
+          or the private ``_client`` attribute it's currently stored under returns
+          that underlying client.
+        - Any other opaque handle (no ``client``/``_client``, not an ``LLMClient``)
+          passes through unchanged rather than raising — DevOps agents still assert
+          non-``None`` at their own boundary, so a genuinely unresolvable handle
+          fails there with a clear message instead of silently here.
+    """
+    from llm_service import LLMClient
+
+    if llm is None or isinstance(llm, LLMClient):
+        return llm
+    underlying = getattr(llm, "client", None) or getattr(llm, "_client", None)
+    return underlying if underlying is not None else llm
+
+
 def _build_implementation_worker(
     agent_id: str,
     spec: StackSpec,
@@ -70,20 +105,42 @@ def _build_implementation_worker(
     ``V2TeamWorker``.
 
     Preconditions:
-        - ``engine_provider`` is a live ``CodeEngineProvider``.
+        - For a frontend_v2/backend_v2 stack, ``engine_provider`` is a live
+          ``CodeEngineProvider``. For a devops stack, ``engine_provider`` is
+          ignored and may be ``None`` (``DevOpsTeamLeadAgent`` is constructed
+          directly; see below).
         - ``review_context`` bundles the plan's system architecture and project
           specification, when available; ``None`` means "nothing to add" so a
           caller without this context yet is unaffected.
 
-    Postconditions: returns a ``V2TeamWorker`` whose ``team_lead`` came from the
-    provider. Raises ``ValueError`` for an unsupported stack and ``RuntimeError``
-    when no provider was injected.
+    Postconditions: returns a ``V2TeamWorker`` (frontend/backend, ``team_lead`` from
+    the provider) or a ``DevOpsTeamWorker`` (devops, ``team_lead`` constructed
+    directly since ``CodeEngineProvider`` only covers frontend/backend). Raises
+    ``ValueError`` for an unsupported stack and ``RuntimeError`` when no provider
+    was injected for a frontend/backend stack.
     """
     kind = _v2_team_kind_for_stack(spec)
     if not kind:
         raise ValueError(
             f"Unsupported coding-team stack {spec.name!r}. "
-            "Only frontend_v2 and backend_v2 implementation teams are available."
+            "Only frontend_v2, backend_v2, and devops implementation teams are available."
+        )
+    if kind == "devops":
+        # DevOpsTeamLeadAgent isn't behind the CodeEngineProvider protocol (that
+        # protocol only covers frontend/backend v2 teams), so it's constructed
+        # directly here rather than via engine_provider.build_implementation_team_lead.
+        # Not wrapped in _v2_text_mode_llm: that forces text-mode parsing for the v2
+        # teams' template parsers, but devops agents want JSON mode
+        # (complete_json_with_continuation). Unwrapped to a raw LLMClient via
+        # _devops_raw_llm_client: see that function's docstring for why two of
+        # DevOps's specialist agents need a raw client rather than a Strands model.
+        from software_engineering_team.devops_team import DevOpsTeamLeadAgent
+        from software_engineering_team.devops_team_worker import DevOpsTeamWorker
+
+        return DevOpsTeamWorker(
+            agent_id=agent_id,
+            stack_spec=spec,
+            team_lead=DevOpsTeamLeadAgent(_devops_raw_llm_client(llm_getter(kind))),
         )
     if engine_provider is None:
         raise RuntimeError(
