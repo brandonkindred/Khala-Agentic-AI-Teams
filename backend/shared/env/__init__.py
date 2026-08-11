@@ -26,7 +26,7 @@ from typing import Optional
 
 __all__ = ["env_flag_enabled", "env_flag_opt_in", "parse_float", "parse_int"]
 
-_FALSY = frozenset({"false", "0", "no"})
+_FALSY = frozenset({"false", "0", "no", "off"})
 _TRUTHY = frozenset({"true", "1", "yes", "on"})
 
 
@@ -36,8 +36,8 @@ def env_flag_enabled(env_name: str) -> bool:
     Preconditions: ``env_name`` is a non-empty environment-variable name
         (enforced with an explicit ``ValueError`` so the check survives ``-O``).
     Postconditions: returns ``False`` only for an explicit ``"false"`` / ``"0"`` /
-        ``"no"`` (case-insensitive, whitespace-tolerant); an unset, blank, or any
-        other value means enabled. Never raises on the env value.
+        ``"no"`` / ``"off"`` (case-insensitive, whitespace-tolerant); an unset,
+        blank, or any other value means enabled. Never raises on the env value.
     """
     if not env_name:
         raise ValueError("env_name must be non-empty")

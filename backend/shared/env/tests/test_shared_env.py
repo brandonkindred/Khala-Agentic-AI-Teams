@@ -16,7 +16,7 @@ def test_flag_default_on_when_unset(monkeypatch):
     assert env_flag_enabled("FLAG_X") is True
 
 
-@pytest.mark.parametrize("value", ["false", "FALSE", "0", "no", " No "])
+@pytest.mark.parametrize("value", ["false", "FALSE", "0", "no", " No ", "off", "OFF"])
 def test_flag_off_for_explicit_falsy(monkeypatch, value):
     monkeypatch.setenv("FLAG_X", value)
     assert env_flag_enabled("FLAG_X") is False
