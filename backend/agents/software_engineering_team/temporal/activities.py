@@ -16,6 +16,7 @@ from temporalio import activity
 
 from shared.concurrency import BackgroundHeartbeat
 from shared.observability import bind_trace_id, current_trace_id, new_trace_id
+from shared.temporal.activity_utils import is_last_attempt
 from software_engineering_team.shared.job_store import (
     JOB_STATUS_FAILED,
     JOB_STATUS_RUNNING,
@@ -162,14 +163,18 @@ def run_frontend_code_v2_activity(
     """Execute frontend-code-v2 workflow.
 
     Postconditions:
-        On failure the job is marked FAILED and the exception is re-raised so
-        Temporal can retry (per the workflow retry policy) and fail the workflow.
+        On the final Temporal attempt, the job is marked FAILED; on a non-final
+        attempt the FAILED write is skipped so a retry that later succeeds never
+        leaves a transient FAILED status behind. The exception is always
+        re-raised so Temporal can retry (per the workflow retry policy) and fail
+        the workflow once attempts are exhausted.
     """
     try:
         _run_frontend_code_v2_impl(job_id, repo_path, task_dict, architecture_overview)
     except Exception as e:
         logger.exception("Frontend-code-v2 activity failed", extra={"trace_id": current_trace_id()})
-        update_job(job_id, error=str(e), status=JOB_STATUS_FAILED)
+        if is_last_attempt():
+            update_job(job_id, error=str(e), status=JOB_STATUS_FAILED)
         raise
 
 
@@ -206,14 +211,18 @@ def run_backend_code_v2_activity(
     """Execute backend-code-v2 workflow.
 
     Postconditions:
-        On failure the job is marked FAILED and the exception is re-raised so
-        Temporal can retry (per the workflow retry policy) and fail the workflow.
+        On the final Temporal attempt, the job is marked FAILED; on a non-final
+        attempt the FAILED write is skipped so a retry that later succeeds never
+        leaves a transient FAILED status behind. The exception is always
+        re-raised so Temporal can retry (per the workflow retry policy) and fail
+        the workflow once attempts are exhausted.
     """
     try:
         _run_backend_code_v2_impl(job_id, repo_path, task_dict, architecture_overview)
     except Exception as e:
         logger.exception("Backend-code-v2 activity failed", extra={"trace_id": current_trace_id()})
-        update_job(job_id, error=str(e), status=JOB_STATUS_FAILED)
+        if is_last_attempt():
+            update_job(job_id, error=str(e), status=JOB_STATUS_FAILED)
         raise
 
 
