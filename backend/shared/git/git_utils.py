@@ -334,6 +334,81 @@ def commit_working_tree(repo_path: str | Path, message: str) -> Tuple[bool, str]
     return True, "Committed"
 
 
+def clean_untracked_files(repo_path: str | Path) -> Tuple[bool, str]:
+    """Remove untracked, non-ignored files and directories (``git clean -fd``).
+
+    A caller-run tool (e.g. a validation dry-run that shells out to a
+    package/build tool, such as ``terraform init`` leaving ``.terraform.lock.hcl``
+    behind) can leave untracked files in the working tree. Those survive a
+    plain ``git reset --hard`` (which only touches tracked files) and later
+    get swept into an unrelated commit by a subsequent ``git add -A``. No
+    ``-x`` is passed, so gitignored paths (caches, build output) are left alone
+    -- only genuinely untracked-and-not-ignored files are removed.
+
+    Preconditions:
+        - ``repo_path`` is an existing git repository.
+    Postconditions:
+        - On success, no untracked, non-ignored files/directories remain in
+          the working tree; returns ``(True, message)``.
+        - On failure, returns ``(False, message)``. When the failure is "not a
+          repo", the working tree is untouched; when the ``git clean``
+          invocation itself fails partway through, some untracked files may
+          already have been removed before the error -- callers must not
+          assume the working tree is unchanged on that failure path.
+    """
+    path = Path(repo_path).resolve()
+    if not (path / ".git").exists():
+        return False, "Not a git repository"
+    code, out = _run_git(path, ["git", "clean", "-fd"])
+    if code != 0:
+        return False, f"Failed to clean untracked files: {out}"
+    return True, "Cleaned untracked files"
+
+
+def reset_hard_to(repo_path: str | Path, ref: str) -> Tuple[bool, str]:
+    """Hard-reset the CURRENTLY checked-out branch to ``ref``'s commit and clean the tree.
+
+    Unlike checking out ``ref`` directly, this works from inside a linked git
+    worktree even when ``ref`` (e.g. ``development``) is already attached in a
+    different worktree -- ``git reset --hard <ref>`` only reads ``ref``'s
+    commit, it never attaches it here.
+
+    Also removes untracked files via :func:`clean_untracked_files` -- see its
+    docstring for why that matters on top of the reset itself.
+
+    Preconditions:
+        - ``repo_path`` is an existing git repository; ``ref`` resolves to a
+          commit (a local branch name, tag, or SHA).
+    Postconditions:
+        - On success, the current branch's tip and working tree exactly match
+          ``ref``'s commit (any commits/changes unique to the current branch
+          are discarded) and any untracked, non-ignored files are removed;
+          returns ``(True, message)``.
+        - On failure (not a repo, ``ref`` does not resolve, or the post-reset
+          untracked-file clean fails) returns ``(False, message)``. When the
+          reset itself fails, the repository state is unchanged; when the
+          reset succeeds but the clean fails, the branch/commit state is
+          already correct but untracked leftovers may remain -- callers must
+          treat this as a failure, not a success with a side note, since a
+          caller that only clean-relies on this call (e.g. to guarantee no
+          validation-tool output survives) would otherwise silently commit
+          that leftover on its next ``git add -A``.
+    """
+    path = Path(repo_path).resolve()
+    if not (path / ".git").exists():
+        return False, "Not a git repository"
+    code, out = _run_git(path, ["git", "reset", "--hard", ref])
+    if code != 0:
+        return False, f"Failed to reset to {ref}: {out}"
+    clean_ok, clean_msg = clean_untracked_files(path)
+    if not clean_ok:
+        message = f"Reset to {ref} succeeded but cleaning untracked files failed: {clean_msg}"
+        logger.warning(message)
+        return False, message
+    logger.info("Reset current branch to '%s'", ref)
+    return True, f"Reset to {ref}"
+
+
 def get_head_sha(repo_path: str | Path) -> Tuple[bool, str]:
     """Return the full SHA of the current HEAD commit.
 

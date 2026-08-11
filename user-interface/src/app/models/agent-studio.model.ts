@@ -37,6 +37,28 @@ export const STUDIO_STAGES: readonly StudioStage[] = [
 ] as const;
 
 /**
+ * Stage 1's own forward-only sub-stepper (spec §3, Stage 1: "Build Agent is
+ * not a single screen — it is a three-step sub-stepper"). Index `i` is
+ * sub-step number `i + 1`; `AgentStudioStateService` tracks the active index
+ * and enforces the same forward-only rule as the main stepper.
+ */
+export type BuildSubStageKey = 'start' | 'define' | 'configure';
+
+export interface BuildSubStage {
+  /** Stable identity used by the state service and sub-stepper. */
+  key: BuildSubStageKey;
+  /** Display label shown in the sub-stepper. */
+  label: string;
+}
+
+/** The forward-only sub-stage order: 1.1 Start → 1.2 Define → 1.3 Configure. */
+export const BUILD_SUB_STAGES: readonly BuildSubStage[] = [
+  { key: 'start', label: 'Start' },
+  { key: 'define', label: 'Define' },
+  { key: 'configure', label: 'Configure' },
+] as const;
+
+/**
  * The three fixed operating "states of being" every authored agent is seeded
  * with. The key set is fixed; only a state's prompt is editable. Mirrors the
  * backend `AgentStateKey` literal.

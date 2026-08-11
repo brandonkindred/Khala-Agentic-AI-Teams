@@ -9,6 +9,90 @@
   gap: var(--kh-space-4);
   height: 100%;
 
+  // ── Stage-1 sub-stepper (1.1 Start → 1.2 Define → 1.3 Configure) ──────────
+  // Structurally mirrors the main shell's `.studio__stepper`, at a smaller scale.
+  &__substepper {
+    display: flex;
+    align-items: center;
+    gap: var(--kh-space-2);
+    flex-wrap: wrap;
+    padding: var(--kh-space-2) var(--kh-space-3);
+    background: var(--kh-surface-1);
+    border: 1px solid var(--kh-border-subtle);
+    border-radius: var(--kh-radius-full);
+    align-self: flex-start;
+  }
+
+  &__substep {
+    display: flex;
+    align-items: center;
+    gap: var(--kh-space-2);
+    padding: var(--kh-space-1) var(--kh-space-2);
+    border-radius: var(--kh-radius-full);
+    color: var(--kh-text-muted);
+
+    &.is-done {
+      color: var(--kh-text-secondary);
+    }
+
+    &.is-active {
+      background: var(--kh-accent-muted);
+      color: var(--kh-accent-text);
+    }
+  }
+
+  &__substep-num {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 18px;
+    height: 18px;
+    border-radius: var(--kh-radius-full);
+    background: var(--kh-surface-3);
+    color: var(--kh-text-secondary);
+    font-size: 0.6875rem;
+    font-weight: 700;
+
+    mat-icon {
+      width: 14px;
+      height: 14px;
+      font-size: 14px;
+    }
+
+    .is-active & {
+      background: var(--kh-accent);
+      color: #000;
+    }
+
+    .is-done & {
+      background: var(--kh-success);
+      color: #000;
+    }
+  }
+
+  &__substep-label {
+    font-size: 0.75rem;
+    font-weight: 600;
+  }
+
+  &__substep-conn {
+    flex: 0 0 14px;
+    height: 2px;
+    background: var(--kh-border);
+  }
+
+  &__substage-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: var(--kh-space-2);
+  }
+
+  &__continue-sub,
+  &__save-sub {
+    --mdc-filled-button-container-color: var(--kh-accent);
+    --mdc-filled-button-label-text-color: #000;
+  }
+
   // Top bar: selection state + the provisioning entry point.
   &__bar {
     display: flex;
@@ -84,4 +168,10 @@
     overflow: auto;
     padding: var(--kh-space-4) var(--kh-space-5);
   }
+}
+
+.error-text {
+  color: var(--kh-error);
+  font-size: var(--kh-text-sm);
+  margin: 0;
 }

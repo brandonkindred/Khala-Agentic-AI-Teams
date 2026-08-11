@@ -624,9 +624,16 @@ notes:
   - "OIDC used for GitHub Actions to AWS, no long-lived deploy keys"
 ```
 
-### Backward Compatibility
+### Entry Points
 
-`DevOpsTeamLeadAgent` exposes two structured entry points: `run(spec)` (skips orchestrator-managed artifact writes/branch commits, but Phase 4.5 validation/execution tools such as `terraform init` or `cdk synth` may still write under the working directory as side effects) and `run_task(spec, repo_path=...)` (writes artifacts to a real repo on a feature branch and merges them into `development`). Both take a `DevOpsTaskSpec` directly — the free-text `run_workflow(...)` adapter has been removed. No production caller currently invokes either — `DevOpsTeamLeadAgent` is registered in the SE orchestrator's agent registry but not yet wired into the Tech Lead handoff; DevOps/infrastructure work is routed to `backend_v2` today.
+`DevOpsTeamLeadAgent` exposes two structured entry points, both funneling through the same 5-phase pipeline; the free-text `run_workflow(...)`/`_build_legacy_spec` adapter has been removed:
+
+- **`run(spec: DevOpsTaskSpec) -> DevOpsCompletionPackage`** — model-only: runs the pipeline with `write_changes=False`, so it never commits or merges (Phase 4.5 validation tools like `terraform init`/`helm lint` may still write under the working directory as side effects).
+- **`run_task(spec: DevOpsTaskSpec, *, repo_path, merge_to_development=True, ...) -> DevOpsTeamResult`** — the structured, write-capable entry point: writes artifacts to a real repo on a feature branch. `merge_to_development=True` (the default) merges and deletes the branch; `merge_to_development=False` commits the branch and leaves it for external review instead — the mode the coding-team handoff below uses.
+
+### Coding-Team Handoff (`CODING_TEAM_DEVOPS_ROUTING`)
+
+Opt-in (default off; see `CODING_TEAM_DEVOPS_ROUTING` in `docs/ENV_VARS.md`). When enabled, a coding-team Task Graph task with `target_team="devops"` — genuinely infrastructure-only work: a CI/CD pipeline definition, IaC provisioning, or deployment/container-orchestration configuration — is dispatched to a `DevOpsTeamWorker` (`software_engineering_team/devops_team_worker.py`) instead of being aliased to `backend_v2`. The worker builds a `DevOpsTaskSpec` from the coding-team `Task`, calls `DevOpsTeamLeadAgent.run_task(spec, repo_path=..., merge_to_development=False)`, and returns the resulting feature branch for the normal Tech Lead code-review/merge step — the coding team's generic build/lint gate is skipped for these tasks since DevOps already runs its own internal gates (`DEVOPS_REQUIRED_GATE_NAMES`). With the flag off, `target_team="devops"`/`"dev_ops"`/`"infra"`/`"infrastructure"`/`"ci"`/`"ci_cd"`/`"cicd"` continue to alias to `backend_v2` as before.
 
 ### Expanded Team (Phase 2, not yet implemented)
 
