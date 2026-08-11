@@ -195,10 +195,13 @@ class AgentStudioConversationStore:
         applies immediately — so an exception after a partial write is caught and
         the pre-turn ``messages`` / ``definition`` are **fully restored** to the
         turn-start snapshot before re-raising, giving the same "rolls back, never
-        partially applied" guarantee. The restore closure keeps the *original*
-        pre-turn ``messages`` list and ``definition`` reference (captured when the
-        read callback runs) rather than reconstructing them from the kernel's
-        ``(role, content)`` tuple history, so rollback is lossless.
+        partially applied" guarantee. The restore closure captures a shallow copy
+        of the pre-turn ``messages`` list and the original ``definition`` object
+        reference (captured when the read callback runs) rather than
+        reconstructing them from the kernel's ``(role, content)`` tuple history —
+        a shallow list copy is enough because ``ConversationMessage`` is frozen
+        and messages are only ever appended, never mutated in place, so rollback
+        is lossless for this store's append-only usage.
 
         Preconditions:
             * ``conversation_id`` exists (raises :class:`LookupError` → 404 if not)

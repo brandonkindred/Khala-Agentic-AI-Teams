@@ -119,7 +119,7 @@ class AgentStudioService:
     def _handle_message(self, conversation_id: str, message: str) -> ConversationStateResponse:
         """Run one assistant turn: read state, call the LLM, persist user + reply.
 
-        The whole turn (read history+definition → LLM → append → set_definition)
+        The whole turn (read history+draft → LLM → append → set_draft)
         runs inside ``store.turn(...)``, which serializes it against a concurrent
         send on the *same* conversation — a per-conversation lock in-memory, or a
         ``SELECT … FOR UPDATE`` row lock with the durable store. A second concurrent
