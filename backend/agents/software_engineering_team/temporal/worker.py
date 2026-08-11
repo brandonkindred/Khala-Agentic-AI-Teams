@@ -18,7 +18,6 @@ from software_engineering_team.temporal.activities import (
     retry_failed_activity,
     run_backend_code_v2_activity,
     run_frontend_code_v2_activity,
-    run_orchestrator_activity,
     run_product_analysis_activity,
 )
 from software_engineering_team.temporal.constants import TASK_QUEUE
@@ -30,7 +29,6 @@ from software_engineering_team.temporal.workflows import (
 
 WORKFLOWS = [RunTeamWorkflowV2, RetryFailedWorkflow, StandaloneJobWorkflow]
 ACTIVITIES = [
-    run_orchestrator_activity,
     parse_spec_activity,
     plan_project_activity,
     execute_coding_team_activity,

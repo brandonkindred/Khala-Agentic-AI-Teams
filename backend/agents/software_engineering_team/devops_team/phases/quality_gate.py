@@ -34,6 +34,25 @@ from ..models import (
 logger = logging.getLogger(__name__)
 
 
+def _describe_task_with_exclusions(task_spec: DevOpsTaskSpec, base: str) -> str:
+    """Append ``task_spec.scope.excluded`` to ``base`` for the security/change-review inputs.
+
+    Neither ``DevSecOpsReviewInput.requirements`` (built from
+    ``task_spec.goal.summary``) nor ``ChangeReviewInput.task_description``
+    (built from ``task_spec.title``) otherwise carries ``scope.excluded``, so
+    an explicit exclusion (e.g. "do not touch the legacy Jenkins pipeline")
+    could be violated by generated artifacts with neither reviewer ever having
+    been told about it -- only ``InfrastructureAsCodeAgent.build_context``
+    reads ``scope`` directly.
+
+    Postconditions: returns ``base`` unchanged when ``scope.excluded`` is
+    empty; otherwise returns ``base`` with an "EXCLUDED:" line appended.
+    """
+    if not task_spec.scope.excluded:
+        return base
+    return f"{base}\n\nEXCLUDED: {'; '.join(task_spec.scope.excluded)}"
+
+
 @dataclass(frozen=True)
 class Phase4QualityGateResult:
     """Outcome of Phase 4 (tool validation, reviews, quality-gate assembly)."""
@@ -136,12 +155,15 @@ def run_phase4_quality_gate(
     devsec = agent.devsecops_review_agent.run(
         DevSecOpsReviewInput(
             task_description=task_spec.title,
-            requirements=task_spec.goal.summary,
+            requirements=_describe_task_with_exclusions(task_spec, task_spec.goal.summary),
             artifacts=aggregated_artifacts,
         )
     )
     change_review = agent.change_review_agent.run(
-        ChangeReviewInput(task_description=task_spec.title, artifacts=aggregated_artifacts)
+        ChangeReviewInput(
+            task_description=_describe_task_with_exclusions(task_spec, task_spec.title),
+            artifacts=aggregated_artifacts,
+        )
     )
 
     qa_val = agent.qa_agent.run(
