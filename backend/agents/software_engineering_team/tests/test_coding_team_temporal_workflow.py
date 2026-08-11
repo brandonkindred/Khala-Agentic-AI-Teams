@@ -35,13 +35,29 @@ def test_activities_export_includes_mark_job_cancelled() -> None:
     """``mark_coding_team_job_cancelled_activity`` must be registered on the
     coding-team worker (``issue_grooming_workflow.py`` schedules it directly,
     but relies on this module's ACTIVITIES export -- merged by
-    ``coding_team_worker.py`` -- for worker registration)."""
+    ``coding_team_worker.py`` -- for worker registration). Asserts the exact
+    ACTIVITIES list (not just membership) so a future reordering/removal of
+    any entry -- not only the new one -- fails this test."""
+    from software_engineering_team.temporal.coding_team_github_activities import (
+        github_branch_prep_activity,
+        github_failure_notice_activity,
+        github_publish_activity,
+    )
     from software_engineering_team.temporal.coding_team_workflow import (
         ACTIVITIES,
         mark_coding_team_job_cancelled_activity,
+        mark_coding_team_job_failed_activity,
+        run_pipeline_activity,
     )
 
-    assert mark_coding_team_job_cancelled_activity in ACTIVITIES
+    assert ACTIVITIES == [
+        run_pipeline_activity,
+        github_branch_prep_activity,
+        github_publish_activity,
+        github_failure_notice_activity,
+        mark_coding_team_job_failed_activity,
+        mark_coding_team_job_cancelled_activity,
+    ]
 
 
 def _patch_execute(monkeypatch: pytest.MonkeyPatch, results: list) -> tuple[list, list]:

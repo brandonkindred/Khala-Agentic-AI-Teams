@@ -191,7 +191,7 @@ def test_run_marks_job_failed_with_fallback_message_for_empty_str_exception(
     with pytest.raises(_EmptyStrError):
         asyncio.run(workflow_obj.run(dict(_VALID_REQUEST)))
 
-    assert calls[1][1]["error"] == "issue grooming run failed"
+    assert calls[1][1]["error"] == "_EmptyStrError: issue grooming run failed"
 
 
 def test_run_marks_job_cancelled_on_temporal_cancellation(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -181,7 +181,7 @@ class IssueGroomingWorkflow:
                     mark_coding_team_job_cancelled_activity, {"job_id": job_id}
                 )
             else:
-                message = str(exc) or "issue grooming run failed"
+                message = str(exc) or f"{type(exc).__name__}: issue grooming run failed"
                 await self._best_effort_terminalize(
                     mark_coding_team_job_failed_activity,
                     {"job_id": job_id, "error": message},
@@ -192,9 +192,10 @@ class IssueGroomingWorkflow:
         """Run a mark-failed/mark-cancelled activity, logging (not raising) on failure.
 
         Preconditions:
-            - Called only from the ``except`` branch of :meth:`run`, so the
-              caller always re-raises its own exception right after this
-              returns, regardless of outcome here.
+            - Intended to be called from the ``except`` branch of :meth:`run`;
+              callers are responsible for re-raising their original
+              exception, because this helper swallows all terminalize
+              failures and never raises one of its own to signal a problem.
         Postconditions:
             - Schedules ``activity_fn`` with ``args`` and
               ``_TERMINALIZE_ACTIVITY_TIMEOUT``; both ``Exception`` and
