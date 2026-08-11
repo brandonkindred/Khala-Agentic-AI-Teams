@@ -1,6 +1,9 @@
 import { Component, EventEmitter, Input, Output } from '@angular/core';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { NoopAnimationsModule } from '@angular/platform-browser/animations';
+import { of } from 'rxjs';
+import { vi } from 'vitest';
+import { AgentStudioApiService } from '../../../services/agent-studio-api.service';
 import { AgentCatalogComponent } from '../agent-console/agent-catalog/agent-catalog.component';
 import { AgentProvisioningDashboardComponent } from '../agent-provisioning-dashboard/agent-provisioning-dashboard.component';
 import { AgentRunnerComponent } from '../agent-console/agent-runner/agent-runner.component';
@@ -45,6 +48,15 @@ describe('AgentStudioShellComponent', () => {
   beforeEach(async () => {
     await TestBed.configureTestingModule({
       imports: [AgentStudioShellComponent, NoopAnimationsModule],
+      providers: [
+        // Build stage isn't stubbed at the shell level (only its catalog/provisioning
+        // children are), so it injects the real AgentStudioApiService — fake it here
+        // so no HTTP client is required; none of these shell tests exercise clone/save.
+        {
+          provide: AgentStudioApiService,
+          useValue: { cloneFromRegistry: vi.fn().mockReturnValue(of({})), saveAgent: vi.fn().mockReturnValue(of({})) },
+        },
+      ],
     })
       .overrideComponent(AgentStudioTestAgentComponent, {
         remove: { imports: [AgentRunnerComponent] },
@@ -216,5 +228,28 @@ describe('AgentStudioShellComponent', () => {
     button = fixture.nativeElement.querySelector('.studio__continue');
     expect(component.forwardDisabled()).toBe(false);
     expect(button.disabled).toBe(false);
+  });
+
+  it('surfaces what\'s missing for the disabled Build "Test this agent →" tooltip, step by step', () => {
+    expect(component.activeStageDef().key).toBe('build');
+    expect(component.buildForwardDisabledReason()).toBe('Select or clone an agent to begin');
+    expect(component.forwardDisabledReason()).toBe('Select or clone an agent to begin');
+
+    component.state.setDraftAgentId('draft-1');
+    fixture.detectChanges();
+    expect(component.buildForwardDisabledReason()).toBe('Save the agent to continue');
+    expect(component.forwardDisabledReason()).toBe('Save the agent to continue');
+
+    component.state.setRegistryAgentId('reg-1');
+    fixture.detectChanges();
+    expect(component.buildForwardDisabledReason()).toBeNull();
+    expect(component.forwardDisabledReason()).toBeNull();
+  });
+
+  it('buildForwardDisabledReason is null off the Build stage', () => {
+    component.state.navigateToStage(1);
+    fixture.detectChanges();
+    expect(component.activeStageDef().key).toBe('test');
+    expect(component.buildForwardDisabledReason()).toBeNull();
   });
 });

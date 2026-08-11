@@ -24,49 +24,8 @@ from software_engineering_team.shared.job_store import (
 
 logger = logging.getLogger(__name__)
 
-# Default long timeout for run_orchestrator (e.g. 48 hours)
-RUN_ORCHESTRATOR_SCHEDULE_TO_CLOSE_SECONDS = 48 * 3600
 RETRY_FAILED_SCHEDULE_TO_CLOSE_SECONDS = 24 * 3600
 STANDALONE_SCHEDULE_TO_CLOSE_SECONDS = 12 * 3600
-
-
-@activity.defn(name="run_orchestrator")
-def run_orchestrator_activity(
-    job_id: str,
-    repo_path: str,
-    spec_content_override: Optional[str] = None,
-    resolved_questions_override: Optional[List[Dict[str, Any]]] = None,
-    planning_only: bool = False,
-    trace_id: str = "",
-    sprint_id: Optional[str] = None,
-) -> None:
-    """Execute the main Tech Lead orchestrator (run_orchestrator).
-
-    Postconditions:
-        On failure the job is marked FAILED and the exception is re-raised so
-        Temporal can retry (per the workflow retry policy) and fail the workflow.
-        ``trace_id`` (workflow-supplied, or freshly generated when blank) is
-        forwarded to ``run_orchestrator``, which binds it for the whole 4-phase run.
-        ``sprint_id``, when set, is forwarded to ``run_orchestrator`` so it pulls
-        planned scope from that Product Delivery sprint instead of parsing a spec.
-    """
-    resolved_trace_id = trace_id or new_trace_id()
-    try:
-        from software_engineering_team.orchestrator import run_orchestrator
-
-        run_orchestrator(
-            job_id,
-            Path(repo_path),
-            spec_content_override=spec_content_override,
-            resolved_questions_override=resolved_questions_override,
-            planning_only=planning_only,
-            sprint_id=sprint_id,
-            trace_id=resolved_trace_id,
-        )
-    except Exception as e:
-        logger.exception("Orchestrator activity failed", extra={"trace_id": resolved_trace_id})
-        update_job(job_id, error=str(e), status=JOB_STATUS_FAILED)
-        raise
 
 
 @activity.defn(name="retry_failed")
