@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import sys
 from pathlib import Path
 from typing import Any, Callable, Optional
 from unittest.mock import AsyncMock, MagicMock
