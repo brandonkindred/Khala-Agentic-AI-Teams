@@ -262,6 +262,34 @@ class TestDeliverInlineMergeQualityGate:
         ]
         assert len(autofix_calls) == 1
 
+    def test_autofix_commit_failure_blocks_merge_and_restores_development(
+        self, tmp_path: Path
+    ) -> None:
+        """A genuine git failure while sweeping up the autofix commit (as opposed
+        to the common "nothing to commit" no-op, which ``commit_working_tree``
+        reports as success) must fail closed: skip the merge and restore
+        ``development``, mirroring the gate-failure branch above.
+        """
+        ops = _RecordingOps(commit_result=(False, "git commit failed: disk full"))
+
+        result = deliver_inline_merge(
+            task_id="t1",
+            repo_path=tmp_path,
+            deliver_files={"a.py": "x"},
+            summary="impl",
+            task_title="Title",
+            commit_msg_template="[{scope}] {summary}",
+            ops=ops.as_deliver_git_ops(),
+            logger=_logger(),
+        )
+
+        assert result.merged is False
+        assert result.summary == "Autofix commit failed: git commit failed: disk full"
+        assert "merge_branch" not in ops.names()
+        assert "commit_working_tree" in ops.names()
+        checkout_calls = [c for c in ops.calls if c[0] == "checkout_branch"]
+        assert checkout_calls[-1][1] == (tmp_path, DEVELOPMENT_BRANCH)
+
     def test_no_verifier_or_linter_preserves_pre_fix_merge_behavior(self, tmp_path: Path) -> None:
         ops = _RecordingOps()
 
