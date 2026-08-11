@@ -204,25 +204,33 @@ def update_review(
     _best_effort_write("update_review", _write)
 
 
-@timed_query(store=_STORE, op="append_review_transcript_entry")
-def append_review_transcript_entry(job_id: str, entry: dict[str, Any]) -> None:
-    """Append one LLM-call entry to a review's durable transcript (best-effort).
+@timed_query(store=_STORE, op="append_review_transcript_entries")
+def append_review_transcript_entries(job_id: str, entries: list[dict[str, Any]]) -> None:
+    """Append a batch of LLM-call entries to a review's durable transcript (best-effort).
+
+    Batched (not one call per entry) so the background transcript flusher
+    (``code_review_agent.transcript``, mirroring ``shared/trace_flusher.py``'s
+    off-hot-path pattern) can drain many buffered entries for one job in a
+    single Postgres round-trip instead of one write per LLM call.
 
     Preconditions:
-        - ``job_id`` is a review job's id; ``entry`` is a JSON-serializable dict
-          (stage/target/model/prompt/response/started_at/duration_ms — see
-          ``code_review_agent.transcript.record_transcript_entry``).
+        - ``job_id`` is a review job's id; ``entries`` is a non-empty list of
+          JSON-serializable dicts (stage/target/model/prompt/response/
+          started_at/duration_ms — see
+          ``code_review_agent.transcript.record_transcript_entry``), in the
+          order they should appear in the transcript.
     Postconditions:
-        - On success, ``entry`` is appended to the end of that job's
-          ``code_review_transcripts.entries`` array, creating the row (starting
-          from an empty array) on the first call for a given ``job_id``. Never
-          raises; no-op without Postgres. Concurrent callers for the same
-          ``job_id`` (the map phase reviews chunks in parallel) each append
-          exactly their own entry — the ``||`` (JSONB concatenation) read-modify-write
-          happens server-side in one statement, so no entry is lost to a
-          last-writer-wins race.
+        - On success, ``entries`` is appended (in order) to the end of that
+          job's ``code_review_transcripts.entries`` array, creating the row
+          (starting from an empty array) on the first call for a given
+          ``job_id``. Never raises; no-op without Postgres or for an empty
+          ``entries`` list. Concurrent callers for the same ``job_id`` (the
+          background flusher may drain from more than one process) each
+          append exactly their own batch — the ``||`` (JSONB concatenation)
+          read-modify-write happens server-side in one statement, so no entry
+          is lost to a last-writer-wins race.
     """
-    if not is_postgres_enabled():
+    if not entries or not is_postgres_enabled():
         return
 
     def _write() -> None:
@@ -232,10 +240,10 @@ def append_review_transcript_entry(job_id: str, entry: dict[str, Any]) -> None:
                        VALUES (%s, %s)
                    ON CONFLICT (job_id) DO UPDATE
                        SET entries = code_review_transcripts.entries || EXCLUDED.entries""",
-                (job_id, Json([entry])),
+                (job_id, Json(list(entries))),
             )
 
-    _best_effort_write("append_review_transcript_entry", _write)
+    _best_effort_write("append_review_transcript_entries", _write)
 
 
 @timed_query(store=_STORE, op="get_review_transcript")

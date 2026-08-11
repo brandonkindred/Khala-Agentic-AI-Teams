@@ -112,7 +112,7 @@ def get_reviews(
 
 
 @router.get("/reviews/{job_id}/transcript", response_model=TranscriptResponse)
-def get_review_transcript(
+def fetch_review_transcript(
     job_id: str,
     owner: Optional[str] = None,
     repo: Optional[str] = None,

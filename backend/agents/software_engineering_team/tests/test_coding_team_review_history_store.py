@@ -13,7 +13,7 @@ from shared.postgres import TeamSchema, is_postgres_enabled, register_team_schem
 from shared.postgres.testing import truncate_team_tables
 from software_engineering_team.postgres import SCHEMA as SE_SCHEMA
 from software_engineering_team.review_history_store import (
-    append_review_transcript_entry,
+    append_review_transcript_entries,
     get_review_transcript,
     list_reviews,
     record_review_start,
@@ -109,29 +109,33 @@ def test_record_start_is_idempotent_on_conflict() -> None:
 
 def test_transcript_entries_append_in_order() -> None:
     record_review_start("j1", "o", "r", 7, "u", "alice")
-    append_review_transcript_entry(
+    append_review_transcript_entries(
         "j1",
-        {
-            "stage": "chunk_review",
-            "target": "a.py",
-            "model": "m",
-            "prompt": "p1",
-            "response": "r1",
-            "started_at": "2024-01-01T00:00:00+00:00",
-            "duration_ms": 10,
-        },
+        [
+            {
+                "stage": "chunk_review",
+                "target": "a.py",
+                "model": "m",
+                "prompt": "p1",
+                "response": "r1",
+                "started_at": "2024-01-01T00:00:00+00:00",
+                "duration_ms": 10,
+            }
+        ],
     )
-    append_review_transcript_entry(
+    append_review_transcript_entries(
         "j1",
-        {
-            "stage": "synthesis",
-            "target": "",
-            "model": "m",
-            "prompt": "p2",
-            "response": "r2",
-            "started_at": "2024-01-01T00:00:01+00:00",
-            "duration_ms": 5,
-        },
+        [
+            {
+                "stage": "synthesis",
+                "target": "",
+                "model": "m",
+                "prompt": "p2",
+                "response": "r2",
+                "started_at": "2024-01-01T00:00:01+00:00",
+                "duration_ms": 5,
+            }
+        ],
     )
     entries = get_review_transcript("j1")
     assert [e["stage"] for e in entries] == ["chunk_review", "synthesis"]
@@ -139,9 +143,24 @@ def test_transcript_entries_append_in_order() -> None:
     assert entries[1]["response"] == "r2"
 
 
+def test_transcript_entries_batched_in_one_call_preserve_order() -> None:
+    """A single flush of several entries for one job appends them all, in order."""
+    record_review_start("j1", "o", "r", 7, "u", "alice")
+    append_review_transcript_entries(
+        "j1",
+        [
+            {"stage": "chunk_review", "target": "a.py", "prompt": "p1", "response": "r1"},
+            {"stage": "chunk_review", "target": "b.py", "prompt": "p2", "response": "r2"},
+            {"stage": "synthesis", "target": "", "prompt": "p3", "response": "r3"},
+        ],
+    )
+    entries = get_review_transcript("j1")
+    assert [e["target"] for e in entries] == ["a.py", "b.py", ""]
+
+
 def test_transcript_missing_returns_none() -> None:
     record_review_start("j1", "o", "r", 7, "u", "alice")
-    # No append_review_transcript_entry call: the row is never created.
+    # No append_review_transcript_entries call: the row is never created.
     assert get_review_transcript("j1") is None
 
 
@@ -149,5 +168,5 @@ def test_transcript_for_unknown_job_is_noop() -> None:
     # No FK row (record_review_start was never called for "ghost"): the FK
     # constraint on job_id must make this a no-op like every other best-effort
     # write, not raise.
-    append_review_transcript_entry("ghost", {"stage": "x"})
+    append_review_transcript_entries("ghost", [{"stage": "x"}])
     assert get_review_transcript("ghost") is None

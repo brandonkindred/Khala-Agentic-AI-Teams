@@ -19,7 +19,8 @@ import { reviewDuration, severityEntries } from '../review-metrics';
 /**
  * The expanded detail panel for a single pull request in the Code Review page:
  * the PR header, the Start Review action, a table of every review run on that PR
- * (status/outcome/findings/started/link), and the pending-issue-proposals list.
+ * (status, outcome, findings, severity, started time, duration, and transcript),
+ * and the pending-issue-proposals list.
  *
  * Presentational and stateless: the parent panel owns the PR list, the review
  * records, the live pollers, and every write (starting a review, filing issues).

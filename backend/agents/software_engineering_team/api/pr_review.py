@@ -813,6 +813,11 @@ def _run_reviewer(
           while ``hunk_files`` still merges when present.
         - ``repo_reader`` is None or a ``RepoReader`` handed to the false-positive
           verifier so it can confirm existing repository files outside the diff.
+        - ``job_id`` is a non-empty string identifying this review run (the
+          same id ``record_review_start`` persisted it under). Forwarded to
+          every reviewer attempt so the pipeline can bind the transcript
+          contextvar (``CodeReviewAgent.run`` -> ``llm_attribution(job_id=...)``)
+          and so job progress/outage recording stays keyed to the right job.
     Postconditions:
         - On success, returns the single attempt's output unchanged when only
           one ran (identical behavior/kwargs to a single-mode dispatch for

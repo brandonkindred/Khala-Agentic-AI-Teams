@@ -1784,6 +1784,13 @@ def _verify_group(
           position of the finding within ``issues`` (i.e. a valid index into
           the ``issues``/``group`` list the caller passed in), so callers may
           index back into their own list with it.
+        - On a successful call, buffers a ``false_positive_filter`` transcript
+          entry (target ``file_path``, the full prompt, the raw model reply)
+          for later batched, off-hot-path persistence to
+          ``code_review_transcripts`` — see
+          ``transcript.record_transcript_entry``. A no-op when no ``job_id``
+          is bound on the current ``llm_attribution`` context (see
+          ``CodeReviewAgent.run``); never raises and never blocks on I/O.
     """
     prompt = _build_group_prompt(index, file_path, issues, input_data)
     agent = Agent(

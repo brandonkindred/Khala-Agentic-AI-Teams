@@ -141,6 +141,12 @@ class CodeReviewAgent:
               When it is None and ``input_data.repo_root`` names a disk checkout,
               the in-process path rebuilds a ``DiskRepoReader`` from that path so
               a live reader and a serialized ``repo_root`` grant the same access.
+            - ``input_data.job_id`` is ``""`` (the default — no caller-tracked
+              job) or a review job id (e.g. a ``code_review_runs`` row's
+              ``job_id``); when non-blank, every LLM call the in-process
+              coordinator makes for this run is recorded into that job's
+              durable transcript (``code_review_transcripts`` — see
+              ``transcript.record_transcript_entry``).
 
         Postconditions:
             - Returns the coordinator's merged verdict covering every submitted
@@ -163,6 +169,16 @@ class CodeReviewAgent:
             - When this instance was constructed with ``force_in_process=True``,
               never starts a Temporal worker or child workflow; always uses the
               in-process coordinator.
+            - Transcript recording (see ``input_data.job_id`` above) only
+              happens on the in-process coordinator path: ``llm_attribution``
+              is a contextvar and does not cross the Temporal activity
+              boundary, so a Temporal-dispatched run (the default unless this
+              instance was constructed with ``force_in_process=True``) records
+              no transcript regardless of ``input_data.job_id``. The GitHub PR
+              review flow — the only caller with a ``code_review_runs``-backed
+              transcript UI — always supplies a live ``repo_reader`` and is
+              therefore always ``force_in_process=True`` in practice (see
+              ``coding_engine_provider.run_pr_code_review``).
 
         Raises:
             CodeReviewUnavailableError: when the review could not be completed —

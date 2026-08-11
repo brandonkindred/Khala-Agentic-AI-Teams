@@ -211,6 +211,13 @@ def _run_chunk_review(
           dedicated post-dedupe spec-compliance pass instead (see ADR-010).
           ``architecture_overview`` and ``existing_codebase_excerpt`` are
           always passed through verbatim regardless of the flag.
+        - On a successful call, buffers a ``chunk_review`` transcript entry
+          (target ``input_data.file_path_or_label``, the full prompt, the
+          model's JSON response) for later batched, off-hot-path persistence
+          to ``code_review_transcripts`` — see
+          ``transcript.record_transcript_entry``. A no-op when no
+          ``job_id`` is bound on the current ``llm_attribution`` context (see
+          ``CodeReviewAgent.run``); never raises and never blocks on I/O.
 
     Raises:
         LLMJsonParseError: the injected ``llm``'s ``complete_json`` could not
