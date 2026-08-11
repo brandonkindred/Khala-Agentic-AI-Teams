@@ -7,7 +7,7 @@ import { vi } from 'vitest';
 import { AgentStudioStateService } from '../../../services/agent-studio-state.service';
 import { AgentStudioApiService } from '../../../services/agent-studio-api.service';
 import { AgentCatalogComponent } from '../agent-console/agent-catalog/agent-catalog.component';
-import { AgentProvisioningDashboardComponent } from '../agent-provisioning-dashboard/agent-provisioning-dashboard.component';
+import { AgentProvisioningPanelComponent } from '../agent-provisioning-panel/agent-provisioning-panel.component';
 import { AgentStudioBuildAgentComponent } from './agent-studio-build-agent.component';
 import type { AgentDefinition } from '../../../models/agent-studio.model';
 
@@ -18,10 +18,11 @@ class StubAgentCatalogComponent {
   @Output() readonly requestRun = new EventEmitter<string>();
 }
 
-/** Stand-in for the provisioning dashboard (self-contained; polls + forms), so
- *  opening the slide-out doesn't start real polling/HTTP in tests. */
-@Component({ selector: 'app-agent-provisioning-dashboard', standalone: true, template: '' })
-class StubProvisioningDashboardComponent {}
+/** Stand-in for the provisioning panel (embeds team-assistant-chat + polls),
+ *  so opening the Stage-1 slide-out doesn't start real chat HTTP / job
+ *  polling in these shell-level tests. */
+@Component({ selector: 'app-agent-provisioning-panel', standalone: true, template: '' })
+class StubAgentProvisioningPanelComponent {}
 
 const definition = (overrides: Partial<AgentDefinition> = {}): AgentDefinition => ({
   name: 'blogging.planner.v2',
@@ -53,8 +54,8 @@ describe('AgentStudioBuildAgentComponent', () => {
       providers: [AgentStudioStateService, { provide: AgentStudioApiService, useValue: api }],
     })
       .overrideComponent(AgentStudioBuildAgentComponent, {
-        remove: { imports: [AgentCatalogComponent, AgentProvisioningDashboardComponent] },
-        add: { imports: [StubAgentCatalogComponent, StubProvisioningDashboardComponent] },
+        remove: { imports: [AgentCatalogComponent, AgentProvisioningPanelComponent] },
+        add: { imports: [StubAgentCatalogComponent, StubAgentProvisioningPanelComponent] },
       })
       .compileComponents();
 
@@ -143,19 +144,19 @@ describe('AgentStudioBuildAgentComponent', () => {
 
   it('keeps the provisioning slide-out closed until requested', () => {
     expect(component.provisionOpen()).toBe(false);
-    expect(fixture.nativeElement.querySelector('app-agent-provisioning-dashboard')).toBeNull();
+    expect(fixture.nativeElement.querySelector('app-agent-provisioning-panel')).toBeNull();
   });
 
   it('opens and closes the provisioning slide-out', () => {
     fixture.nativeElement.querySelector('.studio-build__provision-btn').click();
     fixture.detectChanges();
     expect(component.provisionOpen()).toBe(true);
-    expect(fixture.nativeElement.querySelector('app-agent-provisioning-dashboard')).toBeTruthy();
+    expect(fixture.nativeElement.querySelector('app-agent-provisioning-panel')).toBeTruthy();
 
     fixture.nativeElement.querySelector('.studio-build__provision-head button').click();
     fixture.detectChanges();
     expect(component.provisionOpen()).toBe(false);
-    expect(fixture.nativeElement.querySelector('app-agent-provisioning-dashboard')).toBeNull();
+    expect(fixture.nativeElement.querySelector('app-agent-provisioning-panel')).toBeNull();
   });
 
   it('closes the provisioning slide-out when the scrim is clicked', () => {
