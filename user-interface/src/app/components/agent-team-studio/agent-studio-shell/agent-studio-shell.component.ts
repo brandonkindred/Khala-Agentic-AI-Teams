@@ -139,7 +139,11 @@ export class AgentStudioShellComponent {
     };
     const ref = this.dialog.open<SaveDraftDialogComponent, SaveDraftDialogData, SaveDraftDialogResult>(
       SaveDraftDialogComponent,
-      { data, width: '420px' },
+      // Backdrop click / Escape must not bypass the dialog's busy-guarded
+      // cancel(): dismissing while a create/update request is in flight would
+      // leave the request to complete unobserved, so a later Save would POST
+      // a duplicate draft instead of updating the one that was actually created.
+      { data, width: '420px', disableClose: true },
     );
     ref.afterClosed().subscribe((result) => {
       if (!result) return;

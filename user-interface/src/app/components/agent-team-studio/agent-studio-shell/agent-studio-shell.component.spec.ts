@@ -134,6 +134,13 @@ describe('AgentStudioShellComponent', () => {
       expect(openSpy).toHaveBeenCalled();
     });
 
+    it('disables backdrop/Escape dismissal so an in-flight save cannot be bypassed', () => {
+      openSpy.mockReturnValue({ afterClosed: () => of(undefined) } as unknown as ReturnType<MatDialog['open']>);
+      component.openSaveDraftDialog();
+      const config = openSpy.mock.calls[0][1] as { disableClose?: boolean };
+      expect(config.disableClose).toBe(true);
+    });
+
     it('passes the current handoff state and no draftId as the dialog payload on first save', () => {
       component.state.setRegistryAgentId('reg-1');
       openSpy.mockReturnValue({ afterClosed: () => of(undefined) } as unknown as ReturnType<MatDialog['open']>);
