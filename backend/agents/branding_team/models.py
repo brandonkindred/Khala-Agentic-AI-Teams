@@ -733,6 +733,23 @@ class LogoUsageRule(BaseModel):
     clear_space: str = ""
 
 
+LogoUsageRuleOutput = _derive_strict_variant(
+    "LogoUsageRuleOutput",
+    LogoUsageRule,
+    doc=(
+        "Agent-facing logo usage rule; requires non-empty fields.\n\n"
+        "Field-for-field twin of ``LogoUsageRule`` with required content — "
+        "``LogoUsageRule`` itself must stay soft (all-default) since it also "
+        "backs ``VisualIdentityOutput.logo_suite``'s merge target. "
+    )
+    + _STRICT_TWIN_DOC_SUFFIX,
+    variant=(str, Field(min_length=1)),
+    usage_context=(str, Field(min_length=1)),
+    minimum_size=(str, Field(min_length=1)),
+    clear_space=(str, Field(min_length=1)),
+)
+
+
 class VoiceToneEntry(BaseModel):
     """Voice and tone spectrum entry."""
 
@@ -1217,15 +1234,6 @@ class CreativeRefinementDecisionOutput(BaseModel):
     rationale: str = Field(min_length=1)
     workshop_prompts: List[str] = Field(min_length=1)
     decision_criteria: List[str] = Field(min_length=1)
-
-
-class LogoUsageRuleOutput(BaseModel):
-    """Agent-facing logo usage rule; requires non-empty fields."""
-
-    variant: str = Field(min_length=1)
-    usage_context: str = Field(min_length=1)
-    minimum_size: str = Field(min_length=1)
-    clear_space: str = Field(min_length=1)
 
 
 class LogoSuiteOutput(BaseModel):

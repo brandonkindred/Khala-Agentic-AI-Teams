@@ -42,6 +42,8 @@ from branding_team.models import (
     DifferentiationPillarsOutput,
     ElevatorPitch,
     ElevatorPitchOutput,
+    LogoUsageRule,
+    LogoUsageRuleOutput,
     MessagingFrameworkOutput,
     MessagingPillar,
     MessagingPillarOutput,
@@ -808,3 +810,53 @@ def test_brand_experience_principles_output_rejects_blank_list_items() -> None:
         BrandExperiencePrinciplesOutput(
             **{**_EXPERIENCE_PRINCIPLES_KWARGS, "sensory_elements": ["", ""]}
         )
+
+
+def test_logo_usage_rule_permits_blank_and_omitted_content() -> None:
+    """``LogoUsageRule`` is the soft merge-target twin: all fields default
+    to empty, matching ``VisualIdentityOutput.logo_suite``'s partial-fragment
+    merge contract."""
+    minimal = LogoUsageRule()
+    assert minimal.variant == ""
+    assert minimal.usage_context == ""
+    assert minimal.minimum_size == ""
+    assert minimal.clear_space == ""
+
+    explicit_blank = LogoUsageRule(
+        variant="", usage_context="", minimum_size="", clear_space=""
+    )
+    assert explicit_blank.variant == ""
+
+
+def test_logo_usage_rule_output_rejects_blank_content() -> None:
+    """A blank variant, usage context, minimum size, or clear space must fail."""
+    valid_kwargs = dict(
+        variant="primary",
+        usage_context="Full-color lockup on light backgrounds",
+        minimum_size="24px",
+        clear_space="0.5x cap-height",
+    )
+
+    with pytest.raises(ValidationError):
+        LogoUsageRuleOutput(**{**valid_kwargs, "variant": ""})
+    with pytest.raises(ValidationError):
+        LogoUsageRuleOutput(**{**valid_kwargs, "usage_context": ""})
+    with pytest.raises(ValidationError):
+        LogoUsageRuleOutput(**{**valid_kwargs, "minimum_size": ""})
+    with pytest.raises(ValidationError):
+        LogoUsageRuleOutput(**{**valid_kwargs, "clear_space": ""})
+
+    output = LogoUsageRuleOutput(**valid_kwargs)
+    assert output.variant == "primary"
+
+
+def test_logo_usage_rule_output_is_usable_as_a_logo_usage_rule() -> None:
+    """The derived strict twin stays a normal, directly constructible
+    ``pydantic.BaseModel`` subclass wherever ``LogoUsageRule`` is."""
+    output = LogoUsageRuleOutput(
+        variant="primary",
+        usage_context="Full-color lockup on light backgrounds",
+        minimum_size="24px",
+        clear_space="0.5x cap-height",
+    )
+    assert isinstance(output, LogoUsageRule)
