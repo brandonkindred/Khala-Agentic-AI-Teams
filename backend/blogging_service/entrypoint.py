@@ -9,6 +9,30 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(na
 logger = logging.getLogger("blogging_service")
 
 
+def _register_usage_flusher() -> None:
+    """Register the process-local LLM usage observer before Temporal starts.
+
+    This entrypoint starts the Temporal worker before uvicorn runs the FastAPI
+    lifespan, so ``create_team_app``'s registration is too late for activities
+    that run in that window. ``atexit`` covers a crash before lifespan shutdown.
+    Idempotent with the team-app lifespan hook.
+
+    Postconditions:
+        - ``register_usage_flusher`` has been invoked and ``shutdown`` is
+          registered with ``atexit``, or a failure was logged. Never raises.
+    """
+    try:
+        import atexit
+
+        from llm_service.usage_flusher import register_usage_flusher
+        from llm_service.usage_flusher import shutdown as usage_flush_shutdown
+
+        register_usage_flusher()
+        atexit.register(usage_flush_shutdown)
+    except Exception:
+        logger.warning("llm usage flusher registration failed", exc_info=True)
+
+
 def _start_temporal_worker() -> None:
     """Start the blogging Temporal worker thread when TEMPORAL_ADDRESS is configured."""
     if not os.environ.get("TEMPORAL_ADDRESS", "").strip():
@@ -23,6 +47,7 @@ def _start_temporal_worker() -> None:
 
 
 if __name__ == "__main__":
+    _register_usage_flusher()
     _start_temporal_worker()
 
     # Import the app object so we can instrument it in-process before uvicorn

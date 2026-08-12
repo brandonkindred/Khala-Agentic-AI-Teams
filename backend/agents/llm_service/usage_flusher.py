@@ -12,7 +12,9 @@ observer, and does a final synchronous drain — all before the shared Postgres
 pool is closed. Registration is process-local: Unified API lifespan covers
 in-process routes; :func:`shared.app.create_team_app` and the team-service
 worker wrapper cover every team container (the wrapper registers before the
-Temporal worker starts so in-process activities are captured).
+Temporal worker starts so in-process activities are captured). The blogging
+service's custom entrypoint registers before ``_start_temporal_worker`` for
+the same reason.
 
 Unlike the SE-only :mod:`software_engineering_team.shared.trace_flusher`, this
 flusher enqueues **every** team when Postgres is enabled (no opt-in flag, no
