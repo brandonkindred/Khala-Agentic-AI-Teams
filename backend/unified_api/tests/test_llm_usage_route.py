@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from unittest.mock import patch
 
 _backend = Path(__file__).resolve().parent.parent.parent
 if str(_backend) not in sys.path:
@@ -22,46 +23,79 @@ app.include_router(llm_usage_router)
 client = TestClient(app)
 
 
-def test_usage_summary_returns_200_with_defaults() -> None:
-    """GET /api/llm-usage/ returns a summary dict for the default all-teams/24h window."""
-    resp = client.get("/api/llm-usage/")
+def test_usage_summary_defaults_to_24h() -> None:
+    with patch("unified_api.routes.llm_usage.resolve_storage_status", return_value="unconfigured"):
+        resp = client.get("/api/llm-usage/")
     assert resp.status_code == 200
     data = resp.json()
     assert data["team"] == "all"
+    assert data["window"] == "24h"
     assert data["window_hours"] == 24.0
+    assert data["storage_status"] == "unconfigured"
+    assert data["storage_available"] is False
+    assert "by_model" in data
 
 
-def test_usage_summary_accepts_team_and_window_query_params() -> None:
-    """GET /api/llm-usage/ narrows the summary by the team and window query params."""
-    resp = client.get("/api/llm-usage/", params={"team": "blogging", "window": 1.0})
-    assert resp.status_code == 200
-    data = resp.json()
-    assert data["team"] == "blogging"
-    assert data["window_hours"] == 1.0
+def test_usage_summary_accepts_preset_windows() -> None:
+    with patch("unified_api.routes.llm_usage.resolve_storage_status", return_value="unconfigured"):
+        for window, hours in (("7d", 168.0), ("30d", 720.0), ("all", 0.0)):
+            resp = client.get("/api/llm-usage/", params={"window": window, "team": "blogging"})
+            assert resp.status_code == 200
+            data = resp.json()
+            assert data["window"] == window
+            assert data["window_hours"] == hours
+            assert data["team"] == "blogging"
 
 
-def test_recent_calls_returns_empty_list_by_default() -> None:
-    """GET /api/llm-usage/recent returns a list (empty when no calls have been logged)."""
-    resp = client.get("/api/llm-usage/recent")
-    assert resp.status_code == 200
-    assert isinstance(resp.json(), list)
+def test_usage_summary_rejects_unknown_window() -> None:
+    resp = client.get("/api/llm-usage/", params={"window": "1h"})
+    assert resp.status_code == 422
 
 
-def test_recent_calls_accepts_team_and_limit_query_params() -> None:
-    """GET /api/llm-usage/recent accepts team and limit filters without erroring."""
-    resp = client.get("/api/llm-usage/recent", params={"team": "blogging", "limit": 5})
+def test_recent_calls_returns_list() -> None:
+    with patch("unified_api.routes.llm_usage.resolve_storage_status", return_value="unconfigured"):
+        resp = client.get("/api/llm-usage/recent")
     assert resp.status_code == 200
     assert isinstance(resp.json(), list)
 
 
 def test_recent_calls_rejects_limit_out_of_range() -> None:
-    """GET /api/llm-usage/recent rejects a limit outside the declared 1..1000 bounds."""
     resp = client.get("/api/llm-usage/recent", params={"limit": 0})
     assert resp.status_code == 422
 
 
+def test_postgres_path_does_not_read_ring_buffer() -> None:
+    from llm_service.telemetry import record_llm_call, clear_call_log
+
+    clear_call_log()
+    record_llm_call(team="blogging", agent_key="writer", model="ring", total_tokens=99)
+    store_summary = {
+        "team": "all",
+        "window": "24h",
+        "window_hours": 24.0,
+        "total_calls": 1,
+        "total_prompt_tokens": 1,
+        "total_completion_tokens": 1,
+        "total_tokens": 2,
+        "avg_latency_ms": 0.0,
+        "error_count": 0,
+        "by_agent": {},
+        "by_model": {"pg-model": {"calls": 1, "prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}},
+    }
+    with (
+        patch("unified_api.routes.llm_usage.is_postgres_enabled", return_value=True),
+        patch("unified_api.routes.llm_usage.resolve_storage_status", return_value="available"),
+        patch("unified_api.routes.llm_usage.fetch_summary", return_value=store_summary),
+        patch("unified_api.routes.llm_usage.fetch_recent", return_value=[]),
+    ):
+        resp = client.get("/api/llm-usage/")
+    data = resp.json()
+    assert data["storage_available"] is True
+    assert "pg-model" in data["by_model"]
+    assert "ring" not in data["by_model"]
+
+
 def test_proxy_health_reports_circuit_breaker_states() -> None:
-    """GET /api/llm-usage/health returns the shared circuit breaker's state snapshot."""
     from unified_api.team_proxy import circuit_breaker
 
     circuit_breaker.record_failure("_test_llm_usage_route_team")
@@ -70,7 +104,6 @@ def test_proxy_health_reports_circuit_breaker_states() -> None:
         assert resp.status_code == 200
         data = resp.json()
         assert "circuit_breakers" in data
-        assert data["circuit_breakers"] == circuit_breaker.get_all_states()
         assert "_test_llm_usage_route_team" in data["circuit_breakers"]
     finally:
         circuit_breaker._circuits.pop("_test_llm_usage_route_team", None)

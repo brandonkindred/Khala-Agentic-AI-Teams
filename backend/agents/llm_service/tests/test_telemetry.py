@@ -199,3 +199,40 @@ def test_observer_exception_is_swallowed() -> None:
         assert rec is not None  # call still succeeds despite the failing observer
     finally:
         telemetry.unregister_call_observer(boom)
+
+
+def test_usage_summary_by_model_includes_token_splits() -> None:
+    telemetry.clear_call_log()
+    telemetry.record_llm_call(
+        team="blogging",
+        agent_key="writer",
+        model="m1",
+        prompt_tokens=10,
+        completion_tokens=5,
+        total_tokens=15,
+    )
+    telemetry.record_llm_call(
+        team="blogging",
+        agent_key="writer",
+        model="m2",
+        prompt_tokens=20,
+        completion_tokens=5,
+        total_tokens=25,
+    )
+    summary = telemetry.get_usage_summary(team="blogging", window_hours=24)
+    assert summary["by_model"]["m1"] == {
+        "calls": 1,
+        "prompt_tokens": 10,
+        "completion_tokens": 5,
+        "total_tokens": 15,
+    }
+    assert summary["by_model"]["m2"]["calls"] == 1
+    assert "tokens" not in summary["by_model"]["m1"]
+
+
+def test_usage_summary_window_hours_zero_is_all_time() -> None:
+    telemetry.clear_call_log()
+    rec = telemetry.record_llm_call(team="t", agent_key="a", model="m", total_tokens=1)
+    rec.timestamp = 1.0  # far in the past
+    summary = telemetry.get_usage_summary(window_hours=0)
+    assert summary["total_calls"] >= 1

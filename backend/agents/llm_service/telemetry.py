@@ -470,10 +470,14 @@ def get_usage_summary(
     """Aggregate token usage over the given time window.
 
     Returns a summary dict with totals and per-agent/per-model breakdowns.
+    ``window_hours <= 0`` means all-time (no timestamp cutoff).
     """
-    cutoff = time.time() - (window_hours * 3600)
     with _log_lock:
-        records = [r for r in _call_log if r.timestamp >= cutoff]
+        if window_hours <= 0:
+            records = list(_call_log)
+        else:
+            cutoff = time.time() - (window_hours * 3600)
+            records = [r for r in _call_log if r.timestamp >= cutoff]
     if team:
         records = [r for r in records if r.team == team]
 
@@ -495,10 +499,15 @@ def get_usage_summary(
             agent["tokens"] += r.total_tokens
 
         # Per-model breakdown
-        if r.model:
-            model = summary.by_model.setdefault(r.model, {"calls": 0, "tokens": 0})
-            model["calls"] += 1
-            model["tokens"] += r.total_tokens
+        model_key = r.model or ""
+        model = summary.by_model.setdefault(
+            model_key,
+            {"calls": 0, "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+        )
+        model["calls"] += 1
+        model["prompt_tokens"] += r.prompt_tokens
+        model["completion_tokens"] += r.completion_tokens
+        model["total_tokens"] += r.total_tokens
 
     if summary.total_calls > 0:
         summary.avg_latency_ms = total_latency / summary.total_calls
