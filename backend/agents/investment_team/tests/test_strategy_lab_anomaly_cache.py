@@ -14,6 +14,7 @@ from typing import Any, Dict, List, Tuple
 
 import pytest
 
+from investment_team.strategy_lab._orchestrator_helpers import _DesignAttemptState
 from investment_team.strategy_lab.orchestrator import (
     RefinementStallTracker,
     StrategyLabOrchestrator,
@@ -142,11 +143,10 @@ def test_anomaly_check_shared_across_synthesis_and_alignment_evaluation(
     ledger = _trade_records()
     exec_result = StrategyRunResult(success=True, trades=ledger, stderr="", error_type=None)
     all_gate_results: List[QualityGateResult] = []
+    metrics = compute_metrics(ledger, config.initial_capital, config.start_date, config.end_date)
 
     synthesis_result = orch._evaluate_synthesis_round(
-        spec=spec,
-        code="code-v0",
-        trades=ledger,
+        state=_DesignAttemptState(spec=spec, code="code-v0", trades=ledger, metrics=metrics),
         exec_result=exec_result,
         market_data=market_data,
         config=config,
