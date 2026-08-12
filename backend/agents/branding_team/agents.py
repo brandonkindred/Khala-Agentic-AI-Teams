@@ -462,6 +462,22 @@ def make_voice_principles_drafter() -> Agent:
 # --- Diverge fan-out agents ---
 
 
+_CREATIVE_DIRECTOR_PROMPT = AgentPromptSpec(
+    opening=(
+        "You are a Creative Director reviewing visual identity exploration. Using the three "
+        "moodboard concepts from Inputs from previous nodes, collect them into:"
+    ),
+    fields=(
+        PromptFieldSpec(
+            "mood_board_candidates",
+            "preserve each concept (title, visual_direction, color_story, "
+            "typography_direction, image_style)",
+        ),
+    ),
+    closing="Do not pick a winner — converge_decider selects the winning direction.",
+)
+
+
 def make_creative_director() -> Agent:
     """Build the Phase 3 Creative Director agent.
 
@@ -477,14 +493,35 @@ def make_creative_director() -> Agent:
     return build_agent(
         name="CreativeDirector",
         description="Collects moodboard candidates from conceptualists into a unified list.",
-        system_prompt=(
-            "You are a Creative Director reviewing visual identity exploration. Using the three "
-            "moodboard concepts from Inputs from previous nodes, collect them into "
-            "mood_board_candidates. Preserve each concept (title, visual_direction, color_story, "
-            "typography_direction, image_style). Do not pick a winner — converge_decider selects "
-            "the winning direction."
-        ),
+        system_prompt=render_agent_prompt(_CREATIVE_DIRECTOR_PROMPT),
         structured_output=MoodBoardCandidatesOutput,
+    )
+
+
+def _moodboard_conceptualist_prompt(variant: str) -> AgentPromptSpec:
+    """Build the MoodBoard Conceptualist prompt spec for one visual-direction variant.
+
+    Preconditions:
+        ``variant`` is a non-empty string.
+    Postconditions:
+        Returns an ``AgentPromptSpec`` whose opening interpolates
+        ``variant.lower()`` and whose fields name the five
+        ``MoodBoardConceptOutput`` attributes.
+    """
+    assert isinstance(variant, str) and variant.strip(), "variant must be a non-empty string"
+    return AgentPromptSpec(
+        opening=(
+            f"You are a MoodBoard Conceptualist specialising in {variant.lower()} visual "
+            f"directions. Given a brand's strategic core and narrative, create a moodboard "
+            f"concept with:"
+        ),
+        fields=(
+            PromptFieldSpec("title", "a name for this direction"),
+            PromptFieldSpec("visual_direction", "overall aesthetic description"),
+            PromptFieldSpec("color_story", "3-4 color names/descriptions"),
+            PromptFieldSpec("typography_direction", "font style recommendations"),
+            PromptFieldSpec("image_style", "3-4 image style descriptions"),
+        ),
     )
 
 
@@ -506,21 +543,33 @@ def make_moodboard_conceptualist(variant: str) -> Agent:
     return build_agent(
         name=f"MoodBoardConceptualist_{variant}",
         description=f"Generates a {variant.lower()} visual direction moodboard concept.",
-        system_prompt=(
-            f"You are a MoodBoard Conceptualist specialising in {variant.lower()} visual "
-            f"directions. Given a brand's strategic core and narrative, create a moodboard concept "
-            f"with:\n"
-            f"- title: a name for this direction\n"
-            f"- visual_direction: overall aesthetic description\n"
-            f"- color_story: 3-4 color names/descriptions\n"
-            f"- typography_direction: font style recommendations\n"
-            f"- image_style: 3-4 image style descriptions"
-        ),
+        system_prompt=render_agent_prompt(_moodboard_conceptualist_prompt(variant)),
         structured_output=MoodBoardConceptOutput,
     )
 
 
 # --- Post-diverge Graph nodes ---
+
+
+_CONVERGE_DECIDER_PROMPT = AgentPromptSpec(
+    opening=(
+        "You are a Creative Convergence Decider. You receive moodboard candidates from the "
+        "diverge phase plus the brand's strategic core and values. Score each candidate on:\n"
+        "- Audience resonance\n"
+        "- Distinctiveness vs competitors\n"
+        "- Cross-channel consistency\n"
+        "- Execution feasibility\n\n"
+        "Produce:"
+    ),
+    fields=(
+        PromptFieldSpec("winning_candidate_title", "the selected candidate title"),
+        PromptFieldSpec("scoring_criteria", "the criteria used to score candidates"),
+        PromptFieldSpec("scores_by_candidate", "dict of title→score"),
+        PromptFieldSpec("rationale", "why this candidate won"),
+        PromptFieldSpec("workshop_prompts", "3 questions for stakeholders"),
+        PromptFieldSpec("decision_criteria", "decision criteria used"),
+    ),
+)
 
 
 def make_converge_decider() -> Agent:
@@ -535,19 +584,20 @@ def make_converge_decider() -> Agent:
     return build_agent(
         name="converge_decider",
         description="Scores moodboard candidates and selects a winner.",
-        system_prompt=(
-            "You are a Creative Convergence Decider. You receive moodboard candidates from the "
-            "diverge phase plus the brand's strategic core and values. Score each candidate on:\n"
-            "- Audience resonance\n"
-            "- Distinctiveness vs competitors\n"
-            "- Cross-channel consistency\n"
-            "- Execution feasibility\n\n"
-            "Produce: winning_candidate_title, scoring_criteria, scores_by_candidate (dict of "
-            "title→score), rationale, workshop_prompts (3 questions for stakeholders), and "
-            "decision_criteria used."
-        ),
+        system_prompt=render_agent_prompt(_CONVERGE_DECIDER_PROMPT),
         structured_output=CreativeRefinementDecisionOutput,
     )
+
+
+_LOGO_SPECIFIER_PROMPT = AgentPromptSpec(
+    opening=(
+        "You are a Logo Specifier. Based on the winning moodboard direction, define a logo "
+        "suite. For each variant (primary, monochrome, icon-only, reversed), specify:"
+    ),
+    fields=(
+        PromptFieldSpec("logo_suite", "variant, usage_context, minimum_size, clear_space"),
+    ),
+)
 
 
 def make_logo_specifier() -> Agent:
@@ -562,13 +612,24 @@ def make_logo_specifier() -> Agent:
     return build_agent(
         name="logo_specifier",
         description="Defines logo suite with usage rules.",
-        system_prompt=(
-            "You are a Logo Specifier. Based on the winning moodboard direction, define a logo "
-            "suite. For each variant (primary, monochrome, icon-only, reversed), specify:\n"
-            "- variant, usage_context, minimum_size, clear_space"
-        ),
+        system_prompt=render_agent_prompt(_LOGO_SPECIFIER_PROMPT),
         structured_output=LogoSuiteOutput,
     )
+
+
+_COLOR_SYSTEM_BUILDER_PROMPT = AgentPromptSpec(
+    opening=(
+        "You are a Color System Builder. Based on the winning moodboard direction, define "
+        "5-7 colors. Include primary, secondary, accent, surface, and critical colors."
+    ),
+    fields=(
+        PromptFieldSpec(
+            "color_palette",
+            "for each: name, hex_value, usage (where to use it), and "
+            "psychological_rationale (why this color works for the brand)",
+        ),
+    ),
+)
 
 
 def make_color_system_builder() -> Agent:
@@ -582,14 +643,20 @@ def make_color_system_builder() -> Agent:
     return build_agent(
         name="color_system_builder",
         description="Builds the brand color palette with psychological rationale.",
-        system_prompt=(
-            "You are a Color System Builder. Based on the winning moodboard direction, define "
-            "5-7 colors. For each: name, hex_value, usage (where to use it), and "
-            "psychological_rationale (why this color works for the brand). Include primary, "
-            "secondary, accent, surface, and critical colors."
-        ),
+        system_prompt=render_agent_prompt(_COLOR_SYSTEM_BUILDER_PROMPT),
         structured_output=ColorPaletteSystemOutput,
     )
+
+
+_TYPOGRAPHY_BUILDER_PROMPT = AgentPromptSpec(
+    opening=(
+        "You are a Typography Builder. Based on the winning moodboard direction, define a "
+        "typography system with 3-4 type roles (display, body, caption, code). For each:"
+    ),
+    fields=(
+        PromptFieldSpec("typography_system", "role, font_family, weight_range, usage_notes"),
+    ),
+)
 
 
 def make_typography_builder() -> Agent:
@@ -603,11 +670,7 @@ def make_typography_builder() -> Agent:
     return build_agent(
         name="typography_builder",
         description="Defines the typography system.",
-        system_prompt=(
-            "You are a Typography Builder. Based on the winning moodboard direction, define a "
-            "typography system with 3-4 type roles (display, body, caption, code). For each:\n"
-            "- role, font_family, weight_range, usage_notes"
-        ),
+        system_prompt=render_agent_prompt(_TYPOGRAPHY_BUILDER_PROMPT),
         structured_output=TypographySystemOutput,
     )
 
@@ -641,6 +704,18 @@ def make_iconography_director() -> Agent:
     )
 
 
+_PHOTOGRAPHY_VIDEO_DIRECTOR_PROMPT = AgentPromptSpec(
+    opening="You are a Photography & Video Director. Based on the winning moodboard, define:",
+    fields=(
+        PromptFieldSpec(
+            "photography_direction", "shooting style, lighting, composition, subjects"
+        ),
+        PromptFieldSpec("video_direction", "pacing, tone, visual style for video content"),
+        PromptFieldSpec("motion_principles", "3-4 principles for animation/motion design"),
+    ),
+)
+
+
 def make_photography_video_director() -> Agent:
     """Build the Phase 3 Photography & Video Director agent.
 
@@ -652,14 +727,26 @@ def make_photography_video_director() -> Agent:
     return build_agent(
         name="photography_video_director",
         description="Defines photography direction, video direction, and motion principles.",
-        system_prompt=(
-            "You are a Photography & Video Director. Based on the winning moodboard, define:\n"
-            "1. photography_direction — shooting style, lighting, composition, subjects\n"
-            "2. video_direction — pacing, tone, visual style for video content\n"
-            "3. motion_principles — 3-4 principles for animation/motion design"
-        ),
+        system_prompt=render_agent_prompt(_PHOTOGRAPHY_VIDEO_DIRECTOR_PROMPT),
         structured_output=PhotographyVideoOutput,
     )
+
+
+_VOICE_TONE_BUILDER_PROMPT = AgentPromptSpec(
+    opening=(
+        "You are a Voice & Tone Builder. Using the brand narrative's writing guidelines and "
+        "the moodboard direction, define:"
+    ),
+    fields=(
+        PromptFieldSpec(
+            "voice_tone_spectrum",
+            "for each context (marketing, support, legal, social, internal), specify the "
+            "tone and 2-3 examples",
+        ),
+        PromptFieldSpec("language_dos", "4-5 approved language patterns"),
+        PromptFieldSpec("language_donts", "4-5 language anti-patterns"),
+    ),
+)
 
 
 def make_voice_tone_builder() -> Agent:
@@ -674,16 +761,25 @@ def make_voice_tone_builder() -> Agent:
     return build_agent(
         name="voice_tone_builder",
         description="Defines voice/tone spectrum and language dos/donts.",
-        system_prompt=(
-            "You are a Voice & Tone Builder. Using the brand narrative's writing guidelines and "
-            "the moodboard direction, define:\n"
-            "1. voice_tone_spectrum — for each context (marketing, support, legal, social, "
-            "internal), specify the tone and 2-3 examples\n"
-            "2. language_dos — 4-5 approved language patterns\n"
-            "3. language_donts — 4-5 language anti-patterns"
-        ),
+        system_prompt=render_agent_prompt(_VOICE_TONE_BUILDER_PROMPT),
         structured_output=VoiceToneOutput,
     )
+
+
+_DESIGN_SYSTEM_CODIFIER_PROMPT = AgentPromptSpec(
+    opening="You are a Design System Codifier. Based on the full visual identity work, produce:",
+    fields=(
+        PromptFieldSpec(
+            "design_principles", "3-4 guiding principles (e.g. 'Clarity over decoration')"
+        ),
+        PromptFieldSpec(
+            "foundation_tokens", "4-6 token categories (color, type, spacing, motion, etc.)"
+        ),
+        PromptFieldSpec(
+            "component_standards", "3-5 component rules (buttons, cards, navigation, etc.)"
+        ),
+    ),
+)
 
 
 def make_design_system_codifier() -> Agent:
@@ -697,12 +793,7 @@ def make_design_system_codifier() -> Agent:
     return build_agent(
         name="design_system_codifier",
         description="Codifies the design system: principles, tokens, component standards.",
-        system_prompt=(
-            "You are a Design System Codifier. Based on the full visual identity work, produce:\n"
-            "1. design_principles — 3-4 guiding principles (e.g. 'Clarity over decoration')\n"
-            "2. foundation_tokens — 4-6 token categories (color, type, spacing, motion, etc.)\n"
-            "3. component_standards — 3-5 component rules (buttons, cards, navigation, etc.)"
-        ),
+        system_prompt=render_agent_prompt(_DESIGN_SYSTEM_CODIFIER_PROMPT),
         structured_output=DesignSystemDefinitionOutput,
     )
 
