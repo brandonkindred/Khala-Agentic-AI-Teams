@@ -36,8 +36,7 @@ import logging
 from dataclasses import dataclass, replace
 from typing import Callable, List, Optional, Tuple, TypeVar, Union
 
-from strands import Agent
-from strands.models.model import Model as _StrandsModel
+from strands.types.exceptions import ContextWindowOverflowException, MaxTokensReachedException
 
 from llm_service import LLMClient, LLMClientModel, LLMTruncatedError
 from llm_service.config import resolve_max_output_tokens
@@ -47,6 +46,12 @@ from software_engineering_team.shared.context_sizing import (
 )
 
 from .model_resolution import resolve_code_review_model
+from .via_reasoning import run_agent_via_reasoning
+
+try:
+    from strands.models.model import Model as _StrandsModel
+except ImportError:  # pragma: no cover - strands is a required dependency
+    _StrandsModel = object  # type: ignore[misc, assignment]
 
 logger = logging.getLogger(__name__)
 
@@ -293,24 +298,39 @@ def _with_output_budget(
 
 def _call_agent(
     model: "Union[LLMClient, _StrandsModel]",
-    system_prompt: str,
+    reasoning_system_prompt: str,
+    formatting_instructions: str,
     tools: list,
     prompt: str,
     parse: Callable[[str], T],
 ) -> T:
-    """Construct one fresh ``Agent``, run ``prompt``, and parse the reply.
+    """Run one think-then-format submission pass call and parse the JSON reply.
 
-    Postconditions: returns ``parse``'s result. Raises whatever the ``Agent``
-        call or ``parse`` raises — recovery is entirely the caller's concern.
+    Preconditions:
+        - ``reasoning_system_prompt`` and ``formatting_instructions`` are non-empty.
+        - ``prompt`` is the user message for the reasoning pass.
+
+    Postconditions:
+        - Returns ``parse``'s result from the formatting pass.
+        - Tools are attached only to the reasoning pass (call 1).
+        - Raises whatever ``run_agent_via_reasoning`` or ``parse`` raises —
+          recovery is entirely the caller's concern.
     """
-    agent = Agent(model=model, system_prompt=system_prompt, tools=tools)
-    raw = str(agent(prompt)).strip()
-    return parse(raw)
+    return run_agent_via_reasoning(
+        model=model,
+        reasoning_prompt=prompt,
+        reasoning_system_prompt=reasoning_system_prompt,
+        formatting_instructions=formatting_instructions,
+        parse=parse,
+        tools=tools,
+        reasoning_think=True,
+    )
 
 
 def _run_batch_with_recovery(
     model: "Union[LLMClient, _StrandsModel]",
-    system_prompt: str,
+    reasoning_system_prompt: str,
+    formatting_instructions: str,
     tools: list,
     build_prompt: Callable[[FileBatch, SubmissionPassBudgets], str],
     parse: Callable[[str], T],
@@ -335,7 +355,14 @@ def _run_batch_with_recovery(
     """
     try:
         prompt = build_prompt(batch, budgets)
-        result = _call_agent(model, system_prompt, tools, prompt, parse)
+        result = _call_agent(
+            model,
+            reasoning_system_prompt,
+            formatting_instructions,
+            tools,
+            prompt,
+            parse,
+        )
     except Exception as exc:  # noqa: BLE001 - fail-safe: recover or skip, never raise
         if not _is_overflow_shaped(exc):
             logger.warning(
@@ -349,7 +376,8 @@ def _run_batch_with_recovery(
             return []
         return _recover_from_overflow(
             model,
-            system_prompt,
+            reasoning_system_prompt,
+            formatting_instructions,
             tools,
             build_prompt,
             parse,
@@ -364,7 +392,8 @@ def _run_batch_with_recovery(
 
 def _recover_from_overflow(
     model: "Union[LLMClient, _StrandsModel]",
-    system_prompt: str,
+    reasoning_system_prompt: str,
+    formatting_instructions: str,
     tools: list,
     build_prompt: Callable[[FileBatch, SubmissionPassBudgets], str],
     parse: Callable[[str], T],
@@ -417,7 +446,8 @@ def _recover_from_overflow(
             results.extend(
                 _run_batch_with_recovery(
                     model,
-                    system_prompt,
+                    reasoning_system_prompt,
+                    formatting_instructions,
                     tools,
                     build_prompt,
                     parse,
@@ -453,7 +483,14 @@ def _recover_from_overflow(
     shrink_budgets = _shrink_budgets(budgets)
     try:
         prompt = build_prompt(shrink_batch, shrink_budgets)
-        result = _call_agent(model, system_prompt, tools, prompt, parse)
+        result = _call_agent(
+            model,
+            reasoning_system_prompt,
+            formatting_instructions,
+            tools,
+            prompt,
+            parse,
+        )
     except Exception as retry_exc:  # noqa: BLE001 - one shrink attempt only
         logger.warning(
             "%s: batch %s/%s still failed after shrink (%s: %s); skipping",
@@ -471,7 +508,8 @@ def run_submission_pass(
     llm: LLMClient,
     *,
     changed_files: List[Tuple[str, str]],
-    system_prompt: str,
+    reasoning_system_prompt: str,
+    formatting_instructions: str,
     build_prompt: Callable[[FileBatch, SubmissionPassBudgets], str],
     tools: list,
     parse: Callable[[str], T],
@@ -481,9 +519,9 @@ def run_submission_pass(
 ) -> List[T]:
     """Run one additive code-review submission pass; never raises.
 
-    Owns context budgeting, proactive file-group chunking, ``Agent``
-    construction, and reactive overflow recovery. The calling pass supplies
-    only content: its system prompt, tool list, a ``build_prompt`` closure
+    Owns context budgeting, proactive file-group chunking, think-then-format
+    ``Agent`` calls, and reactive overflow recovery. The calling pass supplies
+    only content: split system prompts, tool list, a ``build_prompt`` closure
     that renders one batch's user prompt from its manifest/content budgets,
     and a ``parse`` callback that turns one call's raw reply into a typed
     result (or raises on a malformed reply — the runner treats a ``parse``
@@ -524,10 +562,11 @@ def run_submission_pass(
         return []
 
     manifest_chars = _manifest_chars([path for path, _ in changed_files])
+    fixed_prompt_chars = len(reasoning_system_prompt) + len(formatting_instructions)
     raw_budgets = compute_code_review_merged_pass_budgets(
         llm,
         architecture_chars=extra_reserved_chars,
-        system_prompt_chars=len(system_prompt),
+        system_prompt_chars=fixed_prompt_chars,
         manifest_chars=manifest_chars,
         base_scaffolding_chars=CODE_REVIEW_MERGED_PASS_BASE_SCAFFOLDING_CHARS,
         finding_array_count=finding_array_count,
@@ -565,7 +604,8 @@ def run_submission_pass(
         results.extend(
             _run_batch_with_recovery(
                 model,
-                system_prompt,
+                reasoning_system_prompt,
+                formatting_instructions,
                 tools,
                 build_prompt,
                 parse,

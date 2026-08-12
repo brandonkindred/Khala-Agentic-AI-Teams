@@ -45,7 +45,10 @@ from .architecture_context import (
 from .false_positive_filter import CodebaseIndex, _build_tools, code_fence_for
 from .models import CodeReviewInput, CodeReviewIssue
 from .profiles import ReviewProfile
-from .prompts import build_merged_architecture_side_effect_prompt
+from .prompts import (
+    build_merged_architecture_side_effect_formatting_instructions,
+    build_merged_architecture_side_effect_reasoning_system_prompt,
+)
 from .repo_reader import RepoReader
 from .submission_pass_runner import FileBatch, SubmissionPassBudgets, run_submission_pass
 
@@ -164,7 +167,12 @@ def _run_pass(
     if not index.files:
         return [], []
 
-    system_prompt = build_merged_architecture_side_effect_prompt(arch_on=arch_on, side_on=side_on)
+    reasoning_system_prompt = build_merged_architecture_side_effect_reasoning_system_prompt(
+        arch_on=arch_on, side_on=side_on
+    )
+    formatting_instructions = build_merged_architecture_side_effect_formatting_instructions(
+        arch_on=arch_on, side_on=side_on
+    )
     arch_body = architecture_document_text(input_data.architecture) if arch_on else ""
     tools = _build_merged_pass_tools(index, side_on=side_on)
     pre_numbered = side_pass._effective_pre_numbered(input_data, index)
@@ -220,7 +228,8 @@ def _run_pass(
     results = run_submission_pass(
         llm,
         changed_files=list(index.files.items()),
-        system_prompt=system_prompt,
+        reasoning_system_prompt=reasoning_system_prompt,
+        formatting_instructions=formatting_instructions,
         build_prompt=_build_prompt_for_batch,
         tools=tools,
         parse=_parse_batch_reply,

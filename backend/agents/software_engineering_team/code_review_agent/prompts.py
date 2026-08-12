@@ -108,6 +108,13 @@ _ARCHITECTURE_CONSISTENCY_BODY = """You are a Senior Software Architect running 
 - If you find nothing in either category, return an empty findings list — an empty list is a valid and expected outcome, not a failure.
 - Default severity is `"medium"`; use `"high"`/`"critical"` ONLY when the contradiction or duplication would cause a real integration break or production risk, never merely because a cleaner or more consistent alternative exists."""
 
+_SUBMISSION_PASS_PROSE_INSTRUCTION = (
+    "\n\n**Output format:**\n"
+    "Answer in structured prose (not JSON). For each finding you would report, "
+    "state severity, category, file_path, line (when applicable), description, "
+    "suggestion, and pre_existing.\n"
+)
+
 _ARCHITECTURE_CONSISTENCY_OUTPUT_FORMAT = """
 
 **Output format:**
@@ -124,10 +131,15 @@ Return a single JSON object with exactly one key:
 Return `{"findings": []}` when you find nothing in either category. Do not add any key other than "findings".
 """
 
+ARCHITECTURE_CONSISTENCY_REASONING_SYSTEM_PROMPT = (
+    _ARCHITECTURE_CONSISTENCY_BODY + _SUBMISSION_PASS_PROSE_INSTRUCTION
+)
+ARCHITECTURE_CONSISTENCY_FORMATTING_INSTRUCTIONS = (
+    _ARCHITECTURE_CONSISTENCY_OUTPUT_FORMAT + JSON_OUTPUT_INSTRUCTION
+)
 ARCHITECTURE_CONSISTENCY_PROMPT = (
-    _ARCHITECTURE_CONSISTENCY_BODY
-    + _ARCHITECTURE_CONSISTENCY_OUTPUT_FORMAT
-    + JSON_OUTPUT_INSTRUCTION
+    ARCHITECTURE_CONSISTENCY_REASONING_SYSTEM_PROMPT
+    + ARCHITECTURE_CONSISTENCY_FORMATTING_INSTRUCTIONS
 )
 
 
@@ -180,8 +192,14 @@ Return a single JSON object with exactly one key:
 Return `{"findings": []}` when you find nothing. Do not add any key other than "findings".
 """
 
+SIDE_EFFECT_IMPACT_REASONING_SYSTEM_PROMPT = (
+    _SIDE_EFFECT_IMPACT_BODY + _SUBMISSION_PASS_PROSE_INSTRUCTION
+)
+SIDE_EFFECT_IMPACT_FORMATTING_INSTRUCTIONS = (
+    _SIDE_EFFECT_IMPACT_OUTPUT_FORMAT + JSON_OUTPUT_INSTRUCTION
+)
 SIDE_EFFECT_IMPACT_PROMPT = (
-    _SIDE_EFFECT_IMPACT_BODY + _SIDE_EFFECT_IMPACT_OUTPUT_FORMAT + JSON_OUTPUT_INSTRUCTION
+    SIDE_EFFECT_IMPACT_REASONING_SYSTEM_PROMPT + SIDE_EFFECT_IMPACT_FORMATTING_INSTRUCTIONS
 )
 
 
@@ -211,35 +229,34 @@ Return a single JSON object with exactly two keys — one per part above. Never 
 An empty list for either key (or both) is a valid and expected outcome when that part finds nothing — it is never a failure. Return `{"architecture_findings": [], "side_effect_findings": []}` when neither part finds anything. Do not add any key other than "architecture_findings"/"side_effect_findings".
 """
 
-MERGED_ARCHITECTURE_SIDE_EFFECT_PROMPT = (
+MERGED_ARCHITECTURE_SIDE_EFFECT_REASONING_SYSTEM_PROMPT = (
     _MERGED_ARCHITECTURE_SIDE_EFFECT_INTRO
     + "\n\n## Part 1: Architecture Consistency & Cross-Codebase Redundancy\n\n"
     + _ARCHITECTURE_CONSISTENCY_BODY
     + "\n\n## Part 2: Side-Effect / Blast-Radius Impact\n\n"
     + _SIDE_EFFECT_IMPACT_BODY
-    + _MERGED_ARCHITECTURE_SIDE_EFFECT_OUTPUT_FORMAT
-    + JSON_OUTPUT_INSTRUCTION
+    + _SUBMISSION_PASS_PROSE_INSTRUCTION
+)
+MERGED_ARCHITECTURE_SIDE_EFFECT_FORMATTING_INSTRUCTIONS = (
+    _MERGED_ARCHITECTURE_SIDE_EFFECT_OUTPUT_FORMAT + JSON_OUTPUT_INSTRUCTION
+)
+MERGED_ARCHITECTURE_SIDE_EFFECT_PROMPT = (
+    MERGED_ARCHITECTURE_SIDE_EFFECT_REASONING_SYSTEM_PROMPT
+    + MERGED_ARCHITECTURE_SIDE_EFFECT_FORMATTING_INSTRUCTIONS
 )
 
 
-def build_merged_architecture_side_effect_prompt(*, arch_on: bool, side_on: bool) -> str:
-    """Build the merged-pass system prompt for the halves that are actually enabled.
-
-    Preconditions:
-        - At least one of ``arch_on`` / ``side_on`` is True.
-
-    Postconditions:
-        - When both halves are on, returns ``MERGED_ARCHITECTURE_SIDE_EFFECT_PROMPT``.
-        - When only one half is on, omits the disabled half's instruction body and
-          explicitly requires its dual-key array to be ``[]``, so the model does
-          not spend tool iterations or output capacity on a discarded check.
-        - Always uses the dual-key output format so the merged pass parser stays
-          unchanged.
-    """
+def build_merged_architecture_side_effect_reasoning_system_prompt(
+    *, arch_on: bool, side_on: bool
+) -> str:
+    """Build the merged-pass reasoning system prompt for enabled halves."""
     if not arch_on and not side_on:
-        raise ValueError("build_merged_architecture_side_effect_prompt requires arch_on or side_on")
+        raise ValueError(
+            "build_merged_architecture_side_effect_reasoning_system_prompt requires "
+            "arch_on or side_on"
+        )
     if arch_on and side_on:
-        return MERGED_ARCHITECTURE_SIDE_EFFECT_PROMPT
+        return MERGED_ARCHITECTURE_SIDE_EFFECT_REASONING_SYSTEM_PROMPT
 
     parts: list[str] = []
     if arch_on:
@@ -260,9 +277,46 @@ def build_merged_architecture_side_effect_prompt(*, arch_on: bool, side_on: bool
         )
         parts.append("\n\n## Part 2: Side-Effect / Blast-Radius Impact\n\n")
         parts.append(_SIDE_EFFECT_IMPACT_BODY)
-    parts.append(_MERGED_ARCHITECTURE_SIDE_EFFECT_OUTPUT_FORMAT)
-    parts.append(JSON_OUTPUT_INSTRUCTION)
+    parts.append(_SUBMISSION_PASS_PROSE_INSTRUCTION)
     return "".join(parts)
+
+
+def build_merged_architecture_side_effect_formatting_instructions(
+    *, arch_on: bool, side_on: bool
+) -> str:
+    """Build merged-pass JSON formatting instructions (dual-key schema)."""
+    if not arch_on and not side_on:
+        raise ValueError(
+            "build_merged_architecture_side_effect_formatting_instructions requires "
+            "arch_on or side_on"
+        )
+    return _MERGED_ARCHITECTURE_SIDE_EFFECT_OUTPUT_FORMAT + JSON_OUTPUT_INSTRUCTION
+
+
+def build_merged_architecture_side_effect_prompt(*, arch_on: bool, side_on: bool) -> str:
+    """Build the merged-pass system prompt for the halves that are actually enabled.
+
+    Preconditions:
+        - At least one of ``arch_on`` / ``side_on`` is True.
+
+    Postconditions:
+        - When both halves are on, returns ``MERGED_ARCHITECTURE_SIDE_EFFECT_PROMPT``.
+        - When only one half is on, omits the disabled half's instruction body and
+          explicitly requires its dual-key array to be ``[]``, so the model does
+          not spend tool iterations or output capacity on a discarded check.
+        - Always uses the dual-key output format so the merged pass parser stays
+          unchanged.
+    """
+    if not arch_on and not side_on:
+        raise ValueError("build_merged_architecture_side_effect_prompt requires arch_on or side_on")
+    return (
+        build_merged_architecture_side_effect_reasoning_system_prompt(
+            arch_on=arch_on, side_on=side_on
+        )
+        + build_merged_architecture_side_effect_formatting_instructions(
+            arch_on=arch_on, side_on=side_on
+        )
+    )
 
 
 REVIEW_SYNTHESIS_PROMPT = (

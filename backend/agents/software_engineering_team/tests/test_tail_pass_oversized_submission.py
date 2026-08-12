@@ -25,6 +25,8 @@ This module instead:
 
 from __future__ import annotations
 
+pytest_plugins = ["tests.submission_pass_two_call_client"]
+
 import re
 from typing import Any, Dict, List
 
@@ -39,6 +41,7 @@ from code_review_agent.models import CodeReviewInput, CodeReviewIssue
 from tests.test_false_positive_filter import _SimulatesFileReadToolCall
 
 from llm_service.clients.dummy import DummyLLMClient
+from tests.submission_pass_two_call_client import SubmissionPassTwoCallClient
 
 _MERGED_PASS_ANCHOR = '"architecture_findings"/"side_effect_findings"'
 
@@ -128,10 +131,10 @@ def test_merged_pass_oversized_submission_stays_within_configured_budget(
     files = _oversized_changed_files()
     prompts: List[str] = []
 
-    class _RecordingStub(DummyLLMClient):
+    class _RecordingStub(SubmissionPassTwoCallClient):
         def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
-            if _MERGED_PASS_ANCHOR in prompt:
-                prompts.append(prompt)
+            if _MERGED_PASS_ANCHOR in self.latest_reasoning_prompt():
+                prompts.append(self.latest_reasoning_prompt())
                 return {
                     "architecture_findings": [],
                     "side_effect_findings": [
@@ -144,7 +147,7 @@ def test_merged_pass_oversized_submission_stays_within_configured_budget(
                             "pre_existing": False,
                         }
                         for path in files
-                        if f"### {path} ###" in prompt
+                        if f"### {path} ###" in self.latest_reasoning_prompt()
                     ],
                 }
             return {"approved": True, "issues": [], "summary": "ok", "spec_compliance_notes": ""}
@@ -182,11 +185,11 @@ def test_merged_pass_oversized_submission_matches_unbounded_baseline(
     monkeypatch.setenv("CODE_REVIEW_ARCHITECTURE_CONSISTENCY_PASS", "false")
     files = _oversized_changed_files()
 
-    def _make_stub(prompts: List[str]) -> DummyLLMClient:
-        class _Stub(DummyLLMClient):
+    def _make_stub(prompts: List[str]) -> SubmissionPassTwoCallClient:
+        class _Stub(SubmissionPassTwoCallClient):
             def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
-                if _MERGED_PASS_ANCHOR in prompt:
-                    prompts.append(prompt)
+                if _MERGED_PASS_ANCHOR in self.latest_reasoning_prompt():
+                    prompts.append(self.latest_reasoning_prompt())
                     return {
                         "architecture_findings": [],
                         "side_effect_findings": [
@@ -199,7 +202,7 @@ def test_merged_pass_oversized_submission_matches_unbounded_baseline(
                                 "pre_existing": False,
                             }
                             for path in files
-                            if f"### {path} ###" in prompt
+                            if f"### {path} ###" in self.latest_reasoning_prompt()
                         ],
                     }
                 return {

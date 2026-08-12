@@ -65,7 +65,10 @@ from .chunking import _coerce_bool
 from .false_positive_filter import CodebaseIndex, _build_tools, _code_fence_for
 from .models import CodeReviewInput, CodeReviewIssue, coerce_line, is_no_op_suggestion
 from .profiles import ReviewProfile
-from .prompts import ARCHITECTURE_CONSISTENCY_PROMPT
+from .prompts import (
+    ARCHITECTURE_CONSISTENCY_FORMATTING_INSTRUCTIONS,
+    ARCHITECTURE_CONSISTENCY_REASONING_SYSTEM_PROMPT,
+)
 from .repo_reader import RepoReader
 from .side_effect_impact_pass import _effective_pre_numbered
 from .submission_pass_runner import FileBatch, SubmissionPassBudgets, run_submission_pass
@@ -603,7 +606,8 @@ def _run_pass(
     results = run_submission_pass(
         llm,
         changed_files=list(index.files.items()),
-        system_prompt=ARCHITECTURE_CONSISTENCY_PROMPT,
+        reasoning_system_prompt=ARCHITECTURE_CONSISTENCY_REASONING_SYSTEM_PROMPT,
+        formatting_instructions=ARCHITECTURE_CONSISTENCY_FORMATTING_INSTRUCTIONS,
         build_prompt=_build_prompt_for_batch,
         tools=tools,
         parse=_parse_batch_reply,
