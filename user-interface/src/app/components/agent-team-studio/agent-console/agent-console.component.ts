@@ -6,24 +6,21 @@ import { MatButtonModule } from '@angular/material/button';
 import { AgentCatalogComponent } from './agent-catalog/agent-catalog.component';
 import { AgentRunnerComponent } from './agent-runner/agent-runner.component';
 import { AgentProvisioningDashboardComponent } from '../agent-provisioning-dashboard/agent-provisioning-dashboard.component';
-import { CognitionTabComponent } from '../../cognition-page/cognition-tab/cognition-tab.component';
 import { MetricsTabComponent } from './metrics-tab/metrics-tab.component';
 
 /**
  * Top-level page for the Agent Console.
  *
- * Hosts five tabs, in template order:
+ * Hosts four tabs, in template order:
  *   - **Catalog** (default) — browse and inspect every registered agent.
  *   - **Runner** — invoke any agent in a per-team warm Docker sandbox.
  *   - **Provisioning & Environments** — embeds the existing provisioning
  *     dashboard verbatim so its behavior is unchanged.
- *   - **Cognition** — operator surface for an agent's rule proposals
- *     (approve/reject), memory timeline, and rules.
  *   - **Metrics** — Software Engineering DORA metrics (deployment frequency,
  *     lead time, change-failure rate, MTTR) and LLM cost over a selectable window.
  *
- * Backlog/Sprints/Feedback (formerly tabs here) now live at their own
- * `/product-delivery` route — see `ProductDeliveryPageComponent`.
+ * Backlog/Sprints/Feedback now live at `/product-delivery`.
+ * Cognition now lives at `/cognition`.
  */
 @Component({
   selector: 'app-agent-console',
@@ -36,7 +33,6 @@ import { MetricsTabComponent } from './metrics-tab/metrics-tab.component';
     AgentCatalogComponent,
     AgentRunnerComponent,
     AgentProvisioningDashboardComponent,
-    CognitionTabComponent,
     MetricsTabComponent,
   ],
   templateUrl: './agent-console.component.html',
