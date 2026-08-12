@@ -336,6 +336,17 @@ def test_grooming_heartbeat_interval_env(monkeypatch: pytest.MonkeyPatch) -> Non
     assert _grooming_heartbeat_interval_s() == 30.0
 
 
+def test_grooming_heartbeat_interval_env_floor_boundary_and_whitespace(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The floor is inclusive (0.1 passes through unclamped); surrounding
+    whitespace on an otherwise-valid value does not fall back to the default."""
+    monkeypatch.setenv("GITHUB_ISSUE_GROOMING_HEARTBEAT_INTERVAL_S", "0.1")
+    assert _grooming_heartbeat_interval_s() == 0.1
+    monkeypatch.setenv("GITHUB_ISSUE_GROOMING_HEARTBEAT_INTERVAL_S", "  7  ")
+    assert _grooming_heartbeat_interval_s() == 7.0
+
+
 def test_grooming_update_callback_forwards_without_heartbeat(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -366,24 +377,25 @@ def test_grooming_update_callback_forwards_without_heartbeat(
 
 
 @contextlib.asynccontextmanager
-async def _workflow_environment_worker(activities=None):
+async def _workflow_environment_worker(activities):
     """Start a time-skipping ``WorkflowEnvironment`` with an ``IssueGroomingWorkflow``
     worker attached, on a self-contained local task queue.
 
-    Preconditions: none.
+    Preconditions:
+        - ``activities`` is a non-empty list of registered-name substitutes for
+          ``run_issue_grooming_activity`` (required, not defaulted to the real
+          ``ACTIVITIES``: every caller in this file passes a substitute, since
+          exercising the real activity here would require a live
+          ``GITHUB_TOKEN`` and GitHub network access -- this tier proves
+          Temporal's own name-based dispatch, not the activity body, that's
+          the direct-call tests above).
     Postconditions:
         - Yields a live ``WorkflowEnvironment`` with a ``Worker`` listening on
           a literal test-only task queue (no shared task-queue constants
           module exists for grooming yet -- worker/task-queue wiring onto the
           coding-team worker is a follow-up change, out of scope here).
-          ``activities`` defaults to the real, production ``ACTIVITIES``; the
-          tests below instead pass a substitute registered under the same
-          ``"issue_grooming_run"`` name, since exercising the real activity
-          here would require a live ``GITHUB_TOKEN`` and GitHub network
-          access -- this tier proves Temporal's own name-based dispatch, not
-          the activity body (that's the direct-call tests above). Skips
-          (rather than fails) when the ephemeral Temporal test-server binary
-          can't be downloaded (no egress) -- same caveat as
+          Skips (rather than fails) when the ephemeral Temporal test-server
+          binary can't be downloaded (no egress) -- same caveat as
           ``test_coding_team_temporal_workflow.py``'s helper of the same
           name.
     """
@@ -400,7 +412,7 @@ async def _workflow_environment_worker(activities=None):
             env.client,
             task_queue="issue-grooming-test-queue",
             workflows=[IssueGroomingWorkflow],
-            activities=activities if activities is not None else ACTIVITIES,
+            activities=activities,
         )
         async with worker:
             yield env

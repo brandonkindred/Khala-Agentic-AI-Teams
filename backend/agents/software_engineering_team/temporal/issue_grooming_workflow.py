@@ -67,6 +67,9 @@ class IssueGroomingRunResult(BaseModel):
         - ``phase`` is a terminal marker, always set on a clean exit: ``"done"``
           when the job's final status is not ``CANCELLED``, ``"cancelled"``
           otherwise -- it does not indicate which of Phase A/B actually ran.
+          On exception this model is never constructed at all: the activity
+          re-raises after marking the job ``FAILED``, so ``phase`` carries no
+          meaning for a failed run.
         - ``grooming`` carries the runner's output dict when available; it may
           be ``None`` or missing ``sub_issues`` when cancellation cut the run
           short before or during Phase B (see ``IssueGroomingRunner``).
