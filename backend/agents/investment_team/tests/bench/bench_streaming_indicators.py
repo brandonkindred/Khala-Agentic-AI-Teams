@@ -269,10 +269,23 @@ def test_macd_view_per_bar_cost_is_flat_in_history() -> None:
     history grows, consistent with the other streaming indicators (OBV, MFI,
     Bollinger, etc.) that already maintain O(1)-amortized state instead of
     re-walking the full ``macd_line`` deque on every read.
+
+    Uses a ``max_bars`` at least as large as ``total_bars`` so the view's
+    bars deque never hits its retention cap and every appended bar stays an
+    ``expand`` step — the transition the incremental fix actually targets.
+    ``test_streaming_view_per_bar_cost_is_flat_in_history`` uses the default
+    ``max_bars=500`` and measures windows starting at bar 600, so once past
+    that cap every subsequent bar is a ``slide`` (fixed-size window,
+    deliberately a full re-walk — see ``_macd_value``'s ``slide`` branch);
+    that path's cost is bounded by window depth regardless of the ``expand``
+    optimization, so it would stay flat even without this fix. Only an
+    unbounded, ever-growing ``macd_line`` (i.e. ``expand`` throughout)
+    exercises the O(N) regression this benchmark guards against.
     """
     window = 100
-    early = _measure_view_window(2200, 600, 600 + window, refs=_MACD_VIEW_REFS)
-    late = _measure_view_window(2200, 2100, 2100 + window, refs=_MACD_VIEW_REFS)
+    total_bars = 2200
+    early = _measure_view_window(total_bars, 600, 600 + window, max_bars=total_bars, refs=_MACD_VIEW_REFS)
+    late = _measure_view_window(total_bars, 2100, 2100 + window, max_bars=total_bars, refs=_MACD_VIEW_REFS)
     ratio = late / max(early, 1e-9)
     if os.environ.get("BENCH_STREAMING_INDICATORS_VERBOSE"):
         print(
