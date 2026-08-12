@@ -1,14 +1,22 @@
 """
-Heuristic Fibonacci complexity scoring for GitHub issue grooming (Phase A).
+Heuristic Fibonacci complexity scoring for GitHub issue grooming, plus the
+legacy ``ScoreBreakdown`` shape Phase A's job/progress/stats contract is
+pinned to.
 
-Scores an issue's conceptual/anticipated-LOC/solution-complexity dimensions from
-its title and body alone -- no network calls, no LLM. LLM-assisted scoring is a
-separate, deferred epic; this module is heuristic-only by design.
+:func:`score_issue` scores an issue's conceptual/anticipated-LOC/solution-
+complexity dimensions from its title and body alone -- no network calls, no
+LLM -- and remains available as a standalone, tested pure function, but it is
+no longer Phase A's live scoring path (see
+``issue_grooming_runner.IssueGroomingRunner.run``), which now scores via the
+LLM/heuristic mode facade in ``issue_scorer`` and adapts the result back to
+this module's schema via :func:`from_unified_score`, so this module's frozen,
+cross-field-validated ``ScoreBreakdown`` remains the one shape the
+job/progress/stats contract ever sees, regardless of which scorer answered.
 
 Also owns the marker-delimited grooming blocks Phase A (and Phase B, in
-``issue_grooming_split``) inject into an issue body, so a re-run replaces its own
-prior output in place instead of duplicating it, and so scoring never mistakes a
-previously-injected block for part of the issue's own content.
+``issue_grooming_split``) inject into an issue body, so a re-run replaces its
+own prior output in place instead of duplicating it, and so scoring never
+mistakes a previously-injected block for part of the issue's own content.
 """
 
 from __future__ import annotations
@@ -16,6 +24,8 @@ from __future__ import annotations
 import re
 
 from pydantic import BaseModel, ConfigDict, model_validator
+
+from .issue_scoring import ScoreBreakdown as LLMScoreBreakdown
 
 FIBONACCI: tuple[int, ...] = (1, 2, 3, 5, 8, 13, 21)
 
@@ -241,6 +251,42 @@ def score_issue(title: str, body: str) -> ScoreBreakdown:
         anticipated_loc_rationale=loc_rationale,
         solution_complexity=solution,
         solution_complexity_rationale=solution_rationale,
+        aggregate=aggregate,
+    )
+
+
+def from_unified_score(score: LLMScoreBreakdown) -> ScoreBreakdown:
+    """Adapt a unified-scorer score (LLM or heuristic-fallback) into this module's legacy shape.
+
+    Preconditions:
+        - ``score`` is a validated ``issue_scoring.ScoreBreakdown`` -- every
+          ``*_score`` field is already guaranteed (by that class's own field
+          validators) to be a member of ``issue_scoring.FIBONACCI_COMPLEXITY_VALUES``,
+          itself a proper subset of this module's :data:`FIBONACCI`; not
+          re-checked here.
+    Postconditions:
+        - Returns a legacy :class:`ScoreBreakdown` with ``conceptual``/
+          ``anticipated_loc``/``solution_complexity`` (and their rationales)
+          copied verbatim from ``score``'s ``conceptual_score``/``loc_score``/
+          ``code_complexity_score``. ``aggregate`` is RECOMPUTED as
+          ``nearest_fibonacci(max(conceptual, anticipated_loc, solution_complexity))``
+          -- never copied from ``score.aggregate_score``, which carries no
+          equivalent guarantee (independently LLM-scored, or heuristic-mean-
+          derived rather than max-derived) and would otherwise fail this
+          class's own ``model_validator`` on a mismatch. ``score.aggregate_score``/
+          ``aggregate_rationale``/``suggested_labels`` are dropped -- no
+          equivalent field exists on this legacy schema.
+    """
+    aggregate = nearest_fibonacci(
+        max(score.conceptual_score, score.loc_score, score.code_complexity_score)
+    )
+    return ScoreBreakdown(
+        conceptual=score.conceptual_score,
+        conceptual_rationale=score.conceptual_rationale,
+        anticipated_loc=score.loc_score,
+        anticipated_loc_rationale=score.loc_rationale,
+        solution_complexity=score.code_complexity_score,
+        solution_complexity_rationale=score.code_complexity_rationale,
         aggregate=aggregate,
     )
 
