@@ -1039,6 +1039,7 @@ def test_dummy_plan_critic_wins_over_analysis_delimiters() -> None:
     assert "approved" not in j or j.get("issues") is None
 
 
+@pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", _MODEL_ROUTED_MODEL_NAMES)
 async def test_stream_routes_structured_output_tool_by_name_despite_misleading_prompt(
     model_name: str,
