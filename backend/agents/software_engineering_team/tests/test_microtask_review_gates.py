@@ -13,6 +13,7 @@ Tests the following new functionality:
 from __future__ import annotations
 
 import sys
+import threading
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Optional
 from unittest.mock import MagicMock
@@ -55,11 +56,21 @@ class _ScriptedTextClient(DummyLLMClient):
 
 
 class _CallableTextClient(DummyLLMClient):
-    """Calls a user-provided function to generate each response."""
+    """Calls a user-provided function to generate each response.
+
+    Chunk review is a think-then-format split: call 1 (``complete``) carries
+    the code, call 2 (``complete_json``) is the JSON wrap. Stub matching must
+    use the reasoning prompt, not the format-pass schema text.
+    """
 
     def __init__(self, fn) -> None:
         super().__init__()
         self._fn = fn
+        self._tls = threading.local()
+
+    def complete(self, prompt: str, **kwargs: Any) -> str:
+        self._tls.reasoning = prompt
+        return super().complete(prompt, **kwargs)
 
     def complete_json(
         self,
@@ -71,6 +82,13 @@ class _CallableTextClient(DummyLLMClient):
         think: bool = False,
         **kwargs: Any,
     ) -> Any:
+        reasoning = getattr(self._tls, "reasoning", "")
+        lowered = prompt.lower()
+        if reasoning and (
+            "convert the following analysis into a single json object" in lowered
+            or ("--- analysis " in lowered and "end analysis" in lowered)
+        ):
+            return self._fn(reasoning)
         return self._fn(prompt)
 
 

@@ -20,10 +20,17 @@ from code_review_agent.models import (
 from code_review_agent.prompts import (
     _ARCHITECTURE_CONSISTENCY_BODY,
     _SIDE_EFFECT_IMPACT_BODY,
+    ARCHITECTURE_CONSISTENCY_FORMATTING_INSTRUCTIONS,
     ARCHITECTURE_CONSISTENCY_PROMPT,
+    ARCHITECTURE_CONSISTENCY_REASONING_SYSTEM_PROMPT,
     JSON_OUTPUT_INSTRUCTION,
+    MERGED_ARCHITECTURE_SIDE_EFFECT_FORMATTING_INSTRUCTIONS,
     MERGED_ARCHITECTURE_SIDE_EFFECT_PROMPT,
+    MERGED_ARCHITECTURE_SIDE_EFFECT_REASONING_SYSTEM_PROMPT,
+    SIDE_EFFECT_IMPACT_FORMATTING_INSTRUCTIONS,
     SIDE_EFFECT_IMPACT_PROMPT,
+    SIDE_EFFECT_IMPACT_REASONING_SYSTEM_PROMPT,
+    build_merged_architecture_side_effect_prompt,
 )
 from pydantic import ValidationError
 
@@ -62,6 +69,28 @@ def test_merged_prompt_output_format_describes_two_separate_keys():
     assert '"architecture_findings"' in MERGED_ARCHITECTURE_SIDE_EFFECT_PROMPT
     assert '"side_effect_findings"' in MERGED_ARCHITECTURE_SIDE_EFFECT_PROMPT
     assert MERGED_ARCHITECTURE_SIDE_EFFECT_PROMPT.endswith(JSON_OUTPUT_INSTRUCTION)
+
+
+def test_submission_pass_prompts_split_reasoning_and_formatting() -> None:
+    assert ARCHITECTURE_CONSISTENCY_PROMPT == (
+        ARCHITECTURE_CONSISTENCY_REASONING_SYSTEM_PROMPT
+        + ARCHITECTURE_CONSISTENCY_FORMATTING_INSTRUCTIONS
+    )
+    assert _ARCHITECTURE_CONSISTENCY_BODY in ARCHITECTURE_CONSISTENCY_REASONING_SYSTEM_PROMPT
+    assert "Return a single JSON object" in ARCHITECTURE_CONSISTENCY_FORMATTING_INSTRUCTIONS
+    assert "Answer in structured prose" in ARCHITECTURE_CONSISTENCY_REASONING_SYSTEM_PROMPT
+
+    assert SIDE_EFFECT_IMPACT_PROMPT == (
+        SIDE_EFFECT_IMPACT_REASONING_SYSTEM_PROMPT + SIDE_EFFECT_IMPACT_FORMATTING_INSTRUCTIONS
+    )
+
+    assert MERGED_ARCHITECTURE_SIDE_EFFECT_PROMPT == (
+        MERGED_ARCHITECTURE_SIDE_EFFECT_REASONING_SYSTEM_PROMPT
+        + MERGED_ARCHITECTURE_SIDE_EFFECT_FORMATTING_INSTRUCTIONS
+    )
+    assert build_merged_architecture_side_effect_prompt(arch_on=True, side_on=False).startswith(
+        "You are running ONLY the architecture-consistency"
+    )
 
 
 def test_merged_schema_round_trips_both_finding_types():

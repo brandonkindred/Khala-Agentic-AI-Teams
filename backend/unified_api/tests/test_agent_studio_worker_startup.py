@@ -3,8 +3,11 @@
 Agent Studio is an in-process team, so its Temporal worker is started from the
 unified-API lifespan (not a separate ``team_service`` container). The helper is gated
 on the team being enabled, must never let a worker-start failure break app startup,
-and must log honestly — INFO only when a worker actually started, WARNING when
-``start_team_worker`` returns ``False`` (``TEMPORAL_ADDRESS`` unset → no worker).
+and must log honestly: INFO both when a worker actually started and when
+``start_team_worker`` returns ``False`` (``TEMPORAL_ADDRESS`` unset → no worker) —
+authoring CRUD falls back to direct in-process dispatch in that case, so it is a mode
+switch, not a degraded state, and does not warrant a WARNING. A genuine worker-start
+failure (an exception) still logs a WARNING.
 
 Log assertions patch ``main.logger`` methods directly rather than using ``caplog``,
 which is unreliable here because importing the unified API configures logging.
@@ -52,9 +55,10 @@ def test_worker_start_invoked_when_enabled(monkeypatch: pytest.MonkeyPatch) -> N
     assert warns == []
 
 
-def test_worker_start_warns_when_temporal_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A ``False`` return (worker not started, e.g. TEMPORAL_ADDRESS unset) logs a
-    WARNING rather than a misleading success line — and never raises."""
+def test_worker_start_logs_info_when_temporal_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A ``False`` return (worker not started, e.g. TEMPORAL_ADDRESS unset) logs an
+    INFO note that authoring falls back to direct dispatch — not a WARNING, since
+    that path is fully functional — and never raises."""
     monkeypatch.setattr(main, "TEAM_CONFIGS", _fake_team_configs(True))
     monkeypatch.setattr(
         "agent_team_studio.agent_studio.temporal.worker.start_agent_studio_temporal_worker_thread",
@@ -64,8 +68,8 @@ def test_worker_start_warns_when_temporal_disabled(monkeypatch: pytest.MonkeyPat
 
     main._start_agent_studio_temporal_worker()
 
-    assert any("NOT started" in m for m in warns)
-    assert infos == []
+    assert any("NOT started" in m for m in infos)
+    assert warns == []
 
 
 def test_worker_start_skipped_when_disabled(monkeypatch: pytest.MonkeyPatch) -> None:

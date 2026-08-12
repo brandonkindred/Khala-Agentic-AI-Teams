@@ -1,0 +1,8 @@
+// Shared look for the Save/Load draft header buttons (`.studio__draft-btn`),
+// used by agent-studio-shell.component.scss and its load-draft-menu child.
+// Angular's view encapsulation scopes each component's styles to its own
+// template, so each still needs its own rule (`.studio__draft-btn { @include
+// draft-btn.look; }`) -- this mixin just keeps the shared property in one place.
+@mixin look {
+  font-size: 0.8125rem;
+}

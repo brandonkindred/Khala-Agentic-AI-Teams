@@ -173,6 +173,53 @@ def test_thinking_override_supported_unaffected_by_new_key() -> None:
     assert model_resolution.thinking_override_supported(MagicMock()) is True
 
 
+def test_resolve_code_review_model_forwards_response_format_text(monkeypatch) -> None:
+    seen: dict[str, Any] = {}
+
+    def fake_get(key: str, **kwargs: Any) -> object:
+        seen.update(kwargs)
+        seen["key"] = key
+        return object()
+
+    monkeypatch.setattr(model_resolution, "get_strands_model", fake_get)
+    model_resolution.resolve_code_review_model(object(), response_format="text", think=True)
+    assert seen["key"] == "code_review"
+    assert seen["response_format"] == "text"
+    assert seen["think"] is True
+
+
+def test_resolve_code_review_verify_model_forwards_response_format_text(monkeypatch) -> None:
+    seen: dict[str, Any] = {}
+
+    def fake_get(key: str, **kwargs: Any) -> MagicMock:
+        seen.update(kwargs)
+        seen["key"] = key
+        return MagicMock()
+
+    monkeypatch.setattr(model_resolution, "get_strands_model", fake_get)
+    monkeypatch.setattr(model_resolution, "with_model_override", lambda client, _m: client)
+    model_resolution.resolve_code_review_verify_model(object(), response_format="text", think=True)
+    assert seen["key"] == "code_review_verify"
+    assert seen["response_format"] == "text"
+    assert seen["think"] is True
+
+
+def test_resolve_code_review_model_clones_injected_model_for_text_mode() -> None:
+    class _ClonableModel(_FakeStrandsModel):
+        def get_config(self) -> dict[str, Any]:
+            return {"response_format": "json"}
+
+        def clone(self, **overrides: Any) -> "_ClonableModel":
+            cloned = _ClonableModel()
+            cloned._overrides = overrides  # type: ignore[attr-defined]
+            return cloned
+
+    base = _ClonableModel()
+    result = model_resolution.resolve_code_review_model(base, response_format="text", think="low")
+    assert result is not base
+    assert result._overrides == {"response_format": "text", "think": "low"}  # type: ignore[attr-defined]
+
+
 def test_resolve_code_review_model_uses_primary_agent_key(monkeypatch) -> None:
     """The primary resolver stays on the ``code_review`` agent key."""
     sentinel = MagicMock()

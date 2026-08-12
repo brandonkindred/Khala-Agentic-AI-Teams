@@ -11,6 +11,7 @@ from software_engineering_team.github_source.issue_grooming_scoring import (
     PHASE_A_START,
     ScoreBreakdown,
     complexity_label,
+    from_unified_score,
     inject_complexity_block,
     inject_marked_block,
     merge_complexity_label,
@@ -18,6 +19,9 @@ from software_engineering_team.github_source.issue_grooming_scoring import (
     render_complexity_markdown,
     score_issue,
     strip_grooming_blocks,
+)
+from software_engineering_team.github_source.issue_scoring import (
+    ScoreBreakdown as UnifiedScoreBreakdown,
 )
 
 # ---------------------------------------------------------------------------
@@ -218,6 +222,79 @@ class TestScoreBreakdownInvariants:
                 solution_complexity_rationale="r",
                 aggregate=2,  # should be 8 (max of dims)
             )
+
+
+# ---------------------------------------------------------------------------
+# from_unified_score
+# ---------------------------------------------------------------------------
+
+
+def _unified_score(
+    conceptual_score: int = 2,
+    loc_score: int = 2,
+    code_complexity_score: int = 2,
+    aggregate_score: int = 2,
+) -> UnifiedScoreBreakdown:
+    return UnifiedScoreBreakdown(
+        conceptual_score=conceptual_score,
+        conceptual_rationale="Unified: conceptual rationale.",
+        loc_score=loc_score,
+        loc_rationale="Unified: loc rationale.",
+        code_complexity_score=code_complexity_score,
+        code_complexity_rationale="Unified: code complexity rationale.",
+        aggregate_score=aggregate_score,
+        aggregate_rationale="Unified: aggregate rationale.",
+        suggested_labels=["needs-design"],
+    )
+
+
+class TestFromUnifiedScore:
+    def test_maps_fields_and_rationales(self) -> None:
+        unified = _unified_score(
+            conceptual_score=3, loc_score=5, code_complexity_score=8, aggregate_score=8
+        )
+
+        adapted = from_unified_score(unified)
+
+        assert adapted.conceptual == 3
+        assert adapted.conceptual_rationale == "Unified: conceptual rationale."
+        assert adapted.anticipated_loc == 5
+        assert adapted.anticipated_loc_rationale == "Unified: loc rationale."
+        assert adapted.solution_complexity == 8
+        assert adapted.solution_complexity_rationale == "Unified: code complexity rationale."
+
+    def test_aggregate_is_recomputed_via_max_not_copied_from_input(self) -> None:
+        # aggregate_score (1) deliberately disagrees with nearest_fibonacci(max(dims))
+        # (8) -- from_unified_score must recompute, never trust the input's own
+        # aggregate_score.
+        unified = _unified_score(
+            conceptual_score=8, loc_score=1, code_complexity_score=1, aggregate_score=1
+        )
+
+        adapted = from_unified_score(unified)
+
+        assert adapted.aggregate == 8
+        assert adapted.aggregate != unified.aggregate_score
+
+    def test_drops_fields_with_no_legacy_equivalent(self) -> None:
+        dumped = from_unified_score(_unified_score()).model_dump()
+        assert set(dumped) == {
+            "conceptual",
+            "conceptual_rationale",
+            "anticipated_loc",
+            "anticipated_loc_rationale",
+            "solution_complexity",
+            "solution_complexity_rationale",
+            "aggregate",
+        }
+
+    @pytest.mark.parametrize("value", [1, 2, 3, 5, 8, 13])
+    def test_every_legal_unified_score_value_adapts_without_error(self, value: int) -> None:
+        # issue_scoring.FIBONACCI_COMPLEXITY_VALUES is a proper subset of this
+        # module's FIBONACCI, so every legal unified score value must adapt
+        # cleanly and satisfy this module's own validator.
+        adapted = from_unified_score(_unified_score(value, value, value, value))
+        assert adapted.aggregate == nearest_fibonacci(value)
 
 
 class TestRenderComplexityMarkdown:

@@ -1,18 +1,20 @@
 """Agent Studio Stage-1 build-flow API (mounted at ``/api/agent-studio``).
 
-Conversation / agent handlers are a thin HTTP surface over Temporal workflows:
+Conversation / agent handlers are a thin HTTP surface over Agent Studio's authoring
+CRUD:
 
     POST /api/agent-studio/conversations                       — start an authoring chat (new | refine)
     POST /api/agent-studio/conversations/{id}/messages         — send a message; assistant updates the draft
     POST /api/agent-studio/agents/from-registry/{agent_id}     — clone a registry agent into a refine draft
     POST /api/agent-studio/agents                              — save + register a finished definition
 
-Those Temporal handlers dispatch a durable workflow → activity via
-:mod:`agent_team_studio.agent_studio.temporal.dispatch` and block for the result.
-There is no non-Temporal fallback for conversations/agents — the activity does the
-real work by delegating to the process-wide
+These handlers call :mod:`agent_team_studio.agent_studio.temporal.dispatch`, which
+transparently picks the dispatch mode per call: a durable workflow → activity round
+trip via Temporal when it's configured, or a direct in-process call otherwise — both
+paths ultimately delegate to the process-wide
 :class:`~agent_team_studio.agent_studio.service.AgentStudioService` singleton
-(:func:`agent_team_studio.agent_studio.runtime.get_studio_service`). The worker runs
+(:func:`agent_team_studio.agent_studio.runtime.get_studio_service`), so the routes
+below are unaware of which mode ran. When Temporal is enabled its worker runs
 in-process (started from the unified-API lifespan), so those activity threads share
 that singleton's conversation store with these handlers.
 
@@ -31,9 +33,10 @@ opaque ``{name?, payload?}`` envelope; tenancy uses :func:`get_current_user_id`
 Tool discovery for the definition panel reuses the existing ``GET /api/llm-tools/``
 (no new route here). Handlers are synchronous ``def`` so FastAPI runs them in its
 threadpool (Temporal round-trips and store I/O stay off the event loop). Errors map
-cleanly: :class:`ValueError` → 400, :class:`LookupError` / missing draft → 404 —
-the Temporal dispatch layer re-raises those native exceptions from workflow failure
-so conversation/agent mapping is unchanged by the Temporal round-trip.
+cleanly: :class:`ValueError` → 400, :class:`LookupError` / missing draft → 404 — the
+dispatch layer surfaces those same native exceptions in both dispatch modes (re-raised
+from the workflow failure on the Temporal path, raised directly by the service on the
+direct path), so conversation/agent mapping here is unchanged either way.
 
 Auth: these routes carry no real authentication dependency, consistent with the
 other team routers on the Unified API. Authentication/authorization is expected to be
