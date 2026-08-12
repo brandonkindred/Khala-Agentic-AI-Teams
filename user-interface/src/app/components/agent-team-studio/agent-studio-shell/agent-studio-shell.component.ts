@@ -4,6 +4,7 @@ import { MatIconModule } from '@angular/material/icon';
 import { MatTooltipModule } from '@angular/material/tooltip';
 import { STUDIO_STAGES } from '../../../models/agent-studio.model';
 import { AgentStudioStateService } from '../../../services/agent-studio-state.service';
+import { AgentStudioFacade } from '../../../services/agent-studio.facade';
 import { AgentStudioBuildAgentComponent } from './agent-studio-build-agent.component';
 import { AgentStudioComposeTeamComponent } from './agent-studio-compose-team.component';
 import { AgentStudioPersonaComponent } from './agent-studio-persona.component';
@@ -15,7 +16,9 @@ import { AgentStudioTestAgentComponent } from './agent-studio-test-agent.compone
  * the forward-only 4-stage stepper and the active stage. All four stages are
  * implemented: Build Agent, Test Agent, Compose Team, and Test Team w/
  * Personas. Owns one `AgentStudioStateService` per session (provided here,
- * not at root, so each visit starts clean).
+ * not at root, so each visit starts clean). `AgentStudioFacade` is provided
+ * alongside it so the facade's injector can resolve this session's state
+ * service (it is not a root singleton either).
  */
 @Component({
   selector: 'app-agent-studio-shell',
@@ -31,7 +34,7 @@ import { AgentStudioTestAgentComponent } from './agent-studio-test-agent.compone
     AgentStudioTestAgentComponent,
   ],
   changeDetection: ChangeDetectionStrategy.OnPush,
-  providers: [AgentStudioStateService],
+  providers: [AgentStudioStateService, AgentStudioFacade],
   templateUrl: './agent-studio-shell.component.html',
   styleUrl: './agent-studio-shell.component.scss',
 })

@@ -104,6 +104,23 @@ def test_extract_json_from_response_prefers_real_payload_over_format_echo() -> N
     assert result == {"approved": False, "issues": ["missing tests"]}
 
 
+def test_extract_json_from_response_prefers_real_payload_over_fenced_format_echo() -> None:
+    """Same disambiguation as the prose case above, but with BOTH the echoed
+    format example and the real answer in their own fenced ```json blocks --
+    the fast first-fenced-block path must defer to last-match-wins instead of
+    returning the echo."""
+    text = (
+        "Format example:\n```json\n"
+        '{"approved": true, "issues": []}\n'
+        "```\n"
+        "Actual verdict:\n```json\n"
+        '{"approved": false, "issues": ["missing tests"]}\n'
+        "```"
+    )
+    result = extract_json_from_response(text)
+    assert result == {"approved": False, "issues": ["missing tests"]}
+
+
 def test_extract_json_from_response_clean_object_unaffected() -> None:
     """A case the existing strategies already handle must not be touched by
     the new fallback path (it returns before the fallback is ever reached)."""
