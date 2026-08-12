@@ -965,18 +965,48 @@ def run_design_attempt_activity(params: Dict[str, Any]) -> Dict[str, Any]:
             # params-seeded pre-attempt state: it already reflects everything
             # params carried PLUS Phase 1's own additions before this exact
             # attempt crashed. Replace, never merge/append.
-            drift_collector = _DriftCollector(
-                spec_history=list(checkpoint.spec_history),
-                code_history=list(checkpoint.code_history),
-                gate_timeline=list(checkpoint.gate_timeline),
-            )
-            cumulative_gate_results = [
-                QualityGateResult.model_validate(g) for g in checkpoint.gate_results
-            ]
-            budget.calls_made = min(checkpoint.budget_calls, budget.limit)
-            resume_spec = checkpoint.spec
-            resume_rationale = checkpoint.rationale
-            resume_design_context = _design_context_from_wire(checkpoint.design_context)
+            #
+            # load_design_attempt_checkpoint's own fail-open contract only
+            # covers the top-level DesignAttemptCheckpoint shape -- nested
+            # fields like gate_results are typed loosely (List[Dict[str,
+            # Any]]) so a malformed entry (e.g. missing gate_name) survives
+            # that validation and only fails here, reconstructing the real
+            # QualityGateResult/SpecCritique objects. Without this guard that
+            # raises straight out of the activity, and every Temporal retry
+            # reloads the same unusable checkpoint and fails identically --
+            # exactly the crash loop the fail-open contract exists to avoid.
+            # Treat any reconstruction failure the same as "no checkpoint
+            # found": fall through to a normal Phase 1 re-run. Reconstruct
+            # into temporaries first and only adopt them together -- never
+            # leave drift_collector/cumulative_gate_results/budget in a
+            # partially-checkpointed, partially-params-seeded mix if
+            # reconstruction fails partway through.
+            try:
+                checkpoint_drift_collector = _DriftCollector(
+                    spec_history=list(checkpoint.spec_history),
+                    code_history=list(checkpoint.code_history),
+                    gate_timeline=list(checkpoint.gate_timeline),
+                )
+                checkpoint_gate_results = [
+                    QualityGateResult.model_validate(g) for g in checkpoint.gate_results
+                ]
+                checkpoint_design_context = _design_context_from_wire(checkpoint.design_context)
+            except Exception as exc:  # noqa: BLE001 -- fail open, see comment above
+                logger.warning(
+                    "design attempt checkpoint for run %s attempt %s failed to "
+                    "reconstruct (treating as no checkpoint found): %s",
+                    run_id,
+                    design_attempt_index,
+                    exc,
+                    exc_info=True,
+                )
+            else:
+                drift_collector = checkpoint_drift_collector
+                cumulative_gate_results = checkpoint_gate_results
+                budget.calls_made = min(checkpoint.budget_calls, budget.limit)
+                resume_spec = checkpoint.spec
+                resume_rationale = checkpoint.rationale
+                resume_design_context = checkpoint_design_context
 
     def _write_checkpoint(_phase: str, data: Dict[str, Any]) -> None:
         if not checkpoint_enabled:
@@ -1017,6 +1047,24 @@ def run_design_attempt_activity(params: Dict[str, Any]) -> Dict[str, Any]:
             logger.warning(
                 "design attempt checkpoint write failed for run %s attempt %s "
                 "(retryable lookup failure): %s",
+                run_id,
+                design_attempt_index,
+                exc,
+                exc_info=True,
+            )
+        except Exception as exc:  # noqa: BLE001
+            # A raw (non-ApplicationError) failure from the WRITE itself --
+            # e.g. a job-service connection/HTTP error surfacing after
+            # _persist_run_state's own retries are exhausted. Only the
+            # fencing check ahead of the write raises ApplicationError; the
+            # write call can still fail with an ordinary exception. Same
+            # best-effort rationale as the retryable-fencing branch above:
+            # checkpoint persistence is optional, so this must never
+            # propagate up and discard the whole (already-completed) design
+            # attempt over a transport blip.
+            logger.warning(
+                "design attempt checkpoint write failed for run %s attempt %s "
+                "(non-fencing write failure): %s",
                 run_id,
                 design_attempt_index,
                 exc,
