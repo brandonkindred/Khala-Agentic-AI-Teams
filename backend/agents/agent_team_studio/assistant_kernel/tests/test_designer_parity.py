@@ -131,10 +131,13 @@ def test_sibling_tag_never_cross_matches_primary_tag_for_either_assistant(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # A block for a longer tag that merely starts with the assistant's real
-    # tag (Agent Studio's "agent" vs. a decoy "agent-v2"; Process Designer's
-    # "process" vs. "agents", its own second, differently-tagged block) must
-    # never be read as the primary block. This is the kernel's whitespace-
-    # boundary regex guarantee, asserted here at the assistant boundary.
+    # tag -- Agent Studio's "agent" vs. a decoy "agent-v2", Process Designer's
+    # "process" vs. a decoy "process-v2" -- must never be read as the primary
+    # block. This is the kernel's whitespace-boundary regex guarantee,
+    # asserted here at the assistant boundary; a decoy tag that shares no
+    # prefix with the real tag (e.g. Process Designer's own "agents" block)
+    # would pass even if the boundary defense regressed, so both decoys below
+    # are word-extensions of the real tag.
     agent_studio_reply = (
         'Here\'s a variant, not the real update.\n\n```agent-v2\n{"name": "decoy"}\n```\n'
     )
@@ -147,26 +150,25 @@ def test_sibling_tag_never_cross_matches_primary_tag_for_either_assistant(
     assert "agent-v2" in reply
 
     process_reply = (
-        "Roster only for now.\n\n"
-        '```agents\n[{"agent_name": "Triage Agent", "role": "Classifies tickets"}]\n```\n'
+        'Here\'s a variant, not the real update.\n\n```process-v2\n{"name": "decoy"}\n```\n'
     )
     _stub_process_designer_reply(monkeypatch, process_reply)
-    _, process, _, agents_data = ProcessDesignerAgent().respond(
+    reply2, process, _, _ = ProcessDesignerAgent().respond(
         conversation_history=[], current_process=None, user_message="hi"
     )
-    # "agents" (plural) must not be mistaken for "process" -- no process
-    # update -- while still being correctly parsed as its own, distinct block.
     assert process is None
-    assert agents_data == [{"agent_name": "Triage Agent", "role": "Classifies tickets"}]
+    assert "process-v2" in reply2
 
 
 def test_suggestions_block_normalizes_identically_for_both_assistants(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # Both assistants extract the "suggestions" tag via the same kernel call
-    # and normalize it to list[str] identically.
-    suggestions_fence = '```suggestions\n["Add a word_count input?", "Target an industry?"]\n```\n'
-    expected = ["Add a word_count input?", "Target an industry?"]
+    # and normalize it to list[str] identically -- including str()-coercing a
+    # non-string element, so a regression that dropped the str() call (and
+    # just returned the parsed list unchanged) would be caught here.
+    suggestions_fence = '```suggestions\n["Add a word_count input?", 3]\n```\n'
+    expected = ["Add a word_count input?", "3"]
 
     agent_studio_reply = f"Some prose.\n\n{suggestions_fence}"
     _, _, suggestions = AgentDesignerAgent(
