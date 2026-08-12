@@ -254,17 +254,27 @@ def _metrics_snapshot(metrics: BacktestResult) -> Dict[str, Any]:
     """Project metrics to the identity the split must preserve.
 
     Pre: ``metrics`` is a ``BacktestResult``.
-    Post: the ledger-derived fields ``compute_metrics`` fills; walk-forward
-    / coverage / diagnostics attachments are excluded so a verification
-    stub cannot mask a synthesis-loop regression.
+    Post: every field ``compute_metrics`` / ``_compute_metrics_daily``
+    populates. Walk-forward, coverage, and diagnostics attachments are
+    excluded so a verification stub cannot mask a synthesis-loop
+    regression.
     """
     return {
         "total_return_pct": metrics.total_return_pct,
         "annualized_return_pct": metrics.annualized_return_pct,
+        "volatility_pct": metrics.volatility_pct,
+        "sharpe_ratio": metrics.sharpe_ratio,
+        "max_drawdown_pct": metrics.max_drawdown_pct,
         "win_rate_pct": metrics.win_rate_pct,
         "profit_factor": metrics.profit_factor,
-        "max_drawdown_pct": metrics.max_drawdown_pct,
-        "sharpe_ratio": metrics.sharpe_ratio,
+        "sortino_ratio": metrics.sortino_ratio,
+        "calmar_ratio": metrics.calmar_ratio,
+        "max_drawdown_duration_days": metrics.max_drawdown_duration_days,
+        "risk_free_rate": metrics.risk_free_rate,
+        "alpha_pct": metrics.alpha_pct,
+        "beta": metrics.beta,
+        "information_ratio": metrics.information_ratio,
+        "deflated_sharpe": metrics.deflated_sharpe,
     }
 
 
@@ -319,7 +329,11 @@ def _neutralize_synthesis_gates(
     no criticals. ``anomaly_gates`` (default: one info-severity pass)
     is what ``_check_anomalies_cached`` returns, so evaluation records
     a deterministic gate without depending on the real detector.
+    ``MAX_CODE_REFINEMENT_ROUNDS`` is pinned to 2 so two-round recovery
+    scenarios still reach round 1 when the process env has the valid
+    floor value ``STRATEGY_LAB_MAX_CODE_REFINEMENT_ROUNDS=1``.
     """
+    monkeypatch.setattr(orchestrator_module, "MAX_CODE_REFINEMENT_ROUNDS", 2)
     monkeypatch.setattr(orch.spec_readiness_gate, "validate", lambda *a, **kw: [])
     monkeypatch.setattr(orch.code_safety_checker, "check", lambda *a, **kw: [])
     monkeypatch.setattr(orch.code_conformance_gate, "check", lambda *a, **kw: [])
@@ -714,7 +728,7 @@ def test_design_attempt_happy_path_preserves_spec_code_trades_metrics_gates(
     assert "predicate_reachability" in gate_names
     assert "backtest_anomaly" in gate_names
     assert "realism" in gate_names
-    assert record.backtest.status != "failed: spec_validation"
+    assert record.backtest.status == "completed"
 
 
 def test_design_attempt_no_market_data_preserves_failed_record_outputs(
