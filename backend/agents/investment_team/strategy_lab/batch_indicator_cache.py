@@ -161,14 +161,18 @@ class BatchIndicatorCache:
             returns the indicator value for ``(indicator_name, params, symbol,
             timeframe, bars)`` when invoked.
         Postconditions:
-          - Returns ``(value, hit)``. On a hit, ``value`` is the object stored
-            by the first call with the same key and ``compute`` was not
-            invoked. On a miss, ``compute`` was invoked at least once (exactly
-            once absent a concurrent race on the same key) and its result is
-            both stored and returned.
-          - ``hits``/``misses`` are incremented to reflect the outcome; a
-            racer that loses a concurrent store still counts as a hit, since
-            the value it observes came from the winning ``compute`` call.
+          - Returns ``(value, hit)``. ``value`` is always the single value
+            stored for this key by whichever call first wins the store (see
+            below) — never a value this call computed but failed to store.
+          - ``hit`` is ``True`` when a value for this key was already stored
+            before this call's own lookup, and ``False`` when this call is
+            the one whose ``compute`` result got stored. A caller that races
+            another caller on the same key and calls ``compute`` but loses
+            the store still returns ``(value, True)``: ``compute`` was
+            invoked by this call, but its result was discarded in favor of
+            the winner's, so the return is indistinguishable from an
+            ordinary hit.
+          - ``hits``/``misses`` are incremented to match ``hit``.
         """
         assert isinstance(indicator_name, str) and indicator_name, (
             "indicator_name must be a non-empty string"
