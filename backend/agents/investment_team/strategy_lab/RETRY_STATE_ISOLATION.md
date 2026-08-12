@@ -61,6 +61,43 @@ a committed proposal (`terminate=False`) carries the new known-good state. Issue
 re-derived deterministically per round from the structured findings
 (`findings_to_issues(check_result.findings)`), never accumulated across rounds.
 
+## Intra-attempt checkpointing (design/synthesis boundary)
+
+`ADR-012` (`system_design/adr/ADR-012-strategy-lab-design-attempt-checkpoint-contract.md`) adds a
+second, different kind of boundary on top of the attempt-to-attempt contract above: a durable
+checkpoint *within* one design attempt, taken where Phase 1 (design + review) hands off to
+Phase 1b (code synthesis), so a worker crash mid-attempt can resume past the design phase instead
+of discarding the whole attempt. It is a checkpoint of attempt-local state, not a new kind of
+cross-attempt state — and is designed to compose with, not weaken, the copy-on-entry/
+commit-on-completion contract this document describes:
+
+- **It never crosses the attempt-to-attempt boundary this document governs.** A checkpoint is
+  scoped to exactly one `(run_id, design_attempt)` pair and is never read by a different
+  `design_attempt` index. A design re-entry after `SpecImplementabilityError` still starts from
+  a fresh `snapshot()`-ed drift collector and fresh attempt-scoped caches, exactly as described
+  above — a checkpointed (and, by definition, since it triggered re-entry, ultimately-rejected)
+  spec from the failed attempt is never consulted by the attempt that replaces it. This is the
+  same "a failed attempt's state never leaks into the next attempt's reasoning" guarantee this
+  document states, applied to the new mechanism.
+- **It does not add a new merge point into the parent drift collector.** The checkpointed drift
+  is the same attempt-local `attempt_drift` this document already describes as copy-on-entry;
+  checkpointing it mid-attempt (to survive a crash) does not change when it becomes visible to
+  the parent — that still happens only via the existing boundary `merge()` call, on this
+  attempt's eventual success or failure, never from the checkpoint write itself.
+- **The checkpointed gate-results slice is consistent with the "intentionally cumulative"
+  callout above.** `cumulative_gate_results` already spans all attempts on purpose, feeding the
+  deflated-Sharpe multiple-testing burden. Checkpointing the design phase's contribution to that
+  list changes only when it becomes durable, not the accounting itself — a resumed attempt
+  reuses its own already-recorded gate results rather than re-evaluating them.
+- **Cleanup mirrors the same discipline**: a checkpoint is deleted on any terminal outcome of the
+  attempt it belongs to (record, reentry, or skip) — not just success — so a design-re-entry
+  loop never accumulates checkpoints from attempts that will never be revisited.
+
+See `ADR-012` for the full contract: checkpoint identity/scoping, the persisted-field set,
+fencing treatment, and resumability semantics. This issue's own implementation (the
+checkpoint-persistence write path and the resume-on-crash wiring) lands separately; this section
+will gain a "Locked in by" row once that lands.
+
 ## Locked in by
 
 | Contract | Tests |
