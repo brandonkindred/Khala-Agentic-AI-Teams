@@ -38,6 +38,14 @@ def test_make_provisioning_agent_id_stable():
     assert len(a) <= 120
 
 
+def test_make_provisioning_agent_id_slugs_step_and_agent_segments():
+    # step_id/agent_name segments are lowercased and hyphenated (shared `slug()`
+    # semantics); team_id/process_id segments are alphanumeric-stripped only. This
+    # locks the exact format so a future refactor can't silently change it.
+    agent_id = make_provisioning_agent_id("Team-1", "Proc.2", "Step One!", "Triage Agent")
+    assert agent_id == "at-Team1-Proc2-step-one-triage-agent"
+
+
 def test_schedule_provision_skips_when_disabled(monkeypatch, fake_pg: dict):
     monkeypatch.setenv("AGENTIC_TEAM_AGENT_PROVISIONING_ENABLED", "false")
     # Reload module flag

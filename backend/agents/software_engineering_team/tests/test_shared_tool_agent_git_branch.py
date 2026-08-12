@@ -163,6 +163,33 @@ def test_deliver_existing_branch_gate_passes_autofix_commit_before_merge(tmp_pat
     ]
 
 
+def test_deliver_existing_branch_autofix_commit_failure_blocks_merge(tmp_path, monkeypatch):
+    """Regression: a genuine git failure while sweeping up the autofix commit
+    (not the common "nothing to commit" no-op, which ``commit_working_tree``
+    reports as success) must skip the merge and fail closed, mirroring the
+    gate-blocks-merge test above.
+    """
+    _git_dir(tmp_path)
+
+    def _commit_working_tree(repo_path, message):
+        if message == "chore: pre-merge quality gate autofix":
+            return False, "git commit failed: lock file exists"
+        return True, ""  # "chore: finalize before merge" keeps succeeding
+
+    monkeypatch.setattr(mod, "commit_working_tree", _commit_working_tree)
+    merge_calls = []
+    monkeypatch.setattr(mod, "merge_branch", lambda *a, **k: merge_calls.append(a) or (True, ""))
+    checkout_calls = []
+    monkeypatch.setattr(
+        mod, "checkout_branch", lambda *a, **k: checkout_calls.append(a) or (True, "")
+    )
+    out = _agent().deliver(_inp(repo_path=str(tmp_path), feature_branch_name="feature/x"))
+    assert out.success is False
+    assert out.summary == "Autofix commit failed: git commit failed: lock file exists"
+    assert merge_calls == []
+    assert checkout_calls[-1][1] == "feature/x"
+
+
 # --- fallback path (no feature_branch_name) --------------------------------
 
 
@@ -204,6 +231,7 @@ def test_deliver_fallback_merge_fail(tmp_path, monkeypatch):
         lambda self, *a, **k: (True, "feature/y"),
     )
     monkeypatch.setattr(repo_writer, "write_agent_output", lambda *a, **k: (True, ""))
+    monkeypatch.setattr(mod, "commit_working_tree", lambda *a, **k: (True, ""))
     monkeypatch.setattr(mod, "merge_branch", lambda *a, **k: (False, "conflict"))
     monkeypatch.setattr(mod, "abort_merge", lambda *a, **k: (True, ""))
     monkeypatch.setattr(mod, "checkout_branch", lambda *a, **k: (True, ""))
@@ -308,6 +336,35 @@ def test_deliver_fallback_gate_passes_autofix_commit_before_merge(tmp_path, monk
     ]
 
 
+def test_deliver_fallback_autofix_commit_failure_blocks_merge(tmp_path, monkeypatch):
+    """Regression: a genuine git failure while sweeping up the autofix commit
+    on the fallback (newly-created-branch) path must skip the merge and
+    restore development, mirroring the gate-blocks-merge test above."""
+    _git_dir(tmp_path)
+    from software_engineering_team.shared import repo_writer
+
+    monkeypatch.setattr(
+        mod.GitBranchManagementToolAgent,
+        "create_feature_branch",
+        lambda self, *a, **k: (True, "feature/y"),
+    )
+    monkeypatch.setattr(repo_writer, "write_agent_output", lambda *a, **k: (True, ""))
+    monkeypatch.setattr(
+        mod, "commit_working_tree", lambda *a, **k: (False, "git commit failed: disk full")
+    )
+    merge_calls = []
+    monkeypatch.setattr(mod, "merge_branch", lambda *a, **k: merge_calls.append(a) or (True, ""))
+    checkout_calls = []
+    monkeypatch.setattr(
+        mod, "checkout_branch", lambda *a, **k: checkout_calls.append(a) or (True, "")
+    )
+    out = _agent().deliver(_inp(repo_path=str(tmp_path), current_files={"a.py": "x"}))
+    assert out.success is False
+    assert out.summary == "Autofix commit failed: git commit failed: disk full"
+    assert merge_calls == []
+    assert checkout_calls[-1][1] == mod.DEVELOPMENT_BRANCH
+
+
 def test_deliver_fallback_success(tmp_path, monkeypatch):
     _git_dir(tmp_path)
     from software_engineering_team.shared import repo_writer
@@ -318,6 +375,7 @@ def test_deliver_fallback_success(tmp_path, monkeypatch):
         lambda self, *a, **k: (True, "feature/y"),
     )
     monkeypatch.setattr(repo_writer, "write_agent_output", lambda *a, **k: (True, ""))
+    monkeypatch.setattr(mod, "commit_working_tree", lambda *a, **k: (True, ""))
     monkeypatch.setattr(mod, "merge_branch", lambda *a, **k: (True, ""))
     monkeypatch.setattr(mod, "delete_branch", lambda *a, **k: (True, ""))
     monkeypatch.setattr(mod, "checkout_branch", lambda *a, **k: (True, ""))

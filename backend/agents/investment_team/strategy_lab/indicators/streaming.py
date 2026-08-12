@@ -17,10 +17,15 @@ This module persists per-key state across calls so the hot path is
   single recurrence step on each subsequent bar.
 * ``macd_line`` is cached as a bounded :class:`deque`; new bars only
   append one element rather than rebuilding the full history.
-* The signal-line EMA, which historically reseeded from
-  ``macd_line[0]`` on every call (sliding-window-EMA semantics tied to
-  the bounded ``history_depth``), is recomputed against the live deque
-  but the deque itself is maintained incrementally.
+* The signal-line EMA reseeds from whatever is currently
+  ``macd_line[0]`` (sliding-window-EMA semantics tied to the bounded
+  ``history_depth``). On an ``expand`` step the reseed point never
+  moves, so it is single-stepped in O(1) — bit-identical to a full
+  walk, not an approximation. On a ``slide`` step the reseed point
+  itself shifts, so it is still recomputed by walking the live deque;
+  that walk is bounded by the caller's window depth (not by total bars
+  seen), so it stays a bounded cost rather than the unbounded one
+  ``expand`` had.
 
 Semantics are preserved bit-for-bit against the legacy templates —
 every indicator returns the same windowed-EMA value at the trailing
@@ -998,8 +1003,13 @@ class IndicatorRegistry:
 
         kind = self._advance_kind(state, bars, fp) if state is not None else "none"
         macd_line: Deque[float]
+        # Set only on an ``expand`` step that has a previous cached signal
+        # value to step from — see the ``expand`` branch below for why this
+        # is bit-identical to (not an approximation of) the full walk.
+        stepped_sig_val: Optional[float] = None
         if kind in ("expand", "slide"):
             macd_line = state["macd_line"]
+            prev_sig_val = state["value"]["signal"]
             # Compute-then-mutate: finish every fallible operation (the
             # EMA recurrences) BEFORE touching the cached deque, so a
             # raise anywhere above leaves the cache untouched and the
@@ -1014,7 +1024,37 @@ class IndicatorRegistry:
                 # Without this, the deque grows past the legacy bound and
                 # the signal-EMA seeds from a bar that legacy would no
                 # longer see — silent semantic divergence on every slide.
+                #
+                # The signal-EMA is deliberately NOT single-stepped here.
+                # It reseeds from whatever is currently ``macd_line[0]``
+                # (see the full-walk block below), and slide moves that
+                # reseed point — a closed-form correction exists but
+                # reorders the floating-point arithmetic relative to a
+                # from-scratch walk, and
+                # ``test_macd_sliding_window_matches_legacy`` asserts
+                # bit-exact (``==``) equality against exactly that walk on
+                # every slide step, which the reordered arithmetic fails
+                # by a few ULPs. ``macd_line`` is already bounded by the
+                # caller's window depth here (pop-front keeps its length
+                # constant), so this walk is O(window) per call — not the
+                # unbounded O(len(bars)) cost the ``expand`` case has — so
+                # it is left as a full re-walk rather than risk drifting
+                # off a pinned exact-equality test for no asymptotic win.
                 macd_line.popleft()
+            elif prev_sig_val is not None:
+                # ``kind == "expand"``: bars only grew, so ``macd_line[0]``
+                # — the signal-EMA's reseed point — is untouched by this
+                # call. Appending one value to the tail is therefore
+                # exactly the next term of the same recurrence the full
+                # walk below computes: not an approximation, bit-identical
+                # to it, and O(1) instead of re-walking the whole deque on
+                # every call over an unboundedly-growing history. Only
+                # valid once a previous call already produced a cached
+                # signal value to step from — the first call that crosses
+                # the ``len(macd_line) >= signal`` threshold has no prior
+                # term and falls through to the full walk below instead.
+                alpha_g = 2.0 / (signal + 1.0)
+                stepped_sig_val = alpha_g * new_val + (1.0 - alpha_g) * prev_sig_val
             macd_line.append(new_val)
         else:
             # Cold-start: replay the legacy outer loop so the macd_line
@@ -1030,7 +1070,13 @@ class IndicatorRegistry:
         macd_val = macd_line[-1]
         sig_val: Optional[float] = None
         hist_val: Optional[float] = None
-        if len(macd_line) >= signal:
+        if stepped_sig_val is not None:
+            sig_val = stepped_sig_val
+            hist_val = macd_val - sig_val
+        elif len(macd_line) >= signal:
+            # Full walk: cold-start, every ``slide`` step (see note above),
+            # or the one-time ``expand`` step that first crosses the
+            # ``len(macd_line) >= signal`` threshold.
             alpha_g = 2.0 / (signal + 1.0)
             # Iterator-based walk avoids ``deque.__getitem__(i)``'s
             # ``O(min(i, n-i))`` indexing cost — random-access on a

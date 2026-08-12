@@ -134,23 +134,6 @@ describe('AgentProvisioningDashboardComponent (extra coverage)', () => {
   });
 
   // ---------------------------------------------------------------------
-  // Assistant launched
-  // ---------------------------------------------------------------------
-
-  it('onAssistantLaunched starts polling when job_id present', () => {
-    fixture.detectChanges();
-    component.onAssistantLaunched({ job_id: 'asst-job', conversation_id: 'c1' });
-    expect(component.currentJobId).toBe('asst-job');
-    expect(component['jobPollSub']).toBeTruthy();
-  });
-
-  it('onAssistantLaunched ignores null job_id', () => {
-    fixture.detectChanges();
-    component.onAssistantLaunched({ job_id: null, conversation_id: 'c1' });
-    expect(component.currentJobId).toBeNull();
-  });
-
-  // ---------------------------------------------------------------------
   // Job and agent loaders error paths
   // ---------------------------------------------------------------------
 

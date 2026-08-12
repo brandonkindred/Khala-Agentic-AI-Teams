@@ -23,8 +23,13 @@ class CICDPipelineAgent(DevOpsSingleShotAgent):
         """Build the CI/CD prompt context from the task spec and existing pipeline.
 
         Preconditions: ``input_data`` is a valid ``CICDPipelineAgentInput``.
-        Postconditions: returns the same context string shape the pre-migration
-        agent appended after the prompt separator.
+        Postconditions: returns the pre-migration agent's context string shape
+        plus an ``excluded`` line carrying ``spec.scope.excluded`` -- this
+        agent otherwise never sees ``task.out_of_scope`` (only
+        ``InfrastructureAsCodeAgent.build_context`` reads ``spec.scope``
+        directly), so a pipeline artifact could otherwise violate an explicit
+        exclusion (e.g. "do not touch the legacy Jenkins pipeline") with no
+        specialist ever having been told about it.
         """
         spec = input_data.task_spec
         return (
@@ -33,6 +38,7 @@ class CICDPipelineAgent(DevOpsSingleShotAgent):
             f"environments={spec.platform_scope.environments}\n"
             f"constraints={spec.constraints.model_dump()}\n"
             f"acceptance_criteria={spec.acceptance_criteria}\n"
+            f"excluded={spec.scope.excluded}\n"
             f"existing_pipeline={input_data.existing_pipeline}\n"
         )
 

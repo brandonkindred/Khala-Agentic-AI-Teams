@@ -3,7 +3,7 @@ GitHub source integrations for the coding team.
 
 Includes issue selection for issue-driven runs, PR review comment mapping,
 existing-comment handling, issue-proposal generation, LLM Fibonacci-scoring
-prompt/schema contract, and repository reading.
+prompt/schema contract and scorer, and repository reading.
 """
 
 from .client import (
@@ -30,6 +30,8 @@ from .existing_comments import (
     match_existing_comment,
     partition_issues_by_existing_comments,
 )
+from .issue_heuristic_scorer import score_issue_heuristically
+from .issue_llm_scorer import score_issue_via_llm
 from .issue_proposals import (
     annotate_duplicate_proposals,
     build_issue_from_proposal,
@@ -37,6 +39,12 @@ from .issue_proposals import (
     find_matching_open_issue,
     group_similar_findings,
     proposal_from_findings,
+)
+from .issue_scorer import (
+    DEFAULT_SCORING_MODE,
+    SCORING_MODES,
+    resolve_scoring_mode,
+    score_issue,
 )
 from .issue_scoring import (
     FIBONACCI_COMPLEXITY_VALUES,
@@ -59,10 +67,12 @@ from .pr_review_mapping import (
 from .repo_reader import GitHubRepoReader
 
 __all__ = [
+    "DEFAULT_SCORING_MODE",
     "FIBONACCI_COMPLEXITY_VALUES",
     "MAX_ISSUES_TRAVERSED",
     "MAX_REVIEW_COMMENTS_TRAVERSED",
     "MAX_REVIEW_THREADS_TRAVERSED",
+    "SCORING_MODES",
     "ExistingComment",
     "GitHubAPIError",
     "GitHubClient",
@@ -100,6 +110,10 @@ __all__ = [
     "pick_ready_issue",
     "proposal_from_findings",
     "render_annotated_hunks",
+    "resolve_scoring_mode",
+    "score_issue",
+    "score_issue_heuristically",
+    "score_issue_via_llm",
     "scrub_token_from_text",
     "split_review_comments",
 ]

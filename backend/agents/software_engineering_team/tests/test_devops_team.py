@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import subprocess
 import tempfile
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Callable, Dict, List, Optional
@@ -36,6 +37,10 @@ from software_engineering_team.devops_team.orchestrator import (
     DEVOPS_REQUIRED_GATE_NAMES,
     ENV_POLICY,
     criterion_traces_from_phase4,
+)
+from software_engineering_team.devops_team.phases.quality_gate import (
+    _describe_task_with_exclusions,
+    run_phase4_quality_gate,
 )
 from software_engineering_team.devops_team.task_clarifier import (
     DevOpsTaskClarifierAgent,
@@ -884,6 +889,20 @@ class TestCICDPipelineAgent:
         assert "source map" in lowered
         assert "frontend.yml" in lowered
 
+    def test_build_context_surfaces_scope_exclusions(self) -> None:
+        """This agent never reads task_spec.scope directly (only
+        InfrastructureAsCodeAgent does), so an explicit exclusion must reach it
+        through the prompt context instead, or a generated pipeline could
+        violate it with the agent never having been told about it."""
+        from software_engineering_team.devops_team.cicd_pipeline_agent import (
+            CICDPipelineAgent,
+            CICDPipelineAgentInput,
+        )
+
+        agent = CICDPipelineAgent(_StubClient({}))
+        context = agent.build_context(CICDPipelineAgentInput(task_spec=_base_task_spec()))
+        assert "cluster provisioning" in context
+
 
 class TestDeploymentStrategyAgent:
     def test_run_returns_strategy(self) -> None:
@@ -974,6 +993,21 @@ class TestDeploymentStrategyAgent:
             {"alerting_configured": "TRUE"},
         )
         assert out.alerting_configured is True
+
+    def test_build_context_surfaces_scope_exclusions(self) -> None:
+        """This agent never reads task_spec.scope directly (only
+        InfrastructureAsCodeAgent does) and doesn't even read title, so an
+        explicit exclusion must reach it through the prompt context instead,
+        or a chosen rollout strategy could violate it with the agent never
+        having been told about it."""
+        from software_engineering_team.devops_team.deployment_strategy_agent import (
+            DeploymentStrategyAgent,
+            DeploymentStrategyAgentInput,
+        )
+
+        agent = DeploymentStrategyAgent(_StubClient({}))
+        context = agent.build_context(DeploymentStrategyAgentInput(task_spec=_base_task_spec()))
+        assert "cluster provisioning" in context
 
 
 class TestDevSecOpsReviewAgent:
@@ -1442,6 +1476,45 @@ class TestDevOpsTeamLeadAgentModelRouting:
 
 
 # ===========================================================================
+# UNIT TESTS -- PHASE 4 REVIEW-INPUT SCOPE EXCLUSIONS
+# ===========================================================================
+
+
+class TestDescribeTaskWithExclusions:
+    """Unit tests for the Phase 4 devsecops/change-review exclusion propagation.
+
+    Neither DevSecOpsReviewInput.requirements (task_spec.goal.summary) nor
+    ChangeReviewInput.task_description (task_spec.title) otherwise carries
+    task_spec.scope.excluded, so an explicit exclusion could be violated by
+    generated artifacts with neither reviewer ever having been told about it.
+    """
+
+    def test_appends_exclusions_when_present(self) -> None:
+        spec = _base_task_spec(
+            scope={"included": ["build"], "excluded": ["legacy Jenkins pipeline"]}
+        )
+        result = _describe_task_with_exclusions(spec, "base text")
+        assert "base text" in result
+        assert "legacy Jenkins pipeline" in result
+
+    def test_returns_base_unchanged_when_no_exclusions(self) -> None:
+        spec = _base_task_spec(scope={"included": ["build"], "excluded": []})
+        result = _describe_task_with_exclusions(spec, "base text")
+        assert result == "base text"
+
+    def test_joins_multiple_exclusions(self) -> None:
+        spec = _base_task_spec(
+            scope={
+                "included": ["build"],
+                "excluded": ["legacy Jenkins pipeline", "blue-green rollout"],
+            }
+        )
+        result = _describe_task_with_exclusions(spec, "base text")
+        assert "legacy Jenkins pipeline" in result
+        assert "blue-green rollout" in result
+
+
+# ===========================================================================
 # INTEGRATION TESTS -- ORCHESTRATOR
 # ===========================================================================
 
@@ -1825,6 +1898,250 @@ class TestDevOpsTeamLeadAgentIntegration:
 
 
 # ===========================================================================
+# STRUCTURED, WRITE-CAPABLE ENTRY POINT -- run_task
+# ===========================================================================
+
+
+class TestRunTaskStructuredEntrypoint:
+    """``run_task`` is the structured, write-capable entry point the
+    coding-team's devops worker adapter uses."""
+
+    def test_run_task_accepts_structured_spec_and_merges(self) -> None:
+        """Default ``merge_to_development=True`` cuts a feature branch,
+        merges it into development, and deletes it."""
+        mock_llm = _scripted_llm_for_happy_path()
+        agent = DevOpsTeamLeadAgent(mock_llm)
+        spec = _base_task_spec(task_id="devops-run-task-merge")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp)
+            init_ok, _ = initialize_new_repo(path)
+            assert init_ok
+            result = agent.run_task(
+                spec, repo_path=path, build_verifier=MagicMock(return_value=(True, ""))
+            )
+            branches = subprocess.run(
+                ["git", "branch"], cwd=path, capture_output=True, text=True, check=True
+            ).stdout
+            rev = subprocess.run(
+                ["git", "rev-parse", "development"],
+                cwd=path,
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            dev_head = rev.stdout.strip()
+        assert result.success
+        assert result.completion_package is not None
+        assert result.completion_package.status == "completed"
+        gitops = result.completion_package.git_operations
+        assert gitops.branch_created.startswith("feature/")
+        assert gitops.merge is not None
+        assert gitops.merge.status == "merged"
+        assert gitops.merge.merge_commit_hash == dev_head
+        assert "feature/" not in branches
+
+    def test_run_task_handoff_mode_leaves_branch_unmerged(self) -> None:
+        """``merge_to_development=False`` commits the feature branch and
+        leaves it in place — the mode the coding-team worker uses — instead
+        of merging/deleting it."""
+        mock_llm = _scripted_llm_for_happy_path()
+        agent = DevOpsTeamLeadAgent(mock_llm)
+        spec = _base_task_spec(task_id="devops-run-task-handoff")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp)
+            init_ok, _ = initialize_new_repo(path)
+            assert init_ok
+            rev_before = subprocess.run(
+                ["git", "rev-parse", "development"],
+                cwd=path,
+                capture_output=True,
+                text=True,
+                check=True,
+            ).stdout.strip()
+            result = agent.run_task(spec, repo_path=path, merge_to_development=False)
+            branches = subprocess.run(
+                ["git", "branch"], cwd=path, capture_output=True, text=True, check=True
+            ).stdout
+            rev_after = subprocess.run(
+                ["git", "rev-parse", "development"],
+                cwd=path,
+                capture_output=True,
+                text=True,
+                check=True,
+            ).stdout.strip()
+        assert result.success
+        assert result.completion_package is not None
+        assert result.completion_package.status == "completed"
+        gitops = result.completion_package.git_operations
+        assert gitops.branch_created.startswith("feature/")
+        assert gitops.merge is None
+        assert len(result.completion_package.files_changed) > 0
+        # The branch is still there, and development never advanced.
+        assert gitops.branch_created in branches
+        assert rev_after == rev_before
+
+    def test_run_task_handoff_branch_matches_make_branch_suffix(self) -> None:
+        """The branch name the pipeline actually cuts must match what a
+        caller (the coding-team devops worker) independently computes via
+        ``make_branch_suffix`` — otherwise the Tech Lead review diffs the
+        wrong branch."""
+        from shared.git.branch_utils import make_branch_suffix
+
+        mock_llm = _scripted_llm_for_happy_path()
+        agent = DevOpsTeamLeadAgent(mock_llm)
+        spec = _base_task_spec(task_id="devops-branch-name", title="Add deploy workflow")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp)
+            init_ok, _ = initialize_new_repo(path)
+            assert init_ok
+            result = agent.run_task(spec, repo_path=path, merge_to_development=False)
+        expected = f"feature/{make_branch_suffix(spec.task_id, spec.title)}"
+        assert result.completion_package.git_operations.branch_created == expected
+
+    def test_run_task_reports_delivery_failure_in_handoff_mode(self, monkeypatch) -> None:
+        """A commit failure in handoff mode still reports a blocked package
+        with ``merge=None`` (no merge was even attempted)."""
+        import software_engineering_team.devops_team.orchestrator as orch
+
+        monkeypatch.setattr(orch, "commit_working_tree", lambda *a, **k: (False, "boom"))
+        mock_llm = _scripted_llm_for_happy_path()
+        agent = DevOpsTeamLeadAgent(mock_llm)
+        spec = _base_task_spec(task_id="devops-handoff-fail")
+        with tempfile.TemporaryDirectory() as tmp:
+            init_ok, _ = initialize_new_repo(Path(tmp))
+            assert init_ok
+            result = agent.run_task(spec, repo_path=Path(tmp), merge_to_development=False)
+        assert not result.success
+        assert result.completion_package is not None
+        assert result.completion_package.status == "blocked"
+        assert result.completion_package.git_operations.merge is None
+
+    def test_run_task_rejects_missing_repo_path(self) -> None:
+        mock_llm = _scripted_llm_for_happy_path()
+        agent = DevOpsTeamLeadAgent(mock_llm)
+        spec = _base_task_spec(task_id="devops-missing-repo")
+        with pytest.raises(AssertionError):
+            agent.run_task(spec, repo_path=Path("/nonexistent/does/not/exist"))
+
+    def test_run_task_requires_task_spec(self) -> None:
+        mock_llm = _scripted_llm_for_happy_path()
+        agent = DevOpsTeamLeadAgent(mock_llm)
+        with tempfile.TemporaryDirectory() as tmp:
+            with pytest.raises(AssertionError):
+                agent.run_task(None, repo_path=Path(tmp))
+
+    def test_run_task_cleans_untracked_validation_leftovers_before_delivering(
+        self, monkeypatch
+    ) -> None:
+        """A Phase 4/4.5 validation tool (e.g. `terraform init` leaving
+        `.terraform.lock.hcl`) can leave untracked files in the working tree
+        AFTER Phase 3 has already written+committed the generated artifacts.
+        deliver_inline_merge/prepare_handoff_branch both commit via `git add
+        -A`, which would otherwise sweep those files into the delivered
+        commit even though they were never part of the generated artifact
+        map. Simulate that leftover as a Phase 4 validation-tool side effect
+        (planting it before Phase 3 runs would just get it committed by
+        Phase 3's own git-add-A, which doesn't exercise this fix) and prove
+        it never reaches the delivered branch."""
+        import software_engineering_team.devops_team.tool_dispatch as tool_dispatch_mod
+
+        real_run_validation_tools = tool_dispatch_mod.run_validation_tools
+
+        def _run_validation_tools_with_leftover(agent, repo_path):
+            (Path(repo_path) / "untracked.leftover").write_text(
+                "validation tool side effect", encoding="utf-8"
+            )
+            return real_run_validation_tools(agent, repo_path)
+
+        monkeypatch.setattr(
+            tool_dispatch_mod, "run_validation_tools", _run_validation_tools_with_leftover
+        )
+        mock_llm = _scripted_llm_for_happy_path()
+        agent = DevOpsTeamLeadAgent(mock_llm)
+        spec = _base_task_spec(task_id="devops-clean-untracked")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp)
+            init_ok, _ = initialize_new_repo(path)
+            assert init_ok
+
+            result = agent.run_task(spec, repo_path=path, merge_to_development=False)
+
+            assert not (path / "untracked.leftover").exists()
+        assert result.success
+        assert "untracked.leftover" not in result.completion_package.files_changed
+
+    def test_run_task_blocks_delivery_when_untracked_cleanup_fails(self, monkeypatch) -> None:
+        """If the pre-delivery reset_hard_to(repo_path, "HEAD") itself fails (e.g. a
+        permissions error), delivery must block rather than merely warn and proceed:
+        continuing into deliver_inline_merge/prepare_handoff_branch would let exactly
+        the leftover this reset exists to catch slip into the commit via git add -A
+        unreviewed."""
+        import software_engineering_team.devops_team.phases.deliver_merge as deliver_merge_mod
+
+        monkeypatch.setattr(
+            deliver_merge_mod,
+            "reset_hard_to",
+            lambda repo_path, ref: (False, "permission denied"),
+        )
+        mock_llm = _scripted_llm_for_happy_path()
+        agent = DevOpsTeamLeadAgent(mock_llm)
+        spec = _base_task_spec(task_id="devops-cleanup-fail")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp)
+            init_ok, _ = initialize_new_repo(path)
+            assert init_ok
+            result = agent.run_task(spec, repo_path=path, merge_to_development=False)
+
+        assert not result.success
+        assert result.completion_package is not None
+        assert result.completion_package.status == "blocked"
+        assert "reset" in (result.failure_reason or "").lower()
+
+    def test_run_task_reverts_tracked_validation_side_effects_before_delivering(
+        self, monkeypatch
+    ) -> None:
+        """A validator can MODIFY an already-tracked file (e.g. terraform init
+        updating a committed .terraform.lock.hcl after provider constraints change)
+        -- git clean alone would not touch that, only reset_hard_to would. Simulate
+        that as a Phase 4 validation-tool side effect and confirm the modification
+        never reaches the delivered branch."""
+        import software_engineering_team.devops_team.tool_dispatch as tool_dispatch_mod
+
+        real_run_validation_tools = tool_dispatch_mod.run_validation_tools
+
+        def _run_validation_tools_with_tracked_mutation(agent, repo_path):
+            tracked = Path(repo_path) / "tracked.lock"
+            if tracked.exists():
+                tracked.write_text("mutated by a validation tool", encoding="utf-8")
+            return real_run_validation_tools(agent, repo_path)
+
+        monkeypatch.setattr(
+            tool_dispatch_mod, "run_validation_tools", _run_validation_tools_with_tracked_mutation
+        )
+        mock_llm = _scripted_llm_for_happy_path()
+        agent = DevOpsTeamLeadAgent(mock_llm)
+        spec = _base_task_spec(task_id="devops-revert-tracked")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp)
+            init_ok, _ = initialize_new_repo(path)
+            assert init_ok
+            (path / "tracked.lock").write_text("committed content", encoding="utf-8")
+            subprocess.run(["git", "add", "-A"], cwd=path, capture_output=True, check=True)
+            subprocess.run(
+                ["git", "commit", "-m", "seed tracked.lock"],
+                cwd=path,
+                capture_output=True,
+                check=True,
+            )
+
+            result = agent.run_task(spec, repo_path=path, merge_to_development=False)
+
+            assert (path / "tracked.lock").read_text(encoding="utf-8") == "committed content"
+        assert result.success
+        assert "tracked.lock" not in result.completion_package.files_changed
+
+
+# ===========================================================================
 # COMPATIBILITY / MIGRATION TESTS
 # ===========================================================================
 
@@ -2018,6 +2335,160 @@ class TestToolDispatchRunValidationTools:
         assert agent.policy_tool.run.call_count == 1
         (call_arg,) = agent.policy_tool.run.call_args.args
         assert call_arg == PolicyAsCodeInput(repo_path=str(repo_path))
+
+    def test_run_validation_tools_executes_the_four_tool_calls_concurrently(self) -> None:
+        """Perf-guard: proves the 4 tool calls run concurrently, not sequentially.
+
+        Each call sleeps ~0.12s (simulating subprocess/I-O-bound work).
+        Sequential execution would take >= 4 * 0.12s == 0.48s; concurrent
+        execution across 4 workers should take roughly one sleep interval.
+        The 2x-one-interval bound sits well below the sequential floor and
+        well above the concurrent expectation, so it isn't flaky under
+        ordinary CI scheduling noise while still failing hard if the four
+        calls ever became sequential again.
+        """
+        sleep_s = 0.12
+
+        def _slow(output: Any) -> Callable[[Any], Any]:
+            def _run(_input: Any) -> Any:
+                time.sleep(sleep_s)
+                return output
+
+            return _run
+
+        agent = MagicMock()
+        agent.iac_validation_tool.run.side_effect = _slow(
+            IaCValidationOutput(success=True, checks={"iac_validate": "pass"})
+        )
+        agent.policy_tool.run.side_effect = _slow(
+            PolicyAsCodeOutput(success=True, checks={"policy_checks": "pass"})
+        )
+        agent.cicd_lint_tool.run.side_effect = _slow(
+            CICDLintOutput(success=True, checks={"pipeline_lint": "pass"})
+        )
+        agent.deploy_dry_run_tool.run.side_effect = _slow(
+            DeploymentDryRunOutput(success=True, checks={"deployment_dry_run": "pass"})
+        )
+
+        start = time.perf_counter()
+        vt = tool_dispatch.run_validation_tools(agent, Path("/tmp/x"))
+        elapsed = time.perf_counter() - start
+
+        assert vt.tool_gate_map == {
+            "iac_validate": "pass",
+            "policy_checks": "pass",
+            "pipeline_lint": "pass",
+            "deployment_dry_run": "pass",
+        }
+        assert elapsed < 2 * sleep_s, (
+            f"run_validation_tools took {elapsed:.3f}s, expected well under "
+            f"{2 * sleep_s:.3f}s if the 4 tool calls run concurrently"
+        )
+
+
+class TestPhase4QualityGateReviewCallsConcurrency:
+    """Perf-guard for the parallel_map refactor of run_phase4_quality_gate's 3 review calls."""
+
+    def _mock_agent(self) -> MagicMock:
+        agent = MagicMock()
+        agent.llm = object()  # not a DummyLLMClient -> takes the parallel_map branch
+        agent.iac_validation_tool.run.return_value = IaCValidationOutput(success=True, checks={})
+        agent.policy_tool.run.return_value = PolicyAsCodeOutput(success=True, checks={})
+        agent.cicd_lint_tool.run.return_value = CICDLintOutput(success=True, checks={})
+        agent.deploy_dry_run_tool.run.return_value = DeploymentDryRunOutput(success=True, checks={})
+        agent._run_execution_tools.return_value = []
+        return agent
+
+    def test_run_phase4_quality_gate_executes_the_three_review_calls_concurrently(self) -> None:
+        """Each review call sleeps ~0.12s; sequential would take >= 3 * 0.12s == 0.36s.
+
+        Concurrent execution across 3 workers should take roughly one sleep
+        interval, so a 2x-one-interval bound is unreachable under sequential
+        execution while staying well above ordinary CI scheduling noise.
+        """
+        from software_engineering_team.devops_team.change_review_agent import ChangeReviewOutput
+        from software_engineering_team.devops_team.devsecops_review_agent import (
+            DevSecOpsReviewOutput,
+        )
+        from software_engineering_team.qa_agent.models import QAOutput
+
+        sleep_s = 0.12
+
+        def _slow(output: Any) -> Callable[[Any], Any]:
+            def _run(_input: Any) -> Any:
+                time.sleep(sleep_s)
+                return output
+
+            return _run
+
+        agent = self._mock_agent()
+        agent.devsecops_review_agent.run.side_effect = _slow(DevSecOpsReviewOutput())
+        agent.change_review_agent.run.side_effect = _slow(ChangeReviewOutput())
+        agent.qa_agent.run.side_effect = _slow(
+            QAOutput(approved=True, quality_gates={"acceptance_evidence": "pass"}, summary="ok")
+        )
+
+        spec = _base_task_spec()
+        start = time.perf_counter()
+        result = run_phase4_quality_gate(
+            agent,
+            task_spec=spec,
+            repo_path=Path("/tmp/x"),
+            aggregated_artifacts={},
+            write_changes=False,
+            subdir="",
+            build_verifier=None,
+        )
+        elapsed = time.perf_counter() - start
+
+        assert result.blocked_result is None
+        assert result.quality_gates["security_review"] == "pass"
+        assert result.quality_gates["change_review"] == "pass"
+        assert elapsed < 2 * sleep_s, (
+            f"run_phase4_quality_gate took {elapsed:.3f}s, expected well under "
+            f"{2 * sleep_s:.3f}s if the 3 review calls run concurrently"
+        )
+
+    def test_run_phase4_quality_gate_runs_sequentially_for_dummy_llm_client(self) -> None:
+        """A DummyLLMClient double (matching _ScriptedClient's isinstance check) takes the
+        sequential branch, so scripted integration tests keep their deterministic call order.
+        """
+        agent = self._mock_agent()
+        agent.llm = DummyLLMClient()
+
+        from software_engineering_team.devops_team.change_review_agent import ChangeReviewOutput
+        from software_engineering_team.devops_team.devsecops_review_agent import (
+            DevSecOpsReviewOutput,
+        )
+        from software_engineering_team.qa_agent.models import QAOutput
+
+        call_order: List[str] = []
+
+        def _record(name: str, output: Any) -> Callable[[Any], Any]:
+            def _run(_input: Any) -> Any:
+                call_order.append(name)
+                return output
+
+            return _run
+
+        agent.devsecops_review_agent.run.side_effect = _record("devsec", DevSecOpsReviewOutput())
+        agent.change_review_agent.run.side_effect = _record("change_review", ChangeReviewOutput())
+        agent.qa_agent.run.side_effect = _record(
+            "qa",
+            QAOutput(approved=True, quality_gates={"acceptance_evidence": "pass"}, summary="ok"),
+        )
+
+        run_phase4_quality_gate(
+            agent,
+            task_spec=_base_task_spec(),
+            repo_path=Path("/tmp/x"),
+            aggregated_artifacts={},
+            write_changes=False,
+            subdir="",
+            build_verifier=None,
+        )
+
+        assert call_order == ["devsec", "change_review", "qa"]
 
 
 class TestMainOrchestratorRegistration:

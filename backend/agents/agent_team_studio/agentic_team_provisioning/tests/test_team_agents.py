@@ -1,4 +1,4 @@
-"""Tests for team agents pool (store + LLM parsing)."""
+"""Tests for team agents pool (store)."""
 
 from __future__ import annotations
 
@@ -6,7 +6,6 @@ from datetime import datetime, timezone
 
 import pytest
 
-from agent_team_studio.agentic_team_provisioning.assistant.agent import _parse_agents_json
 from agent_team_studio.agentic_team_provisioning.assistant.store import AgenticTeamStore
 from agent_team_studio.agentic_team_provisioning.manifest_generation import manifest_agent_id
 from agent_team_studio.agentic_team_provisioning.models import AgenticTeamAgent
@@ -23,21 +22,6 @@ def _thin_agent(team_id: str, agent_name: str) -> AgenticTeamAgent:
 @pytest.fixture
 def fake_pg(monkeypatch: pytest.MonkeyPatch) -> dict:
     return install_fake_postgres(monkeypatch)
-
-
-def test_parse_agents_json_valid():
-    text = 'Here are the agents:\n```agents\n[{"agent_name":"A1","role":"does stuff"}]\n```\nDone.'
-    result = _parse_agents_json(text)
-    assert result == [{"agent_name": "A1", "role": "does stuff"}]
-
-
-def test_parse_agents_json_missing():
-    assert _parse_agents_json("No agents block here.") is None
-
-
-def test_parse_agents_json_bad_json():
-    text = "```agents\nnot valid json\n```"
-    assert _parse_agents_json(text) is None
 
 
 def test_list_team_agents_migrates_fat_row(fake_pg: dict, monkeypatch: pytest.MonkeyPatch):

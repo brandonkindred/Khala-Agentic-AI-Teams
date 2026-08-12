@@ -4,8 +4,9 @@ Modeled on ``agent_team_studio.agentic_team_provisioning.assistant.agent.Process
 but it co-authors a **single** :class:`~agent_team_studio.agent_studio.models.AgentDefinition`
 instead of a team roster + process. Like that agent, the LLM produces a
 conversational reply with two fenced JSON blocks embedded in the prose —
-``agent`` (the full definition) and ``suggestions`` (follow-up prompts) — which
-the parsers below extract and strip from the visible reply.
+``agent`` (the full definition) and ``suggestions`` (follow-up prompts) —
+extracted and stripped from the visible reply via
+``agent_team_studio.assistant_kernel.fenced_json``.
 
 The completion call is injected (``complete``) so tests can drive the assistant
 deterministically without a live model.
@@ -20,6 +21,7 @@ from typing import Callable
 
 from pydantic import ValidationError
 
+from ..assistant_kernel import merge_list_by_key, parse_fenced_json, strip_fenced_blocks
 from .models import AgentDefinition
 
 logger = logging.getLogger(__name__)
@@ -140,49 +142,6 @@ def _neutralize(content: str) -> str:
     return _DELIMITER_RE.sub("", content)
 
 
-def _parse_agent_block(text: str) -> dict | None:
-    """Extract the ```agent ... ``` JSON object from the assistant reply.
-
-    The non-greedy match takes the **first** ``agent`` block; the assistant
-    contract (system prompt) guarantees exactly one per reply, so this stays
-    deterministic even if a misbehaving model emits more than one.
-
-    Robustness: a block whose body is truncated or malformed (e.g. a model that
-    embeds a stray ``` inside a string value, prematurely closing the fence) fails
-    ``json.loads`` and returns ``None`` — i.e. "no parseable update": the prose reply
-    still stands and the stored definition is left unchanged. It never raises, so a
-    pathological model output degrades to a no-op rather than a 500.
-    """
-    match = re.search(r"```agent\s*\n?(.*?)```", text, re.DOTALL)
-    if not match:
-        return None
-    try:
-        data = json.loads(match.group(1).strip())
-    except json.JSONDecodeError:
-        logger.warning("agent_studio: failed to parse agent JSON block")
-        return None
-    return data if isinstance(data, dict) else None
-
-
-def _parse_suggestions(text: str) -> list[str]:
-    """Extract the ```suggestions ... ``` JSON array (empty list if absent/bad)."""
-    match = re.search(r"```suggestions\s*\n?(.*?)```", text, re.DOTALL)
-    if not match:
-        return []
-    try:
-        data = json.loads(match.group(1).strip())
-    except json.JSONDecodeError:
-        return []
-    return [str(s) for s in data] if isinstance(data, list) else []
-
-
-def _strip_code_blocks(text: str) -> str:
-    """Remove the ```agent``` and ```suggestions``` blocks from the visible reply."""
-    text = re.sub(r"```agent\s*\n?.*?```", "", text, flags=re.DOTALL)
-    text = re.sub(r"```suggestions\s*\n?.*?```", "", text, flags=re.DOTALL)
-    return text.strip()
-
-
 def _merge_definition(current: AgentDefinition, block: dict) -> AgentDefinition | None:
     """Merge a parsed ``agent`` block onto the current definition.
 
@@ -220,10 +179,7 @@ def _merge_definition(current: AgentDefinition, block: dict) -> AgentDefinition 
     if isinstance(incoming_states, list) and all(
         isinstance(s, dict) and isinstance(s.get("key"), str) for s in incoming_states
     ):
-        by_key = {s["key"]: s for s in merged["states"]}
-        for state in incoming_states:
-            by_key[state["key"]] = state
-        updates["states"] = list(by_key.values())
+        updates["states"] = merge_list_by_key(merged["states"], incoming_states, key="key")
     merged.update(updates)
     try:
         updated = AgentDefinition.model_validate(merged)
@@ -282,10 +238,11 @@ class AgentDesignerAgent:
         prompt = self._build_prompt(conversation_history, current, user_message)
         raw = self._complete(system_prompt, prompt)
 
-        block = _parse_agent_block(raw)
+        block = parse_fenced_json(raw, "agent", expected_type=dict)
         updated = _merge_definition(current, block) if block is not None else None
-        suggestions = _parse_suggestions(raw)
-        reply = _strip_code_blocks(raw)
+        raw_suggestions = parse_fenced_json(raw, "suggestions", expected_type=list)
+        suggestions = [str(s) for s in raw_suggestions] if raw_suggestions is not None else []
+        reply = strip_fenced_blocks(raw, ["agent", "suggestions"])
         return reply, updated, suggestions
 
     @staticmethod

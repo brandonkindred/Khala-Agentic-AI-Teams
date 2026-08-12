@@ -29,8 +29,9 @@ from psycopg.types.json import Json
 from shared.postgres import get_conn
 from shared.postgres.metrics import timed_query
 
+from ..assistant_kernel import ConversationTurn
 from .models import AgentDefinition, ConversationMessage, StudioMode
-from .store import ConversationRecord, ConversationTurn
+from .store import ConversationRecord
 
 logger = logging.getLogger(__name__)
 
@@ -170,11 +171,11 @@ class PostgresAgentStudioConversationStore:
         return int(row[0]) if row else 0
 
     @contextmanager
-    def turn(self, conversation_id: str) -> Iterator[ConversationTurn]:
+    def turn(self, conversation_id: str) -> Iterator[ConversationTurn[AgentDefinition]]:
         """Serialize a whole authoring turn with a row lock held across the LLM call.
 
         Opens one transaction, takes a ``SELECT … FOR UPDATE`` row lock on the
-        conversation row, snapshots its definition + messages, and yields a
+        conversation row, snapshots its draft + messages, and yields a
         :class:`ConversationTurn` whose writes run on the **same** connection. The
         lock is held until the block commits, so a concurrent ``send_message`` on
         the same conversation blocks in its own ``FOR UPDATE`` until this turn
@@ -190,7 +191,7 @@ class PostgresAgentStudioConversationStore:
             * ``conversation_id`` names an existing conversation.
         Postconditions / Exceptions:
             * Yields a :class:`ConversationTurn` snapshotting the current history +
-              definition; its ``append_message`` / ``set_definition`` run on the
+              draft; its ``append_message`` / ``set_draft`` run on the
               locked transaction and commit atomically on clean block exit.
             * Raises :class:`LookupError` (→ 404) if the conversation is unknown.
             * A Postgres error (raised through the ``@timed_query``-wrapped inner
@@ -246,7 +247,7 @@ class PostgresAgentStudioConversationStore:
 
             yield ConversationTurn(
                 history=history,
-                definition=definition,
+                draft=definition,
                 on_message=_on_message,
-                on_definition=_on_definition,
+                on_draft=_on_definition,
             )
