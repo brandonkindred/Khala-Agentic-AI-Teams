@@ -60,9 +60,7 @@ def make_client(monkeypatch: pytest.MonkeyPatch):
 
     def _factory(service: object, *, raise_server_exceptions: bool = True) -> TestClient:
         monkeypatch.setattr(dispatch_mod, "_temporal_enabled", lambda: False)
-        monkeypatch.setattr(
-            "agent_team_studio.agent_studio.runtime.get_studio_service", lambda: service
-        )
+        monkeypatch.setattr("agent_team_studio.agent_studio.runtime.get_studio_service", lambda: service)
         monkeypatch.setattr(dispatch_mod, "execute_workflow_sync", _boom_execute)
         app = FastAPI()
         app.include_router(router)
