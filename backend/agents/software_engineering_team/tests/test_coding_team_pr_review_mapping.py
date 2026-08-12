@@ -716,6 +716,7 @@ def _open_issue(number: int, title: str, body: str = "") -> Issue:
         state="open",
         html_url=f"https://x/issues/{number}",
         labels=(),
+        id=number,
     )
 
 
