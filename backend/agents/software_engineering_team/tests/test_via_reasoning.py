@@ -404,3 +404,47 @@ def test_run_agent_via_reasoning_wraps_bare_llm_client_with_get_strands_model(
     assert len(strands_calls) == 1
     assert strands_calls[0]["response_format"] == "text"
     assert strands_calls[0]["agent_key"] == "code_review"
+
+
+def test_run_agent_via_reasoning_invokes_on_reasoning_agent_after_prompt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """on_reasoning_agent receives the call-1 Agent after reasoning completes."""
+    from software_engineering_team.code_review_agent import via_reasoning as vr_mod
+
+    captured: list[Any] = []
+    agent_calls: list[Any] = []
+
+    class _RecordingAgent:
+        def __init__(self, **kwargs: Any) -> None:
+            self.kwargs = kwargs
+            agent_calls.append(self)
+
+        def __call__(self, prompt: str) -> str:
+            if "Return {" in prompt:
+                return '{"approved": true, "summary": "ok"}'
+            return "REASONING PROSE"
+
+    class _ClonableModel:
+        def clone(self, **overrides: Any) -> "_ClonableModel":
+            cloned = _ClonableModel()
+            cloned.config = overrides
+            return cloned
+
+    monkeypatch.setattr(vr_mod, "Agent", _RecordingAgent)
+
+    def _on_reasoning_agent(agent: Any) -> None:
+        captured.append(agent)
+
+    run_agent_via_reasoning(
+        model=_ClonableModel(),
+        reasoning_prompt="Review this",
+        reasoning_system_prompt="Prose reviewer",
+        formatting_instructions='Return {"approved": bool, "summary": str}',
+        parse=lambda raw: _Out.model_validate_json(raw),
+        on_reasoning_agent=_on_reasoning_agent,
+    )
+
+    assert len(captured) == 1
+    assert captured[0] is agent_calls[0]
+    assert len(agent_calls) == 2

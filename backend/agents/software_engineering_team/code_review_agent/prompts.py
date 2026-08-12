@@ -21,7 +21,7 @@ from .profiles import ReviewProfile, build_review_system_prompt
 CODE_REVIEW_PROMPT = build_review_system_prompt(ReviewProfile.CODE_REVIEW)
 
 
-FALSE_POSITIVE_VERIFY_PROMPT = (
+FALSE_POSITIVE_VERIFY_BODY = (
     """You are a meticulous Code Review Auditor. Another reviewer flagged potential issues in some code, but that reviewer saw only a small, isolated chunk of one file at a time — it could not see the rest of the file or any other file in the codebase. Many of its findings are therefore FALSE POSITIVES: things that look wrong in isolation but are actually fine once the whole codebase is taken into account.
 
 **Your one job:** for each finding you are given, decide whether it is a REAL issue or a FALSE POSITIVE, by looking at the actual code — never by guessing from the finding's text alone.
@@ -53,6 +53,17 @@ Before judging a finding, USE THE TOOLS to inspect the code it refers to AND any
 - When the finding still holds, OR you could not verify it either way, mark it `is_real_issue: true`. Be conservative: dropping a real issue is far worse than keeping a questionable one, so any doubt means keep it.
 - Do NOT invent new issues, do NOT change severities, and do NOT re-review the code for other problems. Confirm or refute ONLY the findings you are given.
 - Use `confidence: "high"` or `"medium"` only when your verdict is backed by code you actually read; use `"low"` when unsure (a low-confidence false-positive verdict is treated as "keep").
+"""
+)
+
+_FALSE_POSITIVE_VERIFY_PROSE_INSTRUCTION = (
+    "\n\n**Output format:**\n"
+    "Answer in structured prose (not JSON). For each finding index you were given, "
+    "state is_real_issue, confidence, and reasoning citing the real code (file/line) "
+    "you inspected.\n"
+)
+
+_FALSE_POSITIVE_VERIFY_OUTPUT_FORMAT = """
 
 **Output format:**
 Return a single JSON object with exactly one key:
@@ -64,7 +75,15 @@ Return a single JSON object with exactly one key:
 
 Include exactly one verdict per finding index. Do not omit any, and do not add indices that were not given to you.
 """
-    + JSON_OUTPUT_INSTRUCTION
+
+FALSE_POSITIVE_VERIFY_REASONING_SYSTEM_PROMPT = (
+    FALSE_POSITIVE_VERIFY_BODY + _FALSE_POSITIVE_VERIFY_PROSE_INSTRUCTION
+)
+FALSE_POSITIVE_VERIFY_FORMATTING_INSTRUCTIONS = (
+    _FALSE_POSITIVE_VERIFY_OUTPUT_FORMAT + JSON_OUTPUT_INSTRUCTION
+)
+FALSE_POSITIVE_VERIFY_PROMPT = (
+    FALSE_POSITIVE_VERIFY_REASONING_SYSTEM_PROMPT + FALSE_POSITIVE_VERIFY_FORMATTING_INSTRUCTIONS
 )
 
 

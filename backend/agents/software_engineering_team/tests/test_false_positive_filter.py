@@ -151,6 +151,48 @@ def _final_text_stream_events(text: str) -> List[Dict[str, Any]]:
     ]
 
 
+def _first_user_text_from_chat_messages(messages: List[Any]) -> str:
+    """Extract the first user message text from OpenAI-style chat messages."""
+    for msg in messages:
+        if not isinstance(msg, dict) or msg.get("role") != "user":
+            continue
+        content = msg.get("content")
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            parts: List[str] = []
+            for block in content:
+                if isinstance(block, dict) and "text" in block:
+                    parts.append(str(block["text"]))
+                elif isinstance(block, str):
+                    parts.append(block)
+            return "\n".join(parts)
+        return str(content or "")
+    return ""
+
+
+def _chat_tool_result_count(messages: List[Any]) -> int:
+    """Count tool-result messages in OpenAI-style chat history."""
+    return sum(1 for m in messages if isinstance(m, dict) and m.get("role") == "tool")
+
+
+def _chat_return_tool_call(tool_use_id: str, name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "__tool_calls__": [
+            {
+                "id": tool_use_id,
+                "type": "function",
+                "function": {"name": name, "arguments": arguments},
+            }
+        ]
+    }
+
+
+def _is_fpf_reasoning_prompt(text: str) -> bool:
+    """Stable anchor for false-positive verification reasoning user prompts."""
+    return "findings to check for false positives" in text.lower()
+
+
 def _any_tool_use_called(messages: List[Any]) -> bool:
     """Whether any assistant message in ``messages`` already contains a
     ``toolUse`` block.
@@ -184,9 +226,60 @@ class _SimulatesFileReadToolCall(DummyLLMClient):
     answering on the first turn, exactly as this mixin does (it extracts the
     cited path from the prompt's ``read_file("...")`` directive, so it always
     targets the right file). Subclasses still customize the final verdict via
-    ``complete_json``, called with the *original* prompt text once the
-    simulated tool call has round-tripped.
+    ``complete_json`` on call 2 (format pass), which still branches on a
+    ``verdicts`` anchor in the format prompt.
     """
+
+    def chat(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        objective: str = "dummy",
+        response_format: str = "json",
+        temperature: float = 0.2,
+        tools: Optional[list] = None,
+        think: "bool | str | None" = None,
+        max_tokens: Optional[int] = None,
+        **kwargs: Any,
+    ) -> Any:
+        has_tool_result = any(isinstance(m, dict) and m.get("role") == "tool" for m in messages)
+        has_read_file_tool = any(
+            (t or {}).get("function", {}).get("name") == "read_file" for t in (tools or [])
+        )
+        first_text = _first_user_text_from_chat_messages(messages)
+        if has_read_file_tool and _is_fpf_reasoning_prompt(first_text):
+            if not has_tool_result:
+                match = _READ_FILE_CALL_RE.search(first_text)
+                path = match.group(1) if match else "unknown.py"
+                return {
+                    "__tool_calls__": [
+                        {
+                            "id": "sim_read_file",
+                            "type": "function",
+                            "function": {"name": "read_file", "arguments": {"path": path}},
+                        }
+                    ]
+                }
+            self._request_count += 1
+            match = _READ_FILE_CALL_RE.search(first_text)
+            path = match.group(1) if match else "unknown.py"
+            prose = (
+                f"Verified findings for {path}: "
+                "Finding 0: is_real_issue=true, confidence=high — inspected cited file."
+            )
+            if response_format == "text":
+                return prose
+            return {"output": prose}
+        return super().chat(
+            messages,
+            objective=objective,
+            response_format=response_format,
+            temperature=temperature,
+            tools=tools,
+            think=think,
+            max_tokens=max_tokens,
+            **kwargs,
+        )
 
     async def stream(self, messages, tool_specs=None, system_prompt=None, **kwargs: Any):  # type: ignore[override]
         already_called = _any_tool_use_called(messages)
@@ -195,7 +288,7 @@ class _SimulatesFileReadToolCall(DummyLLMClient):
             for spec in (tool_specs or [])
         )
         first_text = _first_user_text(messages)
-        if has_read_file_tool and "verdicts" in first_text.lower():
+        if has_read_file_tool and _is_fpf_reasoning_prompt(first_text):
             if not already_called:
                 match = _READ_FILE_CALL_RE.search(first_text)
                 path = match.group(1) if match else "unknown.py"
@@ -203,11 +296,13 @@ class _SimulatesFileReadToolCall(DummyLLMClient):
                     yield event
                 return
             self._request_count += 1
-            response_data = self.complete_json(first_text, system_prompt=system_prompt)
-            response_text = (
-                json.dumps(response_data) if isinstance(response_data, dict) else str(response_data)
+            match = _READ_FILE_CALL_RE.search(first_text)
+            path = match.group(1) if match else "unknown.py"
+            prose = (
+                f"Verified findings for {path}: "
+                "Finding 0: is_real_issue=true, confidence=high — inspected cited file."
             )
-            for event in _final_text_stream_events(response_text):
+            for event in _final_text_stream_events(prose):
                 yield event
             return
         async for event in super().stream(
@@ -270,19 +365,20 @@ class _BadJsonStub(DummyLLMClient):
 
 
 class _FencedJsonVerdictStub(_SimulatesFileReadToolCall):
-    """Returns a verdicts JSON payload wrapped in a ```json fence with leading
-    prose from complete_json, simulating an LLM response that still contains
-    markdown fencing around its structured output."""
+    """Returns verdicts from the format pass ``complete_json`` call."""
 
     def complete_json(self, prompt: str, **kwargs: Any) -> Any:  # type: ignore[override]
         if "verdicts" in prompt.lower():
-            return (
-                "Here is my assessment:\n"
-                "```json\n"
-                '{"verdicts": [{"index": 0, "is_real_issue": false, "confidence": "high", '
-                '"reasoning": "foo is defined in util.py"}]}\n'
-                "```"
-            )
+            return {
+                "verdicts": [
+                    {
+                        "index": 0,
+                        "is_real_issue": False,
+                        "confidence": "high",
+                        "reasoning": "foo is defined in util.py",
+                    }
+                ]
+            }
         return super().complete_json(prompt, **kwargs)
 
 
@@ -1884,7 +1980,8 @@ def test_group_prompt_has_anchor_indices_and_directs_to_read_tool() -> None:
     idx = CodebaseIndex(files={"app/main.py": "X" * 50}, existing_codebase="old")
     issues = [_issue(description="d0"), _issue(description="d1", line=None)]
     prompt = _build_group_prompt(idx, "app/main.py", issues, _input())
-    assert "verdicts" in prompt.lower()
+    assert "findings to check for false positives" in prompt.lower()
+    assert "structured prose" in prompt.lower()
     assert "Finding index 0" in prompt and "Finding index 1" in prompt
     assert "wire up foo" in prompt  # task description
     assert "X" * 50 not in prompt  # file body never inlined
@@ -1922,7 +2019,7 @@ def test_group_prompt_names_file_without_reading_it() -> None:
     prompt = _build_group_prompt(idx, "missing.py", [_issue()], _input())
     assert "missing.py" in prompt
     assert "Finding index 0" in prompt
-    assert "verdicts" in prompt.lower()
+    assert "structured prose" in prompt.lower()
 
 
 def test_group_prompt_caps_manifest_and_notes_overflow() -> None:
@@ -2192,17 +2289,18 @@ def test_verify_group_disables_strands_tool_result_truncation(monkeypatch) -> No
     and distinguish from a real, complete read (including one that merely
     mentions truncation-like text as incidental content)."""
     import code_review_agent.false_positive_filter as fpf
+    import code_review_agent.via_reasoning as vr_mod
     from strands.agent.conversation_manager import SlidingWindowConversationManager
 
     captured: Dict[str, Any] = {}
-    real_agent_cls = fpf.Agent
+    real_agent_cls = vr_mod.Agent
 
     class _CapturingAgent(real_agent_cls):
         def __init__(self, *args: Any, **kwargs: Any) -> None:
             captured.update(kwargs)
             super().__init__(*args, **kwargs)
 
-    monkeypatch.setattr(fpf, "Agent", _CapturingAgent)
+    monkeypatch.setattr(vr_mod, "Agent", _CapturingAgent)
 
     keep = _issue(description="real bug", line=5)
     stub = _VerdictStub(verdicts=[{"index": 0, "is_real_issue": True, "confidence": "high"}])
@@ -2274,12 +2372,45 @@ def test_filter_keeps_on_unparsable_verdict() -> None:
 
 
 def test_filter_recovers_markdown_fenced_verdict() -> None:
-    """A verdicts JSON wrapped in a ```json fence (with leading prose) is recovered
-    via extract_json_from_response, so a confirmed false positive is still dropped —
-    not kept as if the response were unparsable."""
+    """A confirmed false-positive verdict from the format pass still drops the finding."""
     issues = [_issue()]
     out = filter_false_positives(_FencedJsonVerdictStub(), _input(), issues)
     assert out == []
+
+
+def test_verify_group_two_call_split_first_has_tools_second_does_not(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """FPF verification uses run_agent_via_reasoning: tools on call 1; format via complete_json."""
+    import code_review_agent.via_reasoning as vr_mod
+
+    agent_calls: list[dict[str, Any]] = []
+    format_calls: list[str] = []
+    real_agent_cls = vr_mod.Agent
+
+    class _RecordingAgent(real_agent_cls):
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            agent_calls.append(dict(kwargs))
+            super().__init__(*args, **kwargs)
+
+    stub = _VerdictStub(verdicts=[{"index": 0, "is_real_issue": True, "confidence": "high"}])
+    original_complete_json = stub.complete_json
+
+    def _recording_complete_json(prompt: str, **kwargs: Any) -> Dict[str, Any]:
+        format_calls.append(prompt)
+        return original_complete_json(prompt, **kwargs)
+
+    stub.complete_json = _recording_complete_json  # type: ignore[method-assign]
+    monkeypatch.setattr(vr_mod, "Agent", _RecordingAgent)
+
+    filter_false_positives(stub, _input(), [_issue()])
+
+    assert len(agent_calls) == 1
+    assert agent_calls[0]["tools"]
+    assert agent_calls[0].get("conversation_manager") is not None
+    assert agent_calls[0]["conversation_manager"].should_truncate_results is False
+    assert len(format_calls) == 1
+    assert "verdicts" in format_calls[0].lower()
 
 
 def test_filter_keeps_on_low_confidence_false() -> None:
@@ -2321,6 +2452,23 @@ def test_filter_keeps_drop_when_run_only_called_list_files(caplog) -> None:
     issues = [_issue()]
 
     class ListFilesOnlyDropStub(DummyLLMClient):
+        def chat(
+            self,
+            messages: list[dict[str, Any]],
+            *,
+            tools: Optional[list] = None,
+            response_format: str = "json",
+            **kwargs: Any,
+        ) -> Any:
+            if tools and _chat_tool_result_count(messages) == 0:
+                return _chat_return_tool_call("t_list", "list_files", {})
+            return "Listed files only; no cited-file read."
+
+        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:  # type: ignore[override]
+            if "verdicts" in prompt.lower():
+                return {"verdicts": [{"index": 0, "is_real_issue": False, "confidence": "high"}]}
+            return super().complete_json(prompt, **kwargs)
+
         async def stream(self, messages, tool_specs=None, system_prompt=None, **kwargs: Any):  # type: ignore[override]
             if not _any_tool_use_called(messages):
                 for event in _tool_use_stream_events("t_list", "list_files", {}):
@@ -2351,6 +2499,23 @@ def test_filter_keeps_drop_when_only_a_different_file_was_read(caplog) -> None:
     issues = [_issue(file_path="app/main.py")]
 
     class ReadsSiblingFileOnlyDropStub(DummyLLMClient):
+        def chat(
+            self,
+            messages: list[dict[str, Any]],
+            *,
+            tools: Optional[list] = None,
+            response_format: str = "json",
+            **kwargs: Any,
+        ) -> Any:
+            if tools and _chat_tool_result_count(messages) == 0:
+                return _chat_return_tool_call("t_sibling", "read_file", {"path": "app/util.py"})
+            return "Read sibling util.py only."
+
+        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:  # type: ignore[override]
+            if "verdicts" in prompt.lower():
+                return {"verdicts": [{"index": 0, "is_real_issue": False, "confidence": "high"}]}
+            return super().complete_json(prompt, **kwargs)
+
         async def stream(self, messages, tool_specs=None, system_prompt=None, **kwargs: Any):  # type: ignore[override]
             if not _any_tool_use_called(messages):
                 for event in _tool_use_stream_events(
@@ -2389,6 +2554,31 @@ def test_filter_keeps_all_drops_in_a_batch_when_only_a_narrow_slice_was_read(cap
     issues = [_issue(description=f"finding-{i}") for i in range(3)]
 
     class NarrowSliceOnlyDropStub(DummyLLMClient):
+        def chat(
+            self,
+            messages: list[dict[str, Any]],
+            *,
+            tools: Optional[list] = None,
+            response_format: str = "json",
+            **kwargs: Any,
+        ) -> Any:
+            if tools and _chat_tool_result_count(messages) == 0:
+                return _chat_return_tool_call(
+                    "t_slice",
+                    "read_lines",
+                    {"path": "app/main.py", "start": 1, "end": 1},
+                )
+            return "Read only a narrow slice."
+
+        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:  # type: ignore[override]
+            if "verdicts" in prompt.lower():
+                return {
+                    "verdicts": [
+                        {"index": i, "is_real_issue": False, "confidence": "high"} for i in range(3)
+                    ]
+                }
+            return super().complete_json(prompt, **kwargs)
+
         async def stream(self, messages, tool_specs=None, system_prompt=None, **kwargs: Any):  # type: ignore[override]
             if not _any_tool_use_called(messages):
                 for event in _tool_use_stream_events(
@@ -2490,6 +2680,26 @@ def test_filter_honors_drop_when_cited_file_and_a_related_file_are_both_read() -
     issues = [_issue(file_path="app/main.py")]
 
     class ReadsCitedThenSiblingDropStub(DummyLLMClient):
+        def chat(
+            self,
+            messages: list[dict[str, Any]],
+            *,
+            tools: Optional[list] = None,
+            response_format: str = "json",
+            **kwargs: Any,
+        ) -> Any:
+            tool_results = _chat_tool_result_count(messages)
+            if tools and tool_results == 0:
+                return _chat_return_tool_call("t_cited", "read_file", {"path": "app/main.py"})
+            if tools and tool_results == 1:
+                return _chat_return_tool_call("t_sibling2", "read_file", {"path": "app/util.py"})
+            return "Read cited file and related util.py."
+
+        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:  # type: ignore[override]
+            if "verdicts" in prompt.lower():
+                return {"verdicts": [{"index": 0, "is_real_issue": False, "confidence": "high"}]}
+            return super().complete_json(prompt, **kwargs)
+
         async def stream(self, messages, tool_specs=None, system_prompt=None, **kwargs: Any):  # type: ignore[override]
             # Branch on how many read_file toolUse blocks have already
             # appeared, rather than matching path substrings in str(messages):
@@ -2836,9 +3046,9 @@ def test_filter_groups_by_file_and_removes_across_groups(monkeypatch, parallelis
         def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:  # type: ignore[override]
             if "verdicts" not in prompt.lower():
                 return super().complete_json(prompt, **kwargs)
-            if 'read_file("a.py")' in prompt:
+            if 'Verified findings for a.py' in prompt:
                 return {"verdicts": [{"index": 0, "is_real_issue": False, "confidence": "high"}]}
-            if 'read_file("b.py")' in prompt:
+            if 'Verified findings for b.py' in prompt:
                 return {"verdicts": [{"index": 0, "is_real_issue": True, "confidence": "high"}]}
             return super().complete_json(prompt, **kwargs)
 
@@ -2874,13 +3084,35 @@ def test_filter_splits_oversized_file_into_multiple_batches(monkeypatch) -> None
     call_sizes: List[int] = []
     lock = threading.Lock()
 
-    class CountingStub(DummyLLMClient):
+    class CountingStub(_SimulatesFileReadToolCall):
+        def chat(
+            self,
+            messages: list[dict[str, Any]],
+            *,
+            tools: Optional[list] = None,
+            response_format: str = "json",
+            **kwargs: Any,
+        ) -> Any:
+            first_text = _first_user_text_from_chat_messages(messages)
+            if (
+                _is_fpf_reasoning_prompt(first_text)
+                and tools
+                and _chat_tool_result_count(messages) == 0
+            ):
+                n = first_text.count("--- Finding index")
+                with lock:
+                    call_sizes.append(n)
+            return super().chat(
+                messages,
+                tools=tools,
+                response_format=response_format,
+                **kwargs,
+            )
+
         def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:  # type: ignore[override]
             if "verdicts" not in prompt.lower():
                 return super().complete_json(prompt, **kwargs)
-            n = prompt.count("--- Finding index")
-            with lock:
-                call_sizes.append(n)
+            n = prompt.count("--- Finding index") or call_sizes[-1]
             return {
                 "verdicts": [
                     {"index": i, "is_real_issue": True, "confidence": "high"} for i in range(n)

@@ -227,6 +227,8 @@ def run_agent_via_reasoning(
     reasoning_think: bool | str | None = True,
     formatting_system_prompt: str | None = None,
     agent_key: str = "code_review",
+    conversation_manager: Any | None = None,
+    on_reasoning_agent: Callable[[Agent], None] | None = None,
 ) -> T:
     """Two-call split for Strands ``Agent`` JSON outcome paths.
 
@@ -241,7 +243,8 @@ def run_agent_via_reasoning(
     Preconditions:
         ``reasoning_prompt``, ``reasoning_system_prompt``, and
         ``formatting_instructions`` are non-empty. ``parse`` accepts the raw
-        JSON text from the formatting pass.
+        JSON text from the formatting pass. ``on_reasoning_agent``, when given,
+        is invoked with the call-1 ``Agent`` after the reasoning prompt run.
 
     Postconditions:
         Returns ``parse``'s result. Tools are attached only to call 1.
@@ -256,12 +259,17 @@ def run_agent_via_reasoning(
         response_format="text",
         think=reasoning_think,
     )
-    reasoning_agent = Agent(
-        model=text_model,
-        system_prompt=reasoning_system_prompt,
-        tools=tools or [],
-    )
+    reasoning_agent_kwargs: dict[str, Any] = {
+        "model": text_model,
+        "system_prompt": reasoning_system_prompt,
+        "tools": tools or [],
+    }
+    if conversation_manager is not None:
+        reasoning_agent_kwargs["conversation_manager"] = conversation_manager
+    reasoning_agent = Agent(**reasoning_agent_kwargs)
     prose = str(reasoning_agent(reasoning_prompt)).strip()
+    if on_reasoning_agent is not None:
+        on_reasoning_agent(reasoning_agent)
 
     format_prompt = (
         f"{_DEFAULT_FORMAT_INSTRUCTIONS}\n\n{formatting_instructions}\n\n"
