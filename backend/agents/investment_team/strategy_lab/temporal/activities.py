@@ -99,13 +99,19 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Any, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 from temporalio import activity
 from temporalio.exceptions import ApplicationError, CancelledError
 
 from shared.concurrency.heartbeat import BackgroundHeartbeat
 from shared.temporal.activity_utils import is_cancelled
+
+if TYPE_CHECKING:
+    # Type-checking only -- runtime resolution stays lazy (see module
+    # docstring) since this import pulls in the full strategy-lab dependency
+    # graph and this file's own ACTIVITIES list must stay importable without it.
+    from investment_team.models import DesignAttemptCheckpoint
 
 logger = logging.getLogger(__name__)
 
@@ -406,6 +412,49 @@ def persist_run_state_activity(run_id: str, state: dict, create: bool = False, g
     # Nothing has been written yet, so a lookup failure is safe to retry.
     _check_generation_fencing(run_id, generation, retry_on_lookup_failure=True)
     _persist_run_state(run_id, state, create=create)
+
+
+def persist_design_attempt_checkpoint(checkpoint: DesignAttemptCheckpoint) -> None:
+    """Durably persist one design attempt's Phase 1 output at the design/synthesis boundary.
+
+    Deliberately **not** a Temporal activity: no ``@activity.defn`` decorator,
+    and not registered in ``ACTIVITIES``/``__all__``. Per ``ADR-012``
+    (``system_design/adr/ADR-012-strategy-lab-design-attempt-checkpoint-contract.md``,
+    "Where the write happens"), the parent epic rules out decomposing the
+    design attempt into per-phase Temporal activities, and activities cannot
+    invoke other activities in any case. This is instead a plain synchronous
+    durable-store call, meant to be invoked inline from inside
+    ``run_design_attempt_activity``'s own execution -- threaded through
+    ``_run_design_attempt`` as an optional checkpoint-write callback by the
+    sibling wiring sub-issue that consumes this function; wiring that
+    callback is out of scope here.
+
+    Preconditions:
+        ``checkpoint.generation`` is the fencing generation the calling
+        workflow incarnation was dispatched with.
+    Postconditions:
+        Checks ``checkpoint.run_id``'s fencing token first, exactly like
+        ``persist_run_state_activity`` (see that function's docstring for the
+        full non-atomicity/fail-closed rationale, which applies verbatim
+        here): raises a non-retryable ``ApplicationError`` instead of writing
+        when ``checkpoint.generation`` is older than the run's current
+        persisted generation. Otherwise persists
+        ``checkpoint.model_dump(mode="json")`` under the
+        ``"design_attempt_checkpoint"`` field of ``checkpoint.run_id``'s job
+        record via ``_persist_run_state``, whose partial-merge write leaves
+        every other field on that record untouched.
+    """
+    from investment_team.strategy_lab.orchestrator_api import _persist_run_state
+
+    # Nothing has been written yet, so a lookup failure is safe to retry --
+    # same rationale as persist_run_state_activity's pre-write check.
+    _check_generation_fencing(
+        checkpoint.run_id, checkpoint.generation, retry_on_lookup_failure=True
+    )
+    _persist_run_state(
+        checkpoint.run_id,
+        {"design_attempt_checkpoint": checkpoint.model_dump(mode="json")},
+    )
 
 
 @activity.defn(name="strategy_lab_snapshot_prior_records")
