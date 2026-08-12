@@ -43,6 +43,7 @@ from .issue_grooming_split import (
     extract_checklist_items,
     should_split,
 )
+from .issue_heuristic_scorer import score_issue_heuristically
 from .issue_llm_scorer import score_issue_via_llm
 from .issue_proposals import (
     annotate_duplicate_proposals,
@@ -52,12 +53,20 @@ from .issue_proposals import (
     group_similar_findings,
     proposal_from_findings,
 )
-from .issue_scoring import FIBONACCI_COMPLEXITY_VALUES, build_scoring_prompt
+
+# Aliased: issue_scorer.score_issue (the LLM/heuristic mode-facade from the
+# separate, deferred LLM-assisted-scoring epic) would otherwise collide with
+# issue_grooming_scoring.score_issue (the heuristic Phase A scorer actually
+# wired into IssueGroomingRunner, already re-exported above) at this
+# package's top level.
+from .issue_scorer import DEFAULT_SCORING_MODE, SCORING_MODES, resolve_scoring_mode
+from .issue_scorer import score_issue as score_issue_by_mode
 
 # Aliased: issue_scoring.ScoreBreakdown (the LLM-response schema, unrelated
 # fields) would otherwise collide with issue_grooming_scoring.ScoreBreakdown
 # (the heuristic scorer's own, already re-exported above) at this package's
 # top level.
+from .issue_scoring import FIBONACCI_COMPLEXITY_VALUES, build_scoring_prompt
 from .issue_scoring import ScoreBreakdown as LLMScoreBreakdown
 from .issue_to_plan import issue_to_plan_input
 from .pr_review_mapping import (
@@ -75,10 +84,12 @@ from .pr_review_mapping import (
 from .repo_reader import GitHubRepoReader
 
 __all__ = [
+    "DEFAULT_SCORING_MODE",
     "FIBONACCI_COMPLEXITY_VALUES",
     "MAX_ISSUES_TRAVERSED",
     "MAX_REVIEW_COMMENTS_TRAVERSED",
     "MAX_REVIEW_THREADS_TRAVERSED",
+    "SCORING_MODES",
     "ExistingComment",
     "GitHubAPIError",
     "GitHubClient",
@@ -123,7 +134,10 @@ __all__ = [
     "pick_ready_issue",
     "proposal_from_findings",
     "render_annotated_hunks",
+    "resolve_scoring_mode",
     "score_issue",
+    "score_issue_by_mode",
+    "score_issue_heuristically",
     "score_issue_via_llm",
     "scrub_token_from_text",
     "should_split",
