@@ -5,6 +5,7 @@ gated per-microtask review loop (``run_gated_execution_impl``).
 from __future__ import annotations
 
 import logging
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -470,7 +471,11 @@ def _schedule_microtask_batches(microtasks: List[Any]) -> List[List[Any]]:
 
     Preconditions:
         Every ``mt`` in ``microtasks`` has a ``.id: str`` (unique within the list)
-        and a ``.depends_on: List[str]``.
+        and a ``.depends_on: List[str]``. Uniqueness is enforced here -- a
+        duplicate ``id`` raises ``ValueError`` rather than being silently
+        accepted, since the id-keyed bookkeeping below cannot distinguish two
+        microtasks sharing one id (``parse_planning_output`` is the intended
+        upstream guard that keeps this precondition satisfied in practice).
     Postconditions:
         Returns a list of non-empty batches whose concatenation is a permutation
         of ``microtasks`` containing each microtask exactly once, preserving each
@@ -487,6 +492,13 @@ def _schedule_microtask_batches(microtasks: List[Any]) -> List[List[Any]]:
         ``sum(len(b) for b in batches) == len(microtasks)``.
     """
     id_set = {mt.id for mt in microtasks}
+    if len(id_set) != len(microtasks):
+        counts = Counter(mt.id for mt in microtasks)
+        duplicates = sorted(mid for mid, count in counts.items() if count > 1)
+        raise ValueError(
+            f"Duplicate microtask id(s) {duplicates} in scheduling input; "
+            "ids must be unique within a single run."
+        )
     indegree: Dict[str, int] = {}
     dependents: Dict[str, List[str]] = {}
     for mt in microtasks:
