@@ -1,0 +1,143 @@
+<div class="llm-usage">
+  <header class="page-header">
+    <h1><mat-icon>data_usage</mat-icon> LLM Usage</h1>
+    <p class="subtitle">
+      Durable request and token totals across all agent teams. Choose a time window to
+      inspect summary cards, a per-model breakdown, and the most recent calls.
+    </p>
+  </header>
+
+  @if (!storageAvailable) {
+    <app-inline-banner variant="warning">
+      @if (storageStatus === 'unreachable') {
+        <span banner-message>Postgres is configured but currently unreachable — usage history can't be loaded until the database connection is restored.</span>
+      } @else {
+        <span banner-message>Postgres is not configured — durable usage history is unavailable. Set the Postgres environment variables to persist LLM calls.</span>
+      }
+    </app-inline-banner>
+  }
+
+  @if (loadError) {
+    <app-inline-banner variant="error" [message]="loadError" />
+  }
+
+  <div class="usage-controls">
+    <mat-button-toggle-group
+      [value]="window"
+      (change)="setWindow($event.value)"
+      aria-label="Time window"
+    >
+      @for (opt of windows; track opt.id) {
+        <mat-button-toggle [value]="opt.id">{{ opt.label }}</mat-button-toggle>
+      }
+    </mat-button-toggle-group>
+  </div>
+
+  @if (loading) {
+    <div class="loading" role="status" aria-live="polite">
+      <mat-spinner diameter="24"></mat-spinner> <span>Loading usage…</span>
+    </div>
+  }
+
+  <div class="metric-grid">
+    <mat-card class="metric-card">
+      <mat-card-content>
+        <div class="metric-card__label">Requests</div>
+        <div class="metric-card__value">{{ displaySummary.total_calls }}</div>
+      </mat-card-content>
+    </mat-card>
+    <mat-card class="metric-card">
+      <mat-card-content>
+        <div class="metric-card__label">Input tokens</div>
+        <div class="metric-card__value">{{ displaySummary.total_prompt_tokens }}</div>
+      </mat-card-content>
+    </mat-card>
+    <mat-card class="metric-card">
+      <mat-card-content>
+        <div class="metric-card__label">Response tokens</div>
+        <div class="metric-card__value">{{ displaySummary.total_completion_tokens }}</div>
+      </mat-card-content>
+    </mat-card>
+    <mat-card class="metric-card">
+      <mat-card-content>
+        <div class="metric-card__label">Total tokens</div>
+        <div class="metric-card__value">{{ displaySummary.total_tokens }}</div>
+      </mat-card-content>
+    </mat-card>
+  </div>
+
+  @if (displaySummary.total_calls === 0 && modelRows().length === 0 && (!storageAvailable || recent.length === 0)) {
+    <p class="empty-note">No LLM calls in this window.</p>
+  }
+
+  @if (modelRows().length) {
+    <mat-card class="table-card">
+      <mat-card-header>
+        <mat-card-title>Per-model breakdown</mat-card-title>
+      </mat-card-header>
+      <mat-card-content>
+        <table class="usage-table" data-testid="by-model-table" aria-label="Per-model usage">
+          <thead>
+            <tr>
+              <th>Model</th>
+              <th>Requests</th>
+              <th>Input</th>
+              <th>Response</th>
+              <th>Total</th>
+            </tr>
+          </thead>
+          <tbody>
+            @for (row of modelRows(); track row.model) {
+              <tr>
+                <td>{{ row.model }}</td>
+                <td>{{ row.calls }}</td>
+                <td>{{ row.prompt_tokens }}</td>
+                <td>{{ row.completion_tokens }}</td>
+                <td>{{ row.total_tokens }}</td>
+              </tr>
+            }
+          </tbody>
+        </table>
+      </mat-card-content>
+    </mat-card>
+  }
+
+  @if (storageAvailable && recent.length) {
+    <mat-card class="table-card">
+      <mat-card-header>
+        <mat-card-title>Recent calls</mat-card-title>
+        <mat-card-subtitle>Up to 100 most recent requests in this window</mat-card-subtitle>
+      </mat-card-header>
+      <mat-card-content>
+        <table class="usage-table" aria-label="Recent LLM calls">
+          <thead>
+            <tr>
+              <th>Time</th>
+              <th>Model</th>
+              <th>Team</th>
+              <th>Agent</th>
+              <th>Input</th>
+              <th>Response</th>
+              <th>Total</th>
+              <th>Status</th>
+            </tr>
+          </thead>
+          <tbody>
+            @for (row of recent; track $index) {
+              <tr>
+                <td>{{ formatTime(row.timestamp) }}</td>
+                <td>{{ row.model }}</td>
+                <td>{{ row.team }}</td>
+                <td>{{ row.agent_key }}</td>
+                <td>{{ row.prompt_tokens }}</td>
+                <td>{{ row.completion_tokens }}</td>
+                <td>{{ row.total_tokens }}</td>
+                <td>{{ row.status }}</td>
+              </tr>
+            }
+          </tbody>
+        </table>
+      </mat-card-content>
+    </mat-card>
+  }
+</div>

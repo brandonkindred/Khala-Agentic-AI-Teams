@@ -114,6 +114,7 @@ export const NAV_GROUPS: NavGroup[] = [
       { id: 'user-profile', label: 'User Profile', icon: 'account_circle', route: '/user-profile', group: 'settings' },
       { id: 'integrations', label: 'Integrations', icon: 'integration_instructions', route: '/integrations', group: 'settings' },
       { id: 'llm-config', label: 'LLM Provider', icon: 'tune', route: '/llm-config', group: 'settings' },
+      { id: 'llm-usage', label: 'LLM Usage', icon: 'data_usage', route: '/llm-usage', group: 'settings' },
     ],
   },
 ];
