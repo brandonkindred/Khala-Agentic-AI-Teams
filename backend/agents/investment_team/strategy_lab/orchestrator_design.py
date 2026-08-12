@@ -1391,8 +1391,9 @@ class DesignMixin:
         )
 
         # ── Phase 4: RECORD ───────────────────────────────────────────
+        attempt_state = _DesignAttemptState(spec=spec, code=code, trades=trades, metrics=metrics)
         return self._extract_findings_and_assemble_record(
-            state=_DesignAttemptState(spec=spec, code=code, trades=trades, metrics=metrics),
+            state=attempt_state,
             config=config,
             narrative=narrative,
             original_spec=original_spec,
@@ -1701,10 +1702,10 @@ class DesignMixin:
     ) -> StrategyLabRecord:
         """Extract the final alignment findings and assemble the record.
 
-        Pre: all phases have completed; ``state`` carries the spec/code/
-        trades/metrics as they stood after verification; ``alignment_reports``
-        holds one report per alignment iteration (empty when the loop never
-        ran).
+        Pre: all phases have completed; ``state`` carries the settled
+        ``spec``/``code``/``trades``/``metrics`` for this design attempt;
+        ``alignment_reports`` holds one report per alignment iteration
+        (empty when the loop never ran).
         Post: returns the persisted ``StrategyLabRecord`` built by
         ``_assemble_record``, carrying the last report's per-rule findings (or
         an empty list) and ``refinement_rounds = len(refinement_attempts)``.

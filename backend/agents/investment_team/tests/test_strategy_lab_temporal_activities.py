@@ -286,6 +286,160 @@ def test_persist_run_state_activity_fails_closed_on_generation_lookup_failure(mo
     assert persisted == []  # the write never happened despite a legitimately fresh generation
 
 
+# ---------------------------------------------------------------------------
+# Design-attempt checkpoint (DesignAttemptCheckpoint / persist_design_attempt_checkpoint)
+# ---------------------------------------------------------------------------
+
+
+def _design_attempt_checkpoint(**overrides: Any):
+    from investment_team.models import DesignAttemptCheckpoint
+
+    base = dict(
+        run_id="run-1",
+        design_attempt=0,
+        generation=1,
+        spec=_spec_dict(),
+        rationale="because backtests said so",
+        design_context={
+            "rounds": 2,
+            "critiques": [],
+            "stop_reason": "converged",
+            "loop_telemetry": {},
+        },
+        spec_history=[],
+        code_history=[],
+        gate_timeline=[],
+        gate_results=[],
+        budget_calls=12,
+    )
+    base.update(overrides)
+    return DesignAttemptCheckpoint(**base)
+
+
+def test_design_attempt_checkpoint_round_trips_through_model_dump():
+    from investment_team.models import DesignAttemptCheckpoint
+
+    checkpoint = _design_attempt_checkpoint(
+        spec_history=[
+            {
+                "phase": "design",
+                "agent": "DesignAgent",
+                "timestamp": "2023-01-01T00:00:00Z",
+                "before_hash": "a" * 64,
+                "after_hash": "b" * 64,
+                "diff": "- old\n+ new",
+                "reason": "refinement",
+            }
+        ],
+        gate_timeline=[
+            {
+                "phase": "design",
+                "gate_name": "spec_completeness",
+                "passed": True,
+                "severity": "info",
+                "details": "ok",
+                "timestamp": "2023-01-01T00:00:00Z",
+            }
+        ],
+        gate_results=[{"gate_name": "spec_completeness", "passed": True}],
+    )
+
+    dumped = checkpoint.model_dump(mode="json")
+    restored = DesignAttemptCheckpoint.model_validate(dumped)
+
+    assert restored == checkpoint
+
+
+def test_persist_design_attempt_checkpoint_delegates_to_persist_run_state(monkeypatch):
+    from investment_team.strategy_lab import orchestrator_api, run_state
+
+    monkeypatch.setattr(run_state, "get_run_generation_strict", lambda run_id: 1)
+
+    captured = {}
+    monkeypatch.setattr(
+        orchestrator_api,
+        "_persist_run_state",
+        lambda run_id, state, *, create=False: captured.update(
+            run_id=run_id, state=state, create=create
+        ),
+    )
+
+    checkpoint = _design_attempt_checkpoint(run_id="run-1", generation=1)
+    act.persist_design_attempt_checkpoint(checkpoint)
+
+    assert captured["run_id"] == "run-1"
+    assert captured["create"] is False
+    assert captured["state"] == {"design_attempt_checkpoint": checkpoint.model_dump(mode="json")}
+
+
+def test_persist_design_attempt_checkpoint_rejects_stale_generation(monkeypatch):
+    from investment_team.strategy_lab import orchestrator_api, run_state
+
+    monkeypatch.setattr(run_state, "get_run_generation_strict", lambda run_id: 2)
+
+    persisted = []
+    monkeypatch.setattr(
+        orchestrator_api, "_persist_run_state", lambda *a, **k: persisted.append((a, k))
+    )
+
+    checkpoint = _design_attempt_checkpoint(run_id="run-1", generation=1)
+    with pytest.raises(ApplicationError) as exc_info:
+        act.persist_design_attempt_checkpoint(checkpoint)
+
+    assert exc_info.value.non_retryable is True
+    assert exc_info.value.type == "StaleFencingTokenError"
+    assert persisted == []  # the write never happened
+
+
+def test_persist_design_attempt_checkpoint_accepts_current_or_newer_generation(monkeypatch):
+    from investment_team.strategy_lab import orchestrator_api, run_state
+
+    monkeypatch.setattr(run_state, "get_run_generation_strict", lambda run_id: 2)
+
+    captured = {}
+    monkeypatch.setattr(
+        orchestrator_api,
+        "_persist_run_state",
+        lambda run_id, state, *, create=False: captured.update(state=state),
+    )
+
+    # Same generation: accepted (fan-out from the same incarnation).
+    act.persist_design_attempt_checkpoint(
+        _design_attempt_checkpoint(generation=2, design_attempt=0)
+    )
+    assert captured["state"]["design_attempt_checkpoint"]["design_attempt"] == 0
+
+    # Newer generation: also accepted.
+    act.persist_design_attempt_checkpoint(
+        _design_attempt_checkpoint(generation=3, design_attempt=1)
+    )
+    assert captured["state"]["design_attempt_checkpoint"]["design_attempt"] == 1
+
+
+def test_persist_design_attempt_checkpoint_fails_closed_on_generation_lookup_failure(monkeypatch):
+    """A transient durable-read failure inside the fencing check must raise
+    (rejecting the write) but stays RETRYABLE, mirroring
+    persist_run_state_activity's own fail-closed-but-retryable contract."""
+    from investment_team.strategy_lab import orchestrator_api, run_state
+
+    def _broken(run_id):
+        raise ConnectionError("connection refused")
+
+    monkeypatch.setattr(run_state, "get_run_generation_strict", _broken)
+
+    persisted = []
+    monkeypatch.setattr(
+        orchestrator_api, "_persist_run_state", lambda *a, **k: persisted.append((a, k))
+    )
+
+    checkpoint = _design_attempt_checkpoint(run_id="run-1", generation=5)
+    with pytest.raises(ApplicationError) as exc_info:
+        act.persist_design_attempt_checkpoint(checkpoint)
+
+    assert exc_info.value.non_retryable is False
+    assert persisted == []  # the write never happened despite a legitimately fresh generation
+
+
 def test_snapshot_prior_records_activity_delegates_to_orchestrator_api(monkeypatch):
     from investment_team.models import StrategyLabRecord
     from investment_team.strategy_lab import orchestrator_api
