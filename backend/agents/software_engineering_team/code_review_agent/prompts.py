@@ -99,6 +99,8 @@ _ARCHITECTURE_CONSISTENCY_BODY = """You are a Senior Software Architect running 
 
 2. **Cross-codebase redundancy** (`category: "refactor"`) — the changed code re-implements a capability that ALREADY EXISTS elsewhere in the repository (a second job queue, a second HTTP client wrapper, a second auth check, a second implementation of the same helper). Before flagging this, you MUST confirm the existing capability actually exists elsewhere in the repository and does the same thing — `search_codebase` only searches this submission, so it cannot by itself confirm or rule out something existing outside it. Use `find_references(symbol)` for the candidate name (function, class, or a distinctive term) to find it in the wider repository plus its enclosing construct, or `list_files()`/`read_file()` when you need to confirm a whole file/module exists. Never flag redundancy from a guess or from the finding text alone. Cite the exact file/function that already provides the capability.
 
+**Tagging `pre_existing`:** you are shown the complete current content of every changed file, which can include unrelated, untouched fields/functions/classes that merely live in a file this submission also changed elsewhere — an architecture contradiction (1) or cross-codebase redundancy (2) can be about such pre-existing code just as easily as about code this submission actually added or modified. For EVERY finding, tag `"pre_existing"`: set it `true` when the specific field/function/class/construct the finding is about looks untouched by this submission's actual work (e.g. it sits well away from any edited region, or surrounding code shows no sign it was added or modified by this change), and `false` when it looks like part of what this submission added or changed. Because you cannot see history, this is a best-effort judgment, not a certainty — when genuinely unsure, prefer `false` (report it as tied to this submission) rather than guessing `true` and having a real architecture violation silently routed away from review.
+
 **Hard rules:**
 - Every finding must be tool-verified: you actually read the architecture document section and/or the existing code you are citing, not inferred from naming alone.
 - Do NOT re-review anything the per-file review already covers (naming, structure, documentation, tests, spec compliance, generic code quality, single-file logic bugs) — only architecture contradictions and cross-codebase redundancy.
@@ -117,6 +119,7 @@ Return a single JSON object with exactly one key:
   - "line": integer (1-based line number in the file, when the finding is tied to a specific line) or omit for a file-wide finding
   - "description": string — the specific contradiction or duplication, citing the architecture statement or existing code you verified
   - "suggestion": string — a concrete fix (e.g. which existing helper/module to reuse instead, or how to align with the stated boundary)
+  - "pre_existing": boolean — see the tagging guidance above. Required for every finding.
 
 Return `{"findings": []}` when you find nothing in either category. Do not add any key other than "findings".
 """
@@ -195,6 +198,7 @@ Return a single JSON object with exactly two keys — one per part above. Never 
   - "line": integer (1-based line number in the file, when the finding is tied to a specific line) or omit for a file-wide finding
   - "description": string — the specific contradiction or duplication, citing the architecture statement or existing code you verified
   - "suggestion": string — a concrete fix (e.g. which existing helper/module to reuse instead, or how to align with the stated boundary)
+  - "pre_existing": boolean — see Part 1's tagging guidance above. Required for every architecture_findings entry.
 - "side_effect_findings": a list of objects in Part 2's finding shape, each with:
   - "severity": "critical" | "high" | "medium" | "low" | "info"
   - "category": "side-effects" (a real caller-breaking side effect) or "documentation" (a docstring/comment vs implementation mismatch)

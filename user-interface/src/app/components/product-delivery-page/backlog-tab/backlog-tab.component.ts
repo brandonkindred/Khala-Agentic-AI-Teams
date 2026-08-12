@@ -16,7 +16,7 @@ import { MatIconModule } from '@angular/material/icon';
 import { MatInputModule } from '@angular/material/input';
 import { MatProgressSpinnerModule } from '@angular/material/progress-spinner';
 import { MatSelectModule } from '@angular/material/select';
-import { ProductDeliveryService } from '../../../../services/product-delivery.service';
+import { ProductDeliveryService } from '../../../services/product-delivery.service';
 import {
   GroomModalComponent,
   GroomModalData,
@@ -27,7 +27,7 @@ import type {
   Product,
   Story,
   StoryNode,
-} from '../../../../models/product-delivery.model';
+} from '../../../models/product-delivery.model';
 
 /**
  * Backlog tab — product picker + nested Initiative → Epic → Story tree
