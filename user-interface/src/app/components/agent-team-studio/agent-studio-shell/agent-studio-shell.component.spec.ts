@@ -1,9 +1,14 @@
 import { Component, EventEmitter, Input, Output } from '@angular/core';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
+import { MatDialog } from '@angular/material/dialog';
+import { By } from '@angular/platform-browser';
 import { NoopAnimationsModule } from '@angular/platform-browser/animations';
-import { of } from 'rxjs';
+import { Subject, of, throwError } from 'rxjs';
 import { vi } from 'vitest';
+import type { AgentStudioDraft, AgentStudioDraftSummary } from '../../../models/agent-studio.model';
 import { AgentStudioApiService } from '../../../services/agent-studio-api.service';
+import { AgenticTeamApiService } from '../../../services/agentic-team-api.service';
+import type { ProcessDefinition } from '../../../models/agentic-team.model';
 import { AgentCatalogComponent } from '../agent-console/agent-catalog/agent-catalog.component';
 import { AgentProvisioningPanelComponent } from '../agent-provisioning-panel/agent-provisioning-panel.component';
 import { AgentRunnerComponent } from '../agent-console/agent-runner/agent-runner.component';
@@ -12,6 +17,7 @@ import { AgentStudioComposeTeamComponent } from './agent-studio-compose-team.com
 import { AgentStudioPersonaComponent } from './agent-studio-persona.component';
 import { AgentStudioShellComponent } from './agent-studio-shell.component';
 import { AgentStudioTestAgentComponent } from './agent-studio-test-agent.component';
+import { LoadDraftMenuComponent } from './load-draft-menu/load-draft-menu.component';
 
 /** Stub the heavy Agent Console runner so the Test stage can mount with an agent
  *  set without firing sandbox polling / HTTP inside the shell tests. */
@@ -44,18 +50,31 @@ class StubComposeTeamComponent {}
 describe('AgentStudioShellComponent', () => {
   let component: AgentStudioShellComponent;
   let fixture: ComponentFixture<AgentStudioShellComponent>;
+  // Build stage isn't stubbed at the shell level (only its catalog/provisioning
+  // children are), so it injects the real AgentStudioApiService — fake it here
+  // so no HTTP client is required. Also backs `app-load-draft-menu` (real,
+  // unstubbed) and the shell's own `loadDraft` hydration.
+  let agentStudioApi: {
+    cloneFromRegistry: ReturnType<typeof vi.fn>;
+    saveAgent: ReturnType<typeof vi.fn>;
+    listDrafts: ReturnType<typeof vi.fn>;
+    getDraft: ReturnType<typeof vi.fn>;
+  };
+  let agenticTeamApi: { getProcess: ReturnType<typeof vi.fn> };
 
   beforeEach(async () => {
+    agentStudioApi = {
+      cloneFromRegistry: vi.fn().mockReturnValue(of({})),
+      saveAgent: vi.fn().mockReturnValue(of({})),
+      listDrafts: vi.fn().mockReturnValue(of([])),
+      getDraft: vi.fn(),
+    };
+    agenticTeamApi = { getProcess: vi.fn() };
     await TestBed.configureTestingModule({
       imports: [AgentStudioShellComponent, NoopAnimationsModule],
       providers: [
-        // Build stage isn't stubbed at the shell level (only its catalog/provisioning
-        // children are), so it injects the real AgentStudioApiService — fake it here
-        // so no HTTP client is required; none of these shell tests exercise clone/save.
-        {
-          provide: AgentStudioApiService,
-          useValue: { cloneFromRegistry: vi.fn().mockReturnValue(of({})), saveAgent: vi.fn().mockReturnValue(of({})) },
-        },
+        { provide: AgentStudioApiService, useValue: agentStudioApi },
+        { provide: AgenticTeamApiService, useValue: agenticTeamApi },
       ],
     })
       .overrideComponent(AgentStudioTestAgentComponent, {
@@ -92,14 +111,279 @@ describe('AgentStudioShellComponent', () => {
     expect(steps[1].classList.contains('is-active')).toBe(false);
   });
 
-  it('renders the disabled Save/Load draft header placeholders (spec §3.5)', () => {
+  it('renders Save draft and Load draft, both enabled, in the header (spec §3.5)', () => {
     const draftButtons = fixture.nativeElement.querySelectorAll('.studio__draft-btn');
     expect(draftButtons.length).toBe(2);
     const labels = Array.from(draftButtons).map((b) => (b as HTMLElement).textContent?.trim());
     expect(labels[0]).toContain('Save draft');
     expect(labels[1]).toContain('Load draft');
-    expect((draftButtons[0] as HTMLButtonElement).disabled).toBe(true);
-    expect((draftButtons[1] as HTMLButtonElement).disabled).toBe(true);
+    expect((draftButtons[0] as HTMLButtonElement).disabled).toBe(false);
+    expect((draftButtons[1] as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  describe('Load draft', () => {
+    const draft = (payload: Record<string, unknown>): AgentStudioDraft => ({
+      draft_id: 'd-1',
+      name: 'My draft',
+      created_at: '2026-01-01T00:00:00Z',
+      updated_at: '2026-01-01T00:00:00Z',
+      payload,
+    });
+
+    const process = (status: ProcessDefinition['status']): ProcessDefinition => ({
+      process_id: 'proc-1',
+      name: 'P',
+      description: '',
+      trigger: { trigger_type: 'manual', description: '' },
+      steps: [],
+      output: { description: '', destination: '' },
+      status,
+    });
+
+    it('binds currentDraftId/currentDraftName from the response, not from payload', () => {
+      agentStudioApi.getDraft.mockReturnValue(of(draft({})));
+      component.loadDraft('d-1');
+      expect(component.state.currentDraftId()).toBe('d-1');
+      expect(component.state.currentDraftName()).toBe('My draft');
+    });
+
+    it('hydrates the handoff signals from payload, defensively coercing non-strings to null', () => {
+      agentStudioApi.getDraft.mockReturnValue(
+        of(draft({ registryAgentId: 'reg-1', teamId: 42, personaId: null })),
+      );
+      component.loadDraft('d-1');
+      expect(component.state.registryAgentId()).toBe('reg-1');
+      expect(component.state.teamId()).toBeNull();
+      expect(component.state.personaId()).toBeNull();
+      expect(component.state.processId()).toBeNull();
+      expect(component.state.draftAgentId()).toBeNull();
+    });
+
+    it('Stage 4: teamId + processId set and the process is complete', () => {
+      agentStudioApi.getDraft.mockReturnValue(of(draft({ teamId: 'team-1', processId: 'proc-1' })));
+      agenticTeamApi.getProcess.mockReturnValue(of(process('complete')));
+      component.loadDraft('d-1');
+      expect(agenticTeamApi.getProcess).toHaveBeenCalledWith('proc-1');
+      expect(component.state.activeStage()).toBe(3);
+      expect(component.state.composeProcessStatus()).toBe('complete');
+    });
+
+    it('Stage 3: teamId + processId set but the process is not complete', () => {
+      agentStudioApi.getDraft.mockReturnValue(of(draft({ teamId: 'team-1', processId: 'proc-1' })));
+      agenticTeamApi.getProcess.mockReturnValue(of(process('draft')));
+      component.loadDraft('d-1');
+      expect(component.state.activeStage()).toBe(2);
+    });
+
+    it('Stage 3: falls back when the process lookup fails (e.g. deleted since save)', () => {
+      agentStudioApi.getDraft.mockReturnValue(of(draft({ teamId: 'team-1', processId: 'proc-1' })));
+      agenticTeamApi.getProcess.mockReturnValue(throwError(() => new Error('404')));
+      component.loadDraft('d-1');
+      expect(component.state.activeStage()).toBe(2);
+      // Hydration still completed despite the process lookup failing.
+      expect(component.state.teamId()).toBe('team-1');
+    });
+
+    it('Stage 3: only teamId set — no process lookup performed', () => {
+      agentStudioApi.getDraft.mockReturnValue(of(draft({ teamId: 'team-1' })));
+      component.loadDraft('d-1');
+      expect(agenticTeamApi.getProcess).not.toHaveBeenCalled();
+      expect(component.state.activeStage()).toBe(2);
+    });
+
+    it('Stage 2: only registryAgentId set', () => {
+      agentStudioApi.getDraft.mockReturnValue(of(draft({ registryAgentId: 'reg-1' })));
+      component.loadDraft('d-1');
+      expect(component.state.activeStage()).toBe(1);
+    });
+
+    it('Stage 1: nothing set, including moving backward from a later active stage', () => {
+      component.state.navigateToStage(3);
+      agentStudioApi.getDraft.mockReturnValue(of(draft({})));
+      component.loadDraft('d-1');
+      expect(component.state.activeStage()).toBe(0);
+    });
+
+    it('never re-validates rosterFullyStaffed', () => {
+      component.state.setRosterFullyStaffed(true);
+      agentStudioApi.getDraft.mockReturnValue(of(draft({ teamId: 'team-1', processId: 'proc-1' })));
+      agenticTeamApi.getProcess.mockReturnValue(of(process('complete')));
+      component.loadDraft('d-1');
+      expect(component.state.rosterFullyStaffed()).toBe(true);
+
+      component.state.setRosterFullyStaffed(false);
+      component.loadDraft('d-1');
+      expect(component.state.rosterFullyStaffed()).toBe(false);
+    });
+
+    it('a getDraft failure clears loadingDraft and leaves state unchanged', () => {
+      agentStudioApi.getDraft.mockReturnValue(throwError(() => new Error('404')));
+      component.loadDraft('d-1');
+      expect(component.loadingDraft()).toBe(false);
+      expect(component.state.currentDraftId()).toBeNull();
+      expect(component.state.registryAgentId()).toBeNull();
+    });
+
+    it('loadingDraft reflects the in-flight request and guards re-entrancy', () => {
+      const pending = new Subject<AgentStudioDraft>();
+      agentStudioApi.getDraft.mockReturnValue(pending.asObservable());
+      component.loadDraft('d-1');
+      expect(component.loadingDraft()).toBe(true);
+
+      component.loadDraft('d-2');
+      expect(agentStudioApi.getDraft).toHaveBeenCalledTimes(1);
+
+      pending.next(draft({}));
+      pending.complete();
+      expect(component.loadingDraft()).toBe(false);
+    });
+
+    it('loadingDraft stays true through the nested process-status check, not just the getDraft call', () => {
+      agentStudioApi.getDraft.mockReturnValue(of(draft({ teamId: 'team-1', processId: 'proc-1' })));
+      const pendingProcess = new Subject<ProcessDefinition>();
+      agenticTeamApi.getProcess.mockReturnValue(pendingProcess.asObservable());
+      component.loadDraft('d-1');
+      // getDraft already resolved (synchronous `of`), but the process check is
+      // still pending — loadingDraft must not have gone false in between.
+      expect(component.loadingDraft()).toBe(true);
+      pendingProcess.next(process('complete'));
+      pendingProcess.complete();
+      expect(component.loadingDraft()).toBe(false);
+    });
+
+    it('clears a stale composeProcessStatus when the process lookup fails', () => {
+      component.state.setComposeProcessStatus('complete');
+      agentStudioApi.getDraft.mockReturnValue(of(draft({ teamId: 'team-1', processId: 'proc-1' })));
+      agenticTeamApi.getProcess.mockReturnValue(throwError(() => new Error('404')));
+      component.loadDraft('d-1');
+      expect(component.state.composeProcessStatus()).toBeNull();
+    });
+
+    it('resets the Build sub-stepper when resolving to Stage 1 from mid-sub-stepper progress', () => {
+      component.state.advanceBuildSubStage();
+      component.state.advanceBuildSubStage();
+      expect(component.state.activeBuildSubStage()).toBe(2);
+      agentStudioApi.getDraft.mockReturnValue(of(draft({})));
+      component.loadDraft('d-1');
+      expect(component.state.activeBuildSubStage()).toBe(0);
+      expect(component.state.maxReachedBuildSubStage()).toBe(0);
+    });
+
+    it('a superseded loadDraft call discards its late getDraft response instead of corrupting the newer load', () => {
+      const firstDraft = new Subject<AgentStudioDraft>();
+      agentStudioApi.getDraft.mockReturnValueOnce(firstDraft.asObservable());
+      component.loadDraft('d-1'); // in flight, not yet resolved
+
+      agentStudioApi.getDraft.mockReturnValueOnce(of(draft({ registryAgentId: 'reg-2' })));
+      // Simulate the busy-guard having been bypassed (e.g. a direct call) —
+      // force loadingDraft back to false so the second call isn't blocked,
+      // to isolate the token guard's own protection from the busy guard's.
+      component.loadingDraft.set(false);
+      component.loadDraft('d-2'); // supersedes the first, resolves synchronously
+
+      expect(component.state.registryAgentId()).toBe('reg-2');
+      firstDraft.next(draft({ registryAgentId: 'reg-1-stale' }));
+      firstDraft.complete();
+      // The stale first response must not have overwritten the newer load.
+      expect(component.state.registryAgentId()).toBe('reg-2');
+    });
+
+    it('a superseded loadDraft call discards its late getProcess response', () => {
+      agentStudioApi.getDraft.mockReturnValueOnce(
+        of(draft({ teamId: 'team-1', processId: 'proc-1' })),
+      );
+      const firstProcess = new Subject<ProcessDefinition>();
+      agenticTeamApi.getProcess.mockReturnValueOnce(firstProcess.asObservable());
+      component.loadDraft('d-1'); // getDraft resolves, getProcess left pending
+
+      agentStudioApi.getDraft.mockReturnValueOnce(of(draft({ registryAgentId: 'reg-2' })));
+      component.loadingDraft.set(false); // bypass the busy-guard, isolate the token guard
+      component.loadDraft('d-2'); // resolves synchronously to Stage 2
+
+      expect(component.state.activeStage()).toBe(1);
+      firstProcess.next(process('complete'));
+      firstProcess.complete();
+      // The stale getProcess response must not re-navigate the stepper.
+      expect(component.state.activeStage()).toBe(1);
+    });
+
+    it('the Load-draft menu is wired to loadDraft and reflects loadingDraft as busy', () => {
+      agentStudioApi.getDraft.mockReturnValue(of(draft({})));
+      const menu = fixture.debugElement.query(By.directive(LoadDraftMenuComponent));
+      expect(menu).toBeTruthy();
+      menu.triggerEventHandler('draftSelected', 'd-1');
+      expect(component.state.currentDraftId()).toBe('d-1');
+    });
+  });
+
+  describe('Save draft popover', () => {
+    const draftSummary = (): AgentStudioDraftSummary => ({
+      draft_id: 'd-1',
+      name: 'My draft',
+      updated_at: '2026-01-01T00:00:00Z',
+    });
+
+    // Spy on the prototype method rather than an injected instance: the
+    // standalone shell component (root under TestBed) resolves `MatDialog`
+    // (`providedIn: 'root'`) from a different environment-injector instance
+    // than both `TestBed.inject(MatDialog)` and a `{ provide: MatDialog,
+    // useValue }` override reach — a prototype spy intercepts regardless of
+    // which instance ends up being used.
+    let openSpy: ReturnType<typeof vi.spyOn<MatDialog, 'open'>>;
+
+    beforeEach(() => {
+      openSpy = vi.spyOn(MatDialog.prototype, 'open');
+    });
+
+    afterEach(() => {
+      openSpy.mockRestore();
+    });
+
+    it('clicking Save draft opens the Save-draft dialog', () => {
+      openSpy.mockReturnValue({ afterClosed: () => of(undefined) } as unknown as ReturnType<MatDialog['open']>);
+      const saveButton: HTMLButtonElement = fixture.nativeElement.querySelector('.studio__draft-btn');
+      saveButton.click();
+      expect(openSpy).toHaveBeenCalled();
+    });
+
+    it('disables backdrop/Escape/browser-navigation dismissal so an in-flight save cannot be bypassed', () => {
+      openSpy.mockReturnValue({ afterClosed: () => of(undefined) } as unknown as ReturnType<MatDialog['open']>);
+      component.openSaveDraftDialog();
+      const config = openSpy.mock.calls[0][1] as { disableClose?: boolean; closeOnNavigation?: boolean };
+      expect(config.disableClose).toBe(true);
+      expect(config.closeOnNavigation).toBe(false);
+    });
+
+    it('passes the current handoff state and no draftId as the dialog payload on first save', () => {
+      component.state.setRegistryAgentId('reg-1');
+      openSpy.mockReturnValue({ afterClosed: () => of(undefined) } as unknown as ReturnType<MatDialog['open']>);
+      component.openSaveDraftDialog();
+      const config = openSpy.mock.calls[0][1] as { data: { draftId: string | null; payload: Record<string, unknown> } };
+      expect(config.data.draftId).toBeNull();
+      expect(config.data.payload['registryAgentId']).toBe('reg-1');
+    });
+
+    it('passes the bound draftId once a draft has been saved this session', () => {
+      component.state.setCurrentDraft('d-1', 'My draft');
+      openSpy.mockReturnValue({ afterClosed: () => of(undefined) } as unknown as ReturnType<MatDialog['open']>);
+      component.openSaveDraftDialog();
+      const config = openSpy.mock.calls[0][1] as { data: { draftId: string | null } };
+      expect(config.data.draftId).toBe('d-1');
+    });
+
+    it('binds the session to the returned draft on a successful save', () => {
+      openSpy.mockReturnValue({ afterClosed: () => of(draftSummary()) } as unknown as ReturnType<MatDialog['open']>);
+      component.openSaveDraftDialog();
+      expect(component.state.currentDraftId()).toBe('d-1');
+      expect(component.state.currentDraftName()).toBe('My draft');
+    });
+
+    it('leaves state unchanged when the dialog is cancelled', () => {
+      openSpy.mockReturnValue({ afterClosed: () => of(undefined) } as unknown as ReturnType<MatDialog['open']>);
+      component.openSaveDraftDialog();
+      expect(component.state.currentDraftId()).toBeNull();
+      expect(component.state.currentDraftName()).toBeNull();
+    });
   });
 
   it('stepper indicators are not buttons — there is no backward navigation', () => {
