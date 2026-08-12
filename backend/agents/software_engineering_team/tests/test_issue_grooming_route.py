@@ -33,7 +33,12 @@ def test_groom_dispatches_via_temporal(monkeypatch):
 
     r = client.post(
         "/groom-github-issues",
-        json={"owner": "acme", "repo": "widgets", "issue_number": 42},
+        json={
+            "owner": "acme",
+            "repo": "widgets",
+            "issue_number": 42,
+            "github_token": "fake-token",
+        },
     )
 
     assert r.status_code == 200
@@ -45,11 +50,54 @@ def test_groom_dispatches_via_temporal(monkeypatch):
     assert dispatched["issue_number"] == 42
     assert len(created) == 1
     assert created[0]["repo_path"] == "acme/widgets"
-    # Tagged with job_type + github_context before dispatch.
+    # Tagged with job_type + github_context (and, when an encryption key is
+    # configured, github_token_encrypted -- never the plaintext token) before
+    # dispatch.
     tag_job_id, tag_fields = updates[0]
     assert tag_job_id == body["job_id"]
     assert tag_fields["job_type"] == "issue_grooming"
     assert tag_fields["github_context"] == {"owner": "acme", "repo": "widgets", "issue_number": 42}
+    assert "github_token" not in tag_fields
+
+
+def test_groom_requires_a_github_token(monkeypatch):
+    """Neither a request-body token nor GITHUB_TOKEN env -> 400, no job created."""
+    created: list = []
+    monkeypatch.setattr(api, "create_job", lambda **kw: created.append(kw), raising=True)
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+
+    r = client.post(
+        "/groom-github-issues",
+        json={"owner": "acme", "repo": "widgets", "issue_number": 42},
+    )
+
+    assert r.status_code == 400
+    assert created == []
+
+
+def test_groom_persists_encrypted_token_on_the_job(monkeypatch):
+    """The resolved token is encrypted and stored as github_token_encrypted --
+    the same field run_issue_grooming_activity resolves from -- never the
+    plaintext token."""
+    updates: list = []
+    monkeypatch.setattr(api, "create_job", lambda **kw: None, raising=True)
+    monkeypatch.setattr(api, "update_job", lambda job_id, **kw: updates.append((job_id, kw)))
+    monkeypatch.setattr(route_mod, "start_issue_grooming_workflow", lambda *a, **k: None)
+    monkeypatch.setattr(route_mod, "encrypt_token", lambda token: f"encrypted::{token}")
+
+    r = client.post(
+        "/groom-github-issues",
+        json={
+            "owner": "acme",
+            "repo": "widgets",
+            "issue_number": 42,
+            "github_token": "super-secret-pat",
+        },
+    )
+
+    assert r.status_code == 200
+    _tag_job_id, tag_fields = updates[0]
+    assert tag_fields["github_token_encrypted"] == "encrypted::super-secret-pat"
 
 
 def test_groom_marks_job_failed_and_503_when_temporal_dispatch_raises(monkeypatch):
@@ -68,7 +116,12 @@ def test_groom_marks_job_failed_and_503_when_temporal_dispatch_raises(monkeypatc
 
     r = client.post(
         "/groom-github-issues",
-        json={"owner": "acme", "repo": "widgets", "issue_number": 42},
+        json={
+            "owner": "acme",
+            "repo": "widgets",
+            "issue_number": 42,
+            "github_token": "fake-token",
+        },
     )
 
     assert r.status_code == 503

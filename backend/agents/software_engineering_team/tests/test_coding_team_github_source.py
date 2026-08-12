@@ -61,6 +61,7 @@ def _client_with(handler: Callable[[httpx.Request], httpx.Response]) -> GitHubCl
 
 def _issue_payload(number: int, **overrides: Any) -> dict[str, Any]:
     return {
+        "id": overrides.get("id", 100000 + number),
         "number": number,
         "title": overrides.get("title", f"Issue {number}"),
         "body": overrides.get("body"),
@@ -699,6 +700,7 @@ class TestClientCreateIssue:
             return httpx.Response(
                 201,
                 json={
+                    "id": 100099,
                     "number": 99,
                     "title": "t",
                     "body": "b",
@@ -719,6 +721,7 @@ class TestClientCreateIssue:
         assert seen["body"]["labels"] == ["bug"]
         assert issue.number == 99
         assert issue.html_url == "https://example/issues/99"
+        assert issue.id == 100099
 
     def test_create_issue_omits_labels_when_none(self) -> None:
         seen: dict[str, Any] = {}
@@ -727,7 +730,14 @@ class TestClientCreateIssue:
             seen["body"] = json.loads(req.content.decode())
             return httpx.Response(
                 201,
-                json={"number": 1, "title": "t", "body": "b", "state": "open", "html_url": "u"},
+                json={
+                    "id": 1,
+                    "number": 1,
+                    "title": "t",
+                    "body": "b",
+                    "state": "open",
+                    "html_url": "u",
+                },
             )
 
         _client_with(handler).create_issue("acme", "widget", title="t", body="b")
@@ -741,6 +751,81 @@ class TestClientCreateIssue:
 
         with pytest.raises(GitHubAPIError):
             _client_with(handler).create_issue("acme", "widget", title="t", body="b")
+
+
+class TestClientUpdateIssue:
+    def test_patches_body_only(self) -> None:
+        seen: dict[str, Any] = {}
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            seen["method"] = req.method
+            seen["url"] = str(req.url)
+            seen["body"] = json.loads(req.content.decode())
+            return httpx.Response(200, json=_issue_payload(5, body="new body"))
+
+        issue = _client_with(handler).update_issue("acme", "widget", 5, body="new body")
+        assert seen["method"] == "PATCH"
+        assert seen["url"].endswith("/repos/acme/widget/issues/5")
+        assert seen["body"] == {"body": "new body"}
+        assert issue.body == "new body"
+
+    def test_patches_labels_only(self) -> None:
+        seen: dict[str, Any] = {}
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            seen["body"] = json.loads(req.content.decode())
+            return httpx.Response(200, json=_issue_payload(5, labels=[{"name": "complexity: 3"}]))
+
+        _client_with(handler).update_issue("acme", "widget", 5, labels=["complexity: 3"])
+        assert seen["body"] == {"labels": ["complexity: 3"]}
+
+    def test_patches_body_and_labels(self) -> None:
+        seen: dict[str, Any] = {}
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            seen["body"] = json.loads(req.content.decode())
+            return httpx.Response(200, json=_issue_payload(5))
+
+        _client_with(handler).update_issue("acme", "widget", 5, body="b", labels=["x"])
+        assert seen["body"] == {"body": "b", "labels": ["x"]}
+
+    def test_raises_value_error_when_neither_field_given(self) -> None:
+        def handler(_req: httpx.Request) -> httpx.Response:
+            raise AssertionError("should not make a request when neither field is given")
+
+        with pytest.raises(ValueError):
+            _client_with(handler).update_issue("acme", "widget", 5)
+
+    def test_raises_on_error(self) -> None:
+        def handler(_req: httpx.Request) -> httpx.Response:
+            return httpx.Response(404, json={"message": "not found"})
+
+        with pytest.raises(GitHubAPIError):
+            _client_with(handler).update_issue("acme", "widget", 5, body="b")
+
+
+class TestClientAddSubIssue:
+    def test_posts_sub_issue_id(self) -> None:
+        seen: dict[str, Any] = {}
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            seen["method"] = req.method
+            seen["url"] = str(req.url)
+            seen["body"] = json.loads(req.content.decode())
+            return httpx.Response(201, json={})
+
+        result = _client_with(handler).add_sub_issue("acme", "widget", 5, sub_issue_id=100042)
+        assert seen["method"] == "POST"
+        assert seen["url"].endswith("/repos/acme/widget/issues/5/sub_issues")
+        assert seen["body"] == {"sub_issue_id": 100042}
+        assert result is None
+
+    def test_raises_on_error(self) -> None:
+        def handler(_req: httpx.Request) -> httpx.Response:
+            return httpx.Response(422, json={"message": "already linked"})
+
+        with pytest.raises(GitHubAPIError):
+            _client_with(handler).add_sub_issue("acme", "widget", 5, sub_issue_id=100042)
 
 
 class TestClientCommentReaction:
@@ -974,6 +1059,7 @@ def _issue(num: int, title: str = "T", body: str = "B", labels: tuple[str, ...] 
         state="open",
         html_url=f"https://example/issues/{num}",
         labels=labels,
+        id=100000 + num,
     )
 
 
@@ -1213,7 +1299,9 @@ def patched_app(monkeypatch: pytest.MonkeyPatch, tmp_path):
 
     started: list[dict[str, Any]] = []
 
-    def _capture_start(job_id: str, repo_path: str, plan_input: dict[str, Any], github=None) -> None:
+    def _capture_start(
+        job_id: str, repo_path: str, plan_input: dict[str, Any], github=None
+    ) -> None:
         """Record Temporal workflow starts for route-level assertions.
 
         Preconditions:
@@ -1307,7 +1395,9 @@ def _post_run_from_github_then_run_legacy_hooks(patched_app, json: dict[str, Any
     started = patched_app["started_workflows"][-1]
     api = patched_app["api"]
     request = api.RunFromGitHubRequest(**json)
-    issue = patched_app["github"]().get_issue(request.owner, request.repo, resp.json()["issue_number"])
+    issue = patched_app["github"]().get_issue(
+        request.owner, request.repo, resp.json()["issue_number"]
+    )
     plan = CodingTeamPlanInput.model_validate(started["plan_input"])
     token = json.get("github_token") or os.environ["GITHUB_TOKEN"]
     api._run_with_github_hooks(started["job_id"], request, plan, issue, token)
@@ -2456,9 +2546,7 @@ class TestBusyCheckoutGuard:
         monkeypatch.setattr(api, "_clear_active_issue_if_matches", lambda *a: None)
         client = _FakeClient(issues=[_issue(3)], sub_map={3: []})
         patched_app["set_github"](client)
-        resp = _post_run_from_github_and_run_hooks(
-            patched_app, _body(3, repo_path=repo_path)
-        )
+        resp = _post_run_from_github_and_run_hooks(patched_app, _body(3, repo_path=repo_path))
         assert resp.status_code == 200
         job = patched_app["jobs"].get_job(resp.json()["job_id"])
         assert job["status"] == "failed"
@@ -2489,9 +2577,7 @@ class TestBusyCheckoutGuard:
         monkeypatch.setattr(api, "_clear_active_issue_if_matches", lambda *a: None)
         client = _FakeClient(issues=[_issue(3)], sub_map={3: []})
         patched_app["set_github"](client)
-        resp = _post_run_from_github_and_run_hooks(
-            patched_app, _body(3, repo_path=repo_path)
-        )
+        resp = _post_run_from_github_and_run_hooks(patched_app, _body(3, repo_path=repo_path))
         assert resp.status_code == 200
         job = patched_app["jobs"].get_job(resp.json()["job_id"])
         assert job["status"] == "failed"
@@ -2508,9 +2594,7 @@ class TestBusyCheckoutGuard:
         monkeypatch.setattr(api, "_clear_active_issue_if_matches", lambda *a: None)
         client = _FakeClient(issues=[_issue(3)], sub_map={3: []})
         patched_app["set_github"](client)
-        resp = _post_run_from_github_and_run_hooks(
-            patched_app, _body(3, repo_path=repo_path)
-        )
+        resp = _post_run_from_github_and_run_hooks(patched_app, _body(3, repo_path=repo_path))
         assert resp.status_code == 200
         job = patched_app["jobs"].get_job(resp.json()["job_id"])
         assert job["status"] == "completed"
@@ -2541,9 +2625,7 @@ class TestPublishWindowLiveness:
         monkeypatch.setattr(api, "_clear_active_issue_if_matches", lambda *a: None)
         client = _FakeClient(issues=[_issue(3)], sub_map={3: []})
         patched_app["set_github"](client)
-        resp = _post_run_from_github_and_run_hooks(
-            patched_app, _body(3, repo_path=repo_path)
-        )
+        resp = _post_run_from_github_and_run_hooks(patched_app, _body(3, repo_path=repo_path))
         assert resp.status_code == 200
         # The orchestrator declared success before the push, but the job must
         # still be non-terminal (and visible to the busy-checkout guard)…
