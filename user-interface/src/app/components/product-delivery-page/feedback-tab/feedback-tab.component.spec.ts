@@ -3,12 +3,12 @@ import { provideHttpClient } from '@angular/common/http';
 import { NoopAnimationsModule } from '@angular/platform-browser/animations';
 import { of, throwError } from 'rxjs';
 import { FeedbackTabComponent } from './feedback-tab.component';
-import { ProductDeliveryService } from '../../../../services/product-delivery.service';
+import { ProductDeliveryService } from '../../../services/product-delivery.service';
 import type {
   BacklogTree,
   FeedbackItem,
   Product,
-} from '../../../../models/product-delivery.model';
+} from '../../../models/product-delivery.model';
 
 const products: Product[] = [
   { id: 'p1', name: 'P', description: '', vision: '', author: 'a', created_at: '', updated_at: '' },

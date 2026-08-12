@@ -15,7 +15,7 @@ import {
 import { MatFormFieldModule } from '@angular/material/form-field';
 import { MatIconModule } from '@angular/material/icon';
 import { MatSelectModule } from '@angular/material/select';
-import type { Story } from '../../../../models/product-delivery.model';
+import type { Story } from '../../../models/product-delivery.model';
 
 export interface LinkStoryDialogData {
   feedbackId: string;

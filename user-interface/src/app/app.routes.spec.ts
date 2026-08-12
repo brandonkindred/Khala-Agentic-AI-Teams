@@ -39,6 +39,13 @@ describe('App routes', () => {
     expect(await loadedComponent('job-matching')).toBe(JobMatchingDashboardComponent);
   });
 
+  it('lazily loads ProductDeliveryPageComponent for product-delivery', async () => {
+    const { ProductDeliveryPageComponent } = await import(
+      './components/product-delivery-page/product-delivery-page.component'
+    );
+    expect(await loadedComponent('product-delivery')).toBe(ProductDeliveryPageComponent);
+  });
+
   it('redirects empty path to /dashboard', () => {
     const shell = routes[0];
     const children = shell?.children as { path: string; redirectTo: string }[];
