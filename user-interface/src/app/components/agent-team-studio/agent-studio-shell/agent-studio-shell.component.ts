@@ -1,4 +1,4 @@
-import { ChangeDetectionStrategy, Component, computed, inject, signal } from '@angular/core';
+import { ChangeDetectionStrategy, Component, Injector, computed, inject, signal } from '@angular/core';
 import { MatButtonModule } from '@angular/material/button';
 import { MatDialog, MatDialogModule } from '@angular/material/dialog';
 import { MatIconModule } from '@angular/material/icon';
@@ -65,6 +65,7 @@ export class AgentStudioShellComponent {
   readonly state = inject(AgentStudioStateService);
   private readonly dialog = inject(MatDialog);
   private readonly facade = inject(AgentStudioFacade);
+  private readonly injector = inject(Injector);
   private readonly agenticTeamApi = inject(AgenticTeamApiService);
 
   /** True while a Load-draft selection is being fetched and hydrated. */
@@ -174,7 +175,12 @@ export class AgentStudioShellComponent {
       // one that was actually created. `disableClose` only covers Escape/
       // backdrop — `closeOnNavigation` (Material default `true`) is a
       // separate flag that must be turned off too.
-      { data, width: '420px', disableClose: true, closeOnNavigation: false },
+      //
+      // `injector` is the shell's session injector so the overlay can resolve
+      // `AgentStudioFacade` (provided here, not `root`). Without it, MatDialog
+      // instantiates the dialog from the root injector and the façade inject
+      // throws NullInjectorError.
+      { data, width: '420px', disableClose: true, closeOnNavigation: false, injector: this.injector },
     );
     ref.afterClosed().subscribe((result) => {
       if (!result) return;

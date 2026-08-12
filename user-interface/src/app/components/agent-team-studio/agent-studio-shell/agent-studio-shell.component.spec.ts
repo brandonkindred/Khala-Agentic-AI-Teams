@@ -1,4 +1,4 @@
-import { Component, EventEmitter, Input, Output } from '@angular/core';
+import { Component, EventEmitter, Injector, Input, Output } from '@angular/core';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { MatDialog } from '@angular/material/dialog';
 import { By } from '@angular/platform-browser';
@@ -10,6 +10,7 @@ import { AgentStudioApiService } from '../../../services/agent-studio-api.servic
 import { AgentRunnerApiService } from '../../../services/agent-runner-api.service';
 import { AgenticTeamApiService } from '../../../services/agentic-team-api.service';
 import { PersonaTestingApiService } from '../../../services/persona-testing-api.service';
+import { AgentStudioFacade } from '../../../services/agent-studio.facade';
 import type { ProcessDefinition } from '../../../models/agentic-team.model';
 import { AgentCatalogComponent } from '../agent-console/agent-catalog/agent-catalog.component';
 import { AgentProvisioningPanelComponent } from '../agent-provisioning-panel/agent-provisioning-panel.component';
@@ -355,9 +356,17 @@ describe('AgentStudioShellComponent', () => {
     it('disables backdrop/Escape/browser-navigation dismissal so an in-flight save cannot be bypassed', () => {
       openSpy.mockReturnValue({ afterClosed: () => of(undefined) } as unknown as ReturnType<MatDialog['open']>);
       component.openSaveDraftDialog();
-      const config = openSpy.mock.calls[0][1] as { disableClose?: boolean; closeOnNavigation?: boolean };
+      const config = openSpy.mock.calls[0][1] as {
+        disableClose?: boolean;
+        closeOnNavigation?: boolean;
+        injector?: Injector;
+      };
       expect(config.disableClose).toBe(true);
       expect(config.closeOnNavigation).toBe(false);
+      // Overlay dialogs otherwise resolve from the root injector, where the
+      // session-scoped AgentStudioFacade is not provided.
+      expect(config.injector).toBeDefined();
+      expect(config.injector!.get(AgentStudioFacade)).toBeTruthy();
     });
 
     it('passes the current handoff state and no draftId as the dialog payload on first save', () => {
