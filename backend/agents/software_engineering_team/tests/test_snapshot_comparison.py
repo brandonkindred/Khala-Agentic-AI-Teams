@@ -35,12 +35,16 @@ from code_review_agent.snapshot_comparison import (
     compare_submission,
     diff_findings,
 )
+from tests.submission_pass_two_call_client import SubmissionPassTwoCallClient
 
 from llm_service.clients.dummy import DummyLLMClient
 
+pytest_plugins = ["tests.submission_pass_two_call_client"]
+
 # Same anchor convention as test_architecture_consistency_pass.py /
 # test_side_effect_impact_pass.py / test_merged_architecture_side_effect_pass.py:
-# branch on the user prompt only, never the system prompt.
+# branch on the reasoning-pass user prompt only, never the format wrap or
+# the system prompt.
 _ARCH_PASS_ANCHOR = "Summarize architecture-consistency findings in structured prose"
 _SIDE_EFFECT_PASS_ANCHOR = "Summarize side-effect-impact findings in structured prose"
 _MERGED_PASS_ANCHOR = "Merged submission pass:"
@@ -301,7 +305,7 @@ def _init_one_commit_repo(tmp_path: Path) -> "tuple[Path, str]":
     return repo, sha
 
 
-class _ScriptedComparisonClient(DummyLLMClient):
+class _ScriptedComparisonClient(SubmissionPassTwoCallClient):
     """Old path: architecture + side-effect findings. Merged path: architecture only.
 
     Deliberately drops the side-effect finding on the merged path so the test
@@ -309,7 +313,8 @@ class _ScriptedComparisonClient(DummyLLMClient):
     """
 
     def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
-        if _MERGED_PASS_ANCHOR in prompt:
+        reasoning = self.latest_reasoning_prompt()
+        if _MERGED_PASS_ANCHOR in reasoning:
             return {
                 "architecture_findings": [
                     {
@@ -322,7 +327,7 @@ class _ScriptedComparisonClient(DummyLLMClient):
                 ],
                 "side_effect_findings": [],
             }
-        if _ARCH_PASS_ANCHOR in prompt:
+        if _ARCH_PASS_ANCHOR in reasoning:
             return {
                 "findings": [
                     {
@@ -334,7 +339,7 @@ class _ScriptedComparisonClient(DummyLLMClient):
                     }
                 ]
             }
-        if _SIDE_EFFECT_PASS_ANCHOR in prompt:
+        if _SIDE_EFFECT_PASS_ANCHOR in reasoning:
             return {
                 "findings": [
                     {
@@ -416,15 +421,16 @@ def test_compare_submission_alternates_which_path_runs_first_across_repeats(
     )
     call_order: list[str] = []
 
-    class _OrderTrackingClient(DummyLLMClient):
+    class _OrderTrackingClient(SubmissionPassTwoCallClient):
         def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
-            if _MERGED_PASS_ANCHOR in prompt:
+            reasoning = self.latest_reasoning_prompt()
+            if _MERGED_PASS_ANCHOR in reasoning:
                 call_order.append("merged")
                 return {"architecture_findings": [], "side_effect_findings": []}
-            if _ARCH_PASS_ANCHOR in prompt:
+            if _ARCH_PASS_ANCHOR in reasoning:
                 call_order.append("arch")
                 return {"findings": []}
-            if _SIDE_EFFECT_PASS_ANCHOR in prompt:
+            if _SIDE_EFFECT_PASS_ANCHOR in reasoning:
                 call_order.append("side")
                 return {"findings": []}
             return {"approved": True, "issues": [], "summary": "ok", "spec_compliance_notes": ""}
@@ -462,15 +468,16 @@ def test_compare_submission_dedupes_findings_pooled_unevenly_across_repeats(
         "suggestion": "use the repository",
     }
 
-    class _UnevenClient(DummyLLMClient):
+    class _UnevenClient(SubmissionPassTwoCallClient):
         def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
-            if _MERGED_PASS_ANCHOR in prompt:
+            reasoning = self.latest_reasoning_prompt()
+            if _MERGED_PASS_ANCHOR in reasoning:
                 merged_calls["n"] += 1
                 findings = [_FINDING] if merged_calls["n"] == 1 else []
                 return {"architecture_findings": findings, "side_effect_findings": []}
-            if _ARCH_PASS_ANCHOR in prompt:
+            if _ARCH_PASS_ANCHOR in reasoning:
                 return {"findings": [_FINDING]}
-            if _SIDE_EFFECT_PASS_ANCHOR in prompt:
+            if _SIDE_EFFECT_PASS_ANCHOR in reasoning:
                 return {"findings": []}
             return {"approved": True, "issues": [], "summary": "ok", "spec_compliance_notes": ""}
 
@@ -562,13 +569,14 @@ def test_compare_submission_detects_and_counts_call_failures(tmp_path: Path) -> 
         task_description="test change",
     )
 
-    class _FlakyClient(DummyLLMClient):
+    class _FlakyClient(SubmissionPassTwoCallClient):
         def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
-            if _ARCH_PASS_ANCHOR in prompt:
+            reasoning = self.latest_reasoning_prompt()
+            if _ARCH_PASS_ANCHOR in reasoning:
                 raise RuntimeError("simulated transient failure")
-            if _SIDE_EFFECT_PASS_ANCHOR in prompt:
+            if _SIDE_EFFECT_PASS_ANCHOR in reasoning:
                 return {"findings": []}
-            if _MERGED_PASS_ANCHOR in prompt:
+            if _MERGED_PASS_ANCHOR in reasoning:
                 return {"architecture_findings": [], "side_effect_findings": []}
             return {"approved": True, "issues": [], "summary": "ok", "spec_compliance_notes": ""}
 
