@@ -43,6 +43,13 @@ from typing import Any, Callable, Dict, Mapping, Sequence, Tuple
 
 from ..market_data_cache.store import compute_dataset_fingerprint
 
+# Sentinel distinguishing "no entry for this key" from "entry present with
+# value None" — some indicators (e.g. IndicatorRegistry's EMA/SMA methods)
+# legitimately return None during warm-up (len(bars) < period), and that
+# None must be cacheable like any other value rather than read back as a
+# miss on every subsequent lookup.
+_ABSENT = object()
+
 
 class BatchIndicatorCache:
     """Memoize indicator computations across the cycles of one batch.
@@ -120,10 +127,23 @@ class BatchIndicatorCache:
         Preconditions:
           - ``indicator_name``, ``symbol``, and ``timeframe`` are non-empty
             strings.
+          - ``params`` includes every value that steers ``compute``'s math —
+            not just ``period``, but also e.g. ``source`` when the indicator
+            is source-sensitive. The DSL's ``IndicatorRef`` (``spec_dsl.py``)
+            carries ``source`` as a field separate from ``params``, so a
+            caller forwarding ``IndicatorRef.params`` verbatim MUST fold
+            ``source`` (and any other out-of-band steering value) into the
+            mapping passed here — this cache has no dedicated ``source``
+            argument and treats ``params`` as the complete parameter
+            identity. Omitting a steering value lets two calls that compute
+            different series (e.g. the same period over ``close`` vs.
+            ``high``) collide on the same key.
           - ``bars`` is a non-empty sequence of the OHLCV bars ``compute``
             would compute the indicator over.
           - ``compute`` is a zero-arg callable that returns the indicator's
-            result for ``(indicator_name, params, symbol, timeframe, bars)``.
+            result for ``(indicator_name, params, symbol, timeframe, bars)``;
+            ``None`` is a valid result (e.g. an indicator during warm-up) and
+            is cached like any other value.
         Postconditions:
           - Returns ``(value, hit)``. On a hit, ``value`` is the result
             stored by the first call with the same key and ``compute`` was
@@ -142,8 +162,8 @@ class BatchIndicatorCache:
         key = self._key(indicator_name, params, symbol, timeframe, bars)
 
         with self._lock:
-            cached = self._values.get(key)
-            if cached is not None:
+            cached = self._values.get(key, _ABSENT)
+            if cached is not _ABSENT:
                 self.hits += 1
                 return cached, True
 
@@ -153,8 +173,8 @@ class BatchIndicatorCache:
         value = compute()
 
         with self._lock:
-            existing = self._values.get(key)
-            if existing is not None:
+            existing = self._values.get(key, _ABSENT)
+            if existing is not _ABSENT:
                 # Lost the race: another thread already stored a result.
                 self.hits += 1
                 return existing, True

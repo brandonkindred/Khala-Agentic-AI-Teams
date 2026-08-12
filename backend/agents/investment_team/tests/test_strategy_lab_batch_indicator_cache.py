@@ -155,6 +155,42 @@ def test_same_bar_content_different_object_still_hits() -> None:
     assert len(calls) == 1
 
 
+def test_none_result_is_cached_and_hits_on_second_call() -> None:
+    """A ``compute`` that legitimately returns ``None`` (e.g. an indicator
+    during warm-up) must still be cached — a second identical call is a hit,
+    not a repeated miss that defeats the cache for warm-up-period lookups."""
+    cache = BatchIndicatorCache()
+    calls, compute = _counting_compute(result=None)
+    bars = _bars()
+
+    first, hit1 = cache.get_or_compute("ema", {"period": 50}, "AAPL", "1d", bars, compute)
+    second, hit2 = cache.get_or_compute("ema", {"period": 50}, "AAPL", "1d", bars, compute)
+
+    assert first is None and second is None
+    assert hit1 is False and hit2 is True
+    assert len(calls) == 1  # compute invoked exactly once, not on every lookup
+    assert cache.hits == 1 and cache.misses == 1
+
+
+def test_source_must_be_folded_into_params_to_distinguish_series() -> None:
+    """``params`` is the complete parameter identity — this cache has no
+    dedicated ``source`` argument, so two calls that compute different series
+    (same period, different source) only produce different keys when the
+    caller folds ``source`` into ``params`` itself."""
+    cache = BatchIndicatorCache()
+    calls, compute = _counting_compute()
+    bars = _bars()
+
+    # Correct usage: source is part of params, so differing sources miss.
+    cache.get_or_compute("sma", {"period": 20, "source": "close"}, "AAPL", "1d", bars, compute)
+    _, hit = cache.get_or_compute(
+        "sma", {"period": 20, "source": "high"}, "AAPL", "1d", bars, compute
+    )
+
+    assert hit is False
+    assert len(calls) == 2
+
+
 def test_concurrent_get_or_compute_has_no_torn_reads() -> None:
     """Many threads racing on the same key may redundantly compute (allowed
     per ADR-012's concurrency requirement), but every observed value must be
