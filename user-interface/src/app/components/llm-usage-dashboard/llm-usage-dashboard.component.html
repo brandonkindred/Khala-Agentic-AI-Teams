@@ -126,7 +126,7 @@
             @for (row of recent; track $index) {
               <tr>
                 <td>{{ formatTime(row.timestamp) }}</td>
-                <td>{{ row.model }}</td>
+                <td>{{ row.model || '(unknown)' }}</td>
                 <td>{{ row.team }}</td>
                 <td>{{ row.agent_key }}</td>
                 <td>{{ row.prompt_tokens }}</td>

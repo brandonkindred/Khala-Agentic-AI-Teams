@@ -1,6 +1,6 @@
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { NoopAnimationsModule } from '@angular/platform-browser/animations';
-import { of, throwError } from 'rxjs';
+import { Subject, of, throwError } from 'rxjs';
 import { vi } from 'vitest';
 import { LlmUsageApiService } from '../../services/llm-usage-api.service';
 import { LlmUsageDashboardComponent } from './llm-usage-dashboard.component';
@@ -77,6 +77,53 @@ describe('LlmUsageDashboardComponent', () => {
     component.setWindow('7d');
     expect(apiSpy.getSummary).toHaveBeenCalledWith('7d');
     expect(apiSpy.getRecent).toHaveBeenCalledWith('7d', 100);
+  });
+
+  it('a slow earlier forkJoin cannot clobber a later window', () => {
+    const slow24h$ = new Subject<LlmUsageSummary>();
+    const sevenDay = summary({
+      window: '7d',
+      window_hours: 168,
+      total_calls: 7,
+      total_prompt_tokens: 70,
+      total_completion_tokens: 21,
+      total_tokens: 91,
+    });
+
+    apiSpy.getSummary.mockClear();
+    apiSpy.getRecent.mockClear();
+    apiSpy.getSummary
+      .mockReturnValueOnce(slow24h$.asObservable())
+      .mockReturnValueOnce(of(sevenDay));
+    apiSpy.getRecent.mockReturnValue(of([]));
+
+    component.setWindow('24h');
+    component.setWindow('7d');
+
+    slow24h$.next(
+      summary({
+        window: '24h',
+        total_calls: 999,
+        total_prompt_tokens: 9000,
+        total_completion_tokens: 900,
+        total_tokens: 9900,
+      }),
+    );
+    slow24h$.complete();
+
+    expect(component.window).toBe('7d');
+    expect(component.summary.window).toBe('7d');
+    expect(component.summary.total_calls).toBe(7);
+    expect(component.summary.total_tokens).toBe(91);
+  });
+
+  it('labels empty recent-call models as (unknown)', () => {
+    apiSpy.getSummary.mockReturnValue(of(summary()));
+    apiSpy.getRecent.mockReturnValue(of([callRow({ model: '' })]));
+    component.load();
+    fixture.detectChanges();
+    const el: HTMLElement = fixture.nativeElement;
+    expect(el.textContent).toContain('(unknown)');
   });
 
   it('shows the per-model table when a single model has data', () => {

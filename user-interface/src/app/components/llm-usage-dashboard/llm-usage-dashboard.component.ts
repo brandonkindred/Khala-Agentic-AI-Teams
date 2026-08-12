@@ -1,6 +1,6 @@
 import { Component, DestroyRef, OnInit, inject } from '@angular/core';
 import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
-import { forkJoin } from 'rxjs';
+import { EMPTY, Subject, catchError, forkJoin, switchMap } from 'rxjs';
 import { MatButtonToggleModule } from '@angular/material/button-toggle';
 import { MatCardModule } from '@angular/material/card';
 import { MatIconModule } from '@angular/material/icon';
@@ -71,6 +71,7 @@ function emptySummary(): LlmUsageSummary {
 export class LlmUsageDashboardComponent implements OnInit {
   private readonly api = inject(LlmUsageApiService);
   private readonly destroyRef = inject(DestroyRef);
+  private readonly windowLoad$ = new Subject<LlmUsageWindow>();
 
   window: LlmUsageWindow = '24h';
   readonly windows: { id: LlmUsageWindow; label: string }[] = [
@@ -106,6 +107,29 @@ export class LlmUsageDashboardComponent implements OnInit {
   }
 
   ngOnInit(): void {
+    this.windowLoad$
+      .pipe(
+        switchMap((window) =>
+          forkJoin({
+            summary: this.api.getSummary(window),
+            recent: this.api.getRecent(window, 100),
+          }).pipe(
+            catchError((err) => {
+              this.loadError = extractErrorDetail(err, 'Failed to load LLM usage.');
+              this.loading = false;
+              return EMPTY;
+            }),
+          ),
+        ),
+        takeUntilDestroyed(this.destroyRef),
+      )
+      .subscribe(({ summary, recent }) => {
+        this.summary = summary;
+        this.recent = recent;
+        this.storageStatus = summary.storage_status;
+        this.loadError = null;
+        this.loading = false;
+      });
     this.load();
   }
 
@@ -115,28 +139,12 @@ export class LlmUsageDashboardComponent implements OnInit {
    * Preconditions: none.
    * Postconditions: on success, sets `summary`, `recent`, `storageStatus` and
    * clears `loadError`; on failure, sets `loadError` via `extractErrorDetail`.
+   * A newer `load()` cancels any in-flight pair via `switchMap`.
    */
   load(): void {
     this.loading = true;
     this.loadError = null;
-    forkJoin({
-      summary: this.api.getSummary(this.window),
-      recent: this.api.getRecent(this.window, 100),
-    })
-      .pipe(takeUntilDestroyed(this.destroyRef))
-      .subscribe({
-        next: ({ summary, recent }) => {
-          this.summary = summary;
-          this.recent = recent;
-          this.storageStatus = summary.storage_status;
-          this.loadError = null;
-          this.loading = false;
-        },
-        error: (err) => {
-          this.loadError = extractErrorDetail(err, 'Failed to load LLM usage.');
-          this.loading = false;
-        },
-      });
+    this.windowLoad$.next(this.window);
   }
 
   /**
