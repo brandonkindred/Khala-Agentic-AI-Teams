@@ -71,12 +71,21 @@ KHALA_COMMENT_MARKER = "<!-- khala-generated -->"
 
 @dataclass(frozen=True)
 class Issue:
+    """Metadata for a GitHub issue.
+
+    ``number`` is the repository-local issue number used by most endpoints.
+    ``id`` is GitHub's global numeric issue id -- distinct from ``number`` and
+    intentionally named to match the API field -- required for native
+    sub-issue linkage via :meth:`GitHubClient.add_sub_issue`.
+    """
+
     number: int
     title: str
     body: str
     state: str
     html_url: str
     labels: tuple[str, ...]
+    id: int
 
 
 @dataclass(frozen=True)
@@ -225,6 +234,7 @@ def _issue_from_payload(payload: dict[str, Any]) -> Issue:
             for label in (payload.get("labels") or [])
             if isinstance(label, dict) and label.get("name")
         ),
+        id=int(payload["id"]),
     )
 
 
@@ -486,6 +496,65 @@ class GitHubClient(_GitHubHttpMixin):
             payload["labels"] = list(labels)
         r = self._check(self._request("POST", f"/repos/{owner}/{repo}/issues", json=payload))
         return _issue_from_payload(r.json())
+
+    def update_issue(
+        self,
+        owner: str,
+        repo: str,
+        number: int,
+        *,
+        body: Optional[str] = None,
+        labels: Optional[list[str]] = None,
+    ) -> Issue:
+        """Update an existing issue's body and/or labels (``PATCH /repos/{owner}/{repo}/issues/{number}``).
+
+        Preconditions:
+            - ``number`` names an existing issue.
+            - At least one of ``body``/``labels`` is given (a no-op call is a caller
+              bug, not a legitimate PATCH-with-no-fields request).
+        Postconditions:
+            - Sends only the given field(s); an omitted field is left unchanged by
+              GitHub. ``labels``, when given, REPLACES the issue's full label set
+              (GitHub's PATCH semantics are not additive) -- callers that want to
+              preserve existing labels must pass the complete merged list themselves.
+              Returns the updated ``Issue``. Raises ``ValueError`` when neither
+              ``body`` nor ``labels`` is given, ``GitHubAPIError`` on any non-2xx.
+        """
+        if body is None and labels is None:
+            raise ValueError("update_issue requires at least one of body/labels")
+        payload: dict[str, Any] = {}
+        if body is not None:
+            payload["body"] = body
+        if labels is not None:
+            payload["labels"] = list(labels)
+        r = self._check(
+            self._request("PATCH", f"/repos/{owner}/{repo}/issues/{number}", json=payload)
+        )
+        return _issue_from_payload(r.json())
+
+    def add_sub_issue(self, owner: str, repo: str, issue_number: int, sub_issue_id: int) -> None:
+        """Link an existing issue as a native sub-issue of ``issue_number``
+        (``POST /repos/{owner}/{repo}/issues/{issue_number}/sub_issues``).
+
+        Preconditions:
+            - ``issue_number`` names an existing issue in ``owner/repo``.
+            - ``sub_issue_id`` is the child issue's internal numeric id
+              (:attr:`Issue.id`, GitHub's global issue id) -- NOT its ``number``.
+              GitHub's sub-issues API keys off ``id``, unlike almost every other
+              issue endpoint in this client, which keys off ``number``.
+        Postconditions:
+            - Links the two issues natively (visible via ``list_sub_issues``).
+              Raises ``GitHubAPIError`` on any non-2xx (e.g. the child is already
+              linked to a different parent, or the repository has sub-issues
+              disabled).
+        """
+        self._check(
+            self._request(
+                "POST",
+                f"/repos/{owner}/{repo}/issues/{issue_number}/sub_issues",
+                json={"sub_issue_id": sub_issue_id},
+            )
+        )
 
     def create_comment_reaction(
         self, owner: str, repo: str, comment_id: int, content: str = "eyes"

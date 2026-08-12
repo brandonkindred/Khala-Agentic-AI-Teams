@@ -13,7 +13,7 @@ from __future__ import annotations
 from enum import Enum
 from typing import Annotated, Any, Dict, List, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, create_model
 
 from shared.hitl.models import HumanReview as HumanReview  # noqa: F401 — re-export
 
@@ -21,6 +21,69 @@ from shared.hitl.models import HumanReview as HumanReview  # noqa: F401 — re-e
 # a fully populated ``List[str] = Field(min_length=N)`` still accepts N blank
 # strings, undermining every "requires non-empty content" docstring below.
 NonEmptyStr = Annotated[str, Field(min_length=1)]
+
+# ---------------------------------------------------------------------------
+# Strict/soft validation-context twin pattern
+# ---------------------------------------------------------------------------
+# Several models in this file come in pairs: a "soft" model (permissive
+# defaults; used as a merge target for partial per-agent fragments, and by
+# permissive test fixtures) and a "strict" agent-output twin (every field
+# required/non-empty; used as a Strands ``structured_output=`` schema so a
+# blank/incomplete LLM response fails validation and triggers a retry
+# instead of silently producing empty content). Rather than hand-duplicate
+# every field declaration between the two, the strict twin is generated
+# from the soft base via ``_derive_strict_variant`` immediately below the
+# soft class it derives from. See ``CoreValue``/``CoreValueOutput`` for the
+# reference pair.
+
+
+def _derive_strict_variant(
+    name: str,
+    base: type[BaseModel],
+    *,
+    doc: str,
+    **field_overrides: Any,
+) -> type[BaseModel]:
+    """Derive a strict agent-output twin from a soft merge-target model.
+
+    Generates ``name`` as a real ``pydantic.BaseModel`` subclass of ``base``
+    via ``pydantic.create_model``, re-declaring only the fields named in
+    ``field_overrides`` with stricter annotations/constraints; every other
+    field is inherited unchanged from ``base``. Used instead of a
+    ``context=``-gated ``field_validator`` because the strict twin's
+    primary caller — the Strands SDK's own ``structured_output`` parsing
+    of the LLM's tool-call JSON — constructs instances directly and does
+    not thread any ``context=`` kwarg through call sites we control; a
+    derived-subclass twin enforces its constraints independent of how or
+    where it is instantiated. Note the returned class is a genuine
+    subclass of ``base`` (``issubclass`` / ``isinstance`` against ``base``
+    hold), not an independent sibling type.
+
+    Preconditions:
+        - ``base`` is a concrete ``pydantic.BaseModel`` subclass whose own
+          fields are all constructible with defaults (this file's soft
+          merge-target contract).
+        - Each value in ``field_overrides`` is a ``(annotation, FieldInfo)``
+          pair, keyed by a field name that already exists on ``base``;
+          this function only redeclares existing fields, it does not add
+          new ones.
+    Postconditions:
+        - Returns a new class, named ``name``, that is a subclass of both
+          ``base`` and ``pydantic.BaseModel`` — usable anywhere a
+          ``BaseModel`` subclass is expected, including direct
+          construction (``ClassName(**kwargs)``), ``.model_validate``,
+          ``List[<returned class>]`` field annotations elsewhere in this
+          module, and ``.model_json_schema()``.
+        - Every field named in ``field_overrides`` enforces the given
+          stricter annotation/constraints (a field with a default on
+          ``base`` may become required with no default on the returned
+          class); every other field keeps ``base``'s original annotation,
+          default, and constraints.
+        - Does not mutate ``base``; ``base`` keeps accepting its original,
+          more permissive field values.
+    """
+    return create_model(name, __base__=base, __module__=base.__module__, __doc__=doc, **field_overrides)
+
 
 # ---------------------------------------------------------------------------
 # Shared models
@@ -167,22 +230,26 @@ class CoreValue(BaseModel):
     observable_behaviors: List[str] = Field(default_factory=list)
 
 
-class CoreValueOutput(BaseModel):
-    """Agent-facing core value; requires non-empty fields.
-
-    Field-for-field twin of ``CoreValue`` with required content, matching
-    the Phase 3 nested-output-model pattern (``LogoUsageRuleOutput``,
-    ``ColorEntryOutput``, ``TypographySpecOutput``, ``VoiceToneEntryOutput``,
-    ``BrandArchitectureRuleOutput``, ``PersonaProfileOutput``,
-    ``MessagingPillarOutput``, ``ElevatorPitchOutput``, ``BrandArchetypeOutput``,
-    ``DifferentiationPillarOutput``) — ``CoreValue`` itself must stay soft
-    (only ``value`` required) since it also backs
-    ``StrategicCoreOutput.core_values``'s merge target.
-    """
-
-    value: str = Field(min_length=1)
-    behavioral_definition: str = Field(min_length=1)
-    observable_behaviors: List[NonEmptyStr] = Field(min_length=1)
+CoreValueOutput = _derive_strict_variant(
+    "CoreValueOutput",
+    CoreValue,
+    doc=(
+        "Agent-facing core value; requires non-empty fields.\n\n"
+        "Field-for-field twin of ``CoreValue`` with required content, matching "
+        "the Phase 3 nested-output-model pattern (``LogoUsageRuleOutput``, "
+        "``ColorEntryOutput``, ``TypographySpecOutput``, ``VoiceToneEntryOutput``, "
+        "``BrandArchitectureRuleOutput``, ``PersonaProfileOutput``, "
+        "``MessagingPillarOutput``, ``ElevatorPitchOutput``, ``BrandArchetypeOutput``, "
+        "``DifferentiationPillarOutput``) — ``CoreValue`` itself must stay soft "
+        "(only ``value`` required) since it also backs "
+        "``StrategicCoreOutput.core_values``'s merge target. Generated via "
+        "``_derive_strict_variant`` — see that helper's docstring for the "
+        "shared strict/soft twin pattern this file uses."
+    ),
+    value=(str, Field(min_length=1)),
+    behavioral_definition=(str, Field(min_length=1)),
+    observable_behaviors=(List[NonEmptyStr], Field(min_length=1)),
+)
 
 
 class AudienceSegment(BaseModel):

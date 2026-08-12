@@ -7,17 +7,22 @@
 
 ## 1. Why this redesign
 
-A user who wants to **build an agent → test it → add it to a team → test the team with personas** must today stitch
+A user who wants to **build an agent → test it → add it to a team → test the team with personas** had to stitch
 together three disconnected surfaces, each with its own mental model of "agent" and "test":
 
 | Surface | Route | What it does | The gap |
 |---|---|---|---|
 | Agent Console | `/agent-console` | Browse / inspect / run **registry** agents (real, invokable YAML manifests). 7 heavy tabs. | No path to "team". |
-| Agentic Teams | `/agentic-teams` | Assemble teams whose rosters are **LLM‑generated descriptors** (`AgenticTeamAgent`, *not* registry agents). Manual chat + pipeline testing. | Roster agents ≠ the agents you built. |
+| Agentic Teams | `/agentic-teams` | Assemble teams by staffing a roster. Manual chat + pipeline testing. | No unified journey into/out of this surface. |
 | Testing Personas | `/persona-testing` | Personas that autonomously drive **only** the Software Engineering team (`user_agent_founder`). | Can't reach the team you just assembled. |
 
-Three problems compound: (a) there is **no journey** connecting the surfaces; (b) the **two "agent" models don't
-reconcile** (registry `AgentManifest` vs. roster `AgenticTeamAgent`); (c) **personas can't reach assembled teams**.
+Three problems originally compounded: (a) there is **no journey** connecting the surfaces; (b) *(resolved)* the
+registry `AgentManifest` and roster `AgenticTeamAgent` used to be two competing, unreconciled "agent" models —
+that split has since been closed by the Identity unification work: `AgentManifest` is now the sole writable SoT,
+and `AgenticTeamAgent` roster rows are thin refs (`agent_name`/`source`/`manifest_id`) whose persona is joined
+from the linked Manifest at read time (see `agentic_team_provisioning/README.md`'s "Roster identity: thin refs,
+Manifest SoT" section) — so roster agents sourced from the registry *are* the agents you built, not a second
+identity; (c) **personas can't reach assembled teams**. This redesign's remaining drivers are (a) and (c).
 
 **The redesign** is a single guided **Agent Studio** that makes the build → test → compose → persona‑test flow
 obvious, lets a roster **mix curated registry agents with generated ones**, and lets **any testing persona drive any
