@@ -21,28 +21,6 @@ from .interface import (
     LLMUnreachableAfterRetriesError,
 )
 
-# Keys used when trying code-block fallback (optional filter)
-_DEFAULT_EXPECTED_KEYS = frozenset(
-    {
-        "files",
-        "summary",
-        "code",
-        "overview",
-        "issues",
-        "approved",
-        "components",
-        "architecture_document",
-        "diagrams",
-        "decisions",
-        "tasks",
-        "execution_order",
-        "bugs_found",
-        "integration_tests",
-        "unit_tests",
-        "readme_content",
-    }
-)
-
 logger = logging.getLogger(__name__)
 
 
@@ -264,9 +242,8 @@ def extract_json_from_response(
 
     Preconditions:
         - ``text`` is a str (may be empty or contain no JSON at all).
-        - ``expected_keys`` is ``None`` (defaults to a broad built-in key set,
-          used only to disambiguate an AMBIGUOUS multi-fenced-block response)
-          or a frozenset of str anchor keys.
+        - ``expected_keys`` is ``None`` or a frozenset of str anchor keys used
+          to disambiguate ambiguous or salvaged output.
     Postconditions:
         - When ``text`` contains 0 or 1 fenced code blocks, behavior (and
           performance) is unchanged from the original single-candidate fast
@@ -275,27 +252,26 @@ def extract_json_from_response(
           ``expected_keys`` check performed.
         - When ``text`` contains 2+ fenced code blocks (e.g. an echoed
           format-example block followed by the real-answer block), the greedy
-          fast-path returns are skipped. Every fenced block is parsed against
-          the ORIGINAL, unmutated ``text`` and the LAST one whose parsed value
-          is a dict carrying at least one of ``expected_keys`` is returned
-          (last-candidate-wins, mirroring ``shared.llm_recovery``'s salvage
-          semantics) -- never the first.
-        - Falls back to the shared ``extract_json_object`` salvage engine,
-          anchored on the caller's original (non-defaulted) ``expected_keys``
-          and run against the original text, when no strategy above succeeds.
+          fast-path returns are skipped and resolution is delegated ENTIRELY
+          to the shared ``extract_json_object`` salvage engine (see
+          ``shared.llm_recovery.recovery._salvage_object``) -- its top-level,
+          string-aware balanced-span scan already finds every top-level JSON
+          object in the ORIGINAL text regardless of surrounding fences, and
+          its selection rule picks the LAST one satisfying ``expected_keys``.
+          This function does not re-implement that disambiguation itself.
+        - Falls back to the same ``extract_json_object`` call, anchored on the
+          caller's original ``expected_keys``, whenever no earlier strategy
+          succeeds.
         - Raises ``LLMJsonParseError`` only when every strategy above fails.
     """
     original_text = text
     original_expected_keys = expected_keys
-    if expected_keys is None:
-        expected_keys = _DEFAULT_EXPECTED_KEYS
     if "---DRAFT---" in text:
         parts = text.split("---DRAFT---", 1)
         if len(parts) == 2 and parts[1].strip():
             return {"content": parts[1].strip()}
 
-    fenced_blocks = _FENCED_BLOCK_RE.findall(text)
-    ambiguous = len(fenced_blocks) > 1
+    ambiguous = len(_FENCED_BLOCK_RE.findall(text)) > 1
 
     if not ambiguous:
         json_block_match = re.search(r"```json\s*([\s\S]*?)```", text, re.IGNORECASE)
@@ -345,30 +321,15 @@ def extract_json_from_response(
                 except (json.JSONDecodeError, ValueError):
                     pass
 
-    last_match: Optional[Dict[str, Any]] = None
-    for block in fenced_blocks:
-        block = block.strip()
-        if not block:
-            continue
-        try:
-            parsed = json.loads(block)
-        except (json.JSONDecodeError, ValueError):
-            try:
-                parsed = json.loads(_repair_json(block))
-            except (json.JSONDecodeError, ValueError):
-                continue
-        if isinstance(parsed, dict) and expected_keys & set(parsed.keys()):
-            last_match = parsed
-    if last_match is not None:
-        return last_match
-    # Last resort: the shared salvage engine (also used by agent_call_json)
-    # covers truncation repair, <think>/<thinking>/<reasoning>/<json> tag
-    # stripping, envelope descent, and format-echo-before-payload
-    # disambiguation via a string-aware balanced-span scan. Anchored on the
-    # caller's ORIGINAL expected_keys (not the _DEFAULT_EXPECTED_KEYS-defaulted
-    # value above) so a payload with keys outside that broad default set isn't
-    # spuriously rejected, and run against the ORIGINAL text so wrapper tags
-    # this function hasn't stripped are still visible to it.
+    # Ambiguous (2+ fenced blocks) or no fast-path candidate parsed: hand off
+    # entirely to the shared salvage engine (also used by agent_call_json).
+    # It covers truncation repair, <think>/<thinking>/<reasoning>/<json> tag
+    # stripping, envelope descent, and -- via its string-aware balanced-span
+    # scan plus last-candidate-wins selection -- format-echo-before-payload
+    # disambiguation, so this function does not need its own copy of that
+    # logic. Anchored on the caller's ORIGINAL expected_keys and run against
+    # the ORIGINAL text so wrapper tags this function hasn't stripped are
+    # still visible to it.
     salvaged = extract_json_object(original_text, required_keys=original_expected_keys)
     if salvaged is not None:
         return salvaged
