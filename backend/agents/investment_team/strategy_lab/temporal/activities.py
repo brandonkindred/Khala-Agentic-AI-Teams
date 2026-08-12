@@ -20,18 +20,26 @@ strategy-lab dependency graph (strands, market-data providers, ...) at
 worker-process boot.
 
 Generation fencing: ``persist_run_state_activity`` and
-``finalize_cycle_record_activity`` are the only two activities that write
-durable state tied to a run, so they're the only two that check a fencing
-token (``shared.fencing.check_fencing_token``) before writing. A restart
-mints a new "generation" for the fresh incarnation it dispatches
-(``investment_team.api.main.restart_strategy_lab_run``); a write carrying
-an older generation than the run's current persisted one is rejected —
-closing the window where an already-dispatched, non-heartbeating activity
-from a just-terminated workflow finishes *after* a restart and silently
-commits stale progress or a stale cycle record. This is honestly a
+``finalize_cycle_record_activity`` are the two ``@activity.defn``-decorated
+activities that write durable state tied to a run, so they're the two that
+check a fencing token (``shared.fencing.check_fencing_token``) before
+writing. A restart mints a new "generation" for the fresh incarnation it
+dispatches (``investment_team.api.main.restart_strategy_lab_run``); a write
+carrying an older generation than the run's current persisted one is
+rejected — closing the window where an already-dispatched, non-heartbeating
+activity from a just-terminated workflow finishes *after* a restart and
+silently commits stale progress or a stale cycle record. This is honestly a
 check-then-write, not an atomic compare-and-swap: the fencing read and the
 eventual write are two separate job-service calls, so a restart racing
 exactly between them is (rarely) still possible.
+
+A third fencing-checked write path exists, deliberately *not* an
+``@activity.defn`` (``ADR-012``,
+``system_design/adr/ADR-012-strategy-lab-design-attempt-checkpoint-contract.md``):
+``persist_design_attempt_checkpoint``, called inline from inside
+``run_design_attempt_activity``'s own execution at the design/synthesis
+boundary. It reuses the same ``_check_generation_fencing`` helper and the
+same check-then-write non-atomicity accounting as the two paragraphs above.
 
 That "rarely" claim only holds for ``persist_run_state_activity``, whose
 check sits immediately adjacent to its (fast, synchronous) write.
@@ -112,6 +120,7 @@ if TYPE_CHECKING:
     # docstring) since this import pulls in the full strategy-lab dependency
     # graph and this file's own ACTIVITIES list must stay importable without it.
     from investment_team.models import DesignAttemptCheckpoint
+    from investment_team.strategy_lab._orchestrator_helpers import _DesignPersistContext
 
 logger = logging.getLogger(__name__)
 
@@ -129,6 +138,7 @@ class _DesignAttemptCancelled(BaseException):
     ``run_design_attempt_activity``'s own outer boundary, immediately below.
     """
 
+
 # Local, in-process retry delays (seconds) for finalize_cycle_record_activity's
 # post-write fencing check's durable-generation read. Empty for every other
 # fencing check (nothing committed yet there, so Temporal's own activity-level
@@ -140,6 +150,15 @@ class _DesignAttemptCancelled(BaseException):
 # cheap read absorbs a momentary job-service blip without ever re-triggering
 # the write, sidestepping that concern entirely.
 _POST_WRITE_LOOKUP_RETRY_DELAYS_SECONDS: Tuple[float, ...] = (0.5, 1.0)
+
+# Job-record field-name prefix for a design-attempt checkpoint, namespaced by
+# DesignAttemptCheckpoint.cycle_scope. _persist_run_state's underlying
+# update_job does a FIELD-level partial merge (not a deep merge), so giving
+# each concurrently-running cycle its own field name -- rather than sharing
+# one "design_attempt_checkpoint" field -- is what prevents two cycles in the
+# same wave (StrategyLabBatchWorkflow's max_parallel) from clobbering each
+# other's checkpoint.
+_DESIGN_ATTEMPT_CHECKPOINT_FIELD_PREFIX = "design_attempt_checkpoint:"
 
 
 def _map_exception_to_application_error(exc: Exception) -> ApplicationError:
@@ -203,6 +222,35 @@ def _infer_run_id_from_activity_context() -> Optional[str]:
     if workflow_id and workflow_id.startswith(WORKFLOW_ID_PREFIX):
         return workflow_id[len(WORKFLOW_ID_PREFIX) :]
     return None
+
+
+def _infer_cycle_scope_from_activity_context() -> Optional[str]:
+    """Best-effort: the current activity's own Temporal workflow_id, used as
+    an opaque per-cycle correlation id for design-attempt checkpoint scoping.
+
+    ``StrategyLabCycleWorkflow`` child workflows are started under the
+    deterministic id ``f"{run_id}-c{cycle_index}"``
+    (``temporal/workflows.py``'s wave-start loop); every activity dispatched
+    from inside that child workflow -- including ``run_design_attempt_activity``
+    -- runs under that same ``workflow_id``. Returning it whole (never
+    parsed/sliced, unlike ``_infer_run_id_from_activity_context`` above) is
+    enough to disambiguate two cycles racing ``run_design_attempt_activity``
+    at ``design_attempt=0`` concurrently on the same ``run_id`` within one
+    wave (``StrategyLabBatchWorkflow.run``'s ``max_parallel`` wave-start
+    loop).
+
+    Preconditions:
+        None.
+    Postconditions:
+        Returns the current ``workflow_id``, or ``None`` when there is no
+        current activity execution context (e.g. a direct, non-Temporal
+        call -- this codebase's own test suite calls activities as plain
+        Python functions). Never raises.
+    """
+    try:
+        return activity.info().workflow_id
+    except Exception:
+        return None
 
 
 def _check_generation_fencing(
@@ -369,7 +417,9 @@ def resolve_workflow_config_activity() -> Dict[str, Any]:
 
 
 @activity.defn(name="strategy_lab_persist_run_state")
-def persist_run_state_activity(run_id: str, state: dict, create: bool = False, generation: int = 1) -> None:
+def persist_run_state_activity(
+    run_id: str, state: dict, create: bool = False, generation: int = 1
+) -> None:
     """Persist strategy-lab run/batch progress to the durable job store.
 
     Preconditions:
@@ -423,15 +473,18 @@ def persist_design_attempt_checkpoint(checkpoint: DesignAttemptCheckpoint) -> No
     "Where the write happens"), the parent epic rules out decomposing the
     design attempt into per-phase Temporal activities, and activities cannot
     invoke other activities in any case. This is instead a plain synchronous
-    durable-store call, meant to be invoked inline from inside
-    ``run_design_attempt_activity``'s own execution -- threaded through
-    ``_run_design_attempt`` as an optional checkpoint-write callback by the
-    sibling wiring sub-issue that consumes this function; wiring that
-    callback is out of scope here.
+    durable-store call, invoked inline from inside
+    ``run_design_attempt_activity``'s own execution via a checkpoint-write
+    callback threaded through ``_run_design_attempt``. Deliberately does not
+    call ``activity.info()`` itself (see
+    ``_infer_cycle_scope_from_activity_context``) -- ``checkpoint.cycle_scope``
+    is recovered once, centrally, by the caller, keeping this function pure
+    and trivially unit-testable without mocking Temporal activity context.
 
     Preconditions:
         ``checkpoint.generation`` is the fencing generation the calling
-        workflow incarnation was dispatched with.
+        workflow incarnation was dispatched with; ``checkpoint.cycle_scope``
+        is the caller's own recovered per-cycle correlation id.
     Postconditions:
         Checks ``checkpoint.run_id``'s fencing token first, exactly like
         ``persist_run_state_activity`` (see that function's docstring for the
@@ -440,9 +493,10 @@ def persist_design_attempt_checkpoint(checkpoint: DesignAttemptCheckpoint) -> No
         when ``checkpoint.generation`` is older than the run's current
         persisted generation. Otherwise persists
         ``checkpoint.model_dump(mode="json")`` under the
-        ``"design_attempt_checkpoint"`` field of ``checkpoint.run_id``'s job
-        record via ``_persist_run_state``, whose partial-merge write leaves
-        every other field on that record untouched.
+        ``f"{_DESIGN_ATTEMPT_CHECKPOINT_FIELD_PREFIX}{checkpoint.cycle_scope}"``
+        field of ``checkpoint.run_id``'s job record via ``_persist_run_state``,
+        whose partial-merge write leaves every other field on that record
+        (including a different cycle's own checkpoint field) untouched.
     """
     from investment_team.strategy_lab.orchestrator_api import _persist_run_state
 
@@ -453,7 +507,137 @@ def persist_design_attempt_checkpoint(checkpoint: DesignAttemptCheckpoint) -> No
     )
     _persist_run_state(
         checkpoint.run_id,
-        {"design_attempt_checkpoint": checkpoint.model_dump(mode="json")},
+        {
+            f"{_DESIGN_ATTEMPT_CHECKPOINT_FIELD_PREFIX}{checkpoint.cycle_scope}": checkpoint.model_dump(
+                mode="json"
+            )
+        },
+    )
+
+
+def load_design_attempt_checkpoint(
+    run_id: str, cycle_scope: Optional[str], design_attempt: int
+) -> Optional["DesignAttemptCheckpoint"]:
+    """Look up a valid design-attempt checkpoint for ``(run_id, cycle_scope, design_attempt)``.
+
+    Preconditions:
+        ``run_id`` names a strategy-lab run (may not exist). ``cycle_scope``
+        is the caller's own recovered per-cycle correlation id (see
+        ``_infer_cycle_scope_from_activity_context``), or ``None`` when
+        recovery failed (e.g. outside a real Temporal activity context).
+    Postconditions:
+        Returns ``None`` -- never raises -- for every "no usable checkpoint"
+        outcome: ``cycle_scope`` is ``None``; no job record for ``run_id``;
+        no field for this ``cycle_scope``; the persisted blob fails
+        ``DesignAttemptCheckpoint`` validation; the checkpoint's own
+        ``run_id``/``cycle_scope``/``design_attempt`` don't match the
+        caller's (defense in depth -- the field-name scoping should already
+        guarantee this); or the checkpoint's ``generation`` doesn't exactly
+        match the run's current persisted generation (a checkpoint minted
+        under an older -- or, defensively, a newer -- generation is stale;
+        generations only ever increase, so exact match is the correct
+        comparison for a boundary-time snapshot). Otherwise returns the
+        validated ``DesignAttemptCheckpoint``.
+
+        Deliberately fails OPEN on a current-generation lookup failure or a
+        durable-read failure -- unlike ``get_run_generation_strict``'s own
+        fail-CLOSED contract and unlike ``persist_design_attempt_checkpoint``'s
+        write-side check. A checkpoint READ is a pure optimization on a path
+        where nothing has been mutated yet (no Phase 1 LLM call has been
+        made at this point in ``run_design_attempt_activity``): the worst
+        case of proceeding as "no checkpoint found" is one unnecessary full
+        re-run of Phase 1, never a correctness violation -- whereas raising
+        here would burn one of only ``_ACTIVITY_RETRY.maximum_attempts=2``
+        Temporal-level attempts on an ancillary read having nothing to do
+        with the design work that budget exists to protect.
+
+        Reads the durable job store directly (``run_state.
+        load_run_from_job_service``), bypassing ``active_runs``, for the same
+        cross-process reason ``get_run_generation_strict`` does: this runs
+        inside a Temporal worker process, not the API-server process that
+        owns ``active_runs``.
+    """
+    if not cycle_scope:
+        return None
+    from investment_team.models import DesignAttemptCheckpoint
+    from investment_team.strategy_lab.run_state import (
+        get_run_generation_strict,
+        load_run_from_job_service,
+    )
+
+    try:
+        state = load_run_from_job_service(run_id)
+    except Exception:  # noqa: BLE001 -- fail open, see docstring
+        return None
+    if not state:
+        return None
+    raw = state.get(f"{_DESIGN_ATTEMPT_CHECKPOINT_FIELD_PREFIX}{cycle_scope}")
+    if not raw:
+        return None
+    try:
+        checkpoint = DesignAttemptCheckpoint.model_validate(raw)
+    except Exception:  # noqa: BLE001
+        return None
+    if (
+        checkpoint.run_id != run_id
+        or checkpoint.cycle_scope != cycle_scope
+        or checkpoint.design_attempt != design_attempt
+    ):
+        return None
+    try:
+        current_generation = get_run_generation_strict(run_id)
+    except Exception:  # noqa: BLE001 -- fail open, see docstring
+        return None
+    if checkpoint.generation != current_generation:
+        return None
+    return checkpoint
+
+
+def _design_context_to_wire(
+    design_context: Optional["_DesignPersistContext"],
+) -> Optional[Dict[str, Any]]:
+    """JSON-shape a ``_DesignPersistContext`` for a wire outcome / checkpoint payload.
+
+    Preconditions:
+        None.
+    Postconditions:
+        Returns ``None`` when ``design_context`` is ``None``, else
+        ``{"rounds", "critiques", "stop_reason", "loop_telemetry"}`` with
+        every ``SpecCritique`` in ``critiques`` dumped to a JSON-shaped dict.
+    """
+    if design_context is None:
+        return None
+    return {
+        "rounds": design_context.rounds,
+        "critiques": [c.model_dump(mode="json") for c in design_context.critiques],
+        "stop_reason": design_context.stop_reason,
+        "loop_telemetry": design_context.loop_telemetry,
+    }
+
+
+def _design_context_from_wire(data: Optional[Dict[str, Any]]) -> Optional["_DesignPersistContext"]:
+    """Inverse of :func:`_design_context_to_wire` -- reconstructs real ``SpecCritique`` objects.
+
+    Preconditions:
+        ``data`` is ``None`` or a dict shaped like ``_design_context_to_wire``'s output.
+    Postconditions:
+        Returns ``None`` when ``data`` is ``None``/empty, else a
+        ``_DesignPersistContext`` with ``critiques`` rebuilt as real
+        ``SpecCritique`` instances -- not left as plain dicts, which would
+        raise ``AttributeError`` deep inside record assembly
+        (``orchestrator_record_assembly.py`` calls ``.model_dump()`` on each
+        ``design_context.critiques`` element).
+    """
+    if not data:
+        return None
+    from investment_team.strategy_lab._orchestrator_helpers import _DesignPersistContext
+    from investment_team.strategy_lab.agents.design_review import SpecCritique
+
+    return _DesignPersistContext(
+        rounds=int(data.get("rounds", 0)),
+        critiques=[SpecCritique.model_validate(c) for c in data.get("critiques", [])],
+        stop_reason=data.get("stop_reason", ""),
+        loop_telemetry=dict(data.get("loop_telemetry", {})),
     )
 
 
@@ -655,6 +839,15 @@ def run_design_attempt_activity(params: Dict[str, Any]) -> Dict[str, Any]:
           - ``regime_summary``: ``RegimeSummary`` JSON dump or ``None``.
           - ``convergence_tracker_state``: ``dto.convergence_tracker_to_wire``'s
             output for the batch-level tracker.
+          - ``run_id`` (optional): the owning strategy-lab run's id. Absent
+            or ``None`` disables design-attempt checkpointing entirely (both
+            read and write no-op) -- this is the default for any caller that
+            predates ``ADR-012``, including this file's own direct-call unit
+            tests.
+          - ``generation`` (int, default ``1``): the fencing generation the
+            calling workflow incarnation was dispatched with, mirroring
+            ``persist_run_state_activity``'s own default-generation
+            backward-compat convention.
     Postconditions:
         Returns either
         ``{"kind": "record", "record": <StrategyLabRecord JSON dump>,
@@ -676,6 +869,19 @@ def run_design_attempt_activity(params: Dict[str, Any]) -> Dict[str, Any]:
         design-attempt retry. Any other exception (including a non-502
         ``HTTPException``) maps to ``ApplicationError`` via
         :func:`_map_exception_to_application_error`.
+
+        Checkpoint resume (``ADR-012``): when ``run_id`` is present, this
+        activity's own Temporal ``workflow_id`` is recoverable
+        (:func:`_infer_cycle_scope_from_activity_context`), and a valid
+        checkpoint exists for ``(run_id, cycle_scope, design_attempt)``, Phase
+        1 (design + review) is skipped and ``drift_collector``/
+        ``cumulative_gate_results``/the LLM budget are seeded from the
+        checkpoint's boundary-time state instead of from ``params``' -- the
+        checkpoint strictly dominates, since it reflects everything ``params``
+        carried plus this exact attempt's own Phase-1 work before it crashed.
+        Regardless of whether this execution resumed or ran Phase 1 fresh, a
+        new checkpoint is (best-effort) written at the design/synthesis
+        boundary for a *future* crash to resume from.
     Invariants:
         The returned ``convergence_tracker_state``/``gate_results``/
         ``budget_calls`` reflect exactly this attempt's mutations layered on
@@ -736,6 +942,87 @@ def run_design_attempt_activity(params: Dict[str, Any]) -> Dict[str, Any]:
     budget = LLMCallBudget(_design_max_llm_calls())
     budget.calls_made = min(int(params.get("budget_calls", 0)), budget.limit)
 
+    # ── Checkpoint resume (ADR-012) ─────────────────────────────────────
+    # Must run BEFORE gate_results_len_before is captured below: a valid
+    # checkpoint REPLACES cumulative_gate_results with a list that already
+    # includes this attempt's own Phase-1 gate entries, and the post-call
+    # market_data-gate scan relies on that snapshot reflecting the state
+    # AFTER this replacement to correctly isolate "gates this execution
+    # itself added" from "gates the checkpoint already carried."
+    run_id = params.get("run_id")
+    generation = int(params.get("generation", 1))
+    design_attempt_index = params.get("design_attempt", 0)
+    cycle_scope = _infer_cycle_scope_from_activity_context()
+    checkpoint_enabled = run_id is not None and cycle_scope is not None
+
+    resume_spec = None
+    resume_rationale = None
+    resume_design_context = None
+    if checkpoint_enabled:
+        checkpoint = load_design_attempt_checkpoint(run_id, cycle_scope, design_attempt_index)
+        if checkpoint is not None:
+            # The checkpoint's boundary-time state strictly dominates the
+            # params-seeded pre-attempt state: it already reflects everything
+            # params carried PLUS Phase 1's own additions before this exact
+            # attempt crashed. Replace, never merge/append.
+            drift_collector = _DriftCollector(
+                spec_history=list(checkpoint.spec_history),
+                code_history=list(checkpoint.code_history),
+                gate_timeline=list(checkpoint.gate_timeline),
+            )
+            cumulative_gate_results = [
+                QualityGateResult.model_validate(g) for g in checkpoint.gate_results
+            ]
+            budget.calls_made = min(checkpoint.budget_calls, budget.limit)
+            resume_spec = checkpoint.spec
+            resume_rationale = checkpoint.rationale
+            resume_design_context = _design_context_from_wire(checkpoint.design_context)
+
+    def _write_checkpoint(_phase: str, data: Dict[str, Any]) -> None:
+        if not checkpoint_enabled:
+            return
+        from investment_team.models import DesignAttemptCheckpoint
+
+        checkpoint_to_write = DesignAttemptCheckpoint(
+            run_id=run_id,
+            cycle_scope=cycle_scope,
+            design_attempt=design_attempt_index,
+            generation=generation,
+            spec=data["spec"],
+            rationale=data["rationale"],
+            design_context=_design_context_to_wire(data["design_context"]) or {},
+            spec_history=list(drift_collector.spec_history),
+            code_history=list(drift_collector.code_history),
+            gate_timeline=list(drift_collector.gate_timeline),
+            gate_results=[g.model_dump(mode="json") for g in cumulative_gate_results],
+            budget_calls=budget.calls_made,
+        )
+        try:
+            persist_design_attempt_checkpoint(checkpoint_to_write)
+        except ApplicationError as exc:
+            if exc.non_retryable:
+                # A stale-fencing (or genuine caller-precondition-violation)
+                # failure means this whole activity execution belongs to a
+                # superseded run incarnation -- let it kill the activity,
+                # same as persist_run_state_activity's own stale-write
+                # contract.
+                raise
+            # A transient job-service lookup blip on the WRITE side. By this
+            # point Phase 1's real LLM calls already happened -- failing the
+            # whole activity here would force a full Temporal-level retry
+            # (burning one of only 2 total attempts) purely to recover a
+            # checkpoint write, when losing this write only costs a future
+            # crash the ability to skip Phase 1 on resume, not correctness.
+            # Best-effort: log and continue this attempt.
+            logger.warning(
+                "design attempt checkpoint write failed for run %s attempt %s "
+                "(retryable lookup failure): %s",
+                run_id,
+                design_attempt_index,
+                exc,
+                exc_info=True,
+            )
+
     def _drift_to_wire(collector: _DriftCollector) -> Dict[str, Any]:
         return {
             "spec_history": [r.model_dump(mode="json") for r in collector.spec_history],
@@ -783,11 +1070,15 @@ def run_design_attempt_activity(params: Dict[str, Any]) -> Dict[str, Any]:
                 emit=_design_attempt_cancellation_checkpoint,
                 exclude_asset_classes=params.get("exclude_asset_classes"),
                 directives=list(params.get("directives") or []),
-                design_attempt=params.get("design_attempt", 0),
+                design_attempt=design_attempt_index,
                 phase_back_count=params.get("phase_back_count", 0),
                 drift_collector=drift_collector,
                 cumulative_gate_results=cumulative_gate_results,
                 regime_summary=regime_summary,
+                resume_spec=resume_spec,
+                resume_rationale=resume_rationale,
+                resume_design_context=resume_design_context,
+                checkpoint_hook=_write_checkpoint,
             )
     except _DesignAttemptCancelled:
         # BaseException, so it already bypassed every ``except Exception``
@@ -795,17 +1086,7 @@ def run_design_attempt_activity(params: Dict[str, Any]) -> Dict[str, Any]:
         # it to the real Temporal signal only here, at the activity boundary.
         raise CancelledError("Strategy Lab design attempt cancelled before completion") from None
     except SpecImplementabilityError as exc:
-        design_context = exc.design_context
-        design_context_wire = (
-            None
-            if design_context is None
-            else {
-                "rounds": design_context.rounds,
-                "critiques": [c.model_dump(mode="json") for c in design_context.critiques],
-                "stop_reason": design_context.stop_reason,
-                "loop_telemetry": design_context.loop_telemetry,
-            }
-        )
+        design_context_wire = _design_context_to_wire(exc.design_context)
         return {
             "kind": "reentry",
             "evidence": exc.evidence,

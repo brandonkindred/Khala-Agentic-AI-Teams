@@ -1290,10 +1290,22 @@ class DesignAttemptCheckpoint(BaseModel):
     module would trigger ``strategy_lab/__init__.py``, reintroducing the circular
     import that module's own docstring documents avoiding.
 
+    ``cycle_scope`` disambiguates concurrent ``StrategyLabCycleWorkflow``
+    children sharing one ``run_id``: ``StrategyLabBatchWorkflow`` runs up to
+    ``max_parallel`` cycles per wave, and each cycle's own design-attempt
+    loop independently starts at ``design_attempt=0`` -- without this field,
+    two concurrent cycles could collide on the same ``(run_id,
+    design_attempt)`` pair and one could silently resume with the other's
+    checkpointed spec. It is opaque: never parsed for a ``run_id``/
+    ``cycle_index`` substring, just compared for equality. Populated from the
+    current activity's own Temporal ``workflow_id`` (see
+    ``temporal.activities._infer_cycle_scope_from_activity_context``).
+
     Preconditions:
-        ``run_id``/``design_attempt`` identify exactly the attempt this
-        checkpoint was taken during; ``generation`` is the fencing generation
-        active at write time (see ``shared.fencing.check_fencing_token``).
+        ``run_id``/``cycle_scope``/``design_attempt`` identify exactly the
+        attempt this checkpoint was taken during; ``generation`` is the
+        fencing generation active at write time (see
+        ``shared.fencing.check_fencing_token``).
     Postconditions:
         Instances are immutable snapshots of Phase 1's output plus the
         attempt-local drift/gate/budget state needed to resume Phase 1b
@@ -1301,6 +1313,7 @@ class DesignAttemptCheckpoint(BaseModel):
     """
 
     run_id: str
+    cycle_scope: str = Field(..., min_length=1)
     design_attempt: int = Field(..., ge=0)
     generation: int = Field(..., ge=1)
     spec: StrategySpec

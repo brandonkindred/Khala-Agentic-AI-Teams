@@ -1200,6 +1200,10 @@ class DesignMixin:
         drift_collector: Optional[_DriftCollector] = None,
         cumulative_gate_results: Optional[List[QualityGateResult]] = None,
         regime_summary: Optional[RegimeSummary] = None,
+        resume_spec: Optional[StrategySpec] = None,
+        resume_rationale: Optional[str] = None,
+        resume_design_context: Optional[_DesignPersistContext] = None,
+        checkpoint_hook: Optional[PhaseCallback] = None,
     ) -> StrategyLabRecord:
         """One design + refinement attempt. May raise
         ``SpecImplementabilityError`` to signal a need to re-enter the
@@ -1214,6 +1218,24 @@ class DesignMixin:
         enclosing ``run_cycle`` and is stamped onto the persisted record
         so the breakdown (success after N phase-backs, short-circuit
         after N phase-backs) is observable post hoc.
+
+        Checkpoint resume (``ADR-012``): ``resume_spec``/``resume_rationale``/
+        ``resume_design_context`` let a caller skip Phase 1 (design + review)
+        entirely when it already has that phase's converged output from a
+        prior, crashed execution of this exact attempt -- ``resume_spec is
+        not None`` if and only if ``resume_design_context is not None``
+        (``resume_rationale`` may independently be ``None``/``""``).
+        ``checkpoint_hook``, when not ``None``, is invoked exactly once,
+        immediately after Phase 1 converges on a non-resumed run (never on
+        the short-circuit/not-ready path, nor when resuming, since Phase 1
+        didn't run), as ``checkpoint_hook("design_synthesis_boundary",
+        {"spec": spec, "rationale": rationale, "design_context":
+        design_context})`` -- deliberately the live Python objects, not a
+        JSON-shaped dict, since its only intended consumer
+        (``temporal.activities.run_design_attempt_activity``) lives in the
+        same process and does its own wire-conversion before persisting.
+        Both default to ``None``, so thread mode's caller (which passes
+        neither) is unaffected.
         """
         # Reset per-attempt counters so a re-entry starts fresh.
         self._consecutive_spec_mutation_rounds = {}
@@ -1242,24 +1264,40 @@ class DesignMixin:
             drift_collector = _DriftCollector()
 
         # ── Phase 1: DESIGN + REVIEW LOOP ──────────────────────────────
-        design_phase = self._orchestrate_design_and_review(
-            prior_records=prior_records,
-            signal_brief=signal_brief,
-            directives=directives,
-            exclude_asset_classes=exclude_asset_classes,
-            config=config,
-            all_gate_results=all_gate_results,
-            emit=emit,
-            design_attempt=design_attempt,
-            phase_back_count=phase_back_count,
-            drift_collector=drift_collector,
-            regime_summary=regime_summary,
-        )
-        if design_phase.record is not None:
-            return design_phase.record
-        spec = design_phase.spec
-        rationale = design_phase.rationale
-        design_context = design_phase.design_context
+        if resume_spec is not None:
+            # Checkpoint resume: Phase 1 already ran (and was durably
+            # checkpointed) by a prior, crashed execution of this exact
+            # design attempt. Skip it entirely -- its LLM calls must never
+            # be re-issued (ADR-012's no-double-charge requirement is
+            # structural precisely because this branch never calls
+            # _orchestrate_design_and_review).
+            spec = resume_spec
+            rationale = resume_rationale or ""
+            design_context = resume_design_context
+        else:
+            design_phase = self._orchestrate_design_and_review(
+                prior_records=prior_records,
+                signal_brief=signal_brief,
+                directives=directives,
+                exclude_asset_classes=exclude_asset_classes,
+                config=config,
+                all_gate_results=all_gate_results,
+                emit=emit,
+                design_attempt=design_attempt,
+                phase_back_count=phase_back_count,
+                drift_collector=drift_collector,
+                regime_summary=regime_summary,
+            )
+            if design_phase.record is not None:
+                return design_phase.record
+            spec = design_phase.spec
+            rationale = design_phase.rationale
+            design_context = design_phase.design_context
+            if checkpoint_hook is not None:
+                checkpoint_hook(
+                    "design_synthesis_boundary",
+                    {"spec": spec, "rationale": rationale, "design_context": design_context},
+                )
 
         # ── Phase 1b: CODE SYNTHESIS ──────────────────────────────────
         code_synthesis = self._synthesize_initial_code(
