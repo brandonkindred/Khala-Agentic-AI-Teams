@@ -43,6 +43,18 @@ from investment_team.trading_service.modes.sandbox_compat import StrategyRunResu
 pytestmark = pytest.mark.strategy_lab_integration
 
 
+@pytest.fixture(autouse=True)
+def _pin_risk_free_rate(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep metric snapshots off the live FRED path.
+
+    Pre: none.
+    Post: ``STRATEGY_LAB_RISK_FREE_RATE`` is ``0.04`` (the module default)
+    so ``compute_metrics`` and orchestrator evaluation never issue a FRED
+    HTTP request when ``FRED_API_KEY`` is set in the process environment.
+    """
+    monkeypatch.setenv("STRATEGY_LAB_RISK_FREE_RATE", "0.04")
+
+
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
@@ -742,10 +754,20 @@ def test_design_attempt_happy_path_preserves_spec_code_trades_metrics_gates(
     assert _metrics_snapshot(record.backtest.result) == expected_metrics
     assert record.analysis_narrative == "scripted narrative"
     assert record.strategy_rationale == "scripted rationale"
-    gate_names = [g["gate_name"] for g in _record_gate_snapshot(record.quality_gate_results)]
-    assert "predicate_reachability" in gate_names
-    assert "backtest_anomaly" in gate_names
-    assert "realism" in gate_names
+    assert _record_gate_snapshot(record.quality_gate_results) == _gate_snapshot(
+        [
+            _gate("predicate_reachability", passed=True, severity="info"),
+            _gate("backtest_anomaly", passed=True, severity="info"),
+            _gate(
+                "trade_alignment",
+                passed=True,
+                severity="info",
+                phase="verification",
+                details="Deterministic alignment gate passed all critical checks.",
+            ),
+            _gate("realism", passed=True, severity="info", phase="verification"),
+        ]
+    )
     assert record.backtest.status == "completed"
 
 
@@ -798,8 +820,12 @@ def test_design_attempt_design_not_ready_preserves_short_circuit_record(
 
     The assembled short-circuit record keeps the failed spec, empty
     trades/metrics-adjacent fields, and a critical readiness gate; the
-    sandbox is never called.
+    sandbox is never called. Stall detection is pinned above the round
+    cap so this scenario is honest round-cap exhaustion
+    (``failed: design_not_ready``), not an early stall abort.
     """
+    monkeypatch.setenv("STRATEGY_LAB_DESIGN_REVIEW_ROUNDS", "2")
+    monkeypatch.setenv("STRATEGY_LAB_DESIGN_REVIEW_STALL_ROUNDS", "10")
     bad_spec = {
         "asset_class": "stocks",
         "hypothesis": "test",
@@ -834,10 +860,7 @@ def test_design_attempt_design_not_ready_preserves_short_circuit_record(
         directives=[],
     )
 
-    assert record.backtest.status in {
-        "failed: design_not_ready",
-        "failed: design_stalled",
-    }
+    assert record.backtest.status == "failed: design_not_ready"
     assert record.is_winning is False
     assert record.backtest.trades == []
     assert record.strategy.hypothesis == "test"
