@@ -3,8 +3,8 @@ import { provideHttpClient } from '@angular/common/http';
 import { NoopAnimationsModule } from '@angular/platform-browser/animations';
 import { of, throwError } from 'rxjs';
 import { BacklogTabComponent } from './backlog-tab.component';
-import { ProductDeliveryService } from '../../../../services/product-delivery.service';
-import type { BacklogTree, Product } from '../../../../models/product-delivery.model';
+import { ProductDeliveryService } from '../../../services/product-delivery.service';
+import type { BacklogTree, Product } from '../../../models/product-delivery.model';
 
 const products: Product[] = [
   {
