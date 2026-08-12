@@ -15,7 +15,6 @@ whole test process.
 from __future__ import annotations
 
 import threading
-import time
 
 import pytest
 
@@ -73,9 +72,17 @@ def test_same_key_serializes_and_no_torn_write() -> None:
     microtask_1_may_finish = threading.Event()
     errors: list[Exception] = []
 
-    def microtask_write(content: str, *, acquired: threading.Event = None, wait_for: threading.Event = None) -> None:
+    def microtask_write(
+        content: str,
+        *,
+        about_to_lock: threading.Event = None,
+        acquired: threading.Event = None,
+        wait_for: threading.Event = None,
+    ) -> None:
         nonlocal active, observed_concurrent
         try:
+            if about_to_lock is not None:
+                about_to_lock.set()
             with locks.lock(["shared.py"]):
                 with active_lock:
                     active += 1
@@ -99,8 +106,9 @@ def test_same_key_serializes_and_no_torn_write() -> None:
     )
     assert microtask_1_acquired.wait(timeout=5), "microtask 1 never acquired the lock"
 
-    t2 = _run_daemon(microtask_write, args=("from-microtask-2",))
-    time.sleep(0.1)  # give microtask 2 a chance to attempt (and block behind) the same key
+    microtask_2_about_to_lock = threading.Event()
+    t2 = _run_daemon(microtask_write, args=("from-microtask-2",), kwargs={"about_to_lock": microtask_2_about_to_lock})
+    assert microtask_2_about_to_lock.wait(timeout=5), "microtask 2 never reached its lock() call"
     microtask_1_may_finish.set()  # let microtask 1 finish its write + update and release
 
     t1.join(timeout=5)
@@ -134,6 +142,82 @@ def test_batch_acquisition_avoids_deadlock_with_reversed_key_order() -> None:
     t_ba.join(timeout=10)
 
     assert not t_ab.is_alive() and not t_ba.is_alive(), "reversed-order batch acquisition deadlocked"
+    assert not errors, errors
+
+
+def test_nested_lock_violating_global_order_raises_instead_of_deadlocking() -> None:
+    """A thread holding a higher-order key must not nest-acquire a lower-order one.
+
+    A same-key-only reentrancy check would miss this: thread A holds "b" (the
+    higher-order key here) and nests lock(["a"]) (disjoint, lower-order) while
+    thread B holds "a" and blocks waiting for "b" via a single lock(["a","b"])
+    call — both threads would deadlock forever. The nested acquisition must
+    instead raise RuntimeError immediately, before blocking on anything.
+    """
+    locks: KeyedLockManager[str] = KeyedLockManager()
+    # Register "a" before "b" up front so "a" gets the lower order.
+    with locks.lock(["a", "b"]):
+        pass
+
+    errors: list[Exception] = []
+
+    def run() -> None:
+        try:
+            with locks.lock(["b"]):
+                with pytest.raises(RuntimeError):
+                    with locks.lock(["a"]):
+                        pass  # pragma: no cover - unreachable if lock() raises as required
+        except Exception as exc:  # noqa: BLE001 - collected and re-raised on the main thread
+            errors.append(exc)
+
+    t = _run_daemon(run)
+    t.join(timeout=5)
+
+    assert not t.is_alive(), "order-violating nested lock() call hung instead of raising"
+    assert not errors, errors
+
+
+def test_nested_vs_batch_acquisition_never_deadlock_under_contention() -> None:
+    """The order-violation guard actually prevents the deadlock under real contention.
+
+    One thread repeatedly nests lock(["b"]) then lock(["a"]) (raising on each
+    iteration, per the order guard); another repeatedly does a single batched
+    lock(["a","b"]) call. Neither may hang.
+    """
+    locks: KeyedLockManager[str] = KeyedLockManager()
+    # Register "a" before "b" up front so the order is deterministic here too.
+    with locks.lock(["a", "b"]):
+        pass
+
+    errors: list[Exception] = []
+    iterations = 200
+
+    def nested_loop() -> None:
+        try:
+            for _ in range(iterations):
+                try:
+                    with locks.lock(["b"]):
+                        with locks.lock(["a"]):
+                            pass  # pragma: no cover - unreachable, order guard always raises first
+                except RuntimeError:
+                    pass  # expected every time: nesting "a" under "b" violates the global order
+        except Exception as exc:  # noqa: BLE001 - collected and re-raised on the main thread
+            errors.append(exc)
+
+    def batch_loop() -> None:
+        try:
+            for _ in range(iterations):
+                with locks.lock(["a", "b"]):
+                    pass
+        except Exception as exc:  # noqa: BLE001 - collected and re-raised on the main thread
+            errors.append(exc)
+
+    t_nested = _run_daemon(nested_loop)
+    t_batch = _run_daemon(batch_loop)
+    t_nested.join(timeout=10)
+    t_batch.join(timeout=10)
+
+    assert not t_nested.is_alive() and not t_batch.is_alive(), "nested vs. batch acquisition deadlocked"
     assert not errors, errors
 
 
@@ -209,7 +293,14 @@ def test_locks_release_on_exception_in_with_block() -> None:
 
 
 def test_concurrent_first_use_of_new_key_is_still_mutually_exclusive() -> None:
-    """Many threads racing to lock() a brand-new key for the first time still serialize."""
+    """Many threads racing to lock() a brand-new key for the first time still serialize.
+
+    No sleep is needed to manufacture contention here (unlike the other tests
+    in this module, which use one to widen an *unrelated* window): the
+    Barrier below already forces all threads to call lock() — and so race on
+    ``_resolve()``'s lazy Lock-creation for this never-before-seen key — at
+    essentially the same instant, which is exactly the race this test targets.
+    """
     locks: KeyedLockManager[str] = KeyedLockManager()
     thread_count = 20
     active = 0
@@ -227,8 +318,6 @@ def test_concurrent_first_use_of_new_key_is_still_mutually_exclusive() -> None:
                     active += 1
                     if active > 1:
                         observed_concurrent = True
-                time.sleep(0.005)
-                with active_lock:
                     active -= 1
         except Exception as exc:  # noqa: BLE001 - collected and re-raised on the main thread
             errors.append(exc)

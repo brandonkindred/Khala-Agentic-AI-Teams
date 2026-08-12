@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import threading
 from contextlib import contextmanager
-from typing import Dict, Generic, Hashable, Iterable, Iterator, List, TypeVar
+from typing import Dict, Generic, Hashable, Iterable, Iterator, List, Tuple, TypeVar
 
 __all__ = ["KeyedLockManager"]
 
@@ -47,6 +47,12 @@ class KeyedLockManager(Generic[K]):
           an outer, not-yet-exited :meth:`lock` call on that same thread (not
           reentrant — see :meth:`lock`'s own Preconditions for why, and what
           happens instead of a silent deadlock).
+        - A thread does not nest a :meth:`lock` call for a key whose global
+          order (see Invariants) is lower than that of any key it already
+          holds from an outer, not-yet-exited :meth:`lock` call — this is the
+          same lock-ordering discipline a single batched call already gets
+          for free, generalized across nested calls on one thread (see
+          :meth:`lock`'s own Preconditions for the deadlock this prevents).
 
     Postconditions:
         - Two :meth:`lock` calls whose key sets are disjoint never block each
@@ -69,6 +75,12 @@ class KeyedLockManager(Generic[K]):
           order, fixed the first time either key is seen by this manager
           (see :meth:`lock`) — this is what makes multi-key batch acquisition
           deadlock-free without requiring ``K`` to support ordering (``<``).
+          This order is enforced not only within one batched :meth:`lock`
+          call but also across a thread's nested calls (see :meth:`lock`'s
+          Preconditions): a thread can never come to hold a lower-order key
+          while already holding a higher-order one, which is what rules out
+          a cycle in the wait-for graph — the standard resource-ordering
+          deadlock-avoidance argument.
     """
 
     def __init__(self) -> None:
@@ -88,23 +100,44 @@ class KeyedLockManager(Generic[K]):
         self._next_order = 0
         # The thread currently holding each key's lock, if any — written only
         # by the thread that acquired it, read by a same-thread re-lock() to
-        # raise instead of deadlocking. Not a general cross-key deadlock
-        # detector (none is needed: acquisition order is already globally
-        # consistent); this only catches direct reentrancy on one key.
+        # raise instead of deadlocking. Only catches direct reentrancy on one
+        # key; the *cross*-key nested-acquisition hazard (a thread nesting a
+        # lower-order key under a higher-order one it already holds) is
+        # caught separately, by ``_thread_state`` below.
         self._owners: Dict[K, threading.Thread] = {}
+        # Per-thread state, isolated by ``threading.local`` (each thread sees
+        # only its own ``max_order`` attribute — no cross-thread locking
+        # needed to read or write it). Tracks the highest order this thread
+        # currently holds across every not-yet-exited ``lock()`` call it is
+        # nested inside, defaulting to -1 (holds nothing) via ``getattr``.
+        # ``lock()`` rejects acquiring any key whose order is not strictly
+        # greater than this, closing the deadlock hole a same-key-only
+        # reentrancy check would miss: e.g. thread A holds ``b`` (order 1)
+        # and nests ``lock(["a"])`` (order 0) while thread B holds ``a`` and
+        # waits for ``b`` — disjoint keys, so a same-key check alone would
+        # permit it, and both threads would block forever.
+        self._thread_state = threading.local()
 
-    def _resolve(self, key: K) -> threading.Lock:
-        """Return ``key``'s Lock, creating and order-assigning it on first sight.
+    def _resolve(self, key: K) -> Tuple[threading.Lock, int]:
+        """Return ``key``'s ``(Lock, order)``, creating and assigning both on first sight.
+
+        Returning the order alongside the ``Lock`` (rather than making the
+        caller look ``key`` up in ``self._order`` afterward) keeps the two
+        always read from the exact same ``_registry_lock``-held snapshot —
+        callers never re-derive a key's order from ``self._order`` on their
+        own, so there is nothing to keep in sync between this method and its
+        callers beyond the tuple it returns here.
 
         Preconditions:
             ``key`` is hashable.
         Postconditions:
-            The same ``Lock`` instance is returned for every call with an
-            equal ``key`` for the lifetime of this manager. ``key`` is
-            assigned an order index the first time it is seen (across all
-            threads — resolved atomically under ``_registry_lock``, so two
-            threads racing to resolve the same brand-new key never create two
-            different Lock objects for it).
+            The same ``Lock`` instance (and the same order) is returned for
+            every call with an equal ``key`` for the lifetime of this
+            manager. ``key`` is assigned an order index the first time it is
+            seen (across all threads — resolved atomically under
+            ``_registry_lock``, so two threads racing to resolve the same
+            brand-new key never create two different Lock objects, or two
+            different order indices, for it).
         """
         with self._registry_lock:
             lock = self._locks.get(key)
@@ -113,7 +146,7 @@ class KeyedLockManager(Generic[K]):
                 self._locks[key] = lock
                 self._order[key] = self._next_order
                 self._next_order += 1
-            return lock
+            return lock, self._order[key]
 
     @contextmanager
     def lock(self, keys: Iterable[K]) -> Iterator[None]:
@@ -125,11 +158,17 @@ class KeyedLockManager(Generic[K]):
               not-yet-exited :meth:`lock` call, any key also present in this
               call's ``keys`` — plain ``threading.Lock`` is not reentrant, so
               this would otherwise deadlock the thread against itself
-              forever; detected and raised as ``RuntimeError`` instead
-              (best-effort: this checks each key about to be acquired against
-              its current owner, not a full cross-key cycle detector, which
-              is unnecessary here since acquisition order is already globally
-              consistent — see the class Invariants).
+              forever; detected (via ``_owners``) and raised as
+              ``RuntimeError`` instead.
+            - No key in this call's ``keys`` has a lower global order (see
+              the class Invariants) than the highest-order key the current
+              thread already holds from an outer, not-yet-exited
+              :meth:`lock` call — nesting a lower-order acquisition under a
+              higher-order one it already holds can deadlock against another
+              thread doing the reverse (see the class Invariants for the
+              cycle this rules out); detected (via ``_thread_state``) and
+              raised as ``RuntimeError`` instead, before any lock in this
+              call is acquired.
 
         Postconditions:
             - ``keys`` is deduplicated before acquisition, so a batch
@@ -157,17 +196,38 @@ class KeyedLockManager(Generic[K]):
                     "this thread already holds it from an outer, not-yet-exited "
                     "lock() call, which would deadlock against itself"
                 )
+        # Resolve every key's (Lock, order) once, up front, from the same
+        # _resolve() call — order_by_key is a local snapshot, never re-derived
+        # from self._order later, so acquisition ordering below can't drift
+        # from what was actually resolved here.
+        order_by_key: Dict[K, int] = {}
         for key in unique_keys:
-            self._resolve(key)  # ensure every key has an assigned order before sorting
-        ordered_keys = sorted(unique_keys, key=lambda k: self._order[k])
+            _, order_by_key[key] = self._resolve(key)
+
+        prev_max_order: int = getattr(self._thread_state, "max_order", -1)
+        for key in unique_keys:
+            if order_by_key[key] <= prev_max_order:
+                raise RuntimeError(
+                    f"KeyedLockManager.lock() called for key {key!r} (order {order_by_key[key]}) "
+                    f"while this thread already holds a key of order {prev_max_order} from an "
+                    "outer, not-yet-exited lock() call — acquiring a lower-order key nested under "
+                    "a higher-order one can deadlock against another thread acquiring the same "
+                    "keys in a single batched lock() call; pass all keys to one lock() call "
+                    "instead of nesting"
+                )
+
+        ordered_keys = sorted(unique_keys, key=lambda k: order_by_key[k])
         acquired: List[K] = []
         try:
             for key in ordered_keys:
                 self._locks[key].acquire()
                 self._owners[key] = current_thread
                 acquired.append(key)
+            if ordered_keys:
+                self._thread_state.max_order = order_by_key[ordered_keys[-1]]
             yield
         finally:
+            self._thread_state.max_order = prev_max_order
             for key in reversed(acquired):
                 del self._owners[key]
                 self._locks[key].release()
