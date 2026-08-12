@@ -21,8 +21,7 @@ from .profiles import ReviewProfile, build_review_system_prompt
 CODE_REVIEW_PROMPT = build_review_system_prompt(ReviewProfile.CODE_REVIEW)
 
 
-FALSE_POSITIVE_VERIFY_BODY = (
-    """You are a meticulous Code Review Auditor. Another reviewer flagged potential issues in some code, but that reviewer saw only a small, isolated chunk of one file at a time — it could not see the rest of the file or any other file in the codebase. Many of its findings are therefore FALSE POSITIVES: things that look wrong in isolation but are actually fine once the whole codebase is taken into account.
+FALSE_POSITIVE_VERIFY_BODY = """You are a meticulous Code Review Auditor. Another reviewer flagged potential issues in some code, but that reviewer saw only a small, isolated chunk of one file at a time — it could not see the rest of the file or any other file in the codebase. Many of its findings are therefore FALSE POSITIVES: things that look wrong in isolation but are actually fine once the whole codebase is taken into account.
 
 **Your one job:** for each finding you are given, decide whether it is a REAL issue or a FALSE POSITIVE, by looking at the actual code — never by guessing from the finding's text alone.
 
@@ -54,7 +53,6 @@ Before judging a finding, USE THE TOOLS to inspect the code it refers to AND any
 - Do NOT invent new issues, do NOT change severities, and do NOT re-review the code for other problems. Confirm or refute ONLY the findings you are given.
 - Use `confidence: "high"` or `"medium"` only when your verdict is backed by code you actually read; use `"low"` when unsure (a low-confidence false-positive verdict is treated as "keep").
 """
-)
 
 _FALSE_POSITIVE_VERIFY_PROSE_INSTRUCTION = (
     "\n\n**Output format:**\n"
@@ -328,18 +326,14 @@ def build_merged_architecture_side_effect_prompt(*, arch_on: bool, side_on: bool
     """
     if not arch_on and not side_on:
         raise ValueError("build_merged_architecture_side_effect_prompt requires arch_on or side_on")
-    return (
-        build_merged_architecture_side_effect_reasoning_system_prompt(
-            arch_on=arch_on, side_on=side_on
-        )
-        + build_merged_architecture_side_effect_formatting_instructions(
-            arch_on=arch_on, side_on=side_on
-        )
+    return build_merged_architecture_side_effect_reasoning_system_prompt(
+        arch_on=arch_on, side_on=side_on
+    ) + build_merged_architecture_side_effect_formatting_instructions(
+        arch_on=arch_on, side_on=side_on
     )
 
 
-REVIEW_SYNTHESIS_PROMPT = (
-    """You consolidate the findings of an automated per-file code review into one coherent report.
+REVIEW_SYNTHESIS_BODY = """You consolidate the findings of an automated per-file code review into one coherent report.
 
 A large submission was reviewed in several independent passes. You are given ONLY the findings from those passes — the issues that were flagged, the per-pass summaries, and the per-pass spec-compliance notes. You are NOT given any source code, and you must work only from what is provided.
 
@@ -353,17 +347,31 @@ Rewrite the fragmented per-pass material into a single, coherent narrative that 
 - Do NOT change, upgrade, or downgrade any severity. Report severities exactly as given.
 - Do NOT re-decide the approval verdict — it has already been decided deterministically and is given to you for context only. Your prose must be consistent with it.
 - Do NOT request source code or claim you cannot proceed; synthesize from the findings provided.
+"""
+
+_REVIEW_SYNTHESIS_PROSE_INSTRUCTION = (
+    "\n\n**Output format:**\n"
+    "Answer in structured prose (not JSON). Provide the unified review summary and "
+    "consolidated spec/acceptance-criteria gaps (or state clearly when there are none).\n"
+)
+
+_REVIEW_SYNTHESIS_OUTPUT_FORMAT = """
 
 Return a single JSON object with exactly these keys:
 - "summary": string — the unified review summary (non-empty).
 - "spec_compliance_notes": string — the consolidated spec-compliance gaps, or "" when there are none.
 """
-    + JSON_OUTPUT_INSTRUCTION
+
+REVIEW_SYNTHESIS_REASONING_SYSTEM_PROMPT = (
+    REVIEW_SYNTHESIS_BODY + _REVIEW_SYNTHESIS_PROSE_INSTRUCTION
+)
+REVIEW_SYNTHESIS_FORMATTING_INSTRUCTIONS = _REVIEW_SYNTHESIS_OUTPUT_FORMAT + JSON_OUTPUT_INSTRUCTION
+REVIEW_SYNTHESIS_PROMPT = (
+    REVIEW_SYNTHESIS_REASONING_SYSTEM_PROMPT + REVIEW_SYNTHESIS_FORMATTING_INSTRUCTIONS
 )
 
 
-SPEC_COMPLIANCE_PASS_PROMPT = (
-    """You check one code submission's final review findings against its full specification and acceptance criteria, in a single dedicated pass.
+SPEC_COMPLIANCE_PASS_BODY = """You check one code submission's final review findings against its full specification and acceptance criteria, in a single dedicated pass.
 
 You are given the full project specification, the full acceptance-criteria list, and the FINAL merged findings from an automated code review — every issue that was confirmed, across every category, for the whole submission. You are NOT given any source code, and you must work only from what is provided.
 
@@ -375,9 +383,26 @@ Decide whether the findings reveal any concrete, unmet spec or acceptance-criter
 - Do NOT restate or praise acceptance criteria that appear satisfied; only report gaps.
 - Do NOT re-decide the review verdict or discuss anything other than spec/acceptance-criteria compliance.
 - Do NOT request source code or claim you cannot proceed; work only from the findings and spec/criteria text provided.
+"""
+
+_SPEC_COMPLIANCE_PASS_PROSE_INSTRUCTION = (
+    "\n\n**Output format:**\n"
+    "Answer in structured prose (not JSON). Report concrete spec/acceptance-criteria "
+    "gaps only, or state clearly when there are none.\n"
+)
+
+_SPEC_COMPLIANCE_PASS_OUTPUT_FORMAT = """
 
 Return a single JSON object with exactly this key:
 - "spec_compliance_notes": string — concrete spec/acceptance-criteria gaps only, or "" when there are none.
 """
-    + JSON_OUTPUT_INSTRUCTION
+
+SPEC_COMPLIANCE_PASS_REASONING_SYSTEM_PROMPT = (
+    SPEC_COMPLIANCE_PASS_BODY + _SPEC_COMPLIANCE_PASS_PROSE_INSTRUCTION
+)
+SPEC_COMPLIANCE_PASS_FORMATTING_INSTRUCTIONS = (
+    _SPEC_COMPLIANCE_PASS_OUTPUT_FORMAT + JSON_OUTPUT_INSTRUCTION
+)
+SPEC_COMPLIANCE_PASS_PROMPT = (
+    SPEC_COMPLIANCE_PASS_REASONING_SYSTEM_PROMPT + SPEC_COMPLIANCE_PASS_FORMATTING_INSTRUCTIONS
 )
