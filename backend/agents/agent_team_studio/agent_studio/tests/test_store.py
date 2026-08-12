@@ -141,6 +141,31 @@ def test_discard_unknown_id_is_noop() -> None:
     assert len(store) == 0
 
 
+def test_discard_drops_the_turn_lock_entry() -> None:
+    # The turn-lock table (assistant_kernel.InMemoryTurnLocks) is keyed
+    # independently of ConversationRecord's lifetime, so discard() must drop its
+    # entry too — otherwise a removed conversation's lock lingers forever.
+    store = AgentStudioConversationStore()
+    cid = store.create("new", None, AgentDefinition())
+    with store.turn(cid):
+        pass
+    assert len(store._turn_locks) == 1
+    store.discard(cid)
+    assert len(store._turn_locks) == 0
+
+
+def test_eviction_drops_the_turn_lock_entry() -> None:
+    # Same leak-prevention guarantee as discard(), but for LRU eviction: an
+    # evicted conversation's lock-table entry must not linger either.
+    store = AgentStudioConversationStore(max_conversations=1)
+    a = store.create("new", None, AgentDefinition())
+    with store.turn(a):
+        pass
+    assert len(store._turn_locks) == 1
+    store.create("new", None, AgentDefinition())  # evicts `a`
+    assert len(store._turn_locks) == 0
+
+
 def test_concurrent_creates_are_thread_safe() -> None:
     # Many threads hammering create() must not corrupt the OrderedDict or
     # violate the cap; every returned id is unique.
@@ -178,12 +203,12 @@ def test_turn_applies_messages_and_definition() -> None:
     cid = store.create("new", None, AgentDefinition(name="x", role="r"))
     with store.turn(cid) as t:
         assert t.history == []
-        assert t.definition.name == "x"
+        assert t.draft.name == "x"
         t.append_message("user", "hi")
         t.append_message("assistant", "hello")
-        updated = t.definition.model_copy()
+        updated = t.draft.model_copy()
         updated.name = "Renamed"
-        t.set_definition(updated)
+        t.set_draft(updated)
     record = store.get(cid)
     assert [m.content for m in record.messages] == ["hi", "hello"]
     assert record.definition.name == "Renamed"
@@ -217,11 +242,11 @@ def test_turn_serializes_concurrent_turns_no_lost_update() -> None:
     def do_turn() -> None:
         barrier.wait()
         with store.turn(cid) as t:
-            current = int(t.definition.description or "0")
+            current = int(t.draft.description or "0")
             time.sleep(0.003)
-            updated = t.definition.model_copy()
+            updated = t.draft.model_copy()
             updated.description = str(current + 1)
-            t.set_definition(updated)
+            t.set_draft(updated)
 
     threads = [threading.Thread(target=do_turn) for _ in range(n)]
     for th in threads:
@@ -258,9 +283,9 @@ def test_turn_rolls_back_a_partial_write_on_later_exception() -> None:
     with pytest.raises(RuntimeError):
         with store.turn(cid) as t:
             t.append_message("user", "hi")
-            updated = t.definition.model_copy()
+            updated = t.draft.model_copy()
             updated.name = "should-not-stick"
-            t.set_definition(updated)
+            t.set_draft(updated)
             raise RuntimeError("failed after partial writes")
     record = store.get(cid)
     assert record.messages == []

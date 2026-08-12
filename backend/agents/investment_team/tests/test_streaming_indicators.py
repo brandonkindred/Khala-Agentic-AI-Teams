@@ -251,6 +251,88 @@ def test_macd_sliding_window_keeps_macd_line_bounded() -> None:
     assert len(cached["macd_line"]) == expected_max
 
 
+def test_macd_expand_signal_histogram_reads_stay_o1_amortized(monkeypatch) -> None:
+    """O(1)-amortized proof for MACD ``signal``/``histogram`` reads on the
+    ``expand`` path — sibling indicators (OBV, MFI, Bollinger) prove their
+    O(1)-amortized cost structurally, via a bounded running-sum/deque that
+    never grows with bars seen. MACD's incremental fix has no single
+    bounded buffer to inspect from outside, so this proof instruments both
+    halves of the recurrence instead:
+
+    * the fast/slow EMA legs — every ``windowed_ema`` call must operate on
+      a fixed-size window, never one that grows with history;
+    * the signal-line EMA itself — a full ``iter(macd_line)`` walk (the
+      pre-fix behaviour) must fire only once, at the one-time warm-up
+      crossing. Checking only the EMA-leg calls would miss a regression
+      here: if the incremental single-step ever fell back to re-walking
+      ``macd_line`` on every bar, ``windowed_ema`` call counts would be
+      completely unaffected (that walk touches the cached deque, not the
+      fast/slow legs), so both must be pinned for this test to actually
+      enforce the O(1)-amortized guarantee end to end.
+
+    Distinct from the existing ``bench/`` timing tests (wall-clock ratios,
+    opt-in via ``-m bench``): this is deterministic, always runs in CI, and
+    also proves the second per-bar ``select`` read is a free same-bar cache
+    hit rather than doubling the call count.
+    """
+    import investment_team.strategy_lab.indicators.streaming as streaming
+
+    fast, slow, signal = 12, 26, 9
+    bars = _series(600, seed=91)
+
+    call_lengths: List[int] = []
+    original_windowed_ema = streaming.windowed_ema
+
+    def _ema_spy(bar_window, period, source="close"):
+        call_lengths.append(len(bar_window))
+        return original_windowed_ema(bar_window, period, source)
+
+    monkeypatch.setattr(streaming, "windowed_ema", _ema_spy)
+
+    signal_walk_calls = 0
+    real_deque = streaming.deque
+
+    class _CountingDeque(real_deque):
+        def __iter__(self):
+            nonlocal signal_walk_calls
+            signal_walk_calls += 1
+            return super().__iter__()
+
+    monkeypatch.setattr(streaming, "deque", _CountingDeque)
+
+    reg = IndicatorRegistry()
+    for n in range(slow, len(bars) + 1):
+        sub = bars[:n]
+        reg.macd(sub, fast=fast, slow=slow, signal=signal, select="signal")
+        reg.macd(sub, fast=fast, slow=slow, signal=signal, select="histogram")
+
+    # Every windowed_ema call operates on a fixed-size window (fast or
+    # slow) — never one that scales with `n`. A regression to a per-bar
+    # full re-walk (the legacy O(N·W) shape) would show lengths climbing
+    # toward `len(bars)`.
+    assert call_lengths, "expected at least one windowed_ema call"
+    assert set(call_lengths) <= {fast, slow}
+
+    # Exactly two calls per streamed bar (fast + slow leg) — the second
+    # `select="histogram"` read on the same bar is a same-bar cache hit
+    # and adds zero extra calls, so the total stays linear in bar count
+    # instead of doubling.
+    expected_calls = 2 * (len(bars) - slow + 1)
+    assert len(call_lengths) == expected_calls, (
+        f"expected {expected_calls} windowed_ema calls, got {len(call_lengths)} "
+        "— extra calls indicate a hidden re-walk or lost same-bar caching"
+    )
+
+    # The full macd_line walk fires exactly once — the warm-up bar where
+    # the signal EMA first has enough history to fill. Every later expand
+    # step must single-step from the cached signal value instead.
+    assert signal_walk_calls == 1, (
+        f"expected exactly 1 full macd_line walk (the warm-up crossing), got "
+        f"{signal_walk_calls} — the signal-EMA recurrence is re-walking the "
+        "deque instead of single-stepping from the cached value"
+    )
+
+
 # ---------------------------------------------------------------------------
 # MACD — symbol isolation
 # ---------------------------------------------------------------------------
@@ -291,6 +373,126 @@ def test_macd_isolates_symbols_when_registry_shared() -> None:
         b_ref = IndicatorRegistry().macd(msft[:n], fast=12, slow=26, signal=9, select="signal")
         assert v_a == a_ref, f"n={n} AAPL drifted: {v_a!r} != {a_ref!r}"
         assert v_b == b_ref, f"n={n} MSFT drifted: {v_b!r} != {b_ref!r}"
+
+
+# ---------------------------------------------------------------------------
+# MACD — golden baseline (characterization; pins current pre-fix output)
+#
+# Unlike the parity tests above (which check the registry against an
+# independently-written reference implementation, ``_legacy_macd``), these
+# tests pin literal numeric constants captured from the CURRENT
+# ``_macd_value`` implementation — the one that still re-walks the full
+# ``macd_line`` deque to recompute the signal-line EMA on every call. They
+# are the golden baseline the incremental O(1) rewrite (a sibling issue)
+# must reproduce bit-for-bit; unlike the parity tests, this baseline can't
+# silently drift if ``_legacy_macd`` itself is ever edited.
+# ---------------------------------------------------------------------------
+
+
+def test_macd_golden_baseline_expand_transitions() -> None:
+    """Pins current output across the ``expand`` path: a single registry
+    driven bar-by-bar (n=1..45) over a fixed seeded series."""
+    bars = _series(45, seed=601)
+    reg = IndicatorRegistry()
+    golden = {
+        26: (1.3175242222977062, None, None),
+        30: (1.5093556546607942, None, None),
+        35: (1.7489476141703335, 1.4830941545803946, 0.2658534595899389),
+        40: (2.3228769295836713, 1.746521551146327, 0.5763553784373443),
+        45: (2.7827410071213734, 2.134441625873138, 0.6482993812482354),
+    }
+    for n in range(1, len(bars) + 1):
+        sub = bars[:n]
+        if n == 40:
+            # Confirm the transition under test is actually "expand" for a
+            # representative later step, not implied only by loop shape.
+            state = reg._peek(("macd", None, 12, 26, 9, "close"))
+            fp = reg._bar_fingerprint(sub)
+            assert reg._advance_kind(state, sub, fp) == "expand"
+        m = reg.macd(sub, fast=12, slow=26, signal=9, select="macd")
+        s = reg.macd(sub, fast=12, slow=26, signal=9, select="signal")
+        h = reg.macd(sub, fast=12, slow=26, signal=9, select="histogram")
+        if n in golden:
+            exp_m, exp_s, exp_h = golden[n]
+            assert m == pytest.approx(exp_m, rel=0, abs=1e-12), f"n={n} macd={m!r}"
+            if exp_s is None:
+                assert s is None and h is None, f"n={n} s={s!r} h={h!r}"
+            else:
+                assert s == pytest.approx(exp_s, rel=0, abs=1e-12), f"n={n} signal={s!r}"
+                assert h == pytest.approx(exp_h, rel=0, abs=1e-12), f"n={n} histogram={h!r}"
+
+
+def test_macd_golden_baseline_slide_transitions() -> None:
+    """Pins current output across the ``slide`` path: a single registry
+    driven over a fixed 40-bar sliding window across a longer series."""
+    bars = _series(120, seed=602)
+    window = 40
+    reg = IndicatorRegistry()
+    golden = {
+        0: (2.567567144315447, 2.071800426047202, 0.49576671826824503),
+        5: (2.3414399804443633, 2.292338075899163, 0.04910190454520036),
+        15: (1.8356837115187261, 2.001669642130804, -0.16598593061207767),
+        30: (1.5192284347039617, 1.8180268563542354, -0.2987984216502737),
+        60: (2.2320794091741902, 1.806486677154389, 0.4255927320198012),
+    }
+    for offset in range(0, len(bars) - window + 1):
+        sliding = bars[offset : offset + window]
+        if offset == 5:
+            state = reg._peek(("macd", None, 12, 26, 9, "close"))
+            fp = reg._bar_fingerprint(sliding)
+            assert reg._advance_kind(state, sliding, fp) == "slide"
+        m = reg.macd(sliding, fast=12, slow=26, signal=9, select="macd")
+        s = reg.macd(sliding, fast=12, slow=26, signal=9, select="signal")
+        h = reg.macd(sliding, fast=12, slow=26, signal=9, select="histogram")
+        if offset in golden:
+            exp_m, exp_s, exp_h = golden[offset]
+            assert m == pytest.approx(exp_m, rel=0, abs=1e-12), f"offset={offset} macd={m!r}"
+            assert s == pytest.approx(exp_s, rel=0, abs=1e-12), f"offset={offset} signal={s!r}"
+            assert h == pytest.approx(exp_h, rel=0, abs=1e-12), f"offset={offset} histogram={h!r}"
+
+
+def test_macd_golden_baseline_reset_transitions() -> None:
+    """Pins current output across the ``"none"``/reset path, in two forms:
+    a fresh registry's first-ever (cold) call, and a warm registry forced
+    backwards to an earlier bar count (a genuine mid-life reset, distinct
+    from an initial cold-start on an empty cache)."""
+    # -- Independent fresh-registry cold-starts. --
+    fresh_bars = _series(60, seed=603)
+    fresh_golden = {
+        26: (1.9259170563526453, None, None),
+        34: (1.1711831697481472, 1.910603117224805, -0.7394199474766578),
+        40: (1.0703895180889305, 1.5796168062440215, -0.509227288155091),
+        50: (1.770269234436853, 1.6169731655310817, 0.1532960689057712),
+        60: (2.006039890130964, 2.0338790966289295, -0.027839206497965563),
+    }
+    for n, (exp_m, exp_s, exp_h) in fresh_golden.items():
+        reg = IndicatorRegistry()
+        sub = fresh_bars[:n]
+        m = reg.macd(sub, fast=12, slow=26, signal=9, select="macd")
+        s = reg.macd(sub, fast=12, slow=26, signal=9, select="signal")
+        h = reg.macd(sub, fast=12, slow=26, signal=9, select="histogram")
+        assert m == pytest.approx(exp_m, rel=0, abs=1e-12), f"n={n} macd={m!r}"
+        if exp_s is None:
+            assert s is None and h is None, f"n={n} s={s!r} h={h!r}"
+        else:
+            assert s == pytest.approx(exp_s, rel=0, abs=1e-12), f"n={n} signal={s!r}"
+            assert h == pytest.approx(exp_h, rel=0, abs=1e-12), f"n={n} histogram={h!r}"
+
+    # -- Mid-life reset: drive a registry forward, then jump it backwards. --
+    warm_bars = _series(60, seed=604)
+    reg = IndicatorRegistry()
+    for n in range(26, 61):
+        reg.macd(warm_bars[:n], fast=12, slow=26, signal=9, select="signal")
+    truncated = warm_bars[:45]
+    state = reg._peek(("macd", None, 12, 26, 9, "close"))
+    fp = reg._bar_fingerprint(truncated)
+    assert reg._advance_kind(state, truncated, fp) == "none"
+    m = reg.macd(truncated, fast=12, slow=26, signal=9, select="macd")
+    s = reg.macd(truncated, fast=12, slow=26, signal=9, select="signal")
+    h = reg.macd(truncated, fast=12, slow=26, signal=9, select="histogram")
+    assert m == pytest.approx(2.3299346994342613, rel=0, abs=1e-12)
+    assert s == pytest.approx(1.8677057609652556, rel=0, abs=1e-12)
+    assert h == pytest.approx(0.4622289384690057, rel=0, abs=1e-12)
 
 
 # ---------------------------------------------------------------------------

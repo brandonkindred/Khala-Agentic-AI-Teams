@@ -137,9 +137,9 @@ object — for example:
 }
 ```
 
-There is no `max_drawdown_pct` field — max drawdown is not a constraint
-(a strategy may lose up to 100% by design), so never emit it; it would be
-discarded as an unknown key.
+There is no `max_drawdown_pct` field — see the sizing/risk framing reference
+appended to this prompt for why max drawdown is never a constraint; never
+emit it, it would be discarded as an unknown key.
 
 The orchestrator will only honour `risk_limits`; any other key in
 `proposed_spec_updates` is silently dropped and logged.

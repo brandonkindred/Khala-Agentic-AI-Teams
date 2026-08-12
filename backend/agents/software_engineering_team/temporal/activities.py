@@ -34,10 +34,13 @@ def retry_failed_activity(job_id: str, trace_id: str = "") -> None:
     """Re-run failed tasks for a job (run_failed_tasks).
 
     Postconditions:
-        On failure the job is marked FAILED and the exception is re-raised so
-        Temporal can retry (per the workflow retry policy) and fail the workflow.
-        ``trace_id`` (workflow-supplied, or freshly generated when blank) is
-        forwarded to ``run_failed_tasks``, which binds it for the retry.
+        On the final Temporal attempt, the job is marked FAILED; on a non-final
+        attempt the FAILED write is skipped so a retry that later succeeds never
+        leaves a transient FAILED status behind. The exception is always
+        re-raised so Temporal can retry (per the workflow retry policy) and fail
+        the workflow once attempts are exhausted. ``trace_id`` (workflow-supplied,
+        or freshly generated when blank) is forwarded to ``run_failed_tasks``,
+        which binds it for the retry.
     """
     resolved_trace_id = trace_id or new_trace_id()
     try:
@@ -46,7 +49,8 @@ def retry_failed_activity(job_id: str, trace_id: str = "") -> None:
         run_failed_tasks(job_id, trace_id=resolved_trace_id)
     except Exception as e:
         logger.exception("Retry failed activity failed", extra={"trace_id": resolved_trace_id})
-        update_job(job_id, error=str(e), status=JOB_STATUS_FAILED)
+        if is_last_attempt():
+            update_job(job_id, error=str(e), status=JOB_STATUS_FAILED)
         raise
 
 
@@ -287,14 +291,18 @@ def run_product_analysis_activity(
     """Execute product-analysis workflow.
 
     Postconditions:
-        On failure the job is marked FAILED and the exception is re-raised so
-        Temporal can retry (per the workflow retry policy) and fail the workflow.
+        On the final Temporal attempt, the job is marked FAILED; on a non-final
+        attempt the FAILED write is skipped so a retry that later succeeds never
+        leaves a transient FAILED status behind. The exception is always
+        re-raised so Temporal can retry (per the workflow retry policy) and fail
+        the workflow once attempts are exhausted.
     """
     try:
         _run_product_analysis_impl(job_id, repo_path, spec_content, initial_spec_path)
     except Exception as e:
         logger.exception("Product analysis activity failed", extra={"trace_id": current_trace_id()})
-        update_job(job_id, error=str(e), status=JOB_STATUS_FAILED)
+        if is_last_attempt():
+            update_job(job_id, error=str(e), status=JOB_STATUS_FAILED)
         raise
 
 
@@ -339,8 +347,11 @@ def _parse_spec_activity_body(
 
     Preconditions: a trace id is already bound (callers must go through
         :func:`parse_spec_activity`).
-    Postconditions: returns a ``SpecParseResult`` dict; on failure the job is marked
-        FAILED and the exception propagates to the activity wrapper.
+    Postconditions: returns a ``SpecParseResult`` dict; on the final Temporal
+        attempt the job is marked FAILED, while a non-final attempt skips the
+        FAILED write so a retry that later succeeds never leaves a transient
+        FAILED status behind. Either way, the exception propagates to the
+        activity wrapper.
     """
     from software_engineering_team.temporal.phase_models import SpecParseResult
 
@@ -460,7 +471,8 @@ def _parse_spec_activity_body(
             job_id,
             extra={"trace_id": current_trace_id()},
         )
-        update_job(job_id, error=str(e), status=JOB_STATUS_FAILED)
+        if is_last_attempt():
+            update_job(job_id, error=str(e), status=JOB_STATUS_FAILED)
         raise
 
 
@@ -491,8 +503,10 @@ def _plan_project_activity_body(
 
     Preconditions: a trace id is already bound (callers must go through
         :func:`plan_project_activity`); ``spec_parse_result`` validates as a ``SpecParseResult``.
-    Postconditions: returns a ``PlanResult`` dict; on failure the job is marked FAILED and
-        the exception propagates to the activity wrapper. Uses ``spec_data.requirements_title``
+    Postconditions: returns a ``PlanResult`` dict; on the final Temporal attempt the job is
+        marked FAILED, while a non-final attempt skips the FAILED write so a retry that
+        later succeeds never leaves a transient FAILED status behind. Either way, the
+        exception propagates to the activity wrapper. Uses ``spec_data.requirements_title``
         (set by Phase 1) as the adapter's spec title rather than re-parsing
         ``spec_data.spec_content`` via the LLM — avoids a second, nondeterministic parse and
         an unnecessary spec-intake LLM dependency; required for the sprint path, where
@@ -572,7 +586,8 @@ def _plan_project_activity_body(
             job_id,
             extra={"trace_id": current_trace_id()},
         )
-        update_job(job_id, error=str(e), status=JOB_STATUS_FAILED)
+        if is_last_attempt():
+            update_job(job_id, error=str(e), status=JOB_STATUS_FAILED)
         raise
 
 

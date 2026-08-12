@@ -214,24 +214,65 @@ describe('AgentStudioBuildAgentComponent', () => {
 
     it('advances Start → Define → Configure via the explicit Continue actions, and back via ◂ back to Define', () => {
       selectAgent('blogging.planner');
+      // Start: only the forward Continue action is present — no back/save affordance to skip ahead with.
+      expect(fixture.nativeElement.querySelector('.studio-build__continue-sub')).toBeTruthy();
+      expect(fixture.nativeElement.querySelector('.studio-build__back-sub')).toBeNull();
+      expect(fixture.nativeElement.querySelector('.studio-build__save-sub')).toBeNull();
 
       fixture.nativeElement.querySelector('.studio-build__continue-sub').click();
       fixture.detectChanges();
       expect(component.activeSubStageDef().key).toBe('define');
       expect(fixture.nativeElement.querySelector('app-agent-studio-stage-placeholder')).toBeTruthy();
       expect(fixture.nativeElement.querySelector('app-agent-catalog')).toBeNull();
+      // Define: still only the forward Continue action — no back/save affordance yet.
+      expect(fixture.nativeElement.querySelector('.studio-build__continue-sub')).toBeTruthy();
+      expect(fixture.nativeElement.querySelector('.studio-build__back-sub')).toBeNull();
+      expect(fixture.nativeElement.querySelector('.studio-build__save-sub')).toBeNull();
 
       fixture.nativeElement.querySelector('.studio-build__continue-sub').click();
       fixture.detectChanges();
       expect(component.activeSubStageDef().key).toBe('configure');
       expect(state.maxReachedBuildSubStage()).toBe(2);
+      // Configure: the forward Continue action is gone — back and save are the only actions.
       expect(fixture.nativeElement.querySelector('.studio-build__continue-sub')).toBeNull();
+      expect(fixture.nativeElement.querySelector('.studio-build__back-sub')).toBeTruthy();
+      expect(fixture.nativeElement.querySelector('.studio-build__save-sub')).toBeTruthy();
 
       fixture.nativeElement.querySelector('.studio-build__back-sub').click();
       fixture.detectChanges();
       expect(component.activeSubStageDef().key).toBe('define');
       // Explicit back-loop, not a reset — the furthest sub-stage reached is preserved.
       expect(state.maxReachedBuildSubStage()).toBe(2);
+    });
+
+    it('rejects a forward-only violation instead of swallowing it — backToDefine() off the Configure sub-stage throws', () => {
+      expect(component.activeSubStageDef().key).toBe('start');
+      expect(() => component.backToDefine()).toThrow(RangeError);
+      // The rejected call left the sub-stepper untouched.
+      expect(component.activeSubStageDef().key).toBe('start');
+
+      selectAgent('blogging.planner');
+      fixture.nativeElement.querySelector('.studio-build__continue-sub').click();
+      fixture.detectChanges();
+      expect(component.activeSubStageDef().key).toBe('define');
+      expect(() => component.backToDefine()).toThrow(RangeError);
+      expect(component.activeSubStageDef().key).toBe('define');
+    });
+
+    it('shows the "Cloning agent…" hint only while a clone is in flight', () => {
+      const pending = new Subject<AgentDefinition>();
+      api.cloneFromRegistry.mockReturnValue(pending.asObservable());
+
+      component.onSelectAgent('blogging.planner');
+      fixture.detectChanges();
+      expect(fixture.nativeElement.querySelector('.studio-build__hint')?.textContent).toContain('Cloning agent…');
+      expect(fixture.nativeElement.querySelector('.studio-build__selected')).toBeNull();
+
+      pending.next(definition());
+      pending.complete();
+      fixture.detectChanges();
+      expect(fixture.nativeElement.querySelector('.studio-build__hint')).toBeNull();
+      expect(fixture.nativeElement.querySelector('.studio-build__selected')).toBeTruthy();
     });
 
     it('marks only the active sub-step with aria-current="step"', () => {
@@ -323,6 +364,27 @@ describe('AgentStudioBuildAgentComponent', () => {
       pending.next({ agent_id: 'blogging.planner.v2', manifest: {}, created: true });
       pending.complete();
       expect(state.registryAgentId()).toBe('blogging.planner.v2');
+    });
+
+    it('disables the Save button and relabels it "Saving…" while the save is in flight, then re-enables it', () => {
+      const pending = new Subject<{ agent_id: string; manifest: unknown; created: boolean }>();
+      api.saveAgent.mockReturnValue(pending.asObservable());
+      goToConfigure();
+
+      const saveButton = (): HTMLButtonElement => fixture.nativeElement.querySelector('.studio-build__save-sub');
+      expect(saveButton().disabled).toBe(false);
+      expect(saveButton().textContent?.trim()).toBe('Save agent');
+
+      saveButton().click();
+      fixture.detectChanges();
+      expect(saveButton().disabled).toBe(true);
+      expect(saveButton().textContent?.trim()).toBe('Saving…');
+
+      pending.next({ agent_id: 'blogging.planner.v2', manifest: {}, created: true });
+      pending.complete();
+      fixture.detectChanges();
+      expect(saveButton().disabled).toBe(false);
+      expect(saveButton().textContent?.trim()).toBe('Save agent');
     });
   });
 });
