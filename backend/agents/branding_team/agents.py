@@ -641,6 +641,18 @@ def make_iconography_director() -> Agent:
     )
 
 
+_PHOTOGRAPHY_VIDEO_DIRECTOR_PROMPT = AgentPromptSpec(
+    opening="You are a Photography & Video Director. Based on the winning moodboard, define:",
+    fields=(
+        PromptFieldSpec(
+            "photography_direction", "shooting style, lighting, composition, subjects"
+        ),
+        PromptFieldSpec("video_direction", "pacing, tone, visual style for video content"),
+        PromptFieldSpec("motion_principles", "3-4 principles for animation/motion design"),
+    ),
+)
+
+
 def make_photography_video_director() -> Agent:
     """Build the Phase 3 Photography & Video Director agent.
 
@@ -652,14 +664,26 @@ def make_photography_video_director() -> Agent:
     return build_agent(
         name="photography_video_director",
         description="Defines photography direction, video direction, and motion principles.",
-        system_prompt=(
-            "You are a Photography & Video Director. Based on the winning moodboard, define:\n"
-            "1. photography_direction — shooting style, lighting, composition, subjects\n"
-            "2. video_direction — pacing, tone, visual style for video content\n"
-            "3. motion_principles — 3-4 principles for animation/motion design"
-        ),
+        system_prompt=render_agent_prompt(_PHOTOGRAPHY_VIDEO_DIRECTOR_PROMPT),
         structured_output=PhotographyVideoOutput,
     )
+
+
+_VOICE_TONE_BUILDER_PROMPT = AgentPromptSpec(
+    opening=(
+        "You are a Voice & Tone Builder. Using the brand narrative's writing guidelines and "
+        "the moodboard direction, define:"
+    ),
+    fields=(
+        PromptFieldSpec(
+            "voice_tone_spectrum",
+            "for each context (marketing, support, legal, social, internal), specify the "
+            "tone and 2-3 examples",
+        ),
+        PromptFieldSpec("language_dos", "4-5 approved language patterns"),
+        PromptFieldSpec("language_donts", "4-5 language anti-patterns"),
+    ),
+)
 
 
 def make_voice_tone_builder() -> Agent:
@@ -674,16 +698,25 @@ def make_voice_tone_builder() -> Agent:
     return build_agent(
         name="voice_tone_builder",
         description="Defines voice/tone spectrum and language dos/donts.",
-        system_prompt=(
-            "You are a Voice & Tone Builder. Using the brand narrative's writing guidelines and "
-            "the moodboard direction, define:\n"
-            "1. voice_tone_spectrum — for each context (marketing, support, legal, social, "
-            "internal), specify the tone and 2-3 examples\n"
-            "2. language_dos — 4-5 approved language patterns\n"
-            "3. language_donts — 4-5 language anti-patterns"
-        ),
+        system_prompt=render_agent_prompt(_VOICE_TONE_BUILDER_PROMPT),
         structured_output=VoiceToneOutput,
     )
+
+
+_DESIGN_SYSTEM_CODIFIER_PROMPT = AgentPromptSpec(
+    opening="You are a Design System Codifier. Based on the full visual identity work, produce:",
+    fields=(
+        PromptFieldSpec(
+            "design_principles", "3-4 guiding principles (e.g. 'Clarity over decoration')"
+        ),
+        PromptFieldSpec(
+            "foundation_tokens", "4-6 token categories (color, type, spacing, motion, etc.)"
+        ),
+        PromptFieldSpec(
+            "component_standards", "3-5 component rules (buttons, cards, navigation, etc.)"
+        ),
+    ),
+)
 
 
 def make_design_system_codifier() -> Agent:
@@ -697,12 +730,7 @@ def make_design_system_codifier() -> Agent:
     return build_agent(
         name="design_system_codifier",
         description="Codifies the design system: principles, tokens, component standards.",
-        system_prompt=(
-            "You are a Design System Codifier. Based on the full visual identity work, produce:\n"
-            "1. design_principles — 3-4 guiding principles (e.g. 'Clarity over decoration')\n"
-            "2. foundation_tokens — 4-6 token categories (color, type, spacing, motion, etc.)\n"
-            "3. component_standards — 3-5 component rules (buttons, cards, navigation, etc.)"
-        ),
+        system_prompt=render_agent_prompt(_DESIGN_SYSTEM_CODIFIER_PROMPT),
         structured_output=DesignSystemDefinitionOutput,
     )
 

@@ -12,17 +12,20 @@ from __future__ import annotations
 from branding_team.agents import (
     make_archetype_analyst,
     make_audience_segmenter,
+    make_design_system_codifier,
     make_differentiation_mapper,
     make_discovery_auditor,
     make_iconography_director,
     make_message_mapper,
     make_persona_builder,
+    make_photography_video_director,
     make_positioning_synthesizer,
     make_purpose_vision_writer,
     make_storyteller,
     make_tagline_writer,
     make_values_articulator,
     make_voice_principles_drafter,
+    make_voice_tone_builder,
 )
 
 _EXPECTED_PURPOSE_VISION_PROMPT = (
@@ -136,6 +139,29 @@ _EXPECTED_VOICE_PRINCIPLES_DRAFTER_PROMPT = (
     "This is the final step in narrative development."
 )
 
+_EXPECTED_PHOTOGRAPHY_VIDEO_DIRECTOR_PROMPT = (
+    "You are a Photography & Video Director. Based on the winning moodboard, define:\n"
+    "1. photography_direction — shooting style, lighting, composition, subjects\n"
+    "2. video_direction — pacing, tone, visual style for video content\n"
+    "3. motion_principles — 3-4 principles for animation/motion design"
+)
+
+_EXPECTED_VOICE_TONE_BUILDER_PROMPT = (
+    "You are a Voice & Tone Builder. Using the brand narrative's writing guidelines and "
+    "the moodboard direction, define:\n"
+    "1. voice_tone_spectrum — for each context (marketing, support, legal, social, "
+    "internal), specify the tone and 2-3 examples\n"
+    "2. language_dos — 4-5 approved language patterns\n"
+    "3. language_donts — 4-5 language anti-patterns"
+)
+
+_EXPECTED_DESIGN_SYSTEM_CODIFIER_PROMPT = (
+    "You are a Design System Codifier. Based on the full visual identity work, produce:\n"
+    "1. design_principles — 3-4 guiding principles (e.g. 'Clarity over decoration')\n"
+    "2. foundation_tokens — 4-6 token categories (color, type, spacing, motion, etc.)\n"
+    "3. component_standards — 3-5 component rules (buttons, cards, navigation, etc.)"
+)
+
 
 def test_purpose_vision_writer_prompt_matches_original_wording() -> None:
     assert make_purpose_vision_writer().system_prompt == _EXPECTED_PURPOSE_VISION_PROMPT
@@ -188,4 +214,21 @@ def test_persona_builder_prompt_matches_original_wording() -> None:
 def test_voice_principles_drafter_prompt_matches_original_wording() -> None:
     assert (
         make_voice_principles_drafter().system_prompt == _EXPECTED_VOICE_PRINCIPLES_DRAFTER_PROMPT
+    )
+
+
+def test_photography_video_director_prompt_matches_original_wording() -> None:
+    assert (
+        make_photography_video_director().system_prompt
+        == _EXPECTED_PHOTOGRAPHY_VIDEO_DIRECTOR_PROMPT
+    )
+
+
+def test_voice_tone_builder_prompt_matches_original_wording() -> None:
+    assert make_voice_tone_builder().system_prompt == _EXPECTED_VOICE_TONE_BUILDER_PROMPT
+
+
+def test_design_system_codifier_prompt_matches_original_wording() -> None:
+    assert (
+        make_design_system_codifier().system_prompt == _EXPECTED_DESIGN_SYSTEM_CODIFIER_PROMPT
     )
