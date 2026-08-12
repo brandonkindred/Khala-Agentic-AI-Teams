@@ -155,6 +155,29 @@ def test_run_product_analysis_activity_failure(monkeypatch, tmp_path, patched_jo
     assert job["status"] == js.JOB_STATUS_FAILED
 
 
+def test_run_product_analysis_activity_non_final_attempt_does_not_mark_failed(
+    monkeypatch, tmp_path, patched_job_store
+) -> None:
+    """Mirror of the frontend/backend non-final-attempt tests for product analysis."""
+    from software_engineering_team.shared import job_store as js
+    from software_engineering_team.temporal import activities
+
+    js.create_job("pa-retry", repo_path=str(tmp_path))
+
+    monkeypatch.setattr(activities.activity, "in_activity", lambda: True)
+    monkeypatch.setattr(activities.activity, "info", lambda: _fake_activity_info(attempt=1))
+
+    def boom(*a, **kw):
+        raise RuntimeError("transient PA failure")
+
+    monkeypatch.setattr(activities, "_run_product_analysis_impl", boom)
+    with pytest.raises(RuntimeError, match="transient PA failure"):
+        activities.run_product_analysis_activity("pa-retry", str(tmp_path), "spec")
+
+    job = js.get_job("pa-retry")
+    assert job["status"] != js.JOB_STATUS_FAILED
+
+
 def test_run_frontend_code_v2_activity_happy(monkeypatch, tmp_path, patched_job_store) -> None:
     from software_engineering_team.shared import job_store as js
     from software_engineering_team.temporal import activities
@@ -219,6 +242,27 @@ def test_parse_spec_activity_exception_path(
     failure_records = [r for r in caplog.records if "parse_spec_activity failed" in r.message]
     assert failure_records, "expected the failure log to be emitted"
     assert failure_records[-1].trace_id == "parse-spec-trace-id"
+
+
+def test_parse_spec_activity_non_final_attempt_does_not_mark_failed(
+    monkeypatch, tmp_path, patched_job_store
+) -> None:
+    """No spec file in repo → spec parser raises FileNotFoundError. On a non-final
+    Temporal attempt the job is NOT marked FAILED (Temporal will retry) — only the
+    final attempt marks it, mirroring the code-v2 activities' guard."""
+    from software_engineering_team.shared import job_store as js
+    from software_engineering_team.temporal import activities
+
+    js.create_job("ps-retry", repo_path=str(tmp_path))
+
+    monkeypatch.setattr(activities.activity, "in_activity", lambda: True)
+    monkeypatch.setattr(activities.activity, "info", lambda: _fake_activity_info(attempt=1))
+
+    with pytest.raises(Exception):
+        activities.parse_spec_activity("ps-retry", str(tmp_path), trace_id="parse-spec-retry")
+
+    job = js.get_job("ps-retry")
+    assert job["status"] != js.JOB_STATUS_FAILED
 
 
 def test_parse_spec_activity_with_sprint_id_matches_shared_helper_output(
@@ -351,6 +395,40 @@ def test_plan_project_activity_exception_path(monkeypatch, tmp_path, patched_job
         )
     job = js.get_job("pp-j")
     assert job["status"] == js.JOB_STATUS_FAILED
+
+
+def test_plan_project_activity_non_final_attempt_does_not_mark_failed(
+    monkeypatch, tmp_path, patched_job_store
+) -> None:
+    """Mirror of test_plan_project_activity_exception_path with a non-final Temporal
+    attempt: the job is NOT marked FAILED (Temporal will retry), only re-raised."""
+    from unittest.mock import MagicMock
+
+    from software_engineering_team.shared import job_store as js
+    from software_engineering_team.temporal import activities
+
+    js.create_job("pp-retry", repo_path=str(tmp_path))
+
+    monkeypatch.setenv("LLM_PROVIDER", "dummy")
+    monkeypatch.setattr(
+        "software_engineering_team.orchestrator._get_agents",
+        lambda: {"architecture": MagicMock()},
+    )
+    monkeypatch.setattr(activities.activity, "in_activity", lambda: True)
+    monkeypatch.setattr(activities.activity, "info", lambda: _fake_activity_info(attempt=1))
+
+    def boom(*a, **kw):
+        raise RuntimeError("transient planning failure")
+
+    monkeypatch.setattr("planning_team.orchestrator.run_workflow", boom)
+    with pytest.raises(RuntimeError):
+        activities.plan_project_activity(
+            "pp-retry",
+            str(tmp_path),
+            {"spec_content": "spec", "validated_spec": "spec", "plan_dir": str(tmp_path)},
+        )
+    job = js.get_job("pp-retry")
+    assert job["status"] != js.JOB_STATUS_FAILED
 
 
 def test_plan_project_activity_wires_lazy_architecture_callback(
