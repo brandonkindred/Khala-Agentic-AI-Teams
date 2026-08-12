@@ -190,12 +190,20 @@ _VIEW_REFS = [
     IndicatorRef(name="vwap", params={}),
 ]
 
+_MACD_VIEW_REFS = [
+    IndicatorRef(name="macd", params={"output": "signal"}),
+    IndicatorRef(name="macd", params={"output": "histogram"}),
+]
 
-def _measure_view_window(total_bars: int, lo: int, hi: int, max_bars: int = 500) -> float:
+
+def _measure_view_window(
+    total_bars: int, lo: int, hi: int, max_bars: int = 500, refs: List[IndicatorRef] = _VIEW_REFS
+) -> float:
     """Drive a view over ``total_bars`` and time the per-bar reads in ``[lo, hi)``.
 
-    Each measured bar reads all ten indicators at the trailing bar AND ``i - 1``
-    (the ``cross_*`` shape), the realistic engine workload.
+    Each measured bar reads every ref in ``refs`` at the trailing bar AND ``i - 1``
+    (the ``cross_*`` shape), the realistic engine workload. Defaults to all ten
+    ``_VIEW_REFS``; pass a narrower list to isolate a single indicator's cost.
     """
     view = StreamingHistoryView(max_bars=max_bars)
     rng = random.Random(23)
@@ -215,7 +223,7 @@ def _measure_view_window(total_bars: int, lo: int, hi: int, max_bars: int = 500)
         trailing = view.length() - 1
         measure = lo <= i < hi
         t0 = time.perf_counter() if measure else 0.0
-        for ref in _VIEW_REFS:
+        for ref in refs:
             view.indicator(ref, trailing)
             if trailing > 0:
                 view.indicator(ref, trailing - 1)
@@ -249,4 +257,35 @@ def test_streaming_view_per_bar_cost_is_flat_in_history() -> None:
         f"per-bar cost grew with history: late/early={ratio:.2f}x "
         f"(early={early * 1000:.1f}ms, late={late * 1000:.1f}ms) — "
         "the engine view should be O(window), independent of bars seen"
+    )
+
+
+def test_macd_view_per_bar_cost_is_flat_in_history() -> None:
+    """MACD signal/histogram reads alone must be O(1)-amortized per bar.
+
+    Isolates the MACD selects from ``test_streaming_view_per_bar_cost_is_flat_in_history``'s
+    mixed 10-indicator workload — the incremental signal-line EMA step (see
+    ``IndicatorRegistry._macd_value``) must keep per-bar cost flat as total
+    history grows, consistent with the other streaming indicators (OBV, MFI,
+    Bollinger, etc.) that already maintain O(1)-amortized state instead of
+    re-walking the full ``macd_line`` deque on every read.
+    """
+    window = 100
+    early = _measure_view_window(2200, 600, 600 + window, refs=_MACD_VIEW_REFS)
+    late = _measure_view_window(2200, 2100, 2100 + window, refs=_MACD_VIEW_REFS)
+    ratio = late / max(early, 1e-9)
+    if os.environ.get("BENCH_STREAMING_INDICATORS_VERBOSE"):
+        print(
+            f"\nMACD signal/histogram per-bar cost (100 bars): "
+            f"early[600:700]={early * 1000:6.1f} ms   "
+            f"late[2100:2200]={late * 1000:6.1f} ms   "
+            f"late/early={ratio:5.2f}x"
+        )
+    # Flat within noise: late steady-state cost stays close to the early one.
+    # A regression to a per-bar full-macd_line-deque recompute would blow this
+    # well past 2x as history accumulates.
+    assert ratio < 2.0, (
+        f"MACD per-bar cost grew with history: late/early={ratio:.2f}x "
+        f"(early={early * 1000:.1f}ms, late={late * 1000:.1f}ms) — "
+        "MACD signal/histogram reads should be O(1)-amortized, independent of bars seen"
     )
