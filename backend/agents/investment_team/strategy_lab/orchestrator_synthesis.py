@@ -54,10 +54,12 @@ from ..trading_service.modes.sandbox_compat import StrategyRunResult
 from ._orchestrator_helpers import (
     RefinementStallTracker,
     _attach_execution_diagnostics,
+    _critical_failures,
     _DesignAttemptState,
     _DesignPersistContext,
     _DriftCollector,
     _format_execution_diagnostics,
+    _has_critical_failures,
     _MarketDataFetch,
     _maybe_attach_coverage_report,
     _round_demoted_conformance,
@@ -190,7 +192,7 @@ class SynthesisMixin:
         ]
         self.record_gates(pre_spec_gates, all_gate_results, refinement_round=-1)
 
-        criticals = [g for g in pre_spec_gates if not g.passed and g.severity == "critical"]
+        criticals = _critical_failures(pre_spec_gates)
         if not criticals:
             return None
 
@@ -392,9 +394,7 @@ class SynthesisMixin:
             checks_total = len(round_gate_results)
             checks_passed = sum(1 for g in round_gate_results if g.passed)
 
-            critical_failures = [
-                g for g in round_gate_results if not g.passed and g.severity == "critical"
-            ]
+            critical_failures = _critical_failures(round_gate_results)
             if critical_failures:
                 emit(
                     "coding",
@@ -527,7 +527,7 @@ class SynthesisMixin:
 
             trade_coverage_gates = self.target_symbol_coverage_gate.check_trades(spec, trades)
             self.record_gates(trade_coverage_gates, all_gate_results, refinement_round=round_num)
-            if any(not g.passed and g.severity == "critical" for g in trade_coverage_gates):
+            if _has_critical_failures(trade_coverage_gates):
                 max_rounds_exhausted = True
                 break
 
@@ -676,14 +676,14 @@ class SynthesisMixin:
         # (spec readiness, code safety, code conformance) is clean. Checking
         # code that an earlier gate already flagged as critical adds noisy
         # rule_id criticals on top of the cleaner upstream critical.
-        if not any(not g.passed and g.severity == "critical" for g in round_gate_results):
+        if not _has_critical_failures(round_gate_results):
             pred_conf_gates = self.predicate_conformance_gate.check(
                 code,
                 spec,
                 attempt=predicate_conformance_attempts,
             )
             round_gate_results.extend(pred_conf_gates)
-            if any(not g.passed and g.severity == "critical" for g in pred_conf_gates):
+            if _has_critical_failures(pred_conf_gates):
                 predicate_conformance_attempts += 1
         self.record_gates(round_gate_results, all_gate_results, refinement_round=round_num)
         return round_gate_results, predicate_conformance_attempts
@@ -743,7 +743,7 @@ class SynthesisMixin:
             spec, requested_symbols, fetched_symbols
         )
         self.record_gates(fetch_coverage_gates, all_gate_results, refinement_round=round_num)
-        should_break = any(not g.passed and g.severity == "critical" for g in fetch_coverage_gates)
+        should_break = _has_critical_failures(fetch_coverage_gates)
         return _MarketDataFetch(
             data=market_data,
             requested_symbols=requested_symbols,
@@ -818,7 +818,7 @@ class SynthesisMixin:
         )
         self.record_gates(anomaly_gates, all_gate_results, refinement_round=round_num)
 
-        critical_anomalies = [g for g in anomaly_gates if not g.passed and g.severity == "critical"]
+        critical_anomalies = _critical_failures(anomaly_gates)
         if critical_anomalies:
             recovery = self._handle_critical_anomalies(
                 spec=spec,
