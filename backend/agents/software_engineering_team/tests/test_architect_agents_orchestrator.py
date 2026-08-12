@@ -17,6 +17,7 @@ from agents.data_streaming import data_streaming_architect
 from agents.devops import devops_architect
 from agents.observability import observability_architect
 from agents.orchestrator import create_orchestrator
+from agents.prompts import ORCHESTRATOR_PROMPT
 from agents.security import security_architect
 from tools import aws_pricing_tool, document_writer_tool, file_read_tool, web_search_tool
 
@@ -86,12 +87,10 @@ def test_create_orchestrator_model_env_override(monkeypatch, fake_agent) -> None
     assert fake_agent.last_kwargs["model"] == "custom.model.id"
 
 
-def test_create_orchestrator_prompt_loaded_from_file(fake_agent) -> None:
-    expected_prompt = orchestrator_mod._PROMPT_PATH.read_text(encoding="utf-8")
-
+def test_create_orchestrator_prompt_matches_constant(fake_agent) -> None:
     create_orchestrator()
 
-    assert fake_agent.last_kwargs["system_prompt"] == expected_prompt
+    assert fake_agent.last_kwargs["system_prompt"] == ORCHESTRATOR_PROMPT
 
 
 def test_create_orchestrator_tools_list_composition(fake_agent) -> None:
@@ -124,11 +123,4 @@ def test_create_orchestrator_agent_construction_failure_propagates(monkeypatch) 
     monkeypatch.setattr(orchestrator_mod, "Agent", _FakeAgentBoom)
 
     with pytest.raises(RuntimeError, match="boom"):
-        create_orchestrator()
-
-
-def test_create_orchestrator_missing_prompt_file_raises(monkeypatch, tmp_path) -> None:
-    monkeypatch.setattr(orchestrator_mod, "_PROMPT_PATH", tmp_path / "missing.md")
-
-    with pytest.raises(FileNotFoundError):
         create_orchestrator()
