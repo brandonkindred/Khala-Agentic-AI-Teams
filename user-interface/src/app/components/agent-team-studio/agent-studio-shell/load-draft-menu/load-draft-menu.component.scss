@@ -1,0 +1,62 @@
+// The host wraps only the trigger button + `mat-menu` template — neither
+// participates in the shell's `.studio__draft-actions` flex layout as a box,
+// so it must not introduce one of its own.
+:host {
+  display: contents;
+}
+
+// Duplicated from the shell's `.studio__draft-btn` rule: view encapsulation
+// means that rule doesn't reach this component's own template.
+.studio__draft-btn {
+  font-size: 0.8125rem;
+}
+
+.load-draft-menu {
+  &__loading,
+  &__empty,
+  &__error {
+    margin: 0;
+    padding: 8px 16px;
+    color: var(--kh-text-muted);
+    font-size: 0.85rem;
+  }
+
+  &__loading {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  &__error {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    color: var(--mat-sys-error, #b00020);
+
+    mat-icon {
+      font-size: 18px;
+      height: 18px;
+      width: 18px;
+    }
+  }
+
+  &__name {
+    display: block;
+    font-weight: 600;
+  }
+
+  &__when {
+    display: block;
+    font-size: 0.75rem;
+    color: var(--kh-text-muted);
+  }
+
+  &__more {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    width: calc(100% - 16px);
+    margin: 4px 8px 8px;
+  }
+}

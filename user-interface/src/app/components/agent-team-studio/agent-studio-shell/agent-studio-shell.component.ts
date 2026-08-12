@@ -1,20 +1,36 @@
-import { ChangeDetectionStrategy, Component, computed, inject } from '@angular/core';
+import { ChangeDetectionStrategy, Component, computed, inject, signal } from '@angular/core';
 import { MatButtonModule } from '@angular/material/button';
 import { MatDialog, MatDialogModule } from '@angular/material/dialog';
 import { MatIconModule } from '@angular/material/icon';
 import { MatTooltipModule } from '@angular/material/tooltip';
+import type { AgentStudioDraft } from '../../../models/agent-studio.model';
 import { STUDIO_STAGES } from '../../../models/agent-studio.model';
+import { AgentStudioApiService } from '../../../services/agent-studio-api.service';
 import { AgentStudioStateService } from '../../../services/agent-studio-state.service';
+import { AgenticTeamApiService } from '../../../services/agentic-team-api.service';
 import { AgentStudioBuildAgentComponent } from './agent-studio-build-agent.component';
 import { AgentStudioComposeTeamComponent } from './agent-studio-compose-team.component';
 import { AgentStudioPersonaComponent } from './agent-studio-persona.component';
 import { AgentStudioStagePlaceholderComponent } from './agent-studio-stage-placeholder.component';
 import { AgentStudioTestAgentComponent } from './agent-studio-test-agent.component';
+import { LoadDraftMenuComponent } from './load-draft-menu/load-draft-menu.component';
 import {
   SaveDraftDialogComponent,
   type SaveDraftDialogData,
   type SaveDraftDialogResult,
 } from './save-draft-dialog/save-draft-dialog.component';
+
+/** Stage indices for `navigateToStage` (mirrors `agent-studio-persona.component.ts`'s convention). */
+const STAGE_BUILD = 0;
+const STAGE_TEST = 1;
+const STAGE_COMPOSE = 2;
+const STAGE_PERSONAS = 3;
+
+/** `draft.payload` is an opaque, backend-unvalidated blob (spec §3.5) — never
+ *  trust a field's type without checking it first. */
+function asNullableString(value: unknown): string | null {
+  return typeof value === 'string' ? value : null;
+}
 
 /**
  * Agent Studio shell — the single `/agent-studio` surface (spec §2.1). Renders
@@ -36,6 +52,7 @@ import {
     AgentStudioPersonaComponent,
     AgentStudioStagePlaceholderComponent,
     AgentStudioTestAgentComponent,
+    LoadDraftMenuComponent,
   ],
   changeDetection: ChangeDetectionStrategy.OnPush,
   providers: [AgentStudioStateService],
@@ -45,6 +62,11 @@ import {
 export class AgentStudioShellComponent {
   readonly state = inject(AgentStudioStateService);
   private readonly dialog = inject(MatDialog);
+  private readonly api = inject(AgentStudioApiService);
+  private readonly agenticTeamApi = inject(AgenticTeamApiService);
+
+  /** True while a Load-draft selection is being fetched and hydrated. */
+  readonly loadingDraft = signal(false);
   /** The forward-only stage list rendered by the stepper. */
   readonly stages = STUDIO_STAGES;
 
@@ -149,5 +171,81 @@ export class AgentStudioShellComponent {
       if (!result) return;
       this.state.setCurrentDraft(result.draft_id, result.name);
     });
+  }
+
+  /**
+   * Load a saved draft and hydrate the session from it (spec §3.5). No
+   * unsaved-local-edit conflict check is performed here — that guard is
+   * sibling issue #5914's responsibility; this loads directly.
+   *
+   * Preconditions: `draftId` names a draft the current user owns (rows in
+   *   `LoadDraftMenuComponent` only ever come from that user's own list).
+   * Postconditions: on success, `state` is hydrated from the draft's payload
+   *   and the stepper is moved to the furthest reachable stage. On failure,
+   *   `loadingDraft()` returns to `false` and `state` is unchanged (surfaced
+   *   via the global HTTP error toast, not a bespoke inline banner — the
+   *   triggering menu has already closed by the time this runs).
+   */
+  loadDraft(draftId: string): void {
+    if (this.loadingDraft()) return;
+    this.loadingDraft.set(true);
+    this.api.getDraft(draftId).subscribe({
+      next: (draft) => {
+        this.hydrateFromDraft(draft);
+        this.loadingDraft.set(false);
+      },
+      error: () => {
+        this.loadingDraft.set(false);
+      },
+    });
+  }
+
+  private hydrateFromDraft(draft: AgentStudioDraft): void {
+    this.state.setCurrentDraft(draft.draft_id, draft.name);
+    const payload = draft.payload;
+    this.state.setRegistryAgentId(asNullableString(payload['registryAgentId']));
+    this.state.setTeamId(asNullableString(payload['teamId']));
+    this.state.setProcessId(asNullableString(payload['processId']));
+    this.state.setPersonaId(asNullableString(payload['personaId']));
+    this.state.setDraftAgentId(asNullableString(payload['draftAgentId']));
+    this.resolveFurthestStage();
+  }
+
+  /**
+   * Move the stepper to the furthest stage the just-hydrated state supports
+   * (spec §3.5's "furthest reachable stage" rule, restricted to what's
+   * actually persisted today — no `stage1AgentDraft`, so Stage 1 always
+   * resumes at its default "Start" sub-stage).
+   *
+   * Deliberately does not call `setRosterFullyStaffed`: the spec is explicit
+   * that Stage-4 reachability on load depends only on the process being
+   * complete, not a fresh roster-staffed re-check ("the persisted
+   * teamId/processId already passed the gate when saved, and Stage 4's own
+   * safety net re-checks testability"). A stale `rosterFullyStaffed` from an
+   * unrelated earlier session action is an accepted, spec-mandated tradeoff,
+   * not an oversight.
+   */
+  private resolveFurthestStage(): void {
+    const teamId = this.state.teamId();
+    const processId = this.state.processId();
+    if (teamId && processId) {
+      this.agenticTeamApi.getProcess(processId).subscribe({
+        next: (process) => {
+          this.state.setComposeProcessStatus(process.status);
+          this.state.navigateToStage(process.status === 'complete' ? STAGE_PERSONAS : STAGE_COMPOSE);
+        },
+        // The process may have been deleted/archived since the draft was
+        // saved — fall back one stage rather than failing the whole load.
+        error: () => this.state.navigateToStage(STAGE_COMPOSE),
+      });
+      return;
+    }
+    if (teamId) {
+      this.state.navigateToStage(STAGE_COMPOSE);
+    } else if (this.state.registryAgentId()) {
+      this.state.navigateToStage(STAGE_TEST);
+    } else {
+      this.state.navigateToStage(STAGE_BUILD);
+    }
   }
 }

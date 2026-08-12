@@ -1,0 +1,51 @@
+<button
+  mat-stroked-button
+  type="button"
+  class="studio__draft-btn"
+  [matMenuTriggerFor]="menu"
+  [disabled]="busy"
+>
+  Load draft ▾
+</button>
+
+<mat-menu #menu="matMenu" (opened)="onOpened()" class="load-draft-menu__panel">
+  @if (loading() && drafts().length === 0) {
+    <div class="load-draft-menu__loading">
+      <mat-spinner diameter="20" />
+      <span>Loading…</span>
+    </div>
+  }
+
+  @if (error() && drafts().length === 0) {
+    <p class="load-draft-menu__error" role="alert">
+      <mat-icon>error</mat-icon>
+      {{ error() }}
+    </p>
+  }
+
+  @if (!loading() && !error() && drafts().length === 0) {
+    <p class="load-draft-menu__empty">No saved drafts yet.</p>
+  }
+
+  @for (draft of drafts(); track draft.draft_id) {
+    <button mat-menu-item type="button" (click)="select(draft.draft_id)">
+      <span class="load-draft-menu__name">{{ draft.name }}</span>
+      <span class="load-draft-menu__when">{{ draft.updated_at | date: 'medium' }}</span>
+    </button>
+  }
+
+  @if (hasMore()) {
+    <button
+      mat-stroked-button
+      type="button"
+      class="load-draft-menu__more"
+      [disabled]="loading()"
+      (click)="loadMore()"
+    >
+      @if (loading()) {
+        <mat-spinner diameter="16" />
+      }
+      Show older
+    </button>
+  }
+</mat-menu>
