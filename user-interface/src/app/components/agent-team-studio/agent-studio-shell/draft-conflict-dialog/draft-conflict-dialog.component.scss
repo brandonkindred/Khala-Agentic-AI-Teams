@@ -1,0 +1,36 @@
+:host {
+  display: block;
+  --mdc-dialog-container-color: var(--kh-surface-2);
+  --mdc-dialog-subhead-color: var(--kh-text-primary);
+  --mdc-dialog-supporting-text-color: var(--kh-text-secondary);
+}
+
+.draft-conflict-dialog__title {
+  color: var(--kh-text-primary);
+  font-family: var(--kh-font-sans);
+  font-weight: 600;
+  font-size: var(--kh-text-lg);
+  margin: 0;
+  padding-bottom: var(--kh-space-2);
+}
+
+.draft-conflict-dialog__content {
+  color: var(--kh-text-secondary);
+  font-family: var(--kh-font-sans);
+  font-size: var(--kh-text-base);
+  line-height: 1.5;
+
+  p {
+    margin: 0;
+  }
+}
+
+.draft-conflict-dialog__actions {
+  padding-top: var(--kh-space-3);
+  gap: var(--kh-space-2);
+}
+
+.draft-conflict-dialog__discard {
+  background-color: var(--kh-warning) !important;
+  color: var(--kh-surface-0) !important;
+}
