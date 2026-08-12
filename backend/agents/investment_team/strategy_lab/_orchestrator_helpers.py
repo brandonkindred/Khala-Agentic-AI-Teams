@@ -238,25 +238,25 @@ class _DesignAttemptState:
     until that is scoped, this stays the narrow 4-tuple base.
 
     Preconditions:
-      - ``spec`` is the ``StrategySpec`` in effect at the point this state
-        was captured (may be pre- or post-refinement depending on caller).
+      - ``spec`` is the ``StrategySpec`` in effect, or just proposed for the
+        next round, at the point this state was captured.
       - ``code`` is the strategy Python source associated with ``spec`` at
         that same point (empty string only before code synthesis has run).
-      - ``trades`` and ``metrics`` were produced by executing ``code``
-        against ``spec`` — i.e. they are mutually consistent with each
-        other and with ``spec``/``code``, never a stale pairing from a
-        different round.
+      - ``trades`` and ``metrics`` reflect the most recent completed
+        execution known to the caller. In the common case they were
+        produced by executing this same ``code`` against this same
+        ``spec``; some transitional states instead pair a next-round
+        ``spec``/``code`` proposal with the prior round's ``trades``/
+        ``metrics`` (e.g. ``_AnomalyRecoveryOutcome``'s generic-refinement
+        return, where the refined ``spec``/``code`` haven't executed yet).
+        Each subclass's own docstring is authoritative on which case
+        applies to its construction sites.
 
     Postconditions:
       - None beyond dataclass field-type declarations; this is a plain
         data container and performs no validation.
 
     Invariants:
-      - The four fields always describe the same design-attempt round's
-        spec/code/execution for the instance's lifetime; subclasses may
-        replace all four together (e.g. when a loop commits a new
-        proposal) but must never update one field without the other three
-        that are consistent with it.
       - Not frozen: every subclass in this module and its sibling mixin
         modules is a plain (non-frozen) dataclass, and a frozen base
         cannot be subclassed by a non-frozen dataclass.

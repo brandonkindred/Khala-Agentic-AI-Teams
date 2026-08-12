@@ -87,9 +87,13 @@ class _AnomalyRecoveryOutcome(_DesignAttemptState):
     - ``exhausted=True`` ⇒ caller breaks the synthesis loop with
       ``max_rounds_exhausted=True``; the spec/code/trades/metrics fields
       carry the last failed-round values (callers should not commit them).
-    - ``exhausted=False`` ⇒ caller continues to the next round; the
-      spec/code/trades/metrics/exec_result fields carry the new known-good
-      state (either ZTR-committed proposal or generic-refined source).
+    - ``exhausted=False`` ⇒ caller continues to the next round. On the
+      zero-trade-repair path, ``spec``/``code``/``trades``/``metrics``/
+      ``exec_result`` all carry the freshly executed, mutually consistent
+      repair state. On the generic-refinement path, only ``spec``/``code``
+      carry the new (not-yet-executed) proposal for the next round;
+      ``trades``/``metrics``/``exec_result`` still carry the current
+      round's values, since the refined code hasn't run yet.
     """
 
     exec_result: StrategyRunResult
