@@ -25,6 +25,7 @@ from branding_team.models import (
     TeamOutput,
 )
 from branding_team.shared.job_store import JOB_STATUS_PENDING
+from shared.job_contracts import JobListItemBase, JobStatusResponseBase
 
 # ---------------------------------------------------------------------------
 # Client / brand request models
@@ -287,31 +288,20 @@ class AttachConversationBrandRequest(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-class RunBrandJobResponse(BaseModel):
-    job_id: str
+class RunBrandJobResponse(JobStatusResponseBase):
     status: str = JOB_STATUS_PENDING
 
 
-class BrandJobStatusResponse(BaseModel):
-    job_id: str
-    status: str
+class BrandJobStatusResponse(JobStatusResponseBase):
     client_id: Optional[str] = None
     brand_id: Optional[str] = None
     current_phase: Optional[str] = None
-    progress: Optional[int] = None
     result: Optional[Dict[str, Any]] = None
-    error: Optional[str] = None
-    created_at: Optional[str] = None
-    updated_at: Optional[str] = None
 
 
-class BrandJobListItem(BaseModel):
-    job_id: str
-    status: str
+class BrandJobListItem(JobListItemBase):
     client_id: Optional[str] = None
     brand_id: Optional[str] = None
-    created_at: Optional[str] = None
-    updated_at: Optional[str] = None
 
 
 class BrandJobListResponse(BaseModel):

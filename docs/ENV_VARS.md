@@ -500,6 +500,12 @@ Retention window (by `last_seen`) for `se_learnings` rows used by
 diagnostics and a memory watchdog; `team_service/entrypoint.py` controls how many
 workers run. See `backend/shared/observability/process_health.py`.
 
+The `khala` (unified-api) service is not a `team_service` worker and is sized
+separately — its container `mem_limit`/`mem_reservation` in `docker-compose.yml`,
+the RSS-measurement tooling and methodology, and the current findings (a
+reasoned estimate pending a live measurement) are documented in
+[`docker/README.md`](../docker/README.md)'s "Memory / RSS Measurement" section.
+
 ### TEAM_WORKERS
 uvicorn worker processes per team service (default 2; parsed defensively, clamped
 to `[1, 16]`). Each worker is a full Python interpreter loading the whole app, so
