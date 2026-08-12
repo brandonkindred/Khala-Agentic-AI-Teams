@@ -1,0 +1,362 @@
+"""Direct-call tests for ``dbc_phase.py``'s two functions.
+
+Calls ``run_dbc_comments_review``/``_run_dbc_self_review`` directly rather
+than through ``run_gated_execution_impl`` -- this module is not yet wired
+into the gated loop (that's sibling work), so its tests exercise it in
+isolation, per the module's own docstring.
+"""
+
+from __future__ import annotations
+
+from types import SimpleNamespace
+from typing import Any, Dict, Optional
+
+from software_engineering_team.shared.phases import dbc_phase
+from software_engineering_team.shared.phases.dbc_phase import (
+    _run_dbc_self_review,
+    run_dbc_comments_review,
+)
+from software_engineering_team.shared.phases.execution import ReviewDependencies
+from software_engineering_team.technical_writers.dbc_comments_agent.models import (
+    DbcCommentsOutput,
+    DbcCommentsStatus,
+)
+
+
+def _task() -> SimpleNamespace:
+    return SimpleNamespace(id="t1", title="T", description="do the thing")
+
+
+def _microtask(mid: str = "mt-1") -> SimpleNamespace:
+    return SimpleNamespace(id=mid, title="Microtask", output_files={})
+
+
+def _gate_config(run_dbc_self_review) -> SimpleNamespace:
+    return SimpleNamespace(run_dbc_self_review=run_dbc_self_review)
+
+
+def _call(
+    *,
+    tmp_path,
+    gate_config,
+    mt=None,
+    microtask_files=None,
+    all_files=None,
+    deps=None,
+    build_verify_label: str = "build",
+    progress_callback=None,
+    completed_ids=None,
+):
+    mt = mt if mt is not None else _microtask()
+    microtask_files = microtask_files if microtask_files is not None else {}
+    all_files = all_files if all_files is not None else {}
+    deps = deps if deps is not None else ReviewDependencies()
+    completed_ids = completed_ids if completed_ids is not None else set()
+    calls = []
+    _run_dbc_self_review(
+        gate_config=gate_config,
+        task=_task(),
+        task_id="t1",
+        mt=mt,
+        microtask_files=microtask_files,
+        repo_path=tmp_path,
+        all_files=all_files,
+        architecture=None,
+        language="python",
+        deps=deps,
+        build_verify_label=build_verify_label,
+        progress_callback=progress_callback,
+        current_idx=0,
+        completed_ids=completed_ids,
+        total=1,
+        detail_cb=lambda d, idx, phase: calls.append((d, idx, phase)),
+    )
+    return mt, microtask_files, all_files, calls
+
+
+# ---------------------------------------------------------------------------
+# run_dbc_comments_review
+# ---------------------------------------------------------------------------
+
+
+class _FakeAgent:
+    """Stand-in for DbcCommentsAgent, capturing its constructor/.run() calls."""
+
+    last_input: Optional[Any] = None
+    last_on_status: Optional[Any] = None
+    result: DbcCommentsOutput = DbcCommentsOutput()
+    status_events: tuple = ()
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        pass
+
+    def run(self, input_data: Any, on_status: Optional[Any] = None) -> DbcCommentsOutput:
+        type(self).last_input = input_data
+        type(self).last_on_status = on_status
+        for status, detail in type(self).status_events:
+            if on_status:
+                on_status(status, detail)
+        return type(self).result
+
+
+def test_run_dbc_comments_review_concatenates_with_headers(monkeypatch):
+    _FakeAgent.result = DbcCommentsOutput(files={"a.py": "# dbc\n"})
+    monkeypatch.setattr(dbc_phase, "DbcCommentsAgent", _FakeAgent)
+
+    result = run_dbc_comments_review(code={"a.py": "x", "b.py": "y"}, language="python")
+
+    assert _FakeAgent.last_input.code == "### a.py ###\nx\n\n### b.py ###\ny"
+    assert _FakeAgent.last_input.language == "python"
+    assert result.files == {"a.py": "# dbc\n"}
+
+
+def test_run_dbc_comments_review_bridges_detail_callback(monkeypatch):
+    _FakeAgent.result = DbcCommentsOutput()
+    _FakeAgent.status_events = ((DbcCommentsStatus.ANALYZING_CODE, "chunk 1/1"),)
+    monkeypatch.setattr(dbc_phase, "DbcCommentsAgent", _FakeAgent)
+
+    received = []
+    run_dbc_comments_review(code={"a.py": "x"}, detail_callback=received.append)
+
+    assert received == ["chunk 1/1"]
+    _FakeAgent.status_events = ()
+
+
+def test_run_dbc_comments_review_no_callback_passes_no_on_status(monkeypatch):
+    _FakeAgent.result = DbcCommentsOutput()
+    monkeypatch.setattr(dbc_phase, "DbcCommentsAgent", _FakeAgent)
+
+    run_dbc_comments_review(code={"a.py": "x"})
+
+    assert _FakeAgent.last_on_status is None
+
+
+def test_run_dbc_comments_review_empty_code_dict(monkeypatch):
+    _FakeAgent.result = DbcCommentsOutput(already_compliant=True, summary="No code to review.")
+    monkeypatch.setattr(dbc_phase, "DbcCommentsAgent", _FakeAgent)
+
+    result = run_dbc_comments_review(code={})
+
+    assert _FakeAgent.last_input.code == ""
+    assert result.already_compliant is True
+
+
+def test_run_dbc_comments_review_construction_exception_is_swallowed(monkeypatch):
+    def _raise(*args: Any, **kwargs: Any) -> Any:
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(dbc_phase, "DbcCommentsAgent", _raise)
+
+    result = run_dbc_comments_review(code={"a.py": "x"})
+
+    assert result.already_compliant is False
+    assert "boom" in result.summary
+
+
+def test_run_dbc_comments_review_run_exception_is_swallowed(monkeypatch):
+    class _RaisingAgent:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            pass
+
+        def run(self, *args: Any, **kwargs: Any) -> DbcCommentsOutput:
+            raise RuntimeError("run boom")
+
+    monkeypatch.setattr(dbc_phase, "DbcCommentsAgent", _RaisingAgent)
+
+    result = run_dbc_comments_review(code={"a.py": "x"})
+
+    assert result.already_compliant is False
+    assert "run boom" in result.summary
+
+
+# ---------------------------------------------------------------------------
+# _run_dbc_self_review
+# ---------------------------------------------------------------------------
+
+
+def test_dbc_self_review_writes_and_merges_files(tmp_path):
+    def _review(*, code, **kwargs: Any) -> SimpleNamespace:
+        assert code == {"a.py": "def f(): pass\n"}
+        return SimpleNamespace(files={"a.py": "# dbc\ndef f(): pass\n"})
+
+    mt = _microtask()
+    microtask_files = {"a.py": "def f(): pass\n"}
+    all_files = {"a.py": "def f(): pass\n"}
+    progress_calls = []
+
+    mt, microtask_files, all_files, detail_calls = _call(
+        tmp_path=tmp_path,
+        gate_config=_gate_config(_review),
+        mt=mt,
+        microtask_files=microtask_files,
+        all_files=all_files,
+        progress_callback=lambda *a: progress_calls.append(a),
+    )
+
+    assert (tmp_path / "a.py").read_text() == "# dbc\ndef f(): pass\n"
+    assert microtask_files["a.py"] == "# dbc\ndef f(): pass\n"
+    assert all_files["a.py"] == "# dbc\ndef f(): pass\n"
+    assert mt.output_files["a.py"] == "# dbc\ndef f(): pass\n"
+    assert not hasattr(mt, "status")
+    assert progress_calls and progress_calls[0][4] == "dbc"
+
+
+def test_dbc_self_review_unsafe_path_skipped_atomically(tmp_path):
+    def _review(*, code, **kwargs: Any) -> SimpleNamespace:
+        return SimpleNamespace(files={"a.py": "safe", "../escape.py": "evil"})
+
+    microtask_files = {"a.py": "orig"}
+    all_files = {"a.py": "orig"}
+
+    mt, microtask_files, all_files, _ = _call(
+        tmp_path=tmp_path,
+        gate_config=_gate_config(_review),
+        microtask_files=microtask_files,
+        all_files=all_files,
+    )
+
+    assert not (tmp_path / "a.py").exists()
+    assert microtask_files == {"a.py": "orig"}
+    assert all_files == {"a.py": "orig"}
+
+
+def test_dbc_self_review_gate_config_exception_is_swallowed(tmp_path):
+    def _raises(*, code, **kwargs: Any) -> Any:
+        raise RuntimeError("stub boom")
+
+    microtask_files = {"a.py": "orig"}
+
+    mt, microtask_files, all_files, _ = _call(
+        tmp_path=tmp_path,
+        gate_config=_gate_config(_raises),
+        microtask_files=microtask_files,
+    )
+
+    assert microtask_files == {"a.py": "orig"}
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_dbc_self_review_no_changes_is_noop(tmp_path):
+    def _review(*, code, **kwargs: Any) -> SimpleNamespace:
+        return SimpleNamespace(files={})
+
+    microtask_files = {"a.py": "orig"}
+
+    mt, microtask_files, all_files, _ = _call(
+        tmp_path=tmp_path,
+        gate_config=_gate_config(_review),
+        microtask_files=microtask_files,
+    )
+
+    assert microtask_files == {"a.py": "orig"}
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_dbc_self_review_no_build_verifier_skips_verification(tmp_path):
+    def _review(*, code, **kwargs: Any) -> SimpleNamespace:
+        return SimpleNamespace(files={"a.py": "dbc a\n"})
+
+    mt, microtask_files, all_files, _ = _call(
+        tmp_path=tmp_path,
+        gate_config=_gate_config(_review),
+        microtask_files={"a.py": "orig a\n"},
+        deps=ReviewDependencies(),
+    )
+
+    assert microtask_files["a.py"] == "dbc a\n"
+    assert (tmp_path / "a.py").read_text() == "dbc a\n"
+
+
+def test_dbc_self_review_build_verifier_success_keeps_files(tmp_path):
+    def _review(*, code, **kwargs: Any) -> SimpleNamespace:
+        return SimpleNamespace(files={"a.py": "dbc a\n"})
+
+    verifier_calls = []
+
+    def _verify(repo_path, label, task_id):
+        verifier_calls.append((repo_path, label, task_id))
+        return True, "ok"
+
+    mt, microtask_files, all_files, _ = _call(
+        tmp_path=tmp_path,
+        gate_config=_gate_config(_review),
+        microtask_files={"a.py": "orig a\n"},
+        deps=ReviewDependencies(build_verifier=_verify),
+        build_verify_label="my-build",
+    )
+
+    assert microtask_files["a.py"] == "dbc a\n"
+    assert (tmp_path / "a.py").read_text() == "dbc a\n"
+    assert verifier_calls == [(tmp_path, "my-build", "t1")]
+
+
+def test_dbc_self_review_build_verifier_failure_reverts_only_touched_files(tmp_path):
+    (tmp_path / "a.py").write_text("orig a\n")
+    (tmp_path / "untouched.py").write_text("orig u\n")
+
+    def _review(*, code, **kwargs: Any) -> SimpleNamespace:
+        return SimpleNamespace(files={"a.py": "dbc a\n", "new.py": "dbc new\n"})
+
+    microtask_files = {"a.py": "orig a\n", "untouched.py": "orig u\n"}
+    all_files = {"a.py": "orig a\n", "untouched.py": "orig u\n"}
+    mt = _microtask()
+    mt.output_files = dict(microtask_files)
+
+    mt, microtask_files, all_files, _ = _call(
+        tmp_path=tmp_path,
+        gate_config=_gate_config(_review),
+        mt=mt,
+        microtask_files=microtask_files,
+        all_files=all_files,
+        deps=ReviewDependencies(build_verifier=lambda repo, label, tid: (False, "build broke")),
+    )
+
+    assert (tmp_path / "a.py").read_text() == "orig a\n"
+    assert not (tmp_path / "new.py").exists()
+    assert (tmp_path / "untouched.py").read_text() == "orig u\n"
+    assert microtask_files == {"a.py": "orig a\n", "untouched.py": "orig u\n"}
+    assert all_files == {"a.py": "orig a\n", "untouched.py": "orig u\n"}
+    assert mt.output_files == {"a.py": "orig a\n", "untouched.py": "orig u\n"}
+
+
+def test_dbc_self_review_build_verifier_raises_reverts(tmp_path):
+    (tmp_path / "a.py").write_text("orig a\n")
+
+    def _review(*, code, **kwargs: Any) -> SimpleNamespace:
+        return SimpleNamespace(files={"a.py": "dbc a\n"})
+
+    def _raises(repo, label, tid):
+        raise RuntimeError("verifier boom")
+
+    microtask_files = {"a.py": "orig a\n"}
+
+    mt, microtask_files, all_files, _ = _call(
+        tmp_path=tmp_path,
+        gate_config=_gate_config(_review),
+        microtask_files=microtask_files,
+        deps=ReviewDependencies(build_verifier=_raises),
+    )
+
+    assert (tmp_path / "a.py").read_text() == "orig a\n"
+    assert microtask_files == {"a.py": "orig a\n"}
+
+
+def test_dbc_self_review_build_verifier_reverts_key_absent_before(tmp_path):
+    def _review(*, code, **kwargs: Any) -> SimpleNamespace:
+        return SimpleNamespace(files={"a.py": "dbc a\n"})
+
+    microtask_files: Dict[str, str] = {}
+    all_files: Dict[str, str] = {}
+
+    mt, microtask_files, all_files, _ = _call(
+        tmp_path=tmp_path,
+        gate_config=_gate_config(_review),
+        microtask_files=microtask_files,
+        all_files=all_files,
+        deps=ReviewDependencies(build_verifier=lambda repo, label, tid: (False, "broke")),
+    )
+
+    assert "a.py" not in microtask_files
+    assert "a.py" not in all_files
+    assert "a.py" not in mt.output_files
+    assert not (tmp_path / "a.py").exists()
