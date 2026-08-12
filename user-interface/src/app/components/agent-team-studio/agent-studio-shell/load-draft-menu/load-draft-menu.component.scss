@@ -1,3 +1,5 @@
+@use '../draft-btn';
+
 // The host wraps only the trigger button + `mat-menu` template — neither
 // participates in the shell's `.studio__draft-actions` flex layout as a box,
 // so it must not introduce one of its own.
@@ -5,10 +7,12 @@
   display: contents;
 }
 
-// Duplicated from the shell's `.studio__draft-btn` rule: view encapsulation
-// means that rule doesn't reach this component's own template.
+// Same shared look as the shell's `.studio__draft-btn` rule (`draft-btn.scss`)
+// — view encapsulation means that rule doesn't reach this component's own
+// template, so it still needs its own selector, but the property lives in
+// one place.
 .studio__draft-btn {
-  font-size: 0.8125rem;
+  @include draft-btn.look;
 }
 
 .load-draft-menu {
