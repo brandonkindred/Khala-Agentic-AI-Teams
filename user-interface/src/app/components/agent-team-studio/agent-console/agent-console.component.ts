@@ -6,7 +6,7 @@ import { MatButtonModule } from '@angular/material/button';
 import { AgentCatalogComponent } from './agent-catalog/agent-catalog.component';
 import { AgentRunnerComponent } from './agent-runner/agent-runner.component';
 import { AgentProvisioningDashboardComponent } from '../agent-provisioning-dashboard/agent-provisioning-dashboard.component';
-import { CognitionTabComponent } from './cognition-tab/cognition-tab.component';
+import { CognitionTabComponent } from '../../cognition-page/cognition-tab/cognition-tab.component';
 import { MetricsTabComponent } from './metrics-tab/metrics-tab.component';
 
 /**
