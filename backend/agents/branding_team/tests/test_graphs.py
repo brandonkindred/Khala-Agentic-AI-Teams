@@ -1,7 +1,7 @@
 """Construction tests for the branding Strands graphs + agent factories.
 
-These exercise the graph builders (``graphs/*``), the ``build_agent`` helper and
-phase-order utilities (``graphs/shared``), and — transitively, since building the
+These exercise the graph builders (``graphs/*``), the ``build_agent`` / ``build_compositor``
+helpers and phase-order utilities (``graphs/shared``), and — transitively, since building the
 graphs instantiates every node — the ~35 agent factories in ``agents.py``. They
 run under ``LLM_PROVIDER=dummy`` (no real LLM, no Postgres): construction resolves
 a dummy Strands model and never invokes it.
@@ -23,6 +23,7 @@ from branding_team.graphs.shared import (
     PHASE_ORDER,
     PHASE_TITLES,
     build_agent,
+    build_compositor,
     phase_agent_key,
     phase_index,
     phase_order_text,
@@ -297,6 +298,20 @@ def test_build_agent_default_agent_key_is_branding() -> None:
     """Omitting ``agent_key`` still resolves the historical "branding" default."""
     agent = build_agent(name="a6", system_prompt="do u")
     assert _resolved_agent_key(agent) == "branding"
+
+
+def test_build_compositor_pins_compositor_agent_key() -> None:
+    """``build_compositor`` is the one call site that decides the compositor tier;
+    callers cannot override or omit it (no ``agent_key`` parameter is exposed)."""
+    agent = build_compositor(name="a7", system_prompt="assemble")
+    assert isinstance(agent, Agent)
+    assert agent.name == "a7"
+    assert _resolved_agent_key(agent) == COMPOSITOR_AGENT_KEY
+
+
+def test_build_compositor_forwards_description() -> None:
+    agent = build_compositor(name="a8", system_prompt="assemble", description="joins things")
+    assert agent.description == "joins things"
 
 
 # ---------------------------------------------------------------------------

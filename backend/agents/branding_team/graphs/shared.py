@@ -20,6 +20,48 @@ if TYPE_CHECKING:
     from llm_service import LLMClientModel
 
 # ---------------------------------------------------------------------------
+# Agent-key tiers (per-phase LLM routing)
+# ---------------------------------------------------------------------------
+
+# Every pipeline agent passes an explicit ``agent_key`` instead of resolving
+# ``build_agent``'s implicit "branding" default. The scheme is:
+#
+# - ``branding.<phase value>`` (via ``phase_agent_key``) for each phase's
+#   specialist agents — reusing ``BrandPhase``'s own enum values so the tier
+#   and the phase it routes can never drift apart. This groups each phase's
+#   mix of open-ended strategic/creative work (e.g. Phase 1's
+#   positioning_synthesizer, Phase 2's Storyteller) alongside its more
+#   bounded extraction/list-generation specialists (e.g. Phase 5's
+#   asset_wiki_planner) under one dial, so ops can tune per-phase cost/
+#   quality via ``LLM_MODEL_branding.<phase>`` without a code change.
+# - ``branding.compositor`` (``COMPOSITOR_AGENT_KEY``, via ``build_compositor``)
+#   for the three phase-terminal join agents — ``visual_compositor``,
+#   ``channel_compositor``, ``governance_compositor`` — that assemble a
+#   phase's full set of upstream fragments into that phase's structured
+#   output. This is a distinct role from any single phase's specialists
+#   (broad-context synthesis across many fragments, not one bounded task)
+#   and cuts across phases 3-5, so it gets its own tier rather than
+#   inheriting its phase's key.
+#
+# ``BrandComplianceAgent`` (outside the graph) is deliberately excluded: it
+# is a keyword-matching ``@dataclass`` with no LLM call, so no agent_key
+# applies to it.
+COMPOSITOR_AGENT_KEY = "branding.compositor"
+
+
+def phase_agent_key(phase: BrandPhase) -> str:
+    """Return the ``agent_key`` tier for *phase*'s specialist agents.
+
+    Preconditions:
+        ``phase`` is a ``BrandPhase`` member.
+    Postconditions:
+        Returns ``f"branding.{phase.value}"`` (e.g.
+        ``"branding.strategic_core"`` for ``BrandPhase.STRATEGIC_CORE``).
+    """
+    return f"branding.{phase.value}"
+
+
+# ---------------------------------------------------------------------------
 # Agent factory
 # ---------------------------------------------------------------------------
 
@@ -112,6 +154,40 @@ def build_agent(
     return Agent(**kwargs)
 
 
+def build_compositor(*, name: str, system_prompt: str, description: str = "") -> Agent:
+    """Create a phase-terminal join agent on the shared ``branding.compositor`` tier.
+
+    Thin wrapper over :func:`build_agent` that pins ``agent_key=COMPOSITOR_AGENT_KEY``
+    so every phase's compositor (``visual_compositor``, ``channel_compositor``,
+    ``governance_compositor``) shares one call site for that routing decision,
+    instead of each phase file inlining ``build_agent(..., agent_key=COMPOSITOR_AGENT_KEY)``
+    and risking the key drifting out of sync across phases. Always JSON mode
+    (every compositor assembles its phase's fragments into a structured
+    ``*Output`` document) and never ``structured_output=`` (a compositor's
+    output shape is the full phase ``*Output`` model, assembled from
+    prose-described fragments in the prompt, not a single upstream schema).
+
+    Parameters
+    ----------
+    name:
+        Unique agent name (used as graph node ID), e.g. ``"visual_compositor"``.
+    system_prompt:
+        Full system prompt describing what to assemble.
+    description:
+        Short human-readable description of the agent's purpose.
+
+    Postconditions:
+        Returns a ``build_agent(agent_key=COMPOSITOR_AGENT_KEY)`` result — see
+        that function's contract.
+    """
+    return build_agent(
+        name=name,
+        system_prompt=system_prompt,
+        description=description,
+        agent_key=COMPOSITOR_AGENT_KEY,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Fan-out/fan-in wiring
 # ---------------------------------------------------------------------------
@@ -161,47 +237,6 @@ def phase_index(phase: BrandPhase) -> int:
         return PHASE_ORDER.index(phase)
     except ValueError:
         return len(PHASE_ORDER)
-
-
-# ---------------------------------------------------------------------------
-# Agent-key tiers (per-phase LLM routing)
-# ---------------------------------------------------------------------------
-
-# Every pipeline agent now passes an explicit ``agent_key`` instead of
-# resolving ``build_agent``'s implicit "branding" default. The scheme is:
-#
-# - ``branding.<phase value>`` (via ``phase_agent_key``) for each phase's
-#   specialist agents — reusing ``BrandPhase``'s own enum values so the tier
-#   and the phase it routes can never drift apart. This groups each phase's
-#   mix of open-ended strategic/creative work (e.g. Phase 1's
-#   positioning_synthesizer, Phase 2's Storyteller) alongside its more
-#   bounded extraction/list-generation specialists (e.g. Phase 5's
-#   asset_wiki_planner) under one dial, so ops can tune per-phase cost/
-#   quality via ``LLM_MODEL_branding.<phase>`` without a code change.
-# - ``branding.compositor`` (``COMPOSITOR_AGENT_KEY``) for the three
-#   phase-terminal join agents — ``visual_compositor``, ``channel_compositor``,
-#   ``governance_compositor`` — that assemble a phase's full set of upstream
-#   fragments into that phase's structured output. This is a distinct role
-#   from any single phase's specialists (broad-context synthesis across many
-#   fragments, not one bounded task) and cuts across phases 3-5, so it gets
-#   its own tier rather than inheriting its phase's key.
-#
-# ``BrandComplianceAgent`` (outside the graph) is deliberately excluded: it
-# is a keyword-matching ``@dataclass`` with no LLM call, so no agent_key
-# applies to it.
-COMPOSITOR_AGENT_KEY = "branding.compositor"
-
-
-def phase_agent_key(phase: BrandPhase) -> str:
-    """Return the ``agent_key`` tier for *phase*'s specialist agents.
-
-    Preconditions:
-        ``phase`` is a ``BrandPhase`` member.
-    Postconditions:
-        Returns ``f"branding.{phase.value}"`` (e.g.
-        ``"branding.strategic_core"`` for ``BrandPhase.STRATEGIC_CORE``).
-    """
-    return f"branding.{phase.value}"
 
 
 def should_advance_past(phase_idx: int, target_phase: Optional[BrandPhase]) -> bool:

@@ -17,7 +17,7 @@ from branding_team.agents import (
     make_ownership_definer,
     make_training_planner,
 )
-from branding_team.graphs.shared import COMPOSITOR_AGENT_KEY, build_agent, build_fan_out_fan_in
+from branding_team.graphs.shared import build_compositor, build_fan_out_fan_in
 
 
 def build_phase5_graph() -> Graph:
@@ -37,7 +37,7 @@ def build_phase5_graph() -> Graph:
     builder = GraphBuilder()
 
     # ── Fan-in: governance compositor ───────────────────────────────
-    compositor_agent = build_agent(
+    compositor_agent = build_compositor(
         name="governance_compositor",
         system_prompt=(
             "You are a Governance Compositor. Assemble all governance fragments from upstream agents "
@@ -47,7 +47,6 @@ def build_phase5_graph() -> Graph:
             "cadence, brand guidelines list, and wiki backlog. Output comprehensive valid JSON."
         ),
         description="Joins all governance fragments into a single GovernanceOutput document.",
-        agent_key=COMPOSITOR_AGENT_KEY,
     )
     compositor = builder.add_node(compositor_agent, node_id="governance_compositor")
 
