@@ -929,6 +929,11 @@ class DevOpsTeamLeadAgent(BaseTeamLead):
             """
             nonlocal quality_gates, acceptance_trace, infra_fix_iterations
 
+            # Same DummyLLMClient-detection toggle as _phase2_parallel_design
+            # (see its comment above): the DevSecOps/change-review/QA agents
+            # go through real LLM calls, so scripted test clients need
+            # deterministic sequential ordering.
+            use_parallel = not is_dummy_llm_client_wrapped(self.llm)
             result = run_phase4_quality_gate(
                 self,
                 task_spec=task_spec,
@@ -937,6 +942,7 @@ class DevOpsTeamLeadAgent(BaseTeamLead):
                 write_changes=write_changes,
                 subdir=subdir,
                 build_verifier=build_verifier,
+                parallel=use_parallel,
             )
             quality_gates = result.quality_gates
             acceptance_trace = result.acceptance_trace

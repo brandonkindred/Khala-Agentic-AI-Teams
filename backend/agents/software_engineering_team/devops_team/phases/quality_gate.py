@@ -14,8 +14,9 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
+from shared.concurrency import parallel_map
 from software_engineering_team.qa_agent import QAInput
 from software_engineering_team.shared.security_service import infra_gate_passed
 
@@ -73,6 +74,7 @@ def run_phase4_quality_gate(
     write_changes: bool,
     subdir: str,
     build_verifier: Optional[Any],
+    parallel: bool = True,
 ) -> Phase4QualityGateResult:
     """Phase 4: tool validation, execution verification, reviews, and gates.
 
@@ -80,7 +82,13 @@ def run_phase4_quality_gate(
       be empty); ``agent`` provides ``_report_status``,
       ``_run_execution_tools``, ``_debug_patch_once``,
       ``_run_bounded_retry_loop``, ``devsecops_review_agent``,
-      ``change_review_agent``, and ``qa_agent``.
+      ``change_review_agent``, and ``qa_agent``. ``parallel`` is precomputed
+      by the caller (this function does not decide it, since that decision
+      depends on the caller's LLM client): set ``parallel=False`` for
+      deterministic execution order, needed when the backing LLM client is a
+      ``_ScriptedClient`` with a shared sequential response list, because
+      concurrent execution would cause the review agents to consume
+      responses non-deterministically.
     Postconditions: runs tool validation, execution verification, the
       debug-patch loop, and independent reviews, returning the assembled
       ``quality_gates`` (``agent.qa_agent.run(..., request_mode="acceptance_evidence")``'s
@@ -152,33 +160,56 @@ def run_phase4_quality_gate(
 
     tool_gate_map.update(state.exec_gate_map)
 
-    devsec = agent.devsecops_review_agent.run(
-        DevSecOpsReviewInput(
-            task_description=task_spec.title,
-            requirements=_describe_task_with_exclusions(task_spec, task_spec.goal.summary),
-            artifacts=aggregated_artifacts,
+    def _run_devsecops() -> Any:
+        return agent.devsecops_review_agent.run(
+            DevSecOpsReviewInput(
+                task_description=task_spec.title,
+                requirements=_describe_task_with_exclusions(task_spec, task_spec.goal.summary),
+                artifacts=aggregated_artifacts,
+            )
         )
-    )
-    change_review = agent.change_review_agent.run(
-        ChangeReviewInput(
-            task_description=_describe_task_with_exclusions(task_spec, task_spec.title),
-            artifacts=aggregated_artifacts,
-        )
-    )
 
-    qa_val = agent.qa_agent.run(
-        QAInput(
-            code="",
-            request_mode="acceptance_evidence",
-            acceptance_criteria=task_spec.acceptance_criteria,
-            tool_results={
-                "iac": iac_checks.checks,
-                "policy": policy_checks.checks,
-                "cicd": cicd_checks.checks,
-                "deploy_dry_run": dry_run_checks.checks,
-            },
+    def _run_change_review() -> Any:
+        return agent.change_review_agent.run(
+            ChangeReviewInput(
+                task_description=_describe_task_with_exclusions(task_spec, task_spec.title),
+                artifacts=aggregated_artifacts,
+            )
         )
-    )
+
+    def _run_qa_acceptance() -> Any:
+        return agent.qa_agent.run(
+            QAInput(
+                code="",
+                request_mode="acceptance_evidence",
+                acceptance_criteria=task_spec.acceptance_criteria,
+                tool_results={
+                    "iac": iac_checks.checks,
+                    "policy": policy_checks.checks,
+                    "cicd": cicd_checks.checks,
+                    "deploy_dry_run": dry_run_checks.checks,
+                },
+            )
+        )
+
+    # DevSecOps review, change review, and QA acceptance-evidence have no
+    # data dependency on one another, so they can run concurrently. No
+    # per-call guard here (unlike ``phase2_graph.run_phase2_parallel``'s
+    # silent-default policy): today's sequential version lets an exception
+    # from any of the three propagate uncaught, and the aggregate pass/fail
+    # semantics below must stay unchanged, so ``parallel_map``'s default
+    # fast-fail behavior is used as-is.
+    if parallel:
+        calls: List[Callable[[], Any]] = [_run_devsecops, _run_change_review, _run_qa_acceptance]
+        devsec, change_review, qa_val = parallel_map(
+            calls, lambda fn: fn(), max_workers=len(calls), skip_none=False
+        )
+    else:
+        # Sequential fallback — deterministic ordering for scripted test clients.
+        devsec = _run_devsecops()
+        change_review = _run_change_review()
+        qa_val = _run_qa_acceptance()
+
     acceptance_trace = list(qa_val.acceptance_trace)
 
     quality_gates = {k: coerce_gate_status(v) for k, v in qa_val.quality_gates.items()}
