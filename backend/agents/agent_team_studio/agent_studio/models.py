@@ -9,10 +9,11 @@ from __future__ import annotations
 
 from typing import Annotated, Any, Literal
 
-from pydantic import AfterValidator, BaseModel, ConfigDict, Field
+from pydantic import AfterValidator, BaseModel, Field
 
 from agent_registry.models import AgentManifest
 
+from ..assistant_kernel import ConversationMessage
 from .agent_states import default_agent_states, normalize_agent_states
 
 # The two authoring modes. ``new`` builds from scratch; ``refine`` starts from a
@@ -93,15 +94,6 @@ class AgentDefinition(BaseModel):
     def is_ready(self) -> bool:
         """True iff every required field is present (the Stage-2 gate)."""
         return not self.missing_required()
-
-
-class ConversationMessage(BaseModel):
-    # Frozen: a stored message is never mutated after creation, so the store's
-    # get() snapshot can safely share message instances with internal state.
-    model_config = ConfigDict(frozen=True)
-
-    role: Literal["user", "assistant"]
-    content: str
 
 
 class StartConversationRequest(BaseModel):

@@ -808,6 +808,25 @@ def test_update_roster_agent_rejects_fat_put(client: TestClient) -> None:
     assert roster[0]["role"] == "Plans SEO-aware blog outlines"
 
 
+def test_update_roster_agent_rejects_unknown_key(client: TestClient) -> None:
+    """PUT with any non-empty body is rejected, not just the legacy persona field names.
+
+    ``UpdateAgentRequest`` declares no editable fields at all, so a key that was
+    never part of the old fat-agent contract (e.g. ``nickname``) is rejected the
+    same way a legacy persona field is — not silently dropped and treated as a
+    no-op.
+    """
+    team_id = _new_team()
+    client.post(f"/teams/{team_id}/agents/from-registry", json={"manifest_id": "blogging.planner"})
+
+    resp = client.put(
+        f"/teams/{team_id}/agents/blogging.planner",
+        json={"nickname": "not a real roster field"},
+    )
+    assert resp.status_code == 400
+    assert "AgentManifest" in resp.json()["detail"]
+
+
 def test_update_agent_unknown_agent_404(client: TestClient) -> None:
     """Editing an agent not on the roster is a 404 (roster unchanged)."""
     team_id = _new_team()

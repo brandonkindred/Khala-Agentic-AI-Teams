@@ -211,7 +211,11 @@ def deliver_inline_merge(
     linting_tool_agent: Any = None,
     lint_agent_type: str = "",
 ) -> DeliverResult:
-    """Create a feature branch, write files, merge it, and restore development."""
+    """Create a feature branch, write files, merge it, and restore development.
+
+    Postconditions: on failure, ``result.merged`` is ``False`` and the working
+    tree is restored to ``DEVELOPMENT_BRANCH``.
+    """
     result = DeliverResult()
     if not deliver_files:
         result.summary = "No files to deliver."
@@ -255,7 +259,14 @@ def deliver_inline_merge(
 
     # The gate's build verifier may have autofixed and left uncommitted changes;
     # sweep them up (safe no-op on a clean tree) so the merge includes them.
-    ops.commit_working_tree(repo_path, "chore: pre-merge quality gate autofix")
+    autofix_ok, autofix_msg = ops.commit_working_tree(
+        repo_path, "chore: pre-merge quality gate autofix"
+    )
+    if not autofix_ok:
+        result.summary = f"Autofix commit failed: {autofix_msg}"
+        logger.error("[%s] Deliver: %s", task_id, result.summary)
+        ops.checkout_branch(repo_path, DEVELOPMENT_BRANCH)
+        return result
 
     merge_ok, merge_msg = ops.merge_branch(repo_path, result.branch_name, DEVELOPMENT_BRANCH)
     if not merge_ok:

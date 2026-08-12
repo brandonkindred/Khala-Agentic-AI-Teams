@@ -226,6 +226,22 @@ def test_parse_planning_output_fallback_and_skip():
     assert result.microtasks[0].tool_agent == be_models.ToolAgentKind.GENERAL
 
 
+def test_parse_planning_output_dedupes_by_id():
+    """A microtask id repeated in planner output is skipped; the first occurrence wins."""
+    raw = {
+        "microtasks": [
+            {"id": "m1", "title": "first", "tool_agent": "general"},
+            {"id": "m1", "title": "second", "tool_agent": "general"},
+            {"id": "m2", "title": "third", "tool_agent": "general"},
+        ],
+        "language": "python",
+        "summary": "s",
+    }
+    result = sh_plan.parse_planning_output(raw, "python", models=be_models)
+    assert [m.id for m in result.microtasks] == ["m1", "m2"]
+    assert result.microtasks[0].title == "first"
+
+
 # --- execution -------------------------------------------------------------
 
 
@@ -1031,11 +1047,11 @@ _EXPECTED_PROMPT_DIGESTS = {
     (
         "backend",
         "EXECUTION_PROMPT",
-    ): "3d8e69ceda009a143a2af73a0ebbe9e44247d222a7bacf88553d558a2837d062",
+    ): "09aee4531ca79f0c99088cdd14cf4c799fe8eb29aa50d64c7c5ff3ae2f54e4b1",
     (
         "backend",
         "PROBLEM_SOLVING_SINGLE_ISSUE_PROMPT",
-    ): "be85517553575e102470ad987d8d18a19aa8e28e546a8ee1fe5877b85b1070ed",
+    ): "c9ace258417f3dd641023de0cd1e230da3b3aaebd1026822c03d7294b2dc95a2",
     (
         "frontend",
         "PLANNING_PROMPT",
@@ -1043,11 +1059,11 @@ _EXPECTED_PROMPT_DIGESTS = {
     (
         "frontend",
         "EXECUTION_PROMPT",
-    ): "790512ed71fb7a072d63f4473a1587a3076509cec86297c7d0fed3b9062f153f",
+    ): "13daf0ab51f32e3c35079403ce8f5d5f9a19e65d9122c5acc02657daf1f844be",
     (
         "frontend",
         "PROBLEM_SOLVING_SINGLE_ISSUE_PROMPT",
-    ): "b1e2f622a4f01011142e99086b9f7bb510372bd9a5a66ff8ac3bfea70ebac3d4",
+    ): "4e0ad641c389180f5ecdb90909896937ed00fccfea449a5b2929b095918d5477",
 }
 
 

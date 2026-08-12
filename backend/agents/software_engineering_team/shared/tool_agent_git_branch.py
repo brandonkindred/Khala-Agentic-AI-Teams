@@ -132,7 +132,8 @@ class GitBranchManagementToolAgent:
         Preconditions: ``phase_inp.repo_path`` points at a git repository.
         Postconditions: returns a :class:`ToolAgentPhaseOutput` with ``success``
         set; on failure the working tree is left on ``DEVELOPMENT_BRANCH`` (or the
-        feature branch when a merge was aborted).
+        feature branch, when a merge was attempted-and-aborted or the pre-merge
+        autofix commit failed on the existing-branch path).
         """
         repo_path = Path(phase_inp.repo_path).resolve() if phase_inp.repo_path else None
         if not repo_path or not (repo_path / ".git").exists():
@@ -162,7 +163,14 @@ class GitBranchManagementToolAgent:
                 )
             # The gate's build verifier may have autofixed and left uncommitted changes;
             # sweep them up (safe no-op on a clean tree) so the merge includes them.
-            commit_working_tree(repo_path, "chore: pre-merge quality gate autofix")
+            autofix_ok, autofix_msg = commit_working_tree(
+                repo_path, "chore: pre-merge quality gate autofix"
+            )
+            if not autofix_ok:
+                checkout_branch(repo_path, branch_name)
+                return ToolAgentPhaseOutput(
+                    success=False, summary=f"Autofix commit failed: {autofix_msg}"
+                )
             merge_ok, merge_msg = merge_branch(repo_path, branch_name, DEVELOPMENT_BRANCH)
             if not merge_ok:
                 abort_merge(repo_path)
@@ -209,7 +217,14 @@ class GitBranchManagementToolAgent:
                 )
             # The gate's build verifier may have autofixed and left uncommitted changes;
             # sweep them up (safe no-op on a clean tree) so the merge includes them.
-            commit_working_tree(repo_path, "chore: pre-merge quality gate autofix")
+            autofix_ok, autofix_msg = commit_working_tree(
+                repo_path, "chore: pre-merge quality gate autofix"
+            )
+            if not autofix_ok:
+                checkout_branch(repo_path, DEVELOPMENT_BRANCH)
+                return ToolAgentPhaseOutput(
+                    success=False, summary=f"Autofix commit failed: {autofix_msg}"
+                )
             merge_ok, merge_msg = merge_branch(repo_path, created_branch, DEVELOPMENT_BRANCH)
             if not merge_ok:
                 abort_merge(repo_path)

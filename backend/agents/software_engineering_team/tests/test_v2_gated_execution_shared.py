@@ -26,6 +26,7 @@ Preconditions:
 
 from __future__ import annotations
 
+import logging
 import threading
 import time
 from types import SimpleNamespace
@@ -40,6 +41,7 @@ from software_engineering_team.shared.phases.execution import (
     GatedExecutionConfig,
     GateOutcome,
     ReviewDependencies,
+    _schedule_microtask_batches,
     run_gated_execution_impl,
 )
 from software_engineering_team.shared.v2_models import ReviewIssue
@@ -160,6 +162,17 @@ def _coder_per_microtask(**kwargs: Any) -> Dict[str, str]:
     if kwargs["microtask"].id == "mt-a":
         return {"shared.py": "owned-by-a\n"}
     return {"src/b.py": "print('b')\n"}
+
+
+def _recording_coder(order: List[str]):
+    """Build a coder that appends the microtask's id to ``order`` before writing a file."""
+
+    def _coder_at(**kwargs: Any) -> Dict[str, str]:
+        mid = kwargs["microtask"].id
+        order.append(mid)
+        return {f"src/{mid}.py": "print(1)\n"}
+
+    return _coder_at
 
 
 def _cr_gate_fails_for(mid: str):
@@ -381,12 +394,21 @@ def test_dependent_of_review_failed_is_skipped(tmp_path):
     assert "depends on review-failed" in mt2.notes
 
 
-def test_unmet_dep_without_review_failure_runs_anyway(tmp_path):
-    """An unmet dep that is merely not-yet-complete (not review-failed) still runs."""
+def test_unmet_dep_without_review_failure_runs_anyway(tmp_path, caplog):
+    """An unmet dep that is merely not-yet-complete (not review-failed) still runs.
+
+    Also pins the "running anyway" soft-dependency log line, unchanged by the
+    wave-based scheduler: a ``depends_on`` id with no matching microtask in this
+    run never becomes a scheduling edge, so ``mt`` lands in the first batch and
+    hits this same runtime branch exactly as it did under the old flat order.
+    """
     mt = _microtask("mt-1", depends_on=["ghost"])
-    _run(_make_gate_config(), [mt], tmp_path, review_config=_config())
+    with caplog.at_level(logging.WARNING):
+        _run(_make_gate_config(), [mt], tmp_path, review_config=_config())
 
     assert mt.status == MS.COMPLETED
+    assert "has unmet deps" in caplog.text
+    assert "running anyway" in caplog.text
 
 
 def test_only_microtask_ids_filters(tmp_path):
@@ -400,6 +422,111 @@ def test_only_microtask_ids_filters(tmp_path):
     assert mt1.status == MS.PENDING  # never touched (default status)
     assert mt2.status == MS.COMPLETED
     assert len(result.microtasks) == 1
+
+
+def test_diamond_dependency_executes_in_wave_order(tmp_path):
+    """A -> (B, C) -> D: all four complete, coded in wave order (A, then B/C, then D)."""
+    mt_a = _microtask("mt-a")
+    mt_b = _microtask("mt-b", depends_on=["mt-a"])
+    mt_c = _microtask("mt-c", depends_on=["mt-a"])
+    mt_d = _microtask("mt-d", depends_on=["mt-b", "mt-c"])
+    order: List[str] = []
+    cfg = _make_gate_config(coder=_recording_coder(order))
+
+    result = _run(cfg, [mt_a, mt_b, mt_c, mt_d], tmp_path, review_config=_config())
+
+    assert order == ["mt-a", "mt-b", "mt-c", "mt-d"]
+    assert all(mt.status == MS.COMPLETED for mt in (mt_a, mt_b, mt_c, mt_d))
+    assert "4/4 microtasks successfully" in result.summary
+
+
+def test_fully_independent_microtasks_execute_as_single_batch(tmp_path):
+    """No cross-dependencies: all microtasks schedule into (and run within) one batch."""
+    mt1, mt2, mt3 = _microtask("mt-1"), _microtask("mt-2"), _microtask("mt-3")
+    order: List[str] = []
+    cfg = _make_gate_config(coder=_recording_coder(order))
+
+    result = _run(cfg, [mt1, mt2, mt3], tmp_path, review_config=_config())
+
+    assert order == ["mt-1", "mt-2", "mt-3"]
+    assert all(mt.status == MS.COMPLETED for mt in (mt1, mt2, mt3))
+    assert "3/3 microtasks successfully" in result.summary
+
+
+def test_dependent_of_review_failed_is_skipped_across_batch_boundary(tmp_path):
+    """The SKIP check fires correctly even when the failure is two batches upstream."""
+    mt_a = _microtask("mt-a")
+    mt_b = _microtask("mt-b", depends_on=["mt-a"])
+    mt_c = _microtask("mt-c", depends_on=["mt-b"])
+    cfg = _make_gate_config(code_review_gate=_cr_gate_fails_for("mt-b"))
+    _run(
+        cfg,
+        [mt_a, mt_b, mt_c],
+        tmp_path,
+        review_config=_config(cr=1, on_failure="skip_continue"),
+    )
+
+    assert mt_a.status == MS.COMPLETED
+    assert mt_b.status == MS.REVIEW_FAILED
+    assert mt_c.status == MS.SKIPPED
+    assert "depends on review-failed" in mt_c.notes
+
+
+# ---------------------------------------------------------------------------
+# Wave-based (topological-batch) scheduler — direct unit tests
+# ---------------------------------------------------------------------------
+
+
+def test_schedule_diamond_dependency_batches_into_three_waves():
+    """A -> (B, C) -> D batches as [[A], [B, C], [D]]."""
+    mt_a = _microtask("mt-a")
+    mt_b = _microtask("mt-b", depends_on=["mt-a"])
+    mt_c = _microtask("mt-c", depends_on=["mt-a"])
+    mt_d = _microtask("mt-d", depends_on=["mt-b", "mt-c"])
+
+    batches = _schedule_microtask_batches([mt_a, mt_b, mt_c, mt_d])
+
+    assert [[m.id for m in b] for b in batches] == [["mt-a"], ["mt-b", "mt-c"], ["mt-d"]]
+
+
+def test_schedule_unmet_dependency_not_in_run_does_not_block():
+    """A ``depends_on`` id with no matching microtask in this run is not a scheduling edge."""
+    mt = _microtask("mt-1", depends_on=["ghost"])
+
+    batches = _schedule_microtask_batches([mt])
+
+    assert batches == [[mt]]
+
+
+def test_schedule_fully_independent_microtasks_form_single_batch():
+    """No cross-dependencies: everything lands in one batch, in original order."""
+    mt1, mt2, mt3 = _microtask("mt-1"), _microtask("mt-2"), _microtask("mt-3")
+
+    batches = _schedule_microtask_batches([mt1, mt2, mt3])
+
+    assert batches == [[mt1, mt2, mt3]]
+
+
+def test_schedule_cycle_flushes_remaining_into_final_batch():
+    """A dependency cycle can't be scheduled progressively; it's flushed, not looped forever."""
+    mt_x = _microtask("mt-x", depends_on=["mt-y"])
+    mt_y = _microtask("mt-y", depends_on=["mt-x"])
+
+    batches = _schedule_microtask_batches([mt_x, mt_y])
+
+    assert batches == [[mt_x, mt_y]]
+
+
+def test_schedule_duplicate_ids_raises_value_error_instead_of_hanging():
+    """Two microtasks sharing an id can't be placed progressively (id-keyed bookkeeping
+    collapses them); this must raise immediately rather than looping on empty batches
+    forever, which is the original bug (id-keyed ``placed`` never reaches ``len(microtasks)``).
+    """
+    mt1 = _microtask("dup")
+    mt2 = _microtask("dup")
+
+    with pytest.raises(ValueError, match="dup"):
+        _schedule_microtask_batches([mt1, mt2])
 
 
 # ---------------------------------------------------------------------------

@@ -120,12 +120,147 @@ def test_run_happy_path_returns_activity_result_unchanged(monkeypatch: pytest.Mo
 
 
 def test_run_propagates_activity_exception(monkeypatch: pytest.MonkeyPatch) -> None:
-    """An activity failure propagates uncaught -- no try/except swallows or
-    rewraps it, so Temporal marks the workflow itself terminally failed."""
+    """An activity failure propagates uncaught after the job is terminalized --
+    the original exception is never swallowed or rewrapped, so Temporal marks
+    the workflow itself terminally failed."""
     _patch_execute(monkeypatch, error=RuntimeError("boom"))
     workflow_obj = IssueGroomingWorkflow()
 
     with pytest.raises(RuntimeError, match="boom"):
+        asyncio.run(workflow_obj.run(dict(_VALID_REQUEST)))
+
+
+# ----------------------------------------------------------- job-store terminalization
+#
+# Every fake dispatcher below matches on ``fn.__name__`` rather than an `is` identity
+# check against the module-level ``run_issue_grooming_activity`` import at the top of
+# this file -- same reasoning as ``test_run_happy_path_returns_activity_result_unchanged``:
+# an earlier test in this module reloads ``issue_grooming_workflow``, which rebinds that
+# name to a new function object, so an identity check would spuriously fail depending on
+# test execution order.
+
+
+def test_run_marks_job_failed_on_activity_exception(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A plain activity failure schedules mark-failed with a scrubbed error, then
+    re-raises the original exception unchanged."""
+    calls: list = []
+
+    async def _fake_exec(fn, request, **_kw):
+        calls.append((fn.__name__, dict(request)))
+        if fn.__name__ == "run_issue_grooming_activity":
+            raise RuntimeError("grooming boom")
+        if fn.__name__ == "mark_coding_team_job_failed_activity":
+            return {"job_id": request["job_id"], "status": "failed"}
+        raise AssertionError(f"unexpected activity {fn.__name__}")
+
+    monkeypatch.setattr("temporalio.workflow.execute_activity", _fake_exec)
+    workflow_obj = IssueGroomingWorkflow()
+
+    with pytest.raises(RuntimeError, match="grooming boom"):
+        asyncio.run(workflow_obj.run(dict(_VALID_REQUEST)))
+
+    assert [name for name, _ in calls] == [
+        "run_issue_grooming_activity",
+        "mark_coding_team_job_failed_activity",
+    ]
+    assert calls[1][1] == {"job_id": "j1", "error": "grooming boom"}
+
+
+def test_run_marks_job_failed_with_fallback_message_for_empty_str_exception(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An exception whose ``str()`` is empty still produces a non-empty mark-failed error."""
+
+    class _EmptyStrError(RuntimeError):
+        def __str__(self) -> str:
+            return ""
+
+    calls: list = []
+
+    async def _fake_exec(fn, request, **_kw):
+        calls.append((fn.__name__, dict(request)))
+        if fn.__name__ == "run_issue_grooming_activity":
+            raise _EmptyStrError()
+        if fn.__name__ == "mark_coding_team_job_failed_activity":
+            return {"job_id": request["job_id"], "status": "failed"}
+        raise AssertionError(f"unexpected activity {fn.__name__}")
+
+    monkeypatch.setattr("temporalio.workflow.execute_activity", _fake_exec)
+    workflow_obj = IssueGroomingWorkflow()
+
+    with pytest.raises(_EmptyStrError):
+        asyncio.run(workflow_obj.run(dict(_VALID_REQUEST)))
+
+    assert calls[1][1]["error"] == "_EmptyStrError: issue grooming run failed"
+
+
+def test_run_marks_job_cancelled_on_temporal_cancellation(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A Temporal cancellation schedules mark-cancelled (not mark-failed), then
+    re-raises the cancellation unchanged."""
+    calls: list = []
+
+    async def _fake_exec(fn, request, **_kw):
+        calls.append((fn.__name__, dict(request)))
+        if fn.__name__ == "run_issue_grooming_activity":
+            raise asyncio.CancelledError()
+        if fn.__name__ == "mark_coding_team_job_cancelled_activity":
+            return {"job_id": request["job_id"], "status": "cancelled"}
+        raise AssertionError(f"unexpected activity {fn.__name__}")
+
+    monkeypatch.setattr("temporalio.workflow.execute_activity", _fake_exec)
+    workflow_obj = IssueGroomingWorkflow()
+
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(workflow_obj.run(dict(_VALID_REQUEST)))
+
+    assert [name for name, _ in calls] == [
+        "run_issue_grooming_activity",
+        "mark_coding_team_job_cancelled_activity",
+    ]
+    assert calls[1][1] == {"job_id": "j1"}
+
+
+def test_run_terminalize_failure_does_not_mask_original_exception(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failing mark-failed call is logged, not raised -- the original
+    activity exception still propagates unchanged."""
+
+    async def _fake_exec(fn, request, **_kw):
+        if fn.__name__ == "run_issue_grooming_activity":
+            raise RuntimeError("grooming boom")
+        if fn.__name__ == "mark_coding_team_job_failed_activity":
+            raise RuntimeError("job service unavailable")
+        raise AssertionError(f"unexpected activity {fn.__name__}")
+
+    monkeypatch.setattr("temporalio.workflow.execute_activity", _fake_exec)
+    workflow_obj = IssueGroomingWorkflow()
+
+    with pytest.raises(RuntimeError, match="grooming boom"):
+        asyncio.run(workflow_obj.run(dict(_VALID_REQUEST)))
+
+
+def test_run_terminalize_cancellation_does_not_mask_original_exception(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A bare ``asyncio.CancelledError`` raised *by the terminalize activity
+    itself* (e.g. the whole workflow tearing down concurrently) must be
+    swallowed too -- it is a ``BaseException``, not caught by ``except
+    Exception`` alone, so ``_best_effort_terminalize`` needs its own explicit
+    branch or this cancellation would replace the original activity error
+    that ``run`` is supposed to re-raise unchanged."""
+
+    async def _fake_exec(fn, request, **_kw):
+        if fn.__name__ == "run_issue_grooming_activity":
+            raise RuntimeError("grooming boom")
+        if fn.__name__ == "mark_coding_team_job_failed_activity":
+            raise asyncio.CancelledError()
+        raise AssertionError(f"unexpected activity {fn.__name__}")
+
+    monkeypatch.setattr("temporalio.workflow.execute_activity", _fake_exec)
+    workflow_obj = IssueGroomingWorkflow()
+
+    with pytest.raises(RuntimeError, match="grooming boom"):
         asyncio.run(workflow_obj.run(dict(_VALID_REQUEST)))
 
 

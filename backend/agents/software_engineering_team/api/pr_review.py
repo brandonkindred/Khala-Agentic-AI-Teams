@@ -12,10 +12,10 @@ import itertools
 import logging
 import os
 import threading
-from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
-from typing import Any, Dict, List, NamedTuple, Optional
+from typing import Any, Callable, Dict, List, NamedTuple, Optional
 
+from shared.concurrency import parallel_map
 from software_engineering_team.activity import ActivityBridge
 from software_engineering_team.api import coding_team_main as _main
 from software_engineering_team.api.advisory_lock import advisory_lock
@@ -326,8 +326,10 @@ def _fetch_head_files(
     complete files to check findings against.
 
     Fetches the reviewable files (per :func:`_is_whole_file_reviewable`)
-    concurrently (bounded by ``_HEAD_FETCH_PARALLELISM``), since the per-file
-    GETs are independent.
+    concurrently via :func:`shared.concurrency.parallel_map` (bounded by
+    ``_HEAD_FETCH_PARALLELISM``), since the per-file GETs are independent. This
+    also propagates the caller's contextvars (LLM attribution, trace_id) into
+    each fetch worker — a raw ``ThreadPoolExecutor`` would not.
 
     Postconditions:
         - Returns ``{filename: full_content}`` for every reviewable file whose
@@ -356,12 +358,7 @@ def _fetch_head_files(
             content = None
         return f.filename, content
 
-    workers = min(_HEAD_FETCH_PARALLELISM, len(targets))
-    if workers <= 1:
-        results = [_one(f) for f in targets]
-    else:
-        with ThreadPoolExecutor(max_workers=workers) as executor:
-            results = list(executor.map(_one, targets))
+    results = parallel_map(targets, _one, max_workers=_HEAD_FETCH_PARALLELISM)
     return {name: content for name, content in results if content and content.strip()}
 
 
@@ -931,31 +928,38 @@ def _run_reviewer(
     return outputs[0] if len(outputs) == 1 else _MergedReviewerOutput(outputs)
 
 
-def _results_draining_exceptions(futures: List[Any]) -> List[Any]:
-    """Call ``result()`` on every future; re-raise the first failure after draining all.
+def _run_tasks_draining(tasks: List[Callable[[], Any]]) -> List[Any]:
+    """Run every zero-arg *tasks* concurrently; re-raise the first failure after all finish.
 
-    A generator or list-comprehension unpack stops at the first ``result()``
-    failure and leaves sibling exceptions unretrieved on the remaining futures.
+    Each task's own exception is caught inside the worker (see ``_capture``
+    below) rather than left to propagate through ``parallel_map`` itself — so
+    ``parallel_map``'s own fast-fail path (which cancels not-yet-started
+    siblings on the first exception) never triggers here. Every task always
+    runs to completion, matching the previous hand-rolled
+    ``ThreadPoolExecutor`` + drain-every-future contract this replaces.
 
     Preconditions:
-        - ``futures`` is a list of ``concurrent.futures.Future`` instances.
+        - ``tasks`` is a list of zero-arg callables, safe to invoke concurrently.
     Postconditions:
-        - Every future has had ``result()`` invoked (exceptions retrieved).
-        - Returns the ordered list of successful results when every future succeeds.
-        - Raises the first exception raised by any ``result()`` call when any
-          future fails (after every sibling has also been drained).
+        - Every task in ``tasks`` is invoked exactly once, unconditionally.
+        - Returns the tasks' results in ``tasks`` order when every task succeeds.
+        - Raises the first (by ``tasks`` order, not completion order —
+          deterministic, since every exception is captured before
+          ``parallel_map`` sees it) exception any task raised, once every task
+          has finished.
     """
-    results: List[Any] = []
-    first_error: Optional[BaseException] = None
-    for future in futures:
+
+    def _capture(fn: Callable[[], Any]) -> tuple[Any, Optional[Exception]]:
         try:
-            results.append(future.result())
-        except Exception as exc:  # noqa: BLE001 - drain siblings, then re-raise first
-            if first_error is None:
-                first_error = exc
-    if first_error is not None:
-        raise first_error
-    return results
+            return fn(), None
+        except Exception as exc:  # noqa: BLE001 - captured; re-raised below once every task has finished
+            return None, exc
+
+    outcomes = parallel_map(tasks, _capture, max_workers=len(tasks), skip_none=False)
+    for _, err in outcomes:
+        if err is not None:
+            raise err
+    return [value for value, _ in outcomes]
 
 
 def _fetch_existing_comments(client: Any, owner: str, repo: str, pr_number: int) -> List[Any]:
@@ -974,7 +978,11 @@ def _fetch_existing_comments(client: Any, owner: str, repo: str, pr_number: int)
           semantics as the prior serial version — this lookup must never fail
           an otherwise-working review; a failure here only means findings are
           neither dropped nor cross-referenced on this run, same as a PR with
-          no existing comments at all.
+          no existing comments at all. Fanned out via
+          :func:`shared.concurrency.parallel_map` (through
+          :func:`_run_tasks_draining`), which also propagates the caller's
+          contextvars (LLM attribution, trace_id) into each fetch worker — a
+          raw ``ThreadPoolExecutor`` would not.
     """
 
     def _reviews() -> Any:
@@ -986,11 +994,10 @@ def _fetch_existing_comments(client: Any, owner: str, repo: str, pr_number: int)
     def _issues() -> Any:
         return client.list_issue_comments(owner, repo, pr_number)
 
-    tasks = (_reviews, _resolved, _issues)
     try:
-        with ThreadPoolExecutor(max_workers=len(tasks)) as executor:
-            futures = [executor.submit(t) for t in tasks]
-            review_comments, resolved_ids, issue_comments = _results_draining_exceptions(futures)
+        review_comments, resolved_ids, issue_comments = _run_tasks_draining(
+            [_reviews, _resolved, _issues]
+        )
         return build_existing_comments(review_comments, resolved_ids, issue_comments)
     except Exception as e:  # noqa: BLE001 - this lookup is best-effort, never fails the review
         logger.warning(
@@ -1086,7 +1093,10 @@ def _fetch_pr_metadata(
           in ``get_authenticated_login`` (of any exception type) is caught
           internally and degrades ``reviewer_login`` to ``""`` (logged) — it
           only feeds the self-PR event downgrade and must never fail the
-          review.
+          review. Fanned out via :func:`shared.concurrency.parallel_map`
+          (through :func:`_run_tasks_draining`), which also propagates the
+          caller's contextvars (LLM attribution, trace_id) into each fetch
+          worker — a raw ``ThreadPoolExecutor`` would not.
     """
 
     def _get_pr() -> Any:
@@ -1106,10 +1116,7 @@ def _fetch_pr_metadata(
             )
             return ""
 
-    tasks = (_get_pr, _get_files, _get_login)
-    with ThreadPoolExecutor(max_workers=len(tasks)) as executor:
-        futures = [executor.submit(t) for t in tasks]
-        pr, files, reviewer_login = _results_draining_exceptions(futures)
+    pr, files, reviewer_login = _run_tasks_draining([_get_pr, _get_files, _get_login])
     return pr, files, reviewer_login
 
 
