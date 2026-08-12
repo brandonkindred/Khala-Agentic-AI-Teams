@@ -28,7 +28,11 @@ from branding_team.shared.job_store import (
 router = APIRouter()
 
 
-@router.post("/clients/{client_id}/brands/{brand_id}/run", response_model=RunBrandJobResponse)
+@router.post(
+    "/clients/{client_id}/brands/{brand_id}/run",
+    response_model=RunBrandJobResponse,
+    response_model_exclude_none=True,
+)
 def run_brand(client_id: str, brand_id: str, payload: RunBrandRequest) -> RunBrandJobResponse:
     """Submit a branding run job. Poll GET /branding/status/{job_id} for results."""
     target_phase = _parse_target_phase(payload.target_phase)
@@ -36,7 +40,9 @@ def run_brand(client_id: str, brand_id: str, payload: RunBrandRequest) -> RunBra
 
 
 @router.post(
-    "/clients/{client_id}/brands/{brand_id}/run/{phase}", response_model=RunBrandJobResponse
+    "/clients/{client_id}/brands/{brand_id}/run/{phase}",
+    response_model=RunBrandJobResponse,
+    response_model_exclude_none=True,
 )
 def run_brand_phase(
     client_id: str, brand_id: str, phase: str, payload: RunBrandRequest

@@ -29,6 +29,7 @@ from investment_team.models import (
     StrategySpec,
 )
 from investment_team.strategy_lab import orchestrator as orchestrator_module
+from investment_team.strategy_lab._orchestrator_helpers import _DesignAttemptState
 from investment_team.strategy_lab.agents._response_schemas import ZERO_TRADE_REPAIR_SCHEMA
 from investment_team.strategy_lab.agents.zero_trade_repair import (
     _ZERO_TRADE_REPAIR_SCHEMA_JSON,
@@ -1242,10 +1243,7 @@ def _critical_anomaly() -> QualityGateResult:
 
 def _drive_anomaly_recovery(orch: StrategyLabOrchestrator):
     return orch._handle_critical_anomalies(
-        spec=_spec(),
-        code="# original code\n",
-        trades=[],
-        metrics=_metrics_for(),
+        state=_DesignAttemptState(spec=_spec(), code="# original code\n", trades=[], metrics=_metrics_for()),
         exec_result=_zero_trade_exec_result(),
         market_data=_market_data(),
         config=_config(),
@@ -1331,10 +1329,7 @@ def test_generic_refine_leaves_flag_unset() -> None:
     )
 
     recovery = orch._handle_critical_anomalies(
-        spec=_spec(),
-        code="# original code\n",
-        trades=[],
-        metrics=_metrics_for(),
+        state=_DesignAttemptState(spec=_spec(), code="# original code\n", trades=[], metrics=_metrics_for()),
         # No zero_trade_category -> ZTR branch is skipped.
         exec_result=StrategyRunResult(success=True, trades=[]),
         market_data=_market_data(),
@@ -1361,10 +1356,7 @@ def test_handle_critical_anomalies_rejects_empty_critical_anomalies() -> None:
         ValueError, match="_handle_critical_anomalies requires at least one critical"
     ):
         orch._handle_critical_anomalies(
-            spec=_spec(),
-            code="# original code\n",
-            trades=[],
-            metrics=_metrics_for(),
+            state=_DesignAttemptState(spec=_spec(), code="# original code\n", trades=[], metrics=_metrics_for()),
             exec_result=_zero_trade_exec_result(),
             market_data=_market_data(),
             config=_config(),
@@ -1387,10 +1379,7 @@ def test_handle_critical_anomalies_rejects_invalid_market_data(bad_market_data) 
 
     with pytest.raises(ValueError, match="market_data must be non-empty"):
         orch._handle_critical_anomalies(
-            spec=_spec(),
-            code="# original code\n",
-            trades=[],
-            metrics=_metrics_for(),
+            state=_DesignAttemptState(spec=_spec(), code="# original code\n", trades=[], metrics=_metrics_for()),
             exec_result=_zero_trade_exec_result(),
             market_data=bad_market_data,
             config=_config(),
@@ -1467,10 +1456,7 @@ def test_entry_with_no_exit_routes_to_redesign() -> None:
     code = "# original code\n"
     with pytest.raises(SpecImplementabilityError) as excinfo:
         orch._handle_critical_anomalies(
-            spec=spec,
-            code=code,
-            trades=[],
-            metrics=_metrics_for(),
+            state=_DesignAttemptState(spec=spec, code=code, trades=[], metrics=_metrics_for()),
             exec_result=_entry_with_no_exit_exec_result(),
             market_data=_market_data(),
             config=_config(),
@@ -1507,10 +1493,7 @@ def test_other_zero_trade_category_still_uses_code_repair() -> None:
     orch.predicate_conformance_gate.check = lambda code, spec, **kw: []
 
     recovery = orch._handle_critical_anomalies(
-        spec=_spec(),
-        code="# original code\n",
-        trades=[],
-        metrics=_metrics_for(),
+        state=_DesignAttemptState(spec=_spec(), code="# original code\n", trades=[], metrics=_metrics_for()),
         # NO_ORDERS_EMITTED -> specialised repair, not redesign routing.
         exec_result=_zero_trade_exec_result(),
         market_data=_market_data(),
@@ -1557,10 +1540,7 @@ def test_handle_critical_anomalies_propagates_budget_exhaustion_from_ztr(
     with use_budget(spent_budget):
         with pytest.raises(DesignBudgetExhausted) as exc_info:
             orch._handle_critical_anomalies(
-                spec=_spec(),
-                code="# original code\n",
-                trades=[],
-                metrics=_metrics_for(),
+                state=_DesignAttemptState(spec=_spec(), code="# original code\n", trades=[], metrics=_metrics_for()),
                 exec_result=_zero_trade_exec_result(),
                 market_data=_market_data(),
                 config=_config(),
