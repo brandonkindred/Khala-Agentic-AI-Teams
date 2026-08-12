@@ -31,7 +31,7 @@ from branding_team.models import (
     BrandExperiencePrinciplesOutput,
     BrandStoryOutput,
     ChannelGuidelineOutput,
-    CoreValueOutput,
+    CoreValue,
     CoreValuesOutput,
     DifferentiationPillarOutput,
     DifferentiationPillarsOutput,
@@ -106,7 +106,7 @@ def test_positioning_output_rejects_missing_and_empty_fields() -> None:
 
 def test_core_values_output_enforces_stated_cardinality() -> None:
     """Prompt asks for "3-5 core values"."""
-    value = CoreValueOutput(
+    value = dict(
         value="clarity",
         behavioral_definition="We demonstrate clarity in every decision.",
         observable_behaviors=["Plain-language docs"],
@@ -120,25 +120,76 @@ def test_core_values_output_enforces_stated_cardinality() -> None:
     assert len(output.core_values) == 3
 
 
-def test_core_value_output_rejects_blank_content() -> None:
-    """A blank value, behavioral definition, or observable behavior must fail validation."""
+def test_core_value_soft_mode_accepts_blank_and_omitted_content() -> None:
+    """Default (context-less) validation is the former ``CoreValue``'s soft behavior.
+
+    Only ``value`` is required; ``behavioral_definition``/``observable_behaviors``
+    may be blank or omitted, matching every merge-target construction site
+    (e.g. ``StrategicCoreOutput.core_values``).
+    """
+    with pytest.raises(ValidationError):
+        CoreValue()  # value is still required, even soft
+
+    output = CoreValue(value="clarity")
+    assert output.value == "clarity"
+    assert output.behavioral_definition == ""
+    assert output.observable_behaviors == []
+
+    # Explicitly-blank content is also accepted in soft mode.
+    blank = CoreValue(value="", behavioral_definition="", observable_behaviors=[""])
+    assert blank.value == ""
+
+    # model_validate with no context is the same soft mode as direct construction.
+    validated = CoreValue.model_validate({"value": "trust"})
+    assert validated.behavioral_definition == ""
+
+
+def test_core_value_strict_context_rejects_blank_content() -> None:
+    """``context={"strict": True}`` reproduces the former ``CoreValueOutput``'s
+    requirement that a blank value, behavioral definition, or observable
+    behavior must fail validation, not silently pass."""
     valid_kwargs = dict(
         value="clarity",
         behavioral_definition="We demonstrate clarity in every decision.",
         observable_behaviors=["Plain-language docs"],
     )
 
-    with pytest.raises(ValidationError):
-        CoreValueOutput(**{**valid_kwargs, "value": ""})
-    with pytest.raises(ValidationError):
-        CoreValueOutput(**{**valid_kwargs, "behavioral_definition": ""})
-    with pytest.raises(ValidationError):
-        CoreValueOutput(**{**valid_kwargs, "observable_behaviors": [""]})
-    with pytest.raises(ValidationError):
-        CoreValueOutput(**{**valid_kwargs, "observable_behaviors": []})
+    def _strict(**overrides: object) -> CoreValue:
+        return CoreValue.model_validate({**valid_kwargs, **overrides}, context={"strict": True})
 
-    output = CoreValueOutput(**valid_kwargs)
+    with pytest.raises(ValidationError):
+        _strict(value="")
+    with pytest.raises(ValidationError):
+        _strict(behavioral_definition="")
+    with pytest.raises(ValidationError):
+        _strict(observable_behaviors=[""])
+    with pytest.raises(ValidationError):
+        _strict(observable_behaviors=[])
+
+    output = _strict()
     assert output.value == "clarity"
+
+
+def test_core_values_output_container_propagates_strict_context_to_each_item() -> None:
+    """``CoreValuesOutput`` overrides ``__init__`` to force ``{"strict": True}`` on
+    every nested ``CoreValue`` it holds, even though Strands' structured-output
+    tool constructs it via a bare, context-less ``CoreValuesOutput(**data)`` call
+    — a blank field on any one of the 3-5 core values must fail validation."""
+    valid = dict(
+        value="clarity",
+        behavioral_definition="We demonstrate clarity in every decision.",
+        observable_behaviors=["Plain-language docs"],
+    )
+
+    with pytest.raises(ValidationError):
+        CoreValuesOutput(core_values=[{**valid, "value": ""}, valid, valid])
+    with pytest.raises(ValidationError):
+        CoreValuesOutput(core_values=[{**valid, "behavioral_definition": ""}, valid, valid])
+    with pytest.raises(ValidationError):
+        CoreValuesOutput(core_values=[{**valid, "observable_behaviors": []}, valid, valid])
+
+    output = CoreValuesOutput(core_values=[valid, valid, valid])
+    assert output.core_values[0].value == "clarity"
 
 
 def test_audience_segments_output_enforces_stated_cardinality() -> None:

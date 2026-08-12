@@ -13,7 +13,7 @@ from __future__ import annotations
 from enum import Enum
 from typing import Annotated, Any, Dict, List, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationInfo, model_validator
 
 from shared.hitl.models import HumanReview as HumanReview  # noqa: F401 — re-export
 
@@ -21,6 +21,58 @@ from shared.hitl.models import HumanReview as HumanReview  # noqa: F401 — re-e
 # a fully populated ``List[str] = Field(min_length=N)`` still accepts N blank
 # strings, undermining every "requires non-empty content" docstring below.
 NonEmptyStr = Annotated[str, Field(min_length=1)]
+
+# ---------------------------------------------------------------------------
+# Validation-context-driven strict/soft twin pattern
+# ---------------------------------------------------------------------------
+#
+# Many nested models in this file need two validation modes against the exact
+# same fields: "soft" (only the bare minimum required, everything else may be
+# blank/omitted) when the model is a *merge target* that a partial per-agent
+# fragment must validate against, and "strict" (every field non-blank) when
+# the model is the *agent-facing* schema Strands' structured-output tool uses
+# to reject a blank LLM response and force a retry. Historically each such
+# pair was two hand-maintained, field-for-field-identical classes (e.g. the
+# former ``CoreValue``/``CoreValueOutput``).
+#
+# ``CoreValue`` below is the proof of concept for collapsing such a pair into
+# one model: a single canonical field definition, plus a
+# ``@model_validator(mode="after")`` that only enforces non-blank content when
+# Pydantic's validation context carries ``{"strict": True}``:
+#
+#   - Soft (default): ``CoreValue(value="clarity")``, or
+#     ``CoreValue.model_validate(data)`` with no ``context`` kwarg, skips the
+#     strict checks. This is what every *merge target* container gets — e.g.
+#     ``StrategicCoreOutput.core_values: List[CoreValue]``, validated via
+#     ``model_class.model_validate(merged)`` with no context in
+#     ``orchestrator._merge_named_fragments``/``_merge_structured_output``.
+#   - Strict: ``CoreValue.model_validate(data, context={"strict": True})``
+#     enforces every field non-blank. Pydantic v2 forwards a
+#     ``validate_python`` context to every nested submodel it validates, so a
+#     container only needs to supply the context once — each nested
+#     ``CoreValue`` sees it automatically, with no per-item wiring.
+#
+# The one wrinkle: Strands' structured-output tool constructs the
+# agent-facing container via a bare, context-less
+# ``self._structured_output_type(**tool_input)`` call (see
+# ``strands.tools.structured_output.structured_output_tool.StructuredOutputTool.stream``).
+# So the agent-facing container (``CoreValuesOutput`` below) overrides
+# ``__init__`` to hard-code ``context={"strict": True}`` via the documented
+# Pydantic pattern of calling ``self.__pydantic_validator__.validate_python``
+# directly (https://docs.pydantic.dev/latest/concepts/validators/#validation-context).
+# That context then propagates to every nested ``CoreValue`` the container
+# validates, without ``CoreValue`` itself needing to know which container it's
+# nested under. Note ``model_validate(...)``/``model_validate_json(...)``
+# bypass ``__init__`` entirely (they call the core validator directly), so the
+# ``__init__`` override only intercepts the ``ClassName(**kwargs)``
+# constructor path — which is exactly the path Strands uses, and the path
+# most direct-construction call sites/tests use too.
+#
+# Follow-on sub-issues collapsing the remaining twin pairs should replicate
+# this shape: soft-by-default fields plus a context-gated
+# ``model_validator`` on the merge-target model, and a strict-context
+# ``__init__`` override on whichever container is passed as an agent's
+# ``structured_output=``.
 
 # ---------------------------------------------------------------------------
 # Shared models
@@ -160,29 +212,51 @@ class BrandingMission(BrandingMissionFields):
 
 
 class CoreValue(BaseModel):
-    """A brand value with behavioral definition."""
+    """A brand value with behavioral definition.
+
+    Soft/strict validation-context twin pattern proof of concept for the
+    "collapse soft/strict Pydantic twin models" epic — see the design
+    writeup above ("Validation-context-driven strict/soft twin pattern").
+    Soft by default (only presence of ``value`` is required, matching the
+    former ``CoreValue``'s behavior); nest this model under a container that
+    validates with ``context={"strict": True}`` (e.g. ``CoreValuesOutput``
+    below) — or call ``CoreValue.model_validate(data, context={"strict":
+    True})`` directly — to enforce the former ``CoreValueOutput``'s
+    non-blank-everything behavior instead. Backs both
+    ``CoreValuesOutput.core_values`` (strict) and
+    ``StrategicCoreOutput.core_values``'s merge target (soft).
+    """
 
     value: str
     behavioral_definition: str = ""
     observable_behaviors: List[str] = Field(default_factory=list)
 
+    @model_validator(mode="after")
+    def _enforce_strict_context(self, info: ValidationInfo) -> "CoreValue":
+        """Reject blank/empty content when validated under ``{"strict": True}``.
 
-class CoreValueOutput(BaseModel):
-    """Agent-facing core value; requires non-empty fields.
-
-    Field-for-field twin of ``CoreValue`` with required content, matching
-    the Phase 3 nested-output-model pattern (``LogoUsageRuleOutput``,
-    ``ColorEntryOutput``, ``TypographySpecOutput``, ``VoiceToneEntryOutput``,
-    ``BrandArchitectureRuleOutput``, ``PersonaProfileOutput``,
-    ``MessagingPillarOutput``, ``ElevatorPitchOutput``, ``BrandArchetypeOutput``,
-    ``DifferentiationPillarOutput``) — ``CoreValue`` itself must stay soft
-    (only ``value`` required) since it also backs
-    ``StrategicCoreOutput.core_values``'s merge target.
-    """
-
-    value: str = Field(min_length=1)
-    behavioral_definition: str = Field(min_length=1)
-    observable_behaviors: List[NonEmptyStr] = Field(min_length=1)
+        Preconditions:
+            None — invoked on every validation of this model.
+        Postconditions:
+            Returns ``self`` unchanged when ``info.context`` is falsy or
+            ``info.context.get("strict")`` is falsy (soft mode). Raises
+            ``ValueError`` (surfaced by Pydantic as a ``ValidationError``)
+            when strict and ``value`` or ``behavioral_definition`` is blank,
+            or ``observable_behaviors`` is empty or contains a blank item.
+        """
+        if not (info.context or {}).get("strict"):
+            return self
+        if not self.value.strip():
+            raise ValueError("value must be non-empty in strict mode")
+        if not self.behavioral_definition.strip():
+            raise ValueError("behavioral_definition must be non-empty in strict mode")
+        if not self.observable_behaviors or any(
+            not behavior.strip() for behavior in self.observable_behaviors
+        ):
+            raise ValueError(
+                "observable_behaviors must be non-empty, with no blank items, in strict mode"
+            )
+        return self
 
 
 class AudienceSegment(BaseModel):
@@ -297,12 +371,21 @@ class CoreValuesOutput(BaseModel):
 
     Requires non-empty content so Strands retries blank structured_output.
     ``min_length``/``max_length`` encode the prompt's stated "3-5 core values".
-    Uses ``CoreValueOutput`` (not the soft ``CoreValue``) so each value's
-    fields are individually required — a blank value must fail validation
-    instead of silently passing.
+    Strict entry point for ``CoreValue``'s validation-context twin pattern
+    (see ``CoreValue``'s docstring): overrides ``__init__`` to inject
+    ``context={"strict": True}``, so every nested ``CoreValue`` this model
+    holds is validated as though it were the former ``CoreValueOutput`` — a
+    blank field must fail validation instead of silently passing — even
+    though Strands' structured-output tool constructs this model via a bare,
+    context-less ``CoreValuesOutput(**tool_input)`` call.
     """
 
-    core_values: List[CoreValueOutput] = Field(min_length=3, max_length=5)
+    core_values: List[CoreValue] = Field(min_length=3, max_length=5)
+
+    def __init__(self, /, **data: Any) -> None:
+        self.__pydantic_validator__.validate_python(
+            data, self_instance=self, context={"strict": True}
+        )
 
 
 class AudienceSegmentsOutput(BaseModel):
