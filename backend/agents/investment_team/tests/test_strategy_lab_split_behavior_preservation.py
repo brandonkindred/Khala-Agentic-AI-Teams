@@ -227,27 +227,49 @@ def _record_gate_snapshot(record_gates: List[Dict[str, Any]]) -> List[Dict[str, 
     ]
 
 
-def _trade_snapshot(trades: List[TradeRecord]) -> List[Tuple[Any, ...]]:
-    """Project trades to the identity the split must preserve.
+def _trade_snapshot(trades: List[TradeRecord]) -> List[Dict[str, Any]]:
+    """Copy every ``TradeRecord`` field so later in-place mutation cannot
+    make both sides of an assertion agree.
 
     Pre: ``trades`` is a list of ``TradeRecord``.
-    Post: tuples of (trade_num, symbol, side, entry_date, exit_date,
-    shares, gross_pnl, net_pnl, outcome).
+    Post: a list of ``model_dump()`` dicts (prices, returns, hold days,
+    cumulative P&L, and execution-attribution fields included). Independent
+    of the live objects.
     """
-    return [
-        (
-            t.trade_num,
-            t.symbol,
-            t.side,
-            t.entry_date,
-            t.exit_date,
-            round(t.shares, 4),
-            round(t.gross_pnl, 2),
-            round(t.net_pnl, 2),
-            t.outcome,
-        )
-        for t in trades
-    ]
+    return [t.model_dump() for t in trades]
+
+
+def _spec_snapshot(spec: StrategySpec, *, exclude: Tuple[str, ...] = ()) -> Dict[str, Any]:
+    """Copy the spec the split must preserve.
+
+    Pre: ``spec`` is a ``StrategySpec``.
+    Post: a ``model_dump()`` dict. ``exclude`` drops identity/provenance
+    fields the orchestrator assigns (``strategy_id``, ``authored_by``,
+    ``audit``) when comparing a design-attempt record against a fixture
+    spec that was not the object the loop constructed.
+    """
+    data = spec.model_dump()
+    for key in exclude:
+        data.pop(key, None)
+    return data
+
+
+def _ledger_expectations(
+    trades: List[TradeRecord],
+) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    """Snapshot the sandbox ledger and its metrics before orchestration.
+
+    Pre: ``trades`` is the ledger the stubbed sandbox will return.
+    Post: ``(trade_snapshot, metrics_snapshot)`` computed from that
+    ledger now, so a later in-place mutation of the live ``TradeRecord``
+    objects cannot poison the expected side of the assertion.
+    """
+    return (
+        _trade_snapshot(trades),
+        _metrics_snapshot(
+            orchestrator_module.compute_metrics(trades, 100_000.0, "2023-01-01", "2023-12-31")
+        ),
+    )
 
 
 def _metrics_snapshot(metrics: BacktestResult) -> Dict[str, Any]:
@@ -402,24 +424,23 @@ def test_synthesis_happy_path_preserves_spec_code_trades_metrics_gates(
     monkeypatch.setattr(StrategyLabOrchestrator, "_fetch_market_data", _populated_fetch())
     exec_result = _code_exec(success=True, raw_trades=_benign_sandbox_trades())
     monkeypatch.setattr(orchestrator_module, "run_strategy_code", lambda *a, **k: exec_result)
+    spec = _spec()
+    expected_spec = _spec_snapshot(spec)
+    expected_trades, expected_metrics = _ledger_expectations(exec_result.trades)
 
-    outcome, gates, refinements, zero_trade = _run_synthesis(orch)
+    outcome, gates, refinements, zero_trade = _run_synthesis(orch, spec=spec)
 
     assert outcome.execution_succeeded is True
     assert outcome.max_rounds_exhausted is False
     assert outcome.refinement_stalled is False
     assert outcome.code == _CONFORMANT_CODE
-    assert outcome.spec.target_symbols == ["QQQ"]
-    assert outcome.spec.hypothesis == "RSI mean reversion on a small universe"
+    assert _spec_snapshot(outcome.spec) == expected_spec
     assert outcome.requested_symbols == ["QQQ"]
     assert outcome.fetched_symbols == ["QQQ"]
     assert outcome.provider_used == {"QQQ": "stub"}
     assert outcome.market_data == {"QQQ": []}
-    assert _trade_snapshot(outcome.trades) == _trade_snapshot(exec_result.trades)
-    expected_metrics = orchestrator_module.compute_metrics(
-        exec_result.trades, 100_000.0, "2023-01-01", "2023-12-31"
-    )
-    assert _metrics_snapshot(outcome.metrics) == _metrics_snapshot(expected_metrics)
+    assert _trade_snapshot(outcome.trades) == expected_trades
+    assert _metrics_snapshot(outcome.metrics) == expected_metrics
     assert refinements == []
     assert zero_trade == []
     assert _gate_snapshot(gates) == _gate_snapshot(
@@ -447,12 +468,15 @@ def test_synthesis_no_market_data_preserves_short_circuit_outputs(
         lambda *a, **k: (_ for _ in ()).throw(AssertionError("sandbox must not run")),
     )
 
-    outcome, gates, refinements, _zero_trade = _run_synthesis(orch)
+    spec = _spec()
+    expected_spec = _spec_snapshot(spec)
+
+    outcome, gates, refinements, _zero_trade = _run_synthesis(orch, spec=spec)
 
     assert outcome.execution_succeeded is False
     assert outcome.max_rounds_exhausted is False
     assert outcome.code == _CONFORMANT_CODE
-    assert outcome.spec.target_symbols == ["QQQ"]
+    assert _spec_snapshot(outcome.spec) == expected_spec
     assert outcome.trades == []
     assert outcome.market_data is None
     assert outcome.requested_symbols == ["QQQ"]
@@ -500,6 +524,7 @@ def test_synthesis_validation_critical_then_success_preserves_outputs(
     monkeypatch.setattr(StrategyLabOrchestrator, "_fetch_market_data", _populated_fetch())
     exec_result = _code_exec(success=True, raw_trades=_benign_sandbox_trades())
     monkeypatch.setattr(orchestrator_module, "run_strategy_code", lambda *a, **k: exec_result)
+    expected_trades, expected_metrics = _ledger_expectations(exec_result.trades)
 
     outcome, gates, refinements, _zero_trade = _run_synthesis(orch)
 
@@ -507,11 +532,8 @@ def test_synthesis_validation_critical_then_success_preserves_outputs(
     assert outcome.max_rounds_exhausted is False
     assert outcome.code != _CONFORMANT_CODE
     assert "# refinement round 0" in outcome.code
-    assert _trade_snapshot(outcome.trades) == _trade_snapshot(exec_result.trades)
-    expected_metrics = orchestrator_module.compute_metrics(
-        exec_result.trades, 100_000.0, "2023-01-01", "2023-12-31"
-    )
-    assert _metrics_snapshot(outcome.metrics) == _metrics_snapshot(expected_metrics)
+    assert _trade_snapshot(outcome.trades) == expected_trades
+    assert _metrics_snapshot(outcome.metrics) == expected_metrics
     assert len(refinements) == 1
     names = [g["gate_name"] for g in _gate_snapshot(gates)]
     assert names[0] == "code_safety"
@@ -546,16 +568,14 @@ def test_synthesis_execution_failure_then_success_preserves_outputs(
         return success_result
 
     monkeypatch.setattr(orchestrator_module, "run_strategy_code", _sandbox)
+    expected_trades, expected_metrics = _ledger_expectations(success_result.trades)
 
     outcome, gates, refinements, _zero_trade = _run_synthesis(orch)
 
     assert outcome.execution_succeeded is True
     assert sandbox_calls["n"] == 2
-    assert _trade_snapshot(outcome.trades) == _trade_snapshot(success_result.trades)
-    expected_metrics = orchestrator_module.compute_metrics(
-        success_result.trades, 100_000.0, "2023-01-01", "2023-12-31"
-    )
-    assert _metrics_snapshot(outcome.metrics) == _metrics_snapshot(expected_metrics)
+    assert _trade_snapshot(outcome.trades) == expected_trades
+    assert _metrics_snapshot(outcome.metrics) == expected_metrics
     assert len(refinements) == 1
     exec_gate = next(g for g in gates if g.gate_name == "code_execution")
     assert exec_gate.passed is False
@@ -585,12 +605,13 @@ def test_synthesis_trade_coverage_critical_preserves_break_outputs(
     monkeypatch.setattr(StrategyLabOrchestrator, "_fetch_market_data", _populated_fetch())
     exec_result = _code_exec(success=True, raw_trades=_benign_sandbox_trades())
     monkeypatch.setattr(orchestrator_module, "run_strategy_code", lambda *a, **k: exec_result)
+    expected_trades, _expected_metrics = _ledger_expectations(exec_result.trades)
 
     outcome, gates, refinements, _zero_trade = _run_synthesis(orch)
 
     assert outcome.execution_succeeded is False
     assert outcome.max_rounds_exhausted is True
-    assert _trade_snapshot(outcome.trades) == _trade_snapshot(exec_result.trades)
+    assert _trade_snapshot(outcome.trades) == expected_trades
     assert refinements == []
     coverage = next(g for g in gates if g.gate_name == "target_symbol_coverage")
     assert coverage.passed is False
@@ -629,16 +650,14 @@ def test_synthesis_evaluation_continue_then_success_preserves_outputs(
     monkeypatch.setattr(StrategyLabOrchestrator, "_fetch_market_data", _populated_fetch())
     exec_result = _code_exec(success=True, raw_trades=_benign_sandbox_trades())
     monkeypatch.setattr(orchestrator_module, "run_strategy_code", lambda *a, **k: exec_result)
+    expected_trades, expected_metrics = _ledger_expectations(exec_result.trades)
 
     outcome, gates, refinements, _zero_trade = _run_synthesis(orch)
 
     assert outcome.execution_succeeded is True
     assert anomaly_calls["n"] == 2
-    assert _trade_snapshot(outcome.trades) == _trade_snapshot(exec_result.trades)
-    expected_metrics = orchestrator_module.compute_metrics(
-        exec_result.trades, 100_000.0, "2023-01-01", "2023-12-31"
-    )
-    assert _metrics_snapshot(outcome.metrics) == _metrics_snapshot(expected_metrics)
+    assert _trade_snapshot(outcome.trades) == expected_trades
+    assert _metrics_snapshot(outcome.metrics) == expected_metrics
     assert len(refinements) == 1
     anomaly_gates = [g for g in gates if g.gate_name == "backtest_anomaly"]
     assert len(anomaly_gates) == 2
@@ -703,6 +722,9 @@ def test_design_attempt_happy_path_preserves_spec_code_trades_metrics_gates(
     monkeypatch.setattr(StrategyLabOrchestrator, "_fetch_market_data", _populated_fetch())
     exec_result = _code_exec(success=True, raw_trades=_benign_sandbox_trades())
     monkeypatch.setattr(orchestrator_module, "run_strategy_code", lambda *a, **k: exec_result)
+    expected_trades, expected_metrics = _ledger_expectations(exec_result.trades)
+    _SPEC_IDENTITY = ("strategy_id", "authored_by", "audit")
+    expected_spec = _spec_snapshot(_spec(), exclude=_SPEC_IDENTITY)
 
     record = orch._run_design_attempt(
         prior_records=[],
@@ -713,15 +735,11 @@ def test_design_attempt_happy_path_preserves_spec_code_trades_metrics_gates(
         directives=[],
     )
 
-    assert record.strategy.hypothesis == "RSI mean reversion on a small universe"
-    assert record.strategy.target_symbols == ["QQQ"]
+    assert _spec_snapshot(record.strategy, exclude=_SPEC_IDENTITY) == expected_spec
     assert record.strategy_code == _CONFORMANT_CODE
     assert record.original_code == _CONFORMANT_CODE
-    assert _trade_snapshot(record.backtest.trades) == _trade_snapshot(exec_result.trades)
-    expected_metrics = orchestrator_module.compute_metrics(
-        exec_result.trades, 100_000.0, "2023-01-01", "2023-12-31"
-    )
-    assert _metrics_snapshot(record.backtest.result) == _metrics_snapshot(expected_metrics)
+    assert _trade_snapshot(record.backtest.trades) == expected_trades
+    assert _metrics_snapshot(record.backtest.result) == expected_metrics
     assert record.analysis_narrative == "scripted narrative"
     assert record.strategy_rationale == "scripted rationale"
     gate_names = [g["gate_name"] for g in _record_gate_snapshot(record.quality_gate_results)]
@@ -762,6 +780,7 @@ def test_design_attempt_no_market_data_preserves_failed_record_outputs(
     assert record.strategy_code == _CONFORMANT_CODE
     assert record.backtest.trades == []
     assert record.is_winning is False
+    assert record.backtest.status == "failed"
     gate_names = [g["gate_name"] for g in _record_gate_snapshot(record.quality_gate_results)]
     assert "market_data" in gate_names
     market_gate = next(
