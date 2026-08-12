@@ -106,7 +106,8 @@ def nearest_fibonacci(n: int) -> int:
     Postconditions:
         - Returns ``FIBONACCI[0]`` for ``n <= FIBONACCI[0]`` and ``FIBONACCI[-1]``
           for ``n >= FIBONACCI[-1]``; otherwise the closest member. An exact tie
-          between two members is broken toward the larger one -- a tied estimate
+          between two members is resolved by choosing the larger of the two tied
+          values (not always rounding to the scale's ceiling) -- a tied estimate
           should read as "more complex", not less.
     """
     if n <= FIBONACCI[0]:
@@ -162,9 +163,10 @@ def _count_file_references(body: str) -> int:
     Postconditions:
         - Returns the number of unique inline-code spans (`` `...` ``, under 200
           chars) containing a path separator ("/") or ending in a recognized
-          file extension (:data:`_FILE_EXTENSIONS`). A bare dotted identifier
-          like ``self.foo`` or ``json.dumps`` -- a method call, not a file --
-          does not count, unlike a plain "any dot" check would.
+          file extension (:data:`_FILE_EXTENSIONS`, matched case-insensitively).
+          A bare dotted identifier like ``self.foo`` or ``json.dumps`` -- a
+          method call, not a file -- does not count, unlike a plain "any dot"
+          check would.
     """
     spans = _INLINE_CODE_RE.findall(body)
     refs = {s for s in spans if len(s) < 200 and ("/" in s or s.lower().endswith(_FILE_EXTENSIONS))}
