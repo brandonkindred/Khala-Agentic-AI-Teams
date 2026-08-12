@@ -9,6 +9,7 @@ import code_review_agent.submission_pass_runner as runner_mod
 import pytest
 from code_review_agent.submission_pass_runner import (
     FileBatch,
+    _call_agent,
     _estimated_file_block_chars,
     _is_overflow_shaped,
     _manifest_chars,
@@ -40,6 +41,49 @@ def _fixed_budgets(
 
 def _paths_prompt(batch: FileBatch, _budgets: Any) -> str:
     return "PATHS:" + ",".join(path for path, _ in batch.items)
+
+
+def _patch_via_reasoning_json(
+    monkeypatch: pytest.MonkeyPatch,
+    handler: Any,
+) -> None:
+    """Stub ``run_agent_via_reasoning`` to invoke ``handler(reasoning_prompt)`` -> dict."""
+
+    def _fake(**kwargs: Any) -> Any:
+        data = handler(kwargs["reasoning_prompt"])
+        if isinstance(data, BaseException):
+            raise data
+        return kwargs["parse"](json.dumps(data))
+
+    monkeypatch.setattr(runner_mod, "run_agent_via_reasoning", _fake)
+
+
+def test_call_agent_delegates_to_run_agent_via_reasoning(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: list[dict[str, Any]] = []
+
+    def _fake(**kwargs: Any) -> dict[str, str]:
+        seen.append(kwargs)
+        return {"ok": True}
+
+    monkeypatch.setattr(runner_mod, "run_agent_via_reasoning", _fake)
+    sentinel_tools = [{"name": "list_files"}]
+    result = _call_agent(
+        object(),
+        "reasoning sys",
+        "format json",
+        sentinel_tools,
+        "user prompt",
+        json.loads,
+    )
+    assert result == {"ok": True}
+    assert len(seen) == 1
+    assert seen[0]["reasoning_system_prompt"] == "reasoning sys"
+    assert seen[0]["formatting_instructions"] == "format json"
+    assert seen[0]["reasoning_prompt"] == "user prompt"
+    assert seen[0]["tools"] == sentinel_tools
+    assert seen[0]["reasoning_think"] is True
 
 
 class _FailIfAsked(DummyLLMClient):
@@ -141,7 +185,8 @@ def test_returns_empty_and_makes_no_call_for_empty_changed_files() -> None:
     result = run_submission_pass(
         _FailIfAsked(),
         changed_files=[],
-        system_prompt="sys",
+        reasoning_system_prompt="sys",
+        formatting_instructions="fmt",
         build_prompt=_paths_prompt,
         tools=[],
         parse=json.loads,
@@ -156,7 +201,8 @@ def test_returns_empty_when_budgets_computation_returns_none(
     result = run_submission_pass(
         _FailIfAsked(),
         changed_files=[("a.py", "code")],
-        system_prompt="sys",
+        reasoning_system_prompt="sys",
+        formatting_instructions="fmt",
         build_prompt=_paths_prompt,
         tools=[],
         parse=json.loads,
@@ -171,11 +217,12 @@ def test_returns_empty_when_context_too_small_for_fixed_prompt() -> None:
         def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
             raise AssertionError(f"must not call the LLM, got prompt: {prompt!r}")
 
-    huge_system_prompt = "x" * 500_000  # far exceeds DummyLLMClient's fixed context window
+    huge_reasoning_prompt = "x" * 500_000  # far exceeds DummyLLMClient's fixed context window
     result = run_submission_pass(
         _FailIfCalled(),
         changed_files=[("a.py", "code")],
-        system_prompt=huge_system_prompt,
+        reasoning_system_prompt=huge_reasoning_prompt,
+        formatting_instructions="fmt",
         build_prompt=_paths_prompt,
         tools=[],
         parse=json.loads,
@@ -201,17 +248,17 @@ def test_single_batch_and_single_call_when_everything_fits(
         return _paths_prompt(batch, _budgets)
 
     calls: List[str] = []
-
-    class _Client(DummyLLMClient):
-        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
-            calls.append(prompt)
-            return {"paths": prompt.replace("PATHS:", "")}
+    _patch_via_reasoning_json(
+        monkeypatch,
+        lambda prompt: (calls.append(prompt) or {"paths": prompt.replace("PATHS:", "")}),
+    )
 
     files = [("a.py", "x" * 10), ("b.py", "y" * 10)]
     result = run_submission_pass(
-        _Client(),
+        DummyLLMClient(),
         changed_files=files,
-        system_prompt="sys",
+        reasoning_system_prompt="sys",
+        formatting_instructions="fmt",
         build_prompt=build_prompt,
         tools=[],
         parse=json.loads,
@@ -240,14 +287,16 @@ def test_splits_into_multiple_batches_and_preserves_order(
         seen_batches.append(batch)
         return _paths_prompt(batch, _budgets)
 
-    class _Client(DummyLLMClient):
-        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
-            return {"paths": prompt.replace("PATHS:", "")}
+    _patch_via_reasoning_json(
+        monkeypatch,
+        lambda prompt: {"paths": prompt.replace("PATHS:", "")},
+    )
 
     result = run_submission_pass(
-        _Client(),
+        DummyLLMClient(),
         changed_files=items,
-        system_prompt="sys",
+        reasoning_system_prompt="sys",
+        formatting_instructions="fmt",
         build_prompt=build_prompt,
         tools=[],
         parse=json.loads,
@@ -274,15 +323,17 @@ def test_split_batches_log_names_the_tail_pass_budget_knob(
         lambda *a, **k: _fixed_budgets(max_inline_code_chars=per_file + 10),
     )
 
-    class _Client(DummyLLMClient):
-        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
-            return {"paths": prompt.replace("PATHS:", "")}
+    _patch_via_reasoning_json(
+        monkeypatch,
+        lambda prompt: {"paths": prompt.replace("PATHS:", "")},
+    )
 
     with caplog.at_level("INFO", logger=runner_mod.logger.name):
         run_submission_pass(
-            _Client(),
+            DummyLLMClient(),
             changed_files=items,
-            system_prompt="sys",
+            reasoning_system_prompt="sys",
+            formatting_instructions="fmt",
             build_prompt=_paths_prompt,
             tools=[],
             parse=json.loads,
@@ -314,14 +365,16 @@ def test_max_extra_body_chars_propagates_from_computed_architecture_budget(
         seen_budgets.append(budgets)
         return _paths_prompt(batch, budgets)
 
-    class _Client(DummyLLMClient):
-        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
-            return {"paths": prompt.replace("PATHS:", "")}
+    _patch_via_reasoning_json(
+        monkeypatch,
+        lambda prompt: {"paths": prompt.replace("PATHS:", "")},
+    )
 
     run_submission_pass(
-        _Client(),
+        DummyLLMClient(),
         changed_files=[("a.py", "x")],
-        system_prompt="sys",
+        reasoning_system_prompt="sys",
+        formatting_instructions="fmt",
         build_prompt=build_prompt,
         tools=[],
         parse=json.loads,
@@ -351,18 +404,20 @@ def test_reactive_bisect_recovers_when_multi_file_batch_overflows(
         seen_batches.append(batch)
         return _paths_prompt(batch, _budgets)
 
-    class _Client(DummyLLMClient):
-        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
-            paths = prompt.replace("PATHS:", "")
-            if "," in paths:
-                raise ContextWindowOverflowException("combined batch too large")
-            return {"file": paths}
+    def _handler(prompt: str) -> Any:
+        paths = prompt.replace("PATHS:", "")
+        if "," in paths:
+            raise ContextWindowOverflowException("combined batch too large")
+        return {"file": paths}
+
+    _patch_via_reasoning_json(monkeypatch, _handler)
 
     files = [("a.py", "aaaa"), ("b.py", "bbbb")]
     result = run_submission_pass(
-        _Client(),
+        DummyLLMClient(),
         changed_files=files,
-        system_prompt="sys",
+        reasoning_system_prompt="sys",
+        formatting_instructions="fmt",
         build_prompt=build_prompt,
         tools=[],
         parse=json.loads,
@@ -391,18 +446,20 @@ def test_reactive_shrink_recovers_when_single_file_batch_overflows(
         seen_batches.append(batch)
         return "LEN:" + str(len(batch.items[0][1]))
 
-    class _Client(DummyLLMClient):
-        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
-            length = int(prompt.replace("LEN:", ""))
-            if length >= 150:
-                raise MaxTokensReachedException("output too long for this much input")
-            return {"ok": True, "len": length}
+    def _handler(prompt: str) -> Any:
+        length = int(prompt.replace("LEN:", ""))
+        if length >= 150:
+            raise MaxTokensReachedException("output too long for this much input")
+        return {"ok": True, "len": length}
+
+    _patch_via_reasoning_json(monkeypatch, _handler)
 
     files = [("only.py", "X" * 200)]
     result = run_submission_pass(
-        _Client(),
+        DummyLLMClient(),
         changed_files=files,
-        system_prompt="sys",
+        reasoning_system_prompt="sys",
+        formatting_instructions="fmt",
         build_prompt=build_prompt,
         tools=[],
         parse=json.loads,
@@ -434,18 +491,20 @@ def test_reactive_shrink_reduces_budget_when_content_dwarfs_it(
         rendered_lengths.append(len(rendered))
         return "LEN:" + str(len(rendered))
 
-    class _Client(DummyLLMClient):
-        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
-            length = int(prompt.replace("LEN:", ""))
-            if length >= 100:
-                raise MaxTokensReachedException("output too long for this much input")
-            return {"ok": True, "len": length}
+    def _handler(prompt: str) -> Any:
+        length = int(prompt.replace("LEN:", ""))
+        if length >= 100:
+            raise MaxTokensReachedException("output too long for this much input")
+        return {"ok": True, "len": length}
+
+    _patch_via_reasoning_json(monkeypatch, _handler)
 
     files = [("only.py", "X" * 1_000)]  # far larger than the 100-char budget
     result = run_submission_pass(
-        _Client(),
+        DummyLLMClient(),
         changed_files=files,
-        system_prompt="sys",
+        reasoning_system_prompt="sys",
+        formatting_instructions="fmt",
         build_prompt=build_prompt,
         tools=[],
         parse=json.loads,
@@ -467,16 +526,18 @@ def test_reactive_shrink_gives_up_after_one_failed_retry(
     )
     calls: List[str] = []
 
-    class _Client(DummyLLMClient):
-        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
-            calls.append(prompt)
-            raise MaxTokensReachedException("always too large")
+    def _handler(prompt: str) -> Any:
+        calls.append(prompt)
+        raise MaxTokensReachedException("always too large")
+
+    _patch_via_reasoning_json(monkeypatch, _handler)
 
     files = [("only.py", "X" * 200)]
     result = run_submission_pass(
-        _Client(),
+        DummyLLMClient(),
         changed_files=files,
-        system_prompt="sys",
+        reasoning_system_prompt="sys",
+        formatting_instructions="fmt",
         build_prompt=lambda batch, _b: "LEN:" + str(len(batch.items[0][1])),
         tools=[],
         parse=json.loads,
@@ -499,16 +560,18 @@ def test_overflow_on_unshrinkable_single_file_batch_skips_without_retry(
     )
     calls: List[str] = []
 
-    class _Client(DummyLLMClient):
-        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
-            calls.append(prompt)
-            raise ContextWindowOverflowException("overflow even with no content")
+    def _handler(prompt: str) -> Any:
+        calls.append(prompt)
+        raise ContextWindowOverflowException("overflow even with no content")
+
+    _patch_via_reasoning_json(monkeypatch, _handler)
 
     files = [("only.py", "")]
     result = run_submission_pass(
-        _Client(),
+        DummyLLMClient(),
         changed_files=files,
-        system_prompt="sys",
+        reasoning_system_prompt="sys",
+        formatting_instructions="fmt",
         build_prompt=_paths_prompt,
         tools=[],
         parse=json.loads,
@@ -529,17 +592,19 @@ def test_non_overflow_exception_skips_batch_without_retry(
     )
     calls: List[str] = []
 
-    class _Client(DummyLLMClient):
-        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
-            calls.append(prompt)
-            if "a.py" in prompt:
-                raise RuntimeError("malformed reply, not overflow-shaped")
-            return {"paths": prompt.replace("PATHS:", "")}
+    def _handler(prompt: str) -> Any:
+        calls.append(prompt)
+        if "a.py" in prompt:
+            raise RuntimeError("malformed reply, not overflow-shaped")
+        return {"paths": prompt.replace("PATHS:", "")}
+
+    _patch_via_reasoning_json(monkeypatch, _handler)
 
     result = run_submission_pass(
-        _Client(),
+        DummyLLMClient(),
         changed_files=items,
-        system_prompt="sys",
+        reasoning_system_prompt="sys",
+        formatting_instructions="fmt",
         build_prompt=_paths_prompt,
         tools=[],
         parse=json.loads,
@@ -569,16 +634,18 @@ def test_depth_cap_bounds_bisection_and_terminates(
 
     call_count = 0
 
-    class _Client(DummyLLMClient):
-        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
-            nonlocal call_count
-            call_count += 1
-            raise MaxTokensReachedException("always too large")
+    def _handler(_prompt: str) -> Any:
+        nonlocal call_count
+        call_count += 1
+        raise MaxTokensReachedException("always too large")
+
+    _patch_via_reasoning_json(monkeypatch, _handler)
 
     result = run_submission_pass(
-        _Client(),
+        DummyLLMClient(),
         changed_files=files,
-        system_prompt="sys",
+        reasoning_system_prompt="sys",
+        formatting_instructions="fmt",
         build_prompt=build_prompt,
         tools=[],
         parse=json.loads,

@@ -20,7 +20,7 @@ spied-in ``Agent`` stand-in, matching the runner's own unit-test posture.
 from __future__ import annotations
 
 import inspect
-from typing import Any, Callable, Dict, List, Tuple
+from typing import Any, Callable, Dict, List
 
 import code_review_agent.architecture_consistency_pass as arch_mod
 import code_review_agent.merged_architecture_side_effect_pass as merged_mod
@@ -38,7 +38,7 @@ _PASS_MODULES = (arch_mod, side_mod, merged_mod)
 # or import any of them locally -- that would mean Agent construction or
 # recovery mechanics leaked back out of the runner during a future edit.
 _RUNNER_OWNED_NAMES = (
-    "Agent",
+    "run_agent_via_reasoning",
     "_call_agent",
     "_is_overflow_shaped",
     "_run_batch_with_recovery",
@@ -69,9 +69,9 @@ def _input(**overrides: Any) -> CodeReviewInput:
 def test_pass_module_holds_none_of_the_runner_owned_names(module: Any) -> None:
     """A migrated pass module defines/imports none of the runner-owned names.
 
-    ``Agent`` is the crux of the runner-only-construction invariant: if a
-    pass module ever imported ``strands.Agent``, it could construct one
-    directly, bypassing the runner's budgeting/chunking/recovery entirely.
+    ``run_agent_via_reasoning`` is the crux of the runner-only-construction
+    invariant: if a pass module ever imported it directly, it could bypass
+    the runner's budgeting/chunking/recovery entirely.
     The remaining names are the runner's private recovery helpers -- their
     presence here would mean a duplicate implementation, not delegation.
     """
@@ -85,17 +85,18 @@ def test_pass_module_holds_none_of_the_runner_owned_names(module: Any) -> None:
         )
 
 
-def test_agent_construction_appears_only_in_the_shared_runner() -> None:
-    """Source-level lock: no additive pass module constructs or imports
-    ``strands.Agent`` directly -- among the runner and the three migrated
-    pass modules, only the runner's source may reference it."""
+def test_think_then_format_routes_through_the_shared_runner() -> None:
+    """Source-level lock: the shared runner delegates Agent work to via_reasoning."""
     runner_source = inspect.getsource(runner_mod)
-    assert "Agent(" in runner_source, (
-        "sanity check failed: submission_pass_runner no longer appears to construct Agent anywhere"
+    assert "run_agent_via_reasoning" in runner_source, (
+        "sanity check failed: submission_pass_runner no longer delegates to run_agent_via_reasoning"
     )
 
     for module in _PASS_MODULES:
         source = inspect.getsource(module)
+        assert "run_agent_via_reasoning" not in source, (
+            f"{module.__name__} must not call run_agent_via_reasoning directly"
+        )
         assert "Agent(" not in source, f"{module.__name__} must not construct Agent directly"
         assert "import Agent" not in source, f"{module.__name__} must not import strands.Agent"
         assert "strands.Agent" not in source, f"{module.__name__} must not reference strands.Agent"
@@ -115,6 +116,9 @@ def test_architecture_pass_delegates_to_shared_runner(monkeypatch: pytest.Monkey
     monkeypatch.setattr(arch_mod, "run_submission_pass", _spy)
 
     class _Client(DummyLLMClient):
+        def complete(self, prompt: str, **kwargs: Any) -> str:
+            return "prose"
+
         def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
             return {"findings": []}
 
@@ -133,6 +137,9 @@ def test_side_effect_pass_delegates_to_shared_runner(monkeypatch: pytest.MonkeyP
     monkeypatch.setattr(side_mod, "run_submission_pass", _spy)
 
     class _Client(DummyLLMClient):
+        def complete(self, prompt: str, **kwargs: Any) -> str:
+            return "prose"
+
         def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
             return {"findings": []}
 
@@ -151,6 +158,9 @@ def test_merged_pass_delegates_to_shared_runner(monkeypatch: pytest.MonkeyPatch)
     monkeypatch.setattr(merged_mod, "run_submission_pass", _spy)
 
     class _Client(DummyLLMClient):
+        def complete(self, prompt: str, **kwargs: Any) -> str:
+            return "prose"
+
         def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
             return {"architecture_findings": [], "side_effect_findings": []}
 
@@ -158,20 +168,7 @@ def test_merged_pass_delegates_to_shared_runner(monkeypatch: pytest.MonkeyPatch)
     assert calls == ["merged"]
 
 
-# ------------------------------------------------------- dynamic Agent-symbol checks
-
-
-def _agent_spy_class(reply: str, calls: List[Tuple[Any, str, List[Any]]]) -> type:
-    """Build a `strands.Agent` stand-in that records construction and returns ``reply``."""
-
-    class _Spy:
-        def __init__(self, *, model: Any, system_prompt: str, tools: list) -> None:
-            calls.append((model, system_prompt, tools))
-
-        def __call__(self, prompt: str) -> str:
-            return reply
-
-    return _Spy
+# ------------------------------------------------------- dynamic via_reasoning checks
 
 
 _ARCH_ENTRY: Callable[[Any, CodeReviewInput], Any] = (
@@ -196,16 +193,22 @@ _MERGED_ENTRY: Callable[[Any, CodeReviewInput], Any] = (
     ],
     ids=["architecture_consistency", "side_effect_impact", "merged_architecture_side_effect"],
 )
-def test_agent_construction_routes_through_the_shared_runner(
+def test_run_agent_via_reasoning_routes_through_the_shared_runner(
     monkeypatch: pytest.MonkeyPatch,
     entry_point: Callable[[Any, CodeReviewInput], Any],
     reply: str,
     build_input: Callable[[], CodeReviewInput],
 ) -> None:
-    """Each pass's real public entry point constructs its Agent only via the runner's ``Agent`` symbol."""
-    calls: List[Tuple[Any, str, List[Any]]] = []
-    monkeypatch.setattr(runner_mod, "Agent", _agent_spy_class(reply, calls))
+    """Each pass's real public entry point invokes think-then-format via the runner."""
+    calls: List[dict[str, Any]] = []
+
+    def _spy(**kwargs: Any) -> Any:
+        calls.append(kwargs)
+        return kwargs["parse"](reply)
+
+    monkeypatch.setattr(runner_mod, "run_agent_via_reasoning", _spy)
 
     entry_point(DummyLLMClient(), build_input())
 
-    assert calls, "expected the pass to construct at least one Agent via the shared runner"
+    assert calls, "expected the pass to invoke run_agent_via_reasoning via the shared runner"
+    assert calls[0]["reasoning_think"] is True

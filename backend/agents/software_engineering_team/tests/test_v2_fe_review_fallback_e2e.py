@@ -20,6 +20,7 @@ import pytest
 
 from llm_service import LLMSemanticExhaustionError
 from llm_service.clients.dummy import DummyLLMClient
+from software_engineering_team.code_review_agent.chunk_reviewer import CODE_TO_REVIEW_HEADER
 
 
 @pytest.fixture(autouse=True)
@@ -104,6 +105,9 @@ class _PerFileScriptedClient(DummyLLMClient):
     coordinator mixed up which finding came from which file's content, since
     each canned response's ``file_path`` is a hard-coded value independent of
     the prompt it was served to. Selecting by marker closes that gap.
+
+    Markers are matched on the reasoning ``complete`` prompt; the format
+    ``complete_json`` wrap does not carry ``### path ###`` headers.
     """
 
     def __init__(self, responses_by_marker: dict[str, dict[str, Any]]) -> None:
@@ -111,27 +115,42 @@ class _PerFileScriptedClient(DummyLLMClient):
         self._responses_by_marker = dict(responses_by_marker)
         self.call_count = 0
         self._lock = threading.Lock()
+        self._tls = threading.local()
 
-    def complete_json(self, prompt: str, **kwargs: Any) -> dict[str, Any]:
+    def complete(self, prompt: str, **kwargs: Any) -> str:
+        if CODE_TO_REVIEW_HEADER not in prompt:
+            return super().complete(prompt, **kwargs)
         with self._lock:
             self.call_count += 1
         for marker, response in self._responses_by_marker.items():
             if marker in prompt:
-                return response
+                self._tls.pending = response
+                return "Structured prose review summary."
         raise AssertionError(f"no scripted response matches prompt: {prompt[:200]!r}")
+
+    def complete_json(self, prompt: str, **kwargs: Any) -> dict[str, Any]:
+        pending = getattr(self._tls, "pending", None)
+        if pending is not None:
+            self._tls.pending = None
+            return pending
+        return super().complete_json(prompt, **kwargs)
 
 
 class _PromptCapturingClient(DummyLLMClient):
-    """Records every chunk-review prompt; always returns a clean pass."""
+    """Records every chunk-review reasoning prompt; always returns a clean pass."""
 
     def __init__(self) -> None:
         super().__init__()
         self.prompts: list[str] = []
         self._lock = threading.Lock()
 
+    def complete(self, prompt: str, **kwargs: Any) -> str:
+        if CODE_TO_REVIEW_HEADER in prompt:
+            with self._lock:
+                self.prompts.append(prompt)
+        return super().complete(prompt, **kwargs)
+
     def complete_json(self, prompt: str, **kwargs: Any) -> dict[str, Any]:
-        with self._lock:
-            self.prompts.append(prompt)
         return {"approved": True, "issues": [], "summary": "ok", "spec_compliance_notes": ""}
 
 
@@ -148,13 +167,23 @@ class _FailBadKeepGood(DummyLLMClient):
         super().__init__()
         self.call_count = 0
         self._lock = threading.Lock()
+        self._tls = threading.local()
 
-    def complete_json(self, prompt: str, **kwargs: Any) -> dict[str, Any]:
+    def complete(self, prompt: str, **kwargs: Any) -> str:
+        if CODE_TO_REVIEW_HEADER not in prompt:
+            return super().complete(prompt, **kwargs)
         with self._lock:
             self.call_count += 1
         if "### bad.tsx ###" in prompt:
             raise LLMSemanticExhaustionError("no content", retry_thinking_level=False)
         if "### good.tsx ###" in prompt:
+            self._tls.keep = True
+            return "Structured prose review summary."
+        return super().complete(prompt, **kwargs)
+
+    def complete_json(self, prompt: str, **kwargs: Any) -> dict[str, Any]:
+        if getattr(self._tls, "keep", False):
+            self._tls.keep = False
             return {
                 "approved": False,
                 "issues": [

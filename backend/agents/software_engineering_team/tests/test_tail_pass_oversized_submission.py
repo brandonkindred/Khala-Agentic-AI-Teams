@@ -26,8 +26,10 @@ This module instead:
 from __future__ import annotations
 
 import re
+import threading
 from typing import Any, Dict, List
 
+import pytest
 from code_review_agent.false_positive_filter import (
     _verify_max_findings_per_group,
     filter_false_positives,
@@ -36,11 +38,12 @@ from code_review_agent.merged_architecture_side_effect_pass import (
     find_architecture_and_side_effect_issues,
 )
 from code_review_agent.models import CodeReviewInput, CodeReviewIssue
+from tests.submission_pass_two_call_client import SubmissionPassTwoCallClient
 from tests.test_false_positive_filter import _SimulatesFileReadToolCall
 
-from llm_service.clients.dummy import DummyLLMClient
+pytest_plugins = ["tests.submission_pass_two_call_client"]
 
-_MERGED_PASS_ANCHOR = '"architecture_findings"/"side_effect_findings"'
+_MERGED_PASS_ANCHOR = "Merged submission pass:"
 
 # --------------------------------------------------------------------------- fixture
 
@@ -128,10 +131,10 @@ def test_merged_pass_oversized_submission_stays_within_configured_budget(
     files = _oversized_changed_files()
     prompts: List[str] = []
 
-    class _RecordingStub(DummyLLMClient):
+    class _RecordingStub(SubmissionPassTwoCallClient):
         def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
-            if _MERGED_PASS_ANCHOR in prompt:
-                prompts.append(prompt)
+            if _MERGED_PASS_ANCHOR in self.latest_reasoning_prompt():
+                prompts.append(self.latest_reasoning_prompt())
                 return {
                     "architecture_findings": [],
                     "side_effect_findings": [
@@ -144,7 +147,7 @@ def test_merged_pass_oversized_submission_stays_within_configured_budget(
                             "pre_existing": False,
                         }
                         for path in files
-                        if f"### {path} ###" in prompt
+                        if f"### {path} ###" in self.latest_reasoning_prompt()
                     ],
                 }
             return {"approved": True, "issues": [], "summary": "ok", "spec_compliance_notes": ""}
@@ -182,11 +185,11 @@ def test_merged_pass_oversized_submission_matches_unbounded_baseline(
     monkeypatch.setenv("CODE_REVIEW_ARCHITECTURE_CONSISTENCY_PASS", "false")
     files = _oversized_changed_files()
 
-    def _make_stub(prompts: List[str]) -> DummyLLMClient:
-        class _Stub(DummyLLMClient):
+    def _make_stub(prompts: List[str]) -> SubmissionPassTwoCallClient:
+        class _Stub(SubmissionPassTwoCallClient):
             def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
-                if _MERGED_PASS_ANCHOR in prompt:
-                    prompts.append(prompt)
+                if _MERGED_PASS_ANCHOR in self.latest_reasoning_prompt():
+                    prompts.append(self.latest_reasoning_prompt())
                     return {
                         "architecture_findings": [],
                         "side_effect_findings": [
@@ -199,7 +202,7 @@ def test_merged_pass_oversized_submission_matches_unbounded_baseline(
                                 "pre_existing": False,
                             }
                             for path in files
-                            if f"### {path} ###" in prompt
+                            if f"### {path} ###" in self.latest_reasoning_prompt()
                         ],
                     }
                 return {
@@ -265,11 +268,24 @@ class _DeterministicVerdictStub(_SimulatesFileReadToolCall):
     def __init__(self) -> None:
         super().__init__()
         self.call_sizes: List[int] = []
+        self._reasoning_prompt_local = threading.local()
+
+    def stash_reasoning_prompt(self, prompt: str) -> None:
+        """Record the FPF reasoning user prompt for the in-flight verify call."""
+        self._reasoning_prompt_local.prompt = prompt
+
+    def _take_reasoning_prompt(self) -> str:
+        prompt = getattr(self._reasoning_prompt_local, "prompt", "")
+        self._reasoning_prompt_local.prompt = ""
+        return prompt
 
     def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:  # type: ignore[override]
         if "verdicts" not in prompt.lower():
             return super().complete_json(prompt, **kwargs)
-        global_ids = [int(m) for m in _FINDING_ID_RE.findall(prompt)]
+        # Finding descriptions live on the reasoning user prompt (call 1), not
+        # the format-pass prompt (call 2).
+        source = self._take_reasoning_prompt() or prompt
+        global_ids = [int(m) for m in _FINDING_ID_RE.findall(source)]
         self.call_sizes.append(len(global_ids))
         return {
             "verdicts": [
@@ -281,6 +297,24 @@ class _DeterministicVerdictStub(_SimulatesFileReadToolCall):
                 for i, gid in enumerate(global_ids)
             ]
         }
+
+
+@pytest.fixture(autouse=True)
+def _stash_fpf_reasoning_prompt_on_stub(monkeypatch: Any) -> None:
+    """Bind each format pass to the reasoning prompt from the same verify call."""
+    import code_review_agent.false_positive_filter as fpf_mod
+    import code_review_agent.via_reasoning as vr_mod
+
+    real_run = vr_mod.run_agent_via_reasoning
+
+    def _run_with_stash(**kwargs: Any) -> Any:
+        client = vr_mod._extract_llm_client(kwargs["model"])
+        if client is not None and hasattr(client, "stash_reasoning_prompt"):
+            client.stash_reasoning_prompt(kwargs["reasoning_prompt"])
+        return real_run(**kwargs)
+
+    monkeypatch.setattr(vr_mod, "run_agent_via_reasoning", _run_with_stash)
+    monkeypatch.setattr(fpf_mod, "run_agent_via_reasoning", _run_with_stash)
 
 
 def test_filter_oversized_submission_stays_within_configured_budget(monkeypatch: Any) -> None:
