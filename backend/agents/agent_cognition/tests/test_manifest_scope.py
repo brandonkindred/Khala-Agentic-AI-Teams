@@ -8,11 +8,11 @@ from agent_cognition import manifest_scope
 
 
 def _patch_registry(monkeypatch, manifest):
-    """Patch agent_registry.get_registry to return a registry yielding ``manifest``."""
-    import agent_registry
+    """Patch ``agent_platform.registry.get_registry`` to return a registry yielding ``manifest``."""
+    from agent_platform import registry
 
     fake = types.SimpleNamespace(get=lambda agent_id: manifest)
-    monkeypatch.setattr(agent_registry, "get_registry", lambda: fake)
+    monkeypatch.setattr(registry, "get_registry", lambda: fake)
 
 
 def _manifest(
@@ -41,12 +41,12 @@ def _manifest(
 # Defaults (no manifest / lookup failure)
 # ---------------------------------------------------------------------------
 def test_defaults_when_registry_raises(monkeypatch):
-    import agent_registry
+    from agent_platform import registry
 
     def _boom():
         raise RuntimeError("no registry")
 
-    monkeypatch.setattr(agent_registry, "get_registry", _boom)
+    monkeypatch.setattr(registry, "get_registry", _boom)
     assert manifest_scope.graph_scope("a") == (True, True)
     assert manifest_scope.ground_rule_proposals("a") is True
     assert manifest_scope.retention_days("a") == 90
@@ -61,12 +61,12 @@ def test_defaults_when_manifest_missing(monkeypatch):
 
 
 def test_rule_packs_empty_when_registry_raises(monkeypatch):
-    import agent_registry
+    from agent_platform import registry
 
     def _boom():
         raise RuntimeError("no registry")
 
-    monkeypatch.setattr(agent_registry, "get_registry", _boom)
+    monkeypatch.setattr(registry, "get_registry", _boom)
     assert manifest_scope.rule_packs("a") == []
 
 

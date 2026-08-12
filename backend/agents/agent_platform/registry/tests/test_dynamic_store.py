@@ -12,8 +12,14 @@ import re
 
 import pytest
 
-from agent_registry import dynamic_store as ds
-from agent_registry.models import AgentManifest, CognitionSpec, IOSchema, SandboxSpec, SourceInfo
+from agent_platform.registry import dynamic_store as ds
+from agent_platform.registry.models import (
+    AgentManifest,
+    CognitionSpec,
+    IOSchema,
+    SandboxSpec,
+    SourceInfo,
+)
 
 
 def test_table_is_a_bare_sql_identifier() -> None:
@@ -163,7 +169,7 @@ from shared.postgres import is_postgres_enabled  # noqa: E402
 class TestLivePostgres:
     @pytest.fixture(autouse=True)
     def _provision_schema(self):
-        from agent_registry.postgres import SCHEMA
+        from agent_platform.registry.postgres import SCHEMA
         from shared.postgres import register_team_schemas
         from shared.postgres.testing import truncate_team_tables
 

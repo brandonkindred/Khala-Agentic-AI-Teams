@@ -116,7 +116,7 @@ def client(tmp_path, monkeypatch) -> TestClient:
         "  entrypoint: x:y\n",
         encoding="utf-8",
     )
-    import agent_registry.loader as loader
+    import agent_platform.registry.loader as loader
 
     # Prior tests in the suite may have monkeypatched ``get_registry`` to a
     # plain lambda, which lacks ``cache_clear``. Restore the cached function
