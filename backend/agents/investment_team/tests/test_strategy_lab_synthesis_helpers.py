@@ -10,9 +10,15 @@ The per-round body was decomposed into named helpers:
   fired a critical (the ordering the refactor must preserve exactly).
 - :meth:`_fetch_market_data_for_synthesis` — the one-time fetch + coverage,
   returning a ``should_break`` signal.
+- :meth:`_run_synthesis_reachability_probe` — the per-round predicate
+  reachability probe, re-run only when the entry-rule signature changes.
+- :meth:`_run_synthesis_execution` — runs the round's code and records a
+  failure gate on error.
+- :meth:`_run_synthesis_trade_collection` — collects trades and checks
+  target-symbol coverage, returning a ``should_break`` signal.
 - :meth:`_evaluate_synthesis_round` — metrics + anomaly gates + recovery
-  routing (covered end-to-end by the ``_run_synthesis_loop`` suites; not
-  re-pinned here).
+  routing, dispatching to one of three ``action`` outcomes
+  (``"success"`` / ``"continue"`` / ``"exhausted"``).
 
 These tests stub the orchestrator's gate collaborators so each helper's
 contract is exercised in isolation.
@@ -21,16 +27,20 @@ contract is exercised in isolation.
 from __future__ import annotations
 
 import textwrap
-from typing import List
+from typing import Dict, List
 
-from investment_team.models import BacktestConfig, StrategySpec
+from investment_team.models import BacktestConfig, StrategySpec, TradeRecord
+from investment_team.strategy_lab._orchestrator_helpers import _DesignAttemptState
 from investment_team.strategy_lab.orchestrator import (
+    RefinementStallTracker,
     StrategyLabOrchestrator,
+    _AnomalyRecoveryOutcome,
     _DriftCollector,
     _MarketDataFetch,
 )
 from investment_team.strategy_lab.quality_gates.models import QualityGateResult
 from investment_team.strategy_lab.spec_dsl import EntryRule, Predicate, SignalExitRule
+from investment_team.trading_service.modes.sandbox_compat import StrategyRunResult
 
 
 def _spec() -> StrategySpec:
@@ -344,3 +354,399 @@ def test_fetch_for_synthesis_breaks_on_critical_coverage(monkeypatch) -> None:
 
     assert result.should_break is True
     assert any(g.gate_name == "target_symbol_coverage" for g in all_gate_results)
+
+
+# ---------------------------------------------------------------------------
+# _run_synthesis_reachability_probe
+# ---------------------------------------------------------------------------
+
+
+def test_reachability_probe_noop_without_market_data(monkeypatch) -> None:
+    """No market data yet → returns the input signature unchanged and the
+    probe collaborator is never called."""
+    orch = _orch()
+    calls: List[str] = []
+    monkeypatch.setattr(
+        orch.predicate_reachability_probe, "probe", lambda *a, **k: calls.append("probe")
+    )
+    all_gate_results: List[QualityGateResult] = []
+
+    result = orch._run_synthesis_reachability_probe(
+        spec=_spec(),
+        market_data=None,
+        round_num=0,
+        last_reachability_sig=None,
+        all_gate_results=all_gate_results,
+    )
+
+    assert result is None
+    assert calls == []
+    assert all_gate_results == []
+
+
+def test_reachability_probe_noop_when_signature_unchanged(monkeypatch) -> None:
+    """Market data present but the entry-rule signature matches the prior
+    round's → the probe is not re-run and no gates are recorded."""
+    orch = _orch()
+    calls: List[str] = []
+    monkeypatch.setattr(
+        orch.predicate_reachability_probe, "probe", lambda *a, **k: calls.append("probe")
+    )
+    spec = _spec()
+    prior_sig = (
+        tuple(str(getattr(r, "when", r)) for r in (spec.entry_rules or [])),
+        bool(spec.requires_custom_code),
+    )
+    all_gate_results: List[QualityGateResult] = []
+
+    result = orch._run_synthesis_reachability_probe(
+        spec=spec,
+        market_data={"QQQ": []},
+        round_num=0,
+        last_reachability_sig=prior_sig,
+        all_gate_results=all_gate_results,
+    )
+
+    assert result == prior_sig
+    assert calls == []
+    assert all_gate_results == []
+
+
+def test_reachability_probe_runs_on_changed_signature(monkeypatch) -> None:
+    """A changed entry-rule signature (or first round, ``None`` prior) runs
+    the probe and records its gate results."""
+    orch = _orch()
+    probe_calls: List[tuple] = []
+    monkeypatch.setattr(
+        orch.predicate_reachability_probe,
+        "probe",
+        lambda spec, market_data: probe_calls.append((spec, market_data)) or "reachability",
+    )
+    monkeypatch.setattr(
+        orch.predicate_reachability_probe,
+        "to_gate_results",
+        lambda reachability, spec, phase: [
+            _gate("predicate_reachability", passed=True, severity="info")
+        ],
+    )
+    spec = _spec()
+    all_gate_results: List[QualityGateResult] = []
+
+    result = orch._run_synthesis_reachability_probe(
+        spec=spec,
+        market_data={"QQQ": []},
+        round_num=0,
+        last_reachability_sig=None,
+        all_gate_results=all_gate_results,
+    )
+
+    expected_sig = (
+        tuple(str(getattr(r, "when", r)) for r in (spec.entry_rules or [])),
+        bool(spec.requires_custom_code),
+    )
+    assert result == expected_sig
+    assert len(probe_calls) == 1
+    assert any(g.gate_name == "predicate_reachability" for g in all_gate_results)
+
+
+# ---------------------------------------------------------------------------
+# _run_synthesis_execution
+# ---------------------------------------------------------------------------
+
+
+def test_execution_returns_result_without_gate_on_success(monkeypatch) -> None:
+    """A successful run returns the ``StrategyRunResult`` and appends no gate."""
+    orch = _orch()
+    exec_result = StrategyRunResult(success=True, trades=[])
+    monkeypatch.setattr(orch, "_cached_run_strategy_code", lambda *a, **k: exec_result)
+    all_gate_results: List[QualityGateResult] = []
+
+    result = orch._run_synthesis_execution(
+        spec=_spec(),
+        code="code",
+        market_data={"QQQ": []},
+        config=_config(),
+        round_num=0,
+        all_gate_results=all_gate_results,
+        emit=lambda *a, **k: None,
+    )
+
+    assert result is exec_result
+    assert all_gate_results == []
+
+
+def test_execution_appends_gate_on_failure(monkeypatch) -> None:
+    """A failed run's error type/stderr are folded into the recorded gate."""
+    orch = _orch()
+    exec_result = StrategyRunResult(success=False, error_type="runtime_error", stderr="boom")
+    monkeypatch.setattr(orch, "_cached_run_strategy_code", lambda *a, **k: exec_result)
+    all_gate_results: List[QualityGateResult] = []
+
+    result = orch._run_synthesis_execution(
+        spec=_spec(),
+        code="code",
+        market_data={"QQQ": []},
+        config=_config(),
+        round_num=2,
+        all_gate_results=all_gate_results,
+        emit=lambda *a, **k: None,
+    )
+
+    assert result is exec_result
+    assert len(all_gate_results) == 1
+    gate = all_gate_results[0]
+    assert gate.gate_name == "code_execution"
+    assert gate.severity == "critical"
+    assert "runtime_error" in gate.details and "boom" in gate.details
+    assert gate.refinement_round == 2
+
+
+# ---------------------------------------------------------------------------
+# _run_synthesis_trade_collection
+# ---------------------------------------------------------------------------
+
+
+def test_trade_collection_completes_on_clean_coverage(monkeypatch) -> None:
+    """Clean coverage → should_break False, trades/flags carried through,
+    and the "completed" backtesting event is emitted."""
+    orch = _orch()
+    monkeypatch.setattr(orch.target_symbol_coverage_gate, "check_trades", lambda spec, trades: [])
+    trade = TradeRecord(
+        trade_num=1,
+        entry_date="2024-01-01",
+        exit_date="2024-01-02",
+        symbol="QQQ",
+        side="long",
+        entry_price=100.0,
+        exit_price=101.0,
+        shares=10.0,
+        position_value=1000.0,
+        gross_pnl=10.0,
+        net_pnl=10.0,
+        return_pct=1.0,
+        hold_days=1,
+        outcome="win",
+        cumulative_pnl=10.0,
+    )
+    exec_result = StrategyRunResult(
+        success=True,
+        trades=[trade],
+        execution_time_seconds=1.5,
+        open_position_entry_reasons=["reason"],
+    )
+    round_gate_results = [_gate("predicate_conformance", passed=False, severity="warning")]
+    events: List[Dict[str, object]] = []
+    all_gate_results: List[QualityGateResult] = []
+
+    result = orch._run_synthesis_trade_collection(
+        spec=_spec(),
+        exec_result=exec_result,
+        round_gate_results=round_gate_results,
+        round_num=0,
+        all_gate_results=all_gate_results,
+        emit=lambda phase, data: events.append({"phase": phase, **data}),
+    )
+
+    assert result.should_break is False
+    assert result.trades == [trade]
+    assert result.ran_on_non_conforming_code is True
+    assert result.open_position_entry_reasons == ["reason"]
+    assert events == [
+        {
+            "phase": "backtesting",
+            "sub_phase": "completed",
+            "trades_count": 1,
+            "execution_time": 1.5,
+        }
+    ]
+
+
+def test_trade_collection_breaks_on_critical_coverage_without_completed_event(
+    monkeypatch,
+) -> None:
+    """A critical coverage failure → should_break True and no "completed"
+    event is emitted (mirroring the pre-extraction code's break-before-emit
+    ordering)."""
+    orch = _orch()
+    monkeypatch.setattr(
+        orch.target_symbol_coverage_gate,
+        "check_trades",
+        lambda spec, trades: [_gate("target_symbol_coverage", passed=False, severity="critical")],
+    )
+    exec_result = StrategyRunResult(success=True, trades=[])
+    events: List[Dict[str, object]] = []
+    all_gate_results: List[QualityGateResult] = []
+
+    result = orch._run_synthesis_trade_collection(
+        spec=_spec(),
+        exec_result=exec_result,
+        round_gate_results=[],
+        round_num=0,
+        all_gate_results=all_gate_results,
+        emit=lambda phase, data: events.append({"phase": phase, **data}),
+    )
+
+    assert result.should_break is True
+    assert events == []
+    assert any(g.gate_name == "target_symbol_coverage" for g in all_gate_results)
+
+
+# ---------------------------------------------------------------------------
+# _evaluate_synthesis_round
+# ---------------------------------------------------------------------------
+
+
+def test_evaluate_synthesis_round_success_when_no_critical_anomaly(monkeypatch) -> None:
+    """A clean anomaly check → ``action="success"``, the round's spec/code/
+    trades pass through unchanged, and the anomaly gate is recorded."""
+    orch = _orch()
+    monkeypatch.setattr(
+        orch,
+        "_check_anomalies_cached",
+        lambda metrics, trades, **kw: [_gate("backtest_anomaly", passed=True, severity="info")],
+    )
+    spec = _spec()
+    trades: List[TradeRecord] = []
+    exec_result = StrategyRunResult(success=True, trades=trades)
+    all_gate_results: List[QualityGateResult] = []
+
+    result = orch._evaluate_synthesis_round(
+        state=_DesignAttemptState(spec=spec, code="code-v0", trades=trades, metrics=None),
+        exec_result=exec_result,
+        market_data={"QQQ": []},
+        config=_config(),
+        round_num=0,
+        ran_on_non_conforming_code=True,
+        all_gate_results=all_gate_results,
+        refinement_attempts=[],
+        zero_trade_attempts=[],
+        emit=lambda *a, **k: None,
+        stall_tracker=RefinementStallTracker(),
+        drift_collector=None,
+    )
+
+    assert result.action == "success"
+    assert result.spec is spec
+    assert result.code == "code-v0"
+    assert result.trades == trades
+    assert result.exec_result is exec_result
+    assert result.ran_on_non_conforming_code is True, (
+        "the trade-collection verdict passed in must survive untouched on the success path"
+    )
+    assert result.runtime_lookahead_violation is False
+    assert result.stalled is False
+    assert any(g.gate_name == "backtest_anomaly" for g in all_gate_results)
+
+
+def test_evaluate_synthesis_round_continue_on_recovered_anomaly(monkeypatch) -> None:
+    """A critical anomaly whose recovery does not exhaust the round budget →
+    ``action="continue"`` carrying the recovered state; an unset
+    (``None``) recovery verdict leaves the caller's ``ran_on_non_conforming_code``
+    untouched."""
+    orch = _orch()
+    critical_gate = _gate("backtest_anomaly", passed=False, severity="critical")
+    monkeypatch.setattr(
+        orch, "_check_anomalies_cached", lambda metrics, trades, **kw: [critical_gate]
+    )
+
+    recovered_spec = _spec()
+    recovered_trades: List[TradeRecord] = []
+    recovered_metrics = object()
+    recovered_exec_result = StrategyRunResult(
+        success=True, trades=recovered_trades, error_type="lookahead_violation"
+    )
+    recovery_calls: List[Dict[str, object]] = []
+
+    def _fake_handle_critical_anomalies(**kwargs):
+        recovery_calls.append(kwargs)
+        return _AnomalyRecoveryOutcome(
+            spec=recovered_spec,
+            code="code-refined",
+            trades=recovered_trades,
+            metrics=recovered_metrics,
+            exec_result=recovered_exec_result,
+            exhausted=False,
+            ran_on_non_conforming_code=None,
+            stalled=False,
+        )
+
+    monkeypatch.setattr(orch, "_handle_critical_anomalies", _fake_handle_critical_anomalies)
+
+    result = orch._evaluate_synthesis_round(
+        state=_DesignAttemptState(spec=_spec(), code="code-v0", trades=[], metrics=None),
+        exec_result=StrategyRunResult(success=True, trades=[]),
+        market_data={"QQQ": []},
+        config=_config(),
+        round_num=1,
+        ran_on_non_conforming_code=False,
+        all_gate_results=[],
+        refinement_attempts=[],
+        zero_trade_attempts=[],
+        emit=lambda *a, **k: None,
+        stall_tracker=RefinementStallTracker(),
+        drift_collector=None,
+    )
+
+    assert len(recovery_calls) == 1
+    assert recovery_calls[0]["critical_anomalies"] == [critical_gate]
+    assert result.action == "continue"
+    assert result.spec is recovered_spec
+    assert result.code == "code-refined"
+    assert result.trades is recovered_trades
+    assert result.metrics is recovered_metrics
+    assert result.exec_result is recovered_exec_result
+    assert result.ran_on_non_conforming_code is False, (
+        "a None recovery verdict must not overwrite the caller's flag"
+    )
+    assert result.runtime_lookahead_violation is True, (
+        "must derive from the RECOVERED exec_result, not the original"
+    )
+
+
+def test_evaluate_synthesis_round_exhausted_propagates_stall_and_verdict(monkeypatch) -> None:
+    """A critical anomaly whose recovery exhausts the round budget →
+    ``action="exhausted"``, ``stalled`` threaded from the recovery outcome,
+    and a non-``None`` recovery verdict does overwrite the caller's flag."""
+    orch = _orch()
+    monkeypatch.setattr(
+        orch,
+        "_check_anomalies_cached",
+        lambda metrics, trades, **kw: [
+            _gate("backtest_anomaly", passed=False, severity="critical")
+        ],
+    )
+    monkeypatch.setattr(
+        orch,
+        "_handle_critical_anomalies",
+        lambda **kw: _AnomalyRecoveryOutcome(
+            spec=_spec(),
+            code="code-v0",
+            trades=[],
+            metrics=object(),
+            exec_result=StrategyRunResult(success=False, trades=[]),
+            exhausted=True,
+            ran_on_non_conforming_code=True,
+            stalled=True,
+        ),
+    )
+
+    result = orch._evaluate_synthesis_round(
+        state=_DesignAttemptState(spec=_spec(), code="code-v0", trades=[], metrics=None),
+        exec_result=StrategyRunResult(success=True, trades=[]),
+        market_data={"QQQ": []},
+        config=_config(),
+        round_num=2,
+        ran_on_non_conforming_code=False,
+        all_gate_results=[],
+        refinement_attempts=[],
+        zero_trade_attempts=[],
+        emit=lambda *a, **k: None,
+        stall_tracker=RefinementStallTracker(),
+        drift_collector=None,
+    )
+
+    assert result.action == "exhausted"
+    assert result.stalled is True
+    assert result.ran_on_non_conforming_code is True, (
+        "a non-None recovery verdict must overwrite the caller's flag"
+    )

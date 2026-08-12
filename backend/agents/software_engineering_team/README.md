@@ -46,6 +46,13 @@ New agents needing a typed/structured LLM response should default to
 which also documents the v2 marker-template format as the one justified
 exception.
 
+`architect_agents`' Enterprise Orchestrator (`agents/orchestrator.py` and
+its specialist modules) deliberately does not use `BaseTeamLead` — it's an
+LLM-driven Agents-as-Tools `strands.Agent`, a different delegation model
+than `BaseTeamLead`'s hand-authored phase/gate sequencing; see
+[`docs/ARCHITECT_AGENTS_FRAMEWORK_DECISION.md`](docs/ARCHITECT_AGENTS_FRAMEWORK_DECISION.md)
+for the full rationale.
+
 Prompt modules should reuse the shared builders in
 `backend/shared/prompts/templates.py` rather than hand-writing JSON-output or
 context-formatting scaffolding; see
@@ -253,6 +260,8 @@ Ensure Ollama is running with the model (e.g. `ollama run kimi-k2.7-code:cloud`)
 | `CODING_TEAM_IMPLEMENTATION_CONCURRENCY` | Max implementation workers dispatched concurrently in one round | `4` |
 
 **Faster runs:** Set `SW_SKIP_PLANNING_AGENTS=observability,performance_doc` to skip specific planning agents, or `SW_MINIMAL_PLANNING=1` to skip all domain planning (spec → Tech Lead ↔ Architecture → consolidation → execution).
+
+**GitHub issue grooming — Fibonacci scoring mode (`github_source/issue_scorer.py`):** `ISSUE_GROOMING_SCORING_MODE` selects how Phase A scores an issue's complexity — default `auto` tries the LLM scorer (`issue_llm_scorer.score_issue_via_llm`) first and falls back to the heuristic scorer (`issue_heuristic_scorer.score_issue_heuristically`) on any `LLMError` (no provider configured, a client/provider failure, or a response that fails to parse/validate); `heuristic_only` never calls the LLM scorer. An explicit `mode=` argument to `score_issue(...)` overrides the environment variable.
 
 ### Faster runs summary
 
