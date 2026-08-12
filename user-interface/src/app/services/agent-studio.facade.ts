@@ -37,8 +37,13 @@ import type {
  * `PersonaTestingApiService`), which remain available as implementation
  * details for call sites that still need them directly.
  *
- * Out of scope here: centralizing `AgentStudioStateService` (handoff) writes
- * — the facade returns raw responses and leaves state updates to callers.
+ * Complementary to, not a replacement for, `AgentStudioStateService`: that
+ * service owns in-session state (handoff ids, stepper position) and has no
+ * HTTP dependencies of its own; this facade owns backend data operations and
+ * holds no state. Today the facade returns raw responses and leaves state
+ * updates to callers — centralizing handoff-state writes inside the facade
+ * (so it calls into `AgentStudioStateService` after a successful operation)
+ * is a deliberate follow-up increment, not done here.
  */
 @Injectable({ providedIn: 'root' })
 export class AgentStudioFacade {
