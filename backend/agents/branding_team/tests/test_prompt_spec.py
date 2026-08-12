@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from branding_team.graphs.prompt_spec import AgentPromptSpec, PromptFieldSpec, render_agent_prompt
+from branding_team.prompt_spec import AgentPromptSpec, PromptFieldSpec, render_agent_prompt
 
 
 def test_prompt_field_spec_rejects_blank_name() -> None:

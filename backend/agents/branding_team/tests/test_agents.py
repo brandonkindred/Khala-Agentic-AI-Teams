@@ -2,7 +2,7 @@
 
 Locks the exact rendered ``system_prompt`` of every factory migrated to the
 data-driven ``AgentPromptSpec``/``render_agent_prompt`` pattern
-(``branding_team.graphs.prompt_spec``) against the original hand-written
+(``branding_team.prompt_spec``) against the original hand-written
 prose, so an accidental wording change in a spec constant is caught here
 rather than silently drifting.
 """

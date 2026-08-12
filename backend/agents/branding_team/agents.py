@@ -16,7 +16,6 @@ from typing import List
 from pydantic import BaseModel
 from strands import Agent
 
-from .graphs.prompt_spec import AgentPromptSpec, PromptFieldSpec, render_agent_prompt
 from .graphs.shared import build_agent
 from .models import (
     ApprovalWorkflowsOutput,
@@ -56,6 +55,7 @@ from .models import (
     VoiceToneOutput,
     WritingGuidelinesOutput,
 )
+from .prompt_spec import AgentPromptSpec, PromptFieldSpec, render_agent_prompt
 
 # ===================================================================
 # Phase 1 — Strategic Core  (Graph: fan-out / fan-in)
