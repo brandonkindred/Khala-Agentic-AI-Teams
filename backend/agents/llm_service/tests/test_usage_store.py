@@ -210,3 +210,188 @@ def test_fetch_recent_newest_first_and_limit(fake_db) -> None:
     sql, params = fake_db.executed[0]
     assert "ORDER BY ts DESC" in sql
     assert params[-1] == 2
+
+
+def test_write_rows_empty_returns_zero() -> None:
+    assert us.write_rows([]) == 0
+
+
+def test_write_rows_cur_none(monkeypatch) -> None:
+    monkeypatch.setattr(us, "is_postgres_enabled", lambda: True)
+    monkeypatch.setattr(us, "_table_ensured", True)
+
+    @contextmanager
+    def _none_cursor(*, dict_rows: bool = False, database=None):
+        yield None
+
+    monkeypatch.setattr(us, "pg_cursor", _none_cursor)
+    assert us.write_rows([us.record_to_row(_Rec())]) == 0
+
+
+def test_write_rows_exception_returns_zero(fake_db) -> None:
+    fake_db._raise = True
+    assert us.write_rows([us.record_to_row(_Rec())]) == 0
+
+
+def test_ensure_table_cur_none(monkeypatch) -> None:
+    monkeypatch.setattr(us, "is_postgres_enabled", lambda: True)
+    monkeypatch.setattr(us, "_table_ensured", False)
+
+    @contextmanager
+    def _none_cursor(*, dict_rows: bool = False, database=None):
+        yield None
+
+    monkeypatch.setattr(us, "pg_cursor", _none_cursor)
+    us._ensure_table()
+    assert us._table_ensured is False
+
+
+def test_ensure_table_executes_ddl(monkeypatch) -> None:
+    cursor = FakeCursor()
+
+    @contextmanager
+    def _pg_cursor(*, dict_rows: bool = False, database=None):
+        yield cursor
+
+    monkeypatch.setattr(us, "is_postgres_enabled", lambda: True)
+    monkeypatch.setattr(us, "pg_cursor", _pg_cursor)
+    monkeypatch.setattr(us, "_table_ensured", False)
+    us._ensure_table()
+    assert us._table_ensured is True
+    assert len(cursor.executed) == 2
+    assert "CREATE TABLE IF NOT EXISTS llm_call_records" in cursor.executed[0][0]
+    assert "CREATE INDEX IF NOT EXISTS idx_llm_call_records_ts" in cursor.executed[1][0]
+
+
+def test_ensure_table_exception_leaves_flag_false(monkeypatch) -> None:
+    cursor = FakeCursor(raise_on_execute=True)
+
+    @contextmanager
+    def _pg_cursor(*, dict_rows: bool = False, database=None):
+        yield cursor
+
+    monkeypatch.setattr(us, "is_postgres_enabled", lambda: True)
+    monkeypatch.setattr(us, "pg_cursor", _pg_cursor)
+    monkeypatch.setattr(us, "_table_ensured", False)
+    us._ensure_table()
+    assert us._table_ensured is False
+
+
+def test_ensure_table_noop_when_postgres_off(monkeypatch) -> None:
+    monkeypatch.setattr(us, "is_postgres_enabled", lambda: False)
+    monkeypatch.setattr(us, "_table_ensured", False)
+    us._ensure_table()
+    assert us._table_ensured is False
+
+
+def test_ensure_table_double_check_inside_lock(monkeypatch) -> None:
+    """Second check under the lock skips DDL when another thread already ensured."""
+    calls = {"n": 0}
+
+    @contextmanager
+    def _pg_cursor(*, dict_rows: bool = False, database=None):
+        calls["n"] += 1
+        yield FakeCursor()
+
+    class _MarkEnsuredLock:
+        def __enter__(self):
+            us._table_ensured = True
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    monkeypatch.setattr(us, "is_postgres_enabled", lambda: True)
+    monkeypatch.setattr(us, "pg_cursor", _pg_cursor)
+    monkeypatch.setattr(us, "_table_ensured", False)
+    monkeypatch.setattr(us, "_ensure_lock", _MarkEnsuredLock())
+    us._ensure_table()
+    assert calls["n"] == 0
+    assert us._table_ensured is True
+
+
+def test_fetch_summary_postgres_off(monkeypatch) -> None:
+    monkeypatch.setattr(us, "is_postgres_enabled", lambda: False)
+    summary = us.fetch_summary(window="24h", team="blogging")
+    assert summary["total_calls"] == 0
+    assert summary["team"] == "blogging"
+    assert summary["by_model"] == {}
+
+
+def test_fetch_summary_cur_none(monkeypatch) -> None:
+    monkeypatch.setattr(us, "is_postgres_enabled", lambda: True)
+    monkeypatch.setattr(us, "_table_ensured", True)
+
+    @contextmanager
+    def _none_cursor(*, dict_rows: bool = False, database=None):
+        yield None
+
+    monkeypatch.setattr(us, "pg_cursor", _none_cursor)
+    summary = us.fetch_summary(window="7d")
+    assert summary["total_calls"] == 0
+    assert summary["window"] == "7d"
+
+
+def test_fetch_recent_postgres_off(monkeypatch) -> None:
+    monkeypatch.setattr(us, "is_postgres_enabled", lambda: False)
+    assert us.fetch_recent(window="24h") == []
+
+
+def test_fetch_recent_cur_none(monkeypatch) -> None:
+    monkeypatch.setattr(us, "is_postgres_enabled", lambda: True)
+    monkeypatch.setattr(us, "_table_ensured", True)
+
+    @contextmanager
+    def _none_cursor(*, dict_rows: bool = False, database=None):
+        yield None
+
+    monkeypatch.setattr(us, "pg_cursor", _none_cursor)
+    assert us.fetch_recent(window="24h") == []
+
+
+def test_fetch_recent_naive_and_non_datetime_ts(fake_db) -> None:
+    naive = datetime(2026, 8, 12, 12, 0)  # no tzinfo
+    fake_db._fetchall = [
+        {
+            "ts": naive,
+            "team": "t",
+            "agent_key": "a",
+            "model": "m",
+            "prompt_tokens": 1,
+            "completion_tokens": 1,
+            "total_tokens": 2,
+            "status": "success",
+        },
+        {
+            "ts": 1_724_000_000.5,
+            "team": "t",
+            "agent_key": "a",
+            "model": "m2",
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0,
+            "status": "error",
+        },
+        {
+            "ts": None,
+            "team": "",
+            "agent_key": "",
+            "model": "",
+            "prompt_tokens": None,
+            "completion_tokens": None,
+            "total_tokens": None,
+            "status": None,
+        },
+    ]
+    rows = us.fetch_recent(window="all", limit=10)
+    assert len(rows) == 3
+    assert rows[0]["timestamp"] == naive.replace(tzinfo=timezone.utc).timestamp()
+    assert rows[1]["timestamp"] == 1_724_000_000.5
+    assert rows[2]["timestamp"] == 0.0
+    assert rows[2]["team"] == ""
+    assert rows[2]["status"] == ""
+
+
+def test_fetch_recent_exception_returns_empty(fake_db) -> None:
+    fake_db._raise = True
+    assert us.fetch_recent(window="24h", team="blogging") == []
