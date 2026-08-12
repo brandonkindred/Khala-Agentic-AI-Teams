@@ -1,12 +1,14 @@
 """Process-wide Agent Studio service singleton.
 
-Agent Studio runs Temporal-only (see ``agent_team_studio.agent_studio.temporal``): every request is
-served by a workflow → activity, and the activity does the real work by calling
-:class:`~agent_team_studio.agent_studio.service.AgentStudioService`. Because Agent Studio is an
-in-process team, its Temporal worker runs in the *same* process as the unified API,
-so the activity threads and the HTTP handlers must share one service instance — with
-the in-memory store that shared instance is what makes a conversation created on one
-request resolvable on the next.
+Every authoring request is served by
+:class:`~agent_team_studio.agent_studio.service.AgentStudioService`, reached one of two
+ways depending on whether Temporal is configured (see
+``agent_team_studio.agent_studio.temporal.dispatch``): via a workflow → activity when
+enabled, or directly, in-process, when it isn't. Because Agent Studio is an in-process
+team, its Temporal worker (when running) shares the *same* process as the unified API,
+so the activity threads, the direct-dispatch calls, and the HTTP handlers must all
+share one service instance — with the in-memory store that shared instance is what
+makes a conversation created on one request resolvable on the next.
 
 The store selection (Postgres when configured, else in-memory) is bound **once at
 import time**: ``POSTGRES_HOST`` must be set before this module first loads. This
@@ -78,14 +80,15 @@ def get_studio_service() -> AgentStudioService:
     is durable and the singleton is merely a convenience; with the in-memory store it
     is a correctness requirement.
 
-    Coherence is **per process**: because Agent Studio is Temporal-only, every uvicorn
-    worker starts its own Temporal worker on the shared ``agent-studio-queue``, and
-    Temporal does **not** bind an activity to the process that dispatched its workflow.
-    So the in-memory store is coherent only in single-process mode (``make run``,
-    tests, and default ``make deploy`` / Docker ``--workers 1``). A multi-worker
-    deployment **requires** ``POSTGRES_HOST``: without it, a follow-up request's
-    activity may execute in a different process whose in-memory store lacks the
-    conversation, returning 404.
+    Coherence is **per process**: when Temporal is enabled, every uvicorn worker
+    starts its own Temporal worker on the shared ``agent-studio-queue``, and Temporal
+    does **not** bind an activity to the process that dispatched its workflow; when
+    Temporal is disabled, dispatch calls this singleton directly within whichever
+    process handled the request. Either way, the in-memory store is coherent only in
+    single-process mode (``make run``, tests, and default ``make deploy`` / Docker
+    ``--workers 1``). A multi-worker deployment **requires** ``POSTGRES_HOST``:
+    without it, a follow-up request may be served by a different process whose
+    in-memory store lacks the conversation, returning 404.
 
     Postconditions:
         - Returns the same instance on every call within a process.
