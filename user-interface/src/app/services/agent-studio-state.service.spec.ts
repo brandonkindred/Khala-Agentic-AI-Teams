@@ -225,4 +225,58 @@ describe('AgentStudioStateService', () => {
       expect(service.registryAgentId()).toBe('reg-1');
     });
   });
+
+  describe('dirty tracking', () => {
+    it('starts clean on a blank session', () => {
+      expect(service.isDirty()).toBe(false);
+    });
+
+    it('becomes dirty when any handoff id is set and no snapshot exists yet', () => {
+      service.setRegistryAgentId('reg-1');
+      expect(service.isDirty()).toBe(true);
+    });
+
+    it('markClean makes the current handoff clean', () => {
+      service.setTeamId('team-1');
+      service.markClean();
+      expect(service.isDirty()).toBe(false);
+    });
+
+    it('becomes dirty again when an id changes after markClean', () => {
+      service.setTeamId('team-1');
+      service.markClean();
+      service.setTeamId('team-2');
+      expect(service.isDirty()).toBe(true);
+    });
+
+    it('reset returns to a clean blank session', () => {
+      service.setRegistryAgentId('reg-1');
+      service.markClean();
+      service.setTeamId('team-1');
+      service.reset();
+      expect(service.isDirty()).toBe(false);
+      expect(service.handoff()).toEqual({
+        registryAgentId: null,
+        teamId: null,
+        processId: null,
+        personaId: null,
+        draftAgentId: null,
+      });
+    });
+
+    it('setCurrentDraft does not by itself change isDirty', () => {
+      service.setRegistryAgentId('reg-1');
+      service.markClean();
+      service.setCurrentDraft('d-1', 'My draft');
+      expect(service.isDirty()).toBe(false);
+    });
+
+    it('compares all five ids, not just the one that was last written', () => {
+      service.setRegistryAgentId('reg-1');
+      service.setDraftAgentId('draft-1');
+      service.markClean();
+      service.setPersonaId('persona-1');
+      expect(service.isDirty()).toBe(true);
+    });
+  });
 });

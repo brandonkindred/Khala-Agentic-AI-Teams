@@ -17,6 +17,26 @@ const DEFINE_SUB_STAGE_INDEX = BUILD_SUB_STAGES.findIndex((s) => s.key === 'defi
 /** Index of the Configure sub-stage — the only sub-stage `backToDefine()` may be called from. */
 const CONFIGURE_SUB_STAGE_INDEX = BUILD_SUB_STAGES.findIndex((s) => s.key === 'configure');
 
+function handoffHasAnyId(h: AgentStudioHandoffState): boolean {
+  return (
+    h.registryAgentId != null ||
+    h.teamId != null ||
+    h.processId != null ||
+    h.personaId != null ||
+    h.draftAgentId != null
+  );
+}
+
+function handoffEquals(a: AgentStudioHandoffState, b: AgentStudioHandoffState): boolean {
+  return (
+    a.registryAgentId === b.registryAgentId &&
+    a.teamId === b.teamId &&
+    a.processId === b.processId &&
+    a.personaId === b.personaId &&
+    a.draftAgentId === b.draftAgentId
+  );
+}
+
 /**
  * Holds the Agent Studio handoff state and stepper position for one Studio
  * session. Provided at the Studio shell (not `root`) so navigating afresh to
@@ -54,6 +74,27 @@ export class AgentStudioStateService {
   /** Server draft name from the last successful save — pre-fills the
    *  Save-draft popover on re-save so it doesn't silently rename on confirm. */
   readonly currentDraftName = signal<string | null>(null);
+
+  /**
+   * Last handoff snapshot that was successfully saved or loaded. `null` until
+   * the first `markClean()`. Used only by `isDirty`.
+   */
+  private readonly lastSavedHandoff = signal<AgentStudioHandoffState | null>(null);
+
+  /**
+   * Whether the current handoff differs from the last saved/loaded snapshot.
+   *
+   * Preconditions: none.
+   * Postconditions: `false` on a blank session (`lastSavedHandoff` null and
+   *   every id null); `true` if any id is non-null and there is no snapshot
+   *   yet, or if any of the five ids differs from the snapshot.
+   */
+  readonly isDirty = computed(() => {
+    const current = this.handoff();
+    const saved = this.lastSavedHandoff();
+    if (saved === null) return handoffHasAnyId(current);
+    return !handoffEquals(current, saved);
+  });
 
   /**
    * `${teamId}::${manifestId}` keys the Stage-2 handoff agent has already been
@@ -265,6 +306,16 @@ export class AgentStudioStateService {
   }
 
   /**
+   * Record the current handoff as the last saved/loaded snapshot.
+   *
+   * Preconditions: none.
+   * Postconditions: `isDirty()` is `false` until a later handoff-id write.
+   */
+  markClean(): void {
+    this.lastSavedHandoff.set({ ...this.handoff() });
+  }
+
+  /**
    * Whether the Stage-2 handoff agent has already been auto-added for `key`
    * (`${teamId}::${manifestId}`) this session.
    *
@@ -291,7 +342,7 @@ export class AgentStudioStateService {
   /**
    * Reset the session — clear handoff state and return to Stage 1.
    * Postconditions: every id is null; `activeStage() === 0`; `maxReachedStage() === 0`;
-   *   `activeBuildSubStage() === 0`; `maxReachedBuildSubStage() === 0`.
+   *   `activeBuildSubStage() === 0`; `maxReachedBuildSubStage() === 0`; `isDirty()` is `false`.
    */
   reset(): void {
     this.registryAgentId.set(null);
@@ -303,6 +354,7 @@ export class AgentStudioStateService {
     this.composeProcessStatus.set(null);
     this.currentDraftId.set(null);
     this.currentDraftName.set(null);
+    this.lastSavedHandoff.set(null);
     this.handoffConsumed.clear();
     this._activeStage.set(0);
     this._maxReachedStage.set(0);
