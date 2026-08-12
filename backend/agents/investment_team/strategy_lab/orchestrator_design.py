@@ -55,6 +55,7 @@ from ..models import (
 from ..signal_intelligence_models import SignalIntelligenceBriefV1
 from ..strategy_lab_context import normalize_asset_class, normalize_asset_class_strict
 from ._orchestrator_helpers import (
+    _DesignAttemptState,
     _DesignPersistContext,
     _DriftCollector,
     _emit_phase_transition,
@@ -1395,12 +1396,10 @@ class DesignMixin:
         )
 
         # ── Phase 4: RECORD ───────────────────────────────────────────
+        attempt_state = _DesignAttemptState(spec=spec, code=code, trades=trades, metrics=metrics)
         return self._extract_findings_and_assemble_record(
-            spec=spec,
-            code=code,
+            state=attempt_state,
             config=config,
-            metrics=metrics,
-            trades=trades,
             narrative=narrative,
             original_spec=original_spec,
             original_code=original_code,
@@ -1680,11 +1679,8 @@ class DesignMixin:
     def _extract_findings_and_assemble_record(
         self,
         *,
-        spec: StrategySpec,
-        code: str,
+        state: _DesignAttemptState,
         config: BacktestConfig,
-        metrics: BacktestResult,
-        trades: List[TradeRecord],
         narrative: str,
         original_spec: StrategySpec,
         original_code: str,
@@ -1711,8 +1707,10 @@ class DesignMixin:
     ) -> StrategyLabRecord:
         """Extract the final alignment findings and assemble the record.
 
-        Pre: all phases have completed; ``alignment_reports`` holds one report
-        per alignment iteration (empty when the loop never ran).
+        Pre: all phases have completed; ``state`` carries the settled
+        ``spec``/``code``/``trades``/``metrics`` for this design attempt;
+        ``alignment_reports`` holds one report per alignment iteration
+        (empty when the loop never ran).
         Post: returns the persisted ``StrategyLabRecord`` built by
         ``_assemble_record``, carrying the last report's per-rule findings (or
         an empty list) and ``refinement_rounds = len(refinement_attempts)``.
@@ -1728,11 +1726,11 @@ class DesignMixin:
         )
 
         return self._assemble_record(
-            spec=spec,
-            code=code,
+            spec=state.spec,
+            code=state.code,
             config=config,
-            metrics=metrics,
-            trades=trades,
+            metrics=state.metrics,
+            trades=state.trades,
             narrative=narrative,
             original_spec=original_spec,
             original_code=original_code,
