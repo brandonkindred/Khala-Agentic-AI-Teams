@@ -402,6 +402,15 @@ _DEVOPS_MAINTAINABILITY_CRITERIA = (
 )
 
 
+REVIEW_PROSE_INSTRUCTION = (
+    "\n\n**Output format:**\n"
+    "Answer in structured prose (not JSON). For each issue you would report, "
+    "state severity, category, file_path, line (when applicable), title, "
+    "description, suggestion, and pre_existing. Then state whether the change "
+    "should be approved, give a brief summary, and list any spec-compliance gaps.\n"
+)
+
+
 REVIEW_PROFILES: dict[ReviewProfile, _ProfileSpec] = {
     ReviewProfile.CODE_REVIEW: _ProfileSpec(_CODE_REVIEW_ROLE_LINE, _CODE_REVIEW_CRITERIA),
     ReviewProfile.SPEC_CONFORMANCE: _ProfileSpec(
@@ -429,12 +438,59 @@ REVIEW_PROFILES: dict[ReviewProfile, _ProfileSpec] = {
 }
 
 
-def build_review_system_prompt(profile: ReviewProfile | str) -> str:
-    """Assemble the chunk-reviewer system prompt for a review ``profile``.
+def build_review_reasoning_system_prompt(profile: ReviewProfile | str) -> str:
+    """Assemble the reasoning half of the chunk-reviewer system prompt.
 
-    The prompt is composed from one shared skeleton (coding standards, the
-    settled-decisions guidance, the review-priority framework, and the JSON
-    output contract) plus the profile's own ``role_line`` and ``criteria_block``.
+    Carries the profile persona, shared standards, and criteria checklist plus
+    :data:`REVIEW_PROSE_INSTRUCTION`. Omits :data:`_SHARED_OUTPUT_SECTION` and
+    :data:`JSON_OUTPUT_INSTRUCTION` so the reasoning call is not bound to a JSON
+    response-format contract.
+
+    Preconditions:
+        * ``profile`` is a :class:`ReviewProfile` or its string value; an
+          unknown value raises ``ValueError``.
+
+    Postconditions:
+        * Returns a non-empty prompt string containing no JSON output schema.
+        * Pure; no side effects.
+    """
+    spec = REVIEW_PROFILES[ReviewProfile(profile)]
+    return (
+        spec.role_line
+        + "\n\n"
+        + REVIEW_STANDARDS
+        + _SHARED_ROLE_AND_SETTLED
+        + REVIEW_PRIORITY_FRAMEWORK
+        + spec.criteria_block
+        + REVIEW_PROSE_INSTRUCTION
+    )
+
+
+def build_review_formatting_instructions(profile: ReviewProfile | str) -> str:
+    """Assemble the JSON formatting half of the chunk-reviewer system prompt.
+
+    Profile-agnostic: only validates ``profile`` for API symmetry with
+    :func:`build_review_reasoning_system_prompt`.
+
+    Preconditions:
+        * ``profile`` is a :class:`ReviewProfile` or its string value; an
+          unknown value raises ``ValueError``.
+
+    Postconditions:
+        * Returns :data:`_SHARED_OUTPUT_SECTION` concatenated with
+          :data:`JSON_OUTPUT_INSTRUCTION`.
+        * Pure; no side effects.
+    """
+    _ = ReviewProfile(profile)  # validate
+    return _SHARED_OUTPUT_SECTION + JSON_OUTPUT_INSTRUCTION
+
+
+def build_review_system_prompt(profile: ReviewProfile | str) -> str:
+    """Assemble the full chunk-reviewer system prompt for a review ``profile``.
+
+    Legacy concatenation of :func:`build_review_reasoning_system_prompt` and
+    :func:`build_review_formatting_instructions`. New callers that split the
+    reasoning and formatting LLM calls should use those builders directly.
 
     Preconditions:
         * ``profile`` is a :class:`ReviewProfile` or its string value
@@ -453,14 +509,7 @@ def build_review_system_prompt(profile: ReviewProfile | str) -> str:
         enforce that derivation itself (see the module-level ``Invariants``
         above for the authoritative statement of that relationship).
     """
-    spec = REVIEW_PROFILES[ReviewProfile(profile)]
     return (
-        spec.role_line
-        + "\n\n"
-        + REVIEW_STANDARDS
-        + _SHARED_ROLE_AND_SETTLED
-        + REVIEW_PRIORITY_FRAMEWORK
-        + spec.criteria_block
-        + _SHARED_OUTPUT_SECTION
-        + JSON_OUTPUT_INSTRUCTION
+        build_review_reasoning_system_prompt(profile)
+        + build_review_formatting_instructions(profile)
     )

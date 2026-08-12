@@ -15,6 +15,8 @@ from code_review_agent.profiles import (
     _SHARED_OUTPUT_SECTION,
     _SHARED_ROLE_AND_SETTLED,
     REVIEW_PROFILES,
+    build_review_formatting_instructions,
+    build_review_reasoning_system_prompt,
     build_review_system_prompt,
 )
 from code_review_agent.prompts import CODE_REVIEW_PROMPT
@@ -30,6 +32,30 @@ from software_engineering_team.shared.prompts import REQUIREMENT_CITATION_GUARDR
 def test_code_review_profile_is_byte_identical_to_legacy_prompt() -> None:
     """CODE_REVIEW_PROMPT is an alias of build_review_system_prompt(CODE_REVIEW)."""
     assert build_review_system_prompt(ReviewProfile.CODE_REVIEW) == CODE_REVIEW_PROMPT
+
+
+def test_reasoning_prompt_omits_json_output_contract() -> None:
+    """Reasoning prompt carries prose output guidance, not the JSON schema."""
+    text = build_review_reasoning_system_prompt(ReviewProfile.CODE_REVIEW)
+    assert "Return a single JSON object" not in text
+    assert "Answer in structured prose" in text
+    assert '"approved"' not in text
+
+
+def test_formatting_instructions_include_json_contract() -> None:
+    """Formatting instructions carry the shared JSON output contract."""
+    text = build_review_formatting_instructions(ReviewProfile.CODE_REVIEW)
+    assert "Return a single JSON object" in text
+    assert '"approved"' in text
+
+
+def test_composed_system_prompt_equals_reasoning_plus_formatting() -> None:
+    """Legacy builder concatenates reasoning and formatting halves."""
+    profile = ReviewProfile.CODE_REVIEW
+    assert build_review_system_prompt(profile) == (
+        build_review_reasoning_system_prompt(profile)
+        + build_review_formatting_instructions(profile)
+    )
 
 
 def test_shared_skeleton_pieces_are_slices_of_legacy_prompt() -> None:
