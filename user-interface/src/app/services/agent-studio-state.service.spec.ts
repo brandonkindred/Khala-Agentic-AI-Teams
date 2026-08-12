@@ -214,5 +214,15 @@ describe('AgentStudioStateService', () => {
       expect(service.activeBuildSubStage()).toBe(0);
       expect(service.maxReachedBuildSubStage()).toBe(0);
     });
+
+    it('resetBuildSubStage clears the sub-stepper back to Start without touching handoff state', () => {
+      service.setRegistryAgentId('reg-1');
+      service.advanceBuildSubStage();
+      service.advanceBuildSubStage();
+      service.resetBuildSubStage();
+      expect(service.activeBuildSubStage()).toBe(0);
+      expect(service.maxReachedBuildSubStage()).toBe(0);
+      expect(service.registryAgentId()).toBe('reg-1');
+    });
   });
 });

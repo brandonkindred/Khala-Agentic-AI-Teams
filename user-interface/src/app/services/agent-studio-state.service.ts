@@ -213,6 +213,21 @@ export class AgentStudioStateService {
     this._activeBuildSubStage.set(DEFINE_SUB_STAGE_INDEX);
   }
 
+  /**
+   * Reset the Stage-1 sub-stepper to Start, outside the normal forward-only
+   * flow — used when hydrating a loaded draft that resolves to Stage 1 (spec
+   * §3.5), since navigating the main stepper back to Build alone doesn't
+   * touch the sub-stepper, which may already be past Start from unrelated
+   * in-session progress.
+   *
+   * Preconditions: none.
+   * Postconditions: `activeBuildSubStage() === 0` and `maxReachedBuildSubStage() === 0`.
+   */
+  resetBuildSubStage(): void {
+    this._activeBuildSubStage.set(0);
+    this._maxReachedBuildSubStage.set(0);
+  }
+
   setRegistryAgentId(id: string | null): void {
     this.registryAgentId.set(id);
   }

@@ -238,6 +238,75 @@ describe('AgentStudioShellComponent', () => {
       expect(component.loadingDraft()).toBe(false);
     });
 
+    it('loadingDraft stays true through the nested process-status check, not just the getDraft call', () => {
+      agentStudioApi.getDraft.mockReturnValue(of(draft({ teamId: 'team-1', processId: 'proc-1' })));
+      const pendingProcess = new Subject<ProcessDefinition>();
+      agenticTeamApi.getProcess.mockReturnValue(pendingProcess.asObservable());
+      component.loadDraft('d-1');
+      // getDraft already resolved (synchronous `of`), but the process check is
+      // still pending — loadingDraft must not have gone false in between.
+      expect(component.loadingDraft()).toBe(true);
+      pendingProcess.next(process('complete'));
+      pendingProcess.complete();
+      expect(component.loadingDraft()).toBe(false);
+    });
+
+    it('clears a stale composeProcessStatus when the process lookup fails', () => {
+      component.state.setComposeProcessStatus('complete');
+      agentStudioApi.getDraft.mockReturnValue(of(draft({ teamId: 'team-1', processId: 'proc-1' })));
+      agenticTeamApi.getProcess.mockReturnValue(throwError(() => new Error('404')));
+      component.loadDraft('d-1');
+      expect(component.state.composeProcessStatus()).toBeNull();
+    });
+
+    it('resets the Build sub-stepper when resolving to Stage 1 from mid-sub-stepper progress', () => {
+      component.state.advanceBuildSubStage();
+      component.state.advanceBuildSubStage();
+      expect(component.state.activeBuildSubStage()).toBe(2);
+      agentStudioApi.getDraft.mockReturnValue(of(draft({})));
+      component.loadDraft('d-1');
+      expect(component.state.activeBuildSubStage()).toBe(0);
+      expect(component.state.maxReachedBuildSubStage()).toBe(0);
+    });
+
+    it('a superseded loadDraft call discards its late getDraft response instead of corrupting the newer load', () => {
+      const firstDraft = new Subject<AgentStudioDraft>();
+      agentStudioApi.getDraft.mockReturnValueOnce(firstDraft.asObservable());
+      component.loadDraft('d-1'); // in flight, not yet resolved
+
+      agentStudioApi.getDraft.mockReturnValueOnce(of(draft({ registryAgentId: 'reg-2' })));
+      // Simulate the busy-guard having been bypassed (e.g. a direct call) —
+      // force loadingDraft back to false so the second call isn't blocked,
+      // to isolate the token guard's own protection from the busy guard's.
+      component.loadingDraft.set(false);
+      component.loadDraft('d-2'); // supersedes the first, resolves synchronously
+
+      expect(component.state.registryAgentId()).toBe('reg-2');
+      firstDraft.next(draft({ registryAgentId: 'reg-1-stale' }));
+      firstDraft.complete();
+      // The stale first response must not have overwritten the newer load.
+      expect(component.state.registryAgentId()).toBe('reg-2');
+    });
+
+    it('a superseded loadDraft call discards its late getProcess response', () => {
+      agentStudioApi.getDraft.mockReturnValueOnce(
+        of(draft({ teamId: 'team-1', processId: 'proc-1' })),
+      );
+      const firstProcess = new Subject<ProcessDefinition>();
+      agenticTeamApi.getProcess.mockReturnValueOnce(firstProcess.asObservable());
+      component.loadDraft('d-1'); // getDraft resolves, getProcess left pending
+
+      agentStudioApi.getDraft.mockReturnValueOnce(of(draft({ registryAgentId: 'reg-2' })));
+      component.loadingDraft.set(false); // bypass the busy-guard, isolate the token guard
+      component.loadDraft('d-2'); // resolves synchronously to Stage 2
+
+      expect(component.state.activeStage()).toBe(1);
+      firstProcess.next(process('complete'));
+      firstProcess.complete();
+      // The stale getProcess response must not re-navigate the stepper.
+      expect(component.state.activeStage()).toBe(1);
+    });
+
     it('the Load-draft menu is wired to loadDraft and reflects loadingDraft as busy', () => {
       agentStudioApi.getDraft.mockReturnValue(of(draft({})));
       const menu = fixture.debugElement.query(By.directive(LoadDraftMenuComponent));

@@ -40,6 +40,10 @@ export class LoadDraftMenuComponent {
   readonly error = signal<string | null>(null);
   readonly hasMore = signal(false);
   private nextOffset = 0;
+  /** Bumped on every `onOpened()`; lets a fetch from a since-reopened menu
+   *  recognize its response is stale and discard it instead of appending
+   *  duplicate rows / double-advancing the offset. */
+  private openToken = 0;
 
   /**
    * Wired to `<mat-menu (opened)>`. Always refetches page 1 rather than
@@ -48,13 +52,15 @@ export class LoadDraftMenuComponent {
    *
    * Preconditions: none.
    * Postconditions: `drafts()`/`hasMore()` reflect the first page; `loading()`
-   *   is `true` until the request settles.
+   *   is `true` until the request settles. Any still-in-flight fetch from a
+   *   previous opening is superseded and its response discarded on arrival.
    */
   onOpened(): void {
+    const token = ++this.openToken;
     this.nextOffset = 0;
     this.drafts.set([]);
     this.hasMore.set(false);
-    this.fetchPage();
+    this.fetchPage(token);
   }
 
   /**
@@ -67,7 +73,7 @@ export class LoadDraftMenuComponent {
    */
   loadMore(): void {
     if (this.loading() || !this.hasMore()) return;
-    this.fetchPage();
+    this.fetchPage(this.openToken);
   }
 
   /**
@@ -81,17 +87,19 @@ export class LoadDraftMenuComponent {
     this.draftSelected.emit(draftId);
   }
 
-  private fetchPage(): void {
+  private fetchPage(token: number): void {
     this.loading.set(true);
     this.error.set(null);
     this.api.listDrafts(PAGE_SIZE, this.nextOffset).subscribe({
       next: (rows) => {
+        if (token !== this.openToken) return;
         this.drafts.update((existing) => [...existing, ...rows]);
         this.hasMore.set(rows.length >= PAGE_SIZE);
         this.nextOffset += rows.length;
         this.loading.set(false);
       },
       error: (err) => {
+        if (token !== this.openToken) return;
         this.loading.set(false);
         this.error.set(extractErrorDetail(err, 'Failed to load drafts.'));
       },

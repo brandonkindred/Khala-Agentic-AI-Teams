@@ -1,5 +1,5 @@
 import { TestBed } from '@angular/core/testing';
-import { of, throwError } from 'rxjs';
+import { Subject, of, throwError } from 'rxjs';
 import { describe, expect, it, vi } from 'vitest';
 import { LoadDraftMenuComponent } from './load-draft-menu.component';
 import { AgentStudioApiService } from '../../../../services/agent-studio-api.service';
@@ -97,6 +97,23 @@ describe('LoadDraftMenuComponent', () => {
     expect(fixture.componentInstance.drafts()).toEqual([summary('d-1', 'A')]);
     fixture.componentInstance.onOpened();
     expect(api.listDrafts).toHaveBeenLastCalledWith(10, 0);
+    expect(fixture.componentInstance.drafts()).toEqual([summary('d-2', 'B')]);
+  });
+
+  it('reopening while the first page is still in flight discards the stale response', () => {
+    const firstOpen = new Subject<AgentStudioDraftSummary[]>();
+    const listDrafts = vi
+      .fn()
+      .mockReturnValueOnce(firstOpen.asObservable())
+      .mockReturnValueOnce(of([summary('d-2', 'B')]));
+    const { fixture } = configure(listDrafts);
+    fixture.componentInstance.onOpened(); // first fetch left pending
+    fixture.componentInstance.onOpened(); // reopen supersedes it, resolves synchronously
+
+    expect(fixture.componentInstance.drafts()).toEqual([summary('d-2', 'B')]);
+    firstOpen.next([summary('d-1', 'A')]);
+    firstOpen.complete();
+    // The stale first-open response must not append a duplicate/stray row.
     expect(fixture.componentInstance.drafts()).toEqual([summary('d-2', 'B')]);
   });
 

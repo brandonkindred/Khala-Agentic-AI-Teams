@@ -67,6 +67,10 @@ export class AgentStudioShellComponent {
 
   /** True while a Load-draft selection is being fetched and hydrated. */
   readonly loadingDraft = signal(false);
+  /** Bumped on every `loadDraft` call; lets a superseded call's late-arriving
+   *  responses (`getDraft`, the nested `getProcess` check) recognize they're
+   *  stale and no-op instead of corrupting a newer load. */
+  private loadDraftToken = 0;
   /** The forward-only stage list rendered by the stepper. */
   readonly stages = STUDIO_STAGES;
 
@@ -184,26 +188,32 @@ export class AgentStudioShellComponent {
    * Preconditions: `draftId` names a draft the current user owns (rows in
    *   `LoadDraftMenuComponent` only ever come from that user's own list).
    * Postconditions: on success, `state` is hydrated from the draft's payload
-   *   and the stepper is moved to the furthest reachable stage. On failure,
-   *   `loadingDraft()` returns to `false` and `state` is unchanged (surfaced
-   *   via the global HTTP error toast, not a bespoke inline banner — the
-   *   triggering menu has already closed by the time this runs).
+   *   and the stepper is moved to the furthest reachable stage.
+   *   `loadingDraft()` stays `true` for the entire chain, including the
+   *   nested process-status check, so a second selection can't race it. On
+   *   failure, `loadingDraft()` returns to `false` and `state` is unchanged
+   *   (surfaced via the global HTTP error toast, not a bespoke inline banner
+   *   — the triggering menu has already closed by the time this runs). A
+   *   call superseded by a later `loadDraft` (its token no longer matches
+   *   `loadDraftToken`) discards its response instead of applying it.
    */
   loadDraft(draftId: string): void {
     if (this.loadingDraft()) return;
     this.loadingDraft.set(true);
+    const token = ++this.loadDraftToken;
     this.api.getDraft(draftId).subscribe({
       next: (draft) => {
-        this.hydrateFromDraft(draft);
-        this.loadingDraft.set(false);
+        if (token !== this.loadDraftToken) return;
+        this.hydrateFromDraft(draft, token);
       },
       error: () => {
+        if (token !== this.loadDraftToken) return;
         this.loadingDraft.set(false);
       },
     });
   }
 
-  private hydrateFromDraft(draft: AgentStudioDraft): void {
+  private hydrateFromDraft(draft: AgentStudioDraft, token: number): void {
     this.state.setCurrentDraft(draft.draft_id, draft.name);
     const payload = draft.payload;
     this.state.setRegistryAgentId(asNullableString(payload['registryAgentId']));
@@ -211,14 +221,16 @@ export class AgentStudioShellComponent {
     this.state.setProcessId(asNullableString(payload['processId']));
     this.state.setPersonaId(asNullableString(payload['personaId']));
     this.state.setDraftAgentId(asNullableString(payload['draftAgentId']));
-    this.resolveFurthestStage();
+    this.resolveFurthestStage(token);
   }
 
   /**
    * Move the stepper to the furthest stage the just-hydrated state supports
    * (spec §3.5's "furthest reachable stage" rule, restricted to what's
    * actually persisted today — no `stage1AgentDraft`, so Stage 1 always
-   * resumes at its default "Start" sub-stage).
+   * resumes at its default "Start" sub-stage, explicitly reset here since the
+   * sub-stepper isn't touched by navigating the main stepper alone and may
+   * already be past Start from unrelated in-session Build progress).
    *
    * Deliberately does not call `setRosterFullyStaffed`: the spec is explicit
    * that Stage-4 reachability on load depends only on the process being
@@ -227,19 +239,32 @@ export class AgentStudioShellComponent {
    * safety net re-checks testability"). A stale `rosterFullyStaffed` from an
    * unrelated earlier session action is an accepted, spec-mandated tradeoff,
    * not an oversight.
+   *
+   * `token` guards the async `getProcess` branch against a superseded call's
+   * late response — see `loadDraft`'s contract.
    */
-  private resolveFurthestStage(): void {
+  private resolveFurthestStage(token: number): void {
     const teamId = this.state.teamId();
     const processId = this.state.processId();
     if (teamId && processId) {
       this.agenticTeamApi.getProcess(processId).subscribe({
         next: (process) => {
+          if (token !== this.loadDraftToken) return;
           this.state.setComposeProcessStatus(process.status);
           this.state.navigateToStage(process.status === 'complete' ? STAGE_PERSONAS : STAGE_COMPOSE);
+          this.loadingDraft.set(false);
         },
-        // The process may have been deleted/archived since the draft was
-        // saved — fall back one stage rather than failing the whole load.
-        error: () => this.state.navigateToStage(STAGE_COMPOSE),
+        error: () => {
+          if (token !== this.loadDraftToken) return;
+          // The process may have been deleted/archived since the draft was
+          // saved, or the lookup failed transiently — either way we no longer
+          // know its status, so clear any stale value (e.g. 'complete' left
+          // over from an earlier, unrelated in-session action) rather than
+          // risk it wrongly satisfying the Stage-3→4 gate.
+          this.state.setComposeProcessStatus(null);
+          this.state.navigateToStage(STAGE_COMPOSE);
+          this.loadingDraft.set(false);
+        },
       });
       return;
     }
@@ -248,7 +273,9 @@ export class AgentStudioShellComponent {
     } else if (this.state.registryAgentId()) {
       this.state.navigateToStage(STAGE_TEST);
     } else {
+      this.state.resetBuildSubStage();
       this.state.navigateToStage(STAGE_BUILD);
     }
+    this.loadingDraft.set(false);
   }
 }
