@@ -7,13 +7,14 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from typing import Any, Callable, Collection, Dict, List, Optional
 
 from strands import Agent
 
-from llm_service import call_llm_with_retries
+from llm_service import LLMJsonParseError, call_llm_with_retries, extract_json_from_response
 from shared.env import parse_int
-from shared.llm_recovery import agent_call_json
+from shared.llm_recovery import extract_json_object
 from software_engineering_team.hitl import (
     normalize_open_questions as _normalize_open_questions,
 )
@@ -146,13 +147,59 @@ def _agent_call_json(
           so a usage/format echo that lacks the anchor cannot be mistaken for the
           answer.
     Postconditions:
-        - Returns the parsed object. Strict ``json.loads`` is tried first (after
-          stripping a single leading/trailing ```` ``` ```` fence); on failure the
-          shared salvage recovery extracts a JSON object from prose- or
-          think-block-wrapped output, anchored on ``required_keys``. Raises
-          ``json.JSONDecodeError`` only when no object can be recovered.
+        - Returns the parsed object via a three-tier ladder, each tier only tried
+          after the previous one fails:
+          1. Strict ``json.loads`` (after stripping a single leading/trailing
+             ```` ``` ```` fence) for well-formed replies.
+          2. The shared, non-blogging-aware ``extract_json_object`` salvage engine
+             (``shared.llm_recovery`` — the same engine ``agent_call_json`` used),
+             anchored on ``required_keys`` with correct last-candidate-wins
+             handling of an echoed format example. This tier recovers the vast
+             majority of prose-/fence-wrapped replies without ever reaching tier 3.
+          3. The canonical ``extract_json_from_response`` as a final fallback, so
+             this call site still benefits from any recovery capability unique to
+             it. Tiers 1-2 exist specifically so well-formed or salvageable JSON
+             never reaches tier 3's own pre-parse heuristics (e.g. its
+             ``---DRAFT---`` shortcut, which scans raw text for that literal
+             substring — including inside a JSON string value, such as a
+             code-review reason quoting this repo's blog draft marker — and its
+             first-fenced-block fast path, which does not honor ``required_keys``)
+             on input that a safer engine could already handle correctly. Unlike
+             tier 2, several of tier 3's own recovery paths neither guarantee a
+             ``dict`` result (a fenced array-with-prose reply can come back as a
+             bare ``list``) nor honor ``required_keys`` (an anchor-less object can
+             win before its own key-anchored stage ever runs) — so tier 3's result
+             is validated against both before being accepted; a result that fails
+             either check is treated the same as "nothing recovered."
+          Raises ``json.JSONDecodeError`` only when no object can be recovered by
+          any tier — ``LLMJsonParseError`` from tier 3, and a tier-3 result that
+          fails validation, are both raised as ``json.JSONDecodeError`` so callers
+          keep retrying JSON-parse failures exactly as before (``LLMJsonParseError``
+          is otherwise non-retryable in ``call_llm_with_retries``).
     """
-    return agent_call_json(agent, prompt, required_keys)
+    raw = str(agent(prompt)).strip()
+    fenced = re.sub(r"^```(?:json)?\s*", "", raw)
+    fenced = re.sub(r"\s*```$", "", fenced)
+    try:
+        return json.loads(fenced)
+    except json.JSONDecodeError:
+        pass
+    recovered = extract_json_object(raw, required_keys=required_keys)
+    if recovered is not None:
+        return recovered
+    expected_keys = frozenset(required_keys) if required_keys is not None else None
+    try:
+        fallback = extract_json_from_response(raw, expected_keys=expected_keys)
+    except LLMJsonParseError as e:
+        raise json.JSONDecodeError(str(e), raw, 0) from e
+    if not isinstance(fallback, dict) or (expected_keys and not (expected_keys & fallback.keys())):
+        raise json.JSONDecodeError(
+            "extract_json_from_response fallback returned an object that fails "
+            "this call site's dict/required_keys contract",
+            raw,
+            0,
+        )
+    return fallback
 
 
 _JSON_ONLY_INSTRUCTION = "\n\nRespond with valid JSON only, no markdown fences."
