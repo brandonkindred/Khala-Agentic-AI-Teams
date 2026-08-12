@@ -36,6 +36,7 @@ def test_individual_prompts_still_contain_their_own_body_and_output_format():
     assert ARCHITECTURE_CONSISTENCY_PROMPT.startswith(_ARCHITECTURE_CONSISTENCY_BODY)
     assert ARCHITECTURE_CONSISTENCY_PROMPT.endswith(JSON_OUTPUT_INSTRUCTION)
     assert '"category": "architecture" | "refactor"' in ARCHITECTURE_CONSISTENCY_PROMPT
+    assert '"pre_existing": boolean' in ARCHITECTURE_CONSISTENCY_PROMPT
 
     assert SIDE_EFFECT_IMPACT_PROMPT.startswith(_SIDE_EFFECT_IMPACT_BODY)
     assert SIDE_EFFECT_IMPACT_PROMPT.endswith(JSON_OUTPUT_INSTRUCTION)
@@ -73,6 +74,7 @@ def test_merged_schema_round_trips_both_finding_types():
                 "line": 10,
                 "description": "Bypasses the stated data-access layer.",
                 "suggestion": "Use the repository module instead.",
+                "pre_existing": False,
             }
         ],
         "side_effect_findings": [
@@ -92,6 +94,24 @@ def test_merged_schema_round_trips_both_finding_types():
     assert len(parsed.side_effect_findings) == 1
     assert isinstance(parsed.architecture_findings[0], ArchitectureConsistencyFindingLLM)
     assert isinstance(parsed.side_effect_findings[0], SideEffectImpactFindingLLM)
+
+
+def test_architecture_finding_schema_pre_existing_defaults_false():
+    """``pre_existing`` is optional on an architecture/refactor finding (like
+    its side-effect counterpart), defaulting False when the model omits it."""
+    finding = ArchitectureConsistencyFindingLLM.model_validate(
+        {"category": "architecture", "description": "Bypasses the stated data-access layer."}
+    )
+    assert finding.pre_existing is False
+
+    tagged = ArchitectureConsistencyFindingLLM.model_validate(
+        {
+            "category": "refactor",
+            "description": "Duplicates an existing helper untouched by this change.",
+            "pre_existing": True,
+        }
+    )
+    assert tagged.pre_existing is True
 
 
 def test_merged_schema_accepts_explicit_empty_lists_but_requires_both_keys():
@@ -159,6 +179,17 @@ def test_architecture_body_allows_review_without_formal_document():
     assert "no formal" in body or "without a formal" in body or "when none is provided" in body
     assert "repository" in body
     assert "pattern" in body or "boundaries" in body
+
+
+def test_architecture_body_documents_pre_existing_tagging() -> None:
+    """Regression test: Part 1 (architecture-consistency / cross-codebase
+    redundancy) must instruct the model to tag pre_existing, the same as
+    Part 2 (side-effect impact) already does -- otherwise every architecture/
+    refactor finding about code this submission never touched defaults to
+    pre_existing=False and gets posted as a blocking PR comment instead of
+    routed to a human-review proposal."""
+    assert "pre_existing" in _ARCHITECTURE_CONSISTENCY_BODY
+    assert "Tagging" in _ARCHITECTURE_CONSISTENCY_BODY
 
 
 def test_architecture_body_prefers_scoped_reads_over_whole_file_first() -> None:

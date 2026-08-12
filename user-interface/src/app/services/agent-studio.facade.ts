@@ -1,10 +1,11 @@
 import { Injectable, inject } from '@angular/core';
 import { HttpResponse } from '@angular/common/http';
-import { Observable } from 'rxjs';
+import { Observable, of, tap } from 'rxjs';
 import { AgentStudioApiService } from './agent-studio-api.service';
 import { AgentRunnerApiService } from './agent-runner-api.service';
 import { AgenticTeamApiService } from './agentic-team-api.service';
 import { PersonaTestingApiService } from './persona-testing-api.service';
+import { AgentStudioStateService } from './agent-studio-state.service';
 import type {
   AgentDefinition,
   AgentStudioDraft,
@@ -37,20 +38,25 @@ import type {
  * `PersonaTestingApiService`), which remain available as implementation
  * details for call sites that still need them directly.
  *
- * Complementary to, not a replacement for, `AgentStudioStateService`: that
- * service owns in-session state (handoff ids, stepper position) and has no
- * HTTP dependencies of its own; this facade owns backend data operations and
- * holds no state. Today the facade returns raw responses and leaves state
- * updates to callers — centralizing handoff-state writes inside the facade
- * (so it calls into `AgentStudioStateService` after a successful operation)
- * is a deliberate follow-up increment, not done here.
+ * Complementary to `AgentStudioStateService`, which owns in-session handoff
+ * state (registry/team/persona/draft ids, the roster dedupe set) and stepper
+ * position. Methods whose HTTP call produces a value the handoff state needs
+ * write that state on success and leave it untouched on error — the error
+ * itself is never intercepted, so it always reaches the caller unchanged.
+ * Writes that are pure local UI-state resets with no backing HTTP call
+ * (e.g. clearing the process/roster gates when a different team is selected)
+ * stay the caller's responsibility; there is no response to hang them on.
+ *
+ * Provided at the Studio shell (not `root`), alongside
+ * `AgentStudioStateService`, so both share one session-scoped injector.
  */
-@Injectable({ providedIn: 'root' })
+@Injectable()
 export class AgentStudioFacade {
   private readonly studioApi = inject(AgentStudioApiService);
   private readonly runnerApi = inject(AgentRunnerApiService);
   private readonly agenticTeamApi = inject(AgenticTeamApiService);
   private readonly personaApi = inject(PersonaTestingApiService);
+  private readonly state = inject(AgentStudioStateService);
 
   // -------------------------------------------------------------------------
   // Stage 1 — Build Agent
@@ -67,12 +73,22 @@ export class AgentStudioFacade {
     return this.studioApi.sendMessage(conversationId, req);
   }
 
+  /**
+   * Clone a registry agent into a Stage-1 draft. On success, stamps a fresh
+   * client-generated `draftAgentId` — the draft has no server-issued id yet,
+   * so this is not derived from the response.
+   */
   selectAgent(agentId: string): Observable<AgentDefinition> {
-    return this.studioApi.cloneFromRegistry(agentId);
+    return this.studioApi.cloneFromRegistry(agentId).pipe(
+      tap(() => this.state.setDraftAgentId(crypto.randomUUID())),
+    );
   }
 
+  /** Save + register the current draft. On success, its `agent_id` becomes `registryAgentId`. */
   saveAgent(req: SaveAgentRequest): Observable<SaveAgentResponse> {
-    return this.studioApi.saveAgent(req);
+    return this.studioApi.saveAgent(req).pipe(
+      tap((response) => this.state.setRegistryAgentId(response.agent_id)),
+    );
   }
 
   /**
@@ -131,11 +147,26 @@ export class AgentStudioFacade {
     return this.agenticTeamApi.getTeam(teamId);
   }
 
+  /** Create a team. On success, its `team_id` becomes the journey's `teamId`. */
   composeTeam(req: CreateAgenticTeamRequest): Observable<CreateAgenticTeamResponse> {
-    return this.agenticTeamApi.createTeam(req);
+    return this.agenticTeamApi.createTeam(req).pipe(
+      tap((response) => this.state.setTeamId(response.team_id)),
+    );
   }
 
-  addAgentToTeam(teamId: string, manifestId: string): Observable<AgenticTeamAgent> {
+  /**
+   * Add a registry agent to a team's roster, enforcing the at-most-once
+   * auto-add per `(teamId, manifestId)` this session. The dedupe key is
+   * marked consumed on attempt, not on success, so a failed add is not
+   * retried automatically — the user can still add the agent manually.
+   * Returns `null` without calling the API if the key was already consumed.
+   */
+  addAgentToTeam(teamId: string, manifestId: string): Observable<AgenticTeamAgent | null> {
+    const key = `${teamId}::${manifestId}`;
+    if (this.state.hasConsumedHandoff(key)) {
+      return of(null);
+    }
+    this.state.markHandoffConsumed(key);
     return this.agenticTeamApi.addAgentFromRegistry(teamId, manifestId);
   }
 
@@ -151,8 +182,11 @@ export class AgentStudioFacade {
     return this.personaApi.getPersonas();
   }
 
+  /** Create a persona. On success, it becomes the journey's `personaId`. */
   createPersona(payload: CreatePersonaRequest): Observable<PersonaInfo> {
-    return this.personaApi.createPersona(payload);
+    return this.personaApi.createPersona(payload).pipe(
+      tap((created) => this.state.setPersonaId(created.id)),
+    );
   }
 
   startPersonaRun(

@@ -647,16 +647,14 @@ class ArchitectureConsistencyFindingLLM(BaseModel):
 
     Mirrors the fields ``architecture_consistency_pass._coerce_finding``
     actually populates on ``CodeReviewIssue`` — severity, category,
-    file_path, line, description, suggestion — typed as an enumerated
-    schema in the same style as :class:`ChunkReviewIssueLLM`. Intentionally
-    omits ``start_line`` and ``pre_existing``: that pass's own
-    ``_coerce_finding`` never populates either (its prompt's output format
-    has no multi-line-anchor field, and only the side-effect pass emits
-    ``pre_existing``). This is the intended shape for the merged prompt's
-    Part 1 output contract. The in-process merged pass currently reuses the
-    standalone architecture pass's parsing/validation helpers to coerce and
-    validate per-half findings, rather than model-validating this class
-    directly.
+    file_path, line, description, suggestion, and ``pre_existing`` — typed
+    as an enumerated schema in the same style as :class:`ChunkReviewIssueLLM`.
+    Intentionally omits ``start_line``: that pass's own ``_coerce_finding``
+    never populates it (its prompt's output format has no multi-line-anchor
+    field). This is the intended shape for the merged prompt's Part 1 output
+    contract. The in-process merged pass currently reuses the standalone
+    architecture pass's parsing/validation helpers to coerce and validate
+    per-half findings, rather than model-validating this class directly.
     """
 
     severity: CodeReviewIssueSeverity = Field(
@@ -685,6 +683,15 @@ class ArchitectureConsistencyFindingLLM(BaseModel):
         default="",
         description="A concrete fix (e.g. which existing helper/module to reuse instead, or how to "
         "align with the stated boundary)",
+    )
+    pre_existing: StrictBool = Field(
+        default=False,
+        description="True when this issue is about a field, function, class, or other construct "
+        "the change under review did NOT add or modify — a pre-existing contradiction/duplication "
+        "in unrelated, unchanged code that merely lives in a file this submission also touched — "
+        "rather than a defect the change introduced (mirrors CodeReviewIssue.pre_existing's "
+        "canonical wording). Per the merged prompt's Part 1 tagging guidance, that means the "
+        "specific construct the finding is about looks untouched by this submission's actual work.",
     )
 
 
