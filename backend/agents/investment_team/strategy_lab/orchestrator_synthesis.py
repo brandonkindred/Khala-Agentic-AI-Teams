@@ -49,7 +49,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from ..market_data_service import OHLCVBar
-from ..models import BacktestConfig, BacktestResult, StrategyLabRecord, StrategySpec, TradeRecord
+from ..models import BacktestConfig, StrategyLabRecord, StrategySpec, TradeRecord
 from ..trading_service.modes.sandbox_compat import StrategyRunResult
 from ._orchestrator_helpers import (
     RefinementStallTracker,
