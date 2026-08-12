@@ -161,6 +161,27 @@ def test_same_content_different_bars_object_still_hits() -> None:
     assert len(calls) == 1
 
 
+def test_mutated_bars_object_is_a_miss() -> None:
+    """A caller that appends to the *same* bars list object between calls
+    (e.g. a growing streaming bar view) must not get a stale fingerprint: the
+    fingerprint is content-based and unmemoized by object identity, so the
+    second call — same list object, different content — is a miss."""
+    cache = BatchIndicatorCache()
+    calls, compute = _counting_compute()
+    bars = _bars(close=100.0)
+
+    cache.get_or_compute("sma", {"period": 50}, "AAPL", "1d", bars, compute=compute)
+    bars.append(
+        OHLCVBar(
+            date="2023-01-04", open=101.0, high=102.0, low=100.0, close=101.0, volume=1_200_000
+        )
+    )
+    _, hit = cache.get_or_compute("sma", {"period": 50}, "AAPL", "1d", bars, compute=compute)
+
+    assert hit is False
+    assert len(calls) == 2
+
+
 def test_empty_indicator_name_violates_precondition() -> None:
     cache = BatchIndicatorCache()
     _, compute = _counting_compute()

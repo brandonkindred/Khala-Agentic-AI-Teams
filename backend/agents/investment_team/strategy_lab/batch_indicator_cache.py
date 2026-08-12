@@ -35,7 +35,7 @@ from __future__ import annotations
 import hashlib
 import json
 import threading
-from typing import Any, Callable, Dict, List, Mapping, Sequence, Tuple
+from typing import Any, Callable, Dict, Mapping, Sequence, Tuple
 
 from ..market_data_cache.store import _hash_bars
 from ..market_data_service import OHLCVBar
@@ -85,19 +85,21 @@ class BatchIndicatorCache:
 
     def __init__(self) -> None:
         self._values: Dict[str, Any] = {}
-        # ``id(bars) -> fingerprint`` so the O(len(bars)) hash is paid once
-        # per distinct bars object instead of on every lookup.
-        self._fingerprint_by_id: Dict[int, str] = {}
-        # Hold a reference to each fingerprinted object so its ``id()`` cannot
-        # be recycled by the allocator mid-batch (which would alias a stale
-        # fingerprint onto a different bars object).
-        self._fingerprinted_refs: List[Any] = []
         self._lock = threading.Lock()
         self.hits: int = 0
         self.misses: int = 0
 
     def _bars_fingerprint(self, bars: Sequence[OHLCVBar]) -> str:
-        """Content fingerprint of ``bars``, memoized by object identity.
+        """Content fingerprint of ``bars``.
+
+        Deliberately *not* memoized by object identity (unlike
+        ``BacktestCache._market_data_fingerprint``): Strategy Lab's streaming
+        bar views commonly grow the same list object in place as more bars
+        arrive, so an identity-keyed memo would alias a stale fingerprint
+        onto a bars object whose content has since changed, serving an
+        indicator value computed from outdated data. Always recomputing from
+        content is the only way to keep the invalidation contract's "a stale
+        read is structurally impossible" guarantee.
 
         Preconditions:
           - ``bars`` is a non-empty sequence of ``OHLCVBar`` for a single
@@ -106,16 +108,7 @@ class BatchIndicatorCache:
           - Returns the same fingerprint for any two bars objects with equal
             content, and a different fingerprint whenever the content differs.
         """
-        key = id(bars)
-        with self._lock:
-            fingerprint = self._fingerprint_by_id.get(key)
-        if fingerprint is not None:
-            return fingerprint
-        fingerprint = _hash_bars(bars)
-        with self._lock:
-            self._fingerprint_by_id[key] = fingerprint
-            self._fingerprinted_refs.append(bars)
-        return fingerprint
+        return _hash_bars(bars)
 
     def _key(
         self,
