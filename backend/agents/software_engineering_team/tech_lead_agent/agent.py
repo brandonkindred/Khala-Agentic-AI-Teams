@@ -164,12 +164,18 @@ def _agent_call_json(
              substring — including inside a JSON string value, such as a
              code-review reason quoting this repo's blog draft marker — and its
              first-fenced-block fast path, which does not honor ``required_keys``)
-             on input that a safer engine could already handle correctly.
+             on input that a safer engine could already handle correctly. Unlike
+             tier 2, several of tier 3's own recovery paths neither guarantee a
+             ``dict`` result (a fenced array-with-prose reply can come back as a
+             bare ``list``) nor honor ``required_keys`` (an anchor-less object can
+             win before its own key-anchored stage ever runs) — so tier 3's result
+             is validated against both before being accepted; a result that fails
+             either check is treated the same as "nothing recovered."
           Raises ``json.JSONDecodeError`` only when no object can be recovered by
-          any tier — ``LLMJsonParseError`` from tier 3 is caught and re-raised as
-          ``json.JSONDecodeError`` so callers keep retrying JSON-parse failures
-          exactly as before (``LLMJsonParseError`` is otherwise non-retryable in
-          ``call_llm_with_retries``).
+          any tier — ``LLMJsonParseError`` from tier 3, and a tier-3 result that
+          fails validation, are both raised as ``json.JSONDecodeError`` so callers
+          keep retrying JSON-parse failures exactly as before (``LLMJsonParseError``
+          is otherwise non-retryable in ``call_llm_with_retries``).
     """
     raw = str(agent(prompt)).strip()
     fenced = re.sub(r"^```(?:json)?\s*", "", raw)
@@ -183,9 +189,17 @@ def _agent_call_json(
         return recovered
     expected_keys = frozenset(required_keys) if required_keys is not None else None
     try:
-        return extract_json_from_response(raw, expected_keys=expected_keys)
+        fallback = extract_json_from_response(raw, expected_keys=expected_keys)
     except LLMJsonParseError as e:
         raise json.JSONDecodeError(str(e), raw, 0) from e
+    if not isinstance(fallback, dict) or (expected_keys and not (expected_keys & fallback.keys())):
+        raise json.JSONDecodeError(
+            "extract_json_from_response fallback returned an object that fails "
+            "this call site's dict/required_keys contract",
+            raw,
+            0,
+        )
+    return fallback
 
 
 _JSON_ONLY_INSTRUCTION = "\n\nRespond with valid JSON only, no markdown fences."

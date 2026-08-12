@@ -118,3 +118,28 @@ def test_multiple_fenced_blocks_selects_anchored_last_candidate_not_first() -> N
         'Actual answer:\n```json\n{"approved": false}\n```'
     )
     assert _agent_call_json(agent, "p", required_keys=("approved",)) == {"approved": False}
+
+
+def test_tier3_non_dict_result_is_rejected() -> None:
+    """A fenced JSON array with surrounding prose is correctly declined by tier 2's
+    ``extract_json_object`` (dict-only contract). Tier 3's ``extract_json_from_response``
+    parses and returns the bare list instead of declining it — ``_agent_call_json`` must
+    reject that too, since its own dict contract is what every call site relies on
+    (``data.get(...)``); leaking a list would surface as an uncaught ``AttributeError`` in
+    the caller instead of the safe-default/retry path a parse failure gets."""
+    agent = _FakeAgent("Some prose ```json\n[1, 2, 3]\n``` more prose")
+    with pytest.raises(json.JSONDecodeError):
+        _agent_call_json(agent, "p")
+
+
+def test_tier3_anchor_mismatch_is_rejected() -> None:
+    """A reply containing only unrelated prose-wrapped JSON (e.g. a stray usage/token
+    report) is correctly declined by tier 2's anchor check. Tier 3's
+    ``extract_json_from_response`` recovers and returns that anchor-less object anyway (its
+    early recovery stages don't consult ``expected_keys``) — ``_agent_call_json`` must reject
+    it too, so a caller like ``run_revision_adjudication`` sees a genuine parse failure (and
+    gets its remaining retry attempts) instead of a "successful" call that returns an object
+    with no ``verdict`` key."""
+    agent = _FakeAgent('Usage report: {"tokens": 9}')
+    with pytest.raises(json.JSONDecodeError):
+        _agent_call_json(agent, "p", required_keys=("verdict",))
