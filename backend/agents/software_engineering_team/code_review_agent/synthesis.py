@@ -193,6 +193,7 @@ def synthesize_review_findings(
             "",
             prompt,
             raw,
+            system_prompt=REVIEW_SYNTHESIS_PROMPT,
             model=model_label(_model),
             duration_ms=(time.monotonic() - started) * 1000,
         )
@@ -308,6 +309,7 @@ def synthesize_spec_compliance(
             "",
             prompt,
             raw,
+            system_prompt=SPEC_COMPLIANCE_PASS_PROMPT,
             model=model_label(_model),
             duration_ms=(time.monotonic() - started) * 1000,
         )

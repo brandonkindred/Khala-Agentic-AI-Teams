@@ -211,13 +211,15 @@ def _run_chunk_review(
           dedicated post-dedupe spec-compliance pass instead (see ADR-010).
           ``architecture_overview`` and ``existing_codebase_excerpt`` are
           always passed through verbatim regardless of the flag.
-        - On a successful call, buffers a ``chunk_review`` transcript entry
-          (target ``input_data.file_path_or_label``, the full prompt, the
-          model's JSON response) for later batched, off-hot-path persistence
-          to ``code_review_transcripts`` — see
-          ``transcript.record_transcript_entry``. A no-op when no
-          ``job_id`` is bound on the current ``llm_attribution`` context (see
-          ``CodeReviewAgent.run``); never raises and never blocks on I/O.
+        - Buffers one ``chunk_review`` transcript entry (target
+          ``input_data.file_path_or_label``) per ``complete_validated``
+          attempt — the initial call plus every corrective retry it makes
+          internally, whether that attempt succeeded or failed — for later
+          batched, off-hot-path persistence to ``code_review_transcripts``;
+          see ``transcript.record_transcript_entry`` and this function's
+          ``on_attempt`` callback. A no-op when no ``job_id`` is bound on the
+          current ``llm_attribution`` context (see ``CodeReviewAgent.run``);
+          never raises and never blocks on I/O.
 
     Raises:
         LLMJsonParseError: the injected ``llm``'s ``complete_json`` could not
@@ -334,23 +336,40 @@ def _run_chunk_review(
     )
 
     prompt = "\n".join(context_parts)
-    started = time.monotonic()
+    system_prompt = build_review_system_prompt(input_data.profile)
+    model_name = model_label(llm)
+    target = input_data.file_path_or_label
+    last_attempt_start = time.monotonic()
+
+    def _on_attempt(attempt_prompt: str, attempt_response: str) -> None:
+        # One transcript entry per attempt (initial call plus every corrective
+        # retry ``complete_validated`` makes internally on a malformed/invalid
+        # reply) rather than one entry for only the final, successful attempt —
+        # otherwise a retried call's earlier failed reply (and the corrective
+        # prompt that followed it) would be silently missing from the
+        # transcript even though it is a real LLM call the pipeline made.
+        nonlocal last_attempt_start
+        now = time.monotonic()
+        record_transcript_entry(
+            "chunk_review",
+            target,
+            attempt_prompt,
+            attempt_response,
+            system_prompt=system_prompt,
+            model=model_name,
+            duration_ms=(now - last_attempt_start) * 1000,
+        )
+        last_attempt_start = now
+
     response = complete_validated(
         llm,
         prompt,
         schema=ChunkReviewLLMResponse,
         objective="review code chunk",
-        system_prompt=build_review_system_prompt(input_data.profile),
+        system_prompt=system_prompt,
         temperature=0.0,
         think=think,
-    )
-    record_transcript_entry(
-        "chunk_review",
-        input_data.file_path_or_label,
-        prompt,
-        response.model_dump_json(),
-        model=model_label(llm),
-        duration_ms=(time.monotonic() - started) * 1000,
+        on_attempt=_on_attempt,
     )
 
     # Issue dicts are passed through raw: normalization (defaults, line

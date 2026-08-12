@@ -2011,6 +2011,7 @@ def _verify_group(
         file_path,
         prompt,
         transcript_response,
+        system_prompt=FALSE_POSITIVE_VERIFY_PROMPT,
         model=model_label(model),
         duration_ms=(time.monotonic() - started) * 1000,
     )

@@ -268,6 +268,105 @@ def test_context_is_forwarded_to_model_validate():
         )
 
 
+def test_on_attempt_called_once_per_call_including_failed_ones():
+    """on_attempt sees every attempt (the initial parse failure AND the
+    corrective retry that succeeds), not just the final return value —
+    otherwise a caller building a durable transcript from it would silently
+    drop the first attempt's prompt/response, same as the pre-fix behavior
+    this replaces."""
+    valid_payload = {
+        "selected_option_id": "opt-a",
+        "other_text": None,
+        "rationale": "because reasons",
+    }
+
+    def handler(prompt: str, *, call_index: int) -> dict[str, Any]:
+        if call_index == 0:
+            raise LLMJsonParseError("Non-JSON reply", response_preview="# Markdown spec — not JSON")
+        return valid_payload
+
+    client = _StubClient(handler)
+    attempts: list[tuple[str, str]] = []
+    result = complete_validated(
+        client,
+        "generate an answer",
+        objective="test",
+        schema=FounderAnswer,
+        on_attempt=lambda p, r: attempts.append((p, r)),
+    )
+
+    assert isinstance(result, FounderAnswer)
+    assert len(attempts) == 2
+    # First attempt: the original prompt, and the raw (unparseable) preview.
+    assert attempts[0][0] == "generate an answer"
+    assert attempts[0][1] == "# Markdown spec — not JSON"
+    # Second attempt: the corrective prompt, and the final valid JSON.
+    assert "Non-JSON reply" in attempts[1][0]
+    assert "opt-a" in attempts[1][1]
+
+
+def test_on_attempt_called_for_validation_failure_then_success():
+    def handler(prompt: str, *, call_index: int) -> dict[str, Any]:
+        if call_index == 0:
+            return {"selected_option_id": "opt-a"}  # missing rationale
+        return {"selected_option_id": "opt-a", "rationale": "fixed"}
+
+    client = _StubClient(handler)
+    attempts: list[tuple[str, str]] = []
+    complete_validated(
+        client,
+        "prompt",
+        objective="test",
+        schema=FounderAnswer,
+        on_attempt=lambda p, r: attempts.append((p, r)),
+    )
+
+    assert len(attempts) == 2
+    assert attempts[0][0] == "prompt"
+    assert "opt-a" in attempts[0][1]  # the invalid payload that triggered the retry
+    assert "fixed" in attempts[1][1]
+
+
+def test_on_attempt_called_on_terminal_failure_too():
+    def handler(prompt: str, *, call_index: int) -> dict[str, Any]:
+        raise LLMJsonParseError(f"bad json {call_index}", response_preview=f"raw-{call_index}")
+
+    client = _StubClient(handler)
+    attempts: list[tuple[str, str]] = []
+    with pytest.raises(LLMJsonParseError):
+        complete_validated(
+            client,
+            "prompt",
+            objective="test",
+            schema=FounderAnswer,
+            on_attempt=lambda p, r: attempts.append((p, r)),
+        )
+
+    assert len(attempts) == 2  # initial + the one correction_attempts allows
+    assert attempts[0][1] == "raw-0"
+    assert attempts[1][1] == "raw-1"
+
+
+def test_on_attempt_exception_is_swallowed(caplog):
+    """A broken observer must never break the underlying structured-output call."""
+
+    def handler(prompt: str, *, call_index: int) -> dict[str, Any]:
+        return {"selected_option_id": "opt-a", "rationale": "ok"}
+
+    client = _StubClient(handler)
+
+    def _boom(_p, _r):
+        raise RuntimeError("observer bug")
+
+    with caplog.at_level(logging.WARNING, logger="llm_service.structured"):
+        result = complete_validated(
+            client, "prompt", objective="test", schema=FounderAnswer, on_attempt=_boom
+        )
+
+    assert isinstance(result, FounderAnswer)
+    assert any("on_attempt callback failed" in r.message for r in caplog.records)
+
+
 def test_context_is_isolated_across_retry_attempts():
     """Each retry attempt must see a pristine copy of the original context.
 

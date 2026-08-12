@@ -236,22 +236,26 @@ class CodeReviewAgent:
         with llm_attribution(
             job_id=input_data.job_id, team="software_engineering_team", agent_key="code_review"
         ):
-            output = run_coordinator(
-                self.llm,
-                input_data,
-                progress_callback=progress_callback,
-                repo_reader=effective_reader,
-            )
-        if input_data.job_id:
-            # Synchronously flush this run's buffered transcript entries before
-            # returning, rather than waiting for the background heartbeat
-            # (default 2s interval). The caller (``pr_review.py``) marks the
-            # review COMPLETED/FAILED — which is what makes the UI's "View
-            # Transcript" action appear — only after this call returns, so
-            # without this the dialog could open before the last synthesis/
-            # verification calls made it to Postgres and show a transcript
-            # missing its final entries.
-            transcript.drain()
+            try:
+                output = run_coordinator(
+                    self.llm,
+                    input_data,
+                    progress_callback=progress_callback,
+                    repo_reader=effective_reader,
+                )
+            finally:
+                if input_data.job_id:
+                    # Synchronously flush this run's buffered transcript entries
+                    # before returning, rather than waiting for the background
+                    # heartbeat (default 2s interval) — in ``finally`` so a chunk
+                    # that already recorded an entry before a LATER chunk raises
+                    # ``CodeReviewUnavailableError`` is still flushed: the caller
+                    # (``pr_review.py``) marks the review COMPLETED/FAILED (which
+                    # is what makes the UI's "View Transcript" action appear) as
+                    # soon as this call returns OR raises, so without this a
+                    # failed review could show a transcript missing entries that
+                    # were buffered before the failure.
+                    transcript.drain()
         return output
 
     def _run_via_temporal(

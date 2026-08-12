@@ -68,6 +68,64 @@ class _NonJsonClient(DummyLLMClient):
         )
 
 
+class _FailsOnceThenValidClient(DummyLLMClient):
+    """First ``complete_json`` call raises a parse error; the corrective retry
+    ``complete_validated`` issues returns a valid ``ChunkReviewLLMResponse``."""
+
+    def __init__(self, canned: Dict[str, Any]) -> None:
+        super().__init__()
+        self._canned = canned
+        self.calls = 0
+
+    def complete_json(self, prompt: str, **kwargs: Any) -> Any:
+        self.calls += 1
+        if self.calls == 1:
+            raise LLMJsonParseError("not json", response_preview="not json at all")
+        return self._canned
+
+
+def test_chunk_review_records_each_retry_attempt_in_transcript(monkeypatch) -> None:
+    """A chunk review that needed a corrective retry must record BOTH the
+    failed initial attempt and the successful retry as separate transcript
+    entries -- recording only the final successful attempt would silently
+    drop the initial (malformed) reply and the corrective prompt that
+    followed it, even though both are real LLM calls the pipeline made."""
+    from llm_service import llm_attribution
+
+    canned = {
+        "approved": True,
+        "issues": [],
+        "summary": "ok",
+        "spec_compliance_notes": "",
+    }
+    client = _FailsOnceThenValidClient(canned)
+
+    captured: list = []
+    monkeypatch.setattr(
+        "code_review_agent.chunk_reviewer.record_transcript_entry",
+        lambda *args, **kwargs: captured.append(args),
+    )
+
+    agent = ChunkReviewAgent(llm=client)
+    with llm_attribution(job_id="job-1"):
+        result = agent.run(_chunk_input())
+
+    assert isinstance(result, ChunkReviewOutput)
+    assert client.calls == 2
+    assert len(captured) == 2
+    first_prompt, first_response = captured[0][2], captured[0][3]
+    second_prompt, second_response = captured[1][2], captured[1][3]
+    # First entry: the original prompt and the failed attempt's raw
+    # (unparseable) response.
+    assert first_response == "not json at all"
+    # Second entry: the corrective prompt (embeds the parse error and the
+    # previous reply) and the final valid JSON — and it must differ from the
+    # first attempt's prompt, proving this isn't the same entry recorded twice.
+    assert second_prompt != first_prompt
+    assert "not json" in second_prompt
+    assert "approved" in second_response
+
+
 def test_chunk_review_raises_llm_json_parse_error_on_non_json_model_output() -> None:
     """When the injected client's ``complete_json`` cannot produce parseable
     JSON on any of ``complete_validated``'s attempts, ``LLMJsonParseError``

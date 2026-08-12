@@ -335,6 +335,7 @@ def _call_agent(
         batch_target,
         prompt,
         transcript_response,
+        system_prompt=system_prompt,
         model=model_label(model),
         duration_ms=(time.monotonic() - started) * 1000,
     )

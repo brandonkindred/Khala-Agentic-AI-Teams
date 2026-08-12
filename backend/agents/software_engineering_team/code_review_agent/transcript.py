@@ -122,6 +122,7 @@ def record_transcript_entry(
     prompt: str,
     response: str,
     *,
+    system_prompt: str = "",
     model: str = "",
     duration_ms: float = 0.0,
 ) -> None:
@@ -134,7 +135,10 @@ def record_transcript_entry(
         - ``target`` names what the call covered (a chunk's file label, a
           verification group's file path, or ``""`` for a once-per-submission
           pass); ``prompt``/``response`` are the full text sent to and received
-          from the model — never truncated here.
+          from the model — never truncated here. ``system_prompt``, when
+          non-blank, is the system prompt the caller sent alongside ``prompt``
+          — omitting it would leave the recorded entry missing the instruction
+          layer that actually governed the model's behavior for that call.
         - ``duration_ms`` is the caller's own measured wall-clock time for the
           call (``0.0`` when not measured); used only to backdate this entry's
           ``started_at`` so entries the reader sorts by that field approximate
@@ -152,17 +156,21 @@ def record_transcript_entry(
           batched flush (see :func:`drain`); the buffer is bounded
           (``CODE_REVIEW_TRANSCRIPT_BUFFER_MAX``, default 2000) — past that,
           the oldest buffered entry is dropped so a stalled or disabled flush
-          can never grow this process's memory without bound. Never raises.
+          can never grow this process's memory without bound. The recorded
+          ``prompt`` field is ``prompt`` prefixed with a ``[system]``/``[user]``
+          section split when ``system_prompt`` is non-blank, else ``prompt``
+          unchanged. Never raises.
     """
     job_id = current_attribution().job_id
     if not job_id or not is_postgres_enabled():
         return
+    full_prompt = f"[system]\n{system_prompt}\n\n[user]\n{prompt}" if system_prompt else prompt
     started_at = datetime.now(timezone.utc) - timedelta(milliseconds=max(duration_ms, 0.0))
     entry = {
         "stage": stage,
         "target": target,
         "model": model,
-        "prompt": prompt,
+        "prompt": full_prompt,
         "response": response,
         "started_at": started_at.isoformat(),
         "duration_ms": int(duration_ms),

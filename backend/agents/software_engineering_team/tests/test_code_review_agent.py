@@ -63,6 +63,31 @@ def test_run_flushes_transcript_synchronously_when_job_id_bound(monkeypatch) -> 
     assert calls == [1]
 
 
+def test_run_flushes_transcript_even_when_coordinator_raises(monkeypatch) -> None:
+    """A review that fails partway through (e.g. one chunk raised
+    CodeReviewUnavailableError after an earlier chunk already buffered a
+    transcript entry) must still flush before propagating the failure — the
+    caller marks the review FAILED as soon as run() returns control, so a
+    drain reachable only on the success path would leave that entry stranded
+    until the next background heartbeat."""
+    from code_review_agent import agent as agent_mod
+
+    from llm_service import LLMRateLimitError
+
+    calls = []
+    monkeypatch.setattr(agent_mod.transcript, "drain", lambda: calls.append(1))
+
+    class _AlwaysRateLimited(DummyLLMClient):
+        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+            raise LLMRateLimitError("429")
+
+    reviewer = CodeReviewAgent(llm_client=_AlwaysRateLimited(), force_in_process=True)
+    with pytest.raises(CodeReviewUnavailableError):
+        reviewer.run(_input(job_id="job-1"))
+
+    assert calls == [1]
+
+
 def test_run_does_not_flush_transcript_without_a_job_id(monkeypatch) -> None:
     """No caller-tracked job means nothing was buffered to flush; skip the
     synchronous drain call entirely rather than paying for a pointless one."""

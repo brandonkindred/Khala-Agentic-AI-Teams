@@ -32,7 +32,7 @@ import copy
 import json
 import logging
 import secrets
-from typing import Any, TypeVar
+from typing import Any, Callable, TypeVar
 
 from pydantic import BaseModel, ValidationError
 
@@ -169,6 +169,24 @@ def _truncate(text: str, *, limit: int = 500) -> str:
     return text[:limit] + "…"
 
 
+def _invoke_on_attempt(
+    on_attempt: "Callable[[str, str], None] | None", attempt_prompt: str, response_text: str
+) -> None:
+    """Best-effort call to a caller's per-attempt observer; never propagates.
+
+    Postconditions: ``on_attempt`` is invoked with ``(attempt_prompt,
+    response_text)`` when non-``None``; any exception it raises is logged and
+    swallowed so an observer bug (e.g. a transcript recorder) can never break
+    the structured-output call it is merely observing. Never raises.
+    """
+    if on_attempt is None:
+        return
+    try:
+        on_attempt(attempt_prompt, response_text)
+    except Exception:  # noqa: BLE001 - observer must never break the caller's call
+        logger.warning("complete_validated: on_attempt callback failed", exc_info=True)
+
+
 def complete_validated(
     client: LLMClient,
     prompt: str,
@@ -180,6 +198,7 @@ def complete_validated(
     correction_attempts: int = 1,
     context: dict[str, Any] | None = None,
     think: "bool | str | None" = False,
+    on_attempt: "Callable[[str, str], None] | None" = None,
     **kwargs: Any,
 ) -> T:
     """Call ``client.complete_json`` and validate the result against ``schema``.
@@ -208,6 +227,17 @@ def complete_validated(
             every call here requires a schema-conformant JSON reply, and
             extended thinking competes with strict JSON decoding for the
             content channel. Pass an explicit value to override.
+        on_attempt: Optional observer called once per attempt (initial call
+            plus every corrective retry, whether that attempt succeeded or
+            failed) with ``(attempt_prompt, response_text)`` — the exact
+            prompt sent for that attempt and a best-effort text form of what
+            came back (the raw preview on a parse failure, the parsed JSON on
+            a validation failure or on success). ``None`` (the default) does
+            nothing extra; a caller that wants a durable per-call transcript
+            covering every attempt (not just the final one) passes a recorder
+            here instead of only logging the function's return value. Never
+            allowed to affect control flow: any exception it raises is
+            logged and swallowed.
         **kwargs: Forwarded to ``client.complete_json``.
 
     Returns:
@@ -232,6 +262,7 @@ def complete_validated(
 
     # Total call budget = 1 initial + correction_attempts follow-ups.
     for attempt in range(correction_attempts + 1):
+        attempt_prompt = current_prompt
         try:
             data = client.complete_json(
                 current_prompt,
@@ -245,6 +276,7 @@ def complete_validated(
             last_parse_error = exc
             last_validation_error = None
             last_validation_data = None
+            _invoke_on_attempt(on_attempt, attempt_prompt, exc.response_preview or "")
             if attempt >= correction_attempts:
                 break
             attempts_used = attempt + 1
@@ -255,6 +287,11 @@ def complete_validated(
                 preview=exc.response_preview or "",
             )
             continue
+
+        try:
+            preview = json.dumps(data, default=str)
+        except (TypeError, ValueError):
+            preview = repr(data)
 
         try:
             # Deep-copy the context on every attempt so mutations performed by
@@ -268,13 +305,10 @@ def complete_validated(
             last_validation_error = exc
             last_parse_error = None
             last_validation_data = data
+            _invoke_on_attempt(on_attempt, attempt_prompt, preview)
             if attempt >= correction_attempts:
                 break
             attempts_used = attempt + 1
-            try:
-                preview = json.dumps(data, default=str)
-            except (TypeError, ValueError):
-                preview = repr(data)
             current_prompt = _build_corrective_prompt(
                 prompt,
                 schema=schema,
@@ -283,6 +317,7 @@ def complete_validated(
             )
             continue
 
+        _invoke_on_attempt(on_attempt, attempt_prompt, preview)
         if attempts_used > 0:
             logger.info(
                 "json_self_correction succeeded after %d retry (schema=%s, prompt_hash=%s)",

@@ -83,6 +83,51 @@ def test_record_builds_entry_fields(monkeypatch) -> None:
     assert entry["started_at"]  # non-empty ISO timestamp
 
 
+def test_record_prepends_system_prompt_when_supplied(monkeypatch) -> None:
+    """The recorded prompt includes the system prompt when the caller supplies
+    one -- otherwise the transcript would omit the instruction layer that
+    actually governed the model's behavior for that call."""
+    captured: list = []
+
+    def _write(job_id, entries):
+        captured.append((job_id, entries))
+        return True
+
+    monkeypatch.setattr(
+        "software_engineering_team.review_history_store.append_review_transcript_entries",
+        _write,
+    )
+    with llm_attribution(job_id="job-1"):
+        transcript.record_transcript_entry(
+            "chunk_review", "a.py", "user-text", "resp", system_prompt="be a reviewer"
+        )
+    transcript.drain()
+
+    entry = captured[0][1][0]
+    assert "be a reviewer" in entry["prompt"]
+    assert "user-text" in entry["prompt"]
+    assert entry["prompt"].index("be a reviewer") < entry["prompt"].index("user-text")
+
+
+def test_record_leaves_prompt_unchanged_without_system_prompt(monkeypatch) -> None:
+    captured: list = []
+
+    def _write(job_id, entries):
+        captured.append((job_id, entries))
+        return True
+
+    monkeypatch.setattr(
+        "software_engineering_team.review_history_store.append_review_transcript_entries",
+        _write,
+    )
+    with llm_attribution(job_id="job-1"):
+        transcript.record_transcript_entry("chunk_review", "a.py", "user-text", "resp")
+    transcript.drain()
+
+    entry = captured[0][1][0]
+    assert entry["prompt"] == "user-text"
+
+
 def test_overflow_warning_throttled_to_once_per_burst(monkeypatch, caplog) -> None:
     monkeypatch.setenv("CODE_REVIEW_TRANSCRIPT_BUFFER_MAX", "2")
     caplog.set_level("WARNING", logger="software_engineering_team.code_review_agent.transcript")
