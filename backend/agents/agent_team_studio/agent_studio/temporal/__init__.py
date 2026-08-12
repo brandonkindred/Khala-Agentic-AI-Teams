@@ -1,10 +1,13 @@
 """Temporal workflows + activities for the Agent Studio team.
 
-Agent Studio is Temporal-only: each of its four operations
-(start-conversation, send-message, clone-from-registry, save-agent) runs as a
-``@workflow.defn`` workflow that executes a single ``@activity.defn`` activity, and
-the activity delegates to the existing :class:`~agent_team_studio.agent_studio.service.AgentStudioService`
-(no duplicated business logic). There is no non-Temporal fallback.
+Each of Agent Studio's four authoring operations (start-conversation, send-message,
+clone-from-registry, save-agent) runs as a ``@workflow.defn`` workflow that executes a
+single ``@activity.defn`` activity, and the activity delegates to the existing
+:class:`~agent_team_studio.agent_studio.service.AgentStudioService` (no duplicated
+business logic). :mod:`agent_team_studio.agent_studio.temporal.dispatch` is the single
+call site the routes use; when Temporal isn't configured it bypasses these
+workflows/activities entirely and calls the service directly, in-process, so the
+workflows/activities defined here are only exercised when Temporal is enabled.
 
 The workflow class and activities live in :mod:`workflows` (sandbox-safe — no
 top-level non-deterministic calls). Worker startup lives in :mod:`worker` and is

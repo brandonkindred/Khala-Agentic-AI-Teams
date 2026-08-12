@@ -2093,6 +2093,21 @@ class DummyLLMClient(LLMClient):
                 "summary": "Code review passed (dummy).",
                 "spec_compliance_notes": "Code aligns with task requirements.",
             }
+        elif (
+            "convert the following analysis into a single json object" in lowered
+            or ("--- analysis " in lowered and "end analysis" in lowered)
+        ):
+            # Via-reasoning formatting pass (chunk_reviewer two-call split): prose
+            # from call 1 is wrapped in ANALYSIS delimiters. Must precede the
+            # security/accessibility anchors — formatting instructions mention
+            # review categories like "security" that would otherwise match those
+            # branches and return the wrong JSON shape.
+            return {
+                "approved": True,
+                "issues": [],
+                "summary": "Code review passed (dummy).",
+                "spec_compliance_notes": "",
+            }
         elif "security" in lowered and "vulnerabilities" in lowered:
             # Kept ABOVE the code-review catch-all because the security agent's
             # own prompt includes "Code to review" as a section header, which

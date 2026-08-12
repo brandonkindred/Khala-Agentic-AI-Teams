@@ -1,22 +1,23 @@
-"""Merged architecture-consistency + side-effect-impact pass (one LLM call).
+"""Merged architecture-consistency + side-effect-impact pass (one logical pass).
 
 Runs both additive whole-submission checks that the in-process coordinator
 previously scheduled as two independent Agent calls, in a single pass with
-a half-aware ``build_merged_architecture_side_effect_prompt``. Findings are
-split back into the two lists downstream merge/gate logic already expects.
+a half-aware ``build_merged_architecture_side_effect_prompt``. Each batch is
+think-then-format. Findings are split back into the two lists downstream
+merge/gate logic already expects.
 
 Invariants:
 
     - **Additive-only, fail-safe.** Never removes or mutates findings the
       caller already has; any setup/LLM/validation failure yields
       ``([], [])``.
-    - **Bounded cost per call, with reactive recovery.** Agent construction,
+    - **Bounded cost per batch, with reactive recovery.** Agent construction,
       context budgeting, proactive file-group chunking, and reactive
       overflow bisect/shrink recovery are all owned by the shared
       :func:`~code_review_agent.submission_pass_runner.run_submission_pass`
       runner; this module supplies only its system prompt, tool set, and
       prompt/parse callbacks. A submission that fits under the budget still
-      makes exactly one call, identical to the pre-runner behavior.
+      makes exactly one think-then-format pair.
     - **``CODE_REVIEW`` profile only.** Same restriction as each standalone
       pass.
     - **Context-aware budgeting.** Changed-file inlining (and, when needed,
@@ -45,7 +46,10 @@ from .architecture_context import (
 from .false_positive_filter import CodebaseIndex, _build_tools, code_fence_for
 from .models import CodeReviewInput, CodeReviewIssue
 from .profiles import ReviewProfile
-from .prompts import build_merged_architecture_side_effect_prompt
+from .prompts import (
+    build_merged_architecture_side_effect_formatting_instructions,
+    build_merged_architecture_side_effect_reasoning_system_prompt,
+)
 from .repo_reader import RepoReader
 from .submission_pass_runner import FileBatch, SubmissionPassBudgets, run_submission_pass
 
@@ -61,7 +65,10 @@ def find_architecture_and_side_effect_issues(
     repo_reader: Optional[RepoReader] = None,
     index: Optional[CodebaseIndex] = None,
 ) -> Tuple[List[CodeReviewIssue], List[CodeReviewIssue]]:
-    """Run both additive whole-submission checks in a single LLM call.
+    """Run both additive whole-submission checks in one logical submission-pass.
+
+    Each batch is a think-then-format pair (reasoning text, then JSON), not two
+    independent architecture and side-effect passes.
 
     Preconditions:
         - ``input_data`` is the coordinator's review input for this submission.
@@ -77,7 +84,7 @@ def find_architecture_and_side_effect_issues(
         - Otherwise returns two lists of NEW ``CodeReviewIssue``s
           (architecture/refactor and side-effects/documentation respectively),
           each validated like the corresponding standalone pass; never raises.
-        - When only one half is enabled, still makes the merged call but returns
+        - When only one half is enabled, still makes the merged pass but returns
           ``[]`` for the disabled half. ``pre_numbered`` forces the side-effect
           half off (same guard as the standalone side-effect pass, via
           ``side_pass._effective_pre_numbered`` -- a caller-supplied
@@ -86,12 +93,12 @@ def find_architecture_and_side_effect_issues(
           ``CodebaseIndex.full_content_complete``). Architecture is forced off
           when there is no architecture payload and no ``repo_reader`` /
           ``existing_codebase`` evidence.
-        - When the changed-file set's estimated inline size exceeds one call's
+        - When the changed-file set's estimated inline size exceeds one batch's
           budget, the shared runner splits it into multiple bounded batches
           (and reactively bisects/shrinks any batch that still overflows);
           findings from every batch are concatenated into the same two
           returned lists. A submission under the budget still makes exactly
-          one call.
+          one think-then-format pair.
     """
     if index is None:
         index = CodebaseIndex.from_input(input_data, repo_reader=repo_reader)
@@ -151,8 +158,8 @@ def _run_pass(
     Postconditions:
         - Same contract as the public entry, minus the env/profile early
           returns the caller already handled.
-        - Delegates budgeting, proactive chunking, ``Agent`` construction, and
-          reactive overflow bisect/shrink recovery to
+        - Delegates budgeting, proactive chunking, the think-then-format
+          ``Agent`` pair, and reactive overflow bisect/shrink recovery to
           :func:`~code_review_agent.submission_pass_runner.run_submission_pass`,
           which never raises; a batch's findings are folded into the two
           returned lists in batch order. An empty runner result (context too
@@ -164,7 +171,12 @@ def _run_pass(
     if not index.files:
         return [], []
 
-    system_prompt = build_merged_architecture_side_effect_prompt(arch_on=arch_on, side_on=side_on)
+    reasoning_system_prompt = build_merged_architecture_side_effect_reasoning_system_prompt(
+        arch_on=arch_on, side_on=side_on
+    )
+    formatting_instructions = build_merged_architecture_side_effect_formatting_instructions(
+        arch_on=arch_on, side_on=side_on
+    )
     arch_body = architecture_document_text(input_data.architecture) if arch_on else ""
     tools = _build_merged_pass_tools(index, side_on=side_on)
     pre_numbered = side_pass._effective_pre_numbered(input_data, index)
@@ -220,7 +232,8 @@ def _run_pass(
     results = run_submission_pass(
         llm,
         changed_files=list(index.files.items()),
-        system_prompt=system_prompt,
+        reasoning_system_prompt=reasoning_system_prompt,
+        formatting_instructions=formatting_instructions,
         build_prompt=_build_prompt_for_batch,
         tools=tools,
         parse=_parse_batch_reply,
@@ -447,9 +460,8 @@ def _build_prompt(
           ``total_batches`` is set (> 1), the content section header names
           this batch's position and points to the manifest/tools for files
           not shown in this call.
-        - Ends with a return instruction containing both response keys so
-          DummyLLMClient tests can anchor on the merged call; disabled halves
-          are told to stay empty.
+        - Ends with a prose-only closer (no JSON schema) per enabled half;
+          disabled halves are told to stay empty in the tool-guidance line above.
     """
     parts: List[str] = []
 
@@ -542,11 +554,27 @@ def _build_prompt(
             "list_changed_files(offset, limit) when recovering omitted submission "
             "paths. Do not run architecture analysis."
         )
-    parts.append(
-        'Return a single JSON object with "architecture_findings"/"side_effect_findings" '
-        "keys as instructed. Return "
-        '{"architecture_findings": [], "side_effect_findings": []} if neither part finds anything.'
-    )
+    if arch_on and side_on:
+        parts.append(
+            "Merged submission pass: summarize Part 1 and Part 2 findings separately in "
+            "structured prose per the system instructions — keep architecture-consistency "
+            "findings distinct from side-effect-impact findings. State clearly when either "
+            "part finds nothing."
+        )
+    elif arch_on:
+        parts.append(
+            "Merged submission pass: summarize architecture-consistency findings in structured "
+            "prose per the system instructions (severity, category, file_path, line, "
+            "description, suggestion, pre_existing). Do not report side-effect findings. "
+            "State clearly when you find nothing."
+        )
+    else:
+        parts.append(
+            "Merged submission pass: summarize side-effect-impact findings in structured prose "
+            "per the system instructions (severity, category, file_path, line, description, "
+            "suggestion, pre_existing). Do not report architecture findings. State clearly "
+            "when you find nothing."
+        )
     return "\n".join(parts)
 
 

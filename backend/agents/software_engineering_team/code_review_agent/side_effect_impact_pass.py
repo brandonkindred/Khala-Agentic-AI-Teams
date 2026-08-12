@@ -77,7 +77,10 @@ from .chunking import _coerce_bool
 from .false_positive_filter import CodebaseIndex, _build_tools, _code_fence_for
 from .models import CodeReviewInput, CodeReviewIssue, coerce_line, is_no_op_suggestion
 from .profiles import ReviewProfile
-from .prompts import SIDE_EFFECT_IMPACT_PROMPT
+from .prompts import (
+    SIDE_EFFECT_IMPACT_FORMATTING_INSTRUCTIONS,
+    SIDE_EFFECT_IMPACT_REASONING_SYSTEM_PROMPT,
+)
 from .repo_reader import DEFAULT_MAX_LISTED_FILES, DiskRepoReader, RepoReader
 from .submission_pass_runner import FileBatch, SubmissionPassBudgets, run_submission_pass
 
@@ -424,8 +427,9 @@ def _build_prompt(
         "search_repository reaches the rest of the repository."
     )
     parts.append(
-        'Return a single JSON object with a "side-effects"/"documentation" findings array, per the '
-        'output format above. Return {"findings": []} if you find nothing.'
+        "Summarize side-effect-impact findings in structured prose per the system "
+        "instructions (severity, category, file_path, line, description, suggestion, "
+        "pre_existing). State clearly when you find nothing."
     )
     return "\n".join(parts)
 
@@ -756,7 +760,8 @@ def _run_pass(
     results = run_submission_pass(
         llm,
         changed_files=list(index.files.items()),
-        system_prompt=SIDE_EFFECT_IMPACT_PROMPT,
+        reasoning_system_prompt=SIDE_EFFECT_IMPACT_REASONING_SYSTEM_PROMPT,
+        formatting_instructions=SIDE_EFFECT_IMPACT_FORMATTING_INSTRUCTIONS,
         build_prompt=_build_prompt_for_batch,
         tools=tools,
         parse=_parse_batch_reply,

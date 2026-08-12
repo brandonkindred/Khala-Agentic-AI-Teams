@@ -62,6 +62,9 @@ class _CountingClient(DummyLLMClient):
     """Returns a fixed canned response; counts total and map-phase calls.
 
     Thread-safe: map calls may run in parallel across chunks.
+
+    After the think-then-format split, the map marker lives on the reasoning
+    ``complete`` prompt; ``complete_json`` is the format pass only.
     """
 
     def __init__(self, response: Dict[str, Any]) -> None:
@@ -71,11 +74,16 @@ class _CountingClient(DummyLLMClient):
         self.calls = 0
         self.map_calls = 0
 
-    def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+    def complete(self, prompt: str, **kwargs: Any) -> str:
         with self._lock:
             self.calls += 1
             if _MAP_MARKER in prompt:
                 self.map_calls += 1
+        return "Structured prose review summary."
+
+    def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+        with self._lock:
+            self.calls += 1
         return dict(self._response)
 
 
@@ -93,10 +101,14 @@ class _SwitchingClient(DummyLLMClient):
         self._lock = threading.Lock()
         self.map_calls = 0
 
-    def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+    def complete(self, prompt: str, **kwargs: Any) -> str:
         with self._lock:
             if _MAP_MARKER in prompt:
                 self.map_calls += 1
+        return "Structured prose review summary."
+
+    def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+        with self._lock:
             resp = self._responses[min(self._idx, len(self._responses) - 1)]
             self._idx += 1
             return dict(resp)
@@ -117,12 +129,15 @@ class _FailOnMarkerClient(DummyLLMClient):
         self.map_calls = 0
         self.fail = True
 
-    def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+    def complete(self, prompt: str, **kwargs: Any) -> str:
         with self._lock:
             if _MAP_MARKER in prompt:
                 self.map_calls += 1
         if self.fail and self._fail_marker in prompt:
             raise LLMSemanticExhaustionError("no verdict")
+        return "Structured prose review summary."
+
+    def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
         return dict(_APPROVED)
 
 
@@ -315,12 +330,15 @@ class _FailFullThenBisectClient(DummyLLMClient):
         self._lock = threading.Lock()
         self.map_calls = 0
 
-    def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+    def complete(self, prompt: str, **kwargs: Any) -> str:
         with self._lock:
             if _MAP_MARKER in prompt:
                 self.map_calls += 1
         if "S_MARK_START" in prompt and "E_MARK_END" in prompt:
             raise LLMTruncatedError("full chunk too big", finish_reason="length")
+        return "Structured prose review summary."
+
+    def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
         return dict(_APPROVED)
 
 
@@ -427,10 +445,13 @@ class _PromptCapturingClient(DummyLLMClient):
         self._lock = threading.Lock()
         self.map_prompts: List[str] = []
 
-    def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+    def complete(self, prompt: str, **kwargs: Any) -> str:
         with self._lock:
             if _MAP_MARKER in prompt:
                 self.map_prompts.append(prompt)
+        return "Structured prose review summary."
+
+    def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
         return dict(_APPROVED)
 
 
@@ -580,12 +601,15 @@ class _FailFullCaptureHalvesClient(DummyLLMClient):
         self._lock = threading.Lock()
         self.map_prompts: List[str] = []
 
-    def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+    def complete(self, prompt: str, **kwargs: Any) -> str:
         with self._lock:
             if _MAP_MARKER in prompt:
                 self.map_prompts.append(prompt)
         if "def a_func" in prompt and "def b_func" in prompt:
             raise LLMSemanticExhaustionError("combined chunk too big")
+        return "Structured prose review summary."
+
+    def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
         return dict(_APPROVED)
 
 

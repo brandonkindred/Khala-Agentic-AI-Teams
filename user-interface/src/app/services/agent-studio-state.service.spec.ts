@@ -105,6 +105,24 @@ describe('AgentStudioStateService', () => {
     });
   });
 
+  it('starts with no server draft bound', () => {
+    expect(service.currentDraftId()).toBeNull();
+    expect(service.currentDraftName()).toBeNull();
+  });
+
+  it('setCurrentDraft updates the id and name together', () => {
+    service.setCurrentDraft('draft-1', 'My draft');
+    expect(service.currentDraftId()).toBe('draft-1');
+    expect(service.currentDraftName()).toBe('My draft');
+  });
+
+  it('reset clears the bound server draft', () => {
+    service.setCurrentDraft('draft-1', 'My draft');
+    service.reset();
+    expect(service.currentDraftId()).toBeNull();
+    expect(service.currentDraftName()).toBeNull();
+  });
+
   it('starts with the Stage-3 gate signals unstaffed/unset', () => {
     expect(service.rosterFullyStaffed()).toBe(false);
     expect(service.composeProcessStatus()).toBeNull();
@@ -195,6 +213,16 @@ describe('AgentStudioStateService', () => {
       service.reset();
       expect(service.activeBuildSubStage()).toBe(0);
       expect(service.maxReachedBuildSubStage()).toBe(0);
+    });
+
+    it('resetBuildSubStage clears the sub-stepper back to Start without touching handoff state', () => {
+      service.setRegistryAgentId('reg-1');
+      service.advanceBuildSubStage();
+      service.advanceBuildSubStage();
+      service.resetBuildSubStage();
+      expect(service.activeBuildSubStage()).toBe(0);
+      expect(service.maxReachedBuildSubStage()).toBe(0);
+      expect(service.registryAgentId()).toBe('reg-1');
     });
   });
 });
