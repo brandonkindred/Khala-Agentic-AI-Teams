@@ -261,14 +261,21 @@ def test_criteria_block_ends_without_trailing_newline() -> None:
 
 
 class _SystemPromptProbe(DummyLLMClient):
-    """Captures the ``system_prompt`` each chunk-review call receives."""
+    """Captures chunk-review reasoning-pass ``system_prompt`` values.
+
+    Profile role anchors and review criteria live on call 1 (``complete``);
+    call 2 (``complete_json``) carries only the untrusted-analysis guard.
+    """
 
     def __init__(self):
         super().__init__()
-        self.system_prompts: list[str] = []
+        self.reasoning_system_prompts: list[str] = []
+
+    def complete(self, prompt, *, system_prompt=None, **kwargs):
+        self.reasoning_system_prompts.append(system_prompt or "")
+        return "Structured prose review summary."
 
     def complete_json(self, prompt, *, system_prompt=None, **kwargs):
-        self.system_prompts.append(system_prompt or "")
         return {"approved": True, "issues": [], "summary": "ok", "spec_compliance_notes": ""}
 
 
@@ -287,8 +294,8 @@ def test_engine_threads_profile_to_chunk_reviewer(profile: ReviewProfile, anchor
     CodeReviewAgent(probe, force_in_process=True).run(
         CodeReviewInput(files={"main.py": "def f():\n    return 1"}, profile=profile)
     )
-    assert probe.system_prompts, "expected at least one chunk-review call"
-    assert any(anchor in sp for sp in probe.system_prompts)
+    assert probe.reasoning_system_prompts, "expected at least one chunk-review call"
+    assert any(anchor in sp for sp in probe.reasoning_system_prompts)
 
 
 # ---------------------------------------------------------------------------
@@ -325,15 +332,23 @@ _RETIRED_THOROUGHNESS_PHRASES = (
 )
 
 
-def _assert_eight_criteria_present_and_retired_mandate_absent(prompt: str) -> None:
+def _assert_eight_criteria_present(prompt: str) -> None:
     for header in _EIGHT_CRITERIA_HEADERS:
         assert header in prompt, f"missing criterion header: {header}"
+
+
+def _assert_retired_thoroughness_mandate_absent(prompt: str) -> None:
     for phrase in _RETIRED_THOROUGHNESS_PHRASES:
         assert phrase not in prompt, f"retired thoroughness phrase reappeared: {phrase}"
     assert "review every function" not in prompt.lower()
     assert (
         "Your thoroughness obligation is everything in the code you were given to review" in prompt
     )
+
+
+def _assert_eight_criteria_present_and_retired_mandate_absent(prompt: str) -> None:
+    _assert_eight_criteria_present(prompt)
+    _assert_retired_thoroughness_mandate_absent(prompt)
 
 
 def test_public_default_profile_prompt_covers_eight_criteria_and_drops_retired_mandate() -> None:
@@ -363,9 +378,9 @@ def test_default_dispatch_prompt_covers_eight_criteria_and_drops_retired_mandate
     CodeReviewAgent(probe, force_in_process=True).run(
         CodeReviewInput(files={"main.py": "def f():\n    return 1"}, skip_tail_passes=True)
     )
-    assert probe.system_prompts, "expected at least one chunk-review call"
-    for prompt in probe.system_prompts:
-        _assert_eight_criteria_present_and_retired_mandate_absent(prompt)
+    assert probe.reasoning_system_prompts, "expected at least one chunk-review call"
+    for prompt in probe.reasoning_system_prompts:
+        _assert_eight_criteria_present(prompt)
 
 
 def test_skip_false_positive_filter_field_default_off() -> None:

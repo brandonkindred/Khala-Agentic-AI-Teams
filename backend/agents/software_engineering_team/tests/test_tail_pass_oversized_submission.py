@@ -28,7 +28,10 @@ from __future__ import annotations
 pytest_plugins = ["tests.submission_pass_two_call_client"]
 
 import re
+import threading
 from typing import Any, Dict, List
+
+import pytest
 
 from code_review_agent.false_positive_filter import (
     _verify_max_findings_per_group,
@@ -268,11 +271,24 @@ class _DeterministicVerdictStub(_SimulatesFileReadToolCall):
     def __init__(self) -> None:
         super().__init__()
         self.call_sizes: List[int] = []
+        self._reasoning_prompt_local = threading.local()
+
+    def stash_reasoning_prompt(self, prompt: str) -> None:
+        """Record the FPF reasoning user prompt for the in-flight verify call."""
+        self._reasoning_prompt_local.prompt = prompt
+
+    def _take_reasoning_prompt(self) -> str:
+        prompt = getattr(self._reasoning_prompt_local, "prompt", "")
+        self._reasoning_prompt_local.prompt = ""
+        return prompt
 
     def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:  # type: ignore[override]
         if "verdicts" not in prompt.lower():
             return super().complete_json(prompt, **kwargs)
-        global_ids = [int(m) for m in _FINDING_ID_RE.findall(prompt)]
+        # Finding descriptions live on the reasoning user prompt (call 1), not
+        # the format-pass prompt (call 2).
+        source = self._take_reasoning_prompt() or prompt
+        global_ids = [int(m) for m in _FINDING_ID_RE.findall(source)]
         self.call_sizes.append(len(global_ids))
         return {
             "verdicts": [
@@ -284,6 +300,24 @@ class _DeterministicVerdictStub(_SimulatesFileReadToolCall):
                 for i, gid in enumerate(global_ids)
             ]
         }
+
+
+@pytest.fixture(autouse=True)
+def _stash_fpf_reasoning_prompt_on_stub(monkeypatch: Any) -> None:
+    """Bind each format pass to the reasoning prompt from the same verify call."""
+    import code_review_agent.false_positive_filter as fpf_mod
+    import code_review_agent.via_reasoning as vr_mod
+
+    real_run = vr_mod.run_agent_via_reasoning
+
+    def _run_with_stash(**kwargs: Any) -> Any:
+        client = vr_mod._extract_llm_client(kwargs["model"])
+        if client is not None and hasattr(client, "stash_reasoning_prompt"):
+            client.stash_reasoning_prompt(kwargs["reasoning_prompt"])
+        return real_run(**kwargs)
+
+    monkeypatch.setattr(vr_mod, "run_agent_via_reasoning", _run_with_stash)
+    monkeypatch.setattr(fpf_mod, "run_agent_via_reasoning", _run_with_stash)
 
 
 def test_filter_oversized_submission_stays_within_configured_budget(monkeypatch: Any) -> None:
