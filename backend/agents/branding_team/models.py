@@ -93,7 +93,7 @@ def _derive_strict_variant(
 
 
 # Common closing sentence for every strict-twin ``doc=`` below — factored out
-# so the 8 call sites don't each hand-duplicate the same boilerplate tail.
+# so the 12 call sites don't each hand-duplicate the same boilerplate tail.
 _STRICT_TWIN_DOC_SUFFIX = (
     "Generated via ``_derive_strict_variant`` — see that helper's docstring "
     "for the shared strict/soft twin pattern this file uses."

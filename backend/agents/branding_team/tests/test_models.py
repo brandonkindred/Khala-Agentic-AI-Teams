@@ -1,17 +1,20 @@
-"""Validation tests for the Phase 1, Phase 2, and Phase 4 structured-output wrapper models.
+"""Validation tests for the Phase 1, Phase 2, Phase 3, and Phase 4 structured-output models.
 
 These agent-facing models (``BrandDiscoveryAuditOutput``, ``PurposeVisionOutput``,
 ``CoreValuesOutput``, ``AudienceSegmentsOutput``, ``DifferentiationPillarsOutput``,
 ``PositioningOutput``, plus Phase 2's ``BrandStoryOutput``,
 ``BrandArchetypesOutput``, ``TaglineOutput``, ``MessagingFrameworkOutput``
 (and its nested ``MessagingPillarOutput``/``AudienceMessageMapOutput``),
-``PersonaProfilesOutput``, ``WritingGuidelinesOutput``, plus Phase 4's
-``ChannelGuidelineOutput``, ``BrandArchitectureOutput``, and
-``BrandExperiencePrinciplesOutput``) must reject empty/omitted content so
-Strands' structured-output tool retries the LLM
+``PersonaProfilesOutput``, ``WritingGuidelinesOutput``, plus Phase 3's nested
+twins (``LogoUsageRuleOutput``, ``ColorEntryOutput``, ``TypographySpecOutput``,
+``VoiceToneEntryOutput``), plus Phase 4's ``ChannelGuidelineOutput``,
+``BrandArchitectureOutput``, and ``BrandExperiencePrinciplesOutput``) must
+reject empty/omitted content so Strands' structured-output tool retries the LLM
 instead of silently accepting a blank or under-cardinality response (see
 ``structured_output_tool.py``: a ``ValidationError`` becomes a tool error
-the model is asked to fix).
+the model is asked to fix). Dual-mode tests also pin the soft merge-target
+twins and the ``isinstance(strict, soft)`` subclass contract produced by
+``_derive_strict_variant``.
 """
 
 from __future__ import annotations
