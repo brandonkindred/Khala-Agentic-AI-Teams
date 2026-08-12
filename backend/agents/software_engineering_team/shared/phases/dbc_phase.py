@@ -73,7 +73,9 @@ def run_dbc_comments_review(
 
     Postconditions:
         Any file in ``code`` whose own content contains a ``### path ###``-
-        shaped line is excluded before concatenation (see
+        shaped line, OR whose path itself contains a newline (which would let
+        the path inject its own extra header line into the rendered ``###
+        {path} ###`` header), is excluded before concatenation (see
         ``_HEADER_LIKE_LINE``) -- such a file cannot be safely represented in
         DbcCommentsAgent's concatenated-code transport, so it is skipped
         rather than risking an insertion from a spurious parsed block being
@@ -96,12 +98,14 @@ def run_dbc_comments_review(
         own "never raises" contract, as defense in depth for this layer too.
     """
     safe_code = {
-        path: content for path, content in code.items() if not _HEADER_LIKE_LINE.search(content)
+        path: content
+        for path, content in code.items()
+        if "\n" not in path and not _HEADER_LIKE_LINE.search(content)
     }
     excluded = code.keys() - safe_code.keys()
     if excluded:
         logger.warning(
-            "DbC comments review: excluding file(s) %s -- their content contains a "
+            "DbC comments review: excluding file(s) %s -- their path or content contains a "
             "'### path ###'-shaped line that would be misread as a chunk header",
             sorted(excluded),
         )
