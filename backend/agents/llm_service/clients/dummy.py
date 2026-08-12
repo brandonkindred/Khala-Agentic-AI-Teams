@@ -1425,8 +1425,9 @@ def _code_review_via_reasoning_format_stub(lowered: str) -> Optional[Dict[str, A
 
     Kept out of :meth:`DummyLLMClient.complete_json` so that method stays under
     the mccabe complexity ceiling. Matches schema-specific format instructions
-    (synthesis, spec-compliance, FPF, merged pass, chunk review) and returns
-    ``None`` for unrelated ANALYSIS-wrapped prompts (sales, SOC2, etc.).
+    (synthesis, spec-compliance, FPF, merged/standalone submission passes,
+    chunk review) and returns ``None`` for unrelated ANALYSIS-wrapped prompts
+    (sales, SOC2, etc.).
 
     Preconditions: ``lowered`` is already lowercased prompt text.
     Postconditions: returns a dict matching the recognized format contract, or
@@ -1453,6 +1454,10 @@ def _code_review_via_reasoning_format_stub(lowered: str) -> Optional[Dict[str, A
     if "architecture_findings" in lowered and "side_effect_findings" in lowered:
         # merged architecture/side-effect format pass
         return {"architecture_findings": [], "side_effect_findings": []}
+    if "exactly one key" in lowered and '"findings"' in lowered:
+        # Standalone architecture-consistency / side-effect-impact format pass
+        # (still used by snapshot_comparison and pre-merged Temporal replay).
+        return {"findings": []}
     if "spec_compliance_notes" in lowered and "approved" in lowered and '"issues"' in lowered:
         # chunk-review format pass only (must not match bare ANALYSIS alone)
         return {

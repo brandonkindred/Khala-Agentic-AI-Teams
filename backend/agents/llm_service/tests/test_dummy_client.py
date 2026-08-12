@@ -1085,6 +1085,22 @@ def test_dummy_via_reasoning_fpf_format_returns_verdicts() -> None:
     assert j == {"verdicts": []}
 
 
+def test_dummy_via_reasoning_standalone_submission_pass_returns_findings() -> None:
+    """Architecture / side-effect standalone format contracts use exactly one key."""
+    c = DummyLLMClient()
+    prompt = (
+        "Convert the following analysis into a single JSON object.\n"
+        "--- ANALYSIS abcdef0123456789 ---\n"
+        "No architecture issues.\n"
+        "--- END ANALYSIS abcdef0123456789 ---\n"
+        "Return a single JSON object with exactly one key:\n"
+        '- "findings": a list of objects.\n'
+        'Return {"findings": []} when you find nothing.\n'
+    )
+    j = c.complete_json(prompt, temperature=0.0)
+    assert j == {"findings": []}
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", _MODEL_ROUTED_MODEL_NAMES)
 async def test_stream_routes_structured_output_tool_by_name_despite_misleading_prompt(
