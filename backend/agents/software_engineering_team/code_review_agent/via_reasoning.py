@@ -179,7 +179,6 @@ def _clone_model_for_pass(
     agent_key: str,
     response_format: str,
     think: bool | str | None,
-    drop_output_pin: bool = False,
 ) -> Any:
     """Resolve a Strands model variant for one pass of the split.
 
@@ -188,9 +187,9 @@ def _clone_model_for_pass(
 
     Postconditions:
         Returns a model suitable for ``Agent`` construction. Injected test
-        doubles without ``clone`` are returned unchanged. When
-        ``drop_output_pin`` is True, a cloned model's ``max_tokens`` is
-        cleared so a JSON-findings reserve does not cap thinking.
+        doubles without ``clone`` are returned unchanged. A cloned model's
+        ``max_tokens`` pin is preserved so a submission-pass output reserve
+        still bounds advertised completion size on both passes.
     """
     think_value = _resolve_reasoning_think(think)
     clone_fn = getattr(model, "clone", None)
@@ -199,8 +198,6 @@ def _clone_model_for_pass(
             "response_format": response_format,
             "think": think_value,
         }
-        if drop_output_pin:
-            clone_kwargs["max_tokens"] = None
         try:
             return clone_fn(**clone_kwargs)
         except TypeError:
@@ -307,9 +304,10 @@ def run_agent_via_reasoning(
     When a backing ``LLMClient`` is available, call 2 uses
     ``client.complete_json`` and passes ``json.dumps`` output to ``parse``.
     A positive ``max_tokens`` pin on ``model`` (from ``get_config`` or the
-    attribute) is forwarded so a cloned output reserve is not dropped.
-    That pin is cleared on the reasoning-pass clone so thinking is not
-    starved by a JSON-findings token reserve.
+    attribute) is kept on the reasoning-pass clone and forwarded to
+    ``complete_json`` so a submission-pass output reserve still bounds
+    advertised completion size. Clearing that pin would let the client
+    default (up to 32,768) exceed the packed prompt's leftover window.
     Otherwise call 2 uses a no-tools ``Agent`` on a JSON-mode model clone.
 
     Preconditions:
@@ -320,9 +318,9 @@ def run_agent_via_reasoning(
 
     Postconditions:
         Returns ``parse``'s result. Tools are attached only to call 1.
-        Call 2 honors ``model``'s reserved ``max_tokens`` when one is set.
-        Call 1 does not inherit that pin. Empty reasoning output raises
-        ``LLMSemanticExhaustionError`` before formatting.
+        Both passes honor ``model``'s reserved ``max_tokens`` when one is set.
+        Empty reasoning output raises ``LLMSemanticExhaustionError`` before
+        formatting.
     """
     _require_non_empty("reasoning_prompt", reasoning_prompt)
     _require_non_empty("reasoning_system_prompt", reasoning_system_prompt)
@@ -333,7 +331,6 @@ def run_agent_via_reasoning(
         agent_key=agent_key,
         response_format="text",
         think=reasoning_think,
-        drop_output_pin=True,
     )
     reasoning_agent_kwargs: dict[str, Any] = {
         "model": text_model,

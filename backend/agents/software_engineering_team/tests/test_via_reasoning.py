@@ -285,14 +285,16 @@ def test_run_agent_via_reasoning_forwards_model_max_tokens_to_format_call(
     assert format_calls[0]["max_tokens"] == 4096
 
 
-def test_run_agent_via_reasoning_drops_json_output_pin_on_reasoning_clone(
+def test_run_agent_via_reasoning_keeps_output_pin_on_reasoning_clone(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The JSON findings reserve must not cap the thinking/reasoning pass.
+    """The packed prompt's output reserve must still cap the reasoning pass.
 
-    Submission passes clone the model with reserved_response_tokens sized for
-    findings JSON. Call 1 now uses max thinking; inheriting that pin starves
-    thinking tokens and truncates before any review prose is emitted.
+    Submission passes size the prompt against reserved_response_tokens and pin
+    the model. Clearing that pin lets the client advertise up to 32,768 output
+    tokens; providers that check input plus max output against the context
+    window then reject a near-full prompt. Truncation is overflow-shaped;
+    a generic rejection is swallowed and drops findings.
     """
     from llm_service import LLMClientModel
     from llm_service.clients.dummy import DummyLLMClient
@@ -325,7 +327,7 @@ def test_run_agent_via_reasoning_drops_json_output_pin_on_reasoning_clone(
     )
 
     reasoning_cfg = agent_models[0].get_config()
-    assert reasoning_cfg.get("max_tokens") in (None, 0)
+    assert reasoning_cfg.get("max_tokens") == 4096
     assert format_calls[0]["max_tokens"] == 4096
 
 
