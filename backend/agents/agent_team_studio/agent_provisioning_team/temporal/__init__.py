@@ -16,6 +16,16 @@ explicitly via
 :func:`.worker.start_agent_provisioning_sandbox_temporal_worker_thread`.
 """
 
+from agent_platform.sandbox.temporal.activities import (
+    sandbox_acquire_activity,
+    sandbox_reap_activity,
+    sandbox_teardown_activity,
+)
+from agent_platform.sandbox.temporal.workflows import (
+    SandboxAcquireWorkflow,
+    SandboxReaperWorkflow,
+    SandboxTeardownWorkflow,
+)
 from agent_team_studio.agent_provisioning_team.temporal.activities import (
     acquire_agent_lock_activity,
     audit_activity,
@@ -33,16 +43,6 @@ from agent_team_studio.agent_provisioning_team.temporal.activities import (
     setup_activity,
 )
 from agent_team_studio.agent_provisioning_team.temporal.constants import TASK_QUEUE
-from agent_team_studio.agent_provisioning_team.temporal.sandbox_activities import (
-    sandbox_acquire_activity,
-    sandbox_reap_activity,
-    sandbox_teardown_activity,
-)
-from agent_team_studio.agent_provisioning_team.temporal.sandbox_workflows import (
-    SandboxAcquireWorkflow,
-    SandboxReaperWorkflow,
-    SandboxTeardownWorkflow,
-)
 from agent_team_studio.agent_provisioning_team.temporal.workflows import (
     AgentDeprovisioningWorkflow,
     AgentProvisioningWorkflow,

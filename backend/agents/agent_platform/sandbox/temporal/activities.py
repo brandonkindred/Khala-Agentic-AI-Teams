@@ -1,4 +1,4 @@
-"""Async Temporal activities for the Agent Provisioning sandbox lifecycle.
+"""Async Temporal activities for the platform sandbox lifecycle.
 
 These are **async** activities on purpose. They run on the Temporal worker's
 event loop (not the sync thread-pool executor used by the provisioning
@@ -50,15 +50,15 @@ async def sandbox_acquire_activity(agent_id: str) -> Dict[str, Any]:
           failures instead of the workflow silently "succeeding" with an
           ERROR result on the first attempt. Using a dedicated type (rather
           than a bare ``RuntimeError``) lets
-          ``sandbox_dispatch._reraise_sandbox_error`` recognize it by name once
+          ``dispatch._reraise_sandbox_error`` recognize it by name once
           retries are exhausted and map it to a clean HTTP 503, instead of an
           opaque ``WorkflowFailureError``.
     """
-    from agent_team_studio.agent_provisioning_team.sandbox import (
+    from agent_platform.sandbox import (
         SandboxAcquireFailedError,
         get_lifecycle,
     )
-    from agent_team_studio.agent_provisioning_team.sandbox.state import SandboxStatus
+    from agent_platform.sandbox.state import SandboxStatus
 
     assert agent_id, "agent_id must be non-empty"
     activity.heartbeat("sandbox_acquire")
@@ -79,7 +79,7 @@ async def sandbox_teardown_activity(agent_id: str) -> None:
         * The container is stopped and the state row removed. A real Docker
           failure (``DockerError``) propagates so Temporal retries.
     """
-    from agent_team_studio.agent_provisioning_team.sandbox import get_lifecycle
+    from agent_platform.sandbox import get_lifecycle
 
     assert agent_id, "agent_id must be non-empty"
     activity.heartbeat("sandbox_teardown")
@@ -99,8 +99,8 @@ async def sandbox_reap_activity() -> List[str]:
     Postconditions:
         * Returns the list of torn-down ``agent_id``s (possibly empty).
     """
-    from agent_team_studio.agent_provisioning_team.sandbox import get_lifecycle
-    from agent_team_studio.agent_provisioning_team.sandbox.state import idle_teardown_seconds
+    from agent_platform.sandbox import get_lifecycle
+    from agent_platform.sandbox.state import idle_teardown_seconds
 
     threshold = idle_teardown_seconds()
     activity.heartbeat("sandbox_reap")
