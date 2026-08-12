@@ -17,6 +17,7 @@ from branding_team.agents import (
     make_discovery_auditor,
     make_iconography_director,
     make_message_mapper,
+    make_moodboard_conceptualist,
     make_persona_builder,
     make_photography_video_director,
     make_positioning_synthesizer,
@@ -163,6 +164,24 @@ _EXPECTED_DESIGN_SYSTEM_CODIFIER_PROMPT = (
 )
 
 
+def _expected_moodboard_conceptualist_prompt(variant: str) -> str:
+    return (
+        f"You are a MoodBoard Conceptualist specialising in {variant.lower()} visual "
+        f"directions. Given a brand's strategic core and narrative, create a moodboard "
+        f"concept with:\n"
+        f"1. title — a name for this direction\n"
+        f"2. visual_direction — overall aesthetic description\n"
+        f"3. color_story — 3-4 color names/descriptions\n"
+        f"4. typography_direction — font style recommendations\n"
+        f"5. image_style — 3-4 image style descriptions"
+    )
+
+
+_EXPECTED_MOODBOARD_EDITORIAL_PROMPT = _expected_moodboard_conceptualist_prompt("Editorial")
+_EXPECTED_MOODBOARD_MINIMALIST_PROMPT = _expected_moodboard_conceptualist_prompt("Minimalist")
+_EXPECTED_MOODBOARD_BOLD_PROMPT = _expected_moodboard_conceptualist_prompt("Bold")
+
+
 def test_purpose_vision_writer_prompt_matches_original_wording() -> None:
     assert make_purpose_vision_writer().system_prompt == _EXPECTED_PURPOSE_VISION_PROMPT
 
@@ -232,3 +251,21 @@ def test_design_system_codifier_prompt_matches_original_wording() -> None:
     assert (
         make_design_system_codifier().system_prompt == _EXPECTED_DESIGN_SYSTEM_CODIFIER_PROMPT
     )
+
+
+def test_moodboard_conceptualist_editorial_prompt_matches_spec() -> None:
+    assert (
+        make_moodboard_conceptualist("Editorial").system_prompt
+        == _EXPECTED_MOODBOARD_EDITORIAL_PROMPT
+    )
+
+
+def test_moodboard_conceptualist_minimalist_prompt_matches_spec() -> None:
+    assert (
+        make_moodboard_conceptualist("Minimalist").system_prompt
+        == _EXPECTED_MOODBOARD_MINIMALIST_PROMPT
+    )
+
+
+def test_moodboard_conceptualist_bold_prompt_matches_spec() -> None:
+    assert make_moodboard_conceptualist("Bold").system_prompt == _EXPECTED_MOODBOARD_BOLD_PROMPT

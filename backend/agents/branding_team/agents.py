@@ -488,6 +488,33 @@ def make_creative_director() -> Agent:
     )
 
 
+def _moodboard_conceptualist_prompt(variant: str) -> AgentPromptSpec:
+    """Build the MoodBoard Conceptualist prompt spec for one visual-direction variant.
+
+    Preconditions:
+        ``variant`` is a non-empty string.
+    Postconditions:
+        Returns an ``AgentPromptSpec`` whose opening interpolates
+        ``variant.lower()`` and whose fields name the five
+        ``MoodBoardConceptOutput`` attributes.
+    """
+    assert isinstance(variant, str) and variant.strip(), "variant must be a non-empty string"
+    return AgentPromptSpec(
+        opening=(
+            f"You are a MoodBoard Conceptualist specialising in {variant.lower()} visual "
+            f"directions. Given a brand's strategic core and narrative, create a moodboard "
+            f"concept with:"
+        ),
+        fields=(
+            PromptFieldSpec("title", "a name for this direction"),
+            PromptFieldSpec("visual_direction", "overall aesthetic description"),
+            PromptFieldSpec("color_story", "3-4 color names/descriptions"),
+            PromptFieldSpec("typography_direction", "font style recommendations"),
+            PromptFieldSpec("image_style", "3-4 image style descriptions"),
+        ),
+    )
+
+
 def make_moodboard_conceptualist(variant: str) -> Agent:
     """Build a Phase 3 MoodBoard Conceptualist agent for one visual direction.
 
@@ -506,16 +533,7 @@ def make_moodboard_conceptualist(variant: str) -> Agent:
     return build_agent(
         name=f"MoodBoardConceptualist_{variant}",
         description=f"Generates a {variant.lower()} visual direction moodboard concept.",
-        system_prompt=(
-            f"You are a MoodBoard Conceptualist specialising in {variant.lower()} visual "
-            f"directions. Given a brand's strategic core and narrative, create a moodboard concept "
-            f"with:\n"
-            f"- title: a name for this direction\n"
-            f"- visual_direction: overall aesthetic description\n"
-            f"- color_story: 3-4 color names/descriptions\n"
-            f"- typography_direction: font style recommendations\n"
-            f"- image_style: 3-4 image style descriptions"
-        ),
+        system_prompt=render_agent_prompt(_moodboard_conceptualist_prompt(variant)),
         structured_output=MoodBoardConceptOutput,
     )
 
