@@ -455,6 +455,31 @@ def test_coerce_finding_rejects_invalid_items(item: object) -> None:
     assert _coerce_finding(item) is None
 
 
+def test_coerce_finding_carries_through_pre_existing_tag() -> None:
+    """The model's optional pre_existing tag (used by the PR-review whole-file
+    path to route an architecture/refactor finding about a field, function, or
+    class this submission did NOT add or modify to a human-review proposal
+    instead of a blocking PR comment) survives conversion, tolerates string
+    encodings, and defaults False when absent -- mirrors
+    side_effect_impact_pass._coerce_finding's identical convention."""
+    tagged_true = _coerce_finding(
+        {"category": "architecture", "description": "d1", "pre_existing": True}
+    )
+    tagged_str = _coerce_finding(
+        {"category": "architecture", "description": "d2", "pre_existing": "true"}
+    )
+    tagged_false_str = _coerce_finding(
+        {"category": "refactor", "description": "d3", "pre_existing": "false"}
+    )
+    untagged = _coerce_finding({"category": "refactor", "description": "d4"})
+    assert [f.pre_existing for f in (tagged_true, tagged_str, tagged_false_str, untagged)] == [
+        True,
+        True,
+        False,
+        False,
+    ]
+
+
 def test_coerce_finding_coerces_line_and_unknown_severity() -> None:
     finding = _coerce_finding(
         {
@@ -666,6 +691,38 @@ def test_finds_and_returns_new_findings() -> None:
     assert len(result) == 1
     assert result[0].category == "architecture"
     assert result[0].description == "bypasses the repository layer"
+
+
+def test_finds_and_returns_new_findings_tags_pre_existing() -> None:
+    """End-to-end: a finding the model tags pre_existing=true (e.g. an
+    architecture/refactor complaint about a field that already existed before
+    this submission, in a file the submission also touched elsewhere) carries
+    that tag all the way through to the returned CodeReviewIssue, so the
+    PR-review whole-file path can route it to a human-review proposal instead
+    of posting it as a blocking PR comment."""
+
+    class _FindingsClient(DummyLLMClient):
+        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+            if _ARCH_PASS_ANCHOR in prompt:
+                return {
+                    "findings": [
+                        {
+                            "severity": "medium",
+                            "category": "refactor",
+                            "file_path": "app/main.py",
+                            "description": "duplicates an existing field untouched by this change",
+                            "suggestion": "reuse the existing field",
+                            "pre_existing": True,
+                        }
+                    ]
+                }
+            return {"approved": True, "issues": [], "summary": "ok", "spec_compliance_notes": ""}
+
+    result = find_architecture_and_redundancy_issues(
+        _FindingsClient(), _input(architecture=_arch())
+    )
+    assert len(result) == 1
+    assert result[0].pre_existing is True
 
 
 def test_finds_and_returns_new_findings_with_pre_numbered_input() -> None:

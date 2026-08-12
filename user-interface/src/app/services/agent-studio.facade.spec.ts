@@ -1,11 +1,12 @@
 import { TestBed } from '@angular/core/testing';
-import { of } from 'rxjs';
+import { of, throwError } from 'rxjs';
 import { vi } from 'vitest';
 import { AgentStudioFacade } from './agent-studio.facade';
 import { AgentStudioApiService } from './agent-studio-api.service';
 import { AgentRunnerApiService } from './agent-runner-api.service';
 import { AgenticTeamApiService } from './agentic-team-api.service';
 import { PersonaTestingApiService } from './persona-testing-api.service';
+import { AgentStudioStateService } from './agent-studio-state.service';
 
 describe('AgentStudioFacade', () => {
   let facade: AgentStudioFacade;
@@ -13,6 +14,14 @@ describe('AgentStudioFacade', () => {
   let runnerApi: AgentRunnerApiService;
   let agenticTeamApi: AgenticTeamApiService;
   let personaApi: PersonaTestingApiService;
+  let state: {
+    setRegistryAgentId: ReturnType<typeof vi.fn>;
+    setTeamId: ReturnType<typeof vi.fn>;
+    setDraftAgentId: ReturnType<typeof vi.fn>;
+    setPersonaId: ReturnType<typeof vi.fn>;
+    hasConsumedHandoff: ReturnType<typeof vi.fn>;
+    markHandoffConsumed: ReturnType<typeof vi.fn>;
+  };
 
   beforeEach(() => {
     const studioApiStub = {
@@ -40,10 +49,18 @@ describe('AgentStudioFacade', () => {
     };
     const personaApiStub = {
       getPersonas: vi.fn(() => of({ personas: [] })),
-      createPersona: vi.fn(() => of({ persona_id: 'p1' })),
+      createPersona: vi.fn(() => of({ id: 'p1', name: 'Persona 1' })),
       startTest: vi.fn(() => of({ job_id: 'j1', status: 'started', message: 'ok' })),
       getRunStatus: vi.fn(() => of({ run_id: 'r1' })),
       cancelJob: vi.fn(() => of({})),
+    };
+    const stateStub = {
+      setRegistryAgentId: vi.fn(),
+      setTeamId: vi.fn(),
+      setDraftAgentId: vi.fn(),
+      setPersonaId: vi.fn(),
+      hasConsumedHandoff: vi.fn(() => false),
+      markHandoffConsumed: vi.fn(),
     };
 
     TestBed.configureTestingModule({
@@ -53,6 +70,7 @@ describe('AgentStudioFacade', () => {
         { provide: AgentRunnerApiService, useValue: runnerApiStub },
         { provide: AgenticTeamApiService, useValue: agenticTeamApiStub },
         { provide: PersonaTestingApiService, useValue: personaApiStub },
+        { provide: AgentStudioStateService, useValue: stateStub },
       ],
     });
 
@@ -61,6 +79,7 @@ describe('AgentStudioFacade', () => {
     runnerApi = TestBed.inject(AgentRunnerApiService);
     agenticTeamApi = TestBed.inject(AgenticTeamApiService);
     personaApi = TestBed.inject(PersonaTestingApiService);
+    state = TestBed.inject(AgentStudioStateService) as unknown as typeof state;
   });
 
   // ---------------------------------------------------------------------
@@ -79,15 +98,38 @@ describe('AgentStudioFacade', () => {
     expect(studioApi.sendMessage).toHaveBeenCalledWith('c1', req);
   });
 
-  it('selects (clones) an agent from the registry', () => {
+  it('selects (clones) an agent from the registry and stamps a fresh draftAgentId', () => {
+    vi.spyOn(crypto, 'randomUUID').mockReturnValue('11111111-1111-1111-1111-111111111111');
     facade.selectAgent('blog/writer').subscribe();
     expect(studioApi.cloneFromRegistry).toHaveBeenCalledWith('blog/writer');
+    expect(state.setDraftAgentId).toHaveBeenCalledWith('11111111-1111-1111-1111-111111111111');
   });
 
-  it('saves an agent', () => {
+  it('does not stamp a draftAgentId when cloning an agent fails', () => {
+    const error = new Error('clone failed');
+    (studioApi.cloneFromRegistry as ReturnType<typeof vi.fn>).mockReturnValue(
+      throwError(() => error),
+    );
+    let caught: unknown;
+    facade.selectAgent('blog/writer').subscribe({ error: (err) => (caught = err) });
+    expect(caught).toBe(error);
+    expect(state.setDraftAgentId).not.toHaveBeenCalled();
+  });
+
+  it('saves an agent and registers its agent_id', () => {
     const req = { name: 'My Agent' };
     facade.saveAgent(req).subscribe();
     expect(studioApi.saveAgent).toHaveBeenCalledWith(req);
+    expect(state.setRegistryAgentId).toHaveBeenCalledWith('a1');
+  });
+
+  it('does not register a registryAgentId when saving an agent fails', () => {
+    const error = new Error('save failed');
+    (studioApi.saveAgent as ReturnType<typeof vi.fn>).mockReturnValue(throwError(() => error));
+    let caught: unknown;
+    facade.saveAgent({ name: 'My Agent' }).subscribe({ error: (err) => (caught = err) });
+    expect(caught).toBe(error);
+    expect(state.setRegistryAgentId).not.toHaveBeenCalled();
   });
 
   it('saves a draft by creating one when no draftId is given', () => {
@@ -153,15 +195,48 @@ describe('AgentStudioFacade', () => {
     expect(agenticTeamApi.getTeam).toHaveBeenCalledWith('t1');
   });
 
-  it('composes (creates) a team', () => {
+  it('composes (creates) a team and registers its team_id', () => {
     const req = { name: 'New Team', description: 'desc' };
     facade.composeTeam(req).subscribe();
     expect(agenticTeamApi.createTeam).toHaveBeenCalledWith(req);
+    expect(state.setTeamId).toHaveBeenCalledWith('t1');
   });
 
-  it('adds a registry agent to a team', () => {
+  it('does not register a teamId when composing a team fails', () => {
+    const error = new Error('compose failed');
+    (agenticTeamApi.createTeam as ReturnType<typeof vi.fn>).mockReturnValue(throwError(() => error));
+    let caught: unknown;
+    facade
+      .composeTeam({ name: 'New Team', description: 'desc' })
+      .subscribe({ error: (err) => (caught = err) });
+    expect(caught).toBe(error);
+    expect(state.setTeamId).not.toHaveBeenCalled();
+  });
+
+  it('adds a registry agent to a team and marks the handoff key consumed', () => {
     facade.addAgentToTeam('t1', 'blog/writer').subscribe();
+    expect(state.markHandoffConsumed).toHaveBeenCalledWith('t1::blog/writer');
     expect(agenticTeamApi.addAgentFromRegistry).toHaveBeenCalledWith('t1', 'blog/writer');
+  });
+
+  it('marks the handoff key consumed on attempt even when the add fails, and propagates the error', () => {
+    const error = new Error('add failed');
+    (agenticTeamApi.addAgentFromRegistry as ReturnType<typeof vi.fn>).mockReturnValue(
+      throwError(() => error),
+    );
+    let caught: unknown;
+    facade.addAgentToTeam('t1', 'blog/writer').subscribe({ error: (err) => (caught = err) });
+    expect(caught).toBe(error);
+    expect(state.markHandoffConsumed).toHaveBeenCalledWith('t1::blog/writer');
+  });
+
+  it('skips the API call and emits null when the handoff key was already consumed', () => {
+    state.hasConsumedHandoff.mockReturnValue(true);
+    let result: unknown;
+    facade.addAgentToTeam('t1', 'blog/writer').subscribe((value) => (result = value));
+    expect(result).toBeNull();
+    expect(agenticTeamApi.addAgentFromRegistry).not.toHaveBeenCalled();
+    expect(state.markHandoffConsumed).not.toHaveBeenCalled();
   });
 
   // ---------------------------------------------------------------------
@@ -178,7 +253,7 @@ describe('AgentStudioFacade', () => {
     expect(personaApi.getPersonas).toHaveBeenCalled();
   });
 
-  it('creates a persona', () => {
+  it('creates a persona and registers its personaId', () => {
     const payload = {
       name: 'Persona 1',
       description: 'd',
@@ -188,6 +263,24 @@ describe('AgentStudioFacade', () => {
     };
     facade.createPersona(payload).subscribe();
     expect(personaApi.createPersona).toHaveBeenCalledWith(payload);
+    expect(state.setPersonaId).toHaveBeenCalledWith('p1');
+  });
+
+  it('does not register a personaId when creating a persona fails', () => {
+    const error = new Error('create persona failed');
+    (personaApi.createPersona as ReturnType<typeof vi.fn>).mockReturnValue(throwError(() => error));
+    let caught: unknown;
+    facade
+      .createPersona({
+        name: 'Persona 1',
+        description: 'd',
+        icon: 'bug_report',
+        system_prompt: 's',
+        spec_generation_prompt: 'g',
+      })
+      .subscribe({ error: (err) => (caught = err) });
+    expect(caught).toBe(error);
+    expect(state.setPersonaId).not.toHaveBeenCalled();
   });
 
   it('starts a persona run', () => {

@@ -7,6 +7,7 @@ import type { AgentStudioDraft } from '../../../models/agent-studio.model';
 import { STUDIO_STAGES } from '../../../models/agent-studio.model';
 import { AgentStudioApiService } from '../../../services/agent-studio-api.service';
 import { AgentStudioStateService } from '../../../services/agent-studio-state.service';
+import { AgentStudioFacade } from '../../../services/agent-studio.facade';
 import { AgenticTeamApiService } from '../../../services/agentic-team-api.service';
 import { AgentStudioBuildAgentComponent } from './agent-studio-build-agent.component';
 import { AgentStudioComposeTeamComponent } from './agent-studio-compose-team.component';
@@ -37,7 +38,9 @@ function asNullableString(value: unknown): string | null {
  * the forward-only 4-stage stepper and the active stage. All four stages are
  * implemented: Build Agent, Test Agent, Compose Team, and Test Team w/
  * Personas. Owns one `AgentStudioStateService` per session (provided here,
- * not at root, so each visit starts clean).
+ * not at root, so each visit starts clean). `AgentStudioFacade` is provided
+ * alongside it so the facade's injector can resolve this session's state
+ * service (it is not a root singleton either).
  */
 @Component({
   selector: 'app-agent-studio-shell',
@@ -55,7 +58,7 @@ function asNullableString(value: unknown): string | null {
     LoadDraftMenuComponent,
   ],
   changeDetection: ChangeDetectionStrategy.OnPush,
-  providers: [AgentStudioStateService],
+  providers: [AgentStudioStateService, AgentStudioFacade],
   templateUrl: './agent-studio-shell.component.html',
   styleUrl: './agent-studio-shell.component.scss',
 })
