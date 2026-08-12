@@ -927,17 +927,33 @@ services:
   # mem_limit was 2G, sized for the pre-fix process: 4 uvicorn workers plus an
   # eager Strands/botocore import and a duplicate Temporal worker boot on
   # import (see the workers=1, Pattern-A-boot, and Strands-import-edge fixes).
-  # Measured post-fix (this repo's Docker Hub pulls are blocked by org egress
-  # policy in this environment, so this ran the unified-api process directly
-  # via a local venv rather than the built container): single worker idle RSS
-  # ~137 MiB, ~139-140 MiB under light /health + /api/agents load, vs. the
-  # pre-fix 4-worker process totaling ~600 MiB idle / ~610 MiB under the same
-  # load. Both figures exclude live Postgres/Temporal connections (not wired
-  # up in the isolated measurement), so treat them as the process/import-graph
-  # floor, not full production RSS. 1G / 512M leaves several times that floor
-  # as headroom for the real Postgres pool, Temporal client, and request
-  # bursts; re-check with `docker stats` once deployed somewhere with
-  # registry access, and raise these back if that shows sustained pressure.
+  # Measured post-fix (Docker Hub pulls were blocked by org egress policy, so
+  # this ran the unified-api process directly via a local venv rather than the
+  # built container): single worker idle RSS ~137 MiB, ~139-140 MiB under
+  # light /health + /api/agents load, vs. the pre-fix 4-worker process
+  # totaling ~600 MiB idle / ~610 MiB under the same load. Both figures are a
+  # bare-process floor — no Postgres/Temporal wired up.
+  #
+  # Re-validated 2026-08-12: still no live peak-burst number. The measurement
+  # tooling (docker/scripts/measure_unified_api_rss.sh) and its methodology
+  # (docker/README.md's "Memory / RSS Measurement" section) are ready to run,
+  # but every attempt so far — this one included — hits Docker Hub pulls
+  # blocked at the network-egress layer (here: the agent proxy 403s the
+  # CONNECT to production.cloudfront.docker.com, which serves image layer
+  # blobs), so the full compose stack can't come up to sample real RSS. Until
+  # someone with registry access runs the four subcommands, 1G/512M is
+  # reconfirmed below by a reasoned worst-case estimate instead of a live one:
+  # +15-40 MiB as the Postgres pool grows from its 2-connection min to its
+  # 10-connection max (POSTGRES_POOL_MIN/MAX_SIZE), +20-40 MiB
+  # industry-typical for the temporalio client's Rust-core bridge (unverified
+  # for this repo), +up to 20 MiB worst case for per-team httpx pools (every
+  # real team actually gets team_proxy.py's DEFAULT_POOL_LIMITS 10/5 fallback
+  # — TEAM_POOL_CONFIG's per-team entries key off team names absent from
+  # TEAM_CONFIGS, so that part of the recent pool-limit tuning is dead code),
+  # plus a generous +50-100 MiB for concurrency/thread overhead this analysis
+  # can't bound. That totals ~245-340 MiB reasoned peak, comfortably under
+  # 512M — hence no change to the values below. Replace this paragraph with
+  # real numbers the next time this runs somewhere with registry access.
 
   khala:
     build:

@@ -61,6 +61,7 @@ from shared.dev_models.models import SystemArchitecture
 from shared.env import env_flag_enabled
 
 from .architecture_context import architecture_evidence_available, render_architecture_context
+from .chunking import _coerce_bool
 from .false_positive_filter import CodebaseIndex, _build_tools, _code_fence_for
 from .models import CodeReviewInput, CodeReviewIssue, coerce_line, is_no_op_suggestion
 from .profiles import ReviewProfile
@@ -292,6 +293,14 @@ def _coerce_finding(item: object) -> Optional[CodeReviewIssue]:
           ``severity`` defaults to ``"medium"`` rather than being dropped,
           matching this pass's default-severity guidance. Never raises on
           malformed input.
+        - ``pre_existing`` reflects the model's optional per-finding tag
+          (coerced via ``chunking._coerce_bool``, tolerating string
+          encodings), defaulting to ``False`` when absent -- mirrors
+          ``side_effect_impact_pass._coerce_finding``'s identical convention,
+          used by the PR-review whole-file path to route a finding about a
+          field/function/class this submission did NOT add or modify to a
+          human-review proposal instead of a blocking PR comment (see
+          ``CodeReviewIssue.pre_existing``).
     """
     if not isinstance(item, dict):
         return None
@@ -314,6 +323,7 @@ def _coerce_finding(item: object) -> Optional[CodeReviewIssue]:
         line=coerce_line(item.get("line")),
         description=description,
         suggestion=suggestion,
+        pre_existing=_coerce_bool(item.get("pre_existing")),
     )
 
 
