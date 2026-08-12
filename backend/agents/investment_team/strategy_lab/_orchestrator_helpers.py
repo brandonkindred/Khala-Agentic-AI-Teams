@@ -11,10 +11,15 @@ in a sibling module keeps each of those files focused on its own cluster's
 surface instead of re-deriving these helpers.
 
 Only dataclasses that are genuinely constructed in one cluster and consumed
-in another live here (``_MarketDataFetch``, ``_VerificationOutcome``,
-``_AlignmentLoopOutcome``, ``_DesignPersistContext``, ``_DriftCollector``,
-``RefinementStallTracker``, ``_CodeSynthesisPhaseResult``,
-``_RefinementAlignmentResult``, ``_SynthesisLoopOutcome``). Dataclasses used
+in another live here (``_DesignAttemptState``, ``_MarketDataFetch``,
+``_VerificationOutcome``, ``_AlignmentLoopOutcome``, ``_DesignPersistContext``,
+``_DriftCollector``, ``RefinementStallTracker``, ``_CodeSynthesisPhaseResult``,
+``_RefinementAlignmentResult``, ``_SynthesisLoopOutcome``). ``_DesignAttemptState``
+is the shared ``spec``/``code``/``trades``/``metrics`` base that
+``_AlignmentLoopOutcome`` and ``_SynthesisLoopOutcome`` here, plus
+``_AnomalyRecoveryOutcome``/``_SynthesisEvaluateResult`` in
+``orchestrator_synthesis.py`` and ``_AlignmentRoundOutcome`` in
+``orchestrator_alignment.py``, all inherit. Dataclasses used
 by only a single mixin file live in that file instead (e.g.
 ``_DesignLoopOutcome``/``_DesignPhaseResult`` in ``orchestrator_design.py``,
 ``_AnomalyRecoveryOutcome``/``_SynthesisEvaluateResult`` in
@@ -218,7 +223,53 @@ class _VerificationOutcome:
 
 
 @dataclass
-class _AlignmentLoopOutcome:
+class _DesignAttemptState:
+    """Shared spec/code/trades/metrics 4-tuple carried by every per-round
+    and per-loop outcome bundle in the design-attempt pipeline.
+
+    This is the minimal common base extracted from five outcome dataclasses
+    that each independently declared the same four fields
+    (``_AlignmentLoopOutcome``, ``_SynthesisLoopOutcome`` here;
+    ``_AnomalyRecoveryOutcome`` / ``_SynthesisEvaluateResult`` in
+    ``orchestrator_synthesis.py``; ``_AlignmentRoundOutcome`` in
+    ``orchestrator_alignment.py``). A later phase of this refactor may
+    extend or rename this class into a fuller threaded per-design-attempt
+    context object that orchestrator methods construct and pass directly;
+    until that is scoped, this stays the narrow 4-tuple base.
+
+    Preconditions:
+      - ``spec`` is the ``StrategySpec`` in effect, or just proposed for the
+        next round, at the point this state was captured.
+      - ``code`` is the strategy Python source associated with ``spec`` at
+        that same point (empty string only before code synthesis has run).
+      - ``trades`` and ``metrics`` reflect the most recent completed
+        execution known to the caller. In the common case they were
+        produced by executing this same ``code`` against this same
+        ``spec``; some transitional states instead pair a next-round
+        ``spec``/``code`` proposal with the prior round's ``trades``/
+        ``metrics`` (e.g. ``_AnomalyRecoveryOutcome``'s generic-refinement
+        return, where the refined ``spec``/``code`` haven't executed yet).
+        Each subclass's own docstring is authoritative on which case
+        applies to its construction sites.
+
+    Postconditions:
+      - None beyond dataclass field-type declarations; this is a plain
+        data container and performs no validation.
+
+    Invariants:
+      - Not frozen: every subclass in this module and its sibling mixin
+        modules is a plain (non-frozen) dataclass, and a frozen base
+        cannot be subclassed by a non-frozen dataclass.
+    """
+
+    spec: StrategySpec
+    code: str
+    trades: List[TradeRecord]
+    metrics: BacktestResult
+
+
+@dataclass
+class _AlignmentLoopOutcome(_DesignAttemptState):
     """Bundle of state mutated by ``_run_trade_alignment_loop``.
 
     The trade-alignment loop can replace the run's known-good
@@ -228,10 +279,6 @@ class _AlignmentLoopOutcome:
     unpacking explicit and small.
     """
 
-    spec: StrategySpec
-    code: str
-    trades: List[TradeRecord]
-    metrics: BacktestResult
     alignment_attempts: List[str] = field(default_factory=list)
     alignment_reports: List[Any] = field(default_factory=list)
     trades_aligned: bool = False
@@ -739,7 +786,7 @@ class _RefinementAlignmentResult:
 
 
 @dataclass
-class _SynthesisLoopOutcome:
+class _SynthesisLoopOutcome(_DesignAttemptState):
     """Bundle of state mutated by ``_run_synthesis_loop``.
 
     The synthesis refinement loop iterates up to ``MAX_CODE_REFINEMENT_ROUNDS``
@@ -765,10 +812,6 @@ class _SynthesisLoopOutcome:
       ``execution_succeeded=True``.
     """
 
-    spec: StrategySpec
-    code: str
-    trades: List[TradeRecord]
-    metrics: BacktestResult
     market_data: Optional[Dict[str, List[OHLCVBar]]]
     requested_symbols: List[str]
     fetched_symbols: List[str]
