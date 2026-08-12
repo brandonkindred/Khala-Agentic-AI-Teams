@@ -46,6 +46,7 @@ from ..trading_service.modes.sandbox_compat import StrategyRunResult
 from ._orchestrator_helpers import (
     _AlignmentLoopOutcome,
     _attach_execution_diagnostics,
+    _DesignAttemptState,
     _DriftCollector,
     _format_execution_diagnostics,
     _maybe_attach_coverage_report,
@@ -69,7 +70,7 @@ MAX_ALIGNMENT_ROUNDS = StrategyLabBudgetConfig.from_env().max_alignment_rounds
 
 
 @dataclass
-class _AlignmentRoundOutcome:
+class _AlignmentRoundOutcome(_DesignAttemptState):
     """One iteration of ``_run_trade_alignment_loop``.
 
     Semantics:
@@ -86,10 +87,6 @@ class _AlignmentRoundOutcome:
     directly.
     """
 
-    spec: StrategySpec
-    code: str
-    trades: List[TradeRecord]
-    metrics: BacktestResult
     terminate: bool
     # Set on a committing round (``terminate=False``) to the conformance
     # verdict of the just-committed code; ignored on terminate rounds (which

@@ -18,9 +18,9 @@ import contextlib
 import logging
 import threading
 import weakref
-from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict, List, NamedTuple, Optional
 
+from shared.concurrency import parallel_map
 from software_engineering_team.api.advisory_lock import advisory_lock
 from software_engineering_team.github_source import (
     GitHubAPIError,
@@ -302,9 +302,11 @@ def create_review_issues(
           cannot both open an issue for one proposal.
         - For each requested proposal that exists and has not already been filed,
           opens one GitHub issue (carrying the finding's full detail, token-
-          scrubbed) in the reviewed repository — fanned out concurrently — records
-          the created issue's number/url on the proposal, and persists the
-          updated proposals to both the job store and the durable review row.
+          scrubbed) in the reviewed repository — fanned out concurrently via
+          :func:`shared.concurrency.parallel_map` (which also propagates the
+          caller's contextvars, e.g. trace_id, into each creation worker) —
+          records the created issue's number/url on the proposal, and persists
+          the updated proposals to both the job store and the durable review row.
           Idempotent: a proposal already carrying an ``issue_url`` is skipped, so
           a repeated request never opens a duplicate; an unknown id is ignored.
           A finding ``annotate_duplicate_proposals`` matched to a pre-existing
@@ -375,60 +377,72 @@ def create_review_issues(
             if needed:
                 with _api_main().GitHubClient(token=token) as client:
 
-                    def _file_one(pid: str) -> Optional[Dict[str, Any]]:
+                    def _file_one(
+                        pid: str,
+                    ) -> tuple[str, Optional[Dict[str, Any]], Optional[Exception]]:
                         proposal = by_id[pid]
                         if proposal.get("issue_url"):
                             # Race-only defense: ``needed`` already filtered filed
                             # proposals and dedupes ids, so this is unreachable
                             # except when a concurrent writer files the proposal
                             # between that filter and this task running.
-                            return None  # pragma: no cover
-                        title, body = build_issue_from_proposal(
-                            proposal, pr_number=ctx.pr_number, pr_url=ctx.pr_url
-                        )
-                        # The finding text is LLM output over the reviewed code and
-                        # can echo a secret from it, exactly like the PR comments —
-                        # scrub both title and body before anything reaches GitHub.
-                        scrubbed_title = scrub_token_from_text(title)
-                        issue = client.create_issue(
-                            ctx.owner,
-                            ctx.repo,
-                            title=scrubbed_title,
-                            body=scrub_token_from_text(body),
-                        )
+                            return pid, None, None  # pragma: no cover
+                        try:
+                            title, body = build_issue_from_proposal(
+                                proposal, pr_number=ctx.pr_number, pr_url=ctx.pr_url
+                            )
+                            # The finding text is LLM output over the reviewed code
+                            # and can echo a secret from it, exactly like the PR
+                            # comments — scrub both title and body before anything
+                            # reaches GitHub.
+                            scrubbed_title = scrub_token_from_text(title)
+                            issue = client.create_issue(
+                                ctx.owner,
+                                ctx.repo,
+                                title=scrubbed_title,
+                                body=scrub_token_from_text(body),
+                            )
+                        except Exception as exc:  # noqa: BLE001 - collected; re-raised below after every proposal has had its chance
+                            return pid, None, exc
                         proposal["issue_number"] = issue.number
                         proposal["issue_url"] = issue.html_url
-                        return {
-                            "proposal_id": pid,
-                            "issue_number": issue.number,
-                            "issue_url": issue.html_url,
-                            # The scrubbed title, matching what was actually filed —
-                            # never the raw one, which can still carry a secret.
-                            "title": scrubbed_title,
-                        }
+                        return (
+                            pid,
+                            {
+                                "proposal_id": pid,
+                                "issue_number": issue.number,
+                                "issue_url": issue.html_url,
+                                # The scrubbed title, matching what was actually
+                                # filed — never the raw one, which can still carry
+                                # a secret.
+                                "title": scrubbed_title,
+                            },
+                            None,
+                        )
 
                     # Each proposal's issue-creation call is independent (a distinct
                     # proposal, no shared mutable state until its own result is
-                    # folded in below), so fan them out concurrently instead of
-                    # paying one sequential GitHub round-trip per proposal — the
-                    # same pattern this module already uses for _fetch_head_files.
-                    # Every future is drained (successes and failures alike)
+                    # folded in below), so fan them out concurrently via
+                    # shared.concurrency.parallel_map instead of paying one
+                    # sequential GitHub round-trip per proposal — the same
+                    # primitive pr_review.py's _fetch_head_files uses, which also
+                    # propagates the caller's contextvars (LLM attribution,
+                    # trace_id) into each creation worker. _file_one catches its
+                    # own exception and returns it rather than raising, so
+                    # parallel_map's own fast-fail path never triggers here —
+                    # every proposal is always attempted and its outcome collected
                     # before any exception is re-raised, so one proposal's GitHub
                     # rejection never stops another's independent creation.
-                    workers = min(_ISSUE_CREATION_PARALLELISM, len(needed))
-                    with ThreadPoolExecutor(max_workers=workers) as executor:
-                        futures = {executor.submit(_file_one, pid): pid for pid in needed}
-                        errors: Dict[str, BaseException] = {}
-                        for future in futures:
-                            pid = futures[future]
-                            try:
-                                result = future.result()
-                            except Exception as e:  # noqa: BLE001 - collected; re-raised below after every proposal has had its chance
-                                errors[pid] = e
-                                continue
-                            if result is not None:
-                                changed = True
-                                created.append(result)
+                    outcomes = parallel_map(
+                        needed, _file_one, max_workers=_ISSUE_CREATION_PARALLELISM, skip_none=False
+                    )
+                    errors: Dict[str, BaseException] = {}
+                    for pid, result, err in outcomes:
+                        if err is not None:
+                            errors[pid] = err
+                        elif result is not None:
+                            changed = True
+                            created.append(result)
                     if errors:
                         # Log every failure, not just the one re-raised below — an
                         # operator debugging "why didn't proposal p3 get filed"
