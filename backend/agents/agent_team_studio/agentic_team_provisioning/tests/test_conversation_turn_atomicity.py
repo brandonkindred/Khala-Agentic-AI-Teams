@@ -350,3 +350,77 @@ def test_create_conversation_persists_turn_on_success(
         ("user", "hi there"),
         ("assistant", "Sure, let's design that."),
     ]
+
+
+def test_send_message_does_not_serialize_same_conversation_turns(
+    fake_pg: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Pins the current, intentional absence of a turn-lock around ``send_message``.
+
+    Unlike Agent Studio (whose ``AgentStudioConversationStore.turn()`` holds a
+    per-conversation lock across the whole read -> LLM -> write span — see
+    ``assistant_kernel.turn_lock`` and
+    ``assistant_kernel/tests/test_designer_parity.py::test_process_designer_has_no_turn_lock_surface``),
+    ``send_message`` here has no such lock: each ``_store`` call commits
+    independently, with nothing serializing a whole turn against a concurrent
+    one on the same conversation. Wiring one up is a documented follow-up
+    (``assistant_kernel/turn_lock.py``'s module docstring), not done here.
+
+    Proves the absence deterministically rather than via a timing-dependent
+    race: the first call's mocked LLM step blocks on an ``Event`` until the
+    test has driven a *second* call, for the same conversation, to full
+    completion. If a turn-lock existed, the second call would itself block
+    waiting on the first's lock instead of completing — so a future migration
+    that adds one turns this into a hang/timeout, the intended regression
+    signal, rather than a silent pass.
+
+    Preconditions: an existing conversation with no messages.
+    Postconditions: the second turn's messages are visible in history before
+        the first turn's (proving the two turns interleaved rather than
+        serialized).
+    """
+    import threading
+
+    import agent_team_studio.agentic_team_provisioning.api.main as main_mod
+    from agent_team_studio.agentic_team_provisioning.api.services import (
+        conversations as conv_svc,
+    )
+    from agent_team_studio.agentic_team_provisioning.models import SendMessageRequest
+
+    team_id = _new_team()
+    conversation_id = AgenticTeamStore().create_conversation(team_id=team_id)
+
+    first_call_entered_respond = threading.Event()
+    release_first_call = threading.Event()
+
+    def _respond(**kwargs):
+        if kwargs["user_message"] == "first":
+            first_call_entered_respond.set()
+            assert release_first_call.wait(timeout=5), "second call never ran"
+            return ("First reply", None, [], None)
+        return ("Second reply", None, [], None)
+
+    monkeypatch.setattr(main_mod._agent, "respond", _respond)
+
+    first_thread = threading.Thread(
+        target=lambda: conv_svc.send_message(conversation_id, SendMessageRequest(message="first"))
+    )
+    first_thread.start()
+    assert first_call_entered_respond.wait(timeout=5), "first call never reached respond"
+
+    # The first turn is still in flight (blocked inside respond). A second turn
+    # for the SAME conversation must be free to run to completion -- proving
+    # nothing holds a lock across the first turn's read -> respond -> write span.
+    conv_svc.send_message(conversation_id, SendMessageRequest(message="second"))
+
+    release_first_call.set()
+    first_thread.join(timeout=5)
+    assert not first_thread.is_alive(), "first call did not complete after being released"
+
+    messages = AgenticTeamStore().get_messages(conversation_id)
+    # The second turn's messages committed while the first was still blocked --
+    # only possible because send_message holds no per-conversation lock.
+    assert [(m.role, m.content) for m in messages[:2]] == [
+        ("user", "second"),
+        ("assistant", "Second reply"),
+    ]

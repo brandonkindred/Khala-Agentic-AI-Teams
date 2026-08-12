@@ -30,6 +30,7 @@ from agent_team_studio.agentic_team_provisioning.assistant.agent import (
     ProcessDesignerAgent,
     _dict_to_process,
 )
+from agent_team_studio.agentic_team_provisioning.assistant.store import AgenticTeamStore
 
 
 def _completion(text: str):
@@ -209,11 +210,19 @@ def test_agent_studio_turn_rolls_back_when_respond_raises_mid_turn() -> None:
 
 
 def test_process_designer_has_no_turn_lock_surface() -> None:
-    # Pins the current, intentional asymmetry so a future turn-lock migration
-    # for Process Designer fails this assertion loudly, prompting an update to
-    # this suite's turn-lock parity scope rather than silently drifting.
-    assert not hasattr(ProcessDesignerAgent, "turn")
-    assert "InMemoryTurnLocks" not in vars(agent_module)
+    # Pinned against AgenticTeamStore -- the actual store-layer analog of
+    # AgentStudioConversationStore -- not ProcessDesignerAgent, which never
+    # owned locking on either side (Agent Studio's turn-lock lives in its
+    # store too, not AgentDesignerAgent). The real read -> LLM -> write
+    # boundary for Process Designer is send_message() in
+    # api/services/conversations.py; a concurrency-level proof that it
+    # doesn't serialize same-conversation turns lives in
+    # agentic_team_provisioning/tests/test_conversation_turn_atomicity.py::
+    # test_send_message_does_not_serialize_same_conversation_turns (kept
+    # there since it needs that module's Postgres-backed store fixtures). If
+    # a future turn-lock migration wraps AgenticTeamStore or send_message,
+    # update both assertions together rather than letting them drift apart.
+    assert not hasattr(AgenticTeamStore, "turn")
 
 
 # ---------------------------------------------------------------------------
