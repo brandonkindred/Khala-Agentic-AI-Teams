@@ -1150,7 +1150,7 @@ class _SelectiveRaiser(DummyLLMClient):
 
 
 class _FailNTimes(DummyLLMClient):
-    """Fails the first ``n`` calls, then succeeds."""
+    """Fails the first ``n`` chunk-map reasoning passes, then succeeds."""
 
     def __init__(self, n: int) -> None:
         super().__init__()
@@ -1158,12 +1158,16 @@ class _FailNTimes(DummyLLMClient):
         self.prompts: list[str] = []
         self._lock = threading.Lock()
 
+    def complete(self, prompt: str, **kwargs: Any) -> str:
+        if _is_chunk_map_reasoning_prompt(prompt):
+            with self._lock:
+                self.prompts.append(prompt)
+                if self.remaining > 0:
+                    self.remaining -= 1
+                    raise _bisecting_failure("transient")
+        return super().complete(prompt, **kwargs)
+
     def complete_json(self, prompt: str, **kwargs: Any) -> dict[str, Any]:
-        with self._lock:
-            self.prompts.append(prompt)
-            if self.remaining > 0:
-                self.remaining -= 1
-                raise _bisecting_failure("transient")
         return super().complete_json(prompt, **kwargs)
 
 
@@ -1329,7 +1333,6 @@ def test_failing_multi_segment_chunk_bisects_and_recovers() -> None:
             return super().complete(prompt, **kwargs)
 
         def complete_json(self, prompt: str, **kwargs: Any) -> dict[str, Any]:
-            self.calls += 1
             return super().complete_json(prompt, **kwargs)
 
     client = _FailOnCombined()
@@ -1339,13 +1342,12 @@ def test_failing_multi_segment_chunk_bisects_and_recovers() -> None:
             files={"a.py": "def a(): pass", "b.py": "def b(): pass"},
             task_description="t",
             language="python",
+            skip_tail_passes=True,
         ),
     )
-    # combined fail + two single-file successes + 1 reduce-phase synthesis pass
-    # (two recovered sub-reviews → one findings-only synthesis call) + 1
-    # merged architecture/side-effect pass call (its single prompt also inlines both
-    # files together, so it hits the same synthetic failure and fails safe).
-    assert client.calls == 7
+    # Map-phase reasoning attempts only (format passes are not counted): combined
+    # fail + two single-file recoveries.
+    assert client.calls == 3
     assert result.approved is True
     assert all(i.severity != "info" for i in result.issues)
 
@@ -1360,12 +1362,12 @@ def test_transient_failure_recovers_via_same_input_retry() -> None:
             files={"only.py": "def only(): pass"},
             task_description="t",
             language="python",
+            skip_tail_passes=True,
         ),
     )
     assert result.approved is True
-    # initial failure + successful retry + 1 merged architecture/side-effect pass call
-    # (additive, runs once per submission after the map phase completes).
-    assert len(client.prompts) == 3
+    # Map-phase reasoning attempts only: initial failure + successful retry.
+    assert len(client.prompts) == 2
 
 
 def test_transient_failure_in_bisected_child_recovers() -> None:
@@ -1390,9 +1392,6 @@ def test_transient_failure_in_bisected_child_recovers() -> None:
             return super().complete(prompt, **kwargs)
 
         def complete_json(self, prompt: str, **kwargs: Any) -> dict[str, Any]:
-            self.calls += 1
-            if "### a.py ###" in prompt and "### b.py ###" in prompt:
-                raise _bisecting_failure("no content")  # tail/arch combined prompts
             return super().complete_json(prompt, **kwargs)
 
     client = _FailCombinedAndChildOnce()
@@ -1402,18 +1401,13 @@ def test_transient_failure_in_bisected_child_recovers() -> None:
             files={"a.py": "def a(): pass", "b.py": "def b(): pass"},
             task_description="t",
             language="python",
+            skip_tail_passes=True,
         ),
     )
     assert result.approved is True
-    # Map phase: combined fail + a fail + a retry success + b success (4 calls).
-    # + 1 reduce-phase synthesis pass (two recovered sub-reviews).
-    # + Merged architecture/side-effect pass (now on the shared submission-pass
-    # runner, which reactively bisects on overflow rather than failing safe):
-    # its single combined prompt also inlines both files together, so it hits
-    # the same combined-fail branch and bisects into an a.py call (a_failures
-    # is already consumed by the map phase's retry, so this succeeds
-    # immediately) and a b.py call (3 calls).
-    assert client.calls == 10
+    # Map-phase reasoning attempts only: combined fail + a fail + a retry success
+    # + b success.
+    assert client.calls == 4
 
 
 def test_bisect_halves_run_sequentially_detects_dummy_and_wrapped_dummy() -> None:
@@ -1630,7 +1624,6 @@ def test_semantic_exhaustion_without_ladder_still_gets_same_input_retry() -> Non
     class _FailOnceNoLadder(DummyLLMClient):
         def __init__(self) -> None:
             super().__init__()
-            self.calls = 0
             self._map_reasoning_attempts = 0
 
         def complete(self, prompt: str, **kwargs: Any) -> str:
@@ -1641,20 +1634,21 @@ def test_semantic_exhaustion_without_ladder_still_gets_same_input_retry() -> Non
             return super().complete(prompt, **kwargs)
 
         def complete_json(self, prompt: str, **kwargs: Any) -> dict[str, Any]:
-            self.calls += 1
             return super().complete_json(prompt, **kwargs)
 
     client = _FailOnceNoLadder()
     result = run_coordinator(
         client,
         CodeReviewInput(
-            files={"only.py": "def only(): pass"}, task_description="t", language="python"
+            files={"only.py": "def only(): pass"},
+            task_description="t",
+            language="python",
+            skip_tail_passes=True,
         ),
     )
     assert result.approved is True
-    # initial no-ladder exhaustion + successful same-input retry + 1
-    # merged architecture/side-effect pass call (additive, runs once per submission).
-    assert client.calls == 2
+    # Map-phase reasoning attempts only: initial no-ladder exhaustion + retry.
+    assert client._map_reasoning_attempts == 2
 
 
 def test_context_chained_child_failure_is_not_misclassified_as_semantic() -> None:
