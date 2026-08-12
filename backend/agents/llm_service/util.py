@@ -21,28 +21,6 @@ from .interface import (
     LLMUnreachableAfterRetriesError,
 )
 
-# Keys used when trying code-block fallback (optional filter)
-_DEFAULT_EXPECTED_KEYS = frozenset(
-    {
-        "files",
-        "summary",
-        "code",
-        "overview",
-        "issues",
-        "approved",
-        "components",
-        "architecture_document",
-        "diagrams",
-        "decisions",
-        "tasks",
-        "execution_order",
-        "bugs_found",
-        "integration_tests",
-        "unit_tests",
-        "readme_content",
-    }
-)
-
 logger = logging.getLogger(__name__)
 
 
@@ -250,6 +228,9 @@ def _repair_json(s: str) -> str:
     return re.sub(r",\s*([}\]])", r"\1", s)
 
 
+_FENCED_BLOCK_RE = re.compile(r"```(?:json)?\s*([\s\S]*?)```", re.IGNORECASE)
+
+
 def extract_json_from_response(
     text: str,
     *,
@@ -258,84 +239,97 @@ def extract_json_from_response(
     """
     Extract a single JSON object from model output (e.g. after continuation).
     Raises LLMJsonParseError on failure.
+
+    Preconditions:
+        - ``text`` is a str (may be empty or contain no JSON at all).
+        - ``expected_keys`` is ``None`` or a frozenset of str anchor keys used
+          to disambiguate ambiguous or salvaged output.
+    Postconditions:
+        - When ``text`` contains 0 or 1 fenced code blocks, behavior (and
+          performance) is unchanged from the original single-candidate fast
+          path: the first successful parse among the direct/repaired/regex/
+          stripped-prefix strategies is returned immediately, with no
+          ``expected_keys`` check performed.
+        - When ``text`` contains 2+ fenced code blocks (e.g. an echoed
+          format-example block followed by the real-answer block), the greedy
+          fast-path returns are skipped and resolution is delegated ENTIRELY
+          to the shared ``extract_json_object`` salvage engine (see
+          ``shared.llm_recovery.recovery._salvage_object``) -- its top-level,
+          string-aware balanced-span scan already finds every top-level JSON
+          object in the ORIGINAL text regardless of surrounding fences, and
+          its selection rule picks the LAST one satisfying ``expected_keys``.
+          This function does not re-implement that disambiguation itself.
+        - Falls back to the same ``extract_json_object`` call, anchored on the
+          caller's original ``expected_keys``, whenever no earlier strategy
+          succeeds.
+        - Raises ``LLMJsonParseError`` only when every strategy above fails.
     """
     original_text = text
     original_expected_keys = expected_keys
-    if expected_keys is None:
-        expected_keys = _DEFAULT_EXPECTED_KEYS
     if "---DRAFT---" in text:
         parts = text.split("---DRAFT---", 1)
         if len(parts) == 2 and parts[1].strip():
             return {"content": parts[1].strip()}
-    json_block_match = re.search(r"```json\s*([\s\S]*?)```", text, re.IGNORECASE)
-    if json_block_match:
-        text = json_block_match.group(1).strip()
-    else:
-        fenced_match = re.search(
-            r"```(?:json)?\s*([\s\S]*?)```", text, flags=re.DOTALL | re.IGNORECASE
-        )
-        if fenced_match:
-            block_content = fenced_match.group(1).strip()
-            if block_content.lstrip().startswith(("{", "[")):
-                text = block_content
-    try:
-        return json.loads(text)
-    except (json.JSONDecodeError, ValueError):
-        pass
-    repaired = _repair_json(text)
-    try:
-        return json.loads(repaired)
-    except (json.JSONDecodeError, ValueError):
-        pass
-    obj_match = re.search(r"\{.*\}", text, flags=re.DOTALL)
-    if obj_match:
-        raw = obj_match.group(0)
+
+    ambiguous = len(_FENCED_BLOCK_RE.findall(text)) > 1
+
+    if not ambiguous:
+        json_block_match = re.search(r"```json\s*([\s\S]*?)```", text, re.IGNORECASE)
+        if json_block_match:
+            text = json_block_match.group(1).strip()
+        else:
+            fenced_match = re.search(
+                r"```(?:json)?\s*([\s\S]*?)```", text, flags=re.DOTALL | re.IGNORECASE
+            )
+            if fenced_match:
+                block_content = fenced_match.group(1).strip()
+                if block_content.lstrip().startswith(("{", "[")):
+                    text = block_content
         try:
-            return json.loads(raw)
+            return json.loads(text)
         except (json.JSONDecodeError, ValueError):
-            try:
-                return json.loads(_repair_json(raw))
-            except (json.JSONDecodeError, ValueError):
-                pass
-    stripped = text.strip()
-    for pattern in (
-        r"^(?:Here(?:'s| is) (?:the )?JSON:?)\s*",
-        r"^(?:The (?:response|output|result) is:?)\s*",
-        r"^(?:JSON:?)\s*",
-        r"^\s*```(?:json)?\s*",
-        r"\s*```\s*$",
-    ):
-        stripped = re.sub(pattern, "", stripped, flags=re.IGNORECASE).strip()
-    if stripped != text.strip():
-        obj_match2 = re.search(r"\{.*\}", stripped, flags=re.DOTALL)
-        if obj_match2:
-            try:
-                return json.loads(obj_match2.group(0))
-            except (json.JSONDecodeError, ValueError):
-                pass
-    for block_match in re.finditer(r"```(?:json)?\s*([\s\S]*?)```", text, re.IGNORECASE):
-        block = block_match.group(1).strip()
-        if not block:
-            continue
+            pass
+        repaired = _repair_json(text)
         try:
-            parsed = json.loads(block)
-            if isinstance(parsed, dict) and expected_keys & set(parsed.keys()):
-                return parsed
+            return json.loads(repaired)
         except (json.JSONDecodeError, ValueError):
+            pass
+        obj_match = re.search(r"\{.*\}", text, flags=re.DOTALL)
+        if obj_match:
+            raw = obj_match.group(0)
             try:
-                parsed = json.loads(_repair_json(block))
-                if isinstance(parsed, dict) and expected_keys & set(parsed.keys()):
-                    return parsed
+                return json.loads(raw)
             except (json.JSONDecodeError, ValueError):
-                continue
-    # Last resort: the shared salvage engine (also used by agent_call_json)
-    # covers truncation repair, <think>/<thinking>/<reasoning>/<json> tag
-    # stripping, envelope descent, and format-echo-before-payload
-    # disambiguation via a string-aware balanced-span scan. Anchored on the
-    # caller's ORIGINAL expected_keys (not the _DEFAULT_EXPECTED_KEYS-defaulted
-    # value above) so a payload with keys outside that broad default set isn't
-    # spuriously rejected, and run against the ORIGINAL text so wrapper tags
-    # this function hasn't stripped are still visible to it.
+                try:
+                    return json.loads(_repair_json(raw))
+                except (json.JSONDecodeError, ValueError):
+                    pass
+        stripped = text.strip()
+        for pattern in (
+            r"^(?:Here(?:'s| is) (?:the )?JSON:?)\s*",
+            r"^(?:The (?:response|output|result) is:?)\s*",
+            r"^(?:JSON:?)\s*",
+            r"^\s*```(?:json)?\s*",
+            r"\s*```\s*$",
+        ):
+            stripped = re.sub(pattern, "", stripped, flags=re.IGNORECASE).strip()
+        if stripped != text.strip():
+            obj_match2 = re.search(r"\{.*\}", stripped, flags=re.DOTALL)
+            if obj_match2:
+                try:
+                    return json.loads(obj_match2.group(0))
+                except (json.JSONDecodeError, ValueError):
+                    pass
+
+    # Ambiguous (2+ fenced blocks) or no fast-path candidate parsed: hand off
+    # entirely to the shared salvage engine (also used by agent_call_json).
+    # It covers truncation repair, <think>/<thinking>/<reasoning>/<json> tag
+    # stripping, envelope descent, and -- via its string-aware balanced-span
+    # scan plus last-candidate-wins selection -- format-echo-before-payload
+    # disambiguation, so this function does not need its own copy of that
+    # logic. Anchored on the caller's ORIGINAL expected_keys and run against
+    # the ORIGINAL text so wrapper tags this function hasn't stripped are
+    # still visible to it.
     salvaged = extract_json_object(original_text, required_keys=original_expected_keys)
     if salvaged is not None:
         return salvaged

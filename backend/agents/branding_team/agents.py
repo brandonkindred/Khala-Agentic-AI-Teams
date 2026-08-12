@@ -56,6 +56,7 @@ from .models import (
     VoiceToneOutput,
     WritingGuidelinesOutput,
 )
+from .prompt_spec import AgentPromptSpec, PromptFieldSpec, render_agent_prompt
 
 # ===================================================================
 # Phase 1 — Strategic Core  (Graph: fan-out / fan-in)
@@ -86,6 +87,19 @@ def make_discovery_auditor() -> Agent:
     )
 
 
+_PURPOSE_VISION_PROMPT = AgentPromptSpec(
+    opening="You are a Purpose & Vision Writer. Given a branding mission, write three things:",
+    fields=(
+        PromptFieldSpec("brand_purpose", "why the company exists (one sentence)"),
+        PromptFieldSpec(
+            "mission_statement", "what the company does for its audience (one sentence)"
+        ),
+        PromptFieldSpec("vision_statement", "the aspirational future state (one sentence)"),
+    ),
+    closing="Be concise, inspiring, and specific to the company.",
+)
+
+
 def make_purpose_vision_writer() -> Agent:
     """Build the Phase 1 Purpose & Vision Writer agent.
 
@@ -97,13 +111,7 @@ def make_purpose_vision_writer() -> Agent:
     return build_agent(
         name="purpose_vision_writer",
         description="Crafts brand purpose, mission statement, and vision statement.",
-        system_prompt=(
-            "You are a Purpose & Vision Writer. Given a branding mission, write three things:\n"
-            "1. brand_purpose — why the company exists (one sentence)\n"
-            "2. mission_statement — what the company does for its audience (one sentence)\n"
-            "3. vision_statement — the aspirational future state (one sentence)\n"
-            "Be concise, inspiring, and specific to the company."
-        ),
+        system_prompt=render_agent_prompt(_PURPOSE_VISION_PROMPT),
         structured_output=PurposeVisionOutput,
         agent_key=_PHASE1_AGENT_KEY,
     )
@@ -525,6 +533,19 @@ def make_typography_builder() -> Agent:
     )
 
 
+_ICONOGRAPHY_PROMPT = AgentPromptSpec(
+    opening="You are an Iconography Director. Based on the winning moodboard, define:",
+    fields=(
+        PromptFieldSpec(
+            "iconography_style", "describe the icon aesthetic (line weight, corner radius, fill)"
+        ),
+        PromptFieldSpec(
+            "illustration_style", "describe the illustration approach (flat, isometric, etc.)"
+        ),
+    ),
+)
+
+
 def make_iconography_director() -> Agent:
     """Build the Phase 3 Iconography Director agent.
 
@@ -536,11 +557,7 @@ def make_iconography_director() -> Agent:
     return build_agent(
         name="iconography_director",
         description="Defines iconography and illustration style.",
-        system_prompt=(
-            "You are an Iconography Director. Based on the winning moodboard, define:\n"
-            "1. iconography_style — describe the icon aesthetic (line weight, corner radius, fill)\n"
-            "2. illustration_style — describe the illustration approach (flat, isometric, etc.)"
-        ),
+        system_prompt=render_agent_prompt(_ICONOGRAPHY_PROMPT),
         structured_output=IconographyOutput,
         agent_key=_PHASE3_AGENT_KEY,
     )

@@ -4,8 +4,8 @@ import { NoopAnimationsModule } from '@angular/platform-browser/animations';
 import { MatDialogRef, MAT_DIALOG_DATA } from '@angular/material/dialog';
 import { of, throwError } from 'rxjs';
 import { GroomModalComponent } from './groom-modal.component';
-import { ProductDeliveryService } from '../../../../services/product-delivery.service';
-import type { GroomResult } from '../../../../models/product-delivery.model';
+import { ProductDeliveryService } from '../../../services/product-delivery.service';
+import type { GroomResult } from '../../../models/product-delivery.model';
 
 describe('GroomModalComponent', () => {
   let api: { groom: ReturnType<typeof vi.fn> };
