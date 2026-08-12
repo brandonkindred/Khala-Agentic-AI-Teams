@@ -288,6 +288,81 @@ k6 prints throughput and latency automatically at the end of every run — no ex
      http_reqs.......................: 5412   180.4/s
 ```
 
+## Memory / RSS Measurement
+
+`docker/scripts/measure_unified_api_rss.sh` samples unified-api's process RSS across four
+operating states — idle, DB-pool-warm, Temporal-client-active, and peak-concurrency-burst — to
+build a reproducible memory profile for right-sizing the `khala` service's resource limits (see
+the `deploy.resources`/`mem_limit` block on the `khala` service above). It reads
+`process_resident_memory_bytes{job="unified-api"}` from Prometheus (already scraped, per the
+Observability section above — no new endpoint or `docker stats` shell-out needed) using the same
+`curl .../api/v1/query | jq` pattern as the Prometheus-targets verification step below.
+
+**Methodology**
+
+- **Warm-up period**: 30s of zero driven traffic before each `idle`/`temporal-active` sample batch
+  (`WARMUP_SECONDS`), so transient startup/GC-adjacent noise settles before sampling.
+- **Sampling interval**: 5s between samples, 5 samples per state by default
+  (`SAMPLE_INTERVAL_SECONDS`/`SAMPLE_COUNT`); the script reports the median and max per state.
+- **`idle`**: sampled immediately after `/health` responds and the warm-up period elapses. In the
+  standard compose config this baseline already includes the Postgres pool at its min size (2
+  connections, opened eagerly at startup) and the Temporal client connected (also automatic at
+  startup when `TEMPORAL_ADDRESS` is set) — there's no code path that defers either past process
+  readiness, so `idle` is "freshly booted, standard config, no request traffic," not "nothing
+  initialized yet."
+- **`db-pool-warm`**: fires 12 concurrent requests (`DB_WARM_CONCURRENCY`, above the pool's default
+  10-connection max) at `/api/product-delivery/products` (`DB_WARM_PATH`) to force the Postgres
+  pool to grow beyond min size, waits 5s to settle (`DB_WARM_SETTLE_SECONDS`, comfortably inside
+  psycopg_pool's ~300s default idle-reclaim window), then samples — isolating the incremental RSS
+  cost of a fully-grown pool. Targets that route rather than `/health`: `/health`'s live-DB-probe
+  branch runs through a fixed 2-worker executor (`_get_probe_executor` in
+  `backend/unified_api/main.py`), so concurrent `/health` traffic can never grow the pool past that
+  cap, no matter how many requests are in flight — `/api/product-delivery/products` is a plain
+  synchronous route that hits Postgres directly per request through Starlette's much larger default
+  thread pool. Aborts with an error instead of sampling if fewer than half the warm-up requests
+  succeeded, since that would produce a misleading "pool-warm" measurement against a pool that
+  never actually warmed.
+- **`temporal-active`**: sampled identically to `idle`, because the Temporal client isn't
+  toggleable at runtime — it's a boot-time decision. To isolate its incremental cost, run the
+  script twice across two container boots: once with `UNIFIED_API_AGENT_STUDIO_TEMPORAL_WORKER=false`
+  and `UNIFIED_API_SANDBOX_TEMPORAL_WORKER=false` set on the `khala` service (Temporal-disabled
+  baseline — run `idle` against this boot), then again with the default config (Temporal enabled —
+  run `temporal-active`), and diff the two summaries.
+- **`peak-burst`**: launches the [k6 harness](#load-testing-k6) at `VUS=50 DURATION=60s`
+  (`PEAK_VUS`/`PEAK_DURATION` — "max configured concurrency" per the harness's own tunables) and
+  samples RSS every 15s (`PEAK_SAMPLE_INTERVAL_SECONDS`) for the burst's duration, reporting the
+  max observed value as the peak. The interval defaults to 15s — matching
+  `docker/prometheus/prometheus.yml`'s global `scrape_interval` — rather than something shorter,
+  since sampling faster than Prometheus actually scrapes just re-reads the same cached value and
+  silently produces fewer independent observations than it looks like. Keep this at or above your
+  stack's configured `scrape_interval` if you change it.
+
+**Running it**
+
+```bash
+docker compose -f docker/docker-compose.yml --env-file docker/.env up -d --build
+./docker/scripts/measure_unified_api_rss.sh idle
+./docker/scripts/measure_unified_api_rss.sh db-pool-warm
+./docker/scripts/measure_unified_api_rss.sh temporal-active
+./docker/scripts/measure_unified_api_rss.sh peak-burst
+```
+
+All four subcommands append to the same CSV (default `rss_measurements.csv` in the current
+directory, override with `OUTPUT_CSV`) with columns `timestamp,state,sample_index,rss_bytes`, and
+the `state` column always matches the subcommand name exactly (`idle`, `db-pool-warm`,
+`temporal-active`, `peak-burst`). Each invocation prints a median/max-in-MiB summary as it runs.
+Since the default filename has no timestamp, move or rename it (or set `OUTPUT_CSV` explicitly)
+between unrelated measurement sessions so they don't mix in one file. Attach or link the CSV,
+along with the printed summaries, wherever you're recording the measurement results for
+reproducibility.
+
+**Tests**: `docker/scripts/tests/test_measure_unified_api_rss.sh` covers the median/max math (odd
+and even sample counts, including Prometheus-style scientific-notation values), state-label
+consistency, `sample_index` sequencing, usage/bad-argument handling, failing loudly rather than
+reporting success when a state collects zero usable samples, and — via local mock HTTP servers
+standing in for `/health` and Prometheus, no live stack required — an end-to-end run of the `idle`
+and `db-pool-warm` subcommands. Run it with `bash docker/scripts/tests/test_measure_unified_api_rss.sh`.
+
 ## Verification
 
 After starting the stack:
