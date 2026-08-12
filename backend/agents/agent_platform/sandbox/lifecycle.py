@@ -105,12 +105,12 @@ class SandboxAcquireFailedError(RuntimeError):
 
     ``Lifecycle.acquire()`` itself never raises this — a transient failure
     inside its provisioning try block is caught internally and returned as a
-    non-raising ERROR-status :class:`~agent_team_studio.agent_provisioning_team.sandbox.state.SandboxHandle`
+    non-raising ERROR-status :class:`~agent_platform.sandbox.state.SandboxHandle`
     (see the ``except Exception`` block below), so direct/thread-mode callers
     always get a handle back. This type exists purely as the Temporal-side
     "retries exhausted" marker: the activity raises it so Temporal's retry
     policy can retry the transient failure, and once retries are truly
-    exhausted, ``sandbox_dispatch._reraise_sandbox_error`` translates it back
+    exhausted, ``dispatch._reraise_sandbox_error`` translates it back
     to this exact type so ``POST /warm`` can map it to a clean 503 instead of
     an opaque ``WorkflowFailureError``.
     """
