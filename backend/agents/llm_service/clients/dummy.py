@@ -1408,6 +1408,62 @@ def _looks_like_structured_output_tool(name: str, description_lowered: str) -> b
     )
 
 
+def _is_via_reasoning_format_prompt(lowered: str) -> bool:
+    """True when ``lowered`` looks like a via-reasoning formatting-pass prompt.
+
+    Preconditions: ``lowered`` is already lowercased prompt text.
+    Postconditions: True when the shared convert-preamble or ANALYSIS
+        delimiters are present; False otherwise.
+    """
+    return "convert the following analysis into a single json object" in lowered or (
+        "--- analysis " in lowered and "end analysis" in lowered
+    )
+
+
+def _code_review_via_reasoning_format_stub(lowered: str) -> Optional[Dict[str, Any]]:
+    """Stub JSON for code-review via-reasoning formatting contracts.
+
+    Kept out of :meth:`DummyLLMClient.complete_json` so that method stays under
+    the mccabe complexity ceiling. Matches schema-specific format instructions
+    (synthesis, spec-compliance, FPF, merged pass, chunk review) and returns
+    ``None`` for unrelated ANALYSIS-wrapped prompts (sales, SOC2, etc.).
+
+    Preconditions: ``lowered`` is already lowercased prompt text.
+    Postconditions: returns a dict matching the recognized format contract, or
+        ``None`` when this helper does not own the prompt shape.
+    """
+    if not _is_via_reasoning_format_prompt(lowered):
+        return None
+    if (
+        "exactly these keys" in lowered
+        and '"summary"' in lowered
+        and "spec_compliance_notes" in lowered
+    ):
+        # synthesize_review_findings format pass
+        return {
+            "summary": "Code review synthesis (dummy).",
+            "spec_compliance_notes": "",
+        }
+    if "exactly this key" in lowered and "spec_compliance_notes" in lowered:
+        # synthesize_spec_compliance format pass
+        return {"spec_compliance_notes": ""}
+    if '"verdicts"' in lowered:
+        # false-positive filter format pass
+        return {"verdicts": []}
+    if "architecture_findings" in lowered and "side_effect_findings" in lowered:
+        # merged architecture/side-effect format pass
+        return {"architecture_findings": [], "side_effect_findings": []}
+    if "spec_compliance_notes" in lowered and "approved" in lowered and '"issues"' in lowered:
+        # chunk-review format pass only (must not match bare ANALYSIS alone)
+        return {
+            "approved": True,
+            "issues": [],
+            "summary": "Code review passed (dummy).",
+            "spec_compliance_notes": "",
+        }
+    return None
+
+
 class DummyLLMClient(LLMClient):
     """No-op implementation for tests and environments without an LLM.
 
@@ -2093,72 +2149,13 @@ class DummyLLMClient(LLMClient):
                 "summary": "Code review passed (dummy).",
                 "spec_compliance_notes": "Code aligns with task requirements.",
             }
-        elif (
-            (
-                "convert the following analysis into a single json object" in lowered
-                or ("--- analysis " in lowered and "end analysis" in lowered)
-            )
-            and "exactly these keys" in lowered
-            and '"summary"' in lowered
-            and "spec_compliance_notes" in lowered
-        ):
-            # Review-synthesis via-reasoning formatting pass
-            # (synthesize_review_findings): summary + spec notes, no approved/issues.
-            return {
-                "summary": "Code review synthesis (dummy).",
-                "spec_compliance_notes": "",
-            }
-        elif (
-            (
-                "convert the following analysis into a single json object" in lowered
-                or ("--- analysis " in lowered and "end analysis" in lowered)
-            )
-            and "exactly this key" in lowered
-            and "spec_compliance_notes" in lowered
-        ):
-            # Dedicated spec-compliance via-reasoning formatting pass
-            # (synthesize_spec_compliance): sole key is spec_compliance_notes.
-            return {"spec_compliance_notes": ""}
-        elif (
-            (
-                "convert the following analysis into a single json object" in lowered
-                or ("--- analysis " in lowered and "end analysis" in lowered)
-            )
-            and '"verdicts"' in lowered
-        ):
-            # False-positive filter via-reasoning formatting pass.
-            return {"verdicts": []}
-        elif (
-            (
-                "convert the following analysis into a single json object" in lowered
-                or ("--- analysis " in lowered and "end analysis" in lowered)
-            )
-            and "architecture_findings" in lowered
-            and "side_effect_findings" in lowered
-        ):
-            # Merged architecture/side-effect via-reasoning formatting pass.
-            return {"architecture_findings": [], "side_effect_findings": []}
-        elif (
-            (
-                "convert the following analysis into a single json object" in lowered
-                or ("--- analysis " in lowered and "end analysis" in lowered)
-            )
-            and "spec_compliance_notes" in lowered
-            and "approved" in lowered
-            and '"issues"' in lowered
-        ):
-            # Chunk-review via-reasoning formatting pass only: ANALYSIS-wrapped
-            # prose plus the chunk-review JSON field contract. Must precede the
-            # security/accessibility anchors (formatting instructions mention
-            # "security") but must NOT match other via-reasoning format prompts
-            # (sales critics, SOC2) that share the ANALYSIS delimiters /
-            # convert-preamble alone.
-            return {
-                "approved": True,
-                "issues": [],
-                "summary": "Code review passed (dummy).",
-                "spec_compliance_notes": "",
-            }
+        elif (via_reasoning_stub := _code_review_via_reasoning_format_stub(lowered)) is not None:
+            # Schema-specific via-reasoning format contracts (chunk review,
+            # synthesis, spec-compliance, FPF, merged pass). Must precede the
+            # security/accessibility anchors — formatting instructions can
+            # mention "security" — but must not match unrelated ANALYSIS
+            # prompts (sales critics, SOC2) that share only the preamble.
+            return via_reasoning_stub
         elif "security" in lowered and "vulnerabilities" in lowered:
             # Kept ABOVE the code-review catch-all because the security agent's
             # own prompt includes "Code to review" as a section header, which
