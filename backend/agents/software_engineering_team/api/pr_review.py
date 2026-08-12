@@ -476,21 +476,21 @@ def _pr_review_admission(owner: str, repo: str, pr_number: int):
         yield
 
 
-async def _start_pr_review_temporal(job_id: str, request: ReviewPrRequest, token: str) -> None:
-    """Spawn the PR-review hook as a Temporal workflow.
-
-    Replaces the legacy threading.Thread implementation. Indirection allows 
-    tests to monkey-patch this dispatch.
+async def _start_pr_review_temporal(job_id: str, request, token: str) -> None:
     """
-    # Initialize or retrieve your Temporal client
-    # client = await Client.connect("localhost:7233") or get_temporal_client()
+    Dispatches a PR review job to Temporal.
+    """
     client = await get_temporal_client()
+    
+    # Configurable workflow routing per best practices
+    workflow_name = os.environ.get("TEMPORAL_PR_REVIEW_WORKFLOW", "CodeReviewWorkflow")
+    task_queue = os.environ.get("TEMPORAL_CODE_REVIEW_QUEUE", "code-review")
 
     await client.execute_workflow(
-        "PrReviewWorkflow",  # Replace with your actual Workflow class or string name
+        workflow_name, 
         args=[job_id, request, token],
         id=f"pr-review-{job_id}",
-        task_queue="code-review",  # Replace with your actual task queue name
+        task_queue=task_queue, 
     )
 
 
