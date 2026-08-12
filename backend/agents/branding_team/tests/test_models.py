@@ -20,9 +20,12 @@ import pytest
 from pydantic import ValidationError
 
 from branding_team.models import (
+    AudienceMessageMap,
     AudienceMessageMapOutput,
+    AudienceSegment,
     AudienceSegmentOutput,
     AudienceSegmentsOutput,
+    BrandArchetype,
     BrandArchetypeOutput,
     BrandArchetypesOutput,
     BrandArchitectureOutput,
@@ -34,11 +37,15 @@ from branding_team.models import (
     CoreValue,
     CoreValueOutput,
     CoreValuesOutput,
+    DifferentiationPillar,
     DifferentiationPillarOutput,
     DifferentiationPillarsOutput,
+    ElevatorPitch,
     ElevatorPitchOutput,
     MessagingFrameworkOutput,
+    MessagingPillar,
     MessagingPillarOutput,
+    PersonaProfile,
     PersonaProfileOutput,
     PersonaProfilesOutput,
     PositioningOutput,
@@ -213,6 +220,44 @@ def test_audience_segment_output_rejects_blank_content() -> None:
     assert output.name == "Enterprise leaders"
 
 
+def test_audience_segment_permits_blank_and_omitted_content() -> None:
+    """``AudienceSegment`` is the soft merge-target twin: only ``name`` is
+    required; ``description``/``pain_points``/``goals``/``decision_drivers``
+    accept blank/omitted content, matching
+    ``StrategicCoreOutput.target_audience_segments``'s partial-fragment merge
+    contract."""
+    minimal = AudienceSegment(name="Enterprise leaders")
+    assert minimal.description == ""
+    assert minimal.pain_points == []
+    assert minimal.goals == []
+    assert minimal.decision_drivers == []
+
+    explicit_blank = AudienceSegment(
+        name="Enterprise leaders",
+        description="",
+        pain_points=[],
+        goals=[],
+        decision_drivers=[],
+    )
+    assert explicit_blank.description == ""
+
+    blank_item = AudienceSegment(name="Enterprise leaders", pain_points=[""])
+    assert blank_item.pain_points == [""]
+
+
+def test_audience_segment_output_is_usable_as_an_audience_segment() -> None:
+    """The derived strict twin stays a normal, directly constructible
+    ``pydantic.BaseModel`` subclass wherever ``AudienceSegment`` is."""
+    output = AudienceSegmentOutput(
+        name="Enterprise leaders",
+        description="VP/Director-level buyers at mid-market SaaS companies.",
+        pain_points=["Inconsistent brand touchpoints"],
+        goals=["Ship cohesive experiences"],
+        decision_drivers=["Proven execution speed"],
+    )
+    assert isinstance(output, AudienceSegment)
+
+
 def test_differentiation_pillars_output_enforces_stated_cardinality() -> None:
     """Prompt asks for "2-4 differentiation pillars"."""
     pillar = DifferentiationPillarOutput(
@@ -248,6 +293,36 @@ def test_differentiation_pillar_output_rejects_blank_content() -> None:
 
     output = DifferentiationPillarOutput(**valid_kwargs)
     assert output.pillar == "Execution speed"
+
+
+def test_differentiation_pillar_permits_blank_and_omitted_content() -> None:
+    """``DifferentiationPillar`` is the soft merge-target twin: only
+    ``pillar`` is required; ``proof_points``/``competitive_context`` accept
+    blank/omitted content, matching
+    ``StrategicCoreOutput.differentiation_pillars``'s partial-fragment merge
+    contract."""
+    minimal = DifferentiationPillar(pillar="Execution speed")
+    assert minimal.proof_points == []
+    assert minimal.competitive_context == ""
+
+    explicit_blank = DifferentiationPillar(
+        pillar="Execution speed", proof_points=[], competitive_context=""
+    )
+    assert explicit_blank.competitive_context == ""
+
+    blank_item = DifferentiationPillar(pillar="Execution speed", proof_points=[""])
+    assert blank_item.proof_points == [""]
+
+
+def test_differentiation_pillar_output_is_usable_as_a_differentiation_pillar() -> None:
+    """The derived strict twin stays a normal, directly constructible
+    ``pydantic.BaseModel`` subclass wherever ``DifferentiationPillar`` is."""
+    output = DifferentiationPillarOutput(
+        pillar="Execution speed",
+        proof_points=["Ship weekly release cadence"],
+        competitive_context="Competitors ship quarterly.",
+    )
+    assert isinstance(output, DifferentiationPillar)
 
 
 def test_brand_story_output_rejects_missing_and_enforces_cardinality() -> None:
@@ -358,6 +433,25 @@ def test_brand_archetype_output_rejects_blank_content() -> None:
     assert output.archetype == "The Creator"
 
 
+def test_brand_archetype_permits_blank_and_omitted_content() -> None:
+    """``BrandArchetype`` is the soft merge-target twin: only ``archetype``
+    is required; ``rationale``/``personality_traits`` accept blank/omitted
+    content, matching ``NarrativeMessagingOutput.brand_archetypes``'s
+    partial-fragment merge contract."""
+    minimal = BrandArchetype(archetype="The Creator")
+    assert minimal.rationale == ""
+    assert minimal.personality_traits == []
+
+    blank_item = BrandArchetype(archetype="The Creator", personality_traits=[""])
+    assert blank_item.personality_traits == [""]
+
+
+def test_brand_archetype_output_is_usable_as_a_brand_archetype() -> None:
+    """The derived strict twin stays a normal, directly constructible
+    ``pydantic.BaseModel`` subclass wherever ``BrandArchetype`` is."""
+    assert isinstance(_ARCHETYPE, BrandArchetype)
+
+
 def test_tagline_output_rejects_missing_and_enforces_cardinality() -> None:
     """Prompt asks for three elevator pitch tiers; inherits prior narrative."""
     base = {**_STORY, "brand_archetypes": [_ARCHETYPE]}
@@ -391,6 +485,25 @@ def test_tagline_output_rejects_blank_elevator_pitch_fields() -> None:
 
     output = TaglineOutput(**base, elevator_pitches=_PITCHES)
     assert output.elevator_pitches[0].tier == "5-second"
+
+
+def test_elevator_pitch_permits_blank_and_omitted_content() -> None:
+    """``ElevatorPitch`` is the soft merge-target twin: both fields default
+    to blank, matching ``NarrativeMessagingOutput.elevator_pitches``'s
+    partial-fragment merge contract."""
+    minimal = ElevatorPitch()
+    assert minimal.tier == ""
+    assert minimal.pitch == ""
+
+    explicit_blank = ElevatorPitch(tier="", pitch="")
+    assert explicit_blank.tier == ""
+    assert explicit_blank.pitch == ""
+
+
+def test_elevator_pitch_output_is_usable_as_an_elevator_pitch() -> None:
+    """The derived strict twin stays a normal, directly constructible
+    ``pydantic.BaseModel`` subclass wherever ``ElevatorPitch`` is."""
+    assert isinstance(_PITCHES[0], ElevatorPitch)
 
 
 def test_messaging_framework_output_enforces_stated_cardinality() -> None:
@@ -446,6 +559,46 @@ def test_messaging_pillar_and_audience_map_outputs_reject_blank_content() -> Non
     assert audience.audience_segment == "Enterprise leaders"
 
 
+def test_messaging_pillar_permits_blank_and_omitted_content() -> None:
+    """``MessagingPillar`` is the soft merge-target twin: only ``pillar`` is
+    required; ``key_message``/``proof_points`` accept blank/omitted content,
+    matching ``NarrativeMessagingOutput.messaging_framework``'s
+    partial-fragment merge contract."""
+    minimal = MessagingPillar(pillar="Cohesion")
+    assert minimal.key_message == ""
+    assert minimal.proof_points == []
+
+    blank_item = MessagingPillar(pillar="Cohesion", proof_points=[""])
+    assert blank_item.proof_points == [""]
+
+
+def test_messaging_pillar_output_is_usable_as_a_messaging_pillar() -> None:
+    """The derived strict twin stays a normal, directly constructible
+    ``pydantic.BaseModel`` subclass wherever ``MessagingPillar`` is."""
+    assert isinstance(_PILLAR, MessagingPillar)
+
+
+def test_audience_message_map_permits_blank_and_omitted_content() -> None:
+    """``AudienceMessageMap`` is the soft merge-target twin: only
+    ``audience_segment`` is required; ``primary_message``/
+    ``supporting_messages``/``tone_adjustments`` accept blank/omitted
+    content, matching ``NarrativeMessagingOutput.audience_message_maps``'s
+    partial-fragment merge contract."""
+    minimal = AudienceMessageMap(audience_segment="Enterprise leaders")
+    assert minimal.primary_message == ""
+    assert minimal.supporting_messages == []
+    assert minimal.tone_adjustments == ""
+
+    blank_item = AudienceMessageMap(audience_segment="Enterprise leaders", supporting_messages=[""])
+    assert blank_item.supporting_messages == [""]
+
+
+def test_audience_message_map_output_is_usable_as_an_audience_message_map() -> None:
+    """The derived strict twin stays a normal, directly constructible
+    ``pydantic.BaseModel`` subclass wherever ``AudienceMessageMap`` is."""
+    assert isinstance(_AUDIENCE, AudienceMessageMap)
+
+
 def test_persona_profiles_output_enforces_stated_cardinality() -> None:
     """Prompt asks for "2-3 persona profiles"."""
     base = {
@@ -479,6 +632,30 @@ def test_persona_profile_output_rejects_blank_name() -> None:
 
     output = PersonaProfileOutput(**valid_kwargs)
     assert output.name == "Alex"
+
+
+def test_persona_profile_permits_blank_and_omitted_content() -> None:
+    """``PersonaProfile`` is the soft merge-target twin: only ``name`` is
+    required; every other field accepts blank/omitted content, matching
+    ``NarrativeMessagingOutput.persona_profiles``'s partial-fragment merge
+    contract."""
+    minimal = PersonaProfile(name="Alex")
+    assert minimal.role == ""
+    assert minimal.demographics == ""
+    assert minimal.psychographics == ""
+    assert minimal.goals == []
+    assert minimal.frustrations == []
+    assert minimal.media_habits == []
+    assert minimal.jobs_to_be_done == []
+
+    blank_item = PersonaProfile(name="Alex", goals=[""])
+    assert blank_item.goals == [""]
+
+
+def test_persona_profile_output_is_usable_as_a_persona_profile() -> None:
+    """The derived strict twin stays a normal, directly constructible
+    ``pydantic.BaseModel`` subclass wherever ``PersonaProfile`` is."""
+    assert isinstance(_PERSONA, PersonaProfile)
 
 
 def test_writing_guidelines_output_rejects_missing_and_enforces_cardinality() -> None:
