@@ -44,6 +44,17 @@ export class AgentStudioStateService {
   /** Stage-3 gate: status of the process selected as the Stage-4 handoff target. */
   readonly composeProcessStatus = signal<ProcessStatus | null>(null);
 
+  // ── Server draft binding (spec §3.5) ───────────────────────────────────────
+  /**
+   * Server draft id this session is bound to; `null` until the first
+   * successful save. Re-saving with this set issues a PUT (update-in-place)
+   * instead of a POST (create) — see `AgentStudioApiService`.
+   */
+  readonly currentDraftId = signal<string | null>(null);
+  /** Server draft name from the last successful save — pre-fills the
+   *  Save-draft popover on re-save so it doesn't silently rename on confirm. */
+  readonly currentDraftName = signal<string | null>(null);
+
   /**
    * `${teamId}::${manifestId}` keys the Stage-2 handoff agent has already been
    * auto-added for (spec §2.4 handoff). Kept in shared session state — not on
@@ -225,6 +236,20 @@ export class AgentStudioStateService {
   }
 
   /**
+   * Record the server draft this session is now bound to. A single combined
+   * setter (rather than two) because `draft_id`/`name` always change together
+   * after a create/update response — this prevents a caller from updating one
+   * without the other and leaving them inconsistent mid-frame.
+   *
+   * Preconditions: none.
+   * Postconditions: `currentDraftId() === id` and `currentDraftName() === name`.
+   */
+  setCurrentDraft(id: string | null, name: string | null): void {
+    this.currentDraftId.set(id);
+    this.currentDraftName.set(name);
+  }
+
+  /**
    * Whether the Stage-2 handoff agent has already been auto-added for `key`
    * (`${teamId}::${manifestId}`) this session.
    *
@@ -261,6 +286,8 @@ export class AgentStudioStateService {
     this.draftAgentId.set(null);
     this.rosterFullyStaffed.set(false);
     this.composeProcessStatus.set(null);
+    this.currentDraftId.set(null);
+    this.currentDraftName.set(null);
     this.handoffConsumed.clear();
     this._activeStage.set(0);
     this._maxReachedStage.set(0);

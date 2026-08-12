@@ -105,6 +105,24 @@ describe('AgentStudioStateService', () => {
     });
   });
 
+  it('starts with no server draft bound', () => {
+    expect(service.currentDraftId()).toBeNull();
+    expect(service.currentDraftName()).toBeNull();
+  });
+
+  it('setCurrentDraft updates the id and name together', () => {
+    service.setCurrentDraft('draft-1', 'My draft');
+    expect(service.currentDraftId()).toBe('draft-1');
+    expect(service.currentDraftName()).toBe('My draft');
+  });
+
+  it('reset clears the bound server draft', () => {
+    service.setCurrentDraft('draft-1', 'My draft');
+    service.reset();
+    expect(service.currentDraftId()).toBeNull();
+    expect(service.currentDraftName()).toBeNull();
+  });
+
   it('starts with the Stage-3 gate signals unstaffed/unset', () => {
     expect(service.rosterFullyStaffed()).toBe(false);
     expect(service.composeProcessStatus()).toBeNull();

@@ -1,8 +1,10 @@
 import { Component, EventEmitter, Input, Output } from '@angular/core';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
+import { MatDialog } from '@angular/material/dialog';
 import { NoopAnimationsModule } from '@angular/platform-browser/animations';
 import { of } from 'rxjs';
 import { vi } from 'vitest';
+import type { AgentStudioDraftSummary } from '../../../models/agent-studio.model';
 import { AgentStudioApiService } from '../../../services/agent-studio-api.service';
 import { AgentCatalogComponent } from '../agent-console/agent-catalog/agent-catalog.component';
 import { AgentProvisioningPanelComponent } from '../agent-provisioning-panel/agent-provisioning-panel.component';
@@ -92,14 +94,76 @@ describe('AgentStudioShellComponent', () => {
     expect(steps[1].classList.contains('is-active')).toBe(false);
   });
 
-  it('renders the disabled Save/Load draft header placeholders (spec §3.5)', () => {
+  it('renders Save draft (enabled) and Load draft (disabled placeholder) in the header (spec §3.5)', () => {
     const draftButtons = fixture.nativeElement.querySelectorAll('.studio__draft-btn');
     expect(draftButtons.length).toBe(2);
     const labels = Array.from(draftButtons).map((b) => (b as HTMLElement).textContent?.trim());
     expect(labels[0]).toContain('Save draft');
     expect(labels[1]).toContain('Load draft');
-    expect((draftButtons[0] as HTMLButtonElement).disabled).toBe(true);
+    expect((draftButtons[0] as HTMLButtonElement).disabled).toBe(false);
     expect((draftButtons[1] as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  describe('Save draft popover', () => {
+    const draftSummary = (): AgentStudioDraftSummary => ({
+      draft_id: 'd-1',
+      name: 'My draft',
+      updated_at: '2026-01-01T00:00:00Z',
+    });
+
+    // Spy on the prototype method rather than an injected instance: the
+    // standalone shell component (root under TestBed) resolves `MatDialog`
+    // (`providedIn: 'root'`) from a different environment-injector instance
+    // than both `TestBed.inject(MatDialog)` and a `{ provide: MatDialog,
+    // useValue }` override reach — a prototype spy intercepts regardless of
+    // which instance ends up being used.
+    let openSpy: ReturnType<typeof vi.spyOn<MatDialog, 'open'>>;
+
+    beforeEach(() => {
+      openSpy = vi.spyOn(MatDialog.prototype, 'open');
+    });
+
+    afterEach(() => {
+      openSpy.mockRestore();
+    });
+
+    it('clicking Save draft opens the Save-draft dialog', () => {
+      openSpy.mockReturnValue({ afterClosed: () => of(undefined) } as unknown as ReturnType<MatDialog['open']>);
+      const saveButton: HTMLButtonElement = fixture.nativeElement.querySelector('.studio__draft-btn');
+      saveButton.click();
+      expect(openSpy).toHaveBeenCalled();
+    });
+
+    it('passes the current handoff state and no draftId as the dialog payload on first save', () => {
+      component.state.setRegistryAgentId('reg-1');
+      openSpy.mockReturnValue({ afterClosed: () => of(undefined) } as unknown as ReturnType<MatDialog['open']>);
+      component.openSaveDraftDialog();
+      const config = openSpy.mock.calls[0][1] as { data: { draftId: string | null; payload: Record<string, unknown> } };
+      expect(config.data.draftId).toBeNull();
+      expect(config.data.payload['registryAgentId']).toBe('reg-1');
+    });
+
+    it('passes the bound draftId once a draft has been saved this session', () => {
+      component.state.setCurrentDraft('d-1', 'My draft');
+      openSpy.mockReturnValue({ afterClosed: () => of(undefined) } as unknown as ReturnType<MatDialog['open']>);
+      component.openSaveDraftDialog();
+      const config = openSpy.mock.calls[0][1] as { data: { draftId: string | null } };
+      expect(config.data.draftId).toBe('d-1');
+    });
+
+    it('binds the session to the returned draft on a successful save', () => {
+      openSpy.mockReturnValue({ afterClosed: () => of(draftSummary()) } as unknown as ReturnType<MatDialog['open']>);
+      component.openSaveDraftDialog();
+      expect(component.state.currentDraftId()).toBe('d-1');
+      expect(component.state.currentDraftName()).toBe('My draft');
+    });
+
+    it('leaves state unchanged when the dialog is cancelled', () => {
+      openSpy.mockReturnValue({ afterClosed: () => of(undefined) } as unknown as ReturnType<MatDialog['open']>);
+      component.openSaveDraftDialog();
+      expect(component.state.currentDraftId()).toBeNull();
+      expect(component.state.currentDraftName()).toBeNull();
+    });
   });
 
   it('stepper indicators are not buttons — there is no backward navigation', () => {

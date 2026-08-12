@@ -1,5 +1,6 @@
 import { ChangeDetectionStrategy, Component, computed, inject } from '@angular/core';
 import { MatButtonModule } from '@angular/material/button';
+import { MatDialog, MatDialogModule } from '@angular/material/dialog';
 import { MatIconModule } from '@angular/material/icon';
 import { MatTooltipModule } from '@angular/material/tooltip';
 import { STUDIO_STAGES } from '../../../models/agent-studio.model';
@@ -9,6 +10,11 @@ import { AgentStudioComposeTeamComponent } from './agent-studio-compose-team.com
 import { AgentStudioPersonaComponent } from './agent-studio-persona.component';
 import { AgentStudioStagePlaceholderComponent } from './agent-studio-stage-placeholder.component';
 import { AgentStudioTestAgentComponent } from './agent-studio-test-agent.component';
+import {
+  SaveDraftDialogComponent,
+  type SaveDraftDialogData,
+  type SaveDraftDialogResult,
+} from './save-draft-dialog/save-draft-dialog.component';
 
 /**
  * Agent Studio shell — the single `/agent-studio` surface (spec §2.1). Renders
@@ -22,6 +28,7 @@ import { AgentStudioTestAgentComponent } from './agent-studio-test-agent.compone
   standalone: true,
   imports: [
     MatButtonModule,
+    MatDialogModule,
     MatIconModule,
     MatTooltipModule,
     AgentStudioBuildAgentComponent,
@@ -37,6 +44,7 @@ import { AgentStudioTestAgentComponent } from './agent-studio-test-agent.compone
 })
 export class AgentStudioShellComponent {
   readonly state = inject(AgentStudioStateService);
+  private readonly dialog = inject(MatDialog);
   /** The forward-only stage list rendered by the stepper. */
   readonly stages = STUDIO_STAGES;
 
@@ -111,5 +119,31 @@ export class AgentStudioShellComponent {
    */
   onContinue(): void {
     this.state.advance();
+  }
+
+  /**
+   * Open the Save-draft popover (spec §3.5). Assembles the payload from the
+   * currently-available handoff state and lets the dialog decide create vs
+   * update based on whether this session is already bound to a server draft.
+   *
+   * Preconditions: none — always safe to call.
+   * Postconditions: on a successful save, `state.currentDraftId()`/
+   *   `currentDraftName()` reflect the saved draft. On cancel or failure,
+   *   state is unchanged.
+   */
+  openSaveDraftDialog(): void {
+    const data: SaveDraftDialogData = {
+      draftId: this.state.currentDraftId(),
+      initialName: this.state.currentDraftName(),
+      payload: { ...this.state.handoff() },
+    };
+    const ref = this.dialog.open<SaveDraftDialogComponent, SaveDraftDialogData, SaveDraftDialogResult>(
+      SaveDraftDialogComponent,
+      { data, width: '420px' },
+    );
+    ref.afterClosed().subscribe((result) => {
+      if (!result) return;
+      this.state.setCurrentDraft(result.draft_id, result.name);
+    });
   }
 }
