@@ -15,6 +15,10 @@ import { AgentStudioComposeTeamComponent } from './agent-studio-compose-team.com
 import { AgentStudioPersonaComponent } from './agent-studio-persona.component';
 import { AgentStudioStagePlaceholderComponent } from './agent-studio-stage-placeholder.component';
 import { AgentStudioTestAgentComponent } from './agent-studio-test-agent.component';
+import {
+  DraftConflictDialogComponent,
+  type DraftConflictResult,
+} from './draft-conflict-dialog/draft-conflict-dialog.component';
 import { LoadDraftMenuComponent } from './load-draft-menu/load-draft-menu.component';
 import {
   SaveDraftDialogComponent,
@@ -187,23 +191,99 @@ export class AgentStudioShellComponent {
   }
 
   /**
-   * Load a saved draft and hydrate the session from it (spec §3.5). Hydration
-   * still runs immediately when `!state.isDirty()`; the unsaved-edit conflict
-   * gate lands in a follow-on task.
+   * Load a saved draft and hydrate the session from it (spec §3.5 / §2.4).
    *
-   * Preconditions: `draftId` names a draft the current user owns (rows in
-   *   `LoadDraftMenuComponent` only ever come from that user's own list).
-   * Postconditions: on success, `state` is hydrated from the draft's payload
-   *   and the stepper is moved to the furthest reachable stage.
-   *   `loadingDraft()` stays `true` for the entire chain, including the
-   *   nested process-status check, so a second selection can't race it. On
-   *   failure, `loadingDraft()` returns to `false` and `state` is unchanged
-   *   (surfaced via the global HTTP error toast, not a bespoke inline banner
-   *   — the triggering menu has already closed by the time this runs). A
-   *   call superseded by a later `loadDraft` (its token no longer matches
-   *   `loadDraftToken`) discards its response instead of applying it.
+   * Preconditions: `draftId` names a draft the current user owns.
+   * Postconditions: when `!isDirty()`, hydrates immediately. When dirty, opens
+   *   the conflict dialog and `loadingDraft()` stays false until hydration
+   *   HTTP starts. Cancel / Escape / backdrop: no HTTP, state unchanged.
+   *   Discard: hydrate the chosen draft. Save first: persist current handoff
+   *   then hydrate; a failed persist does not hydrate.
    */
   loadDraft(draftId: string): void {
+    if (this.loadingDraft()) return;
+    if (this.state.isDirty()) {
+      this.resolveLoadConflict(draftId);
+      return;
+    }
+    this.fetchAndHydrate(draftId);
+  }
+
+  /**
+   * Open the unsaved-edit conflict dialog and route the user's choice.
+   *
+   * Preconditions: `state.isDirty()` is true; `draftId` is the draft the user
+   *   asked to load.
+   * Postconditions: `'discard'` starts `fetchAndHydrate`; `'save'` runs
+   *   `saveFirstThenHydrate`; `undefined` (cancel) leaves state and HTTP
+   *   unchanged. Does not set `loadingDraft()` — that begins only when
+   *   hydration HTTP starts.
+   */
+  private resolveLoadConflict(draftId: string): void {
+    const ref = this.dialog.open<DraftConflictDialogComponent, void, DraftConflictResult>(
+      DraftConflictDialogComponent,
+      { width: '420px', disableClose: false },
+    );
+    ref.afterClosed().subscribe((choice) => {
+      if (choice === 'discard') {
+        this.fetchAndHydrate(draftId);
+        return;
+      }
+      if (choice === 'save') {
+        this.saveFirstThenHydrate(draftId);
+      }
+    });
+  }
+
+  /**
+   * Persist the current handoff, then hydrate the chosen draft.
+   *
+   * Preconditions: caller has already chosen `'save'` from the conflict
+   *   dialog; `draftId` is the draft to load after a successful persist.
+   * Postconditions: when bound (`currentDraftId` + `currentDraftName`), PUTs
+   *   via `updateDraft`, `markClean`s on success, then hydrates. On PUT
+   *   error, does not hydrate. When unbound, opens the Save-draft dialog;
+   *   truthy result hydrates, empty/cancel aborts with no hydrate.
+   */
+  private saveFirstThenHydrate(draftId: string): void {
+    const boundId = this.state.currentDraftId();
+    const boundName = this.state.currentDraftName();
+    if (boundId && boundName) {
+      this.api
+        .updateDraft(boundId, { name: boundName, payload: { ...this.state.handoff() } })
+        .subscribe({
+          next: (summary) => {
+            this.state.setCurrentDraft(summary.draft_id, summary.name);
+            this.state.markClean();
+            this.fetchAndHydrate(draftId);
+          },
+          error: () => {
+            // Global HTTP interceptor toasts. Do not hydrate.
+          },
+        });
+      return;
+    }
+    this.openSaveDraftDialog().subscribe((result) => {
+      if (!result) return;
+      this.fetchAndHydrate(draftId);
+    });
+  }
+
+  /**
+   * Fetch a draft and hydrate the session from it.
+   *
+   * Preconditions: `draftId` names a draft the current user owns; caller has
+   *   already cleared any dirty-gate (clean session, discard, or successful
+   *   save-first).
+   * Postconditions: on success, `state` is hydrated from the draft's payload
+   *   and the stepper moves to the furthest reachable stage.
+   *   `loadingDraft()` stays `true` for the entire chain, including the
+   *   nested process-status check. On failure, `loadingDraft()` returns to
+   *   `false` and `state` is unchanged. A call superseded by a later
+   *   `loadDraft` (its token no longer matches `loadDraftToken`) discards
+   *   its response instead of applying it.
+   */
+  private fetchAndHydrate(draftId: string): void {
     if (this.loadingDraft()) return;
     this.loadingDraft.set(true);
     const token = ++this.loadDraftToken;
