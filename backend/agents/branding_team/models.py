@@ -92,6 +92,14 @@ def _derive_strict_variant(
     )
 
 
+# Common closing sentence for every strict-twin ``doc=`` below — factored out
+# so the 8 call sites don't each hand-duplicate the same boilerplate tail.
+_STRICT_TWIN_DOC_SUFFIX = (
+    "Generated via ``_derive_strict_variant`` — see that helper's docstring "
+    "for the shared strict/soft twin pattern this file uses."
+)
+
+
 # ---------------------------------------------------------------------------
 # Shared models
 # ---------------------------------------------------------------------------
@@ -249,10 +257,9 @@ CoreValueOutput = _derive_strict_variant(
         "``MessagingPillarOutput``, ``ElevatorPitchOutput``, ``BrandArchetypeOutput``, "
         "``DifferentiationPillarOutput``) — ``CoreValue`` itself must stay soft "
         "(only ``value`` required) since it also backs "
-        "``StrategicCoreOutput.core_values``'s merge target. Generated via "
-        "``_derive_strict_variant`` — see that helper's docstring for the "
-        "shared strict/soft twin pattern this file uses."
-    ),
+        "``StrategicCoreOutput.core_values``'s merge target. "
+    )
+    + _STRICT_TWIN_DOC_SUFFIX,
     value=(str, Field(min_length=1)),
     behavioral_definition=(str, Field(min_length=1)),
     observable_behaviors=(List[NonEmptyStr], Field(min_length=1)),
@@ -281,10 +288,9 @@ AudienceSegmentOutput = _derive_strict_variant(
         "``MessagingPillarOutput``, ``ElevatorPitchOutput``, ``BrandArchetypeOutput``, "
         "``DifferentiationPillarOutput``) — ``AudienceSegment`` itself must stay "
         "soft (only ``name`` required) since it also backs "
-        "``StrategicCoreOutput.target_audience_segments``'s merge target. Generated via "
-        "``_derive_strict_variant`` — see that helper's docstring for the "
-        "shared strict/soft twin pattern this file uses."
-    ),
+        "``StrategicCoreOutput.target_audience_segments``'s merge target. "
+    )
+    + _STRICT_TWIN_DOC_SUFFIX,
     name=(str, Field(min_length=1)),
     description=(str, Field(min_length=1)),
     pain_points=(List[NonEmptyStr], Field(min_length=1)),
@@ -313,10 +319,9 @@ DifferentiationPillarOutput = _derive_strict_variant(
         "``MessagingPillarOutput``, ``ElevatorPitchOutput``, ``BrandArchetypeOutput``, "
         "``AudienceSegmentOutput``) — ``DifferentiationPillar`` itself must stay "
         "soft (only ``pillar`` required) since it also backs "
-        "``StrategicCoreOutput.differentiation_pillars``'s merge target. Generated via "
-        "``_derive_strict_variant`` — see that helper's docstring for the "
-        "shared strict/soft twin pattern this file uses."
-    ),
+        "``StrategicCoreOutput.differentiation_pillars``'s merge target. "
+    )
+    + _STRICT_TWIN_DOC_SUFFIX,
     pillar=(str, Field(min_length=1)),
     proof_points=(List[NonEmptyStr], Field(min_length=1)),
     competitive_context=(str, Field(min_length=1)),
@@ -461,10 +466,9 @@ BrandArchetypeOutput = _derive_strict_variant(
         "``BrandArchitectureRuleOutput``, ``PersonaProfileOutput``, "
         "``MessagingPillarOutput``, ``ElevatorPitchOutput``) — ``BrandArchetype`` "
         "itself must stay soft (only ``archetype`` required) since it also backs "
-        "``NarrativeMessagingOutput.brand_archetypes``'s merge target. Generated via "
-        "``_derive_strict_variant`` — see that helper's docstring for the "
-        "shared strict/soft twin pattern this file uses."
-    ),
+        "``NarrativeMessagingOutput.brand_archetypes``'s merge target. "
+    )
+    + _STRICT_TWIN_DOC_SUFFIX,
     archetype=(str, Field(min_length=1)),
     rationale=(str, Field(min_length=1)),
     personality_traits=(List[NonEmptyStr], Field(min_length=1)),
@@ -490,9 +494,9 @@ MessagingPillarOutput = _derive_strict_variant(
         "``BrandArchitectureRuleOutput``, ``PersonaProfileOutput``) — "
         "``MessagingPillar`` itself must stay soft (only ``pillar`` required) since "
         "it also backs ``NarrativeMessagingOutput.messaging_framework``'s merge "
-        "target. Generated via ``_derive_strict_variant`` — see that helper's "
-        "docstring for the shared strict/soft twin pattern this file uses."
-    ),
+        "target. "
+    )
+    + _STRICT_TWIN_DOC_SUFFIX,
     pillar=(str, Field(min_length=1)),
     key_message=(str, Field(min_length=1)),
     proof_points=(List[NonEmptyStr], Field(min_length=1)),
@@ -518,9 +522,8 @@ AudienceMessageMapOutput = _derive_strict_variant(
         "``AudienceMessageMap`` itself must stay soft (only ``audience_segment`` "
         "required) since it also backs "
         "``NarrativeMessagingOutput.audience_message_maps``'s merge target. "
-        "Generated via ``_derive_strict_variant`` — see that helper's docstring "
-        "for the shared strict/soft twin pattern this file uses."
-    ),
+    )
+    + _STRICT_TWIN_DOC_SUFFIX,
     audience_segment=(str, Field(min_length=1)),
     primary_message=(str, Field(min_length=1)),
     supporting_messages=(List[NonEmptyStr], Field(min_length=1)),
@@ -545,10 +548,9 @@ ElevatorPitchOutput = _derive_strict_variant(
         "``ColorEntryOutput``, ``TypographySpecOutput``, ``VoiceToneEntryOutput``, "
         "``BrandArchitectureRuleOutput``, ``PersonaProfileOutput``) — "
         "``ElevatorPitch`` itself must stay soft (all-default) since it also backs "
-        "``NarrativeMessagingOutput.elevator_pitches``'s merge target. Generated "
-        "via ``_derive_strict_variant`` — see that helper's docstring for the "
-        "shared strict/soft twin pattern this file uses."
-    ),
+        "``NarrativeMessagingOutput.elevator_pitches``'s merge target. "
+    )
+    + _STRICT_TWIN_DOC_SUFFIX,
     tier=(str, Field(min_length=1)),
     pitch=(str, Field(min_length=1)),
 )
@@ -577,10 +579,9 @@ PersonaProfileOutput = _derive_strict_variant(
         "``ColorEntryOutput``, ``TypographySpecOutput``, ``VoiceToneEntryOutput``, "
         "``BrandArchitectureRuleOutput``) — ``PersonaProfile`` itself must stay soft "
         "(all-default except ``name``) since it also backs "
-        "``NarrativeMessagingOutput.persona_profiles``'s merge target. Generated via "
-        "``_derive_strict_variant`` — see that helper's docstring for the "
-        "shared strict/soft twin pattern this file uses."
-    ),
+        "``NarrativeMessagingOutput.persona_profiles``'s merge target. "
+    )
+    + _STRICT_TWIN_DOC_SUFFIX,
     name=(str, Field(min_length=1)),
     role=(str, Field(min_length=1)),
     demographics=(str, Field(min_length=1)),
