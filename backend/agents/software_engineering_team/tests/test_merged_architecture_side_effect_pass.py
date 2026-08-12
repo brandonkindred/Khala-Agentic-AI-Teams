@@ -108,6 +108,39 @@ def test_splits_merged_response_into_two_finding_lists() -> None:
     assert "other.py:3" in side[0].description
 
 
+def test_architecture_finding_pre_existing_tag_survives_the_merged_pass() -> None:
+    """Regression test: an architecture/refactor finding the model tags
+    pre_existing=true (e.g. a field/function untouched by this submission,
+    living in a file the submission also changed elsewhere) must carry that
+    tag through the merged pass's per-half parsing/validation, matching the
+    side-effect half's identical, already-covered behavior -- otherwise the
+    PR-review whole-file path can never route it to a human-review proposal
+    instead of a blocking PR comment."""
+
+    class _FindingsClient(DummyLLMClient):
+        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+            if _MERGED_PASS_ANCHOR in prompt:
+                return {
+                    "architecture_findings": [
+                        {
+                            "severity": "medium",
+                            "category": "refactor",
+                            "file_path": "app/main.py",
+                            "description": "duplicates an existing field untouched by this change",
+                            "suggestion": "reuse the existing field",
+                            "pre_existing": True,
+                        }
+                    ],
+                    "side_effect_findings": [],
+                }
+            return {"approved": True, "issues": [], "summary": "ok", "spec_compliance_notes": ""}
+
+    arch, side = find_architecture_and_side_effect_issues(_FindingsClient(), _input())
+    assert len(arch) == 1
+    assert arch[0].pre_existing is True
+    assert side == []
+
+
 def test_fails_safe_on_llm_error() -> None:
     class _Raiser(DummyLLMClient):
         def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
