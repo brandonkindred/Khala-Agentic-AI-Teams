@@ -52,8 +52,10 @@ once per burst. Used by `llm_service.usage_flusher`. No-op when Postgres is unse
 Seconds between background drains of the in-memory usage buffer to
 `llm_call_records` (default `2`; garbage → `2`, negatives clamped to `0` which
 floors the loop at `0.1s` so it never busy-loops). The observer does zero DB I/O
-on the LLM call path. A final drain runs at Unified API shutdown before the
-Postgres pool closes.
+on the LLM call path. A final drain runs at process shutdown (team-app
+lifespan, Unified API lifespan, or team-service ``atexit``) before the
+Postgres pool closes. The observer registry is process-local, so every
+LLM-calling process registers its own flusher.
 
 ### LLM_NUM_CTX_FALLBACK_TTL_S
 TTL (seconds, default `300`) for the Ollama client's provisional `num_ctx` fallback. When a model's

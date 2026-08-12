@@ -164,7 +164,7 @@ export class LlmUsageDashboardComponent implements OnInit {
    * Preconditions: none.
    * Postconditions: one row per model key; empty model keys become `(unknown)`.
    */
-  modelRows(): Array<{ model: string } & LlmUsageModelBreakdown> {
+  modelRows(): ({ model: string } & LlmUsageModelBreakdown)[] {
     return Object.entries(this.displaySummary.by_model).map(([model, b]) => ({
       model: model || '(unknown)',
       ...b,

@@ -12,7 +12,7 @@ from __future__ import annotations
 import sys
 import time
 from pathlib import Path
-from typing import Any, Literal, Optional
+from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Query
 
@@ -38,8 +38,8 @@ def _attach_storage(data: dict[str, Any]) -> dict[str, Any]:
 
 @router.get("/")
 def usage_summary(
-    team: Optional[str] = Query(None, description="Filter by team name"),
-    window: WindowPreset = Query("24h", description="Time window preset"),
+    team: Annotated[str | None, Query(description="Filter by team name")] = None,
+    window: Annotated[WindowPreset, Query(description="Time window preset")] = "24h",
 ) -> dict[str, Any]:
     """Aggregated LLM token usage over a preset window."""
     if is_postgres_enabled():
@@ -54,9 +54,9 @@ def usage_summary(
 
 @router.get("/recent")
 def recent_calls(
-    team: Optional[str] = Query(None, description="Filter by team name"),
-    window: WindowPreset = Query("24h", description="Time window preset"),
-    limit: int = Query(100, ge=1, le=1000, description="Max records to return"),
+    team: Annotated[str | None, Query(description="Filter by team name")] = None,
+    window: Annotated[WindowPreset, Query(description="Time window preset")] = "24h",
+    limit: Annotated[int, Query(ge=1, le=1000, description="Max records to return")] = 100,
 ) -> list:
     """Recent individual LLM call records, newest first."""
     if is_postgres_enabled():

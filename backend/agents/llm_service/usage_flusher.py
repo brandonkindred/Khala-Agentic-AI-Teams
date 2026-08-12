@@ -9,7 +9,10 @@ A :class:`BackgroundHeartbeat` daemon thread drains the deque on an interval and
 writes the whole batch in one ``executemany`` (:func:`usage_store.write_rows`).
 On clean shutdown :func:`shutdown` stops the heartbeat, unregisters the
 observer, and does a final synchronous drain — all before the shared Postgres
-pool is closed (see ``unified_api/main.py`` lifespan).
+pool is closed. Registration is process-local: Unified API lifespan covers
+in-process routes; :func:`shared.app.create_team_app` and the team-service
+worker wrapper cover every team container (the wrapper registers before the
+Temporal worker starts so in-process activities are captured).
 
 Unlike the SE-only :mod:`software_engineering_team.shared.trace_flusher`, this
 flusher enqueues **every** team when Postgres is enabled (no opt-in flag, no
@@ -192,8 +195,8 @@ def shutdown() -> None:
 
     Order matters: :func:`unregister` first (stop the heartbeat + remove the
     observer so no new rows arrive), then :func:`drain` for the final synchronous
-    flush. Called from Unified API lifespan before the shared Postgres pool closes,
-    so the final drain can still use the pool.
+    flush.     Called from team-app and Unified API lifespan before the shared Postgres
+    pool closes, so the final drain can still use the pool.
 
     Postconditions: observer unregistered, heartbeat stopped, buffer drained
         (best-effort). Never raises.
