@@ -63,7 +63,11 @@ class BatchIndicatorCache:
       - Concurrent :meth:`get_or_compute` calls never observe a torn/partial
         entry: a read sees either no entry or a fully-computed one. Two
         calls racing on the same key may both invoke ``compute`` (redundant
-        work, not a correctness issue per the ADR's concurrency requirement).
+        work, not a correctness issue per the ADR's concurrency requirement)
+        — a call only counts as a hit when it never invoked ``compute`` at
+        all; a call that computed but lost the store race to a faster
+        concurrent caller is a miss, even though it returns the winner's
+        value rather than its own.
     """
 
     def __init__(self) -> None:
@@ -79,8 +83,18 @@ class BatchIndicatorCache:
         Matches ``backtest_cache.py``'s ``_config_hash`` convention (sorted
         keys, no whitespace) so float params (e.g. ``num_std``,
         ``multiplier``) always serialize identically for equal values.
+        Every non-bool ``int``/``float`` is normalized to ``float`` before
+        serialization so numerically-equal params passed with different
+        Python types (e.g. ``num_std=2`` vs. ``num_std=2.0`` — both accepted
+        by the DSL's indicator validators, and both coerced to the same float
+        by the computation) collide on one key rather than needlessly
+        recomputing under two.
         """
-        return json.dumps(dict(params), sort_keys=True, separators=(",", ":"), default=str)
+        normalized = {
+            k: (float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else v)
+            for k, v in params.items()
+        }
+        return json.dumps(normalized, sort_keys=True, separators=(",", ":"), default=str)
 
     @staticmethod
     def _data_fingerprint(symbol: str, bars: Sequence[Any]) -> str:
@@ -147,9 +161,12 @@ class BatchIndicatorCache:
         Postconditions:
           - Returns ``(value, hit)``. On a hit, ``value`` is the result
             stored by the first call with the same key and ``compute`` was
-            not invoked. On a miss, ``compute`` was invoked exactly once (per
-            this call — see the concurrency invariant for racing calls) and
-            its result stored and returned.
+            not invoked by this call. On a miss, ``compute`` was invoked
+            exactly once by this call; ``value`` is usually this call's own
+            result, except when it lost a same-key store race to a
+            concurrent caller (see the concurrency invariant), in which case
+            ``value`` is the race winner's (deterministic-compute-assumed
+            equal) result.
           - ``hits``/``misses`` are incremented to reflect the outcome.
         """
         assert isinstance(indicator_name, str) and indicator_name, (
@@ -174,10 +191,13 @@ class BatchIndicatorCache:
 
         with self._lock:
             existing = self._values.get(key, _ABSENT)
+            self.misses += 1
             if existing is not _ABSENT:
                 # Lost the race: another thread already stored a result.
-                self.hits += 1
-                return existing, True
+                # This call still invoked compute() itself, so per the
+                # "hit == compute not invoked" contract it is a miss even
+                # though the winner's value (not this call's own) is
+                # returned.
+                return existing, False
             self._values[key] = value
-            self.misses += 1
             return value, False

@@ -191,6 +191,58 @@ def test_source_must_be_folded_into_params_to_distinguish_series() -> None:
     assert len(calls) == 2
 
 
+def test_int_and_float_equivalent_params_collide() -> None:
+    """A param expressed as ``int`` vs. the numerically-equal ``float`` (both
+    accepted by the DSL's indicator validators, and both coerced to the same
+    float by the computation) must share one cache entry rather than
+    recomputing under two different serializations."""
+    cache = BatchIndicatorCache()
+    calls, compute = _counting_compute()
+    bars = _bars()
+
+    cache.get_or_compute(
+        "bollinger_bands", {"period": 20, "num_std": 2}, "AAPL", "1d", bars, compute
+    )
+    _, hit = cache.get_or_compute(
+        "bollinger_bands", {"period": 20, "num_std": 2.0}, "AAPL", "1d", bars, compute
+    )
+
+    assert hit is True
+    assert len(calls) == 1
+
+
+def test_same_key_race_loser_is_counted_as_a_miss_not_a_hit() -> None:
+    """A caller whose first lookup misses and who therefore invokes
+    ``compute`` must be counted as a miss even if it then loses the store
+    race to a faster concurrent caller — it did not avoid the work the way a
+    true hit implies, regardless of whose value is ultimately returned."""
+    cache = BatchIndicatorCache()
+    bars = _bars()
+    both_entered_compute = threading.Barrier(2)
+    outcomes: List[bool] = [None, None]  # type: ignore[list-item]
+
+    def _compute() -> str:
+        # Blocks until both threads have reached compute() — guaranteeing
+        # both passed their initial (pre-compute) lookup while the key was
+        # still absent, so both are genuine misses that raced to store.
+        both_entered_compute.wait()
+        return "value"
+
+    def _worker(i: int) -> None:
+        _, hit = cache.get_or_compute("sma", {"period": 50}, "AAPL", "1d", bars, _compute)
+        outcomes[i] = hit
+
+    t1 = threading.Thread(target=_worker, args=(0,))
+    t2 = threading.Thread(target=_worker, args=(1,))
+    t1.start()
+    t2.start()
+    t1.join()
+    t2.join()
+
+    assert outcomes == [False, False]
+    assert cache.misses == 2 and cache.hits == 0
+
+
 def test_concurrent_get_or_compute_has_no_torn_reads() -> None:
     """Many threads racing on the same key may redundantly compute (allowed
     per ADR-012's concurrency requirement), but every observed value must be
