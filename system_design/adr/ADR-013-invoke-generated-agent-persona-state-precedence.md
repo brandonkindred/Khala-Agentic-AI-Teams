@@ -134,6 +134,13 @@ for LLM-authored roster saves. An explicitly empty list or blank string in the b
 is a caller clearing that field for this invoke (request wins); an omitted key
 inherits the manifest default.
 
+This presence check is purely a **key-detection** step, not a validation bypass:
+every value — whether request-supplied or manifest-defaulted — still flows through
+`GeneratedAgentInvokeInput.model_validate(...)` exactly as today
+(`agent_builder.py:314`). The raw dict is inspected only to decide, per field,
+*which* value (request vs. manifest) gets handed to that same validation call; it
+never replaces or skips it.
+
 ### Manifest resolution identity
 
 Binding must resolve the manifest through the same trusted lookup the sandbox shim
@@ -153,6 +160,20 @@ forwarded past the shim today. Closing that gap (by threading the manifest or it
 id through `dispatch.invoke_entrypoint` down to `invoke_generated_agent`) is the
 implementation story's job; this ADR only fixes the identity the eventual plumbing
 must carry.
+
+**Once resolved, the manifest-to-persona mapping itself must go through the
+existing `persona_from_manifest(manifest)` / `resolve_persona(manifest_id)` helpers**
+(`roster_resolve.py:40-78`) — the same functions `pipeline_runner.py:285` and
+`testing.py:246` already call. `invoke_generated_agent` must not grow a second,
+parallel mapping from `AgentManifest` to `role`/`skills`/`capabilities`/`expertise`;
+all three invoke paths reuse one resolver, differing only in (a) how they acquire
+the manifest identity — a roster row's `manifest_id` for pipeline/test-chat, the
+shim's URL-resolved `agent_id` for sandbox invoke — and (b) whether an explicit
+request field is allowed to override the resolved value per-field afterward (only
+sandbox invoke has a body to override with). This is what keeps the three paths'
+*resolution logic* identical even though only one of them exposes an *override*
+surface; see Rejected alternatives below for the parallel-resolver approach this
+rules out.
 
 ### No-manifest fallback
 
@@ -194,6 +215,14 @@ no behavior change at all.
 - **Error-handling policy for an invalid/unknown `state` key** (e.g. a request
   supplying a `state` the manifest doesn't carry) — left to the implementation
   story to decide (reject vs. silently fall through to the generic composer).
+- **Consolidating `GeneratedAgentInvokeInput`'s persona fields with
+  `RosterPersonaView`/`AgentManifest`.** `role` / `skills` / `capabilities` /
+  `expertise` already exist on both shapes today — this structural duplication
+  predates this ADR (it is what makes an override even expressible: the request
+  schema mirrors the manifest-derived view field-for-field so a caller can name
+  exactly which field it is overriding). Collapsing that duplication into a single
+  shared shape is a schema refactor this contract does not require and does not
+  block; it is a separate follow-up if pursued.
 
 ## Rejected alternatives
 
@@ -221,6 +250,14 @@ no behavior change at all.
   would let a request claim a different agent's persona than the one the URL path
   (and any surrounding authorization) already committed to — a correctness and
   trust-boundary problem, not just a style choice.
+- **A second, `invoke_generated_agent`-local function that re-derives
+  `role`/`skills`/`capabilities`/`expertise` from `AgentManifest`, parallel to
+  `persona_from_manifest`.** Rejected: this is the one alternative that would
+  actually reintroduce cross-path inconsistency — two independent, potentially
+  drifting mappings from the same `AgentManifest` fields, one used by
+  pipeline/test-chat and a second used by sandbox invoke. Reusing
+  `persona_from_manifest`/`resolve_persona` (see Manifest resolution identity
+  above) is mandatory precisely to avoid this.
 
 ## Risks and tradeoffs
 
@@ -240,6 +277,24 @@ no behavior change at all.
   also touching `dispatch.invoke_entrypoint`'s call shape — a small blast-radius
   increase beyond `agent_builder.py` alone, acknowledged here so the implementation
   story doesn't discover it as a surprise.
+
+## Studio manifests are not a distinct structure
+
+Studio-saved agents raise no separate compatibility question because there is only
+one `AgentManifest` Pydantic model in this codebase, not a Studio variant and a
+generated-team variant. `build_studio_agent_manifest`
+(`registration.py:117-164`) constructs a plain `AgentManifest` — same `states:
+list[AgentStateSpec]`, same `cognition`, same `source.entrypoint` field types a
+generated team manifest has — and the function's own last line,
+`return revalidate(manifest)`, re-validates it through that identical model before
+returning. `_manifest_states` (`registration.py:93-114`) is what populates
+`states` for a Studio agent (folding the top-level `system_prompt` into the
+`executing` key), but the *shape* it produces is exactly the `list[AgentStateSpec]`
+the generic Per-field precedence and Backward compatibility rules above already
+handle — including the empty/legacy case. No guard or conditional is needed in
+`invoke_generated_agent` to distinguish a Studio-authored manifest from a
+generated-team one; both are read through the same `AgentManifest.states` field by
+the same `persona_from_manifest`-based resolution this contract mandates.
 
 ## Reconciliation with existing SoT documentation
 
@@ -264,8 +319,10 @@ A future implementation must satisfy exactly this surface:
   `capabilities` / `expertise` / `tools` / `agent_id`.
 - `invoke_generated_agent` (or its sync core) resolves the manifest via the same
   trusted identity the shim already uses (the route's `agent_id`, threaded through
-  `dispatch.invoke_entrypoint` rather than re-derived from the body), and, for each
-  of `role` / `skills` / `capabilities` / `expertise` / `system_prompt`, uses the
+  `dispatch.invoke_entrypoint` rather than re-derived from the body), maps it to
+  persona defaults via the existing `persona_from_manifest`/`resolve_persona`
+  helpers (`roster_resolve.py`) — not a new parallel mapping — and, for each of
+  `role` / `skills` / `capabilities` / `expertise` / `system_prompt`, uses that
   manifest-derived default unless the raw request body explicitly carries that key
   — per the table and presence test above.
 - `system_prompt`, when manifest-sourced, comes from `manifest.states[key ==
