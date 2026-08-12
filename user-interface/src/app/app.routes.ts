@@ -149,6 +149,15 @@ export const routes: Routes = [
       },
       { path: 'agent-provisioning', redirectTo: '/agent-console', pathMatch: 'full' },
       {
+        path: 'product-delivery',
+        loadComponent: () =>
+          import('./components/product-delivery-page/product-delivery-page.component').then(
+            (m) => m.ProductDeliveryPageComponent,
+          ),
+        title: 'Product Delivery',
+        data: { breadcrumb: 'Product Delivery' },
+      },
+      {
         path: 'ai-systems',
         loadComponent: () =>
           import('./components/ai-systems-dashboard/ai-systems-dashboard.component').then(
