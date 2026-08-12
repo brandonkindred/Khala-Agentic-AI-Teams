@@ -20,9 +20,10 @@ Invariants:
       is a derived alias of ``build_review_system_prompt(ReviewProfile.CODE_REVIEW)``
       (locked by ``tests/test_review_profiles.py``).
     * The skeleton pieces (:data:`_SHARED_ROLE_AND_SETTLED`,
-      :data:`_SHARED_OUTPUT_SECTION`) are shared across profiles so they reuse
-      the same coding standards, settled-decisions guidance, and JSON output
-      contract — only the ``role_line`` and ``criteria_block`` differ.
+      :data:`_SHARED_REVIEW_POLICY`, :data:`_SHARED_OUTPUT_SECTION`) are shared
+      across profiles so they reuse the same coding standards, settled-decisions
+      guidance, review policy, and JSON output contract — only the
+      ``role_line`` and ``criteria_block`` differ.
 """
 
 from __future__ import annotations
@@ -63,7 +64,7 @@ class _ProfileSpec:
         * ``role_line`` is a single opening paragraph (no trailing newline).
         * ``criteria_block`` begins with a leading newline and ends without a
           trailing newline, so it composes cleanly between
-          :data:`REVIEW_PRIORITY_FRAMEWORK` and :data:`_SHARED_OUTPUT_SECTION`.
+          :data:`REVIEW_PRIORITY_FRAMEWORK` and :data:`_SHARED_REVIEW_POLICY`.
     """
 
     role_line: str
@@ -71,9 +72,10 @@ class _ProfileSpec:
 
 
 # --- Shared skeleton pieces -----------------------------------------------------
-# These constants are reused across every profile so the JSON output contract and
-# settled-decisions guidance stay identical. ``tests/test_review_profiles.py``
-# asserts each one appears in the derived ``CODE_REVIEW_PROMPT``.
+# These constants are reused across every profile so the JSON output contract,
+# review policy, and settled-decisions guidance stay identical.
+# ``tests/test_review_profiles.py`` asserts each one appears in the derived
+# ``CODE_REVIEW_PROMPT``.
 
 # NOTE: the composed prompt carries TWO role statements — the profile's own
 # ``role_line`` (set above each criteria block) and this generic "**Your role:**"
@@ -132,8 +134,14 @@ _SHARED_OUTPUT_SECTION = (
     "their own comments). When there are no issues, a single short sentence.\n"
     '- "spec_compliance_notes": string. List ONLY concrete spec or acceptance-criteria gaps '
     "(missing or unmet requirements), briefly. If there are no spec gaps, return an empty string "
-    '"" — do not write reassuring "meets the spec" prose.\n\n'
-    "**Severity definitions (consistent with QA and Security agents):**\n"
+    '"" — do not write reassuring "meets the spec" prose.\n'
+)
+
+# Review policy that governs *what* to find (severity, approval, scope,
+# actionability). Lives on the reasoning pass; the formatting pass only
+# transcribes the resulting prose into JSON.
+_SHARED_REVIEW_POLICY = (
+    "\n\n**Severity definitions (consistent with QA and Security agents):**\n"
     "- **critical**: Code is broken, has security vulnerabilities, or fundamentally wrong (e.g., "
     "code won't compile, missing core logic, data loss risk)\n"
     "- **high**: Significant issues that must be fixed (e.g., missing tests, wrong project "
@@ -441,10 +449,11 @@ REVIEW_PROFILES: dict[ReviewProfile, _ProfileSpec] = {
 def build_review_reasoning_system_prompt(profile: ReviewProfile | str) -> str:
     """Assemble the reasoning half of the chunk-reviewer system prompt.
 
-    Carries the profile persona, shared standards, and criteria checklist plus
-    :data:`REVIEW_PROSE_INSTRUCTION`. Omits :data:`_SHARED_OUTPUT_SECTION` and
-    :data:`JSON_OUTPUT_INSTRUCTION` so the reasoning call is not bound to a JSON
-    response-format contract.
+    Carries the profile persona, shared standards, criteria checklist,
+    :data:`_SHARED_REVIEW_POLICY` (severity, approval, scope, actionability),
+    and :data:`REVIEW_PROSE_INSTRUCTION`. Omits :data:`_SHARED_OUTPUT_SECTION`
+    and :data:`JSON_OUTPUT_INSTRUCTION` so the reasoning call is not bound to a
+    JSON response-format contract.
 
     Preconditions:
         * ``profile`` is a :class:`ReviewProfile` or its string value; an
@@ -462,6 +471,7 @@ def build_review_reasoning_system_prompt(profile: ReviewProfile | str) -> str:
         + _SHARED_ROLE_AND_SETTLED
         + REVIEW_PRIORITY_FRAMEWORK
         + spec.criteria_block
+        + _SHARED_REVIEW_POLICY
         + REVIEW_PROSE_INSTRUCTION
     )
 
@@ -470,7 +480,8 @@ def build_review_formatting_instructions(profile: ReviewProfile | str) -> str:
     """Assemble the JSON formatting half of the chunk-reviewer system prompt.
 
     Profile-agnostic: only validates ``profile`` for API symmetry with
-    :func:`build_review_reasoning_system_prompt`.
+    :func:`build_review_reasoning_system_prompt`. Carries the JSON field schema
+    only; review policy lives on the reasoning prompt.
 
     Preconditions:
         * ``profile`` is a :class:`ReviewProfile` or its string value; an
@@ -509,7 +520,6 @@ def build_review_system_prompt(profile: ReviewProfile | str) -> str:
         enforce that derivation itself (see the module-level ``Invariants``
         above for the authoritative statement of that relationship).
     """
-    return (
-        build_review_reasoning_system_prompt(profile)
-        + build_review_formatting_instructions(profile)
+    return build_review_reasoning_system_prompt(profile) + build_review_formatting_instructions(
+        profile
     )

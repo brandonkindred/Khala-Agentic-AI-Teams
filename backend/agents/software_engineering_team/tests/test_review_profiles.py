@@ -13,6 +13,7 @@ import pytest
 from code_review_agent import CodeReviewAgent, CodeReviewInput, ReviewProfile
 from code_review_agent.profiles import (
     _SHARED_OUTPUT_SECTION,
+    _SHARED_REVIEW_POLICY,
     _SHARED_ROLE_AND_SETTLED,
     REVIEW_PROFILES,
     build_review_formatting_instructions,
@@ -35,18 +36,21 @@ def test_code_review_profile_is_byte_identical_to_legacy_prompt() -> None:
 
 
 def test_reasoning_prompt_omits_json_output_contract() -> None:
-    """Reasoning prompt carries prose output guidance, not the JSON schema."""
+    """Reasoning prompt carries review policy and prose guidance, not the JSON schema."""
     text = build_review_reasoning_system_prompt(ReviewProfile.CODE_REVIEW)
     assert "Return a single JSON object" not in text
+    assert '"approved": boolean' not in text
     assert "Answer in structured prose" in text
-    assert '"approved"' not in text
+    assert _SHARED_REVIEW_POLICY in text
 
 
 def test_formatting_instructions_include_json_contract() -> None:
-    """Formatting instructions carry the shared JSON output contract."""
+    """Formatting instructions carry the shared JSON output contract, not review policy."""
     text = build_review_formatting_instructions(ReviewProfile.CODE_REVIEW)
     assert "Return a single JSON object" in text
-    assert '"approved"' in text
+    assert '"approved": boolean' in text
+    assert _SHARED_REVIEW_POLICY not in text
+    assert _SHARED_OUTPUT_SECTION in text
 
 
 def test_composed_system_prompt_equals_reasoning_plus_formatting() -> None:
@@ -61,6 +65,7 @@ def test_composed_system_prompt_equals_reasoning_plus_formatting() -> None:
 def test_shared_skeleton_pieces_are_slices_of_legacy_prompt() -> None:
     """Shared skeleton pieces remain substrings of the derived CODE_REVIEW prompt."""
     assert _SHARED_ROLE_AND_SETTLED in CODE_REVIEW_PROMPT
+    assert _SHARED_REVIEW_POLICY in CODE_REVIEW_PROMPT
     assert _SHARED_OUTPUT_SECTION in CODE_REVIEW_PROMPT
 
 
@@ -132,17 +137,17 @@ def test_thoroughness_requirements_are_surface_scoped_not_whole_codebase() -> No
     diff-first rewrite."""
     assert (
         "Your thoroughness obligation is everything in the code you were given to review"
-        in _SHARED_OUTPUT_SECTION
+        in _SHARED_REVIEW_POLICY
     )
-    assert '"Code to review" input' in _SHARED_OUTPUT_SECTION
+    assert '"Code to review" input' in _SHARED_REVIEW_POLICY
     assert (
         "Do NOT extend that obligation to code shown to you only as background"
-        in _SHARED_OUTPUT_SECTION
+        in _SHARED_REVIEW_POLICY
     )
     # The retired whole-codebase thoroughness mandate must not reappear.
-    assert "EVERY file" not in _SHARED_OUTPUT_SECTION
-    assert "EVERY function, method, and class" not in _SHARED_OUTPUT_SECTION
-    assert "review every function" not in _SHARED_OUTPUT_SECTION.lower()
+    assert "EVERY file" not in _SHARED_REVIEW_POLICY
+    assert "EVERY function, method, and class" not in _SHARED_REVIEW_POLICY
+    assert "review every function" not in _SHARED_REVIEW_POLICY.lower()
 
 
 def test_code_review_criteria_covers_eight_change_focused_headers() -> None:
@@ -249,7 +254,7 @@ def test_registry_exhausts_all_profiles() -> None:
 
 def test_criteria_block_ends_without_trailing_newline() -> None:
     """Every profile's criteria_block ends without a trailing newline (the
-    _ProfileSpec invariant), so it composes cleanly into _SHARED_OUTPUT_SECTION
+    _ProfileSpec invariant), so it composes cleanly into _SHARED_REVIEW_POLICY
     without introducing extra blank lines."""
     for profile, spec in REVIEW_PROFILES.items():
         assert not spec.criteria_block.endswith("\n"), profile
@@ -302,7 +307,7 @@ def test_engine_threads_profile_to_chunk_reviewer(profile: ReviewProfile, anchor
 # Epic-level prompt contract regression net (#5418).
 #
 # The tests above pin the eight criteria and the retired thoroughness mandate
-# against the builder function and its private ``_SHARED_OUTPUT_SECTION``
+# against the builder function and its private ``_SHARED_REVIEW_POLICY``
 # constant directly. Neither production caller of the review engine
 # (``api/pr_review.py``'s ``_run_reviewer`` nor ``shared/v2_review.py``) ever
 # passes ``profile=`` -- both rely entirely on ``CodeReviewInput``'s implicit
@@ -380,7 +385,7 @@ def test_default_dispatch_prompt_covers_eight_criteria_and_drops_retired_mandate
     )
     assert probe.reasoning_system_prompts, "expected at least one chunk-review call"
     for prompt in probe.reasoning_system_prompts:
-        _assert_eight_criteria_present(prompt)
+        _assert_eight_criteria_present_and_retired_mandate_absent(prompt)
 
 
 def test_skip_false_positive_filter_field_default_off() -> None:
