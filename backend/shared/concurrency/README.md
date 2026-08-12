@@ -190,9 +190,11 @@ the same wave could touch overlapping files, and the write-then-`all_files.updat
 sequence (`_execute_coding_phase`) plus the snapshot/restore sequence
 (`rollback.py`'s `_record_prior_values`/`_rollback_microtask_files`) would need
 to run as one atomic unit per file to avoid a torn write or a split-brain state
-where the worktree and `all_files` disagree. **This module is standalone and
-intentionally not yet imported anywhere** — wiring it into that write sequence
-is exactly the sibling issue it exists to unblock.
+where the worktree and `all_files` disagree. **This module is standalone**:
+it's exported from this package like every other primitive here (so it's
+actually usable by a caller), but `execution.py`/`rollback.py` are
+intentionally untouched — wiring it into that write sequence is exactly the
+sibling issue it exists to unblock, not something this change does itself.
 
 ```python
 from shared.concurrency import KeyedLockManager
