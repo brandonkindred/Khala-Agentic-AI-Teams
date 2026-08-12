@@ -17,7 +17,7 @@ from typing import Any, List
 
 import pytest
 
-from investment_team.models import StrategyLabRecord
+from investment_team.models import BacktestResult, StrategyLabRecord
 from investment_team.strategy_lab._orchestrator_helpers import _DesignAttemptState
 from investment_team.strategy_lab.phases import PHASE_TRANSITION_EVENT_NAME, Phase
 
@@ -76,6 +76,46 @@ def test_design_attempt_state_threads_end_to_end_on_converged_cycle(
         lambda *args, **kwargs: analysis_calls.append((args, kwargs)) or "narrative",
     )
 
+    # wire_run_cycle_stubs patches compute_metrics to a single constant
+    # BacktestResult regardless of the trades it's called with, which would
+    # make the two real compute_metrics call sites indistinguishable here:
+    # the loop's zero-trade initialization (orchestrator_synthesis.py:349)
+    # and the post-execution round evaluation (orchestrator_synthesis.py:
+    # 920) would both hand back the same object, so a regression that
+    # threaded the stale zero-trade placeholder into verification would
+    # still pass a bare `is not None` check. Override with distinct
+    # sentinels keyed on whether any trades were passed, so the assertions
+    # below can tell "stale init placeholder" apart from "this round's
+    # real result" and confirm the pipeline forwards the latter.
+    empty_ledger_metrics = BacktestResult(
+        total_return_pct=0.0,
+        annualized_return_pct=0.0,
+        volatility_pct=0.0,
+        sharpe_ratio=0.0,
+        max_drawdown_pct=0.0,
+        win_rate_pct=0.0,
+        profit_factor=0.0,
+        calmar_ratio=0.0,
+        deflated_sharpe=0.0,
+        sortino_ratio=0.0,
+    )
+    round_metrics = BacktestResult(
+        total_return_pct=18.0,
+        annualized_return_pct=15.0,
+        volatility_pct=8.0,
+        sharpe_ratio=1.4,
+        max_drawdown_pct=4.0,
+        win_rate_pct=60.0,
+        profit_factor=2.0,
+        calmar_ratio=0.0,
+        deflated_sharpe=0.0,
+        sortino_ratio=0.0,
+    )
+    monkeypatch.setattr(
+        "investment_team.strategy_lab.orchestrator.compute_metrics",
+        lambda trades, *args, **kwargs: round_metrics if trades else empty_ledger_metrics,
+    )
+
     config = _config(walk_forward_enabled=False)
     record: StrategyLabRecord = orch.run_cycle(prior_records=[], config=config)
 
@@ -108,13 +148,25 @@ def test_design_attempt_state_threads_end_to_end_on_converged_cycle(
     assert record_assembly_state.trades == synthesis_round_state.trades
     assert pre_verification_state.trades == synthesis_round_state.trades
 
-    # metrics: the synthesis-round state's ``.metrics`` field is a stale
-    # placeholder (per _evaluate_synthesis_round's own precondition that it
-    # computes fresh metrics from state.trades rather than trusting
-    # state.metrics); pre_verification/record_assembly instead carry the
-    # freshly computed BacktestResult, and those two must agree with each
-    # other and with what the final record persists.
-    assert pre_verification_state.metrics is not None
+    # metrics: the synthesis-round state's ``.metrics`` field really is the
+    # stale zero-trade placeholder seeded before the loop started (per
+    # _evaluate_synthesis_round's own precondition that it computes fresh
+    # metrics from state.trades rather than trusting state.metrics) --
+    # confirmed here via the distinct sentinel rather than a bare
+    # not-None check, so a regression that threaded the stale placeholder
+    # into verification would actually fail this assertion.
+    assert synthesis_round_state.metrics is empty_ledger_metrics
+    # pre_verification carries this round's freshly computed BacktestResult
+    # untouched.
+    assert pre_verification_state.metrics is round_metrics
+    # record_assembly's metrics is verification's own annotated copy (it
+    # stamps fields like acceptance_reason onto the BacktestResult, so it's
+    # no longer the exact same object) -- assert it's derived from this
+    # round's real result rather than the stale placeholder by comparing
+    # the field the two sentinels disagree on, then confirm it matches
+    # what the final record persists.
+    assert record_assembly_state.metrics.total_return_pct == round_metrics.total_return_pct
+    assert record_assembly_state.metrics.total_return_pct != empty_ledger_metrics.total_return_pct
     assert record_assembly_state.metrics == record.backtest.result
 
     # -- the persisted record matches the threaded state exactly ---------
