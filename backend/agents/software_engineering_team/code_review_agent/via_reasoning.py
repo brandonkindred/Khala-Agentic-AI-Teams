@@ -19,7 +19,7 @@ from typing import Any, Callable, TypeVar
 from pydantic import BaseModel
 from strands import Agent
 
-from llm_service import LLMClient, get_strands_model
+from llm_service import LLMClient, LLMSemanticExhaustionError, get_strands_model
 from llm_service.structured import complete_validated
 
 T = TypeVar("T", bound=BaseModel)
@@ -147,12 +147,39 @@ def _pinned_max_tokens(model: Any) -> int | None:
     return None
 
 
+def _require_reasoning_prose(prose: str) -> str:
+    """Return stripped reasoning text, or raise if the reasoning pass was empty.
+
+    An empty or whitespace-only reply is the thinking-only failure the
+    coordinator recovers from via ``LLMSemanticExhaustionError`` (bisect /
+    thinking-off retry). Forwarding it to the formatter would let a valid
+    empty-issues JSON approval stand in for a review that never happened.
+
+    Preconditions:
+        ``prose`` is the raw string from the reasoning call (may be empty).
+
+    Postconditions:
+        Returns ``prose.strip()`` when that is non-empty. Raises
+        ``LLMSemanticExhaustionError`` otherwise, with
+        ``retry_thinking_level is None`` so mapping still retries.
+    """
+    text = (prose or "").strip()
+    if text:
+        return text
+    raise LLMSemanticExhaustionError(
+        "reasoning pass produced no usable assistant content",
+        attempts_used=1,
+        content_bytes_seen=bool(prose),
+    )
+
+
 def _clone_model_for_pass(
     model: Any,
     *,
     agent_key: str,
     response_format: str,
     think: bool | str | None,
+    drop_output_pin: bool = False,
 ) -> Any:
     """Resolve a Strands model variant for one pass of the split.
 
@@ -161,15 +188,27 @@ def _clone_model_for_pass(
 
     Postconditions:
         Returns a model suitable for ``Agent`` construction. Injected test
-        doubles without ``clone`` are returned unchanged.
+        doubles without ``clone`` are returned unchanged. When
+        ``drop_output_pin`` is True, a cloned model's ``max_tokens`` is
+        cleared so a JSON-findings reserve does not cap thinking.
     """
     think_value = _resolve_reasoning_think(think)
     clone_fn = getattr(model, "clone", None)
     if callable(clone_fn):
+        clone_kwargs: dict[str, Any] = {
+            "response_format": response_format,
+            "think": think_value,
+        }
+        if drop_output_pin:
+            clone_kwargs["max_tokens"] = None
         try:
-            return clone_fn(response_format=response_format, think=think_value)
+            return clone_fn(**clone_kwargs)
         except TypeError:
-            return clone_fn(response_format=response_format)
+            clone_kwargs.pop("think", None)
+            try:
+                return clone_fn(**clone_kwargs)
+            except TypeError:
+                return clone_fn(response_format=response_format)
 
     backing = _extract_llm_client(model)
     if backing is not None:
@@ -210,19 +249,23 @@ def complete_validated_via_reasoning_local(
 
     Postconditions:
         Returns a validated Pydantic instance. A step-1 exception propagates
-        immediately and step 2 is never invoked.
+        immediately and step 2 is never invoked. Empty or whitespace-only
+        reasoning output raises ``LLMSemanticExhaustionError`` before
+        formatting so coordinator recovery still runs.
     """
     _require_non_empty("objective", objective)
     _require_non_empty("reasoning_prompt", reasoning_prompt)
     _require_non_empty("formatting_instructions", formatting_instructions)
     _reject_think_kwarg("complete_validated_via_reasoning_local", kwargs)
 
-    prose = client.complete(
-        reasoning_prompt,
-        objective=f"{objective} (reasoning)",
-        system_prompt=reasoning_system_prompt,
-        temperature=reasoning_temperature,
-        think=_resolve_reasoning_think(reasoning_think),
+    prose = _require_reasoning_prose(
+        client.complete(
+            reasoning_prompt,
+            objective=f"{objective} (reasoning)",
+            system_prompt=reasoning_system_prompt,
+            temperature=reasoning_temperature,
+            think=_resolve_reasoning_think(reasoning_think),
+        )
     )
     format_prompt = (
         f"{_DEFAULT_FORMAT_INSTRUCTIONS}\n\n{formatting_instructions}\n\n"
@@ -265,6 +308,8 @@ def run_agent_via_reasoning(
     ``client.complete_json`` and passes ``json.dumps`` output to ``parse``.
     A positive ``max_tokens`` pin on ``model`` (from ``get_config`` or the
     attribute) is forwarded so a cloned output reserve is not dropped.
+    That pin is cleared on the reasoning-pass clone so thinking is not
+    starved by a JSON-findings token reserve.
     Otherwise call 2 uses a no-tools ``Agent`` on a JSON-mode model clone.
 
     Preconditions:
@@ -276,6 +321,8 @@ def run_agent_via_reasoning(
     Postconditions:
         Returns ``parse``'s result. Tools are attached only to call 1.
         Call 2 honors ``model``'s reserved ``max_tokens`` when one is set.
+        Call 1 does not inherit that pin. Empty reasoning output raises
+        ``LLMSemanticExhaustionError`` before formatting.
     """
     _require_non_empty("reasoning_prompt", reasoning_prompt)
     _require_non_empty("reasoning_system_prompt", reasoning_system_prompt)
@@ -286,6 +333,7 @@ def run_agent_via_reasoning(
         agent_key=agent_key,
         response_format="text",
         think=reasoning_think,
+        drop_output_pin=True,
     )
     reasoning_agent_kwargs: dict[str, Any] = {
         "model": text_model,
@@ -295,7 +343,7 @@ def run_agent_via_reasoning(
     if conversation_manager is not None:
         reasoning_agent_kwargs["conversation_manager"] = conversation_manager
     reasoning_agent = Agent(**reasoning_agent_kwargs)
-    prose = str(reasoning_agent(reasoning_prompt)).strip()
+    prose = _require_reasoning_prose(str(reasoning_agent(reasoning_prompt)))
     if on_reasoning_agent is not None:
         on_reasoning_agent(reasoning_agent)
 

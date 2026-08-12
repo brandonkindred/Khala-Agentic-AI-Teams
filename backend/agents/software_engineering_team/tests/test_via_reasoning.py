@@ -7,7 +7,7 @@ from typing import Any, Optional
 import pytest
 from pydantic import BaseModel
 
-from llm_service.interface import LLMClient, LLMPermanentError
+from llm_service.interface import LLMClient, LLMPermanentError, LLMSemanticExhaustionError
 from software_engineering_team.code_review_agent.via_reasoning import (
     complete_validated_via_reasoning_local,
     formatting_system_prompt_with_untrusted_guard,
@@ -152,6 +152,28 @@ def test_validated_via_reasoning_step_one_failure_skips_format() -> None:
     assert client.format_calls == []
 
 
+@pytest.mark.parametrize("prose", ["", "   \n\t  "])
+def test_validated_via_reasoning_empty_prose_skips_format(prose: str) -> None:
+    """Thinking-only / empty complete() must not reach the formatter.
+
+    Mapping's thinking-off retry only runs on LLMSemanticExhaustionError (or
+    truncation). Formatting empty analysis into a valid empty-issues approval
+    would skip that recovery and treat an unreviewed chunk as approved.
+    """
+    client = _RecordingClient(prose=prose)
+    with pytest.raises(LLMSemanticExhaustionError, match="no usable assistant content"):
+        complete_validated_via_reasoning_local(
+            client,
+            schema=_Out,
+            reasoning_prompt="Review this code",
+            reasoning_system_prompt="Prose only.",
+            formatting_instructions="JSON shape here",
+            objective="review code chunk",
+        )
+    assert client.order == ["complete"]
+    assert client.format_calls == []
+
+
 def test_validated_via_reasoning_rejects_empty_objective() -> None:
     client = _RecordingClient()
     with pytest.raises(ValueError, match="objective must be non-empty"):
@@ -261,6 +283,87 @@ def test_run_agent_via_reasoning_forwards_model_max_tokens_to_format_call(
     )
 
     assert format_calls[0]["max_tokens"] == 4096
+
+
+def test_run_agent_via_reasoning_drops_json_output_pin_on_reasoning_clone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The JSON findings reserve must not cap the thinking/reasoning pass.
+
+    Submission passes clone the model with reserved_response_tokens sized for
+    findings JSON. Call 1 now uses max thinking; inheriting that pin starves
+    thinking tokens and truncates before any review prose is emitted.
+    """
+    from llm_service import LLMClientModel
+    from llm_service.clients.dummy import DummyLLMClient
+    from software_engineering_team.code_review_agent import via_reasoning as vr_mod
+
+    agent_models: list[Any] = []
+    format_calls: list[dict[str, Any]] = []
+
+    class _RecordingClient(DummyLLMClient):
+        def complete_json(self, prompt: str, **kwargs: Any) -> dict[str, Any]:
+            format_calls.append({"prompt": prompt, **kwargs})
+            return {"approved": True, "summary": "via client"}
+
+    class _RecordingAgent:
+        def __init__(self, **kwargs: Any) -> None:
+            agent_models.append(kwargs["model"])
+
+        def __call__(self, prompt: str) -> str:
+            return "REVIEW PROSE"
+
+    monkeypatch.setattr(vr_mod, "Agent", _RecordingAgent)
+    model = LLMClientModel(_RecordingClient(), agent_key="code_review", max_tokens=4096)
+
+    run_agent_via_reasoning(
+        model=model,
+        reasoning_prompt="Review this",
+        reasoning_system_prompt="Prose reviewer",
+        formatting_instructions='Return {"approved": bool, "summary": str}',
+        parse=lambda raw: _Out.model_validate_json(raw),
+    )
+
+    reasoning_cfg = agent_models[0].get_config()
+    assert reasoning_cfg.get("max_tokens") in (None, 0)
+    assert format_calls[0]["max_tokens"] == 4096
+
+
+@pytest.mark.parametrize("prose", ["", "   \n"])
+def test_run_agent_via_reasoning_empty_prose_skips_format(
+    monkeypatch: pytest.MonkeyPatch, prose: str
+) -> None:
+    """Empty Agent reasoning output must raise before complete_json."""
+    from llm_service import LLMClientModel
+    from llm_service.clients.dummy import DummyLLMClient
+    from software_engineering_team.code_review_agent import via_reasoning as vr_mod
+
+    format_calls: list[dict[str, Any]] = []
+
+    class _RecordingClient(DummyLLMClient):
+        def complete_json(self, prompt: str, **kwargs: Any) -> dict[str, Any]:
+            format_calls.append({"prompt": prompt, **kwargs})
+            return {"approved": True, "summary": "via client"}
+
+    class _RecordingAgent:
+        def __init__(self, **kwargs: Any) -> None:
+            pass
+
+        def __call__(self, prompt: str) -> str:
+            return prose
+
+    monkeypatch.setattr(vr_mod, "Agent", _RecordingAgent)
+    model = LLMClientModel(_RecordingClient(), agent_key="code_review")
+
+    with pytest.raises(LLMSemanticExhaustionError, match="no usable assistant content"):
+        run_agent_via_reasoning(
+            model=model,
+            reasoning_prompt="Review this",
+            reasoning_system_prompt="Prose reviewer",
+            formatting_instructions='Return {"approved": bool, "summary": str}',
+            parse=lambda raw: _Out.model_validate_json(raw),
+        )
+    assert format_calls == []
 
 
 def test_run_agent_via_reasoning_omits_max_tokens_when_model_has_no_pin(
