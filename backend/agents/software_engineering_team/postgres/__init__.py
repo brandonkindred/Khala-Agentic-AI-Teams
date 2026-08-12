@@ -23,7 +23,7 @@ Four tables:
   LLM call the review pipeline made (stage, target, prompt, response) as an
   ordered JSONB array, so a completed review's full transcript can be
   inspected after the fact. Rows are appended to incrementally as the review
-  runs (see ``review_history_store.append_review_transcript_entry``), keyed
+  runs (see ``review_history_store.append_review_transcript_entries``), keyed
   1:1 with ``code_review_runs.job_id``.
 """
 
@@ -119,7 +119,7 @@ SCHEMA = TeamSchema(
         """CREATE INDEX IF NOT EXISTS idx_code_review_runs_pr_ci
             ON code_review_runs(lower(owner), lower(repo), pr_number, created_at DESC)""",
         # One row per review job; ``entries`` is appended to (never replaced) as
-        # the review runs — see ``append_review_transcript_entry``.
+        # the review runs — see ``append_review_transcript_entries``.
         """CREATE TABLE IF NOT EXISTS code_review_transcripts (
             job_id       TEXT PRIMARY KEY REFERENCES code_review_runs(job_id) ON DELETE CASCADE,
             entries      JSONB NOT NULL DEFAULT '[]'::jsonb,

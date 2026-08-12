@@ -907,7 +907,7 @@ class CodeReviewInput(BaseModel):
         "submission-level cache key). Consumed by ``CodeReviewAgent.run`` to bind "
         "``llm_attribution(job_id=...)`` for the run, which lets each LLM call site record its "
         "prompt/response into that job's durable transcript (``review_history_store."
-        "append_review_transcript_entry``); ``''`` (the default) means no caller-tracked job, so "
+        "append_review_transcript_entries``); ``''`` (the default) means no caller-tracked job, so "
         "transcript recording is a no-op.",
     )
 
