@@ -92,15 +92,9 @@ re-exports from `lifecycle.py`/`state.py`: `Lifecycle`, `get_lifecycle`, `acquir
 callers that need it import `sandbox.provisioner` directly. Not present in `TEAM_CONFIGS`, and
 not gated by any `TeamConfig.enabled`/`in_process` flag at all — it is a plain library
 consumed only by `unified_api/routes/{sandboxes.py, agents.py}` and `unified_api/main.py`'s
-lifespan. Its `Lifecycle` singleton is in-memory, per-process state; its Temporal workflows run
-on a dedicated `SANDBOX_TASK_QUEUE` (separate from `agent_provisioning_team`'s main
-`TASK_QUEUE`), and that worker is started **only** from `unified_api/main.py`'s own lifespan
-(`_maybe_start_sandbox_reaper` → `start_agent_provisioning_sandbox_temporal_worker_thread`),
-never by the standalone `agent_provisioning_team` team_service container's main worker. The
-sandbox README states the reason directly: sharing a task queue would let Temporal "dispatch a
-sandbox activity into that other process, against a different, unsynchronized `Lifecycle`
-instance ... silently diverging state (e.g. the reaper tearing down a sandbox it wrongly
-believes idle)."
+lifespan. Its `Lifecycle` singleton is process-affine to the unified-API process (documented in
+`sandbox/README.md`) — Decision §4 restates this as the ADR's authoritative, citable
+worker-boot-ownership statement, per this issue's acceptance criterion.
 
 **`agent_studio`** (`agent_team_studio/agent_studio/`) — has **no** package-level façade;
 callers import submodules directly (`agent_team_studio.agent_studio.temporal.worker`,
@@ -110,11 +104,11 @@ Unlike the other three, it **is** present in `TEAM_CONFIGS`, with `in_process=Tr
 Pattern A, Temporal-only (`agent_studio/temporal/__init__.py` exports `WORKFLOWS`,
 `ACTIVITIES`, `TASK_QUEUE = "agent-studio-queue"`, with no non-Temporal fallback), plus Pattern
 B (`agent_studio/postgres.py::SCHEMA`, registered at `main.py:672-679`, gated on
-`TEAM_CONFIGS["agent_studio"].enabled`). Its worker activities delegate to the process-local
-`AgentStudioService`/`drafts_runtime` singleton that the same process's HTTP handlers
-populate; the worker is started only from `unified_api/main.py` lifespan step 8
-(`_start_agent_studio_temporal_worker`). Studio depends on
-`agent_registry.models.AgentManifest`; registry does not depend on Studio.
+`TEAM_CONFIGS["agent_studio"].enabled`). Its worker activities delegate to a process-local
+`AgentStudioService`/`drafts_runtime` singleton (documented in `agent_studio/runtime.py` and
+`agent_studio/temporal/worker.py`) — Decision §4 restates this as the ADR's authoritative,
+citable worker-boot-ownership statement. Studio depends on `agent_registry.models.AgentManifest`;
+registry does not depend on Studio.
 
 **Adjacent, distinct concern that stays put.** The sibling directory
 `agent_team_studio/agent_provisioning_team/` also holds an unrelated, onboarding-style
