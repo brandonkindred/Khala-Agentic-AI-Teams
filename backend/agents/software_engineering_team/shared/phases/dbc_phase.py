@@ -20,6 +20,7 @@ sibling work. This module is self-contained and directly tested.
 from __future__ import annotations
 
 import logging
+import re
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Dict, Optional
 
@@ -41,6 +42,19 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# Mirrors (deliberately more permissive than) DbcCommentsAgent's own
+# chunking._FILE_HEADER_PATTERN: a whole line of the form "### path ###".
+# DbcCommentsAgent's concatenated-code transport has no per-file input, so a
+# reviewed file whose own content contains such a line is inherently
+# ambiguous to its parser -- it cannot tell that line apart from a real chunk
+# boundary. If the line's path collides with another reviewed file's real
+# path, the parser splits that real file's content into two spurious blocks
+# and the agent's merge step can attach an insertion derived from one file's
+# content to a different, unrelated file. There is no way to safely
+# distinguish this case after the fact, so a matching file is excluded from
+# review entirely up front, before concatenation.
+_HEADER_LIKE_LINE = re.compile(r"^###[ \t]+\S[^\n]*[ \t]+###[ \t]*$", re.MULTILINE)
+
 
 def run_dbc_comments_review(
     *,
@@ -58,8 +72,14 @@ def run_dbc_comments_review(
         pre-concatenated string. An empty dict is valid.
 
     Postconditions:
-        ``code`` is concatenated into the ``### path ###``-headered format
-        ``DbcCommentsAgent``/``parse_code_into_file_blocks`` expect (one
+        Any file in ``code`` whose own content contains a ``### path ###``-
+        shaped line is excluded before concatenation (see
+        ``_HEADER_LIKE_LINE``) -- such a file cannot be safely represented in
+        DbcCommentsAgent's concatenated-code transport, so it is skipped
+        rather than risking an insertion from a spurious parsed block being
+        merged into an unrelated file. The remaining files are concatenated
+        into the ``### path ###``-headered format ``DbcCommentsAgent``/
+        ``parse_code_into_file_blocks`` expect (one
         ``"### {path} ###\\n{content}"`` block per file, joined with
         ``"\\n\\n"``, matching ``DbcChunk.content``'s own rendering), then
         reviewed via a freshly constructed ``DbcCommentsAgent()`` (it
@@ -75,7 +95,18 @@ def run_dbc_comments_review(
         propagated -- this holds regardless of ``DbcCommentsAgent.run()``'s
         own "never raises" contract, as defense in depth for this layer too.
     """
-    concatenated = "\n\n".join(f"### {path} ###\n{content}" for path, content in code.items())
+    safe_code = {
+        path: content for path, content in code.items() if not _HEADER_LIKE_LINE.search(content)
+    }
+    excluded = code.keys() - safe_code.keys()
+    if excluded:
+        logger.warning(
+            "DbC comments review: excluding file(s) %s -- their content contains a "
+            "'### path ###'-shaped line that would be misread as a chunk header",
+            sorted(excluded),
+        )
+
+    concatenated = "\n\n".join(f"### {path} ###\n{content}" for path, content in safe_code.items())
 
     def _on_status(status: DbcCommentsStatus, detail: str = "") -> None:
         if detail_callback:

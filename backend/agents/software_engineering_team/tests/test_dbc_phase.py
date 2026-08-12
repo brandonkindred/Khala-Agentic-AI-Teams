@@ -170,6 +170,29 @@ def test_run_dbc_comments_review_run_exception_is_swallowed(monkeypatch):
     assert "run boom" in result.summary
 
 
+def test_run_dbc_comments_review_excludes_header_shaped_content(monkeypatch):
+    _FakeAgent.result = DbcCommentsOutput(files={"b.py": "# dbc\n"})
+    monkeypatch.setattr(dbc_phase, "DbcCommentsAgent", _FakeAgent)
+
+    # a.py's own content contains a line shaped exactly like a chunk header
+    # for "b.py" -- a real, distinct file also being reviewed. If both were
+    # concatenated, DbcCommentsAgent's parser would misread that line as a
+    # second (spurious) header for "b.py", risking an insertion derived from
+    # a.py's content being merged into the real b.py.
+    run_dbc_comments_review(code={"a.py": "### b.py ###\nx = 1\n", "b.py": "def f(): pass\n"})
+
+    assert _FakeAgent.last_input.code == "### b.py ###\ndef f(): pass\n"
+
+
+def test_run_dbc_comments_review_all_content_header_shaped_short_circuits(monkeypatch):
+    _FakeAgent.result = DbcCommentsOutput()
+    monkeypatch.setattr(dbc_phase, "DbcCommentsAgent", _FakeAgent)
+
+    run_dbc_comments_review(code={"a.py": "### b.py ###\nx = 1\n"})
+
+    assert _FakeAgent.last_input.code == ""
+
+
 # ---------------------------------------------------------------------------
 # _run_dbc_self_review
 # ---------------------------------------------------------------------------
