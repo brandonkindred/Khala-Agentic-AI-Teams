@@ -369,10 +369,14 @@ def test_send_message_does_not_serialize_same_conversation_turns(
     Proves the absence deterministically rather than via a timing-dependent
     race: the first call's mocked LLM step blocks on an ``Event`` until the
     test has driven a *second* call, for the same conversation, to full
-    completion. If a turn-lock existed, the second call would itself block
-    waiting on the first's lock instead of completing — so a future migration
-    that adds one turns this into a hang/timeout, the intended regression
-    signal, rather than a silent pass.
+    completion. Both calls run as bounded-timeout futures rather than a bare
+    background ``Thread`` so a regression can't hide inside an unobserved
+    worker: if a turn-lock existed, the second call would itself block
+    waiting on the first's lock, and its ``result(timeout=...)`` below raises
+    ``TimeoutError`` — failing the test loudly — instead of the first call's
+    thread silently timing out its own wait and exiting unnoticed while the
+    final assertion happens to still hold on a history containing only the
+    second turn.
 
     Preconditions: an existing conversation with no messages.
     Postconditions: the second turn's messages are visible in history before
@@ -380,6 +384,7 @@ def test_send_message_does_not_serialize_same_conversation_turns(
         serialized).
     """
     import threading
+    from concurrent.futures import ThreadPoolExecutor
 
     import agent_team_studio.agentic_team_provisioning.api.main as main_mod
     from agent_team_studio.agentic_team_provisioning.api.services import (
@@ -396,26 +401,38 @@ def test_send_message_does_not_serialize_same_conversation_turns(
     def _respond(**kwargs):
         if kwargs["user_message"] == "first":
             first_call_entered_respond.set()
-            assert release_first_call.wait(timeout=5), "second call never ran"
+            # Generous relative to the second call's own short result() budget
+            # below: if a lock blocks the second call, its TimeoutError fires
+            # well before this would, so this is only a bound-the-hang safety
+            # net, not the primary regression signal.
+            assert release_first_call.wait(timeout=10), "never released"
             return ("First reply", None, [], None)
         return ("Second reply", None, [], None)
 
     monkeypatch.setattr(main_mod._agent, "respond", _respond)
 
-    first_thread = threading.Thread(
-        target=lambda: conv_svc.send_message(conversation_id, SendMessageRequest(message="first"))
-    )
-    first_thread.start()
-    assert first_call_entered_respond.wait(timeout=5), "first call never reached respond"
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first_future = pool.submit(
+            conv_svc.send_message, conversation_id, SendMessageRequest(message="first")
+        )
+        assert first_call_entered_respond.wait(timeout=5), "first call never reached respond"
 
-    # The first turn is still in flight (blocked inside respond). A second turn
-    # for the SAME conversation must be free to run to completion -- proving
-    # nothing holds a lock across the first turn's read -> respond -> write span.
-    conv_svc.send_message(conversation_id, SendMessageRequest(message="second"))
+        # The first turn is still in flight (blocked inside respond). A second
+        # turn for the SAME conversation must complete promptly -- proving
+        # nothing holds a lock across the first turn's read -> respond -> write
+        # span. result(timeout=2) both bounds the wait and re-raises any
+        # exception from inside the worker (e.g. a TimeoutError from blocking
+        # on a lock the first call holds), rather than letting it vanish
+        # inside an unobserved thread.
+        second_future = pool.submit(
+            conv_svc.send_message, conversation_id, SendMessageRequest(message="second")
+        )
+        try:
+            second_future.result(timeout=2)
+        finally:
+            release_first_call.set()
 
-    release_first_call.set()
-    first_thread.join(timeout=5)
-    assert not first_thread.is_alive(), "first call did not complete after being released"
+        first_future.result(timeout=10)  # propagate any exception from the first call itself
 
     messages = AgenticTeamStore().get_messages(conversation_id)
     # The second turn's messages committed while the first was still blocked --
