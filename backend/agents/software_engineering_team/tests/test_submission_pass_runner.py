@@ -1,45 +1,25 @@
-"""Tests for the shared submission-pass runner (budgeting/chunking/recovery)."""
+"""Tests for the shared submission-pass runner (bisect recovery, no char caps)."""
 
 from __future__ import annotations
 
 import json
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List
 
 import code_review_agent.submission_pass_runner as runner_mod
 import pytest
 from code_review_agent.submission_pass_runner import (
     FileBatch,
     _call_agent,
-    _estimated_file_block_chars,
     _is_overflow_shaped,
-    _manifest_chars,
-    _pack_batches,
-    _shrink_items,
-    _with_output_budget,
     run_submission_pass,
 )
 from strands.types.exceptions import ContextWindowOverflowException, MaxTokensReachedException
 
-from llm_service import LLMClientModel, LLMTruncatedError
+from llm_service import LLMTruncatedError
 from llm_service.clients.dummy import DummyLLMClient
-from software_engineering_team.shared.context_sizing import MergedPassBudgets
 
 
-def _fixed_budgets(
-    *,
-    max_inline_code_chars: int,
-    max_manifest_chars: int = 10_000,
-    max_architecture_chars: int = 0,
-) -> MergedPassBudgets:
-    return MergedPassBudgets(
-        max_architecture_chars=max_architecture_chars,
-        max_inline_code_chars=max_inline_code_chars,
-        max_manifest_chars=max_manifest_chars,
-        reserved_response_tokens=4096,
-    )
-
-
-def _paths_prompt(batch: FileBatch, _budgets: Any) -> str:
+def _paths_prompt(batch: FileBatch) -> str:
     return "PATHS:" + ",".join(path for path, _ in batch.items)
 
 
@@ -87,84 +67,8 @@ def test_call_agent_delegates_to_run_agent_via_reasoning(
 
 
 class _FailIfAsked(DummyLLMClient):
-    def get_max_context_tokens(self) -> int:
-        raise AssertionError("must not compute budgets when no call should be made")
-
     def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
         raise AssertionError(f"must not call the LLM, got prompt: {prompt!r}")
-
-
-# --- Pure helper unit tests -------------------------------------------------
-
-
-def test_manifest_chars_counts_header_and_paths() -> None:
-    assert _manifest_chars([]) == len("**Changed files in this submission (0):**\n")
-    n = _manifest_chars(["a.py", "bb.py"])
-    assert n == len("**Changed files in this submission (2):**\n") + len("a.py\n") + len("bb.py\n")
-
-
-def test_estimated_file_block_chars_at_least_content_length() -> None:
-    assert _estimated_file_block_chars("a.py", "hello") >= len("hello")
-
-
-def test_pack_batches_empty_items() -> None:
-    assert _pack_batches([], max_chars=1_000) == []
-
-
-def test_pack_batches_single_batch_when_under_budget() -> None:
-    items = [("a.py", "x" * 50), ("b.py", "y" * 50)]
-    assert _pack_batches(items, max_chars=10_000) == [items]
-
-
-def test_pack_batches_single_batch_when_max_chars_non_positive() -> None:
-    items = [("a.py", "x" * 50), ("b.py", "y" * 50)]
-    assert _pack_batches(items, max_chars=0) == [items]
-    assert _pack_batches(items, max_chars=-5) == [items]
-
-
-def test_pack_batches_splits_when_over_budget() -> None:
-    items = [("a.py", "x" * 100), ("b.py", "y" * 100), ("c.py", "z" * 100)]
-    per_file = _estimated_file_block_chars(*items[0])
-    batches = _pack_batches(items, max_chars=per_file + 10)
-    assert batches == [[items[0]], [items[1]], [items[2]]]
-
-
-def test_pack_batches_keeps_oversized_file_alone() -> None:
-    items = [("small.py", "a" * 10), ("huge.py", "b" * 10_000)]
-    batches = _pack_batches(items, max_chars=500)
-    assert batches[0] == [items[0]]
-    assert batches[-1] == [items[1]]
-    assert sum(len(b) for b in batches) == len(items)
-
-
-def test_shrink_items_halves_content() -> None:
-    shrunk = _shrink_items([("a.py", "a" * 10), ("b.py", "b" * 4)])
-    assert shrunk == [("a.py", "a" * 5), ("b.py", "b" * 2)]
-
-
-def test_shrink_items_returns_none_when_nothing_left_to_shrink() -> None:
-    assert _shrink_items([("a.py", ""), ("b.py", "")]) is None
-
-
-def test_with_output_budget_leaves_non_llm_client_model_unchanged() -> None:
-    client = DummyLLMClient()
-    assert _with_output_budget(client, response_tokens=4096) is client
-
-
-def test_with_output_budget_clones_when_effective_cap_differs(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.delenv("LLM_MAX_OUTPUT_TOKENS", raising=False)
-    model = LLMClientModel(DummyLLMClient(), max_tokens=None)
-    result = _with_output_budget(model, response_tokens=4096)
-    assert result is not model
-    assert result.get_config().get("max_tokens") == 4096
-
-
-def test_with_output_budget_returns_same_model_when_cap_already_matches() -> None:
-    model = LLMClientModel(DummyLLMClient(), max_tokens=4096)
-    result = _with_output_budget(model, response_tokens=4096)
-    assert result is model
 
 
 def test_is_overflow_shaped_classifies_known_and_unknown_exceptions() -> None:
@@ -178,7 +82,16 @@ def test_is_overflow_shaped_classifies_known_and_unknown_exceptions() -> None:
     assert _is_overflow_shaped(json.JSONDecodeError("bad", "doc", 0)) is False
 
 
-# --- run_submission_pass: budgeting / no-op paths ---------------------------
+def test_is_overflow_shaped_matches_provider_prompt_too_large_messages() -> None:
+    """Generic 4xx wrappers that name context/prompt length must recover."""
+    from llm_service.interface import LLMPermanentError
+
+    assert _is_overflow_shaped(LLMPermanentError("prompt is too long for the model")) is True
+    assert _is_overflow_shaped(RuntimeError("Request exceeds the context window")) is True
+    wrapped = LLMPermanentError("bad request")
+    wrapped.__cause__ = ValueError("input too long: 200000 tokens")
+    assert _is_overflow_shaped(wrapped) is True
+    assert _is_overflow_shaped(LLMPermanentError("invalid api key")) is False
 
 
 def test_returns_empty_and_makes_no_call_for_empty_changed_files() -> None:
@@ -194,66 +107,21 @@ def test_returns_empty_and_makes_no_call_for_empty_changed_files() -> None:
     assert result == []
 
 
-def test_returns_empty_when_budgets_computation_returns_none(
+def test_single_call_inlines_full_changed_file_set(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(runner_mod, "compute_code_review_merged_pass_budgets", lambda *a, **k: None)
-    result = run_submission_pass(
-        _FailIfAsked(),
-        changed_files=[("a.py", "code")],
-        reasoning_system_prompt="sys",
-        formatting_instructions="fmt",
-        build_prompt=_paths_prompt,
-        tools=[],
-        parse=json.loads,
-    )
-    assert result == []
-
-
-def test_returns_empty_when_context_too_small_for_fixed_prompt() -> None:
-    """No monkeypatch: exercises the real budgeting function end to end."""
-
-    class _FailIfCalled(DummyLLMClient):
-        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
-            raise AssertionError(f"must not call the LLM, got prompt: {prompt!r}")
-
-    huge_reasoning_prompt = "x" * 500_000  # far exceeds DummyLLMClient's fixed context window
-    result = run_submission_pass(
-        _FailIfCalled(),
-        changed_files=[("a.py", "code")],
-        reasoning_system_prompt=huge_reasoning_prompt,
-        formatting_instructions="fmt",
-        build_prompt=_paths_prompt,
-        tools=[],
-        parse=json.loads,
-    )
-    assert result == []
-
-
-# --- run_submission_pass: proactive chunking --------------------------------
-
-
-def test_single_batch_and_single_call_when_everything_fits(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(
-        runner_mod,
-        "compute_code_review_merged_pass_budgets",
-        lambda *a, **k: _fixed_budgets(max_inline_code_chars=100_000),
-    )
     seen_batches: List[FileBatch] = []
 
-    def build_prompt(batch: FileBatch, _budgets: Any) -> str:
+    def build_prompt(batch: FileBatch) -> str:
         seen_batches.append(batch)
-        return _paths_prompt(batch, _budgets)
+        return _paths_prompt(batch)
 
-    calls: List[str] = []
-    _patch_via_reasoning_json(
-        monkeypatch,
-        lambda prompt: (calls.append(prompt) or {"paths": prompt.replace("PATHS:", "")}),
-    )
+    def _handler(prompt: str) -> Any:
+        return {"paths": prompt.replace("PATHS:", "")}
 
-    files = [("a.py", "x" * 10), ("b.py", "y" * 10)]
+    _patch_via_reasoning_json(monkeypatch, _handler)
+
+    files = [("a.py", "aaaa"), ("b.py", "bbbb"), ("c.py", "cccc")]
     result = run_submission_pass(
         DummyLLMClient(),
         changed_files=files,
@@ -262,152 +130,51 @@ def test_single_batch_and_single_call_when_everything_fits(
         build_prompt=build_prompt,
         tools=[],
         parse=json.loads,
-        pass_label="TestPass",
     )
-
-    assert len(calls) == 1
+    assert result == [{"paths": "a.py,b.py,c.py"}]
     assert len(seen_batches) == 1
-    assert seen_batches[0] == FileBatch(items=files, index=1, total=1)
-    assert result == [{"paths": "a.py,b.py"}]
+    assert seen_batches[0].items == files
+    assert seen_batches[0].is_partial is False
 
 
-def test_splits_into_multiple_batches_and_preserves_order(
+def test_build_prompt_receives_full_file_content(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    items = [("a.py", "x" * 100), ("b.py", "y" * 100), ("c.py", "z" * 100)]
-    per_file = _estimated_file_block_chars(*items[0])
-    monkeypatch.setattr(
-        runner_mod,
-        "compute_code_review_merged_pass_budgets",
-        lambda *a, **k: _fixed_budgets(max_inline_code_chars=per_file + 10),
-    )
-    seen_batches: List[FileBatch] = []
+    seen_content: List[str] = []
 
-    def build_prompt(batch: FileBatch, _budgets: Any) -> str:
-        seen_batches.append(batch)
-        return _paths_prompt(batch, _budgets)
+    def build_prompt(batch: FileBatch) -> str:
+        for _path, content in batch.items:
+            seen_content.append(content)
+        return "ok"
 
-    _patch_via_reasoning_json(
-        monkeypatch,
-        lambda prompt: {"paths": prompt.replace("PATHS:", "")},
-    )
+    _patch_via_reasoning_json(monkeypatch, lambda _p: {"ok": True})
 
-    result = run_submission_pass(
-        DummyLLMClient(),
-        changed_files=items,
-        reasoning_system_prompt="sys",
-        formatting_instructions="fmt",
-        build_prompt=build_prompt,
-        tools=[],
-        parse=json.loads,
-    )
-
-    assert len(seen_batches) == 3
-    assert [b.index for b in seen_batches] == [1, 2, 3]
-    assert all(b.total == 3 for b in seen_batches)
-    assert [b.items for b in seen_batches] == [[items[0]], [items[1]], [items[2]]]
-    assert result == [{"paths": "a.py"}, {"paths": "b.py"}, {"paths": "c.py"}]
-
-
-def test_split_batches_log_names_the_tail_pass_budget_knob(
-    monkeypatch: pytest.MonkeyPatch,
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    """The batch-split telemetry log must name CODE_REVIEW_TAIL_PASS_CHUNK_CHARS
-    so an operator tuning that knob can find the log line that reports it."""
-    items = [("a.py", "x" * 100), ("b.py", "y" * 100)]
-    per_file = _estimated_file_block_chars(*items[0])
-    monkeypatch.setattr(
-        runner_mod,
-        "compute_code_review_merged_pass_budgets",
-        lambda *a, **k: _fixed_budgets(max_inline_code_chars=per_file + 10),
-    )
-
-    _patch_via_reasoning_json(
-        monkeypatch,
-        lambda prompt: {"paths": prompt.replace("PATHS:", "")},
-    )
-
-    with caplog.at_level("INFO", logger=runner_mod.logger.name):
-        run_submission_pass(
-            DummyLLMClient(),
-            changed_files=items,
-            reasoning_system_prompt="sys",
-            formatting_instructions="fmt",
-            build_prompt=_paths_prompt,
-            tools=[],
-            parse=json.loads,
-            pass_label="TestTailPass",
-        )
-
-    split_logs = [r.message for r in caplog.records if "split into" in r.message]
-    assert len(split_logs) == 1
-    assert "CODE_REVIEW_TAIL_PASS_CHUNK_CHARS" in split_logs[0]
-    assert "TestTailPass" in split_logs[0]
-    assert "2 batches" in split_logs[0]
-
-
-def test_max_extra_body_chars_propagates_from_computed_architecture_budget(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The runner must expose the computed extra-body allowance to
-    build_prompt, not discard it — otherwise a pass that inlines a
-    pass-specific body (e.g. an architecture document) has no way to know
-    how much of it actually fits."""
-    monkeypatch.setattr(
-        runner_mod,
-        "compute_code_review_merged_pass_budgets",
-        lambda *a, **k: _fixed_budgets(max_inline_code_chars=100_000, max_architecture_chars=777),
-    )
-    seen_budgets = []
-
-    def build_prompt(batch: FileBatch, budgets: Any) -> str:
-        seen_budgets.append(budgets)
-        return _paths_prompt(batch, budgets)
-
-    _patch_via_reasoning_json(
-        monkeypatch,
-        lambda prompt: {"paths": prompt.replace("PATHS:", "")},
-    )
-
+    big = "X" * 50_000
     run_submission_pass(
         DummyLLMClient(),
-        changed_files=[("a.py", "x")],
+        changed_files=[("big.py", big)],
         reasoning_system_prompt="sys",
         formatting_instructions="fmt",
         build_prompt=build_prompt,
         tools=[],
         parse=json.loads,
-        extra_reserved_chars=1_000,
     )
-    assert len(seen_budgets) == 1
-    assert seen_budgets[0].max_extra_body_chars == 777
+    assert seen_content == [big]
 
 
-# --- run_submission_pass: reactive recovery ---------------------------------
-
-
-def test_reactive_bisect_recovers_when_multi_file_batch_overflows(
+def test_reactive_bisect_recovers_multi_file_overflow(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Both files fit in one proactive batch, but the combined call overflows;
-    the runner must bisect into two single-file calls that each succeed."""
-    monkeypatch.setattr(
-        runner_mod,
-        "compute_code_review_merged_pass_budgets",
-        lambda *a, **k: _fixed_budgets(max_inline_code_chars=100_000),
-    )
-
     seen_batches: List[FileBatch] = []
 
-    def build_prompt(batch: FileBatch, _budgets: Any) -> str:
+    def build_prompt(batch: FileBatch) -> str:
         seen_batches.append(batch)
-        return _paths_prompt(batch, _budgets)
+        return _paths_prompt(batch)
 
     def _handler(prompt: str) -> Any:
         paths = prompt.replace("PATHS:", "")
         if "," in paths:
-            raise ContextWindowOverflowException("combined batch too large")
+            raise MaxTokensReachedException("too large")
         return {"file": paths}
 
     _patch_via_reasoning_json(monkeypatch, _handler)
@@ -423,38 +190,29 @@ def test_reactive_bisect_recovers_when_multi_file_batch_overflows(
         parse=json.loads,
     )
     assert result == [{"file": "a.py"}, {"file": "b.py"}]
-    # The original combined attempt is not partial; the two bisected retries are.
     assert [b.is_partial for b in seen_batches] == [False, True, True]
-    assert all(b.total == 1 and b.index == 1 for b in seen_batches), (
-        "bisected children keep the parent's index/total, but is_partial tells "
-        "build_prompt they no longer represent the full batch"
-    )
 
 
-def test_reactive_shrink_recovers_when_single_file_batch_overflows(
+def test_provider_prompt_too_large_message_triggers_bisect(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(
-        runner_mod,
-        "compute_code_review_merged_pass_budgets",
-        lambda *a, **k: _fixed_budgets(max_inline_code_chars=100_000),
-    )
+    from llm_service.interface import LLMPermanentError
 
     seen_batches: List[FileBatch] = []
 
-    def build_prompt(batch: FileBatch, _budgets: Any) -> str:
+    def build_prompt(batch: FileBatch) -> str:
         seen_batches.append(batch)
-        return "LEN:" + str(len(batch.items[0][1]))
+        return _paths_prompt(batch)
 
     def _handler(prompt: str) -> Any:
-        length = int(prompt.replace("LEN:", ""))
-        if length >= 150:
-            raise MaxTokensReachedException("output too long for this much input")
-        return {"ok": True, "len": length}
+        paths = prompt.replace("PATHS:", "")
+        if "," in paths:
+            raise LLMPermanentError("prompt is too long for the model context")
+        return {"file": paths}
 
     _patch_via_reasoning_json(monkeypatch, _handler)
 
-    files = [("only.py", "X" * 200)]
+    files = [("a.py", "aaaa"), ("b.py", "bbbb")]
     result = run_submission_pass(
         DummyLLMClient(),
         changed_files=files,
@@ -464,66 +222,13 @@ def test_reactive_shrink_recovers_when_single_file_batch_overflows(
         tools=[],
         parse=json.loads,
     )
-    assert result == [{"ok": True, "len": 100}]
-    # The original attempt is not partial; the shrunk retry is (its content is
-    # not the full file body).
-    assert [b.is_partial for b in seen_batches] == [False, True]
+    assert result == [{"file": "a.py"}, {"file": "b.py"}]
+    assert [b.is_partial for b in seen_batches] == [False, True, True]
 
 
-def test_reactive_shrink_reduces_budget_when_content_dwarfs_it(
+def test_single_file_overflow_skips_without_truncating(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """When one file's content is far larger than the inline budget, a
-    compliant build_prompt truncates to budgets.max_inline_code_chars rather
-    than to the item's own length — so halving only the raw content
-    (_shrink_items) renders an identical truncated prefix on retry. The
-    runner must also shrink the budget it hands to build_prompt so the
-    retry's rendered payload is actually smaller."""
-    monkeypatch.setattr(
-        runner_mod,
-        "compute_code_review_merged_pass_budgets",
-        lambda *a, **k: _fixed_budgets(max_inline_code_chars=100),
-    )
-    rendered_lengths: List[int] = []
-
-    def build_prompt(batch: FileBatch, budgets: Any) -> str:
-        rendered = batch.items[0][1][: budgets.max_inline_code_chars]
-        rendered_lengths.append(len(rendered))
-        return "LEN:" + str(len(rendered))
-
-    def _handler(prompt: str) -> Any:
-        length = int(prompt.replace("LEN:", ""))
-        if length >= 100:
-            raise MaxTokensReachedException("output too long for this much input")
-        return {"ok": True, "len": length}
-
-    _patch_via_reasoning_json(monkeypatch, _handler)
-
-    files = [("only.py", "X" * 1_000)]  # far larger than the 100-char budget
-    result = run_submission_pass(
-        DummyLLMClient(),
-        changed_files=files,
-        reasoning_system_prompt="sys",
-        formatting_instructions="fmt",
-        build_prompt=build_prompt,
-        tools=[],
-        parse=json.loads,
-    )
-    # Without shrinking the budget too, the retry would render the identical
-    # 100-char prefix and still overflow. The budget shrinking to 50 lets the
-    # retry actually send less.
-    assert rendered_lengths == [100, 50]
-    assert result == [{"ok": True, "len": 50}]
-
-
-def test_reactive_shrink_gives_up_after_one_failed_retry(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(
-        runner_mod,
-        "compute_code_review_merged_pass_budgets",
-        lambda *a, **k: _fixed_budgets(max_inline_code_chars=100_000),
-    )
     calls: List[str] = []
 
     def _handler(prompt: str) -> Any:
@@ -538,119 +243,58 @@ def test_reactive_shrink_gives_up_after_one_failed_retry(
         changed_files=files,
         reasoning_system_prompt="sys",
         formatting_instructions="fmt",
-        build_prompt=lambda batch, _b: "LEN:" + str(len(batch.items[0][1])),
+        build_prompt=lambda batch: "LEN:" + str(len(batch.items[0][1])),
         tools=[],
         parse=json.loads,
     )
     assert result == []
-    # Exactly one original attempt plus one shrink-and-retry attempt; no further retries.
-    assert calls == ["LEN:200", "LEN:100"]
+    # No content shrink — one attempt with full length, then skip.
+    assert calls == ["LEN:200"]
 
 
-def test_overflow_on_unshrinkable_single_file_batch_skips_without_retry(
+def test_non_overflow_failure_skips_without_bisect(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """An empty-content single-file batch cannot be bisected (one file) or
-    shrunk further (nothing left to halve); it must be skipped after the
-    first failed attempt, with no shrink retry."""
-    monkeypatch.setattr(
-        runner_mod,
-        "compute_code_review_merged_pass_budgets",
-        lambda *a, **k: _fixed_budgets(max_inline_code_chars=100_000),
-    )
-    calls: List[str] = []
-
-    def _handler(prompt: str) -> Any:
-        calls.append(prompt)
-        raise ContextWindowOverflowException("overflow even with no content")
-
-    _patch_via_reasoning_json(monkeypatch, _handler)
-
-    files = [("only.py", "")]
-    result = run_submission_pass(
-        DummyLLMClient(),
-        changed_files=files,
-        reasoning_system_prompt="sys",
-        formatting_instructions="fmt",
-        build_prompt=_paths_prompt,
-        tools=[],
-        parse=json.loads,
-    )
-    assert result == []
-    assert len(calls) == 1
-
-
-def test_non_overflow_exception_skips_batch_without_retry(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    items = [("a.py", "x" * 50), ("b.py", "y" * 50)]
-    per_file = _estimated_file_block_chars(*items[0])
-    monkeypatch.setattr(
-        runner_mod,
-        "compute_code_review_merged_pass_budgets",
-        lambda *a, **k: _fixed_budgets(max_inline_code_chars=per_file + 5),
-    )
-    calls: List[str] = []
-
-    def _handler(prompt: str) -> Any:
-        calls.append(prompt)
-        if "a.py" in prompt:
-            raise RuntimeError("malformed reply, not overflow-shaped")
-        return {"paths": prompt.replace("PATHS:", "")}
-
-    _patch_via_reasoning_json(monkeypatch, _handler)
-
-    result = run_submission_pass(
-        DummyLLMClient(),
-        changed_files=items,
-        reasoning_system_prompt="sys",
-        formatting_instructions="fmt",
-        build_prompt=_paths_prompt,
-        tools=[],
-        parse=json.loads,
-    )
-    assert result == [{"paths": "b.py"}]
-    # One call per batch; the failing batch is never retried.
-    assert len(calls) == 2
-
-
-def test_depth_cap_bounds_bisection_and_terminates(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """An always-overflowing 32-file batch must stop bisecting at the depth
-    cap (never reaching single-file granularity) rather than recursing
-    without bound."""
-    files: List[Tuple[str, str]] = [(f"f{i}.py", "x" * 10) for i in range(32)]
-    monkeypatch.setattr(
-        runner_mod,
-        "compute_code_review_merged_pass_budgets",
-        lambda *a, **k: _fixed_budgets(max_inline_code_chars=100_000),
-    )
-    seen_sizes: List[int] = []
-
-    def build_prompt(batch: FileBatch, _budgets: Any) -> str:
-        seen_sizes.append(len(batch.items))
-        return "SIZE:" + str(len(batch.items))
-
-    call_count = 0
+    calls = 0
 
     def _handler(_prompt: str) -> Any:
-        nonlocal call_count
-        call_count += 1
-        raise MaxTokensReachedException("always too large")
+        nonlocal calls
+        calls += 1
+        raise RuntimeError("malformed json")
 
     _patch_via_reasoning_json(monkeypatch, _handler)
 
     result = run_submission_pass(
         DummyLLMClient(),
-        changed_files=files,
+        changed_files=[("a.py", "a"), ("b.py", "b")],
         reasoning_system_prompt="sys",
         formatting_instructions="fmt",
-        build_prompt=build_prompt,
+        build_prompt=_paths_prompt,
         tools=[],
         parse=json.loads,
     )
     assert result == []
-    assert 1 not in seen_sizes, "depth cap must stop bisection before single-file granularity"
-    assert min(seen_sizes) == 2
-    assert call_count < 200  # bounded, not unbounded/exponential-without-limit
+    assert calls == 1
+
+
+def test_context_window_overflow_bisects(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _handler(prompt: str) -> Any:
+        paths = prompt.replace("PATHS:", "")
+        if "," in paths:
+            raise ContextWindowOverflowException("context")
+        return {"file": paths}
+
+    _patch_via_reasoning_json(monkeypatch, _handler)
+
+    result = run_submission_pass(
+        DummyLLMClient(),
+        changed_files=[("a.py", "a"), ("b.py", "b")],
+        reasoning_system_prompt="sys",
+        formatting_instructions="fmt",
+        build_prompt=_paths_prompt,
+        tools=[],
+        parse=json.loads,
+    )
+    assert result == [{"file": "a.py"}, {"file": "b.py"}]

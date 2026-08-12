@@ -3,15 +3,14 @@
 The three once-per-submission additive code-review passes
 (``architecture_consistency_pass``, ``side_effect_impact_pass``,
 ``merged_architecture_side_effect_pass``) were migrated onto the shared
-``submission_pass_runner`` so budgeting, chunking, ``Agent`` construction, and
-overflow recovery live in one place. This file does not re-test that
-mechanics: ``test_submission_pass_runner.py`` covers the runner's own
-budgeting/chunking/recovery in isolation, and each pass's own
-"...through_public_entry_point" test already exercises its overflow-recovery
-path end to end. Instead, this file locks in the migration invariant so a
-future change cannot silently reintroduce a direct ``Agent`` construction, a
-duplicated recovery helper, or a call path that bypasses
-``run_submission_pass`` in a pass module without failing a test.
+``submission_pass_runner`` so Agent construction and overflow recovery live
+in one place. This file does not re-test that mechanics:
+``test_submission_pass_runner.py`` covers the runner's bisect recovery in
+isolation, and each pass's own overflow-recovery test exercises its path end
+to end. Instead, this file locks in the migration invariant so a future change
+cannot silently reintroduce a direct ``Agent`` construction, a duplicated
+recovery helper, or a call path that bypasses ``run_submission_pass`` in a
+pass module without failing a test.
 
 No network/LLM: every test here uses ``DummyLLMClient`` subclasses or a
 spied-in ``Agent`` stand-in, matching the runner's own unit-test posture.
@@ -43,9 +42,6 @@ _RUNNER_OWNED_NAMES = (
     "_is_overflow_shaped",
     "_run_batch_with_recovery",
     "_recover_from_overflow",
-    "_shrink_items",
-    "_shrink_budgets",
-    "_pack_batches",
     "_MAX_BATCH_BISECT_DEPTH",
 )
 
@@ -71,7 +67,7 @@ def test_pass_module_holds_none_of_the_runner_owned_names(module: Any) -> None:
 
     ``run_agent_via_reasoning`` is the crux of the runner-only-construction
     invariant: if a pass module ever imported it directly, it could bypass
-    the runner's budgeting/chunking/recovery entirely.
+    the runner's overflow recovery entirely.
     The remaining names are the runner's private recovery helpers -- their
     presence here would mean a duplicate implementation, not delegation.
     """

@@ -996,7 +996,49 @@ async def test_stream_unrecognized_tool_name_falls_back_to_text_scan() -> None:
     assert "architecture_document" in data
 
 
-@pytest.mark.asyncio
+def test_dummy_via_reasoning_analysis_alone_is_not_chunk_review_shape() -> None:
+    """Bare ANALYSIS / convert-preamble must not hijack other via-reasoning formatters."""
+    c = DummyLLMClient()
+    prompt = (
+        "Convert the following analysis into a single JSON object.\n"
+        "--- ANALYSIS abcdef0123456789 ---\n"
+        "Sales notes here.\n"
+        "--- END ANALYSIS abcdef0123456789 ---\n"
+        "Return fields: status, score.\n"
+    )
+    j = c.complete_json(prompt, temperature=0.0)
+    assert "approved" not in j or "issues" not in j or "spec_compliance_notes" not in j
+
+
+def test_dummy_via_reasoning_chunk_review_format_markers_return_chunk_stub() -> None:
+    c = DummyLLMClient()
+    prompt = (
+        "Convert the following analysis into a single JSON object.\n"
+        "--- ANALYSIS abcdef0123456789 ---\n"
+        "Review prose.\n"
+        "--- END ANALYSIS abcdef0123456789 ---\n"
+        'Required keys: "approved", "issues", "summary", "spec_compliance_notes".\n'
+    )
+    j = c.complete_json(prompt, temperature=0.0)
+    assert j["approved"] is True
+    assert j["issues"] == []
+    assert "spec_compliance_notes" in j
+
+
+def test_dummy_plan_critic_wins_over_analysis_delimiters() -> None:
+    c = DummyLLMClient()
+    prompt = (
+        "Convert the following analysis into a single JSON object.\n"
+        "--- ANALYSIS abcdef0123456789 ---\n"
+        "Plan looks fine.\n"
+        "--- END ANALYSIS abcdef0123456789 ---\n"
+        "Schema: PlanCriticReport with status and notes.\n"
+    )
+    j = c.complete_json(prompt, temperature=0.0)
+    assert "notes" in j
+    assert "approved" not in j or j.get("issues") is None
+
+
 @pytest.mark.parametrize("model_name", _MODEL_ROUTED_MODEL_NAMES)
 async def test_stream_routes_structured_output_tool_by_name_despite_misleading_prompt(
     model_name: str,
