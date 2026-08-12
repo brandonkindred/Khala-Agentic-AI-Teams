@@ -949,10 +949,7 @@ class SynthesisMixin:
         critical_anomalies = _critical_failures(anomaly_gates)
         if critical_anomalies:
             recovery = self._handle_critical_anomalies(
-                spec=spec,
-                code=code,
-                trades=trades,
-                metrics=metrics,
+                state=_DesignAttemptState(spec=spec, code=code, trades=trades, metrics=metrics),
                 exec_result=exec_result,
                 market_data=market_data,
                 config=config,
@@ -1005,10 +1002,7 @@ class SynthesisMixin:
     def _handle_critical_anomalies(
         self,
         *,
-        spec: StrategySpec,
-        code: str,
-        trades: List[TradeRecord],
-        metrics: BacktestResult,
+        state: _DesignAttemptState,
         exec_result: StrategyRunResult,
         market_data: Dict[str, List[OHLCVBar]],
         config: BacktestConfig,
@@ -1024,7 +1018,8 @@ class SynthesisMixin:
         """Recover from critical backtest anomalies in the evaluation phase.
 
         Pre: ``critical_anomalies`` is non-empty; the caller has already
-        run the anomaly detector and recorded its gates;
+        run the anomaly detector and recorded its gates; ``state`` carries
+        this round's settled ``spec``/``code``/``trades``/``metrics``;
         ``all_gate_results``, ``refinement_attempts``, ``zero_trade_attempts``
         are running lists the helper mutates in place.
         Post: returns an ``_AnomalyRecoveryOutcome``. On ``exhausted=False``
@@ -1055,6 +1050,8 @@ class SynthesisMixin:
             raise ValueError("_handle_critical_anomalies requires at least one critical")
         if not isinstance(market_data, dict) or not market_data:
             raise ValueError("market_data must be non-empty")
+
+        spec, code, trades, metrics = state.spec, state.code, state.trades, state.metrics
 
         # ── 1: Build the failure-details prompt block (also used by generic refine) ──
         failure_details = "\n".join(f"- {g.details}" for g in critical_anomalies)
