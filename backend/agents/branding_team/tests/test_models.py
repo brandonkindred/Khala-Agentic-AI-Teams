@@ -831,9 +831,7 @@ def test_logo_usage_rule_permits_blank_and_omitted_content() -> None:
     assert minimal.minimum_size == ""
     assert minimal.clear_space == ""
 
-    explicit_blank = LogoUsageRule(
-        variant="", usage_context="", minimum_size="", clear_space=""
-    )
+    explicit_blank = LogoUsageRule(variant="", usage_context="", minimum_size="", clear_space="")
     assert explicit_blank.variant == ""
 
 
@@ -881,9 +879,7 @@ def test_color_entry_permits_blank_and_omitted_content() -> None:
     assert minimal.usage == ""
     assert minimal.psychological_rationale == ""
 
-    explicit_blank = ColorEntry(
-        name="Midnight", hex_value="", usage="", psychological_rationale=""
-    )
+    explicit_blank = ColorEntry(name="Midnight", hex_value="", usage="", psychological_rationale="")
     assert explicit_blank.hex_value == ""
 
 
@@ -931,9 +927,7 @@ def test_typography_spec_permits_blank_and_omitted_content() -> None:
     assert minimal.weight_range == ""
     assert minimal.usage_notes == ""
 
-    explicit_blank = TypographySpec(
-        role="", font_family="", weight_range="", usage_notes=""
-    )
+    explicit_blank = TypographySpec(role="", font_family="", weight_range="", usage_notes="")
     assert explicit_blank.role == ""
 
 
@@ -1007,9 +1001,7 @@ def test_voice_tone_entry_output_rejects_blank_content() -> None:
     output = VoiceToneEntryOutput(**valid_kwargs)
     assert output.context == "marketing"
 
-    blank_item = VoiceToneEntryOutput(
-        context="marketing", tone="confident and warm", examples=[""]
-    )
+    blank_item = VoiceToneEntryOutput(context="marketing", tone="confident and warm", examples=[""])
     assert blank_item.examples == [""]
 
 
