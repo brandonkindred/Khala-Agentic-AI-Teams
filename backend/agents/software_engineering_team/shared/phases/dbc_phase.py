@@ -72,14 +72,19 @@ def run_dbc_comments_review(
         pre-concatenated string. An empty dict is valid.
 
     Postconditions:
-        Any file in ``code`` whose own content contains a ``### path ###``-
-        shaped line, OR whose path itself contains a newline (which would let
-        the path inject its own extra header line into the rendered ``###
-        {path} ###`` header), is excluded before concatenation (see
-        ``_HEADER_LIKE_LINE``) -- such a file cannot be safely represented in
-        DbcCommentsAgent's concatenated-code transport, so it is skipped
-        rather than risking an insertion from a spurious parsed block being
-        merged into an unrelated file. The remaining files are concatenated
+        A file in ``code`` is excluded before concatenation (see
+        ``_HEADER_LIKE_LINE``) when its own content contains a ``### path
+        ###``-shaped line, or its path contains a newline (letting the path
+        inject its own extra header line into the rendered ``### {path}
+        ###`` header), or its path has leading/trailing whitespace (which
+        ``parse_code_into_file_blocks`` strips when parsing headers back out,
+        so a padded path and its unpadded twin -- or a lone padded path and
+        this function's own membership bookkeeping downstream -- would
+        silently collide or mismatch). Such a file cannot be safely
+        represented in DbcCommentsAgent's concatenated-code transport, so it
+        is skipped rather than risking an insertion from a spurious parsed
+        block being merged into an unrelated file. The remaining files are
+        concatenated
         into the ``### path ###``-headered format ``DbcCommentsAgent``/
         ``parse_code_into_file_blocks`` expect (one
         ``"### {path} ###\\n{content}"`` block per file, joined with
@@ -100,13 +105,14 @@ def run_dbc_comments_review(
     safe_code = {
         path: content
         for path, content in code.items()
-        if "\n" not in path and not _HEADER_LIKE_LINE.search(content)
+        if path == path.strip() and "\n" not in path and not _HEADER_LIKE_LINE.search(content)
     }
     excluded = code.keys() - safe_code.keys()
     if excluded:
         logger.warning(
             "DbC comments review: excluding file(s) %s -- their path or content contains a "
-            "'### path ###'-shaped line that would be misread as a chunk header",
+            "'### path ###'-shaped line, an embedded newline, or leading/trailing whitespace "
+            "that would be misread or normalized away by the chunk parser",
             sorted(excluded),
         )
 

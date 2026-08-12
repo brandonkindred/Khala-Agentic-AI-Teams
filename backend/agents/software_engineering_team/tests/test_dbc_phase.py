@@ -207,6 +207,31 @@ def test_run_dbc_comments_review_excludes_newline_containing_path(monkeypatch):
     assert _FakeAgent.last_input.code == "### b.py ###\ndef f(): pass\n"
 
 
+def test_run_dbc_comments_review_excludes_padded_path_colliding_with_real_path(monkeypatch):
+    _FakeAgent.result = DbcCommentsOutput(files={"b.py": "# dbc\n"})
+    monkeypatch.setattr(dbc_phase, "DbcCommentsAgent", _FakeAgent)
+
+    # parse_code_into_file_blocks() strips each parsed header path, so a
+    # padded key (" b.py") and its unpadded twin ("b.py") would otherwise
+    # both parse to the same path "b.py" -- risking an insertion derived
+    # from one being merged into the other via last-path-wins merging.
+    run_dbc_comments_review(code={" b.py": "evil\n", "b.py": "def f(): pass\n"})
+
+    assert _FakeAgent.last_input.code == "### b.py ###\ndef f(): pass\n"
+
+
+def test_run_dbc_comments_review_excludes_lone_padded_path(monkeypatch):
+    _FakeAgent.result = DbcCommentsOutput()
+    monkeypatch.setattr(dbc_phase, "DbcCommentsAgent", _FakeAgent)
+
+    # Even with no colliding twin, a padded key's parsed (stripped) result
+    # would mismatch this function's own dict key downstream, silently
+    # discarding legitimate review work -- so it's excluded here too.
+    run_dbc_comments_review(code={" a.py\t": "x = 1\n"})
+
+    assert _FakeAgent.last_input.code == ""
+
+
 # ---------------------------------------------------------------------------
 # _run_dbc_self_review
 # ---------------------------------------------------------------------------
