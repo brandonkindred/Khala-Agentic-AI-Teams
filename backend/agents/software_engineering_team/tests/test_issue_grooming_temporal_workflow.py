@@ -237,6 +237,52 @@ def test_run_marks_job_cancelled_on_temporal_cancellation(monkeypatch: pytest.Mo
     assert calls[1][1] == {"job_id": "j1"}
 
 
+def test_run_marks_job_cancelled_on_activity_error_wrapping_cancellation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An ``ActivityError`` whose ``cause`` is a ``CancelledError`` (the shape Temporal
+    actually raises for an activity-side cancellation, as opposed to a bare
+    ``asyncio.CancelledError`` delivered to the workflow itself) is still routed
+    through mark-cancelled via the ``is_cancelled_exception`` branch of the generic
+    ``except Exception`` handler -- not mark-failed."""
+    from temporalio.exceptions import ActivityError
+    from temporalio.exceptions import CancelledError as TemporalCancelledError
+
+    cause = TemporalCancelledError("activity cancelled")
+    activity_error = ActivityError(
+        "activity task cancelled",
+        scheduled_event_id=1,
+        started_event_id=2,
+        identity="test-identity",
+        activity_type="issue_grooming_run",
+        activity_id="1",
+        retry_state=None,
+    )
+    activity_error.__cause__ = cause
+
+    calls: list = []
+
+    async def _fake_exec(fn, request, **_kw):
+        calls.append((fn.__name__, dict(request)))
+        if fn.__name__ == "run_issue_grooming_activity":
+            raise activity_error
+        if fn.__name__ == "mark_coding_team_job_cancelled_activity":
+            return {"job_id": request["job_id"], "status": "cancelled"}
+        raise AssertionError(f"unexpected activity {fn.__name__}")
+
+    monkeypatch.setattr("temporalio.workflow.execute_activity", _fake_exec)
+    workflow_obj = IssueGroomingWorkflow()
+
+    with pytest.raises(ActivityError):
+        asyncio.run(workflow_obj.run(dict(_VALID_REQUEST)))
+
+    assert [name for name, _ in calls] == [
+        "run_issue_grooming_activity",
+        "mark_coding_team_job_cancelled_activity",
+    ]
+    assert calls[1][1] == {"job_id": "j1"}
+
+
 def test_run_terminalize_failure_does_not_mask_original_exception(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
