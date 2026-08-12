@@ -50,7 +50,6 @@ from ..models import (
     ExpectancyForecast,
     StrategyLabRecord,
     StrategySpec,
-    TradeRecord,
 )
 from ..signal_intelligence_models import SignalIntelligenceBriefV1
 from ..strategy_lab_context import normalize_asset_class, normalize_asset_class_strict
@@ -1390,6 +1389,9 @@ class DesignMixin:
         alignment_reports = alignment_outcome.alignment_reports
 
         # ── Phases 2.6–3: TRIAL COUNTING → VERIFICATION → ANALYSIS ─────
+        pre_verification_state = _DesignAttemptState(
+            spec=spec, code=code, trades=trades, metrics=metrics
+        )
         (
             metrics,
             is_winning,
@@ -1397,9 +1399,7 @@ class DesignMixin:
             publishability_skip,
             narrative,
         ) = self._orchestrate_verification_and_analysis(
-            spec=spec,
-            trades=trades,
-            metrics=metrics,
+            state=pre_verification_state,
             market_data=market_data,
             config=config,
             execution_succeeded=execution_succeeded,
@@ -1630,9 +1630,7 @@ class DesignMixin:
     def _orchestrate_verification_and_analysis(
         self,
         *,
-        spec: StrategySpec,
-        trades: List[TradeRecord],
-        metrics: BacktestResult,
+        state: _DesignAttemptState,
         market_data: Optional[Dict[str, List[OHLCVBar]]],
         config: BacktestConfig,
         execution_succeeded: bool,
@@ -1647,7 +1645,10 @@ class DesignMixin:
     ) -> Tuple[BacktestResult, bool, bool, Optional[str], str]:
         """Count the trial, run verification, and generate the analysis.
 
-        Pre: the refinement + alignment loops have settled the run state.
+        Pre: the refinement + alignment loops have settled the run state;
+        ``state`` carries the settled ``spec``/``code``/``trades``/``metrics``
+        for this design attempt (``state.code`` is unused here — verification
+        and analysis never touch the strategy source).
         Post: returns ``(metrics, is_winning, is_publishable,
         publishability_skip_reason, narrative)``. Increments the
         convergence trial counter (one per refinement round, plus the first),
@@ -1665,9 +1666,9 @@ class DesignMixin:
 
         # ── Phase 2.7: WALK-FORWARD + ACCEPTANCE + CONFORMANCE + is_winning ────
         verification = self._run_verification_phase(
-            spec=spec,
-            trades=trades,
-            metrics=metrics,
+            spec=state.spec,
+            trades=state.trades,
+            metrics=state.metrics,
             market_data=market_data,
             config=config,
             execution_succeeded=execution_succeeded,
@@ -1696,9 +1697,9 @@ class DesignMixin:
             exit_rule_conformance_passed=verification.exit_rule_conformance_passed,
         )
         narrative = self._run_analysis_phase(
-            spec=spec,
+            spec=state.spec,
             metrics=metrics,
-            trades=trades,
+            trades=state.trades,
             rationale=rationale,
             is_winning=is_winning,
             execution_succeeded=execution_succeeded,
