@@ -150,14 +150,23 @@ this subsystem.
 
 ## Known caveats
 
-- **Session persistence is already inert on every reachable path today.**
-  `main.py` and `agentcore_main.py` both call `get_session_manager()` with
-  no `session_id`, so a fresh random UUID is generated on every
-  invocation — nothing is ever actually resumed by ID in the current code.
-  `integration.py`'s subprocess bridge explicitly sets
-  `ARCHITECT_SESSION_DISABLED=1`, turning session persistence off outright.
-  A future reader should not assume real multi-turn conversation
-  continuity is happening in production today; it is not.
+- **Session persistence behaves differently, but is not doing anything
+  useful, on either reachable path today.** `main.py` is one process per
+  CLI invocation: it calls `get_session_manager()` with no `session_id`,
+  gets a fresh random UUID, and exits — nothing is ever resumed by ID.
+  `agentcore_main.py` is different and worth calling out precisely:
+  `_create_app()` builds the session manager and orchestrator **once**,
+  before `invoke()` is defined, so that single session/orchestrator pair
+  is reused for every HTTP request the process handles for its lifetime —
+  and `invoke()` never reads the payload's documented `session_id` field,
+  so a caller cannot select or resume a specific session either. In
+  practice this means the AgentCore path doesn't give per-request
+  isolation: concurrent or sequential callers to the same running process
+  share one conversation history, not that persistence is simply off.
+  `integration.py`'s subprocess bridge sidesteps this entirely by setting
+  `ARCHITECT_SESSION_DISABLED=1`. A future reader should not assume either
+  path gives a caller controlled, resumable multi-turn continuity in
+  production today — it does not, for two different reasons.
 - **The Enterprise Orchestrator's dead-code reachability is a separate,
   unresolved question.** Whether the dormant `SW_USE_ENTERPRISE_ARCHITECT`
   bridge should be wired up, left as-is, or removed is a product/scoping
