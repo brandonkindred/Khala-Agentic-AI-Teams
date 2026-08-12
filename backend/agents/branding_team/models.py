@@ -13,7 +13,7 @@ from __future__ import annotations
 from enum import Enum
 from typing import Annotated, Any, Dict, List, Optional
 
-from pydantic import BaseModel, Field, ValidationInfo, model_validator
+from pydantic import BaseModel, Field, ValidationInfo, create_model, model_validator
 
 from shared.hitl.models import HumanReview as HumanReview  # noqa: F401 — re-export
 
@@ -73,6 +73,57 @@ NonEmptyStr = Annotated[str, Field(min_length=1)]
 # ``model_validator`` on the merge-target model, and a strict-context
 # ``__init__`` override on whichever container is passed as an agent's
 # ``structured_output=``.
+#
+# One more wrinkle the ``__init__`` override alone doesn't cover: Strands
+# builds the LLM-facing tool spec from ``CoreValuesOutput.model_json_schema()``
+# (see ``strands.tools.structured_output.structured_output_utils
+# .convert_pydantic_to_tool_spec``), and Pydantic's JSON schema generation
+# only ever reflects a model's *static* field declarations — it has no
+# concept of a context-gated ``model_validator``, so the schema it embeds
+# for a nested ``List[CoreValue]`` field always shows ``CoreValue``'s soft
+# shape (only ``value`` required, no length constraints), never the strict
+# shape the container actually enforces at validation time. Left alone, that
+# under-constrains the tool schema the LLM sees, trading upfront guidance for
+# extra post-hoc validation-error retries. ``_strict_json_schema_for`` below
+# fixes this the same way it would for any follow-on twin: it builds a
+# throwaway ``pydantic.create_model`` twin with the strict constraints
+# (never instantiated — used only to ask Pydantic what schema it would
+# generate), and ``CoreValuesOutput`` overrides ``model_json_schema`` to
+# splice that shape into its own ``$defs`` entry for ``CoreValue``. Runtime
+# validation still goes through the single ``CoreValue`` class and its
+# context-gated validator; only the advertised tool schema is patched.
+
+
+def _strict_json_schema_for(soft_model: type[BaseModel]) -> Dict[str, Any]:
+    """Compute the JSON schema ``soft_model`` would have if every field were
+    required and non-blank, for splicing into an agent-facing container's
+    ``model_json_schema()`` override (see the design writeup above).
+
+    Preconditions:
+        Every field on ``soft_model`` is annotated ``str`` or ``List[str]``.
+    Postconditions:
+        Returns the ``model_json_schema()`` dict of a same-named,
+        same-shaped, throwaway model with every ``str`` field retyped
+        ``NonEmptyStr`` and required, and every ``List[str]`` field retyped
+        ``List[NonEmptyStr]`` and required with ``min_length=1``. Does not
+        mutate ``soft_model`` or return a usable model class — the throwaway
+        twin exists solely to ask Pydantic for its generated schema.
+    """
+    strict_fields: Dict[str, Any] = {}
+    for field_name, field_info in soft_model.model_fields.items():
+        annotation = field_info.annotation
+        if annotation is str:
+            strict_fields[field_name] = (NonEmptyStr, ...)
+        elif annotation == List[str]:
+            strict_fields[field_name] = (List[NonEmptyStr], Field(min_length=1))
+        else:
+            raise TypeError(
+                f"_strict_json_schema_for doesn't know how to constrain "
+                f"{soft_model.__name__}.{field_name}: {annotation!r}"
+            )
+    strict_twin = create_model(soft_model.__name__, __doc__=soft_model.__doc__, **strict_fields)
+    return strict_twin.model_json_schema()
+
 
 # ---------------------------------------------------------------------------
 # Shared models
@@ -377,7 +428,12 @@ class CoreValuesOutput(BaseModel):
     holds is validated as though it were the former ``CoreValueOutput`` — a
     blank field must fail validation instead of silently passing — even
     though Strands' structured-output tool constructs this model via a bare,
-    context-less ``CoreValuesOutput(**tool_input)`` call.
+    context-less ``CoreValuesOutput(**tool_input)`` call. Also overrides
+    ``model_json_schema`` to splice in ``CoreValue``'s strict shape (see
+    ``_strict_json_schema_for``) so the tool schema Strands shows the LLM
+    carries the same ``required``/``minLength``/``minItems`` constraints
+    ``CoreValueOutput`` used to — the context-gated validator alone rejects a
+    blank response after the fact, but can't influence the schema itself.
     """
 
     core_values: List[CoreValue] = Field(min_length=3, max_length=5)
@@ -386,6 +442,24 @@ class CoreValuesOutput(BaseModel):
         self.__pydantic_validator__.validate_python(
             data, self_instance=self, context={"strict": True}
         )
+
+    @classmethod
+    def model_json_schema(cls, *args: Any, **kwargs: Any) -> Dict[str, Any]:
+        """Report ``CoreValue``'s strict shape in the generated tool schema.
+
+        Preconditions:
+            None.
+        Postconditions:
+            Returns the schema Pydantic would normally generate for this
+            model, with the ``CoreValue`` entry in ``$defs`` (present because
+            ``core_values: List[CoreValue]`` is a nested-submodel field)
+            replaced by ``_strict_json_schema_for(CoreValue)``'s strict
+            shape. Every other part of the schema is unchanged.
+        """
+        schema = super().model_json_schema(*args, **kwargs)
+        if "CoreValue" in schema.get("$defs", {}):
+            schema["$defs"]["CoreValue"] = _strict_json_schema_for(CoreValue)
+        return schema
 
 
 class AudienceSegmentsOutput(BaseModel):

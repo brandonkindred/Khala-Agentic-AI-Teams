@@ -192,6 +192,25 @@ def test_core_values_output_container_propagates_strict_context_to_each_item() -
     assert output.core_values[0].value == "clarity"
 
 
+def test_core_values_output_tool_schema_advertises_strict_core_value_shape() -> None:
+    """The JSON schema Strands builds the LLM-facing tool spec from must show
+    ``CoreValue``'s strict shape, not its soft defaults — otherwise the LLM is
+    under-constrained upfront and only gets rejected after the fact, costing an
+    extra structured-output retry every time (see PR review discussion)."""
+    schema = CoreValuesOutput.model_json_schema()
+    core_value_schema = schema["$defs"]["CoreValue"]
+
+    assert set(core_value_schema["required"]) == {
+        "value",
+        "behavioral_definition",
+        "observable_behaviors",
+    }
+    assert core_value_schema["properties"]["value"]["minLength"] == 1
+    assert core_value_schema["properties"]["behavioral_definition"]["minLength"] == 1
+    assert core_value_schema["properties"]["observable_behaviors"]["minItems"] == 1
+    assert core_value_schema["properties"]["observable_behaviors"]["items"]["minLength"] == 1
+
+
 def test_audience_segments_output_enforces_stated_cardinality() -> None:
     """Prompt asks for "1-3 target audience segments"."""
     segment = AudienceSegmentOutput(
