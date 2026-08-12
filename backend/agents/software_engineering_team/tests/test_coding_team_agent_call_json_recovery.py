@@ -51,3 +51,95 @@ def test_required_keys_anchor_skips_usage_echo() -> None:
         "approved": False,
         "issues": ["x"],
     }
+
+
+def test_routes_through_extract_json_from_response(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``_agent_call_json`` must fall back to the canonical ``extract_json_from_response``
+    helper (not the older ``agent_call_json``) once the earlier tiers fail — this is the
+    migration's contract. ``extract_json_object`` (tier 2) is forced to fail here since it
+    already recovers most realistic malformed input on its own, which would otherwise mean
+    this input never actually reaches tier 3."""
+    import software_engineering_team.tech_lead_agent.agent as tl_mod
+
+    calls: list = []
+    raw = "not real json at all"
+
+    monkeypatch.setattr(tl_mod, "extract_json_object", lambda text, required_keys=None: None)
+
+    def fake_extract(text: str, *, expected_keys=None):
+        calls.append((text, expected_keys))
+        return {"a": 1}
+
+    monkeypatch.setattr(tl_mod, "extract_json_from_response", fake_extract)
+    assert _agent_call_json(_FakeAgent(raw), "p", required_keys=("a",)) == {"a": 1}
+    assert calls == [(raw, frozenset({"a"}))]
+
+
+def test_strict_valid_json_bypasses_recovery_tiers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A well-formed JSON reply must parse via strict ``json.loads`` and never reach the
+    recovery tiers — this guards against ``extract_json_from_response``'s own pre-parse
+    heuristics (e.g. its ``---DRAFT---`` shortcut) misfiring on valid payloads whose text
+    happens to contain a matching literal substring."""
+    import software_engineering_team.tech_lead_agent.agent as tl_mod
+
+    def unexpected(*args, **kwargs):
+        raise AssertionError("recovery tiers should not be reached")
+
+    monkeypatch.setattr(tl_mod, "extract_json_object", unexpected)
+    monkeypatch.setattr(tl_mod, "extract_json_from_response", unexpected)
+    agent = _FakeAgent('{"reason": "discusses the ---DRAFT--- marker"}')
+    assert _agent_call_json(agent, "p") == {"reason": "discusses the ---DRAFT--- marker"}
+
+
+def test_prose_wrapped_json_containing_draft_marker_recovers_via_extract_json_object() -> None:
+    """A prose-wrapped (not strictly-parseable) reply whose payload text happens to contain
+    the literal ``---DRAFT---`` substring must still recover the real object — via tier 2's
+    ``extract_json_object`` (which has no draft-sentinel special-casing) — rather than
+    falling all the way to ``extract_json_from_response``'s ``---DRAFT---`` shortcut, which
+    would discard the structured payload entirely."""
+    agent = _FakeAgent(
+        'Here is the JSON: {"approved": false, "reason": "uses ---DRAFT--- before publication"}'
+    )
+    assert _agent_call_json(agent, "p", required_keys=("approved",)) == {
+        "approved": False,
+        "reason": "uses ---DRAFT--- before publication",
+    }
+
+
+def test_multiple_fenced_blocks_selects_anchored_last_candidate_not_first() -> None:
+    """When a reply contains a fenced format example followed by the real fenced answer —
+    both individually valid JSON — tier 2's ``extract_json_object`` must select the last
+    ``required_keys``-anchored candidate, not just parse whichever fenced block comes first
+    (the bug in ``extract_json_from_response``'s own first-fenced-block fast path)."""
+    agent = _FakeAgent(
+        'Format example:\n```json\n{"approved": true}\n```\n'
+        'Actual answer:\n```json\n{"approved": false}\n```'
+    )
+    assert _agent_call_json(agent, "p", required_keys=("approved",)) == {"approved": False}
+
+
+def test_tier3_non_dict_result_is_rejected() -> None:
+    """A fenced JSON array with surrounding prose is correctly declined by tier 2's
+    ``extract_json_object`` (dict-only contract). Tier 3's ``extract_json_from_response``
+    parses and returns the bare list instead of declining it — ``_agent_call_json`` must
+    reject that too, since its own dict contract is what every call site relies on
+    (``data.get(...)``); leaking a list would surface as an uncaught ``AttributeError`` in
+    the caller instead of the safe-default/retry path a parse failure gets."""
+    agent = _FakeAgent("Some prose ```json\n[1, 2, 3]\n``` more prose")
+    with pytest.raises(json.JSONDecodeError):
+        _agent_call_json(agent, "p")
+
+
+def test_tier3_anchor_mismatch_is_rejected() -> None:
+    """A reply containing only unrelated prose-wrapped JSON (e.g. a stray usage/token
+    report) is correctly declined by tier 2's anchor check. Tier 3's
+    ``extract_json_from_response`` recovers and returns that anchor-less object anyway (its
+    early recovery stages don't consult ``expected_keys``) — ``_agent_call_json`` must reject
+    it too, so a caller like ``run_revision_adjudication`` sees a genuine parse failure (and
+    gets its remaining retry attempts) instead of a "successful" call that returns an object
+    with no ``verdict`` key."""
+    agent = _FakeAgent('Usage report: {"tokens": 9}')
+    with pytest.raises(json.JSONDecodeError):
+        _agent_call_json(agent, "p", required_keys=("verdict",))
