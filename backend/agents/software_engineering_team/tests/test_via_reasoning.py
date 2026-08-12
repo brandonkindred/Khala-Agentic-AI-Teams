@@ -273,6 +273,92 @@ def test_run_agent_via_reasoning_second_call_has_no_tools(
     assert agent_calls[1]["model"].config.get("response_format") == "json"
 
 
+def test_run_agent_via_reasoning_none_reasoning_think_clones_with_max_think(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """reasoning_think=None must resolve to think=True on the text pass model."""
+    from software_engineering_team.code_review_agent import via_reasoning as vr_mod
+
+    class _RecordingAgent:
+        def __init__(self, **kwargs: Any) -> None:
+            self.kwargs = kwargs
+
+        def __call__(self, prompt: str) -> str:
+            if "Return {" in prompt:
+                return '{"approved": true, "summary": "ok"}'
+            return "REVIEW PROSE"
+
+    class _ClonableModel:
+        def __init__(self) -> None:
+            self.config: dict[str, Any] = {"response_format": "json"}
+            self.clone_calls: list[dict[str, Any]] = []
+
+        def clone(self, **overrides: Any) -> "_ClonableModel":
+            self.clone_calls.append(overrides)
+            cloned = _ClonableModel()
+            cloned.config = {**self.config, **overrides}
+            cloned.clone_calls = self.clone_calls
+            return cloned
+
+    model = _ClonableModel()
+    monkeypatch.setattr(vr_mod, "Agent", _RecordingAgent)
+
+    run_agent_via_reasoning(
+        model=model,
+        reasoning_prompt="Review this",
+        reasoning_system_prompt="Prose reviewer",
+        formatting_instructions='Return {"approved": bool, "summary": str}',
+        parse=lambda raw: _Out.model_validate_json(raw),
+        reasoning_think=None,
+    )
+
+    assert model.clone_calls[0]["think"] is True
+    assert model.clone_calls[0]["response_format"] == "text"
+
+
+def test_run_agent_via_reasoning_honors_reasoning_think_false(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """reasoning_think=False must pass think=False to the text pass model clone."""
+    from software_engineering_team.code_review_agent import via_reasoning as vr_mod
+
+    class _RecordingAgent:
+        def __init__(self, **kwargs: Any) -> None:
+            self.kwargs = kwargs
+
+        def __call__(self, prompt: str) -> str:
+            if "Return {" in prompt:
+                return '{"approved": true, "summary": "ok"}'
+            return "REVIEW PROSE"
+
+    class _ClonableModel:
+        def __init__(self) -> None:
+            self.config: dict[str, Any] = {"response_format": "json"}
+            self.clone_calls: list[dict[str, Any]] = []
+
+        def clone(self, **overrides: Any) -> "_ClonableModel":
+            self.clone_calls.append(overrides)
+            cloned = _ClonableModel()
+            cloned.config = {**self.config, **overrides}
+            cloned.clone_calls = self.clone_calls
+            return cloned
+
+    model = _ClonableModel()
+    monkeypatch.setattr(vr_mod, "Agent", _RecordingAgent)
+
+    run_agent_via_reasoning(
+        model=model,
+        reasoning_prompt="Review this",
+        reasoning_system_prompt="Prose reviewer",
+        formatting_instructions='Return {"approved": bool, "summary": str}',
+        parse=lambda raw: _Out.model_validate_json(raw),
+        reasoning_think=False,
+    )
+
+    assert model.clone_calls[0]["think"] is False
+    assert model.clone_calls[0]["response_format"] == "text"
+
+
 def test_run_agent_via_reasoning_wraps_bare_llm_client_with_get_strands_model(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

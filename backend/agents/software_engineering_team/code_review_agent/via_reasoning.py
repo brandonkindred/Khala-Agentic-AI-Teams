@@ -138,7 +138,7 @@ def _clone_model_for_pass(
         Returns a model suitable for ``Agent`` construction. Injected test
         doubles without ``clone`` are returned unchanged.
     """
-    think_value = _resolve_reasoning_think(think) if think is not None else think
+    think_value = _resolve_reasoning_think(think)
     clone_fn = getattr(model, "clone", None)
     if callable(clone_fn):
         try:
