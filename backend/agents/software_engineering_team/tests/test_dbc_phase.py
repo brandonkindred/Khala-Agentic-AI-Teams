@@ -8,6 +8,7 @@ isolation, per the module's own docstring.
 
 from __future__ import annotations
 
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Dict, Optional
 
@@ -360,3 +361,63 @@ def test_dbc_self_review_build_verifier_reverts_key_absent_before(tmp_path):
     assert "a.py" not in all_files
     assert "a.py" not in mt.output_files
     assert not (tmp_path / "a.py").exists()
+
+
+def test_dbc_self_review_snapshot_oserror_skips_without_writing(tmp_path, monkeypatch):
+    def _review(*, code, **kwargs: Any) -> SimpleNamespace:
+        return SimpleNamespace(files={"a.py": "dbc a\n"})
+
+    def _raise_read_bytes(self: Path) -> bytes:
+        raise OSError("permission denied")
+
+    monkeypatch.setattr(Path, "read_bytes", _raise_read_bytes)
+    (tmp_path / "a.py").write_text("orig a\n")
+    microtask_files = {"a.py": "orig a\n"}
+
+    mt, microtask_files, all_files, _ = _call(
+        tmp_path=tmp_path,
+        gate_config=_gate_config(_review),
+        microtask_files=microtask_files,
+    )
+
+    assert microtask_files == {"a.py": "orig a\n"}
+    assert (tmp_path / "a.py").read_text() == "orig a\n"
+
+
+def test_dbc_self_review_write_oserror_reverts_partial_write(tmp_path, monkeypatch):
+    (tmp_path / "a.py").write_text("orig a\n")
+
+    def _review(*, code, **kwargs: Any) -> SimpleNamespace:
+        return SimpleNamespace(files={"a.py": "dbc a\n", "new.py": "dbc new\n"})
+
+    def _fake_write(repo_path: Path, files: Dict[str, str]) -> None:
+        # Simulate write_repo_text_files getting partway through the batch
+        # (e.g. a full disk) before raising -- one file lands, one doesn't.
+        (Path(repo_path) / "a.py").write_text(files["a.py"])
+        raise OSError("no space left on device")
+
+    monkeypatch.setattr(dbc_phase, "write_repo_text_files", _fake_write)
+    microtask_files = {"a.py": "orig a\n"}
+    all_files = {"a.py": "orig a\n"}
+
+    mt, microtask_files, all_files, _ = _call(
+        tmp_path=tmp_path,
+        gate_config=_gate_config(_review),
+        microtask_files=microtask_files,
+        all_files=all_files,
+    )
+
+    assert (tmp_path / "a.py").read_text() == "orig a\n"
+    assert not (tmp_path / "new.py").exists()
+    assert microtask_files == {"a.py": "orig a\n"}
+    assert all_files == {"a.py": "orig a\n"}
+
+
+def test_revert_disk_swallows_oserror(tmp_path, monkeypatch):
+    def _raise_write_bytes(self: Path, data: bytes) -> int:
+        raise OSError("still unwritable")
+
+    monkeypatch.setattr(Path, "write_bytes", _raise_write_bytes)
+
+    # Should not raise even though the underlying restore attempt fails.
+    dbc_phase._revert_disk({tmp_path / "a.py": b"orig a\n"})

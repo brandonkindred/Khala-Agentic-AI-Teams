@@ -110,6 +110,28 @@ def _restore_dict_entry(d: Dict[str, str], key: str, prior: Optional[str]) -> No
         d[key] = prior
 
 
+def _revert_disk(prior_disk: Dict[Path, Optional[bytes]]) -> None:
+    """Best-effort restore of each snapshotted path to its prior on-disk bytes.
+
+    Postconditions:
+        Each path with ``prior_bytes is None`` is deleted (it did not exist
+        before); each other path is restored to ``prior_bytes``. An ordinary
+        filesystem failure (e.g. the disk that caused the original write to
+        fail is still unwritable) is logged and skipped per-path rather than
+        raised -- this is already the fallback path of a "never fails"
+        phase, so it must not itself introduce a new way to fail loud.
+    """
+    for full_path, prior_bytes in prior_disk.items():
+        try:
+            if prior_bytes is None:
+                full_path.unlink(missing_ok=True)
+            else:
+                full_path.parent.mkdir(parents=True, exist_ok=True)
+                full_path.write_bytes(prior_bytes)
+        except OSError as exc:
+            logger.warning("Failed to revert %s to its prior state (ignored): %s", full_path, exc)
+
+
 def _run_dbc_self_review(
     *,
     gate_config: Any,
@@ -155,8 +177,10 @@ def _run_dbc_self_review(
         ``all_files``/``mt.output_files`` (prior value restored, or the key
         popped if it did not exist before); every other file is left
         untouched. A ``gate_config.run_dbc_self_review`` exception, an unsafe
-        write path, or a build-verifier exception are all logged and
-        skipped/reverted rather than propagated -- this phase never raises or
+        write path, an ordinary filesystem failure while snapshotting or
+        writing (e.g. a full disk or revoked permissions), or a build-verifier
+        exception are all logged and skipped/reverted rather than propagated
+        -- this phase never raises or
         fails the microtask.
     """
     if progress_callback:
@@ -201,15 +225,24 @@ def _run_dbc_self_review(
     prior_output: Dict[str, Optional[str]] = {}
     prior_disk: Dict[Path, Optional[bytes]] = {}
 
-    for rel_path in dbc_files:
-        prior_microtask[rel_path] = microtask_files.get(rel_path)
-        prior_all[rel_path] = all_files.get(rel_path)
-        prior_output[rel_path] = output_files.get(rel_path)
-        try:
-            full_path = resolve_safe_repo_path(root, rel_path)
-        except UnsafeRepoPathError:
-            continue  # write_repo_text_files rejects the whole batch below.
-        prior_disk[full_path] = full_path.read_bytes() if full_path.exists() else None
+    try:
+        for rel_path in dbc_files:
+            prior_microtask[rel_path] = microtask_files.get(rel_path)
+            prior_all[rel_path] = all_files.get(rel_path)
+            prior_output[rel_path] = output_files.get(rel_path)
+            try:
+                full_path = resolve_safe_repo_path(root, rel_path)
+            except UnsafeRepoPathError:
+                continue  # write_repo_text_files rejects the whole batch below.
+            prior_disk[full_path] = full_path.read_bytes() if full_path.exists() else None
+    except OSError as exc:
+        logger.warning(
+            "[%s] Microtask %s: could not snapshot prior DbC file state, skipping: %s",
+            task_id,
+            mt.id,
+            exc,
+        )
+        return  # No write attempted -- nothing to revert.
 
     try:
         write_repo_text_files(repo_path, dbc_files)
@@ -221,6 +254,21 @@ def _run_dbc_self_review(
             exc,
         )
         return  # Nothing was written (write_repo_text_files is all-or-nothing).
+    except OSError as exc:
+        logger.warning(
+            "[%s] Microtask %s: DbC comments write failed (%s), reverting any partial write",
+            task_id,
+            mt.id,
+            exc,
+        )
+        # write_repo_text_files writes file-by-file after validating every
+        # path, so a mid-batch OSError (disk full, permission revoked, a
+        # path replaced by a directory) can leave some files written and
+        # others not -- restore every snapshotted path regardless, since
+        # the dicts were never updated (see below) there is nothing to
+        # revert there.
+        _revert_disk(prior_disk)
+        return
 
     microtask_files.update(dbc_files)
     all_files.update(dbc_files)
@@ -246,12 +294,7 @@ def _run_dbc_self_review(
                 _restore_dict_entry(all_files, rel_path, prior_all[rel_path])
                 _restore_dict_entry(output_files, rel_path, prior_output[rel_path])
             mt.output_files = output_files
-            for full_path, prior_bytes in prior_disk.items():
-                if prior_bytes is None:
-                    full_path.unlink(missing_ok=True)
-                else:
-                    full_path.parent.mkdir(parents=True, exist_ok=True)
-                    full_path.write_bytes(prior_bytes)
+            _revert_disk(prior_disk)
             return
 
     logger.info(
