@@ -1,59 +1,30 @@
-import { Component, EventEmitter, Input, Output } from '@angular/core';
+import { Component } from '@angular/core';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { MatDialog } from '@angular/material/dialog';
 import { By } from '@angular/platform-browser';
 import { NoopAnimationsModule } from '@angular/platform-browser/animations';
+import { provideRouter } from '@angular/router';
+import { RouterTestingHarness } from '@angular/router/testing';
 import { Subject, of, throwError } from 'rxjs';
 import { vi } from 'vitest';
 import type { AgentStudioDraft, AgentStudioDraftSummary } from '../../../models/agent-studio.model';
 import { AgentStudioApiService } from '../../../services/agent-studio-api.service';
 import { AgenticTeamApiService } from '../../../services/agentic-team-api.service';
 import type { ProcessDefinition } from '../../../models/agentic-team.model';
-import { AgentCatalogComponent } from '../agent-console/agent-catalog/agent-catalog.component';
-import { AgentProvisioningPanelComponent } from '../agent-provisioning-panel/agent-provisioning-panel.component';
-import { AgentRunnerComponent } from '../agent-console/agent-runner/agent-runner.component';
-import { AgentStudioBuildAgentComponent } from './agent-studio-build-agent.component';
-import { AgentStudioComposeTeamComponent } from './agent-studio-compose-team.component';
-import { AgentStudioPersonaComponent } from './agent-studio-persona.component';
 import { AgentStudioShellComponent } from './agent-studio-shell.component';
-import { AgentStudioTestAgentComponent } from './agent-studio-test-agent.component';
 import { LoadDraftMenuComponent } from './load-draft-menu/load-draft-menu.component';
 
-/** Stub the heavy Agent Console runner so the Test stage can mount with an agent
- *  set without firing sandbox polling / HTTP inside the shell tests. */
-@Component({ selector: 'app-agent-runner', standalone: true, template: '' })
-class StubAgentRunnerComponent {
-  @Input() preselectedAgentId: string | null = null;
-  @Output() readonly requestCatalogReturn = new EventEmitter<void>();
-}
+@Component({ selector: 'app-stub-stage-host', standalone: true, template: '' })
+class StubStageHostComponent {}
 
-/** Stub the catalog + provisioning panel so the Build stage (the default
- *  active stage) mounts without firing catalog HTTP / provisioning polling. */
-@Component({ selector: 'app-agent-catalog', standalone: true, template: '' })
-class StubAgentCatalogComponent {
-  @Output() readonly requestRun = new EventEmitter<string>();
-}
-
-@Component({ selector: 'app-agent-provisioning-panel', standalone: true, template: '' })
-class StubAgentProvisioningPanelComponent {}
-
-/** Stub the Stage-4 persona component so the shell's final-stage tests don't pull
- *  in its API services / dialog. */
-@Component({ selector: 'app-agent-studio-persona', standalone: true, template: '' })
-class StubPersonaComponent {}
-
-/** Stub the Stage-3 compose component so the shell's Compose-stage tests don't
- *  pull in its API services / the embedded process-designer-chat. */
-@Component({ selector: 'app-agent-studio-compose-team', standalone: true, template: '' })
-class StubComposeTeamComponent {}
+@Component({ selector: 'app-stub-audit-host', standalone: true, template: '' })
+class StubAuditHostComponent {}
 
 describe('AgentStudioShellComponent', () => {
   let component: AgentStudioShellComponent;
   let fixture: ComponentFixture<AgentStudioShellComponent>;
-  // Build stage isn't stubbed at the shell level (only its catalog/provisioning
-  // children are), so it injects the real AgentStudioApiService — fake it here
-  // so no HTTP client is required. Also backs `app-load-draft-menu` (real,
-  // unstubbed) and the shell's own `loadDraft` hydration.
+  // Backs `app-load-draft-menu` (real, unstubbed) and the shell's own
+  // `loadDraft` hydration. Stage views live on the child host, not the shell.
   let agentStudioApi: {
     cloneFromRegistry: ReturnType<typeof vi.fn>;
     saveAgent: ReturnType<typeof vi.fn>;
@@ -75,21 +46,9 @@ describe('AgentStudioShellComponent', () => {
       providers: [
         { provide: AgentStudioApiService, useValue: agentStudioApi },
         { provide: AgenticTeamApiService, useValue: agenticTeamApi },
+        provideRouter([]),
       ],
-    })
-      .overrideComponent(AgentStudioTestAgentComponent, {
-        remove: { imports: [AgentRunnerComponent] },
-        add: { imports: [StubAgentRunnerComponent] },
-      })
-      .overrideComponent(AgentStudioBuildAgentComponent, {
-        remove: { imports: [AgentCatalogComponent, AgentProvisioningPanelComponent] },
-        add: { imports: [StubAgentCatalogComponent, StubAgentProvisioningPanelComponent] },
-      })
-      .overrideComponent(AgentStudioShellComponent, {
-        remove: { imports: [AgentStudioPersonaComponent, AgentStudioComposeTeamComponent] },
-        add: { imports: [StubPersonaComponent, StubComposeTeamComponent] },
-      })
-      .compileComponents();
+    }).compileComponents();
 
     fixture = TestBed.createComponent(AgentStudioShellComponent);
     component = fixture.componentInstance;
@@ -419,13 +378,6 @@ describe('AgentStudioShellComponent', () => {
     expect(component.state.activeStage()).toBe(3);
   });
 
-  it('renders the real Compose Team stage (not the placeholder) on Stage 3', () => {
-    component.state.navigateToStage(2);
-    fixture.detectChanges();
-    expect(fixture.nativeElement.querySelector('app-agent-studio-compose-team')).toBeTruthy();
-    expect(fixture.nativeElement.querySelector('app-agent-studio-stage-placeholder')).toBeNull();
-  });
-
   it('passes the live handoff through to Compose', () => {
     component.state.setRegistryAgentId('reg-1');
     component.state.navigateToStage(2);
@@ -473,13 +425,6 @@ describe('AgentStudioShellComponent', () => {
     expect(steps[1].getAttribute('aria-current')).toBe('step');
   });
 
-  it('renders the real Test Agent stage (not the placeholder) on Stage 2', () => {
-    component.state.navigateToStage(1);
-    fixture.detectChanges();
-    expect(fixture.nativeElement.querySelector('app-agent-studio-test-agent')).toBeTruthy();
-    expect(fixture.nativeElement.querySelector('app-agent-studio-stage-placeholder')).toBeNull();
-  });
-
   it('gates the "Add to team →" forward step until an agent is selected', () => {
     component.state.navigateToStage(1);
     fixture.detectChanges();
@@ -492,12 +437,6 @@ describe('AgentStudioShellComponent', () => {
     button = fixture.nativeElement.querySelector('.studio__continue');
     expect(component.forwardDisabled()).toBe(false);
     expect(button.disabled).toBe(false);
-  });
-
-  it('renders the real Build Agent stage (not the placeholder) on Stage 1', () => {
-    expect(component.activeStageDef().key).toBe('build');
-    expect(fixture.nativeElement.querySelector('app-agent-studio-build-agent')).toBeTruthy();
-    expect(fixture.nativeElement.querySelector('app-agent-studio-stage-placeholder')).toBeNull();
   });
 
   it('gates the Build "Test this agent →" forward step until an agent is selected', () => {
@@ -535,5 +474,47 @@ describe('AgentStudioShellComponent', () => {
     fixture.detectChanges();
     expect(component.activeStageDef().key).toBe('test');
     expect(component.buildForwardDisabledReason()).toBeNull();
+  });
+
+  it('hides the continue footer on the persona-run child and keeps handoff state', async () => {
+    TestBed.resetTestingModule();
+    await TestBed.configureTestingModule({
+      imports: [AgentStudioShellComponent, NoopAnimationsModule],
+      providers: [
+        { provide: AgentStudioApiService, useValue: agentStudioApi },
+        { provide: AgenticTeamApiService, useValue: agenticTeamApi },
+        provideRouter([
+          {
+            path: '',
+            component: AgentStudioShellComponent,
+            children: [
+              { path: '', component: StubStageHostComponent },
+              {
+                path: 'persona-run/:runId',
+                component: StubAuditHostComponent,
+                data: { hideStudioFooter: true },
+              },
+            ],
+          },
+        ]),
+      ],
+    }).compileComponents();
+
+    const harness = await RouterTestingHarness.create();
+    const shell = await harness.navigateByUrl('/', AgentStudioShellComponent);
+    shell.state.setRegistryAgentId('reg-keep');
+    harness.detectChanges();
+    expect(harness.routeNativeElement?.querySelector('.studio__footer')).toBeTruthy();
+
+    await harness.navigateByUrl('/persona-run/run-1');
+    harness.detectChanges();
+    expect(harness.routeNativeElement?.querySelector('.studio__footer')).toBeNull();
+    expect(harness.routeNativeElement?.querySelector('app-stub-audit-host')).toBeTruthy();
+    expect(shell.state.registryAgentId()).toBe('reg-keep');
+
+    await harness.navigateByUrl('/');
+    harness.detectChanges();
+    expect(harness.routeNativeElement?.querySelector('.studio__footer')).toBeTruthy();
+    expect(shell.state.registryAgentId()).toBe('reg-keep');
   });
 });

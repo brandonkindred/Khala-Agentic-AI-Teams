@@ -1,19 +1,17 @@
 import { ChangeDetectionStrategy, Component, computed, inject, signal } from '@angular/core';
+import { toSignal } from '@angular/core/rxjs-interop';
 import { MatButtonModule } from '@angular/material/button';
 import { MatDialog, MatDialogModule } from '@angular/material/dialog';
 import { MatIconModule } from '@angular/material/icon';
 import { MatTooltipModule } from '@angular/material/tooltip';
+import { ActivatedRoute, NavigationEnd, Router, RouterOutlet } from '@angular/router';
+import { filter, map, startWith } from 'rxjs';
 import type { AgentStudioDraft } from '../../../models/agent-studio.model';
 import { STUDIO_STAGES } from '../../../models/agent-studio.model';
 import { AgentStudioApiService } from '../../../services/agent-studio-api.service';
 import { AgentStudioStateService } from '../../../services/agent-studio-state.service';
 import { AgentStudioFacade } from '../../../services/agent-studio.facade';
 import { AgenticTeamApiService } from '../../../services/agentic-team-api.service';
-import { AgentStudioBuildAgentComponent } from './agent-studio-build-agent.component';
-import { AgentStudioComposeTeamComponent } from './agent-studio-compose-team.component';
-import { AgentStudioPersonaComponent } from './agent-studio-persona.component';
-import { AgentStudioStagePlaceholderComponent } from './agent-studio-stage-placeholder.component';
-import { AgentStudioTestAgentComponent } from './agent-studio-test-agent.component';
 import { LoadDraftMenuComponent } from './load-draft-menu/load-draft-menu.component';
 import {
   SaveDraftDialogComponent,
@@ -50,12 +48,8 @@ function asNullableString(value: unknown): string | null {
     MatDialogModule,
     MatIconModule,
     MatTooltipModule,
-    AgentStudioBuildAgentComponent,
-    AgentStudioComposeTeamComponent,
-    AgentStudioPersonaComponent,
-    AgentStudioStagePlaceholderComponent,
-    AgentStudioTestAgentComponent,
     LoadDraftMenuComponent,
+    RouterOutlet,
   ],
   changeDetection: ChangeDetectionStrategy.OnPush,
   providers: [AgentStudioStateService, AgentStudioFacade],
@@ -67,6 +61,34 @@ export class AgentStudioShellComponent {
   private readonly dialog = inject(MatDialog);
   private readonly api = inject(AgentStudioApiService);
   private readonly agenticTeamApi = inject(AgenticTeamApiService);
+  private readonly router = inject(Router);
+  private readonly route = inject(ActivatedRoute);
+
+  /**
+   * True when the active child route sets `data.hideStudioFooter`.
+   *
+   * Preconditions: this component is the routed `/agent-studio` parent.
+   * Postconditions: `true` iff the deepest activated child snapshot has
+   *   `hideStudioFooter === true`; `false` when there is no child (unit tests
+   *   that construct the shell without navigating).
+   */
+  readonly hideFooter = toSignal(
+    this.router.events.pipe(
+      filter((e): e is NavigationEnd => e instanceof NavigationEnd),
+      map(() => this.childHidesFooter()),
+      startWith(this.childHidesFooter()),
+    ),
+    { initialValue: false },
+  );
+
+  private childHidesFooter(): boolean {
+    let child = this.route.firstChild;
+    while (child?.firstChild) {
+      child = child.firstChild;
+    }
+    // `firstChild` can exist before `snapshot` is attached during outlet activation.
+    return child?.snapshot?.data['hideStudioFooter'] === true;
+  }
 
   /** True while a Load-draft selection is being fetched and hydrated. */
   readonly loadingDraft = signal(false);
