@@ -11,9 +11,8 @@ from typing import Any, Callable, Collection, Dict, List, Optional
 
 from strands import Agent
 
-from llm_service import call_llm_with_retries
+from llm_service import LLMJsonParseError, call_llm_with_retries, extract_json_from_response
 from shared.env import parse_int
-from shared.llm_recovery import agent_call_json
 from software_engineering_team.hitl import (
     normalize_open_questions as _normalize_open_questions,
 )
@@ -146,13 +145,20 @@ def _agent_call_json(
           so a usage/format echo that lacks the anchor cannot be mistaken for the
           answer.
     Postconditions:
-        - Returns the parsed object. Strict ``json.loads`` is tried first (after
-          stripping a single leading/trailing ```` ``` ```` fence); on failure the
-          shared salvage recovery extracts a JSON object from prose- or
-          think-block-wrapped output, anchored on ``required_keys``. Raises
-          ``json.JSONDecodeError`` only when no object can be recovered.
+        - Returns the parsed object via the canonical ``extract_json_from_response``
+          recovery ladder (fence stripping, repair, and prose-/think-block-wrapped
+          salvage anchored on ``required_keys``). Raises ``json.JSONDecodeError``
+          only when no object can be recovered — ``LLMJsonParseError`` is caught and
+          re-raised as ``json.JSONDecodeError`` so callers keep retrying JSON-parse
+          failures exactly as before (``LLMJsonParseError`` is otherwise
+          non-retryable in ``call_llm_with_retries``).
     """
-    return agent_call_json(agent, prompt, required_keys)
+    raw = str(agent(prompt)).strip()
+    expected_keys = frozenset(required_keys) if required_keys is not None else None
+    try:
+        return extract_json_from_response(raw, expected_keys=expected_keys)
+    except LLMJsonParseError as e:
+        raise json.JSONDecodeError(str(e), raw, 0) from e
 
 
 _JSON_ONLY_INSTRUCTION = "\n\nRespond with valid JSON only, no markdown fences."

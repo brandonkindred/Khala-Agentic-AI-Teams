@@ -51,3 +51,19 @@ def test_required_keys_anchor_skips_usage_echo() -> None:
         "approved": False,
         "issues": ["x"],
     }
+
+
+def test_routes_through_extract_json_from_response(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``_agent_call_json`` must use the canonical ``extract_json_from_response``
+    helper (not the older ``agent_call_json``) — this is the migration's contract."""
+    import software_engineering_team.tech_lead_agent.agent as tl_mod
+
+    calls: list = []
+
+    def fake_extract(text: str, *, expected_keys=None):
+        calls.append((text, expected_keys))
+        return {"a": 1}
+
+    monkeypatch.setattr(tl_mod, "extract_json_from_response", fake_extract)
+    assert _agent_call_json(_FakeAgent('{"a": 1}'), "p", required_keys=("a",)) == {"a": 1}
+    assert calls == [('{"a": 1}', frozenset({"a"}))]
