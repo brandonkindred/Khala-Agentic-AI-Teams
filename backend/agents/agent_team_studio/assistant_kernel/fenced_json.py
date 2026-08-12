@@ -3,16 +3,14 @@
 Design-assistant LLM replies embed structured updates as fenced code blocks
 inside otherwise free-form prose (e.g. ```` ```agent\n{...}\n``` ````).
 ``agent_studio.assistant`` and ``agentic_team_provisioning.assistant.agent``
-parse this shape with near-identical regex + ``json.loads`` helpers that
-differ only in the block's tag and expected JSON type; this module is the
-shared implementation — ``agent_studio.assistant`` now calls it directly,
-``agentic_team_provisioning.assistant.agent`` still carries its own local copy
-(migrating it is a follow-up). Each assistant's *merge* strategy (how a parsed
-block folds onto the current draft) stays caller-supplied — one does a
-field-level overlay with re-validation, the other rebuilds the draft from
-field fallbacks, and unifying those is out of scope here — except for the one
-merge shape both use: overlaying a list of dicts by key, which is common
-enough to share (:func:`merge_list_by_key`).
+used to parse this shape with near-identical regex + ``json.loads`` helpers
+that differed only in the block's tag and expected JSON type; both now call
+this shared implementation directly. Each assistant's *merge* strategy (how a
+parsed block folds onto the current draft) stays caller-supplied — one does a
+field-level overlay with re-validation, one rebuilds the draft wholesale from
+field fallbacks (no overlay at all), and unifying those is out of scope here —
+except for the one merge shape ``agent_studio`` uses: overlaying a list of
+dicts by key, which is common enough to share (:func:`merge_list_by_key`).
 """
 
 from __future__ import annotations

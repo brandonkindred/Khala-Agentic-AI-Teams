@@ -62,6 +62,8 @@ if reads:
     raise SystemExit(f"import read design prompt files: {{reads!r}}")
 if mod._get_stop_order_semantics.cache_info().currsize != 0:
     raise SystemExit("stop-order cache warmed at import")
+if mod._get_sizing_risk_framing.cache_info().currsize != 0:
+    raise SystemExit("sizing-risk-framing cache warmed at import")
 if mod._get_design_system_prompt.cache_info().currsize != 0:
     raise SystemExit("design system prompt cache warmed at import")
 if mod._get_self_review_system_prompt.cache_info().currsize != 0:
@@ -108,6 +110,33 @@ def test_design_prompt_helpers_include_stop_order_and_bodies() -> None:
     assert stop in review
     assert design.index(stop) > 0
     assert review.index(stop) > 0
+
+
+def test_design_system_prompt_includes_sizing_risk_framing() -> None:
+    """Both the designer and self-review system prompts append the sizing/risk block.
+
+    Preconditions: prompt markdown files exist under strategy_lab/prompts.
+    Postconditions: sizing/risk framing text is non-empty and appears after
+    the stop-order block in both the design system prompt and the
+    self-review system prompt.
+    """
+    from investment_team.strategy_lab.agents.design import (
+        _get_design_system_prompt,
+        _get_self_review_system_prompt,
+        _get_sizing_risk_framing,
+        _get_stop_order_semantics,
+    )
+
+    sizing = _get_sizing_risk_framing()
+    stop = _get_stop_order_semantics()
+    design = _get_design_system_prompt()
+    review = _get_self_review_system_prompt()
+
+    assert "per-trade loss cap" in sizing
+    assert sizing in design
+    assert design.index(sizing) > design.index(stop)
+    assert sizing in review
+    assert review.index(sizing) > review.index(stop)
 
 
 def test_design_prompt_helpers_cache_composed_prompts(

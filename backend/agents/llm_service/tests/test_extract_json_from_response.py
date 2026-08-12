@@ -6,57 +6,43 @@ decided canonical helper; ``agent_call_json`` (``shared.llm_recovery``, which
 delegates to the more sophisticated ``extract_json_object``/``_salvage_object``
 engine) is the richer of the two implementations it is meant to absorb. This
 module runs both against a shared fixture corpus and records, per fixture,
-where they agree and where they diverge. It makes no production code changes
--- every result below was captured by actually running both functions, not
-inferred from reading their source.
+where they agree and where they diverge. Every result below was captured by
+actually running both functions, not inferred from reading their source.
 
-Capability gaps: what agent_call_json (-> extract_json_object) does that
-extract_json_from_response currently lacks, each backed by a failing case
-below:
+``extract_json_from_response`` now closes its recovery gap against
+``agent_call_json`` by falling back, as a last resort, to the same shared
+``extract_json_object`` salvage engine ``agent_call_json`` uses -- so the four
+capability gaps this corpus originally documented are now resolved:
 
-  1. Truncation repair -- fabricates a missing closing bracket/brace for an
+  1. Truncation repair -- fabricating a missing closing bracket/brace for an
      object cut off mid-stream (e.g. by a max-tokens limit). See
-     ``truncated_json``: agent_call_json recovers the full task list;
-     extract_json_from_response raises, because its only extraction strategy
-     for un-fenced text is a single greedy ``\\{.*\\}`` regex, which has no
-     literal closing brace to anchor on.
+     ``truncated_json``.
   2. ``<think>``/``<thinking>``/``<reasoning>``/``<json>`` tag stripping
-     before salvage. See ``think_block_wrapped``: when the reasoning block
-     itself contains a brace, extract_json_from_response's greedy regex spans
-     from the first ``{`` inside the (unstripped) reasoning block all the way
-     to the last ``}`` in the real payload, producing an invalid, unparseable
-     splice; agent_call_json discards the whole tagged block first and
-     parses cleanly.
+     before salvage. See ``think_block_wrapped``.
   3. Envelope descent -- when a keys-anchor is supplied and the top-level
-     object doesn't carry it, agent_call_json looks one level into that
-     object's dict-valued children for a match (e.g. unwrapping
+     object doesn't carry it, looking one level into that object's
+     dict-valued children for a match (e.g. unwrapping
      ``{"result": {"tasks": [...]}}`` when anchored on ``"tasks"``). See
-     ``envelope_wrapped``: extract_json_from_response has no equivalent
-     descent step -- its ``expected_keys`` filtering only ever applies to
-     candidates already found by literal fenced-block scanning.
+     ``envelope_wrapped``.
   4. A recall/disambiguation strategy for "echoed format example, then the
-     real payload" prompts. See ``format_echo_before_payload``:
-     extract_json_from_response's single greedy ``\\{.*\\}`` regex spans both
-     the decoy and the real object into one invalid blob (it has no notion of
-     "distinct candidate objects"); agent_call_json's balanced, string-aware
-     scanner finds both as separate candidates and its "last accepted
-     candidate wins" heuristic selects the real one.
+     real payload" prompts, via a balanced, string-aware scanner whose "last
+     accepted candidate wins" heuristic selects the real (trailing) object
+     instead of splicing the decoy and the real object together. See
+     ``format_echo_before_payload``.
+
+One documented, accepted difference remains:
+
   5. A domain-specific failure signal. On genuinely unrecoverable input (see
      ``unrecoverable_prose``) both refuse to fabricate a result, but
      extract_json_from_response raises a purpose-built ``LLMJsonParseError``
      (with a response preview attached) while agent_call_json re-raises the
      generic stdlib ``json.JSONDecodeError`` it started from -- a caller
-     pattern-matching on exception type must handle both today.
+     pattern-matching on exception type must handle both today. This is out
+     of scope: fixing it would change extract_json_from_response's existing,
+     widely-relied-on failure contract rather than purely add capability.
 
-Where they agree: a clean object, a ```json fence, simple prose-wrapping,
-trailing commentary after a valid object, a trailing comma, and a brace
-embedded inside a string value are all handled identically by both (see
-``EXPECTED`` below, and ``test_agreement_documented`` for value-level
-confirmation).
-
-This corpus and the EXPECTED table are the spec for the sibling "extend the
-canonical helper" sub-issue: closing gaps 1-4 above would eliminate every
-observed divergence in this corpus.
+Where they agree: every case in this corpus (see ``EXPECTED`` below, and
+``test_agreement_documented`` for value-level confirmation).
 """
 
 from __future__ import annotations
@@ -188,11 +174,11 @@ EXPECTED: dict[str, tuple[bool, bool]] = {
     "prose_wrapped": (True, True),
     "trailing_commentary": (True, True),
     "trailing_comma": (True, True),
-    "truncated_json": (False, True),
-    "think_block_wrapped": (False, True),
-    "envelope_wrapped": (False, True),
+    "truncated_json": (True, True),
+    "think_block_wrapped": (True, True),
+    "envelope_wrapped": (True, True),
     "brace_in_string_value": (True, True),
-    "format_echo_before_payload": (False, True),
+    "format_echo_before_payload": (True, True),
     "unrecoverable_prose": (False, False),
 }
 
