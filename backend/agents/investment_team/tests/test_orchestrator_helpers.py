@@ -9,6 +9,8 @@ Targets pure helper functions that don't require the full
 * ``_equity_to_returns`` and ``_closes_to_equity`` corner cases.
 * ``_parse_bar_date`` round trip.
 * ``_resolve_vix_provider`` env-var driven dispatcher.
+* ``_has_critical_failures`` / ``_critical_failures`` — empty / no-critical
+  (all-passed and failed-but-non-critical) / critical-present cases.
 """
 
 from __future__ import annotations
@@ -18,12 +20,15 @@ import pytest
 from investment_team.execution.risk_filter import RiskLimits
 from investment_team.strategy_lab._orchestrator_helpers import (
     _closes_to_equity,
+    _critical_failures,
     _daily_returns_from_trades,
     _equity_to_returns,
+    _has_critical_failures,
     _merge_risk_limits_tighten_only,
     _parse_bar_date,
     _resolve_vix_provider,
 )
+from investment_team.strategy_lab.quality_gates.models import QualityGateResult
 
 
 def _trade(*, ret_pct: float = 1.0, net: float = 10.0, cum: float = 100.0, n: int = 1):
@@ -45,6 +50,23 @@ def _trade(*, ret_pct: float = 1.0, net: float = 10.0, cum: float = 100.0, n: in
         hold_days=4,
         cumulative_pnl=cum,
         outcome="win" if ret_pct > 0 else "loss",
+    )
+
+
+def _gate(
+    *,
+    name: str = "some_gate",
+    passed: bool = True,
+    severity: str = "info",
+    details: str = "",
+    phase: str = "synthesis",
+) -> QualityGateResult:
+    return QualityGateResult(
+        gate_name=name,
+        passed=passed,
+        details=details,
+        severity=severity,
+        phase=phase,
     )
 
 
@@ -218,3 +240,58 @@ def test_resolve_vix_provider_returns_none_for_now_for_known_source(
     monkeypatch.setenv("STRATEGY_LAB_VIX_SOURCE", "yahoo")
     # Implementation still returns None — production hook point.
     assert _resolve_vix_provider() is None
+
+
+# ---------------------------------------------------------------------------
+# _has_critical_failures / _critical_failures
+# ---------------------------------------------------------------------------
+
+
+def test_has_critical_failures_false_for_empty_list() -> None:
+    assert _has_critical_failures([]) is False
+
+
+def test_critical_failures_empty_for_empty_list() -> None:
+    assert _critical_failures([]) == []
+
+
+def test_has_critical_failures_false_when_all_passed() -> None:
+    results = [
+        _gate(name="a", passed=True, severity="critical"),
+        _gate(name="b", passed=True, severity="warning"),
+    ]
+    assert _has_critical_failures(results) is False
+
+
+def test_critical_failures_empty_when_all_passed() -> None:
+    results = [
+        _gate(name="a", passed=True, severity="critical"),
+        _gate(name="b", passed=True, severity="warning"),
+    ]
+    assert _critical_failures(results) == []
+
+
+def test_has_critical_failures_false_for_non_critical_failure() -> None:
+    results = [_gate(name="a", passed=False, severity="warning")]
+    assert _has_critical_failures(results) is False
+
+
+def test_critical_failures_empty_for_non_critical_failure() -> None:
+    results = [_gate(name="a", passed=False, severity="warning")]
+    assert _critical_failures(results) == []
+
+
+def test_has_critical_failures_true_when_critical_present() -> None:
+    results = [
+        _gate(name="a", passed=True, severity="critical"),
+        _gate(name="b", passed=False, severity="critical"),
+    ]
+    assert _has_critical_failures(results) is True
+
+
+def test_critical_failures_returns_only_unpassed_critical_in_order() -> None:
+    first = _gate(name="first", passed=False, severity="critical")
+    second = _gate(name="second", passed=False, severity="warning")
+    third = _gate(name="third", passed=False, severity="critical")
+    results = [first, second, third]
+    assert _critical_failures(results) == [first, third]

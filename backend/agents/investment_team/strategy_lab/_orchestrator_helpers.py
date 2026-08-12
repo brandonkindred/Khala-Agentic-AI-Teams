@@ -827,6 +827,39 @@ def _round_demoted_conformance(round_gate_results: List[QualityGateResult]) -> b
     )
 
 
+def _critical_failures(results: Sequence[QualityGateResult]) -> List[QualityGateResult]:
+    """The subset of ``results`` that are failed, critical-severity gates.
+
+    Centralizes the ``not passed and severity == "critical"`` idiom
+    duplicated across the orchestrator's synthesis/alignment/verification/
+    design mixins and ``zero_trade_repair.py``.
+
+    Preconditions:
+      - ``results`` is a finite sequence of ``QualityGateResult``.
+    Postconditions:
+      - Returns a new list containing every element ``g`` of ``results``
+        for which ``not g.passed and g.severity == "critical"``, in the
+        same relative order as ``results``. Returns ``[]`` when ``results``
+        is empty or contains no such element. Does not mutate ``results``.
+    """
+    return [g for g in results if not g.passed and g.severity == "critical"]
+
+
+def _has_critical_failures(results: Sequence[QualityGateResult]) -> bool:
+    """Whether ``results`` contains at least one failed, critical-severity gate.
+
+    Preconditions:
+      - ``results`` is a finite sequence of ``QualityGateResult``.
+    Postconditions:
+      - Returns ``True`` iff ``results`` contains an element ``g`` with
+        ``not g.passed and g.severity == "critical"``; ``False`` otherwise
+        (including for an empty ``results``). Equivalent to
+        ``bool(_critical_failures(results))`` but short-circuits on the
+        first match instead of building the full list.
+    """
+    return any(not g.passed and g.severity == "critical" for g in results)
+
+
 def _maybe_attach_coverage_report(
     *,
     metrics: BacktestResult,
