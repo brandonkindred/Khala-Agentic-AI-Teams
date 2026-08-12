@@ -256,10 +256,19 @@ def test_macd_expand_signal_histogram_reads_stay_o1_amortized(monkeypatch) -> No
     ``expand`` path — sibling indicators (OBV, MFI, Bollinger) prove their
     O(1)-amortized cost structurally, via a bounded running-sum/deque that
     never grows with bars seen. MACD's incremental fix has no single
-    bounded buffer to inspect from outside (its O(1) step is the *absence*
-    of extra ``windowed_ema`` work), so this is the same proof adapted to
-    that shape: instrument ``windowed_ema`` and assert every call's window
-    is a fixed size (``fast``/``slow``), never one that grows with history.
+    bounded buffer to inspect from outside, so this proof instruments both
+    halves of the recurrence instead:
+
+    * the fast/slow EMA legs — every ``windowed_ema`` call must operate on
+      a fixed-size window, never one that grows with history;
+    * the signal-line EMA itself — a full ``iter(macd_line)`` walk (the
+      pre-fix behaviour) must fire only once, at the one-time warm-up
+      crossing. Checking only the EMA-leg calls would miss a regression
+      here: if the incremental single-step ever fell back to re-walking
+      ``macd_line`` on every bar, ``windowed_ema`` call counts would be
+      completely unaffected (that walk touches the cached deque, not the
+      fast/slow legs), so both must be pinned for this test to actually
+      enforce the O(1)-amortized guarantee end to end.
 
     Distinct from the existing ``bench/`` timing tests (wall-clock ratios,
     opt-in via ``-m bench``): this is deterministic, always runs in CI, and
@@ -272,13 +281,24 @@ def test_macd_expand_signal_histogram_reads_stay_o1_amortized(monkeypatch) -> No
     bars = _series(600, seed=91)
 
     call_lengths: List[int] = []
-    original = streaming.windowed_ema
+    original_windowed_ema = streaming.windowed_ema
 
-    def _spy(bar_window, period, source="close"):
+    def _ema_spy(bar_window, period, source="close"):
         call_lengths.append(len(bar_window))
-        return original(bar_window, period, source)
+        return original_windowed_ema(bar_window, period, source)
 
-    monkeypatch.setattr(streaming, "windowed_ema", _spy)
+    monkeypatch.setattr(streaming, "windowed_ema", _ema_spy)
+
+    signal_walk_calls = 0
+    real_deque = streaming.deque
+
+    class _CountingDeque(real_deque):
+        def __iter__(self):
+            nonlocal signal_walk_calls
+            signal_walk_calls += 1
+            return super().__iter__()
+
+    monkeypatch.setattr(streaming, "deque", _CountingDeque)
 
     reg = IndicatorRegistry()
     for n in range(slow, len(bars) + 1):
@@ -301,6 +321,15 @@ def test_macd_expand_signal_histogram_reads_stay_o1_amortized(monkeypatch) -> No
     assert len(call_lengths) == expected_calls, (
         f"expected {expected_calls} windowed_ema calls, got {len(call_lengths)} "
         "— extra calls indicate a hidden re-walk or lost same-bar caching"
+    )
+
+    # The full macd_line walk fires exactly once — the warm-up bar where
+    # the signal EMA first has enough history to fill. Every later expand
+    # step must single-step from the cached signal value instead.
+    assert signal_walk_calls == 1, (
+        f"expected exactly 1 full macd_line walk (the warm-up crossing), got "
+        f"{signal_walk_calls} — the signal-EMA recurrence is re-walking the "
+        "deque instead of single-stepping from the cached value"
     )
 
 
