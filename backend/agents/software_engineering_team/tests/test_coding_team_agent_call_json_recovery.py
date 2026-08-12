@@ -55,12 +55,16 @@ def test_required_keys_anchor_skips_usage_echo() -> None:
 
 def test_routes_through_extract_json_from_response(monkeypatch: pytest.MonkeyPatch) -> None:
     """``_agent_call_json`` must fall back to the canonical ``extract_json_from_response``
-    helper (not the older ``agent_call_json``) once strict parsing fails — this is the
-    migration's contract."""
+    helper (not the older ``agent_call_json``) once the earlier tiers fail — this is the
+    migration's contract. ``extract_json_object`` (tier 2) is forced to fail here since it
+    already recovers most realistic malformed input on its own, which would otherwise mean
+    this input never actually reaches tier 3."""
     import software_engineering_team.tech_lead_agent.agent as tl_mod
 
     calls: list = []
-    raw = 'Sure! Here is the plan: {"a": 1} Done.'
+    raw = "not real json at all"
+
+    monkeypatch.setattr(tl_mod, "extract_json_object", lambda text, required_keys=None: None)
 
     def fake_extract(text: str, *, expected_keys=None):
         calls.append((text, expected_keys))
@@ -71,18 +75,46 @@ def test_routes_through_extract_json_from_response(monkeypatch: pytest.MonkeyPat
     assert calls == [(raw, frozenset({"a"}))]
 
 
-def test_strict_valid_json_bypasses_extract_json_from_response(
+def test_strict_valid_json_bypasses_recovery_tiers(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A well-formed JSON reply must parse via strict ``json.loads`` and never reach
-    ``extract_json_from_response`` — this guards against that helper's own pre-parse
-    heuristics (e.g. its ``---DRAFT---`` shortcut) misfiring on valid payloads whose
-    text happens to contain a matching literal substring."""
+    """A well-formed JSON reply must parse via strict ``json.loads`` and never reach the
+    recovery tiers — this guards against ``extract_json_from_response``'s own pre-parse
+    heuristics (e.g. its ``---DRAFT---`` shortcut) misfiring on valid payloads whose text
+    happens to contain a matching literal substring."""
     import software_engineering_team.tech_lead_agent.agent as tl_mod
 
-    def unexpected_extract(text: str, *, expected_keys=None):
-        raise AssertionError("extract_json_from_response should not be called")
+    def unexpected(*args, **kwargs):
+        raise AssertionError("recovery tiers should not be reached")
 
-    monkeypatch.setattr(tl_mod, "extract_json_from_response", unexpected_extract)
+    monkeypatch.setattr(tl_mod, "extract_json_object", unexpected)
+    monkeypatch.setattr(tl_mod, "extract_json_from_response", unexpected)
     agent = _FakeAgent('{"reason": "discusses the ---DRAFT--- marker"}')
     assert _agent_call_json(agent, "p") == {"reason": "discusses the ---DRAFT--- marker"}
+
+
+def test_prose_wrapped_json_containing_draft_marker_recovers_via_extract_json_object() -> None:
+    """A prose-wrapped (not strictly-parseable) reply whose payload text happens to contain
+    the literal ``---DRAFT---`` substring must still recover the real object — via tier 2's
+    ``extract_json_object`` (which has no draft-sentinel special-casing) — rather than
+    falling all the way to ``extract_json_from_response``'s ``---DRAFT---`` shortcut, which
+    would discard the structured payload entirely."""
+    agent = _FakeAgent(
+        'Here is the JSON: {"approved": false, "reason": "uses ---DRAFT--- before publication"}'
+    )
+    assert _agent_call_json(agent, "p", required_keys=("approved",)) == {
+        "approved": False,
+        "reason": "uses ---DRAFT--- before publication",
+    }
+
+
+def test_multiple_fenced_blocks_selects_anchored_last_candidate_not_first() -> None:
+    """When a reply contains a fenced format example followed by the real fenced answer —
+    both individually valid JSON — tier 2's ``extract_json_object`` must select the last
+    ``required_keys``-anchored candidate, not just parse whichever fenced block comes first
+    (the bug in ``extract_json_from_response``'s own first-fenced-block fast path)."""
+    agent = _FakeAgent(
+        'Format example:\n```json\n{"approved": true}\n```\n'
+        'Actual answer:\n```json\n{"approved": false}\n```'
+    )
+    assert _agent_call_json(agent, "p", required_keys=("approved",)) == {"approved": False}

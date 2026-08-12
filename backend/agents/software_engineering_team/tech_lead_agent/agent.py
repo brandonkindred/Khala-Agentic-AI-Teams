@@ -14,6 +14,7 @@ from strands import Agent
 
 from llm_service import LLMJsonParseError, call_llm_with_retries, extract_json_from_response
 from shared.env import parse_int
+from shared.llm_recovery import extract_json_object
 from software_engineering_team.hitl import (
     normalize_open_questions as _normalize_open_questions,
 )
@@ -146,19 +147,28 @@ def _agent_call_json(
           so a usage/format echo that lacks the anchor cannot be mistaken for the
           answer.
     Postconditions:
-        - Returns the parsed object. Strict ``json.loads`` is tried first (after
-          stripping a single leading/trailing ```` ``` ```` fence) so well-formed
-          JSON is never routed through ``extract_json_from_response``'s own
-          pre-parse heuristics (e.g. its ``---DRAFT---`` shortcut, which would
-          otherwise misfire on a well-formed payload whose text happens to contain
-          that literal substring, such as a code-review reason quoting this
-          repo's blog draft marker). On failure, falls back to the canonical
-          ``extract_json_from_response`` recovery ladder (fence stripping, repair,
-          and prose-/think-block-wrapped salvage anchored on ``required_keys``).
-          Raises ``json.JSONDecodeError`` only when no object can be recovered —
-          ``LLMJsonParseError`` is caught and re-raised as ``json.JSONDecodeError``
-          so callers keep retrying JSON-parse failures exactly as before
-          (``LLMJsonParseError`` is otherwise non-retryable in
+        - Returns the parsed object via a three-tier ladder, each tier only tried
+          after the previous one fails:
+          1. Strict ``json.loads`` (after stripping a single leading/trailing
+             ```` ``` ```` fence) for well-formed replies.
+          2. The shared, non-blogging-aware ``extract_json_object`` salvage engine
+             (``shared.llm_recovery`` — the same engine ``agent_call_json`` used),
+             anchored on ``required_keys`` with correct last-candidate-wins
+             handling of an echoed format example. This tier recovers the vast
+             majority of prose-/fence-wrapped replies without ever reaching tier 3.
+          3. The canonical ``extract_json_from_response`` as a final fallback, so
+             this call site still benefits from any recovery capability unique to
+             it. Tiers 1-2 exist specifically so well-formed or salvageable JSON
+             never reaches tier 3's own pre-parse heuristics (e.g. its
+             ``---DRAFT---`` shortcut, which scans raw text for that literal
+             substring — including inside a JSON string value, such as a
+             code-review reason quoting this repo's blog draft marker — and its
+             first-fenced-block fast path, which does not honor ``required_keys``)
+             on input that a safer engine could already handle correctly.
+          Raises ``json.JSONDecodeError`` only when no object can be recovered by
+          any tier — ``LLMJsonParseError`` from tier 3 is caught and re-raised as
+          ``json.JSONDecodeError`` so callers keep retrying JSON-parse failures
+          exactly as before (``LLMJsonParseError`` is otherwise non-retryable in
           ``call_llm_with_retries``).
     """
     raw = str(agent(prompt)).strip()
@@ -168,6 +178,9 @@ def _agent_call_json(
         return json.loads(fenced)
     except json.JSONDecodeError:
         pass
+    recovered = extract_json_object(raw, required_keys=required_keys)
+    if recovered is not None:
+        return recovered
     expected_keys = frozenset(required_keys) if required_keys is not None else None
     try:
         return extract_json_from_response(raw, expected_keys=expected_keys)
