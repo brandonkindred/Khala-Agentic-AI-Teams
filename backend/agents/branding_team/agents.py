@@ -62,6 +62,28 @@ from .prompt_spec import AgentPromptSpec, PromptFieldSpec, render_agent_prompt
 # ===================================================================
 
 
+_DISCOVERY_AUDITOR_PROMPT = AgentPromptSpec(
+    opening=(
+        "You are a Brand Discovery Analyst. Given a branding mission, produce a comprehensive "
+        "brand discovery audit covering:"
+    ),
+    fields=(
+        PromptFieldSpec(
+            "current_brand_perception", "how the market and customers currently see the brand"
+        ),
+        PromptFieldSpec("market_position", "where the brand sits relative to competitors today"),
+        PromptFieldSpec("strengths", "internal advantages the brand can build on"),
+        PromptFieldSpec("weaknesses", "internal gaps or vulnerabilities"),
+        PromptFieldSpec("opportunities", "external trends or openings the brand can pursue"),
+        PromptFieldSpec("threats", "external risks or competitive pressures"),
+        PromptFieldSpec(
+            "stakeholder_insights", "perspectives and concerns gathered from stakeholders"
+        ),
+    ),
+    closing="Be specific and grounded in the company description and target audience provided.",
+)
+
+
 def make_discovery_auditor() -> Agent:
     """Build the Phase 1 Discovery Auditor agent.
 
@@ -73,12 +95,7 @@ def make_discovery_auditor() -> Agent:
     return build_agent(
         name="discovery_auditor",
         description="Analyses current brand perception, SWOT, and stakeholder insights.",
-        system_prompt=(
-            "You are a Brand Discovery Analyst. Given a branding mission, produce a comprehensive "
-            "brand discovery audit. Include: current_brand_perception, market_position, strengths, "
-            "weaknesses, opportunities, threats, and stakeholder_insights. Be specific and grounded "
-            "in the company description and target audience provided."
-        ),
+        system_prompt=render_agent_prompt(_DISCOVERY_AUDITOR_PROMPT),
         structured_output=BrandDiscoveryAuditOutput,
     )
 
@@ -112,6 +129,21 @@ def make_purpose_vision_writer() -> Agent:
     )
 
 
+_VALUES_ARTICULATOR_PROMPT = AgentPromptSpec(
+    opening=(
+        "You are a Values Articulator. Given a branding mission with optional seed values, "
+        "produce a list of 3-5 core values. For each value provide:"
+    ),
+    fields=(
+        PromptFieldSpec("value", "the value name"),
+        PromptFieldSpec("behavioral_definition", "what this value means in practice"),
+        PromptFieldSpec(
+            "observable_behaviors", "2-3 concrete behaviors that demonstrate this value"
+        ),
+    ),
+)
+
+
 def make_values_articulator() -> Agent:
     """Build the Phase 1 Values Articulator agent.
 
@@ -123,15 +155,25 @@ def make_values_articulator() -> Agent:
     return build_agent(
         name="values_articulator",
         description="Defines core values with behavioral definitions and observable behaviors.",
-        system_prompt=(
-            "You are a Values Articulator. Given a branding mission with optional seed values, "
-            "produce a list of 3-5 core values. For each value provide:\n"
-            "- value: the value name\n"
-            "- behavioral_definition: what this value means in practice\n"
-            "- observable_behaviors: 2-3 concrete behaviors that demonstrate this value"
-        ),
+        system_prompt=render_agent_prompt(_VALUES_ARTICULATOR_PROMPT),
         structured_output=CoreValuesOutput,
     )
+
+
+_AUDIENCE_SEGMENTER_PROMPT = AgentPromptSpec(
+    opening=(
+        "You are an Audience Segmenter. Given a branding mission, identify 1-3 target audience "
+        "segments. For each segment provide:"
+    ),
+    fields=(
+        PromptFieldSpec("name", "the segment name"),
+        PromptFieldSpec("description", "a short description of this segment"),
+        PromptFieldSpec("pain_points", "2-3 pain points this segment experiences"),
+        PromptFieldSpec("goals", "2-3 goals this segment is pursuing"),
+        PromptFieldSpec("decision_drivers", "2-3 factors that drive this segment's decisions"),
+    ),
+    closing="Ground your analysis in the company description and stated target audience.",
+)
 
 
 def make_audience_segmenter() -> Agent:
@@ -145,14 +187,22 @@ def make_audience_segmenter() -> Agent:
     return build_agent(
         name="audience_segmenter",
         description="Segments target audience with psychographic depth.",
-        system_prompt=(
-            "You are an Audience Segmenter. Given a branding mission, identify 1-3 target audience "
-            "segments. For each segment provide: name, description, pain_points (2-3), goals (2-3), "
-            "and decision_drivers (2-3). Ground your analysis in the company description and stated "
-            "target audience."
-        ),
+        system_prompt=render_agent_prompt(_AUDIENCE_SEGMENTER_PROMPT),
         structured_output=AudienceSegmentsOutput,
     )
+
+
+_DIFFERENTIATION_MAPPER_PROMPT = AgentPromptSpec(
+    opening=(
+        "You are a Differentiation Mapper. Given a branding mission with optional "
+        "differentiators, produce 2-4 differentiation pillars. For each pillar provide:"
+    ),
+    fields=(
+        PromptFieldSpec("pillar", "the differentiator name"),
+        PromptFieldSpec("proof_points", "2-3 evidence items"),
+        PromptFieldSpec("competitive_context", "how competitors fall short here"),
+    ),
+)
 
 
 def make_differentiation_mapper() -> Agent:
@@ -167,15 +217,26 @@ def make_differentiation_mapper() -> Agent:
     return build_agent(
         name="differentiation_mapper",
         description="Maps competitive differentiation pillars with proof points.",
-        system_prompt=(
-            "You are a Differentiation Mapper. Given a branding mission with optional differentiators, "
-            "produce 2-4 differentiation pillars. For each pillar provide:\n"
-            "- pillar: the differentiator name\n"
-            "- proof_points: 2-3 evidence items\n"
-            "- competitive_context: how competitors fall short here"
-        ),
+        system_prompt=render_agent_prompt(_DIFFERENTIATION_MAPPER_PROMPT),
         structured_output=DifferentiationPillarsOutput,
     )
+
+
+_POSITIONING_SYNTHESIZER_PROMPT = AgentPromptSpec(
+    opening=(
+        "You are a Positioning Synthesizer. You receive outputs from the discovery auditor, "
+        "purpose/vision writer, values articulator, audience segmenter, and differentiation "
+        "mapper. Synthesise them into:"
+    ),
+    fields=(
+        PromptFieldSpec(
+            "positioning_statement",
+            "a single sentence following the format: 'For [audience] who need [need], "
+            "[company] is the [differentiator] that delivers [value] because [proof].'",
+        ),
+        PromptFieldSpec("brand_promise", "a one-sentence commitment to the customer"),
+    ),
+)
 
 
 def make_positioning_synthesizer() -> Agent:
@@ -190,15 +251,7 @@ def make_positioning_synthesizer() -> Agent:
     return build_agent(
         name="positioning_synthesizer",
         description="Synthesises all Phase 1 fragments into positioning statement and brand promise.",
-        system_prompt=(
-            "You are a Positioning Synthesizer. You receive outputs from the discovery auditor, "
-            "purpose/vision writer, values articulator, audience segmenter, and differentiation "
-            "mapper. Synthesise them into:\n"
-            "1. positioning_statement — a single sentence following the format: "
-            "'For [audience] who need [need], [company] is the [differentiator] that delivers "
-            "[value] because [proof].'\n"
-            "2. brand_promise — a one-sentence commitment to the customer"
-        ),
+        system_prompt=render_agent_prompt(_POSITIONING_SYNTHESIZER_PROMPT),
         structured_output=PositioningOutput,
     )
 
@@ -206,6 +259,20 @@ def make_positioning_synthesizer() -> Agent:
 # ===================================================================
 # Phase 2 — Narrative & Messaging  (Graph: sequential specialists)
 # ===================================================================
+
+
+_STORYTELLER_PROMPT = AgentPromptSpec(
+    opening=(
+        "You are a Brand Storyteller. Using the strategic core output and branding mission, craft:"
+    ),
+    fields=(
+        PromptFieldSpec("brand_story", "a compelling 2-3 paragraph origin/purpose story"),
+        PromptFieldSpec("hero_narrative", "a shorter, punchy version for hero sections"),
+        PromptFieldSpec(
+            "boilerplate_variants", "3 versions (short/medium/long) for press and bios"
+        ),
+    ),
+)
 
 
 def make_storyteller() -> Agent:
@@ -219,15 +286,24 @@ def make_storyteller() -> Agent:
     return build_agent(
         name="Storyteller",
         description="Crafts the brand story, hero narrative, and boilerplate variants.",
-        system_prompt=(
-            "You are a Brand Storyteller. Using the strategic core output and branding mission, "
-            "craft:\n"
-            "1. brand_story — a compelling 2-3 paragraph origin/purpose story\n"
-            "2. hero_narrative — a shorter, punchy version for hero sections\n"
-            "3. boilerplate_variants — 3 versions (short/medium/long) for press and bios"
-        ),
+        system_prompt=render_agent_prompt(_STORYTELLER_PROMPT),
         structured_output=BrandStoryOutput,
     )
+
+
+_ARCHETYPE_ANALYST_PROMPT = AgentPromptSpec(
+    opening=(
+        "You are a Brand Archetype Analyst. Review the brand story from Inputs from previous "
+        "nodes and the strategic core, then select 1-2 brand archetypes "
+        "(e.g. The Sage, The Creator, The Explorer). Carry forward brand_story, hero_narrative, "
+        "and boilerplate_variants unchanged, and add for each archetype:"
+    ),
+    fields=(
+        PromptFieldSpec("archetype", "name"),
+        PromptFieldSpec("rationale", "why this fits"),
+        PromptFieldSpec("personality_traits", "3-5 traits"),
+    ),
+)
 
 
 def make_archetype_analyst() -> Agent:
@@ -242,17 +318,30 @@ def make_archetype_analyst() -> Agent:
     return build_agent(
         name="ArchetypeAnalyst",
         description="Selects brand archetypes with rationale and personality traits.",
-        system_prompt=(
-            "You are a Brand Archetype Analyst. Review the brand story from Inputs from previous "
-            "nodes and the strategic core, then select 1-2 brand archetypes "
-            "(e.g. The Sage, The Creator, The Explorer). Carry forward brand_story, hero_narrative, "
-            "and boilerplate_variants unchanged, and add for each archetype:\n"
-            "- archetype: name\n"
-            "- rationale: why this fits\n"
-            "- personality_traits: 3-5 traits"
-        ),
+        system_prompt=render_agent_prompt(_ARCHETYPE_ANALYST_PROMPT),
         structured_output=BrandArchetypesOutput,
     )
+
+
+_TAGLINE_WRITER_PROMPT = AgentPromptSpec(
+    opening=(
+        "You are a Tagline Writer. Using Inputs from previous nodes (brand story, archetypes) "
+        "and the strategic core, carry forward every prior narrative field unchanged and add:"
+    ),
+    fields=(
+        PromptFieldSpec("tagline", "a memorable brand tagline (max 8 words)"),
+        PromptFieldSpec("tagline_rationale", "why this tagline works"),
+        PromptFieldSpec(
+            "elevator_pitches",
+            "three variants:",
+            sub_items=(
+                "tier: '5-second', pitch: ...",
+                "tier: '30-second', pitch: ...",
+                "tier: '2-minute', pitch: ...",
+            ),
+        ),
+    ),
+)
 
 
 def make_tagline_writer() -> Agent:
@@ -266,18 +355,29 @@ def make_tagline_writer() -> Agent:
     return build_agent(
         name="TaglineWriter",
         description="Creates tagline, tagline rationale, and elevator pitches.",
-        system_prompt=(
-            "You are a Tagline Writer. Using Inputs from previous nodes (brand story, archetypes) "
-            "and the strategic core, carry forward every prior narrative field unchanged and add:\n"
-            "1. tagline — a memorable brand tagline (max 8 words)\n"
-            "2. tagline_rationale — why this tagline works\n"
-            "3. elevator_pitches — three variants:\n"
-            "   - tier: '5-second', pitch: ...\n"
-            "   - tier: '30-second', pitch: ...\n"
-            "   - tier: '2-minute', pitch: ..."
-        ),
+        system_prompt=render_agent_prompt(_TAGLINE_WRITER_PROMPT),
         structured_output=TaglineOutput,
     )
+
+
+_MESSAGE_MAPPER_PROMPT = AgentPromptSpec(
+    opening=(
+        "You are a Message Mapper. Using all prior narrative fields from Inputs from previous "
+        "nodes, carry them forward unchanged and add:"
+    ),
+    fields=(
+        PromptFieldSpec(
+            "messaging_framework",
+            "3-4 messaging pillars, each with:",
+            sub_items=("pillar, key_message, proof_points",),
+        ),
+        PromptFieldSpec(
+            "audience_message_maps",
+            "one per audience segment, each with:",
+            sub_items=("audience_segment, primary_message, supporting_messages, tone_adjustments",),
+        ),
+    ),
+)
 
 
 def make_message_mapper() -> Agent:
@@ -292,16 +392,27 @@ def make_message_mapper() -> Agent:
     return build_agent(
         name="MessageMapper",
         description="Builds messaging framework pillars and audience message maps.",
-        system_prompt=(
-            "You are a Message Mapper. Using all prior narrative fields from Inputs from previous "
-            "nodes, carry them forward unchanged and add:\n"
-            "1. messaging_framework — 3-4 messaging pillars, each with:\n"
-            "   - pillar, key_message, proof_points\n"
-            "2. audience_message_maps — one per audience segment, each with:\n"
-            "   - audience_segment, primary_message, supporting_messages, tone_adjustments"
-        ),
+        system_prompt=render_agent_prompt(_MESSAGE_MAPPER_PROMPT),
         structured_output=MessagingFrameworkOutput,
     )
+
+
+_PERSONA_BUILDER_PROMPT = AgentPromptSpec(
+    opening=(
+        "You are a Persona Builder. Using audience segments and all prior narrative fields "
+        "from Inputs from previous nodes, carry those fields forward unchanged and create:"
+    ),
+    fields=(
+        PromptFieldSpec(
+            "persona_profiles",
+            "2-3 persona profiles, each with:",
+            sub_items=(
+                "name, role, demographics, psychographics, goals, frustrations, "
+                "media_habits, jobs_to_be_done",
+            ),
+        ),
+    ),
+)
 
 
 def make_persona_builder() -> Agent:
@@ -315,14 +426,25 @@ def make_persona_builder() -> Agent:
     return build_agent(
         name="PersonaBuilder",
         description="Creates rich persona profiles with psychographic depth.",
-        system_prompt=(
-            "You are a Persona Builder. Using audience segments and all prior narrative fields "
-            "from Inputs from previous nodes, carry those fields forward unchanged and create "
-            "2-3 persona profiles. Each persona has: name, role, demographics, psychographics, "
-            "goals, frustrations, media_habits, jobs_to_be_done."
-        ),
+        system_prompt=render_agent_prompt(_PERSONA_BUILDER_PROMPT),
         structured_output=PersonaProfilesOutput,
     )
+
+
+_VOICE_PRINCIPLES_DRAFTER_PROMPT = AgentPromptSpec(
+    opening=(
+        "You are a Voice Principles Drafter. Using all prior narrative fields from Inputs from "
+        "previous nodes and the mission's desired_voice, carry the prior fields forward "
+        "unchanged and produce writing_guidelines:"
+    ),
+    fields=(
+        PromptFieldSpec("voice_principles", "3-4 principles (e.g. 'Use a confident, human voice')"),
+        PromptFieldSpec("style_dos", "3-4 writing best practices"),
+        PromptFieldSpec("style_donts", "3-4 things to avoid"),
+        PromptFieldSpec("editorial_quality_bar", "3-4 quality standards every piece must meet"),
+    ),
+    closing="This is the final step in narrative development.",
+)
 
 
 def make_voice_principles_drafter() -> Agent:
@@ -337,16 +459,7 @@ def make_voice_principles_drafter() -> Agent:
     return build_agent(
         name="VoicePrinciplesDrafter",
         description="Defines writing guidelines: voice principles, style dos/donts, editorial bar.",
-        system_prompt=(
-            "You are a Voice Principles Drafter. Using all prior narrative fields from Inputs from "
-            "previous nodes and the mission's desired_voice, carry the prior fields forward "
-            "unchanged and produce writing_guidelines:\n"
-            "1. voice_principles — 3-4 principles (e.g. 'Use a confident, human voice')\n"
-            "2. style_dos — 3-4 writing best practices\n"
-            "3. style_donts — 3-4 things to avoid\n"
-            "4. editorial_quality_bar — 3-4 quality standards every piece must meet\n\n"
-            "This is the final step in narrative development."
-        ),
+        system_prompt=render_agent_prompt(_VOICE_PRINCIPLES_DRAFTER_PROMPT),
         structured_output=WritingGuidelinesOutput,
     )
 
