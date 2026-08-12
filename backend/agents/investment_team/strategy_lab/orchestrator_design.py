@@ -50,11 +50,11 @@ from ..models import (
     ExpectancyForecast,
     StrategyLabRecord,
     StrategySpec,
-    TradeRecord,
 )
 from ..signal_intelligence_models import SignalIntelligenceBriefV1
 from ..strategy_lab_context import normalize_asset_class, normalize_asset_class_strict
 from ._orchestrator_helpers import (
+    _DesignAttemptState,
     _DesignPersistContext,
     _DriftCollector,
     _emit_phase_transition,
@@ -1351,6 +1351,9 @@ class DesignMixin:
         alignment_reports = alignment_outcome.alignment_reports
 
         # ── Phases 2.6–3: TRIAL COUNTING → VERIFICATION → ANALYSIS ─────
+        pre_verification_state = _DesignAttemptState(
+            spec=spec, code=code, trades=trades, metrics=metrics
+        )
         (
             metrics,
             is_winning,
@@ -1358,9 +1361,7 @@ class DesignMixin:
             publishability_skip,
             narrative,
         ) = self._orchestrate_verification_and_analysis(
-            spec=spec,
-            trades=trades,
-            metrics=metrics,
+            state=pre_verification_state,
             market_data=market_data,
             config=config,
             execution_succeeded=execution_succeeded,
@@ -1390,12 +1391,10 @@ class DesignMixin:
         )
 
         # ── Phase 4: RECORD ───────────────────────────────────────────
+        attempt_state = _DesignAttemptState(spec=spec, code=code, trades=trades, metrics=metrics)
         return self._extract_findings_and_assemble_record(
-            spec=spec,
-            code=code,
+            state=attempt_state,
             config=config,
-            metrics=metrics,
-            trades=trades,
             narrative=narrative,
             original_spec=original_spec,
             original_code=original_code,
@@ -1593,9 +1592,7 @@ class DesignMixin:
     def _orchestrate_verification_and_analysis(
         self,
         *,
-        spec: StrategySpec,
-        trades: List[TradeRecord],
-        metrics: BacktestResult,
+        state: _DesignAttemptState,
         market_data: Optional[Dict[str, List[OHLCVBar]]],
         config: BacktestConfig,
         execution_succeeded: bool,
@@ -1610,7 +1607,10 @@ class DesignMixin:
     ) -> Tuple[BacktestResult, bool, bool, Optional[str], str]:
         """Count the trial, run verification, and generate the analysis.
 
-        Pre: the refinement + alignment loops have settled the run state.
+        Pre: the refinement + alignment loops have settled the run state;
+        ``state`` carries the settled ``spec``/``code``/``trades``/``metrics``
+        for this design attempt (``state.code`` is unused here — verification
+        and analysis never touch the strategy source).
         Post: returns ``(metrics, is_winning, is_publishable,
         publishability_skip_reason, narrative)``. Increments the
         convergence trial counter (one per refinement round, plus the first),
@@ -1628,9 +1628,9 @@ class DesignMixin:
 
         # ── Phase 2.7: WALK-FORWARD + ACCEPTANCE + CONFORMANCE + is_winning ────
         verification = self._run_verification_phase(
-            spec=spec,
-            trades=trades,
-            metrics=metrics,
+            spec=state.spec,
+            trades=state.trades,
+            metrics=state.metrics,
             market_data=market_data,
             config=config,
             execution_succeeded=execution_succeeded,
@@ -1659,9 +1659,9 @@ class DesignMixin:
             exit_rule_conformance_passed=verification.exit_rule_conformance_passed,
         )
         narrative = self._run_analysis_phase(
-            spec=spec,
+            spec=state.spec,
             metrics=metrics,
-            trades=trades,
+            trades=state.trades,
             rationale=rationale,
             is_winning=is_winning,
             execution_succeeded=execution_succeeded,
@@ -1675,11 +1675,8 @@ class DesignMixin:
     def _extract_findings_and_assemble_record(
         self,
         *,
-        spec: StrategySpec,
-        code: str,
+        state: _DesignAttemptState,
         config: BacktestConfig,
-        metrics: BacktestResult,
-        trades: List[TradeRecord],
         narrative: str,
         original_spec: StrategySpec,
         original_code: str,
@@ -1706,8 +1703,10 @@ class DesignMixin:
     ) -> StrategyLabRecord:
         """Extract the final alignment findings and assemble the record.
 
-        Pre: all phases have completed; ``alignment_reports`` holds one report
-        per alignment iteration (empty when the loop never ran).
+        Pre: all phases have completed; ``state`` carries the settled
+        ``spec``/``code``/``trades``/``metrics`` for this design attempt;
+        ``alignment_reports`` holds one report per alignment iteration
+        (empty when the loop never ran).
         Post: returns the persisted ``StrategyLabRecord`` built by
         ``_assemble_record``, carrying the last report's per-rule findings (or
         an empty list) and ``refinement_rounds = len(refinement_attempts)``.
@@ -1723,11 +1722,11 @@ class DesignMixin:
         )
 
         return self._assemble_record(
-            spec=spec,
-            code=code,
+            spec=state.spec,
+            code=state.code,
             config=config,
-            metrics=metrics,
-            trades=trades,
+            metrics=state.metrics,
+            trades=state.trades,
             narrative=narrative,
             original_spec=original_spec,
             original_code=original_code,
