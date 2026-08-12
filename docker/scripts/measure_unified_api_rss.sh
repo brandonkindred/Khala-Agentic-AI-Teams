@@ -32,9 +32,18 @@ SAMPLE_INTERVAL_SECONDS="${SAMPLE_INTERVAL_SECONDS:-5}"
 SAMPLE_COUNT="${SAMPLE_COUNT:-5}"
 DB_WARM_CONCURRENCY="${DB_WARM_CONCURRENCY:-12}"
 DB_WARM_SETTLE_SECONDS="${DB_WARM_SETTLE_SECONDS:-5}"
+# /health's live-DB-probe branch runs through a fixed 2-worker executor
+# (_get_probe_executor in backend/unified_api/main.py), so no amount of concurrent /health
+# traffic can grow the shared pool past that cap. /api/product-delivery/products is a plain
+# synchronous FastAPI route (list_products) that hits Postgres directly per request through
+# Starlette's much larger default thread pool, so concurrent hits actually drive pool growth.
+DB_WARM_PATH="${DB_WARM_PATH:-/api/product-delivery/products}"
 PEAK_VUS="${PEAK_VUS:-50}"
 PEAK_DURATION="${PEAK_DURATION:-60s}"
-PEAK_SAMPLE_INTERVAL_SECONDS="${PEAK_SAMPLE_INTERVAL_SECONDS:-2}"
+# Prometheus's global scrape_interval (docker/prometheus/prometheus.yml) is 15s, so sampling
+# faster than that just re-reads the same cached value — this must stay >= that interval or the
+# reported peak will silently undercount how many independent observations were actually taken.
+PEAK_SAMPLE_INTERVAL_SECONDS="${PEAK_SAMPLE_INTERVAL_SECONDS:-15}"
 OUTPUT_CSV="${OUTPUT_CSV:-rss_measurements.csv}"
 
 _here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -84,14 +93,18 @@ record_samples() {
 }
 
 # Prints a median/max summary (in MiB) for one state's rows already written to $OUTPUT_CSV.
+# Returns non-zero when there are no usable samples, so callers can fail loudly instead of
+# reporting a run as complete when Prometheus never actually returned an RSS value.
 summarize_state() {
   local state="$1"
+  # sort -g (not -n): Prometheus can serialize large sample values in scientific notation
+  # (e.g. 9.4e+07), which -n compares only by its leading digits and misorders.
   awk -F, -v state="$state" '
     $2 == state && $4 != "" { print $4 }
-  ' "${OUTPUT_CSV}" | sort -n | awk '
+  ' "${OUTPUT_CSV}" | sort -g | awk '
     { values[NR] = $1 }
     END {
-      if (NR == 0) { print "  (no samples)"; exit }
+      if (NR == 0) { print "  (no samples)"; exit 1 }
       if (NR % 2 == 1) {
         median_bytes = values[(NR + 1) / 2]
       } else {
@@ -104,21 +117,33 @@ summarize_state() {
   '
 }
 
+# Fails loudly (rather than reporting a run as complete) when a state has zero usable RSS
+# samples — e.g. Prometheus hadn't scraped unified-api yet, or was unreachable.
+report_summary_or_fail() {
+  local state="$1"
+  echo "${state} summary:"
+  if ! summarize_state "${state}"; then
+    echo "ERROR: no usable RSS samples for '${state}' — Prometheus likely hasn't scraped" >&2
+    echo "unified-api yet, or is unreachable at ${PROM_URL}. Re-run once it has." >&2
+    return 1
+  fi
+}
+
 cmd_idle() {
   wait_for_health
   echo "Warming up ${WARMUP_SECONDS}s with no driven traffic ..." >&2
   sleep "${WARMUP_SECONDS}"
   ensure_csv_header
   record_samples "idle" "${SAMPLE_COUNT}"
-  echo "idle summary:"; summarize_state "idle"
+  report_summary_or_fail "idle"
 }
 
 cmd_db_pool_warm() {
   wait_for_health
-  echo "Firing ${DB_WARM_CONCURRENCY} concurrent /health requests to grow the Postgres pool ..." >&2
+  echo "Firing ${DB_WARM_CONCURRENCY} concurrent requests at ${DB_WARM_PATH} to grow the Postgres pool ..." >&2
   local pids=() pid succeeded=0 failed=0
   for ((i = 1; i <= DB_WARM_CONCURRENCY; i++)); do
-    curl -sf "${BASE_URL}/health" > /dev/null &
+    curl -sf "${BASE_URL}${DB_WARM_PATH}" > /dev/null &
     pids+=("$!")
   done
   for pid in "${pids[@]}"; do
@@ -137,7 +162,7 @@ cmd_db_pool_warm() {
   sleep "${DB_WARM_SETTLE_SECONDS}"
   ensure_csv_header
   record_samples "db-pool-warm" "${SAMPLE_COUNT}"
-  echo "db-pool-warm summary:"; summarize_state "db-pool-warm"
+  report_summary_or_fail "db-pool-warm"
 }
 
 cmd_temporal_active() {
@@ -150,7 +175,7 @@ cmd_temporal_active() {
   sleep "${WARMUP_SECONDS}"
   ensure_csv_header
   record_samples "temporal-active" "${SAMPLE_COUNT}"
-  echo "temporal-active summary:"; summarize_state "temporal-active"
+  report_summary_or_fail "temporal-active"
 }
 
 cmd_peak_burst() {
@@ -170,7 +195,7 @@ cmd_peak_burst() {
     sleep "${PEAK_SAMPLE_INTERVAL_SECONDS}"
   done
   wait "${k6_pid}" || echo "k6 exited non-zero (check its threshold output above); RSS samples above are still valid" >&2
-  echo "peak-burst summary:"; summarize_state "peak-burst"
+  report_summary_or_fail "peak-burst"
 }
 
 main() {

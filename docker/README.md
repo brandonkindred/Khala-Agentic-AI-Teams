@@ -310,12 +310,18 @@ Observability section above — no new endpoint or `docker stats` shell-out need
   startup when `TEMPORAL_ADDRESS` is set) — there's no code path that defers either past process
   readiness, so `idle` is "freshly booted, standard config, no request traffic," not "nothing
   initialized yet."
-- **`db-pool-warm`**: fires 12 concurrent `/health` requests (`DB_WARM_CONCURRENCY`, above the
-  pool's default 10-connection max) to force the Postgres pool to grow beyond min size, waits 5s
-  to settle (`DB_WARM_SETTLE_SECONDS`, comfortably inside psycopg_pool's ~300s default idle-reclaim
-  window), then samples — isolating the incremental RSS cost of a fully-grown pool. Aborts with an
-  error instead of sampling if fewer than half the warm-up requests succeeded, since that would
-  produce a misleading "pool-warm" measurement against a pool that never actually warmed.
+- **`db-pool-warm`**: fires 12 concurrent requests (`DB_WARM_CONCURRENCY`, above the pool's default
+  10-connection max) at `/api/product-delivery/products` (`DB_WARM_PATH`) to force the Postgres
+  pool to grow beyond min size, waits 5s to settle (`DB_WARM_SETTLE_SECONDS`, comfortably inside
+  psycopg_pool's ~300s default idle-reclaim window), then samples — isolating the incremental RSS
+  cost of a fully-grown pool. Targets that route rather than `/health`: `/health`'s live-DB-probe
+  branch runs through a fixed 2-worker executor (`_get_probe_executor` in
+  `backend/unified_api/main.py`), so concurrent `/health` traffic can never grow the pool past that
+  cap, no matter how many requests are in flight — `/api/product-delivery/products` is a plain
+  synchronous route that hits Postgres directly per request through Starlette's much larger default
+  thread pool. Aborts with an error instead of sampling if fewer than half the warm-up requests
+  succeeded, since that would produce a misleading "pool-warm" measurement against a pool that
+  never actually warmed.
 - **`temporal-active`**: sampled identically to `idle`, because the Temporal client isn't
   toggleable at runtime — it's a boot-time decision. To isolate its incremental cost, run the
   script twice across two container boots: once with `UNIFIED_API_AGENT_STUDIO_TEMPORAL_WORKER=false`
@@ -324,8 +330,12 @@ Observability section above — no new endpoint or `docker stats` shell-out need
   run `temporal-active`), and diff the two summaries.
 - **`peak-burst`**: launches the [k6 harness](#load-testing-k6) at `VUS=50 DURATION=60s`
   (`PEAK_VUS`/`PEAK_DURATION` — "max configured concurrency" per the harness's own tunables) and
-  samples RSS every 2s (`PEAK_SAMPLE_INTERVAL_SECONDS`) for the burst's duration, reporting the max
-  observed value as the peak.
+  samples RSS every 15s (`PEAK_SAMPLE_INTERVAL_SECONDS`) for the burst's duration, reporting the
+  max observed value as the peak. The interval defaults to 15s — matching
+  `docker/prometheus/prometheus.yml`'s global `scrape_interval` — rather than something shorter,
+  since sampling faster than Prometheus actually scrapes just re-reads the same cached value and
+  silently produces fewer independent observations than it looks like. Keep this at or above your
+  stack's configured `scrape_interval` if you change it.
 
 **Running it**
 
@@ -347,10 +357,11 @@ along with the printed summaries, wherever you're recording the measurement resu
 reproducibility.
 
 **Tests**: `docker/scripts/tests/test_measure_unified_api_rss.sh` covers the median/max math (odd
-and even sample counts), state-label consistency, `sample_index` sequencing, usage/bad-argument
-handling, and — via local mock HTTP servers standing in for `/health` and Prometheus, no live
-stack required — an end-to-end run of the `idle` and `db-pool-warm` subcommands. Run it with
-`bash docker/scripts/tests/test_measure_unified_api_rss.sh`.
+and even sample counts, including Prometheus-style scientific-notation values), state-label
+consistency, `sample_index` sequencing, usage/bad-argument handling, failing loudly rather than
+reporting success when a state collects zero usable samples, and — via local mock HTTP servers
+standing in for `/health` and Prometheus, no live stack required — an end-to-end run of the `idle`
+and `db-pool-warm` subcommands. Run it with `bash docker/scripts/tests/test_measure_unified_api_rss.sh`.
 
 ## Verification
 
