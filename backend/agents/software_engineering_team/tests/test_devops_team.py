@@ -40,6 +40,7 @@ from software_engineering_team.devops_team.orchestrator import (
 )
 from software_engineering_team.devops_team.phases.quality_gate import (
     _describe_task_with_exclusions,
+    run_phase4_quality_gate,
 )
 from software_engineering_team.devops_team.task_clarifier import (
     DevOpsTaskClarifierAgent,
@@ -2383,6 +2384,111 @@ class TestToolDispatchRunValidationTools:
             f"run_validation_tools took {elapsed:.3f}s, expected well under "
             f"{2 * sleep_s:.3f}s if the 4 tool calls run concurrently"
         )
+
+
+class TestPhase4QualityGateReviewCallsConcurrency:
+    """Perf-guard for the parallel_map refactor of run_phase4_quality_gate's 3 review calls."""
+
+    def _mock_agent(self) -> MagicMock:
+        agent = MagicMock()
+        agent.llm = object()  # not a DummyLLMClient -> takes the parallel_map branch
+        agent.iac_validation_tool.run.return_value = IaCValidationOutput(success=True, checks={})
+        agent.policy_tool.run.return_value = PolicyAsCodeOutput(success=True, checks={})
+        agent.cicd_lint_tool.run.return_value = CICDLintOutput(success=True, checks={})
+        agent.deploy_dry_run_tool.run.return_value = DeploymentDryRunOutput(success=True, checks={})
+        agent._run_execution_tools.return_value = []
+        return agent
+
+    def test_run_phase4_quality_gate_executes_the_three_review_calls_concurrently(self) -> None:
+        """Each review call sleeps ~0.12s; sequential would take >= 3 * 0.12s == 0.36s.
+
+        Concurrent execution across 3 workers should take roughly one sleep
+        interval, so a 2x-one-interval bound is unreachable under sequential
+        execution while staying well above ordinary CI scheduling noise.
+        """
+        from software_engineering_team.devops_team.change_review_agent import ChangeReviewOutput
+        from software_engineering_team.devops_team.devsecops_review_agent import (
+            DevSecOpsReviewOutput,
+        )
+        from software_engineering_team.qa_agent.models import QAOutput
+
+        sleep_s = 0.12
+
+        def _slow(output: Any) -> Callable[[Any], Any]:
+            def _run(_input: Any) -> Any:
+                time.sleep(sleep_s)
+                return output
+
+            return _run
+
+        agent = self._mock_agent()
+        agent.devsecops_review_agent.run.side_effect = _slow(DevSecOpsReviewOutput())
+        agent.change_review_agent.run.side_effect = _slow(ChangeReviewOutput())
+        agent.qa_agent.run.side_effect = _slow(
+            QAOutput(approved=True, quality_gates={"acceptance_evidence": "pass"}, summary="ok")
+        )
+
+        spec = _base_task_spec()
+        start = time.perf_counter()
+        result = run_phase4_quality_gate(
+            agent,
+            task_spec=spec,
+            repo_path=Path("/tmp/x"),
+            aggregated_artifacts={},
+            write_changes=False,
+            subdir="",
+            build_verifier=None,
+        )
+        elapsed = time.perf_counter() - start
+
+        assert result.blocked_result is None
+        assert result.quality_gates["security_review"] == "pass"
+        assert result.quality_gates["change_review"] == "pass"
+        assert elapsed < 2 * sleep_s, (
+            f"run_phase4_quality_gate took {elapsed:.3f}s, expected well under "
+            f"{2 * sleep_s:.3f}s if the 3 review calls run concurrently"
+        )
+
+    def test_run_phase4_quality_gate_runs_sequentially_for_dummy_llm_client(self) -> None:
+        """A DummyLLMClient double (matching _ScriptedClient's isinstance check) takes the
+        sequential branch, so scripted integration tests keep their deterministic call order.
+        """
+        agent = self._mock_agent()
+        agent.llm = DummyLLMClient()
+
+        from software_engineering_team.devops_team.change_review_agent import ChangeReviewOutput
+        from software_engineering_team.devops_team.devsecops_review_agent import (
+            DevSecOpsReviewOutput,
+        )
+        from software_engineering_team.qa_agent.models import QAOutput
+
+        call_order: List[str] = []
+
+        def _record(name: str, output: Any) -> Callable[[Any], Any]:
+            def _run(_input: Any) -> Any:
+                call_order.append(name)
+                return output
+
+            return _run
+
+        agent.devsecops_review_agent.run.side_effect = _record("devsec", DevSecOpsReviewOutput())
+        agent.change_review_agent.run.side_effect = _record("change_review", ChangeReviewOutput())
+        agent.qa_agent.run.side_effect = _record(
+            "qa",
+            QAOutput(approved=True, quality_gates={"acceptance_evidence": "pass"}, summary="ok"),
+        )
+
+        run_phase4_quality_gate(
+            agent,
+            task_spec=_base_task_spec(),
+            repo_path=Path("/tmp/x"),
+            aggregated_artifacts={},
+            write_changes=False,
+            subdir="",
+            build_verifier=None,
+        )
+
+        assert call_order == ["devsec", "change_review", "qa"]
 
 
 class TestMainOrchestratorRegistration:
