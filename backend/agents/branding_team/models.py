@@ -792,6 +792,22 @@ class VoiceToneEntry(BaseModel):
     examples: List[str] = Field(default_factory=list)
 
 
+VoiceToneEntryOutput = _derive_strict_variant(
+    "VoiceToneEntryOutput",
+    VoiceToneEntry,
+    doc=(
+        "Agent-facing voice/tone entry; requires non-empty fields.\n\n"
+        "Field-for-field twin of ``VoiceToneEntry`` with required content — "
+        "``VoiceToneEntry`` itself must stay soft (all-default) since it also "
+        "backs ``VisualIdentityOutput.voice_tone_spectrum``'s merge target. "
+    )
+    + _STRICT_TWIN_DOC_SUFFIX,
+    context=(str, Field(min_length=1)),
+    tone=(str, Field(min_length=1)),
+    examples=(List[str], Field(min_length=1)),
+)
+
+
 class VisualIdentityOutput(BaseModel):
     """Phase 3 output: the full design system and voice guide."""
 
@@ -1314,14 +1330,6 @@ class PhotographyVideoOutput(BaseModel):
     photography_direction: str = Field(min_length=1)
     video_direction: str = Field(min_length=1)
     motion_principles: List[str] = Field(min_length=3, max_length=4)
-
-
-class VoiceToneEntryOutput(BaseModel):
-    """Agent-facing voice/tone entry; requires non-empty fields."""
-
-    context: str = Field(min_length=1)
-    tone: str = Field(min_length=1)
-    examples: List[str] = Field(min_length=1)
 
 
 class VoiceToneOutput(BaseModel):

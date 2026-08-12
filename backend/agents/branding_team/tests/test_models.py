@@ -57,6 +57,8 @@ from branding_team.models import (
     TaglineOutput,
     TypographySpec,
     TypographySpecOutput,
+    VoiceToneEntry,
+    VoiceToneEntryOutput,
     WritingGuidelinesBody,
     WritingGuidelinesOutput,
 )
@@ -964,3 +966,56 @@ def test_typography_spec_output_is_usable_as_a_typography_spec() -> None:
         usage_notes="Headlines and hero type only",
     )
     assert isinstance(output, TypographySpec)
+
+
+def test_voice_tone_entry_permits_blank_and_omitted_content() -> None:
+    """``VoiceToneEntry`` is the soft merge-target twin: all fields default
+    empty, matching ``VisualIdentityOutput.voice_tone_spectrum``'s
+    partial-fragment merge contract."""
+    minimal = VoiceToneEntry()
+    assert minimal.context == ""
+    assert minimal.tone == ""
+    assert minimal.examples == []
+
+    explicit_blank = VoiceToneEntry(context="", tone="", examples=[])
+    assert explicit_blank.examples == []
+
+    blank_item = VoiceToneEntry(examples=[""])
+    assert blank_item.examples == [""]
+
+
+def test_voice_tone_entry_output_rejects_blank_content() -> None:
+    """A blank context, tone, or empty examples list must fail; a list of
+    blank strings is still valid because ``examples`` is ``List[str]`` with
+    container ``min_length=1``, not ``List[NonEmptyStr]``."""
+    valid_kwargs = dict(
+        context="marketing",
+        tone="confident and warm",
+        examples=["Let's ship the brand, not the buzzwords."],
+    )
+
+    with pytest.raises(ValidationError):
+        VoiceToneEntryOutput(**{**valid_kwargs, "context": ""})
+    with pytest.raises(ValidationError):
+        VoiceToneEntryOutput(**{**valid_kwargs, "tone": ""})
+    with pytest.raises(ValidationError):
+        VoiceToneEntryOutput(**{**valid_kwargs, "examples": []})
+
+    output = VoiceToneEntryOutput(**valid_kwargs)
+    assert output.context == "marketing"
+
+    blank_item = VoiceToneEntryOutput(
+        context="marketing", tone="confident and warm", examples=[""]
+    )
+    assert blank_item.examples == [""]
+
+
+def test_voice_tone_entry_output_is_usable_as_a_voice_tone_entry() -> None:
+    """The derived strict twin stays a normal, directly constructible
+    ``pydantic.BaseModel`` subclass wherever ``VoiceToneEntry`` is."""
+    output = VoiceToneEntryOutput(
+        context="marketing",
+        tone="confident and warm",
+        examples=["Let's ship the brand, not the buzzwords."],
+    )
+    assert isinstance(output, VoiceToneEntry)
