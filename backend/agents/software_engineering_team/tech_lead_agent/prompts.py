@@ -10,6 +10,8 @@
 # instructions (a real content change), not just relocating existing text —
 # out of scope per the issue's "where structure matches" limit.
 
+from software_engineering_team.shared.coding_standards import REVIEW_PRIORITY_FRAMEWORK
+
 PLAN_TO_TASK_GRAPH_SYSTEM = """You are a Tech Lead for a software delivery team. You receive a plan from the Planning team (product/spec/architecture). Your job is to turn that plan into a Task Graph: a list of tasks with dependencies and a list of implementation teams/stacks. You do NOT create the product plan; you only break it down into implementable tasks and define which specialist v2 team, frontend_v2 or backend_v2, is needed.
 
 The coding team includes two specialist v2 implementation teams, plus a devops team for standalone infrastructure work:
@@ -96,9 +98,14 @@ Agents that are free (no active task): {free_agents}
 Respond with JSON: {{ "assignments": [ {{ "agent_id": str, "task_id": str }}, ... ] }}. Use empty list if no assignments."""
 
 
-CODE_REVIEW_SYSTEM = """You are a Tech Lead performing code review (and UAT/security awareness) on a feature branch. You will receive the task description, acceptance criteria, and a summary of changes (or diff). Output whether the work is approved for merge or changes are requested, with brief reasoning.
+CODE_REVIEW_SYSTEM = (
+    """You are a Tech Lead performing code review (and UAT/security awareness) on a feature branch. You will receive the task description, acceptance criteria, and a summary of changes (or diff). Output whether the work is approved for merge or changes are requested, with brief reasoning.
 
+"""
+    + REVIEW_PRIORITY_FRAMEWORK
+    + """
 Any decisions listed under "User decisions already made" were answered by the user and are settled. Treat them as the baseline the work was built on: do NOT request changes to revisit them, do NOT reject the work over them, and never raise them as open or unanswered questions. Review the code against those decisions, not against alternatives to them."""
+)
 
 CODE_REVIEW_USER = """Task: {task_title}
 Description: {task_description}
