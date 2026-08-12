@@ -517,6 +517,18 @@ def test_schedule_cycle_flushes_remaining_into_final_batch():
     assert batches == [[mt_x, mt_y]]
 
 
+def test_schedule_duplicate_ids_raises_value_error_instead_of_hanging():
+    """Two microtasks sharing an id can't be placed progressively (id-keyed bookkeeping
+    collapses them); this must raise immediately rather than looping on empty batches
+    forever, which is the original bug (id-keyed ``placed`` never reaches ``len(microtasks)``).
+    """
+    mt1 = _microtask("dup")
+    mt2 = _microtask("dup")
+
+    with pytest.raises(ValueError, match="dup"):
+        _schedule_microtask_batches([mt1, mt2])
+
+
 # ---------------------------------------------------------------------------
 # Coding gate failures
 # ---------------------------------------------------------------------------

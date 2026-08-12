@@ -54,10 +54,12 @@ from ..trading_service.modes.sandbox_compat import StrategyRunResult
 from ._orchestrator_helpers import (
     RefinementStallTracker,
     _attach_execution_diagnostics,
+    _critical_failures,
     _DesignAttemptState,
     _DesignPersistContext,
     _DriftCollector,
     _format_execution_diagnostics,
+    _has_critical_failures,
     _MarketDataFetch,
     _maybe_attach_coverage_report,
     _round_demoted_conformance,
@@ -139,6 +141,22 @@ class _SynthesisEvaluateResult(_DesignAttemptState):
     stalled: bool = False
 
 
+@dataclass
+class _TradeCollectionResult:
+    """Return envelope for ``_run_synthesis_trade_collection``.
+
+    Bundles the round's collected trades with the target-symbol coverage
+    verdict so the loop can thread ``should_break`` into its own
+    ``max_rounds_exhausted`` exit without re-deriving any of the other three
+    fields.
+    """
+
+    trades: List[TradeRecord]
+    ran_on_non_conforming_code: bool
+    open_position_entry_reasons: List[str]
+    should_break: bool
+
+
 class SynthesisMixin:
     """Pre-synthesis / synthesis-loop / validation-gate / anomaly-handling cluster."""
 
@@ -190,7 +208,7 @@ class SynthesisMixin:
         ]
         self.record_gates(pre_spec_gates, all_gate_results, refinement_round=-1)
 
-        criticals = [g for g in pre_spec_gates if not g.passed and g.severity == "critical"]
+        criticals = _critical_failures(pre_spec_gates)
         if not criticals:
             return None
 
@@ -392,9 +410,7 @@ class SynthesisMixin:
             checks_total = len(round_gate_results)
             checks_passed = sum(1 for g in round_gate_results if g.passed)
 
-            critical_failures = [
-                g for g in round_gate_results if not g.passed and g.severity == "critical"
-            ]
+            critical_failures = _critical_failures(round_gate_results)
             if critical_failures:
                 emit(
                     "coding",
@@ -455,46 +471,27 @@ class SynthesisMixin:
                     break
 
             # ── 2b.5: PRE-BACKTEST reachability probe ────────────────
-            # Evaluate the authored entry predicates against the REAL fetched bars
-            # (same evaluator the compiled engine uses) before the backtest runs,
-            # so data-dependent dead code — legs that never co-occur, a cross that
-            # never happens — is surfaced early and per-leg instead of only after a
-            # doomed backtest. Findings are recorded on the timeline (critical on
-            # the compiled path where zero fires ⇒ zero entries; warning on the
-            # custom path where the executed code may differ); they do not
-            # short-circuit the round — the post-backtest zero-trade path still
-            # owns routing. Re-run only when the entry rules change across rounds
-            # (market data is static), so an unchanged spec is not re-probed and
-            # its findings are not recorded twice.
-            reachability_sig = (
-                tuple(str(getattr(r, "when", r)) for r in (spec.entry_rules or [])),
-                bool(spec.requires_custom_code),
+            last_reachability_sig = self._run_synthesis_reachability_probe(
+                spec=spec,
+                market_data=market_data,
+                round_num=round_num,
+                last_reachability_sig=last_reachability_sig,
+                all_gate_results=all_gate_results,
             )
-            if market_data and reachability_sig != last_reachability_sig:
-                last_reachability_sig = reachability_sig
-                reachability = self.predicate_reachability_probe.probe(spec, market_data)
-                self.record_gates(
-                    self.predicate_reachability_probe.to_gate_results(
-                        reachability, spec, phase="synthesis"
-                    ),
-                    all_gate_results,
-                    refinement_round=round_num,
-                )
 
             # ── 2c: EXECUTE (syntax / runtime correctness) ───────────
-            emit("backtesting", {"sub_phase": "running_code", "refinement_round": round_num})
-            exec_result = self._cached_run_strategy_code(code, market_data, config, strategy=spec)
+            exec_result = self._run_synthesis_execution(
+                spec=spec,
+                code=code,
+                market_data=market_data,
+                config=config,
+                round_num=round_num,
+                all_gate_results=all_gate_results,
+                emit=emit,
+            )
             runtime_lookahead_violation = exec_result.error_type == "lookahead_violation"
 
             if not exec_result.success:
-                all_gate_results.append(
-                    self.build_orchestrator_gate(
-                        "code_execution",
-                        phase="synthesis",
-                        details=f"Execution failed ({exec_result.error_type}): {exec_result.stderr}",
-                        refinement_round=round_num,
-                    )
-                )
                 failure_details = (
                     f"Error type: {exec_result.error_type}\nstderr:\n{exec_result.stderr}"
                 )
@@ -518,33 +515,27 @@ class SynthesisMixin:
                 continue
 
             # ── 2d: COLLECT TRADES + target-symbol coverage on trades ─
-            trades = exec_result.trades
+            collection = self._run_synthesis_trade_collection(
+                spec=spec,
+                exec_result=exec_result,
+                round_gate_results=round_gate_results,
+                round_num=round_num,
+                all_gate_results=all_gate_results,
+                emit=emit,
+            )
+            trades = collection.trades
             # This round's executed code is what produced the persisted trades;
             # attribute the conformance verdict to it (overwriting any earlier
             # round's value) so the flag tracks the backtest that survives.
-            ran_on_non_conforming_code = _round_demoted_conformance(round_gate_results)
-            open_position_entry_reasons = getattr(exec_result, "open_position_entry_reasons", [])
-
-            trade_coverage_gates = self.target_symbol_coverage_gate.check_trades(spec, trades)
-            self.record_gates(trade_coverage_gates, all_gate_results, refinement_round=round_num)
-            if any(not g.passed and g.severity == "critical" for g in trade_coverage_gates):
+            ran_on_non_conforming_code = collection.ran_on_non_conforming_code
+            open_position_entry_reasons = collection.open_position_entry_reasons
+            if collection.should_break:
                 max_rounds_exhausted = True
                 break
 
-            emit(
-                "backtesting",
-                {
-                    "sub_phase": "completed",
-                    "trades_count": len(trades),
-                    "execution_time": exec_result.execution_time_seconds,
-                },
-            )
-
             # ── 2e: BACKTEST EVALUATION (anomaly gates → zero-trade-repair → generic refine) ─
             evaluation = self._evaluate_synthesis_round(
-                spec=spec,
-                code=code,
-                trades=trades,
+                state=_DesignAttemptState(spec=spec, code=code, trades=trades, metrics=metrics),
                 exec_result=exec_result,
                 market_data=market_data,
                 config=config,
@@ -676,14 +667,14 @@ class SynthesisMixin:
         # (spec readiness, code safety, code conformance) is clean. Checking
         # code that an earlier gate already flagged as critical adds noisy
         # rule_id criticals on top of the cleaner upstream critical.
-        if not any(not g.passed and g.severity == "critical" for g in round_gate_results):
+        if not _has_critical_failures(round_gate_results):
             pred_conf_gates = self.predicate_conformance_gate.check(
                 code,
                 spec,
                 attempt=predicate_conformance_attempts,
             )
             round_gate_results.extend(pred_conf_gates)
-            if any(not g.passed and g.severity == "critical" for g in pred_conf_gates):
+            if _has_critical_failures(pred_conf_gates):
                 predicate_conformance_attempts += 1
         self.record_gates(round_gate_results, all_gate_results, refinement_round=round_num)
         return round_gate_results, predicate_conformance_attempts
@@ -743,7 +734,7 @@ class SynthesisMixin:
             spec, requested_symbols, fetched_symbols
         )
         self.record_gates(fetch_coverage_gates, all_gate_results, refinement_round=round_num)
-        should_break = any(not g.passed and g.severity == "critical" for g in fetch_coverage_gates)
+        should_break = _has_critical_failures(fetch_coverage_gates)
         return _MarketDataFetch(
             data=market_data,
             requested_symbols=requested_symbols,
@@ -752,12 +743,145 @@ class SynthesisMixin:
             should_break=should_break,
         )
 
-    def _evaluate_synthesis_round(
+    def _run_synthesis_reachability_probe(
+        self,
+        *,
+        spec: StrategySpec,
+        market_data: Optional[Dict[str, List[OHLCVBar]]],
+        round_num: int,
+        last_reachability_sig: Optional[tuple],
+        all_gate_results: List[QualityGateResult],
+    ) -> Optional[tuple]:
+        """Evaluate the authored entry predicates against the REAL fetched bars
+        (same evaluator the compiled engine uses) before the backtest runs, so
+        data-dependent dead code — legs that never co-occur, a cross that never
+        happens — is surfaced early and per-leg instead of only after a doomed
+        backtest.
+
+        Pre: ``round_gate_results``' validation gates for this round already
+        passed (no critical); ``last_reachability_sig`` is the signature
+        returned by the previous round's call (``None`` on round 0).
+        Post: returns the signature the probe last ran against. When
+        ``market_data`` is not yet available, or the ``(entry_rules,
+        requires_custom_code)`` signature is unchanged from
+        ``last_reachability_sig``, returns ``last_reachability_sig`` unchanged
+        and records nothing — market data is static once fetched, so an
+        unchanged spec is not re-probed and its findings are not recorded
+        twice. Otherwise runs the probe and records its gate results (critical
+        on the compiled path where zero fires ⇒ zero entries; warning on the
+        custom path where the executed code may differ) onto
+        ``all_gate_results`` in place; findings never short-circuit the
+        round — the post-backtest zero-trade path still owns routing.
+        """
+        reachability_sig = (
+            tuple(str(getattr(r, "when", r)) for r in (spec.entry_rules or [])),
+            bool(spec.requires_custom_code),
+        )
+        if not market_data or reachability_sig == last_reachability_sig:
+            return last_reachability_sig
+        reachability = self.predicate_reachability_probe.probe(spec, market_data)
+        self.record_gates(
+            self.predicate_reachability_probe.to_gate_results(
+                reachability, spec, phase="synthesis"
+            ),
+            all_gate_results,
+            refinement_round=round_num,
+        )
+        return reachability_sig
+
+    def _run_synthesis_execution(
         self,
         *,
         spec: StrategySpec,
         code: str,
-        trades: List[TradeRecord],
+        market_data: Dict[str, List[OHLCVBar]],
+        config: BacktestConfig,
+        round_num: int,
+        all_gate_results: List[QualityGateResult],
+        emit: PhaseCallback,
+    ) -> StrategyRunResult:
+        """Run the round's code through the attempt-scoped backtest cache.
+
+        Pre: validation gates and the reachability probe for this round
+        already ran; ``market_data`` is populated.
+        Post: returns the ``StrategyRunResult`` for ``code`` (via
+        ``_cached_run_strategy_code``). When ``exec_result.success`` is
+        False, appends a ``code_execution`` critical gate describing the
+        failure onto ``all_gate_results`` in place; the caller owns deciding
+        whether to refine or exhaust the round budget on that failure.
+        """
+        emit("backtesting", {"sub_phase": "running_code", "refinement_round": round_num})
+        exec_result = self._cached_run_strategy_code(code, market_data, config, strategy=spec)
+        if not exec_result.success:
+            all_gate_results.append(
+                self.build_orchestrator_gate(
+                    "code_execution",
+                    phase="synthesis",
+                    details=f"Execution failed ({exec_result.error_type}): {exec_result.stderr}",
+                    refinement_round=round_num,
+                )
+            )
+        return exec_result
+
+    def _run_synthesis_trade_collection(
+        self,
+        *,
+        spec: StrategySpec,
+        exec_result: StrategyRunResult,
+        round_gate_results: List[QualityGateResult],
+        round_num: int,
+        all_gate_results: List[QualityGateResult],
+        emit: PhaseCallback,
+    ) -> "_TradeCollectionResult":
+        """Collect the round's trades and check target-symbol coverage on them.
+
+        Pre: ``exec_result.success`` is True (the caller only reaches this
+        stage after a clean execution); ``round_gate_results`` is this
+        round's validation-gate list, used to derive the
+        conformance-demotion verdict for the code that produced these
+        trades.
+        Post: returns a ``_TradeCollectionResult``. ``should_break=True``
+        when the coverage check on the collected trades fires a critical —
+        the caller sets ``max_rounds_exhausted`` and breaks the loop, and
+        the "backtesting"/"completed" event is not emitted (mirroring the
+        pre-extraction code, where that emit sat after the break);
+        ``should_break=False`` otherwise, after emitting it. Records the
+        coverage gates onto ``all_gate_results`` in place.
+        """
+        trades = exec_result.trades
+        ran_on_non_conforming_code = _round_demoted_conformance(round_gate_results)
+        open_position_entry_reasons = getattr(exec_result, "open_position_entry_reasons", [])
+
+        trade_coverage_gates = self.target_symbol_coverage_gate.check_trades(spec, trades)
+        self.record_gates(trade_coverage_gates, all_gate_results, refinement_round=round_num)
+        should_break = _has_critical_failures(trade_coverage_gates)
+        if should_break:
+            return _TradeCollectionResult(
+                trades=trades,
+                ran_on_non_conforming_code=ran_on_non_conforming_code,
+                open_position_entry_reasons=open_position_entry_reasons,
+                should_break=True,
+            )
+
+        emit(
+            "backtesting",
+            {
+                "sub_phase": "completed",
+                "trades_count": len(trades),
+                "execution_time": exec_result.execution_time_seconds,
+            },
+        )
+        return _TradeCollectionResult(
+            trades=trades,
+            ran_on_non_conforming_code=ran_on_non_conforming_code,
+            open_position_entry_reasons=open_position_entry_reasons,
+            should_break=False,
+        )
+
+    def _evaluate_synthesis_round(
+        self,
+        *,
+        state: _DesignAttemptState,
         exec_result: StrategyRunResult,
         market_data: Dict[str, List[OHLCVBar]],
         config: BacktestConfig,
@@ -773,8 +897,10 @@ class SynthesisMixin:
         """Compute metrics, run the anomaly gates, and route any recovery.
 
         Pre: this round executed cleanly and collected ``trades`` through the
-        coverage gate; ``ran_on_non_conforming_code`` is the verdict captured at
-        trade collection.
+        coverage gate; ``state`` carries this round's settled ``spec``/``code``/
+        ``trades`` (``state.metrics`` is unused — this method computes its own
+        metrics from ``state.trades``); ``ran_on_non_conforming_code`` is the
+        verdict captured at trade collection.
         Post: returns a ``_SynthesisEvaluateResult``. ``action="success"`` when
         no critical anomaly fired (the caller marks ``execution_succeeded``);
         otherwise ``_handle_critical_anomalies`` runs and the result carries the
@@ -788,6 +914,8 @@ class SynthesisMixin:
         # ``_cached_run_strategy_code`` above: keeps test monkeypatches of
         # ``orchestrator.compute_metrics`` honored.
         from . import orchestrator as _orchestrator_module
+
+        spec, code, trades = state.spec, state.code, state.trades
 
         metrics = _orchestrator_module.compute_metrics(
             trades, config.initial_capital, config.start_date, config.end_date
@@ -818,7 +946,7 @@ class SynthesisMixin:
         )
         self.record_gates(anomaly_gates, all_gate_results, refinement_round=round_num)
 
-        critical_anomalies = [g for g in anomaly_gates if not g.passed and g.severity == "critical"]
+        critical_anomalies = _critical_failures(anomaly_gates)
         if critical_anomalies:
             recovery = self._handle_critical_anomalies(
                 spec=spec,
