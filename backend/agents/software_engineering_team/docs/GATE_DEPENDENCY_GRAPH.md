@@ -40,11 +40,7 @@ runs five phases in strict order:
      `shared/phases/review.py:329-375`, sharing the parameterised
      `_run_agent_testing_phase` body at lines 149-295). On failure, batch-fixes once
      and `continue`s — which restarts the outer loop **from Code Review**, not just
-     QA, *except* on the sequential (non-`parallelize_qa_security`) branch when
-     Code Review's pass this same outer cycle was clean (no retry-fix needed):
-     there, the restart narrows to QA only, since that Code Review pass is still
-     valid. If Code Review itself needed a retry-fix this cycle, the full
-     restart-from-Code-Review is unchanged.
+     QA.
    - **Security** (`gate_config.run_security_gate` →
      `run_security_testing_phase_impl`, `shared/phases/review.py:378-414`, same
      shared `_run_agent_testing_phase` body). Same restart-from-Code-Review behavior

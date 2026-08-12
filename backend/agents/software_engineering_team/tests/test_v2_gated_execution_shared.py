@@ -736,8 +736,7 @@ def test_rollback_canonicalizes_symlink_and_direct_path_aliases(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# QA / security gates (fail → batch-fix → restart from code review, unless a
-# QA-only failure follows a clean same-cycle Code Review pass -- see below)
+# QA / security gates (fail → batch-fix → restart from code review)
 # ---------------------------------------------------------------------------
 
 
@@ -754,55 +753,6 @@ def test_qa_fail_then_pass_restarts_and_completes(tmp_path):
 
     assert qa.calls == 2  # failed once (→ restart), passed on the next cycle
     assert mt.status == MS.COMPLETED
-
-
-def test_qa_only_failure_restarts_only_qa_not_code_review(tmp_path):
-    """A QA failure following a clean (no-retry) Code Review pass this cycle
-    batch-fixes and restarts only QA on the next cycle -- Code Review, which is
-    still valid, is not re-run."""
-    cr = _CapturingGate()
-    qa = _ScriptedGate([GateOutcome(passed=False, issues=[_issue("qa")], summary="qa")])
-    mt = _microtask()
-    _run(
-        _make_gate_config(code_review_gate=cr, qa_gate=qa),
-        [mt],
-        tmp_path,
-        review_config=_config(cr=1, qa=2, sec=1),
-        progress=lambda *a: None,
-    )
-
-    assert mt.status == MS.COMPLETED
-    assert qa.calls == 2  # failed once (→ restart QA only), passed on the next cycle
-    assert len(cr.calls_kwargs) == 1  # Code Review's clean pass was reused, not re-run
-
-
-def test_cr_and_qa_both_fail_in_same_cycle_full_restart_still_occurs(tmp_path):
-    """When Code Review itself needs a retry-fix this cycle (not a clean pass),
-    a subsequent QA failure still restarts the full cycle from Code Review --
-    the QA-only narrowing does not apply."""
-    cr = _ScriptedGate(
-        [
-            GateOutcome(passed=False, issues=[_issue()], summary="cr cycle 1"),
-            GateOutcome(passed=True),
-            GateOutcome(passed=False, issues=[_issue()], summary="cr cycle 2"),
-            GateOutcome(passed=True),
-        ]
-    )
-    qa = _ScriptedGate([GateOutcome(passed=False, issues=[_issue("qa")], summary="qa")])
-    mt = _microtask()
-    _run(
-        _make_gate_config(code_review_gate=cr, qa_gate=qa),
-        [mt],
-        tmp_path,
-        review_config=_config(cr=1, qa=2, sec=1),
-        progress=lambda *a: None,
-    )
-
-    assert mt.status == MS.COMPLETED
-    # Code Review ran twice per cycle (fail, then a retry-fix pass) across both
-    # outer cycles -- i.e. it genuinely re-ran in cycle 2, not skipped.
-    assert cr.calls == 4
-    assert qa.calls == 2
 
 
 def test_qa_unsafe_fix_breaks(tmp_path):
