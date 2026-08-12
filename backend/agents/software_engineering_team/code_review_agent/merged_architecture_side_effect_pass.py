@@ -1,22 +1,23 @@
-"""Merged architecture-consistency + side-effect-impact pass (one LLM call).
+"""Merged architecture-consistency + side-effect-impact pass (one logical pass).
 
 Runs both additive whole-submission checks that the in-process coordinator
 previously scheduled as two independent Agent calls, in a single pass with
-a half-aware ``build_merged_architecture_side_effect_prompt``. Findings are
-split back into the two lists downstream merge/gate logic already expects.
+a half-aware ``build_merged_architecture_side_effect_prompt``. Each batch is
+think-then-format. Findings are split back into the two lists downstream
+merge/gate logic already expects.
 
 Invariants:
 
     - **Additive-only, fail-safe.** Never removes or mutates findings the
       caller already has; any setup/LLM/validation failure yields
       ``([], [])``.
-    - **Bounded cost per call, with reactive recovery.** Agent construction,
+    - **Bounded cost per batch, with reactive recovery.** Agent construction,
       context budgeting, proactive file-group chunking, and reactive
       overflow bisect/shrink recovery are all owned by the shared
       :func:`~code_review_agent.submission_pass_runner.run_submission_pass`
       runner; this module supplies only its system prompt, tool set, and
       prompt/parse callbacks. A submission that fits under the budget still
-      makes exactly one call, identical to the pre-runner behavior.
+      makes exactly one think-then-format pair.
     - **``CODE_REVIEW`` profile only.** Same restriction as each standalone
       pass.
     - **Context-aware budgeting.** Changed-file inlining (and, when needed,
@@ -64,7 +65,10 @@ def find_architecture_and_side_effect_issues(
     repo_reader: Optional[RepoReader] = None,
     index: Optional[CodebaseIndex] = None,
 ) -> Tuple[List[CodeReviewIssue], List[CodeReviewIssue]]:
-    """Run both additive whole-submission checks in a single LLM call.
+    """Run both additive whole-submission checks in one logical submission-pass.
+
+    Each batch is a think-then-format pair (reasoning text, then JSON), not two
+    independent architecture and side-effect passes.
 
     Preconditions:
         - ``input_data`` is the coordinator's review input for this submission.
@@ -80,7 +84,7 @@ def find_architecture_and_side_effect_issues(
         - Otherwise returns two lists of NEW ``CodeReviewIssue``s
           (architecture/refactor and side-effects/documentation respectively),
           each validated like the corresponding standalone pass; never raises.
-        - When only one half is enabled, still makes the merged call but returns
+        - When only one half is enabled, still makes the merged pass but returns
           ``[]`` for the disabled half. ``pre_numbered`` forces the side-effect
           half off (same guard as the standalone side-effect pass, via
           ``side_pass._effective_pre_numbered`` -- a caller-supplied
@@ -89,12 +93,12 @@ def find_architecture_and_side_effect_issues(
           ``CodebaseIndex.full_content_complete``). Architecture is forced off
           when there is no architecture payload and no ``repo_reader`` /
           ``existing_codebase`` evidence.
-        - When the changed-file set's estimated inline size exceeds one call's
+        - When the changed-file set's estimated inline size exceeds one batch's
           budget, the shared runner splits it into multiple bounded batches
           (and reactively bisects/shrinks any batch that still overflows);
           findings from every batch are concatenated into the same two
           returned lists. A submission under the budget still makes exactly
-          one call.
+          one think-then-format pair.
     """
     if index is None:
         index = CodebaseIndex.from_input(input_data, repo_reader=repo_reader)
@@ -154,8 +158,8 @@ def _run_pass(
     Postconditions:
         - Same contract as the public entry, minus the env/profile early
           returns the caller already handled.
-        - Delegates budgeting, proactive chunking, ``Agent`` construction, and
-          reactive overflow bisect/shrink recovery to
+        - Delegates budgeting, proactive chunking, the think-then-format
+          ``Agent`` pair, and reactive overflow bisect/shrink recovery to
           :func:`~code_review_agent.submission_pass_runner.run_submission_pass`,
           which never raises; a batch's findings are folded into the two
           returned lists in batch order. An empty runner result (context too
