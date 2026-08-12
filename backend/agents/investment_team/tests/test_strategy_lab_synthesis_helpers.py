@@ -17,8 +17,8 @@ The per-round body was decomposed into named helpers:
 - :meth:`_run_synthesis_trade_collection` — collects trades and checks
   target-symbol coverage, returning a ``should_break`` signal.
 - :meth:`_evaluate_synthesis_round` — metrics + anomaly gates + recovery
-  routing (covered end-to-end by the ``_run_synthesis_loop`` suites; not
-  re-pinned here).
+  routing, dispatching to one of three ``action`` outcomes
+  (``"success"`` / ``"continue"`` / ``"exhausted"``).
 
 These tests stub the orchestrator's gate collaborators so each helper's
 contract is exercised in isolation.
@@ -30,8 +30,11 @@ import textwrap
 from typing import Dict, List
 
 from investment_team.models import BacktestConfig, StrategySpec, TradeRecord
+from investment_team.strategy_lab._orchestrator_helpers import _DesignAttemptState
 from investment_team.strategy_lab.orchestrator import (
+    RefinementStallTracker,
     StrategyLabOrchestrator,
+    _AnomalyRecoveryOutcome,
     _DriftCollector,
     _MarketDataFetch,
 )
@@ -586,3 +589,164 @@ def test_trade_collection_breaks_on_critical_coverage_without_completed_event(
     assert result.should_break is True
     assert events == []
     assert any(g.gate_name == "target_symbol_coverage" for g in all_gate_results)
+
+
+# ---------------------------------------------------------------------------
+# _evaluate_synthesis_round
+# ---------------------------------------------------------------------------
+
+
+def test_evaluate_synthesis_round_success_when_no_critical_anomaly(monkeypatch) -> None:
+    """A clean anomaly check → ``action="success"``, the round's spec/code/
+    trades pass through unchanged, and the anomaly gate is recorded."""
+    orch = _orch()
+    monkeypatch.setattr(
+        orch,
+        "_check_anomalies_cached",
+        lambda metrics, trades, **kw: [_gate("backtest_anomaly", passed=True, severity="info")],
+    )
+    spec = _spec()
+    trades: List[TradeRecord] = []
+    exec_result = StrategyRunResult(success=True, trades=trades)
+    all_gate_results: List[QualityGateResult] = []
+
+    result = orch._evaluate_synthesis_round(
+        state=_DesignAttemptState(spec=spec, code="code-v0", trades=trades, metrics=None),
+        exec_result=exec_result,
+        market_data={"QQQ": []},
+        config=_config(),
+        round_num=0,
+        ran_on_non_conforming_code=True,
+        all_gate_results=all_gate_results,
+        refinement_attempts=[],
+        zero_trade_attempts=[],
+        emit=lambda *a, **k: None,
+        stall_tracker=RefinementStallTracker(),
+        drift_collector=None,
+    )
+
+    assert result.action == "success"
+    assert result.spec is spec
+    assert result.code == "code-v0"
+    assert result.trades == trades
+    assert result.exec_result is exec_result
+    assert result.ran_on_non_conforming_code is True, (
+        "the trade-collection verdict passed in must survive untouched on the success path"
+    )
+    assert result.runtime_lookahead_violation is False
+    assert result.stalled is False
+    assert any(g.gate_name == "backtest_anomaly" for g in all_gate_results)
+
+
+def test_evaluate_synthesis_round_continue_on_recovered_anomaly(monkeypatch) -> None:
+    """A critical anomaly whose recovery does not exhaust the round budget →
+    ``action="continue"`` carrying the recovered state; an unset
+    (``None``) recovery verdict leaves the caller's ``ran_on_non_conforming_code``
+    untouched."""
+    orch = _orch()
+    critical_gate = _gate("backtest_anomaly", passed=False, severity="critical")
+    monkeypatch.setattr(
+        orch, "_check_anomalies_cached", lambda metrics, trades, **kw: [critical_gate]
+    )
+
+    recovered_spec = _spec()
+    recovered_trades: List[TradeRecord] = []
+    recovered_metrics = object()
+    recovered_exec_result = StrategyRunResult(
+        success=True, trades=recovered_trades, error_type="lookahead_violation"
+    )
+    recovery_calls: List[Dict[str, object]] = []
+
+    def _fake_handle_critical_anomalies(**kwargs):
+        recovery_calls.append(kwargs)
+        return _AnomalyRecoveryOutcome(
+            spec=recovered_spec,
+            code="code-refined",
+            trades=recovered_trades,
+            metrics=recovered_metrics,
+            exec_result=recovered_exec_result,
+            exhausted=False,
+            ran_on_non_conforming_code=None,
+            stalled=False,
+        )
+
+    monkeypatch.setattr(orch, "_handle_critical_anomalies", _fake_handle_critical_anomalies)
+
+    result = orch._evaluate_synthesis_round(
+        state=_DesignAttemptState(spec=_spec(), code="code-v0", trades=[], metrics=None),
+        exec_result=StrategyRunResult(success=True, trades=[]),
+        market_data={"QQQ": []},
+        config=_config(),
+        round_num=1,
+        ran_on_non_conforming_code=False,
+        all_gate_results=[],
+        refinement_attempts=[],
+        zero_trade_attempts=[],
+        emit=lambda *a, **k: None,
+        stall_tracker=RefinementStallTracker(),
+        drift_collector=None,
+    )
+
+    assert len(recovery_calls) == 1
+    assert recovery_calls[0]["critical_anomalies"] == [critical_gate]
+    assert result.action == "continue"
+    assert result.spec is recovered_spec
+    assert result.code == "code-refined"
+    assert result.trades is recovered_trades
+    assert result.metrics is recovered_metrics
+    assert result.exec_result is recovered_exec_result
+    assert result.ran_on_non_conforming_code is False, (
+        "a None recovery verdict must not overwrite the caller's flag"
+    )
+    assert result.runtime_lookahead_violation is True, (
+        "must derive from the RECOVERED exec_result, not the original"
+    )
+
+
+def test_evaluate_synthesis_round_exhausted_propagates_stall_and_verdict(monkeypatch) -> None:
+    """A critical anomaly whose recovery exhausts the round budget →
+    ``action="exhausted"``, ``stalled`` threaded from the recovery outcome,
+    and a non-``None`` recovery verdict does overwrite the caller's flag."""
+    orch = _orch()
+    monkeypatch.setattr(
+        orch,
+        "_check_anomalies_cached",
+        lambda metrics, trades, **kw: [
+            _gate("backtest_anomaly", passed=False, severity="critical")
+        ],
+    )
+    monkeypatch.setattr(
+        orch,
+        "_handle_critical_anomalies",
+        lambda **kw: _AnomalyRecoveryOutcome(
+            spec=_spec(),
+            code="code-v0",
+            trades=[],
+            metrics=object(),
+            exec_result=StrategyRunResult(success=False, trades=[]),
+            exhausted=True,
+            ran_on_non_conforming_code=True,
+            stalled=True,
+        ),
+    )
+
+    result = orch._evaluate_synthesis_round(
+        state=_DesignAttemptState(spec=_spec(), code="code-v0", trades=[], metrics=None),
+        exec_result=StrategyRunResult(success=True, trades=[]),
+        market_data={"QQQ": []},
+        config=_config(),
+        round_num=2,
+        ran_on_non_conforming_code=False,
+        all_gate_results=[],
+        refinement_attempts=[],
+        zero_trade_attempts=[],
+        emit=lambda *a, **k: None,
+        stall_tracker=RefinementStallTracker(),
+        drift_collector=None,
+    )
+
+    assert result.action == "exhausted"
+    assert result.stalled is True
+    assert result.ran_on_non_conforming_code is True, (
+        "a non-None recovery verdict must overwrite the caller's flag"
+    )

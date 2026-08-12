@@ -363,6 +363,39 @@ reporting success when a state collects zero usable samples, and — via local m
 standing in for `/health` and Prometheus, no live stack required — an end-to-end run of the `idle`
 and `db-pool-warm` subcommands. Run it with `bash docker/scripts/tests/test_measure_unified_api_rss.sh`.
 
+**Results (2026-08-12)**
+
+No live numbers exist yet for any of the four states. Two separate attempts to actually run this
+methodology — including the one that wrote this paragraph — were blocked before reaching a live
+stack: Docker Hub pulls are denied at the network-egress layer (confirmed here via the outbound
+proxy explicitly 403ing the `CONNECT` to `production.cloudfront.docker.com`, which serves image
+layer blobs), so `docker compose up` can't pull Postgres, Temporal, or any of the ~20 team-service
+images in this class of environment. Bringing up the stack somewhere with registry access and
+re-running the four subcommands above remains the only way to get trustworthy numbers. Until then,
+`docker/docker-compose.yml`'s `khala` service comment carries a reasoned, component-based worst-case
+estimate in place of a measurement, built from:
+
+- The existing bare-process idle floor (~137-140 MiB, no Postgres/Temporal — see that comment).
+- The Postgres pool's own configured range (`POSTGRES_POOL_MIN_SIZE`/`MAX_SIZE`, default 2/10 —
+  `backend/shared/postgres/client.py`) at a conservative ~2-5 MiB/connection.
+- An unverified, industry-typical figure for the `temporalio` client's Rust-core bridge (~20-40
+  MiB) — the number most worth replacing first, since it's the least grounded in this repo.
+- Per-team httpx pool connections (`backend/unified_api/team_proxy.py`), which are KB- not
+  MB-scale per idle keep-alive connection. Worth flagging while re-validating "post pool-tuning":
+  every real team currently falls through to `DEFAULT_POOL_LIMITS` (10 max_connections / 5
+  max_keepalive) — `TEAM_POOL_CONFIG`'s per-team overrides are keyed to `auth_team`/`billing_team`/
+  `reporting_team`/`ops_tooling`, none of which exist in `TEAM_CONFIGS` (the real proxied teams are
+  `blogging`, `software_engineering`, `personal_assistant`, etc.), so the per-team differentiation
+  never actually applies. The reduced *default* is still real and still helps; only the *per-team*
+  part is dead code.
+- A generous, deliberately unbounded-by-analysis headroom slice for concurrency/thread overhead —
+  exactly what live `peak-burst` sampling would pin down and this math can't.
+
+The reasoned worst case lands around 245-340 MiB, comfortably inside the current 512M reservation,
+so the compose values are unchanged. Whoever next has registry access: run the four subcommands
+above, replace this paragraph and the compose comment with the real numbers, and reconsider the
+values if they don't hold up.
+
 ## Verification
 
 After starting the stack:
