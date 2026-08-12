@@ -75,7 +75,7 @@ def mount_invoke_shim(app: FastAPI) -> None:
     )
     async def _invoke(agent_id: str, request: Request) -> InvokeEnvelope:
         # Lazy import to avoid registry/agents load at sandbox startup.
-        from agent_registry import get_registry
+        from agent_platform.registry import get_registry
 
         manifest = get_registry().get(agent_id)
         if manifest is None:

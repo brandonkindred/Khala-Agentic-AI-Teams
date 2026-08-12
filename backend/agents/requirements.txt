@@ -3,7 +3,7 @@ pytest-xdist>=3.5,<4.0
 pytest-cov>=7.1,<8.0
 pytest-asyncio>=1.0,<2.0
 pydantic>=2.12,<3.0
-# Direct dep: agent_registry.models imports jsonschema at module load to validate
+# Direct dep: agent_platform.registry.models imports jsonschema at module load to validate
 # IOSchema.inline_schema. Currently satisfied transitively via strands-agents/mcp,
 # but declared directly here since the import is direct (matches backend/requirements.txt).
 jsonschema>=4.23,<5.0
