@@ -60,6 +60,7 @@ describe('AgentStudioShellComponent', () => {
     listDrafts: ReturnType<typeof vi.fn>;
     getDraft: ReturnType<typeof vi.fn>;
     updateDraft: ReturnType<typeof vi.fn>;
+    renameDraft: ReturnType<typeof vi.fn>;
   };
   let agenticTeamApi: { getProcess: ReturnType<typeof vi.fn> };
 
@@ -78,6 +79,7 @@ describe('AgentStudioShellComponent', () => {
       listDrafts: vi.fn().mockReturnValue(of([])),
       getDraft: vi.fn(),
       updateDraft: vi.fn(),
+      renameDraft: vi.fn(),
     };
     agenticTeamApi = { getProcess: vi.fn() };
     await TestBed.configureTestingModule({
@@ -317,6 +319,13 @@ describe('AgentStudioShellComponent', () => {
       expect(component.state.currentDraftId()).toBe('d-1');
     });
 
+    it('the Load-draft menu draftDeleted output calls onDraftDeleted', () => {
+      component.state.setCurrentDraft('d-1', 'My draft');
+      const menu = fixture.debugElement.query(By.directive(LoadDraftMenuComponent));
+      menu.triggerEventHandler('draftDeleted', 'd-1');
+      expect(component.state.currentDraftId()).toBeNull();
+    });
+
     it('markClean after hydrate so a just-loaded draft is not dirty', () => {
       expect(component.state.isDirty()).toBe(false);
       agentStudioApi.getDraft.mockReturnValue(of(draft({ registryAgentId: 'reg-1' })));
@@ -484,6 +493,77 @@ describe('AgentStudioShellComponent', () => {
       const emitted: unknown[] = [];
       component.openSaveDraftDialog().subscribe((v) => emitted.push(v));
       expect(emitted).toEqual([draftSummary()]);
+    });
+  });
+
+  describe('Bound draft header', () => {
+    let openSpy: ReturnType<typeof vi.spyOn<MatDialog, 'open'>>;
+
+    beforeEach(() => {
+      openSpy = vi.spyOn(MatDialog.prototype, 'open');
+    });
+    afterEach(() => {
+      openSpy.mockRestore();
+    });
+
+    it('hides the name and pencil when no draft is bound', () => {
+      expect(fixture.nativeElement.querySelector('.studio__current-draft')).toBeNull();
+    });
+
+    it('shows the bound name and a rename button', () => {
+      component.state.setCurrentDraft('d-1', 'My draft');
+      fixture.detectChanges();
+      const root = fixture.nativeElement.querySelector('.studio__current-draft') as HTMLElement;
+      expect(root.textContent).toContain('My draft');
+      const btn = fixture.nativeElement.querySelector('.studio__rename-draft') as HTMLButtonElement;
+      expect(btn.getAttribute('aria-label')).toBe('Rename draft');
+    });
+
+    it('pencil opens the rename dialog with the bound id and name', () => {
+      component.state.setCurrentDraft('d-1', 'My draft');
+      openSpy.mockReturnValue({ afterClosed: () => of(undefined) } as unknown as ReturnType<MatDialog['open']>);
+      component.openRenameDraftDialog();
+      const config = openSpy.mock.calls[0][1] as {
+        data: { draftId: string; initialName: string };
+        disableClose?: boolean;
+        closeOnNavigation?: boolean;
+      };
+      expect(config.data).toEqual({ draftId: 'd-1', initialName: 'My draft' });
+      expect(config.disableClose).toBe(true);
+      expect(config.closeOnNavigation).toBe(false);
+    });
+
+    it('rename success updates the bound name without markClean', () => {
+      component.state.setRegistryAgentId('reg-1');
+      component.state.markClean();
+      component.state.setCurrentDraft('d-1', 'Old');
+      openSpy.mockReturnValue({
+        afterClosed: () => of({ draft_id: 'd-1', name: 'New', updated_at: '2026-01-01T00:00:00Z' }),
+      } as unknown as ReturnType<MatDialog['open']>);
+      component.openRenameDraftDialog();
+      expect(component.state.currentDraftName()).toBe('New');
+      expect(component.state.isDirty()).toBe(false);
+    });
+
+    it('openRenameDraftDialog is a no-op when unbound', () => {
+      openSpy.mockReturnValue({ afterClosed: () => of(undefined) } as unknown as ReturnType<MatDialog['open']>);
+      component.openRenameDraftDialog();
+      expect(openSpy).not.toHaveBeenCalled();
+    });
+
+    it('onDraftDeleted of the current id unbinds without clearing handoff', () => {
+      component.state.setRegistryAgentId('reg-1');
+      component.state.setCurrentDraft('d-1', 'My draft');
+      component.onDraftDeleted('d-1');
+      expect(component.state.currentDraftId()).toBeNull();
+      expect(component.state.currentDraftName()).toBeNull();
+      expect(component.state.registryAgentId()).toBe('reg-1');
+    });
+
+    it('onDraftDeleted of a different id leaves the bound draft alone', () => {
+      component.state.setCurrentDraft('d-1', 'My draft');
+      component.onDraftDeleted('other');
+      expect(component.state.currentDraftId()).toBe('d-1');
     });
   });
 

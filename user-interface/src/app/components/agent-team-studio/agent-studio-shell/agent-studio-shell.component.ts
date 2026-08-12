@@ -21,6 +21,11 @@ import {
 } from './draft-conflict-dialog/draft-conflict-dialog.component';
 import { LoadDraftMenuComponent } from './load-draft-menu/load-draft-menu.component';
 import {
+  RenameDraftDialogComponent,
+  type RenameDraftDialogData,
+  type RenameDraftDialogResult,
+} from './rename-draft-dialog/rename-draft-dialog.component';
+import {
   SaveDraftDialogComponent,
   type SaveDraftDialogData,
   type SaveDraftDialogResult,
@@ -188,6 +193,42 @@ export class AgentStudioShellComponent {
       this.state.markClean();
     });
     return closed$;
+  }
+
+  /**
+   * Open the rename dialog for the bound draft.
+   *
+   * Preconditions: none — no-op when unbound or when the bound name is null.
+   * Postconditions: on success, `currentDraftName()` matches the PATCH
+   *   response; `isDirty()` is unchanged. On cancel/failure, state unchanged.
+   */
+  openRenameDraftDialog(): void {
+    const draftId = this.state.currentDraftId();
+    const initialName = this.state.currentDraftName();
+    if (!draftId || initialName == null) return;
+    const data: RenameDraftDialogData = { draftId, initialName };
+    const ref = this.dialog.open<RenameDraftDialogComponent, RenameDraftDialogData, RenameDraftDialogResult>(
+      RenameDraftDialogComponent,
+      { data, width: '420px', disableClose: true, closeOnNavigation: false },
+    );
+    ref.afterClosed().subscribe((result) => {
+      if (!result) return;
+      this.state.setCurrentDraft(result.draft_id, result.name);
+    });
+  }
+
+  /**
+   * Handle a successful delete from the Load menu.
+   *
+   * Preconditions: `draftId` is a non-empty id.
+   * Postconditions: if it was the bound draft, `currentDraftId()` /
+   *   `currentDraftName()` are null and handoff ids are unchanged. Otherwise
+   *   state is unchanged.
+   */
+  onDraftDeleted(draftId: string): void {
+    if (this.state.currentDraftId() === draftId) {
+      this.state.setCurrentDraft(null, null);
+    }
   }
 
   /**

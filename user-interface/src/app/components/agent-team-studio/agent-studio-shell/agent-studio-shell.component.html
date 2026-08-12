@@ -2,14 +2,33 @@
   <!--
     Save / Load draft controls (spec §3.5). Save creates/updates a server
     draft via the Save-draft popover; Load lists saved drafts and hydrates the
-    session from the selected one. Unsaved-edit conflict prompts and
-    rename/delete affordances land in a later increment (#5914).
+    session from the selected one. When a draft is bound, the header shows its
+    name with a rename pencil; deleting the bound draft from the Load menu
+    unbinds it without clearing handoff.
   -->
   <header class="studio__header">
     <h1 class="studio__title">Agent Studio</h1>
     <div class="studio__draft-actions">
+      @if (state.currentDraftId()) {
+        <span class="studio__current-draft">
+          <span class="studio__current-draft-name">{{ state.currentDraftName() }}</span>
+          <button
+            mat-icon-button
+            type="button"
+            class="studio__rename-draft"
+            aria-label="Rename draft"
+            (click)="openRenameDraftDialog()"
+          >
+            <mat-icon>edit</mat-icon>
+          </button>
+        </span>
+      }
       <button mat-stroked-button type="button" class="studio__draft-btn" (click)="openSaveDraftDialog()">Save draft</button>
-      <app-load-draft-menu [busy]="loadingDraft()" (draftSelected)="loadDraft($event)" />
+      <app-load-draft-menu
+        [busy]="loadingDraft()"
+        (draftSelected)="loadDraft($event)"
+        (draftDeleted)="onDraftDeleted($event)"
+      />
     </div>
   </header>
 
