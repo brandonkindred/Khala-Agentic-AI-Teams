@@ -251,6 +251,59 @@ def test_macd_sliding_window_keeps_macd_line_bounded() -> None:
     assert len(cached["macd_line"]) == expected_max
 
 
+def test_macd_expand_signal_histogram_reads_stay_o1_amortized(monkeypatch) -> None:
+    """O(1)-amortized proof for MACD ``signal``/``histogram`` reads on the
+    ``expand`` path — sibling indicators (OBV, MFI, Bollinger) prove their
+    O(1)-amortized cost structurally, via a bounded running-sum/deque that
+    never grows with bars seen. MACD's incremental fix has no single
+    bounded buffer to inspect from outside (its O(1) step is the *absence*
+    of extra ``windowed_ema`` work), so this is the same proof adapted to
+    that shape: instrument ``windowed_ema`` and assert every call's window
+    is a fixed size (``fast``/``slow``), never one that grows with history.
+
+    Distinct from the existing ``bench/`` timing tests (wall-clock ratios,
+    opt-in via ``-m bench``): this is deterministic, always runs in CI, and
+    also proves the second per-bar ``select`` read is a free same-bar cache
+    hit rather than doubling the call count.
+    """
+    import investment_team.strategy_lab.indicators.streaming as streaming
+
+    fast, slow, signal = 12, 26, 9
+    bars = _series(600, seed=91)
+
+    call_lengths: List[int] = []
+    original = streaming.windowed_ema
+
+    def _spy(bar_window, period, source="close"):
+        call_lengths.append(len(bar_window))
+        return original(bar_window, period, source)
+
+    monkeypatch.setattr(streaming, "windowed_ema", _spy)
+
+    reg = IndicatorRegistry()
+    for n in range(slow, len(bars) + 1):
+        sub = bars[:n]
+        reg.macd(sub, fast=fast, slow=slow, signal=signal, select="signal")
+        reg.macd(sub, fast=fast, slow=slow, signal=signal, select="histogram")
+
+    # Every windowed_ema call operates on a fixed-size window (fast or
+    # slow) — never one that scales with `n`. A regression to a per-bar
+    # full re-walk (the legacy O(N·W) shape) would show lengths climbing
+    # toward `len(bars)`.
+    assert call_lengths, "expected at least one windowed_ema call"
+    assert set(call_lengths) <= {fast, slow}
+
+    # Exactly two calls per streamed bar (fast + slow leg) — the second
+    # `select="histogram"` read on the same bar is a same-bar cache hit
+    # and adds zero extra calls, so the total stays linear in bar count
+    # instead of doubling.
+    expected_calls = 2 * (len(bars) - slow + 1)
+    assert len(call_lengths) == expected_calls, (
+        f"expected {expected_calls} windowed_ema calls, got {len(call_lengths)} "
+        "— extra calls indicate a hidden re-walk or lost same-bar caching"
+    )
+
+
 # ---------------------------------------------------------------------------
 # MACD — symbol isolation
 # ---------------------------------------------------------------------------
