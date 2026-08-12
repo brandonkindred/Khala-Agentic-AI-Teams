@@ -34,6 +34,8 @@ from branding_team.models import (
     BrandExperiencePrinciplesOutput,
     BrandStoryOutput,
     ChannelGuidelineOutput,
+    ColorEntry,
+    ColorEntryOutput,
     CoreValue,
     CoreValueOutput,
     CoreValuesOutput,
@@ -860,3 +862,53 @@ def test_logo_usage_rule_output_is_usable_as_a_logo_usage_rule() -> None:
         clear_space="0.5x cap-height",
     )
     assert isinstance(output, LogoUsageRule)
+
+
+def test_color_entry_permits_blank_and_omitted_content() -> None:
+    """``ColorEntry`` is the soft merge-target twin: only ``name`` is
+    required; ``hex_value``/``usage``/``psychological_rationale`` accept
+    blank/omitted content, matching ``VisualIdentityOutput.color_palette``'s
+    partial-fragment merge contract."""
+    minimal = ColorEntry(name="Midnight")
+    assert minimal.hex_value == ""
+    assert minimal.usage == ""
+    assert minimal.psychological_rationale == ""
+
+    explicit_blank = ColorEntry(
+        name="Midnight", hex_value="", usage="", psychological_rationale=""
+    )
+    assert explicit_blank.hex_value == ""
+
+
+def test_color_entry_output_rejects_blank_content() -> None:
+    """A blank name, hex value, usage, or rationale must fail validation."""
+    valid_kwargs = dict(
+        name="Midnight",
+        hex_value="#1a1a2e",
+        usage="Primary background",
+        psychological_rationale="Conveys depth and authority",
+    )
+
+    with pytest.raises(ValidationError):
+        ColorEntryOutput(**{**valid_kwargs, "name": ""})
+    with pytest.raises(ValidationError):
+        ColorEntryOutput(**{**valid_kwargs, "hex_value": ""})
+    with pytest.raises(ValidationError):
+        ColorEntryOutput(**{**valid_kwargs, "usage": ""})
+    with pytest.raises(ValidationError):
+        ColorEntryOutput(**{**valid_kwargs, "psychological_rationale": ""})
+
+    output = ColorEntryOutput(**valid_kwargs)
+    assert output.name == "Midnight"
+
+
+def test_color_entry_output_is_usable_as_a_color_entry() -> None:
+    """The derived strict twin stays a normal, directly constructible
+    ``pydantic.BaseModel`` subclass wherever ``ColorEntry`` is."""
+    output = ColorEntryOutput(
+        name="Midnight",
+        hex_value="#1a1a2e",
+        usage="Primary background",
+        psychological_rationale="Conveys depth and authority",
+    )
+    assert isinstance(output, ColorEntry)

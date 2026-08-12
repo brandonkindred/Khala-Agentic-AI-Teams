@@ -715,6 +715,23 @@ class ColorEntry(BaseModel):
     psychological_rationale: str = ""
 
 
+ColorEntryOutput = _derive_strict_variant(
+    "ColorEntryOutput",
+    ColorEntry,
+    doc=(
+        "Agent-facing color entry; requires non-empty fields.\n\n"
+        "Field-for-field twin of ``ColorEntry`` with required content — "
+        "``ColorEntry`` itself must stay soft (only ``name`` required) since "
+        "it also backs ``VisualIdentityOutput.color_palette``'s merge target. "
+    )
+    + _STRICT_TWIN_DOC_SUFFIX,
+    name=(str, Field(min_length=1)),
+    hex_value=(str, Field(min_length=1)),
+    usage=(str, Field(min_length=1)),
+    psychological_rationale=(str, Field(min_length=1)),
+)
+
+
 class TypographySpec(BaseModel):
     """Typography system specification."""
 
@@ -1243,15 +1260,6 @@ class LogoSuiteOutput(BaseModel):
     """
 
     logo_suite: List[LogoUsageRuleOutput] = Field(min_length=4, max_length=4)
-
-
-class ColorEntryOutput(BaseModel):
-    """Agent-facing color entry; requires non-empty fields."""
-
-    name: str = Field(min_length=1)
-    hex_value: str = Field(min_length=1)
-    usage: str = Field(min_length=1)
-    psychological_rationale: str = Field(min_length=1)
 
 
 class ColorPaletteSystemOutput(BaseModel):
