@@ -42,7 +42,6 @@ _RUNNER_OWNED_NAMES = (
     "_is_overflow_shaped",
     "_run_batch_with_recovery",
     "_recover_from_overflow",
-    "_MAX_BATCH_BISECT_DEPTH",
 )
 
 

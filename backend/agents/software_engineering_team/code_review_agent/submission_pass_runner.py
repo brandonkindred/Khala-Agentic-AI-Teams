@@ -25,8 +25,8 @@ Invariants:
       pre-runner fail-safe posture each pass already has.
     - **No character/token packing.** The full changed-file set is attempted
       in one call; reactive recovery only grows the call count for a batch
-      that has already overflowed, and is depth-bounded so it can never
-      recurse unboundedly.
+      that has already overflowed, bisecting until single-file leaves so it
+      cannot recurse unboundedly (each split reduces file count).
     - **Callers own content, not mechanics.** The runner never builds a
       `CodebaseIndex`, never invents prompt text, and never validates parsed
       findings — those stay entirely with the calling pass via the
@@ -52,14 +52,6 @@ except ImportError:  # pragma: no cover - strands is a required dependency
 logger = logging.getLogger(__name__)
 
 T = TypeVar("T")
-
-# Depth cap for reactive file-group bisection: at most this many successive
-# halvings of a batch before recovery gives up instead of continuing to
-# split. Bounds worst-case call count per submission to O(2 ** depth) leaf
-# batches; not env-overridable, unlike the map-phase bisector, since this
-# operates at whole-file granularity where a handful of levels already
-# isolates a single culprit file.
-_MAX_BATCH_BISECT_DEPTH = 4
 
 # Provider/API error text that means "input or completion ran out of room"
 # even when the exception type is a generic 4xx wrapper rather than a Strands
@@ -269,17 +261,19 @@ def _recover_from_overflow(
     Preconditions: ``_is_overflow_shaped(exc)`` is True; ``batch.items`` is non-empty.
 
     Postconditions:
-        - When ``batch.items`` has more than one file and ``depth`` is under
-          :data:`_MAX_BATCH_BISECT_DEPTH`, bisects the file list in half and
-          recurses into each half at ``depth + 1``, concatenating both halves'
-          results in order (each half may recover independently). Each half's
+        - When ``batch.items`` has more than one file, bisects the file list
+          in half and recurses into each half at ``depth + 1``, concatenating
+          both halves' results in order (each half may recover independently).
+          Continues until every overflowing multi-file batch is reduced to
+          single-file leaves — there is no depth cap that would leave a
+          multi-file batch unrecoverable. Each half's
           :attr:`FileBatch.is_partial` is True, since neither contains all of
           ``batch.items``.
-        - Otherwise (a single file, or the bisect depth cap reached) returns
-          ``[]`` — the runner never truncates file, body, or manifest content
-          to force a fit. Logged, never raised.
+        - When ``batch.items`` is a single file, returns ``[]`` — the runner
+          never truncates file, body, or manifest content to force a fit.
+          Logged, never raised.
     """
-    if len(batch.items) > 1 and depth < _MAX_BATCH_BISECT_DEPTH:
+    if len(batch.items) > 1:
         logger.warning(
             "%s: batch %s/%s overflowed (%s: %s); bisecting %s file(s) at depth %s",
             pass_label,

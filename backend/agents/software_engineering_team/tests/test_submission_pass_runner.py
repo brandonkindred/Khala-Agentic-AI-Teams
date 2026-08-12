@@ -298,3 +298,33 @@ def test_context_window_overflow_bisects(
         parse=json.loads,
     )
     assert result == [{"file": "a.py"}, {"file": "b.py"}]
+
+
+def test_bisect_continues_past_former_depth_cap_to_isolate_files(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Multi-file batches must keep splitting until each leaf is one file.
+
+    A fixed depth-4 cap would leave 2-file leaves for a 32-file submission and
+    drop them all when every multi-file call overflows.
+    """
+
+    def _handler(prompt: str) -> Any:
+        paths = prompt.replace("PATHS:", "")
+        if "," in paths:
+            raise MaxTokensReachedException("too large")
+        return {"file": paths}
+
+    _patch_via_reasoning_json(monkeypatch, _handler)
+
+    files = [(f"f{i:02d}.py", "x") for i in range(32)]
+    result = run_submission_pass(
+        DummyLLMClient(),
+        changed_files=files,
+        reasoning_system_prompt="sys",
+        formatting_instructions="fmt",
+        build_prompt=_paths_prompt,
+        tools=[],
+        parse=json.loads,
+    )
+    assert [row["file"] for row in result] == [path for path, _ in files]
