@@ -1,15 +1,30 @@
-"""Prompt-spec schema and template renderer for branding agent factories.
+"""Prompt-spec schema, template renderer, and per-agent prompt data for
+``branding_team.agents``'s ``make_*`` factories.
 
 Mirrors the data-driven prompt-construction idiom proven in
 ``branding_team.assistant.prompts`` (``_PHASE_ITEMS``/``_PHASE_INTROS``/
 ``_phase_section()``): a prompt is represented as an explicit data structure
 and rendered by a single pure function, instead of being hand-written prose
-duplicated across factories. That mechanism is keyed by the shared, ordered
-``BrandPhase`` enum, which doesn't fit here — each ``make_*`` factory in
-``agents.py`` is an independent unit with no shared ordering key. What
-carries over is the idiom itself: role, output fields, and cardinality
-constraints as data; a renderer that turns the data into the same
-hand-written-prose shape the factories used before.
+duplicated across factories. As in that module, the prompt *data* lives here
+next to the renderer rather than in the consumer (``agents.py``) that wires
+rendered text into ``build_agent()`` calls — the same split as
+``assistant/prompts.py`` (data + renderer) vs. ``assistant/agent.py``
+(consumer).
+
+The schema itself is intentionally *not* shared with
+``assistant.prompts``'s ``BrandPhase``-keyed mechanism, despite the
+surface-level similarity — the two solve different rendering problems.
+``assistant/prompts.py`` assembles one ordered, 5-part guided-flow document
+from phase-keyed fragments that reference neighboring phases by number
+(``_PHASE_DEPENDS_ON_PREV``, ``_PHASE_GATE_CONDITIONS``, joined via
+``PHASE_ORDER``). ``agents.py``'s ~38 factories each need one independent,
+unordered, single-role prompt (role + intro + numbered output fields +
+optional closing) with no neighbor/position concept at all. Forcing both
+shapes through one schema would mean branching on two incompatible calling
+conventions inside a single renderer — more complexity, not less. What
+*does* carry over from ``assistant/prompts.py`` is the idiom: role, output
+fields, and cardinality constraints as data; a small renderer that turns the
+data into the same hand-written-prose shape the factories used before.
 """
 
 from __future__ import annotations
@@ -75,3 +90,34 @@ def render_prompt(spec: PromptSpec) -> str:
     if spec.closing:
         lines.append(spec.closing)
     return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Per-agent prompt data — proof-of-concept for the Phase 1 Purpose & Vision
+# Writer and Phase 3 Iconography Director factories in ``agents.py``. Further
+# ``make_*`` factories are migrated to specs here in follow-on sub-issues.
+# ---------------------------------------------------------------------------
+
+PURPOSE_VISION_PROMPT_SPEC = PromptSpec(
+    role="a Purpose & Vision Writer",
+    intro="Given a branding mission, write three things:",
+    fields=[
+        PromptField("brand_purpose", "why the company exists (one sentence)"),
+        PromptField("mission_statement", "what the company does for its audience (one sentence)"),
+        PromptField("vision_statement", "the aspirational future state (one sentence)"),
+    ],
+    closing="Be concise, inspiring, and specific to the company.",
+)
+
+ICONOGRAPHY_DIRECTOR_PROMPT_SPEC = PromptSpec(
+    role="an Iconography Director",
+    intro="Based on the winning moodboard, define:",
+    fields=[
+        PromptField(
+            "iconography_style", "describe the icon aesthetic (line weight, corner radius, fill)"
+        ),
+        PromptField(
+            "illustration_style", "describe the illustration approach (flat, isometric, etc.)"
+        ),
+    ],
+)

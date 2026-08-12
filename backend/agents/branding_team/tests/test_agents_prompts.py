@@ -14,13 +14,14 @@ is provably behavior-preserving.
 
 from __future__ import annotations
 
-from branding_team.agents import (
-    _ICONOGRAPHY_DIRECTOR_PROMPT_SPEC,
-    _PURPOSE_VISION_PROMPT_SPEC,
-    make_iconography_director,
-    make_purpose_vision_writer,
+from branding_team.agents import make_iconography_director, make_purpose_vision_writer
+from branding_team.prompt_spec import (
+    ICONOGRAPHY_DIRECTOR_PROMPT_SPEC,
+    PURPOSE_VISION_PROMPT_SPEC,
+    PromptField,
+    PromptSpec,
+    render_prompt,
 )
-from branding_team.prompt_spec import PromptField, PromptSpec, render_prompt
 
 # Captured verbatim from ``agents.py`` before ``make_purpose_vision_writer``
 # was migrated to ``render_prompt``. Kept as a literal snapshot so the
@@ -44,11 +45,11 @@ _ORIGINAL_ICONOGRAPHY_DIRECTOR_PROMPT = (
 
 
 def test_purpose_vision_prompt_matches_pre_migration_text() -> None:
-    assert render_prompt(_PURPOSE_VISION_PROMPT_SPEC) == _ORIGINAL_PURPOSE_VISION_PROMPT
+    assert render_prompt(PURPOSE_VISION_PROMPT_SPEC) == _ORIGINAL_PURPOSE_VISION_PROMPT
 
 
 def test_iconography_director_prompt_matches_pre_migration_text() -> None:
-    assert render_prompt(_ICONOGRAPHY_DIRECTOR_PROMPT_SPEC) == _ORIGINAL_ICONOGRAPHY_DIRECTOR_PROMPT
+    assert render_prompt(ICONOGRAPHY_DIRECTOR_PROMPT_SPEC) == _ORIGINAL_ICONOGRAPHY_DIRECTOR_PROMPT
 
 
 def test_purpose_vision_writer_agent_system_prompt_matches_pre_migration_text() -> None:
