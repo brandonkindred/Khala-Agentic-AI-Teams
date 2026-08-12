@@ -6,9 +6,9 @@ Postgres) each expose a ``turn(conversation_id)`` context manager that holds a
 per-conversation lock across the whole read -> LLM call -> write sequence, so
 a concurrent ``send_message`` on the same conversation blocks until the first
 turn commits rather than racing it or losing an update. The in-memory store
-implements the lock with a per-record ``threading.Lock`` and a manual
-rollback-on-exception snapshot restore; the Postgres store implements the
-same contract with ``SELECT ... FOR UPDATE`` and transaction rollback.
+implements the lock via this module's :class:`InMemoryTurnLocks` (a keyed
+lock table, not a per-record lock); the Postgres store implements the same
+contract with ``SELECT ... FOR UPDATE`` and transaction rollback.
 ``agentic_team_provisioning``'s conversation routes have no equivalent lock at
 all today.
 
@@ -21,14 +21,16 @@ This module extracts the store-agnostic pieces of that protocol:
   acquire -> snapshot -> yield -> rollback-on-exception -> release dance, so
   a future in-memory store doesn't re-derive it from scratch.
 * :class:`TurnStore` — a ``Protocol`` documenting the target turn-lock shape
-  both existing stores' locking mechanics are modeled on. Neither store is a
-  structural match *yet*: both still yield their own local
-  ``agent_studio.store.ConversationTurn`` (``definition``/``set_definition``)
-  from ``turn()`` rather than this module's :class:`ConversationTurn`
-  (``draft``/``set_draft``) — becoming ``TurnStore``-conformant is part of
-  the migration, not this extraction.
+  both existing stores' locking mechanics are modeled on.
 
-Nothing here is wired into either existing store yet; that migration is a
+``agent_studio.store.AgentStudioConversationStore`` now wraps
+:class:`InMemoryTurnLocks` and yields this module's :class:`ConversationTurn`
+(``draft``/``set_draft``) directly — it's ``TurnStore``-conformant.
+``agent_studio.pg_store.PostgresAgentStudioConversationStore`` yields this
+module's :class:`ConversationTurn` too, but keeps its own ``SELECT ... FOR
+UPDATE``-based locking rather than :class:`InMemoryTurnLocks` (a Postgres row
+lock, not an in-memory keyed table). ``agentic_team_provisioning``'s
+conversation routes still have no equivalent lock at all; wiring one up is a
 follow-up.
 """
 

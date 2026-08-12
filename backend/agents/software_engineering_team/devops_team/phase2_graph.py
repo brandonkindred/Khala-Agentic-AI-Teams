@@ -2,7 +2,7 @@
 
 Replaces the sequential ``iac_agent.run → cicd_agent.run → deployment_agent.run``
 calls in ``DevOpsTeamLeadAgent._run_pipeline`` with concurrent execution via
-``concurrent.futures.ThreadPoolExecutor``. All three design agents produce
+``shared.concurrency.parallel_map``. All three design agents produce
 disjoint artifact files and have no cross-dependencies, so they can run
 concurrently. Wall-clock latency drops from ``sum(iac, cicd, deploy)`` to
 ``max(iac, cicd, deploy)``.
@@ -11,8 +11,9 @@ concurrently. Wall-clock latency drops from ``sum(iac, cicd, deploy)`` to
 from __future__ import annotations
 
 import logging
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Any, Dict, Optional
+from typing import Any, Callable, Dict, Optional
+
+from shared.concurrency import parallel_map
 
 from .cicd_pipeline_agent import CICDPipelineAgent, CICDPipelineAgentInput
 from .cicd_pipeline_agent.models import CICDPipelineAgentOutput
@@ -36,14 +37,29 @@ def run_phase2_parallel(
 ) -> Dict[str, Any]:
     """Run Phase 2 design agents, returning merged artifacts.
 
-    When ``parallel=True`` (the default), the three independent agents
-    run simultaneously in a ``ThreadPoolExecutor``, reducing wall-clock
-    latency from ``sum(iac, cicd, deploy)`` to ``max(iac, cicd, deploy)``.
+    When ``parallel=True`` (the default), the three independent agents run
+    simultaneously via ``shared.concurrency.parallel_map``, reducing
+    wall-clock latency from ``sum(iac, cicd, deploy)`` to
+    ``max(iac, cicd, deploy)``.
 
     Set ``parallel=False`` for deterministic execution order — this is
     needed when the backing LLM client is a ``_ScriptedClient`` with a
-    shared sequential response list, because the thread pool would cause
-    agents to consume responses non-deterministically.
+    shared sequential response list, because concurrent execution would
+    cause agents to consume responses non-deterministically.
+
+    Failure policy — deliberately silent-default, not fast-fail: this
+    function, not the individual agents, owns catch/fallback policy for
+    the three Phase 2 design agents (see
+    ``docs/LLM_CALLING_PATTERN_DECISION.md`` Pattern 3 and
+    ``docs/LLM_CALLING_PATTERNS_AUDIT.md``). Each agent's ``DevOpsSingleShotAgent``
+    base intentionally lets LLM/parse errors propagate unchanged out of
+    ``run()``, on the assumption the caller handles them. ``parallel_map``
+    itself is fast-fail (an unhandled exception aborts the whole batch), so
+    each agent call below is individually wrapped to catch its own
+    ``Exception``, log a warning, and degrade to ``None`` instead of
+    propagating — one agent failing must not abort the other two or the
+    aggregation step. A ``None`` result is then replaced with that agent's
+    typed empty-summary default below.
 
     Args:
         iac_agent: The IaC agent instance (from the orchestrator).
@@ -78,25 +94,19 @@ def run_phase2_parallel(
     def _run_deploy() -> DeploymentStrategyAgentOutput:
         return deployment_agent.run(DeploymentStrategyAgentInput(task_spec=task_spec))
 
-    if parallel:  # pragma: no cover  # integration-only: ThreadPoolExecutor parallel-agent fan-out
-        with ThreadPoolExecutor(max_workers=3, thread_name_prefix="devops_phase2") as pool:
-            futures = {
-                pool.submit(_run_iac): "iac",
-                pool.submit(_run_cicd): "cicd",
-                pool.submit(_run_deploy): "deploy",
-            }
-            for future in as_completed(futures):
-                agent_name = futures[future]
-                try:
-                    result = future.result()
-                    if agent_name == "iac":
-                        iac_result = result
-                    elif agent_name == "cicd":
-                        cicd_result = result
-                    elif agent_name == "deploy":
-                        deploy_result = result
-                except Exception as exc:
-                    logger.warning("DevOps Phase 2: %s agent failed: %s", agent_name, exc)
+    def _guarded(named_fn: tuple[str, Callable[[], Any]]) -> Optional[Any]:
+        agent_name, fn = named_fn
+        try:
+            return fn()
+        except Exception as exc:
+            logger.warning("DevOps Phase 2: %s agent failed: %s", agent_name, exc)
+            return None
+
+    if parallel:  # pragma: no cover  # integration-only: parallel_map fan-out
+        tasks = [("iac", _run_iac), ("cicd", _run_cicd), ("deploy", _run_deploy)]
+        iac_result, cicd_result, deploy_result = parallel_map(
+            tasks, _guarded, max_workers=3, skip_none=False
+        )
     else:
         # Sequential fallback — deterministic ordering for scripted test clients.
         try:

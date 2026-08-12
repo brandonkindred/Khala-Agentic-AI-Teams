@@ -4,6 +4,7 @@ Prompts for the backend-code-v2 team.
 Written from scratch — no reuse of ``backend_agent`` prompts.
 """
 
+from software_engineering_team.shared.coding_standards import CODING_STANDARDS
 from software_engineering_team.shared.prompts import (
     DELIVER_COMMIT_MSG_TEMPLATE as DELIVER_COMMIT_MSG_TEMPLATE,
 )
@@ -25,21 +26,6 @@ from software_engineering_team.shared.security_service import (
     SecurityProfile,
     build_review_prompt,
 )
-
-# ---------------------------------------------------------------------------
-# Shared coding standards (injected into Execution and Problem-solving)
-# ---------------------------------------------------------------------------
-
-CODING_STANDARDS = """
-**Coding standards (apply to every file you produce):**
-
-1. Design by Contract: preconditions, postconditions, invariants on all public APIs.
-2. SOLID principles in class/module design.
-3. Docstrings on every class, method, and function.
-4. Unit tests targeting at least 85 % branch coverage.
-5. No commented-out code in production files.
-6. Explicit error handling — do not swallow exceptions silently.
-"""
 
 PYTHON_CONVENTIONS = """
 **Python conventions:**

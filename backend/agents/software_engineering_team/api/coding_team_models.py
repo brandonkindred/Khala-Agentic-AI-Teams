@@ -198,6 +198,10 @@ class GroomGithubIssuesRequest(BaseModel):
     owner: str = Field(..., description="GitHub repository owner (user or org)")
     repo: str = Field(..., description="GitHub repository name")
     issue_number: int = Field(..., description="Issue to groom")
+    github_token: Optional[str] = Field(
+        default=None,
+        description="Overrides GITHUB_TOKEN env var for this request.",
+    )
 
 
 class GroomGithubIssuesResponse(BaseModel):
