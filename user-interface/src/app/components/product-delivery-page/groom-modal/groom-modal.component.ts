@@ -15,12 +15,12 @@ import {
 } from '@angular/material/dialog';
 import { MatIconModule } from '@angular/material/icon';
 import { MatProgressSpinnerModule } from '@angular/material/progress-spinner';
-import { ProductDeliveryService } from '../../../../services/product-delivery.service';
-import { InlineBannerComponent } from '../../../../shared/inline-banner/inline-banner.component';
+import { ProductDeliveryService } from '../../../services/product-delivery.service';
+import { InlineBannerComponent } from '../../../shared/inline-banner/inline-banner.component';
 import type {
   GroomMethod,
   GroomResult,
-} from '../../../../models/product-delivery.model';
+} from '../../../models/product-delivery.model';
 
 export interface GroomModalData {
   productId: string;

@@ -13,12 +13,12 @@ import { MatFormFieldModule } from '@angular/material/form-field';
 import { MatIconModule } from '@angular/material/icon';
 import { MatProgressSpinnerModule } from '@angular/material/progress-spinner';
 import { MatSelectModule } from '@angular/material/select';
-import { ProductDeliveryService } from '../../../../services/product-delivery.service';
+import { ProductDeliveryService } from '../../../services/product-delivery.service';
 import type {
   Product,
   Sprint,
   SprintPlanResult,
-} from '../../../../models/product-delivery.model';
+} from '../../../models/product-delivery.model';
 
 const ACTIVE_STATUSES = new Set(['draft', 'proposed', 'planning']);
 
