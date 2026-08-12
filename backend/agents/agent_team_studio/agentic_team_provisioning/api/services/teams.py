@@ -385,13 +385,14 @@ def update_roster_agent(team_id: str, agent_name: str, req: UpdateAgentRequest):
     """Inline roster edit endpoint (legacy contract).
 
     Persona fields now live on ``AgentManifest``; roster rows are thin refs only.
-    Any request that supplies persona fields is rejected. An empty body is a no-op
+    ``UpdateAgentRequest`` declares no editable fields, so any non-empty body —
+    legacy persona field or otherwise — is rejected. An empty body is a no-op
     that returns the current enriched agent.
 
     Preconditions: ``team_id`` and ``agent_name`` are non-empty strings.
     Postconditions: ``200`` with the enriched agent when the body is empty;
-        ``400`` when any persona field is supplied; ``404`` if the team or agent
-        is unknown (roster unchanged).
+        ``400`` when any key is supplied; ``404`` if the team or agent is
+        unknown (roster unchanged).
     """
     from agent_team_studio.agentic_team_provisioning.api import main as _main
 
