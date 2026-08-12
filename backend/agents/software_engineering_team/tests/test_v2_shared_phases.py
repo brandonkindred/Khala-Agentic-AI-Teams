@@ -226,6 +226,22 @@ def test_parse_planning_output_fallback_and_skip():
     assert result.microtasks[0].tool_agent == be_models.ToolAgentKind.GENERAL
 
 
+def test_parse_planning_output_dedupes_by_id():
+    """A microtask id repeated in planner output is skipped; the first occurrence wins."""
+    raw = {
+        "microtasks": [
+            {"id": "m1", "title": "first", "tool_agent": "general"},
+            {"id": "m1", "title": "second", "tool_agent": "general"},
+            {"id": "m2", "title": "third", "tool_agent": "general"},
+        ],
+        "language": "python",
+        "summary": "s",
+    }
+    result = sh_plan.parse_planning_output(raw, "python", models=be_models)
+    assert [m.id for m in result.microtasks] == ["m1", "m2"]
+    assert result.microtasks[0].title == "first"
+
+
 # --- execution -------------------------------------------------------------
 
 

@@ -218,7 +218,7 @@ def github_publish_activity(request: dict[str, Any]) -> dict[str, Any]:
     with _main.GitHubClient(token=token) as client:
         if already_complete:
             issue_obj = _main.Issue(
-                number=num, title="", body="", state="open", html_url="", labels=()
+                number=num, title="", body="", state="open", html_url="", labels=(), id=num
             )
             _finish_already_complete(client, job_id, req_obj, issue_obj, job_after)
         else:
@@ -229,6 +229,7 @@ def github_publish_activity(request: dict[str, Any]) -> dict[str, Any]:
                 state="open",
                 html_url="",
                 labels=(),
+                id=num,
             )
             _publish_merged_work(
                 client,
