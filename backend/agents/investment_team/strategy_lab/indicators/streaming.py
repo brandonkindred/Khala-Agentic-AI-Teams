@@ -35,10 +35,43 @@ bar — so the engine's golden snapshots are unchanged.
 from __future__ import annotations
 
 import math
+import os
 from collections import deque
-from typing import Any, Deque, Dict, Optional, Sequence, Tuple
+from typing import TYPE_CHECKING, Any, Deque, Dict, Optional, Sequence, Tuple
+
+if TYPE_CHECKING:
+    # Deferred: ``..batch_indicator_cache`` transitively imports
+    # ``..market_data_service`` -> ``.models`` -> ``.strategy_lab.spec_dsl`` ->
+    # ``.indicators.registry_metadata`` -> this module, so importing it eagerly
+    # at module scope here would be a circular import. Only the type hints
+    # below need the name; ``from __future__ import annotations`` (above)
+    # already makes every annotation in this file a lazily-evaluated string,
+    # so no runtime import is required.
+    from ..batch_indicator_cache import BatchIndicatorCache
 
 NAN = float("nan")
+
+# Feature flag gating whether a registry constructed with a ``batch_cache``
+# actually consults it (see :class:`IndicatorRegistry`). Defaults to off so
+# every existing caller's behavior is unchanged until a batch caller
+# (tracked separately) both flips this on and passes a real cache/timeframe.
+_BATCH_CACHE_ENV_VAR = "STRATEGY_LAB_BATCH_INDICATOR_CACHE_ENABLED"
+_TRUE_ENV_VALUES = frozenset({"true", "1", "yes", "on"})
+
+
+def _batch_cache_flag_enabled() -> bool:
+    """Read ``_BATCH_CACHE_ENV_VAR`` without importing ``shared.env_config``.
+
+    This module is copied verbatim (unmodified, stdlib-only) into the
+    flat-sandbox subprocess ``StreamingHarness`` builds for strategy
+    execution (``trading_service/strategy/streaming_harness.py``), which has
+    no ``shared`` package on its path — importing ``shared.env_config`` here
+    would crash every sandboxed strategy at import time. This reimplements
+    just the boolean-truthiness slice of ``shared.env_config.env_bool``
+    (case-insensitive ``true``/``1``/``yes``/``on``; anything else, including
+    unset, is ``False``) rather than depending on it.
+    """
+    return os.environ.get(_BATCH_CACHE_ENV_VAR, "").strip().lower() in _TRUE_ENV_VALUES
 
 
 # ---------------------------------------------------------------------------
@@ -367,10 +400,45 @@ class IndicatorRegistry:
     stream isolated. Bars without a ``symbol`` attribute share one cache
     slot under ``symbol=None``; safe for a single such stream, unsafe
     across multiple unrelated symbol-less streams.
+
+    Batch indicator cache (optional): a registry may also be given a
+    :class:`~..batch_indicator_cache.BatchIndicatorCache` reference so that
+    ``resolve_indicator`` (the single dispatch point every caller routes
+    through) can check a batch-scoped, cross-strategy cache before falling
+    back to this instance's own per-bar streaming computation — see
+    :func:`resolve_indicator`. This is purely additive and off by default;
+    see :meth:`__init__`.
     """
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        batch_cache: Optional[BatchIndicatorCache] = None,
+        timeframe: str = "",
+    ) -> None:
+        """Construct a registry, optionally able to consult a batch cache.
+
+        Preconditions:
+          - ``timeframe`` is a plain string (empty is valid and means "no
+            timeframe known" — see postconditions).
+        Postconditions:
+          - ``self._batch_cache`` is ``batch_cache`` when the
+            ``STRATEGY_LAB_BATCH_INDICATOR_CACHE_ENABLED`` env var (read via
+            :func:`_batch_cache_flag_enabled`, default off) is true, and
+            ``None`` otherwise — regardless of what was passed. Every
+            existing zero-arg ``IndicatorRegistry()`` call site, and every
+            call site until the flag is explicitly enabled, therefore gets
+            ``self._batch_cache is None`` and consults nothing, preserving
+            today's behavior byte-for-byte.
+          - ``self._timeframe`` is stored verbatim; :func:`resolve_indicator`
+            only consults the batch cache when both a cache is present and
+            this is non-empty (bars carry no timeframe of their own).
+        """
         self._state: Dict[Tuple, Dict[str, Any]] = {}
+        self._batch_cache: Optional[BatchIndicatorCache] = (
+            batch_cache if _batch_cache_flag_enabled() else None
+        )
+        self._timeframe = timeframe
 
     # ----- key/fingerprint helpers --------------------------------------
 
@@ -1502,7 +1570,7 @@ class IndicatorRegistry:
 # ---------------------------------------------------------------------------
 
 
-def resolve_indicator(
+def _dispatch_indicator(
     reg: "IndicatorRegistry",
     name: str,
     bars: Sequence[Any],
@@ -1518,7 +1586,9 @@ def resolve_indicator(
     ``strategy_indicators``' validated ``**params`` both already carry them).
     Postconditions: returns the registry's trailing-bar value for ``bars``,
     or ``None`` during warm-up — identical to calling the registry method
-    directly with the same arguments.
+    directly with the same arguments. Always walks ``reg``'s own per-bar
+    streaming state; never consults a batch cache (that's
+    :func:`resolve_indicator`'s job, which this function is the fallback for).
     """
     if name == "sma":
         return reg.sma(bars, period=int(params["period"]), source=source)
@@ -1577,3 +1647,73 @@ def resolve_indicator(
     if name == "williams_r":
         return reg.williams_r(bars, period=int(params["period"]))
     raise ValueError(f"unknown indicator name: {name!r}")
+
+
+def resolve_indicator(
+    reg: "IndicatorRegistry",
+    name: str,
+    bars: Sequence[Any],
+    *,
+    source: str = "close",
+    **params: Any,
+) -> Optional[float]:
+    """Dispatch DSL indicator ``name``, consulting ``reg``'s batch cache first.
+
+    Preconditions: same as :func:`_dispatch_indicator` — ``name`` is a known
+    DSL indicator name; ``params`` carries every param that indicator's
+    registry method requires.
+    Postconditions: returns the same value :func:`_dispatch_indicator` would
+    for ``(reg, name, bars, source, params)`` — batch-cache consultation only
+    ever changes *how* that value is produced (a cache hit skips walking
+    ``reg``'s own streaming state), never *what* value is returned, since the
+    cache's key is fully determined by these same inputs plus ``bars``'
+    content.
+
+    The batch cache (``reg._batch_cache``, set only when
+    ``STRATEGY_LAB_BATCH_INDICATOR_CACHE_ENABLED`` was true at ``reg``'s
+    construction — see :meth:`IndicatorRegistry.__init__`) is consulted only
+    when all of the following hold, so that a registry built the ordinary
+    way (no ``batch_cache``/``timeframe`` args, flag off) always falls
+    straight through to :func:`_dispatch_indicator` unchanged:
+      - ``reg._batch_cache`` is not ``None``.
+      - ``bars`` is non-empty and ``reg._timeframe`` is non-empty (bars carry
+        no timeframe of their own; it must come from the registry).
+      - ``bars[-1]`` carries a non-empty string ``symbol`` attribute (per
+        :class:`~..batch_indicator_cache.BatchIndicatorCache`'s precondition
+        that ``symbol`` be a non-empty string).
+      - every bar in ``bars`` carries a ``date`` attribute.
+        ``BatchIndicatorCache._data_fingerprint`` reuses
+        ``market_data_cache.store.compute_dataset_fingerprint``, whose
+        ``_hash_bars`` helper sorts and hashes on ``bar.date`` — the shape
+        of ``market_data_service.OHLCVBar``, not
+        ``trading_service.strategy.contract.Bar`` (the streaming engine's
+        actual bar type, which carries ``timestamp``/no ``date``). Until the
+        cache's fingerprint helper (or its bar inputs) is extended to cover
+        ``timestamp``-only bars, consulting it with ``contract.Bar``-shaped
+        streams would raise ``AttributeError`` instead of returning a value
+        — a caller-visible regression on the very code path this feature
+        exists to speed up. Guarding on ``hasattr(..., "date")`` here keeps
+        that gap non-fatal: it declines to consult (falls through to
+        :func:`_dispatch_indicator`) rather than crashing, for exactly the
+        bar shapes the cache cannot key today.
+    """
+
+    def _compute() -> Optional[float]:
+        return _dispatch_indicator(reg, name, bars, source=source, **params)
+
+    cache = reg._batch_cache
+    timeframe = reg._timeframe
+    if cache is not None and bars and timeframe and hasattr(bars[-1], "date"):
+        symbol = _safe_getattr(bars[-1], "symbol")
+        if isinstance(symbol, str) and symbol:
+            cache_params: Dict[str, Any] = dict(params)
+            # BatchIndicatorCache treats `params` as the complete parameter
+            # identity — `source` steers the math for source-sensitive
+            # indicators but isn't itself in `params`, so it must be folded
+            # in here (see BatchIndicatorCache.get_or_compute's docstring).
+            cache_params["source"] = source
+            value, _hit = cache.get_or_compute(
+                name, cache_params, symbol, timeframe, bars, _compute
+            )
+            return value
+    return _compute()
