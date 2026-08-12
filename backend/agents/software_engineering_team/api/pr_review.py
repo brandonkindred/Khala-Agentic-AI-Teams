@@ -12,10 +12,10 @@ import itertools
 import logging
 import os
 import threading
-from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
-from typing import Any, Dict, List, NamedTuple, Optional
+from typing import Any, Callable, Dict, List, NamedTuple, Optional
 
+from shared.concurrency import parallel_map
 from software_engineering_team.activity import ActivityBridge
 from software_engineering_team.api import coding_team_main as _main
 from software_engineering_team.api.advisory_lock import advisory_lock
@@ -356,12 +356,7 @@ def _fetch_head_files(
             content = None
         return f.filename, content
 
-    workers = min(_HEAD_FETCH_PARALLELISM, len(targets))
-    if workers <= 1:
-        results = [_one(f) for f in targets]
-    else:
-        with ThreadPoolExecutor(max_workers=workers) as executor:
-            results = list(executor.map(_one, targets))
+    results = parallel_map(targets, _one, max_workers=_HEAD_FETCH_PARALLELISM, skip_none=False)
     return {name: content for name, content in results if content and content.strip()}
 
 
@@ -931,31 +926,44 @@ def _run_reviewer(
     return outputs[0] if len(outputs) == 1 else _MergedReviewerOutput(outputs)
 
 
-def _results_draining_exceptions(futures: List[Any]) -> List[Any]:
-    """Call ``result()`` on every future; re-raise the first failure after draining all.
+class _ThunkOutcome(NamedTuple):
+    """One thunk's result, captured instead of raised — see ``_results_draining_exceptions``."""
 
-    A generator or list-comprehension unpack stops at the first ``result()``
-    failure and leaves sibling exceptions unretrieved on the remaining futures.
+    value: Any
+    error: Optional[BaseException]
+
+
+def _results_draining_exceptions(tasks: "tuple[Callable[[], Any], ...]") -> List[Any]:
+    """Run every zero-arg ``tasks`` callable concurrently; re-raise the first failure after draining all.
+
+    A generator or list-comprehension unpack stops at the first failure and
+    leaves sibling exceptions unretrieved/unrun. ``parallel_map``'s own error
+    policy is fast-fail (first exception wins, remaining tasks are cancelled or
+    left running in the background), so each task is wrapped to capture its own
+    exception instead of raising it — ``parallel_map`` then never sees a
+    failure and always waits for every task, giving the same "drain all, then
+    decide" contract this helper has always had.
 
     Preconditions:
-        - ``futures`` is a list of ``concurrent.futures.Future`` instances.
+        - ``tasks`` is a tuple of zero-arg callables.
     Postconditions:
-        - Every future has had ``result()`` invoked (exceptions retrieved).
-        - Returns the ordered list of successful results when every future succeeds.
-        - Raises the first exception raised by any ``result()`` call when any
-          future fails (after every sibling has also been drained).
+        - Every task has been called (exceptions captured, not lost).
+        - Returns the ordered list of successful results when every task succeeds.
+        - Raises the first exception raised by any task (in ``tasks`` order) when
+          any task fails, after every sibling has also run to completion.
     """
-    results: List[Any] = []
-    first_error: Optional[BaseException] = None
-    for future in futures:
+
+    def _run(task: Callable[[], Any]) -> _ThunkOutcome:
         try:
-            results.append(future.result())
-        except Exception as exc:  # noqa: BLE001 - drain siblings, then re-raise first
-            if first_error is None:
-                first_error = exc
-    if first_error is not None:
-        raise first_error
-    return results
+            return _ThunkOutcome(task(), None)
+        except Exception as exc:  # noqa: BLE001 - captured; drained then re-raised below, in task order
+            return _ThunkOutcome(None, exc)
+
+    outcomes = parallel_map(tasks, _run, max_workers=len(tasks), skip_none=False)
+    for outcome in outcomes:
+        if outcome.error is not None:
+            raise outcome.error
+    return [outcome.value for outcome in outcomes]
 
 
 def _fetch_existing_comments(client: Any, owner: str, repo: str, pr_number: int) -> List[Any]:
@@ -988,9 +996,7 @@ def _fetch_existing_comments(client: Any, owner: str, repo: str, pr_number: int)
 
     tasks = (_reviews, _resolved, _issues)
     try:
-        with ThreadPoolExecutor(max_workers=len(tasks)) as executor:
-            futures = [executor.submit(t) for t in tasks]
-            review_comments, resolved_ids, issue_comments = _results_draining_exceptions(futures)
+        review_comments, resolved_ids, issue_comments = _results_draining_exceptions(tasks)
         return build_existing_comments(review_comments, resolved_ids, issue_comments)
     except Exception as e:  # noqa: BLE001 - this lookup is best-effort, never fails the review
         logger.warning(
@@ -1107,9 +1113,7 @@ def _fetch_pr_metadata(
             return ""
 
     tasks = (_get_pr, _get_files, _get_login)
-    with ThreadPoolExecutor(max_workers=len(tasks)) as executor:
-        futures = [executor.submit(t) for t in tasks]
-        pr, files, reviewer_login = _results_draining_exceptions(futures)
+    pr, files, reviewer_login = _results_draining_exceptions(tasks)
     return pr, files, reviewer_login
 
 

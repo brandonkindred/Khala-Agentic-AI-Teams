@@ -129,8 +129,12 @@ results = parallel_map(
 
 Migrated callers: the sales pod's per-prospect / decision-maker / dossier
 fan-outs (`sales_team/orchestrator.py`), the blog research agent's document
-scoring and summarization (`blogging/blog_research_agent/agent.py`), and the SE
-code-review coordinator's per-chunk map (`code_review_agent/coordinator.py`).
+scoring and summarization (`blogging/blog_research_agent/agent.py`), the SE
+code-review coordinator's per-chunk map (`code_review_agent/coordinator.py`),
+and the PR-review API's per-file head-content fetch, existing-comment lookup,
+PR-metadata fetch, and per-proposal issue-filing fan-outs
+(`software_engineering_team/api/pr_review.py`,
+`software_engineering_team/api/pr_review_issues.py`).
 
 ## `LatestValueFlusher`
 

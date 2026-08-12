@@ -3700,47 +3700,28 @@ class TestParallelReviewReads:
                 7,
             )
 
-    def test_fetch_pr_metadata_awaits_all_futures_when_first_fails(
-        self, review_app, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """When get_pull_request fails, siblings that also fail must still have
-        ``result()`` called — a generator unpack stops early and leaves secondary
-        exceptions unretrieved on those futures."""
-        from concurrent.futures import ThreadPoolExecutor as _RealTPE
-
-        from software_engineering_team.api import pr_review
+    def test_fetch_pr_metadata_awaits_all_futures_when_first_fails(self, review_app) -> None:
+        """When get_pull_request fails, siblings that also fail must still run to
+        completion — a generator unpack stops early and leaves secondary
+        exceptions unretrieved/unrun. Asserted by counting the underlying calls
+        rather than inspecting executor internals, since the fan-out is now an
+        implementation detail of parallel_map."""
         from software_engineering_team.api.pr_review import _fetch_pr_metadata
 
-        result_calls = {"n": 0}
-        futures_seen: list[Any] = []
-
-        class _CountingExecutor(_RealTPE):
-            def submit(self, fn: Any, /, *args: Any, **kwargs: Any) -> Any:
-                fut = super().submit(fn, *args, **kwargs)
-                futures_seen.append(fut)
-                real_result = fut.result
-
-                def _counting_result(*a: Any, **kw: Any) -> Any:
-                    result_calls["n"] += 1
-                    return real_result(*a, **kw)
-
-                fut.result = _counting_result  # type: ignore[method-assign]
-                return fut
-
-        monkeypatch.setattr(pr_review, "ThreadPoolExecutor", _CountingExecutor)
+        calls: list[str] = []
 
         with pytest.raises(GitHubAPIError, match="missing PR"):
             _fetch_pr_metadata(
                 _pr_metadata_client(
                     fail_pr=GitHubAPIError(404, "missing PR"),
                     fail_files=GitHubAPIError(502, "files unavailable"),
+                    on_each=lambda: calls.append("x"),
                 ),
                 "o",
                 "r",
                 7,
             )
-        assert len(futures_seen) == 3
-        assert result_calls["n"] == 3
+        assert len(calls) == 3
 
     def test_fetch_pr_metadata_get_authenticated_login_failure_degrades(self, review_app) -> None:
         """A get_authenticated_login failure must degrade to "" without blocking
@@ -3841,48 +3822,31 @@ class TestParallelReviewReads:
 
         assert _fetch_existing_comments(_FakeGitHubClient(), "o", "r", 7) == []
 
-    def test_fetch_existing_comments_awaits_all_futures_when_first_fails(
-        self, review_app, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_fetch_existing_comments_awaits_all_futures_when_first_fails(self, review_app) -> None:
         """When the first concurrent comment fetch fails, siblings that also fail
-        must still have ``result()`` called. The call still degrades to []
-        (best-effort)."""
-        from concurrent.futures import ThreadPoolExecutor as _RealTPE
-
-        from software_engineering_team.api import pr_review
+        must still run to completion. The call still degrades to [] (best-effort).
+        Asserted by counting the underlying calls rather than inspecting executor
+        internals, since the fan-out is now an implementation detail of
+        parallel_map."""
         from software_engineering_team.api.pr_review import _fetch_existing_comments
 
-        result_calls = {"n": 0}
-        futures_seen: list[Any] = []
-
-        class _CountingExecutor(_RealTPE):
-            def submit(self, fn: Any, /, *args: Any, **kwargs: Any) -> Any:
-                fut = super().submit(fn, *args, **kwargs)
-                futures_seen.append(fut)
-                real_result = fut.result
-
-                def _counting_result(*a: Any, **kw: Any) -> Any:
-                    result_calls["n"] += 1
-                    return real_result(*a, **kw)
-
-                fut.result = _counting_result  # type: ignore[method-assign]
-                return fut
-
-        monkeypatch.setattr(pr_review, "ThreadPoolExecutor", _CountingExecutor)
+        calls: list[str] = []
 
         class _FakeGitHubClient:
             def list_review_comments(self, o, r, n):
+                calls.append("reviews")
                 raise GitHubAPIError(500, "reviews boom")
 
             def get_resolved_review_thread_comment_ids(self, o, r, n):
+                calls.append("resolved")
                 raise GitHubAPIError(500, "resolved boom")
 
             def list_issue_comments(self, o, r, n):
+                calls.append("issues")
                 raise GitHubAPIError(500, "issues boom")
 
         assert _fetch_existing_comments(_FakeGitHubClient(), "o", "r", 7) == []
-        assert len(futures_seen) == 3
-        assert result_calls["n"] == 3
+        assert len(calls) == 3
 
     @pytest.mark.parametrize(
         "failing_method",

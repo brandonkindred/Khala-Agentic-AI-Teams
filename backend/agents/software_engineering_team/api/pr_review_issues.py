@@ -18,9 +18,9 @@ import contextlib
 import logging
 import threading
 import weakref
-from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict, List, NamedTuple, Optional
 
+from shared.concurrency import parallel_map
 from software_engineering_team.api.advisory_lock import advisory_lock
 from software_engineering_team.github_source import (
     GitHubAPIError,
@@ -275,6 +275,21 @@ def _persist_review_proposals(job_id: str, status: str, summary: Dict[str, Any])
         logger.warning("could not update review row %s after issue creation", job_id, exc_info=True)
 
 
+class _FileOutcome(NamedTuple):
+    """One proposal's issue-filing outcome, captured instead of raised.
+
+    Used by ``create_review_issues``'s concurrent fan-out: each task returns
+    its own outcome rather than raising, so ``parallel_map`` (whose own error
+    policy is fast-fail) never observes a failure and always waits for every
+    proposal — preserving the "drain all, then decide" contract the caller
+    needs to log every failure and choose a single-vs-composite raise.
+    """
+
+    pid: str
+    result: Optional[Dict[str, Any]]
+    error: Optional[BaseException]
+
+
 def create_review_issues(
     job_id: str,
     proposal_ids: List[str],
@@ -409,26 +424,31 @@ def create_review_issues(
 
                     # Each proposal's issue-creation call is independent (a distinct
                     # proposal, no shared mutable state until its own result is
-                    # folded in below), so fan them out concurrently instead of
-                    # paying one sequential GitHub round-trip per proposal — the
-                    # same pattern this module already uses for _fetch_head_files.
-                    # Every future is drained (successes and failures alike)
-                    # before any exception is re-raised, so one proposal's GitHub
-                    # rejection never stops another's independent creation.
+                    # folded in below), so fan them out concurrently via
+                    # parallel_map instead of paying one sequential GitHub
+                    # round-trip per proposal. Every proposal is drained
+                    # (successes and failures alike) before any exception is
+                    # re-raised, so one proposal's GitHub rejection never stops
+                    # another's independent creation — each task below captures
+                    # its own exception instead of raising it, so parallel_map
+                    # (whose own error policy is fast-fail) never sees a failure
+                    # and always waits for every proposal.
+                    def _run_one(pid: str) -> _FileOutcome:
+                        try:
+                            return _FileOutcome(pid, _file_one(pid), None)
+                        except Exception as e:  # noqa: BLE001 - collected; re-raised below after every proposal has had its chance
+                            return _FileOutcome(pid, None, e)
+
                     workers = min(_ISSUE_CREATION_PARALLELISM, len(needed))
-                    with ThreadPoolExecutor(max_workers=workers) as executor:
-                        futures = {executor.submit(_file_one, pid): pid for pid in needed}
-                        errors: Dict[str, BaseException] = {}
-                        for future in futures:
-                            pid = futures[future]
-                            try:
-                                result = future.result()
-                            except Exception as e:  # noqa: BLE001 - collected; re-raised below after every proposal has had its chance
-                                errors[pid] = e
-                                continue
-                            if result is not None:
-                                changed = True
-                                created.append(result)
+                    outcomes = parallel_map(needed, _run_one, max_workers=workers, skip_none=False)
+                    errors: Dict[str, BaseException] = {}
+                    for outcome in outcomes:
+                        if outcome.error is not None:
+                            errors[outcome.pid] = outcome.error
+                            continue
+                        if outcome.result is not None:
+                            changed = True
+                            created.append(outcome.result)
                     if errors:
                         # Log every failure, not just the one re-raised below — an
                         # operator debugging "why didn't proposal p3 get filed"
