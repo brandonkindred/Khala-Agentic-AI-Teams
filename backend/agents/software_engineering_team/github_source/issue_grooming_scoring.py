@@ -229,6 +229,10 @@ def _score_solution_complexity(body: str) -> tuple[int, str]:
 def score_issue(title: str, body: str) -> ScoreBreakdown:
     """Compute a heuristic Fibonacci complexity score from an issue's title/body.
 
+    Standalone legacy scorer, no longer Phase A's live scoring path -- see
+    ``issue_scorer.score_issue`` (re-exported as ``score_issue_by_mode``) for
+    the LLM/heuristic mode facade ``IssueGroomingRunner`` actually calls.
+
     Preconditions:
         - ``title``/``body`` are strings (either may be empty).
     Postconditions:
