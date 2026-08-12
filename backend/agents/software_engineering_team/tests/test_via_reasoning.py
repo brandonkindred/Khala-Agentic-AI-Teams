@@ -1,0 +1,320 @@
+"""Tests for code_review_agent.via_reasoning two-call split."""
+
+from __future__ import annotations
+
+from typing import Any, Optional
+
+import pytest
+from pydantic import BaseModel
+
+from llm_service.interface import LLMClient, LLMPermanentError
+from software_engineering_team.code_review_agent.via_reasoning import (
+    complete_validated_via_reasoning_local,
+    formatting_system_prompt_with_untrusted_guard,
+    run_agent_via_reasoning,
+    wrap_with_analysis_delimiters,
+)
+
+
+class _Out(BaseModel):
+    approved: bool
+    summary: str
+
+
+class _RecordingClient(LLMClient):
+    def __init__(
+        self,
+        json_response: Optional[dict[str, Any]] = None,
+        *,
+        prose: str = "REVIEW PROSE",
+        complete_error: Optional[Exception] = None,
+    ) -> None:
+        self._json_response = json_response if json_response is not None else {
+            "approved": True,
+            "summary": "ok",
+        }
+        self._prose = prose
+        self._complete_error = complete_error
+        self.reasoning_calls: list[dict[str, Any]] = []
+        self.format_calls: list[dict[str, Any]] = []
+        self.order: list[str] = []
+
+    def complete(
+        self,
+        prompt: str,
+        *,
+        objective: str,
+        temperature: float = 0.7,
+        max_tokens: Optional[int] = None,
+        system_prompt: Optional[str] = None,
+        tools: Optional[list] = None,
+        think: "bool | str | None" = None,
+    ) -> str:
+        self.order.append("complete")
+        self.reasoning_calls.append(
+            {
+                "prompt": prompt,
+                "objective": objective,
+                "system_prompt": system_prompt,
+                "temperature": temperature,
+                "think": think,
+                "tools": tools,
+            }
+        )
+        if self._complete_error is not None:
+            raise self._complete_error
+        return self._prose
+
+    def complete_json(
+        self,
+        prompt: str,
+        *,
+        objective: str,
+        temperature: float = 0.0,
+        system_prompt: Optional[str] = None,
+        tools: Optional[list] = None,
+        think: "bool | str | None" = None,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        self.order.append("complete_json")
+        self.format_calls.append(
+            {
+                "prompt": prompt,
+                "objective": objective,
+                "system_prompt": system_prompt,
+                "temperature": temperature,
+                "think": think,
+                "tools": tools,
+                "kwargs": kwargs,
+            }
+        )
+        return self._json_response
+
+
+def test_wrap_delimiters_include_prose_and_random_boundary() -> None:
+    wrapped = wrap_with_analysis_delimiters("hello findings")
+    assert "hello findings" in wrapped
+    assert "ANALYSIS" in wrapped
+    assert "END ANALYSIS" in wrapped
+
+
+def test_untrusted_guard_appended() -> None:
+    out = formatting_system_prompt_with_untrusted_guard("Format JSON.")
+    assert out.startswith("Format JSON.")
+    assert "untrusted data" in out.lower()
+
+
+def test_validated_via_reasoning_sequences_reason_then_format() -> None:
+    client = _RecordingClient()
+    result = complete_validated_via_reasoning_local(
+        client,
+        schema=_Out,
+        reasoning_prompt="Review this code",
+        reasoning_system_prompt="You are a reviewer. Answer in prose.",
+        formatting_instructions='Return {"approved": bool, "summary": str}',
+        objective="review code chunk",
+    )
+    assert result.approved is True
+    assert client.order == ["complete", "complete_json"]
+    assert client.reasoning_calls[0]["think"] is True
+    assert client.format_calls[0]["think"] is False
+    assert "REVIEW PROSE" in client.format_calls[0]["prompt"]
+    assert "Return {" in client.format_calls[0]["prompt"]
+
+
+def test_validated_via_reasoning_honors_reasoning_think_false() -> None:
+    client = _RecordingClient()
+    complete_validated_via_reasoning_local(
+        client,
+        schema=_Out,
+        reasoning_prompt="Review this code",
+        reasoning_system_prompt="Prose only.",
+        formatting_instructions="JSON shape here",
+        objective="review code chunk",
+        reasoning_think=False,
+    )
+    assert client.reasoning_calls[0]["think"] is False
+    assert client.format_calls[0]["think"] is False
+
+
+def test_validated_via_reasoning_step_one_failure_skips_format() -> None:
+    client = _RecordingClient(complete_error=LLMPermanentError("boom"))
+    with pytest.raises(LLMPermanentError, match="boom"):
+        complete_validated_via_reasoning_local(
+            client,
+            schema=_Out,
+            reasoning_prompt="Review this code",
+            reasoning_system_prompt="Prose only.",
+            formatting_instructions="JSON shape here",
+            objective="review code chunk",
+        )
+    assert client.order == ["complete"]
+    assert client.format_calls == []
+
+
+def test_validated_via_reasoning_rejects_empty_objective() -> None:
+    client = _RecordingClient()
+    with pytest.raises(ValueError, match="objective must be non-empty"):
+        complete_validated_via_reasoning_local(
+            client,
+            schema=_Out,
+            reasoning_prompt="Review this code",
+            reasoning_system_prompt="Prose only.",
+            formatting_instructions="JSON shape here",
+            objective="   ",
+        )
+    assert client.order == []
+
+
+def test_validated_via_reasoning_rejects_think_kwarg() -> None:
+    client = _RecordingClient()
+    with pytest.raises(TypeError, match="unexpected keyword argument 'think'"):
+        complete_validated_via_reasoning_local(
+            client,
+            schema=_Out,
+            reasoning_prompt="Review this code",
+            reasoning_system_prompt="Prose only.",
+            formatting_instructions="JSON shape here",
+            objective="review code chunk",
+            think=False,
+        )
+    assert client.order == []
+
+
+def test_run_agent_via_reasoning_formats_via_underlying_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When the model exposes a backing LLMClient, call 2 uses complete_json."""
+    from llm_service import LLMClientModel
+    from llm_service.clients.dummy import DummyLLMClient
+
+    from software_engineering_team.code_review_agent import via_reasoning as vr_mod
+
+    agent_calls: list[dict[str, Any]] = []
+    format_calls: list[dict[str, Any]] = []
+
+    class _RecordingClient(DummyLLMClient):
+        def complete_json(self, prompt: str, **kwargs: Any) -> dict[str, Any]:
+            format_calls.append({"prompt": prompt, **kwargs})
+            return {"approved": True, "summary": "via client"}
+
+    class _RecordingAgent:
+        def __init__(self, **kwargs: Any) -> None:
+            agent_calls.append(kwargs)
+
+        def __call__(self, prompt: str) -> str:
+            return "REVIEW PROSE"
+
+    monkeypatch.setattr(vr_mod, "Agent", _RecordingAgent)
+    model = LLMClientModel(_RecordingClient(), agent_key="code_review")
+
+    result = run_agent_via_reasoning(
+        model=model,
+        reasoning_prompt="Review this",
+        reasoning_system_prompt="Prose reviewer",
+        formatting_instructions='Return {"approved": bool, "summary": str}',
+        parse=lambda raw: _Out.model_validate_json(raw),
+    )
+
+    assert result.summary == "via client"
+    assert len(agent_calls) == 1
+    assert len(format_calls) == 1
+    assert format_calls[0]["think"] is False
+    assert "REVIEW PROSE" in format_calls[0]["prompt"]
+
+
+def test_run_agent_via_reasoning_second_call_has_no_tools(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Call 1 may attach tools; call 2 must never receive them."""
+    from software_engineering_team.code_review_agent import via_reasoning as vr_mod
+
+    agent_calls: list[dict[str, Any]] = []
+    sentinel_tool = {"name": "list_files"}
+
+    class _RecordingAgent:
+        def __init__(self, **kwargs: Any) -> None:
+            agent_calls.append(kwargs)
+
+        def __call__(self, prompt: str) -> str:
+            if len(agent_calls) == 1:
+                return "REVIEW PROSE"
+            return '{"approved": true, "summary": "ok"}'
+
+    class _ClonableModel:
+        def __init__(self) -> None:
+            self.config: dict[str, Any] = {"response_format": "json"}
+            self.clone_calls: list[dict[str, Any]] = []
+
+        def clone(self, **overrides: Any) -> "_ClonableModel":
+            self.clone_calls.append(overrides)
+            cloned = _ClonableModel()
+            cloned.config = {**self.config, **overrides}
+            cloned.clone_calls = self.clone_calls
+            return cloned
+
+    model = _ClonableModel()
+    monkeypatch.setattr(vr_mod, "Agent", _RecordingAgent)
+
+    result = run_agent_via_reasoning(
+        model=model,
+        reasoning_prompt="Review this",
+        reasoning_system_prompt="Prose reviewer",
+        formatting_instructions='Return {"approved": bool, "summary": str}',
+        parse=lambda raw: _Out.model_validate_json(raw),
+        tools=[sentinel_tool],
+    )
+
+    assert result.approved is True
+    assert len(agent_calls) == 2
+    assert agent_calls[0]["tools"] == [sentinel_tool]
+    assert agent_calls[1]["tools"] == []
+    assert agent_calls[0]["model"].config.get("response_format") == "text"
+    assert agent_calls[1]["model"].config.get("response_format") == "json"
+
+
+def test_run_agent_via_reasoning_wraps_bare_llm_client_with_get_strands_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A bare LLMClient without clone uses get_strands_model for the text pass."""
+    from llm_service.clients.dummy import DummyLLMClient
+
+    from software_engineering_team.code_review_agent import via_reasoning as vr_mod
+
+    strands_calls: list[dict[str, Any]] = []
+
+    def _fake_get_strands_model(agent_key: str, **kwargs: Any) -> Any:
+        strands_calls.append({"agent_key": agent_key, **kwargs})
+
+        class _FakeModel:
+            def __init__(self) -> None:
+                self.config = dict(kwargs)
+
+        return _FakeModel()
+
+    class _RecordingAgent:
+        def __init__(self, **kwargs: Any) -> None:
+            self.kwargs = kwargs
+
+        def __call__(self, prompt: str) -> str:
+            return "REVIEW PROSE"
+
+    class _RecordingClient(DummyLLMClient):
+        def complete_json(self, prompt: str, **kwargs: Any) -> dict[str, Any]:
+            return {"approved": True, "summary": "wrapped client"}
+
+    monkeypatch.setattr(vr_mod, "get_strands_model", _fake_get_strands_model)
+    monkeypatch.setattr(vr_mod, "Agent", _RecordingAgent)
+
+    result = run_agent_via_reasoning(
+        model=_RecordingClient(),
+        reasoning_prompt="Review this",
+        reasoning_system_prompt="Prose reviewer",
+        formatting_instructions='Return {"approved": bool, "summary": str}',
+        parse=lambda raw: _Out.model_validate_json(raw),
+    )
+
+    assert result.summary == "wrapped client"
+    assert len(strands_calls) == 1
+    assert strands_calls[0]["response_format"] == "text"
+    assert strands_calls[0]["agent_key"] == "code_review"
