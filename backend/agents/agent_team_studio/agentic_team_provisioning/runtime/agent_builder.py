@@ -285,7 +285,8 @@ async def invoke_generated_agent(body: Any) -> dict[str, Any]:
     taken from the body**: the manifest declares ``cognition.tools = []`` and tool
     brokering isn't wired yet, so the runtime grants no tools (a caller can't
     escalate to ``python`` / ``http_request``). Binding the manifest to its stored
-    definition lands with the cross-process invoke work.
+    definition lands with the cross-process invoke work, against the locked
+    precedence contract in ``system_design/adr/ADR-013-invoke-generated-agent-persona-state-precedence.md``.
 
     Preconditions:
         * ``body`` is a mapping; ``agent_name`` and ``message`` are recommended
