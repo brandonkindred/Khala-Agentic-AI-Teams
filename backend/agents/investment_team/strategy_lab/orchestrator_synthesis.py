@@ -54,6 +54,7 @@ from ..trading_service.modes.sandbox_compat import StrategyRunResult
 from ._orchestrator_helpers import (
     RefinementStallTracker,
     _attach_execution_diagnostics,
+    _DesignAttemptState,
     _DesignPersistContext,
     _DriftCollector,
     _format_execution_diagnostics,
@@ -73,7 +74,7 @@ PhaseCallback = Callable[[str, Dict[str, Any]], None]
 
 
 @dataclass
-class _AnomalyRecoveryOutcome:
+class _AnomalyRecoveryOutcome(_DesignAttemptState):
     """Bundle of state returned by ``_handle_critical_anomalies``.
 
     The synthesis loop's evaluation phase delegates to that helper when
@@ -91,10 +92,6 @@ class _AnomalyRecoveryOutcome:
       state (either ZTR-committed proposal or generic-refined source).
     """
 
-    spec: StrategySpec
-    code: str
-    trades: List[TradeRecord]
-    metrics: BacktestResult
     exec_result: StrategyRunResult
     exhausted: bool
     # Set only when a zero-trade repair commits new code (which replaces the
@@ -112,7 +109,7 @@ class _AnomalyRecoveryOutcome:
 
 
 @dataclass
-class _SynthesisEvaluateResult:
+class _SynthesisEvaluateResult(_DesignAttemptState):
     """Return envelope for the synthesis loop's backtest-evaluation step.
 
     ``action`` is one of:
@@ -128,10 +125,6 @@ class _SynthesisEvaluateResult:
     """
 
     action: str
-    spec: StrategySpec
-    code: str
-    trades: List[TradeRecord]
-    metrics: BacktestResult
     exec_result: StrategyRunResult
     ran_on_non_conforming_code: Optional[bool]
     runtime_lookahead_violation: bool

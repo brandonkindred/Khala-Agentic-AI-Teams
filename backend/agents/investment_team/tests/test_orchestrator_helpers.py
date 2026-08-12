@@ -9,6 +9,12 @@ Targets pure helper functions that don't require the full
 * ``_equity_to_returns`` and ``_closes_to_equity`` corner cases.
 * ``_parse_bar_date`` round trip.
 * ``_resolve_vix_provider`` env-var driven dispatcher.
+
+Also covers ``_DesignAttemptState`` — the shared spec/code/trades/metrics
+base that ``_AlignmentLoopOutcome`` / ``_SynthesisLoopOutcome`` (here),
+``_AnomalyRecoveryOutcome`` / ``_SynthesisEvaluateResult``
+(``orchestrator_synthesis.py``), and ``_AlignmentRoundOutcome``
+(``orchestrator_alignment.py``) all inherit.
 """
 
 from __future__ import annotations
@@ -16,19 +22,27 @@ from __future__ import annotations
 import pytest
 
 from investment_team.execution.risk_filter import RiskLimits
+from investment_team.models import BacktestResult, StrategySpec, TradeRecord
 from investment_team.strategy_lab._orchestrator_helpers import (
+    _AlignmentLoopOutcome,
     _closes_to_equity,
     _daily_returns_from_trades,
+    _DesignAttemptState,
     _equity_to_returns,
     _merge_risk_limits_tighten_only,
     _parse_bar_date,
     _resolve_vix_provider,
+    _SynthesisLoopOutcome,
 )
+from investment_team.strategy_lab.orchestrator_alignment import _AlignmentRoundOutcome
+from investment_team.strategy_lab.orchestrator_synthesis import (
+    _AnomalyRecoveryOutcome,
+    _SynthesisEvaluateResult,
+)
+from investment_team.trading_service.modes.sandbox_compat import StrategyRunResult
 
 
 def _trade(*, ret_pct: float = 1.0, net: float = 10.0, cum: float = 100.0, n: int = 1):
-    from investment_team.models import TradeRecord
-
     return TradeRecord(
         trade_num=n,
         symbol="X",
@@ -46,6 +60,36 @@ def _trade(*, ret_pct: float = 1.0, net: float = 10.0, cum: float = 100.0, n: in
         cumulative_pnl=cum,
         outcome="win" if ret_pct > 0 else "loss",
     )
+
+
+def _spec(**overrides) -> StrategySpec:
+    fields = dict(
+        strategy_id="design-attempt-state-test",
+        authored_by="test",
+        asset_class="stocks",
+        hypothesis="hyp",
+        signal_definition="sig",
+        timeframe="1d",
+    )
+    fields.update(overrides)
+    return StrategySpec(**fields)
+
+
+def _metrics(**overrides) -> BacktestResult:
+    fields = dict(
+        total_return_pct=20.0,
+        annualized_return_pct=10.0,
+        volatility_pct=12.0,
+        sharpe_ratio=0.8,
+        max_drawdown_pct=10.0,
+        win_rate_pct=58.0,
+        profit_factor=1.6,
+        sortino_ratio=0.0,
+        calmar_ratio=0.0,
+        deflated_sharpe=0.0,
+    )
+    fields.update(overrides)
+    return BacktestResult(**fields)
 
 
 # ---------------------------------------------------------------------------
@@ -218,3 +262,131 @@ def test_resolve_vix_provider_returns_none_for_now_for_known_source(
     monkeypatch.setenv("STRATEGY_LAB_VIX_SOURCE", "yahoo")
     # Implementation still returns None — production hook point.
     assert _resolve_vix_provider() is None
+
+
+# ---------------------------------------------------------------------------
+# _DesignAttemptState and its 5 subclasses
+# ---------------------------------------------------------------------------
+
+
+def test_design_attempt_state_construction_exposes_all_four_fields() -> None:
+    spec, code, trades, metrics = _spec(), "code", [_trade()], _metrics()
+    state = _DesignAttemptState(spec=spec, code=code, trades=trades, metrics=metrics)
+    assert state.spec is spec
+    assert state.code == code
+    assert state.trades is trades
+    assert state.metrics is metrics
+
+
+def test_design_attempt_state_equality_is_by_value() -> None:
+    trades = [_trade()]
+    metrics = _metrics()
+    a = _DesignAttemptState(spec=_spec(), code="code", trades=trades, metrics=metrics)
+    b = _DesignAttemptState(spec=_spec(), code="code", trades=trades, metrics=metrics)
+    assert a == b
+    c = _DesignAttemptState(spec=_spec(), code="different", trades=trades, metrics=metrics)
+    assert a != c
+
+
+def test_alignment_loop_outcome_is_a_design_attempt_state() -> None:
+    outcome = _AlignmentLoopOutcome(
+        spec=_spec(), code="code", trades=[_trade()], metrics=_metrics()
+    )
+    assert isinstance(outcome, _DesignAttemptState)
+    assert outcome.trades_aligned is False
+    assert outcome.alignment_rounds == 0
+
+
+def test_alignment_loop_outcome_alignment_rounds_property_unaffected() -> None:
+    outcome = _AlignmentLoopOutcome(
+        spec=_spec(),
+        code="code",
+        trades=[_trade()],
+        metrics=_metrics(),
+        alignment_attempts=["round-1", "round-2"],
+    )
+    assert outcome.alignment_rounds == 2
+
+
+def test_synthesis_loop_outcome_is_a_design_attempt_state() -> None:
+    outcome = _SynthesisLoopOutcome(
+        spec=_spec(),
+        code="code",
+        trades=[_trade()],
+        metrics=_metrics(),
+        market_data=None,
+        requested_symbols=["QQQ"],
+        fetched_symbols=[],
+        execution_succeeded=False,
+        max_rounds_exhausted=True,
+    )
+    assert isinstance(outcome, _DesignAttemptState)
+    assert outcome.refinement_stalled is False
+
+
+def test_anomaly_recovery_outcome_is_a_design_attempt_state() -> None:
+    outcome = _AnomalyRecoveryOutcome(
+        spec=_spec(),
+        code="code",
+        trades=[_trade()],
+        metrics=_metrics(),
+        exec_result=StrategyRunResult(success=True),
+        exhausted=False,
+    )
+    assert isinstance(outcome, _DesignAttemptState)
+    assert outcome.stalled is False
+
+
+def test_synthesis_evaluate_result_is_a_design_attempt_state() -> None:
+    outcome = _SynthesisEvaluateResult(
+        action="success",
+        spec=_spec(),
+        code="code",
+        trades=[_trade()],
+        metrics=_metrics(),
+        exec_result=StrategyRunResult(success=True),
+        ran_on_non_conforming_code=None,
+        runtime_lookahead_violation=False,
+    )
+    assert isinstance(outcome, _DesignAttemptState)
+    assert outcome.action == "success"
+
+
+def test_synthesis_evaluate_result_all_kwargs_construction_succeeds() -> None:
+    """Base-class fields now precede ``action`` in the generated ``__init__``'s
+    positional order, but every real construction site uses kwargs — so
+    passing them in an arbitrary order (not matching either the old or new
+    positional order) must still succeed and round-trip correctly."""
+    outcome = _SynthesisEvaluateResult(
+        metrics=_metrics(),
+        action="continue",
+        code="code",
+        exec_result=StrategyRunResult(success=True),
+        spec=_spec(),
+        runtime_lookahead_violation=True,
+        trades=[_trade()],
+        ran_on_non_conforming_code=True,
+    )
+    assert outcome.action == "continue"
+    assert outcome.runtime_lookahead_violation is True
+    assert outcome.ran_on_non_conforming_code is True
+
+
+def test_alignment_round_outcome_is_a_design_attempt_state() -> None:
+    outcome = _AlignmentRoundOutcome(
+        spec=_spec(), code="code", trades=[_trade()], metrics=_metrics(), terminate=True
+    )
+    assert isinstance(outcome, _DesignAttemptState)
+    assert outcome.ran_on_non_conforming_code is False
+
+
+def test_distinct_subclasses_with_identical_base_fields_are_not_equal() -> None:
+    """dataclass-generated ``__eq__`` compares ``self.__class__ is
+    other.__class__`` first — the shared base must not make two different
+    outcome types compare equal just because their 4-tuple values match."""
+    spec, trades, metrics = _spec(), [_trade()], _metrics()
+    alignment_loop = _AlignmentLoopOutcome(spec=spec, code="code", trades=trades, metrics=metrics)
+    alignment_round = _AlignmentRoundOutcome(
+        spec=spec, code="code", trades=trades, metrics=metrics, terminate=False
+    )
+    assert alignment_loop != alignment_round
