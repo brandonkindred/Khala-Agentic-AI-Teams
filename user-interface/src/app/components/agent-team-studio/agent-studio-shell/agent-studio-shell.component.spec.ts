@@ -314,6 +314,14 @@ describe('AgentStudioShellComponent', () => {
       menu.triggerEventHandler('draftSelected', 'd-1');
       expect(component.state.currentDraftId()).toBe('d-1');
     });
+
+    it('markClean after hydrate so a just-loaded draft is not dirty', () => {
+      expect(component.state.isDirty()).toBe(false);
+      agentStudioApi.getDraft.mockReturnValue(of(draft({ registryAgentId: 'reg-1' })));
+      component.loadDraft('d-1');
+      expect(component.state.registryAgentId()).toBe('reg-1');
+      expect(component.state.isDirty()).toBe(false);
+    });
   });
 
   describe('Save draft popover', () => {
@@ -383,6 +391,21 @@ describe('AgentStudioShellComponent', () => {
       component.openSaveDraftDialog();
       expect(component.state.currentDraftId()).toBeNull();
       expect(component.state.currentDraftName()).toBeNull();
+    });
+
+    it('markClean after a successful save so the session is not dirty', () => {
+      component.state.setRegistryAgentId('reg-1');
+      expect(component.state.isDirty()).toBe(true);
+      openSpy.mockReturnValue({ afterClosed: () => of(draftSummary()) } as unknown as ReturnType<MatDialog['open']>);
+      component.openSaveDraftDialog();
+      expect(component.state.isDirty()).toBe(false);
+    });
+
+    it('returns afterClosed so callers can chain on success', () => {
+      openSpy.mockReturnValue({ afterClosed: () => of(draftSummary()) } as unknown as ReturnType<MatDialog['open']>);
+      const emitted: unknown[] = [];
+      component.openSaveDraftDialog().subscribe((v) => emitted.push(v));
+      expect(emitted).toEqual([draftSummary()]);
     });
   });
 

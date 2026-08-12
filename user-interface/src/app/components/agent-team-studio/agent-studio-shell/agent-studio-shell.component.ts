@@ -3,6 +3,7 @@ import { MatButtonModule } from '@angular/material/button';
 import { MatDialog, MatDialogModule } from '@angular/material/dialog';
 import { MatIconModule } from '@angular/material/icon';
 import { MatTooltipModule } from '@angular/material/tooltip';
+import { Observable } from 'rxjs';
 import type { AgentStudioDraft } from '../../../models/agent-studio.model';
 import { STUDIO_STAGES } from '../../../models/agent-studio.model';
 import { AgentStudioApiService } from '../../../services/agent-studio-api.service';
@@ -151,16 +152,15 @@ export class AgentStudioShellComponent {
   }
 
   /**
-   * Open the Save-draft popover (spec §3.5). Assembles the payload from the
-   * currently-available handoff state and lets the dialog decide create vs
-   * update based on whether this session is already bound to a server draft.
+   * Open the Save-draft popover (spec §3.5).
    *
    * Preconditions: none — always safe to call.
-   * Postconditions: on a successful save, `state.currentDraftId()`/
-   *   `currentDraftName()` reflect the saved draft. On cancel or failure,
-   *   state is unchanged.
+   * Postconditions: on a successful save, `state.currentDraftId()` /
+   *   `currentDraftName()` reflect the saved draft and `state.isDirty()` is
+   *   false. On cancel or failure, state is unchanged. The returned
+   *   observable is the dialog's `afterClosed()`.
    */
-  openSaveDraftDialog(): void {
+  openSaveDraftDialog(): Observable<SaveDraftDialogResult | undefined> {
     const data: SaveDraftDialogData = {
       draftId: this.state.currentDraftId(),
       initialName: this.state.currentDraftName(),
@@ -177,16 +177,19 @@ export class AgentStudioShellComponent {
       // separate flag that must be turned off too.
       { data, width: '420px', disableClose: true, closeOnNavigation: false },
     );
-    ref.afterClosed().subscribe((result) => {
+    const closed$ = ref.afterClosed();
+    closed$.subscribe((result) => {
       if (!result) return;
       this.state.setCurrentDraft(result.draft_id, result.name);
+      this.state.markClean();
     });
+    return closed$;
   }
 
   /**
-   * Load a saved draft and hydrate the session from it (spec §3.5). No
-   * unsaved-local-edit conflict check is performed here — that guard is
-   * sibling issue #5914's responsibility; this loads directly.
+   * Load a saved draft and hydrate the session from it (spec §3.5). Hydration
+   * still runs immediately when `!state.isDirty()`; the unsaved-edit conflict
+   * gate lands in a follow-on task.
    *
    * Preconditions: `draftId` names a draft the current user owns (rows in
    *   `LoadDraftMenuComponent` only ever come from that user's own list).
@@ -224,6 +227,7 @@ export class AgentStudioShellComponent {
     this.state.setProcessId(asNullableString(payload['processId']));
     this.state.setPersonaId(asNullableString(payload['personaId']));
     this.state.setDraftAgentId(asNullableString(payload['draftAgentId']));
+    this.state.markClean();
     this.resolveFurthestStage(token);
   }
 
