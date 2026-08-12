@@ -7,7 +7,7 @@ import { vi } from 'vitest';
 import { AgentStudioStateService } from '../../../services/agent-studio-state.service';
 import { AgentStudioApiService } from '../../../services/agent-studio-api.service';
 import { AgentCatalogComponent } from '../agent-console/agent-catalog/agent-catalog.component';
-import { AgentProvisioningDashboardComponent } from '../agent-provisioning-dashboard/agent-provisioning-dashboard.component';
+import { AgentProvisioningPanelComponent } from '../agent-provisioning-panel/agent-provisioning-panel.component';
 import { AgentStudioBuildAgentComponent } from './agent-studio-build-agent.component';
 import type { AgentDefinition } from '../../../models/agent-studio.model';
 
@@ -18,10 +18,11 @@ class StubAgentCatalogComponent {
   @Output() readonly requestRun = new EventEmitter<string>();
 }
 
-/** Stand-in for the provisioning dashboard (self-contained; polls + forms), so
- *  opening the slide-out doesn't start real polling/HTTP in tests. */
-@Component({ selector: 'app-agent-provisioning-dashboard', standalone: true, template: '' })
-class StubProvisioningDashboardComponent {}
+/** Stand-in for the provisioning panel (embeds team-assistant-chat + polls),
+ *  so opening the Stage-1 slide-out doesn't start real chat HTTP / job
+ *  polling in these shell-level tests. */
+@Component({ selector: 'app-agent-provisioning-panel', standalone: true, template: '' })
+class StubAgentProvisioningPanelComponent {}
 
 const definition = (overrides: Partial<AgentDefinition> = {}): AgentDefinition => ({
   name: 'blogging.planner.v2',
@@ -53,8 +54,8 @@ describe('AgentStudioBuildAgentComponent', () => {
       providers: [AgentStudioStateService, { provide: AgentStudioApiService, useValue: api }],
     })
       .overrideComponent(AgentStudioBuildAgentComponent, {
-        remove: { imports: [AgentCatalogComponent, AgentProvisioningDashboardComponent] },
-        add: { imports: [StubAgentCatalogComponent, StubProvisioningDashboardComponent] },
+        remove: { imports: [AgentCatalogComponent, AgentProvisioningPanelComponent] },
+        add: { imports: [StubAgentCatalogComponent, StubAgentProvisioningPanelComponent] },
       })
       .compileComponents();
 
@@ -143,19 +144,19 @@ describe('AgentStudioBuildAgentComponent', () => {
 
   it('keeps the provisioning slide-out closed until requested', () => {
     expect(component.provisionOpen()).toBe(false);
-    expect(fixture.nativeElement.querySelector('app-agent-provisioning-dashboard')).toBeNull();
+    expect(fixture.nativeElement.querySelector('app-agent-provisioning-panel')).toBeNull();
   });
 
   it('opens and closes the provisioning slide-out', () => {
     fixture.nativeElement.querySelector('.studio-build__provision-btn').click();
     fixture.detectChanges();
     expect(component.provisionOpen()).toBe(true);
-    expect(fixture.nativeElement.querySelector('app-agent-provisioning-dashboard')).toBeTruthy();
+    expect(fixture.nativeElement.querySelector('app-agent-provisioning-panel')).toBeTruthy();
 
     fixture.nativeElement.querySelector('.studio-build__provision-head button').click();
     fixture.detectChanges();
     expect(component.provisionOpen()).toBe(false);
-    expect(fixture.nativeElement.querySelector('app-agent-provisioning-dashboard')).toBeNull();
+    expect(fixture.nativeElement.querySelector('app-agent-provisioning-panel')).toBeNull();
   });
 
   it('closes the provisioning slide-out when the scrim is clicked', () => {
@@ -213,24 +214,65 @@ describe('AgentStudioBuildAgentComponent', () => {
 
     it('advances Start → Define → Configure via the explicit Continue actions, and back via ◂ back to Define', () => {
       selectAgent('blogging.planner');
+      // Start: only the forward Continue action is present — no back/save affordance to skip ahead with.
+      expect(fixture.nativeElement.querySelector('.studio-build__continue-sub')).toBeTruthy();
+      expect(fixture.nativeElement.querySelector('.studio-build__back-sub')).toBeNull();
+      expect(fixture.nativeElement.querySelector('.studio-build__save-sub')).toBeNull();
 
       fixture.nativeElement.querySelector('.studio-build__continue-sub').click();
       fixture.detectChanges();
       expect(component.activeSubStageDef().key).toBe('define');
       expect(fixture.nativeElement.querySelector('app-agent-studio-stage-placeholder')).toBeTruthy();
       expect(fixture.nativeElement.querySelector('app-agent-catalog')).toBeNull();
+      // Define: still only the forward Continue action — no back/save affordance yet.
+      expect(fixture.nativeElement.querySelector('.studio-build__continue-sub')).toBeTruthy();
+      expect(fixture.nativeElement.querySelector('.studio-build__back-sub')).toBeNull();
+      expect(fixture.nativeElement.querySelector('.studio-build__save-sub')).toBeNull();
 
       fixture.nativeElement.querySelector('.studio-build__continue-sub').click();
       fixture.detectChanges();
       expect(component.activeSubStageDef().key).toBe('configure');
       expect(state.maxReachedBuildSubStage()).toBe(2);
+      // Configure: the forward Continue action is gone — back and save are the only actions.
       expect(fixture.nativeElement.querySelector('.studio-build__continue-sub')).toBeNull();
+      expect(fixture.nativeElement.querySelector('.studio-build__back-sub')).toBeTruthy();
+      expect(fixture.nativeElement.querySelector('.studio-build__save-sub')).toBeTruthy();
 
       fixture.nativeElement.querySelector('.studio-build__back-sub').click();
       fixture.detectChanges();
       expect(component.activeSubStageDef().key).toBe('define');
       // Explicit back-loop, not a reset — the furthest sub-stage reached is preserved.
       expect(state.maxReachedBuildSubStage()).toBe(2);
+    });
+
+    it('rejects a forward-only violation instead of swallowing it — backToDefine() off the Configure sub-stage throws', () => {
+      expect(component.activeSubStageDef().key).toBe('start');
+      expect(() => component.backToDefine()).toThrow(RangeError);
+      // The rejected call left the sub-stepper untouched.
+      expect(component.activeSubStageDef().key).toBe('start');
+
+      selectAgent('blogging.planner');
+      fixture.nativeElement.querySelector('.studio-build__continue-sub').click();
+      fixture.detectChanges();
+      expect(component.activeSubStageDef().key).toBe('define');
+      expect(() => component.backToDefine()).toThrow(RangeError);
+      expect(component.activeSubStageDef().key).toBe('define');
+    });
+
+    it('shows the "Cloning agent…" hint only while a clone is in flight', () => {
+      const pending = new Subject<AgentDefinition>();
+      api.cloneFromRegistry.mockReturnValue(pending.asObservable());
+
+      component.onSelectAgent('blogging.planner');
+      fixture.detectChanges();
+      expect(fixture.nativeElement.querySelector('.studio-build__hint')?.textContent).toContain('Cloning agent…');
+      expect(fixture.nativeElement.querySelector('.studio-build__selected')).toBeNull();
+
+      pending.next(definition());
+      pending.complete();
+      fixture.detectChanges();
+      expect(fixture.nativeElement.querySelector('.studio-build__hint')).toBeNull();
+      expect(fixture.nativeElement.querySelector('.studio-build__selected')).toBeTruthy();
     });
 
     it('marks only the active sub-step with aria-current="step"', () => {
@@ -322,6 +364,27 @@ describe('AgentStudioBuildAgentComponent', () => {
       pending.next({ agent_id: 'blogging.planner.v2', manifest: {}, created: true });
       pending.complete();
       expect(state.registryAgentId()).toBe('blogging.planner.v2');
+    });
+
+    it('disables the Save button and relabels it "Saving…" while the save is in flight, then re-enables it', () => {
+      const pending = new Subject<{ agent_id: string; manifest: unknown; created: boolean }>();
+      api.saveAgent.mockReturnValue(pending.asObservable());
+      goToConfigure();
+
+      const saveButton = (): HTMLButtonElement => fixture.nativeElement.querySelector('.studio-build__save-sub');
+      expect(saveButton().disabled).toBe(false);
+      expect(saveButton().textContent?.trim()).toBe('Save agent');
+
+      saveButton().click();
+      fixture.detectChanges();
+      expect(saveButton().disabled).toBe(true);
+      expect(saveButton().textContent?.trim()).toBe('Saving…');
+
+      pending.next({ agent_id: 'blogging.planner.v2', manifest: {}, created: true });
+      pending.complete();
+      fixture.detectChanges();
+      expect(saveButton().disabled).toBe(false);
+      expect(saveButton().textContent?.trim()).toBe('Save agent');
     });
   });
 });

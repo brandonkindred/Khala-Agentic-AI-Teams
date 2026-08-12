@@ -114,11 +114,15 @@ than just move code, which is out of this issue's scope:
   `_AnomalyRecoveryOutcome` itself — a real contract change to a type
   consumed by `_handle_critical_anomalies`, not a rename.
 - **A shared `spec`/`code`/`trades`/`metrics` base dataclass.** This
-  4-tuple appears verbatim in five dataclasses across three files. A common
-  base or composed type would cut real duplication, but touches
-  `dataclasses.replace()`/equality semantics and every consumer of all five
-  types — a larger, riskier change better scoped as its own follow-up than
-  bundled into this line-count-reduction issue.
+  4-tuple appeared verbatim in five dataclasses across three files. It was
+  a larger, riskier change than this line-count-reduction issue's scope, so
+  it was left as its own follow-up — since done: the five dataclasses
+  (`_AlignmentLoopOutcome` / `_SynthesisLoopOutcome` in
+  `_orchestrator_helpers.py`, `_AnomalyRecoveryOutcome` /
+  `_SynthesisEvaluateResult` in `orchestrator_synthesis.py`,
+  `_AlignmentRoundOutcome` in `orchestrator_alignment.py`) now inherit the
+  4-tuple from a shared `_DesignAttemptState` base defined in
+  `_orchestrator_helpers.py`, purely additively — no call site changed.
 
 ## Final module boundaries
 

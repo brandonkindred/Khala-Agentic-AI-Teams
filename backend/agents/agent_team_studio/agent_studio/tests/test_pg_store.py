@@ -83,9 +83,9 @@ def test_turn_applies_messages_and_definition(store) -> None:
         assert t.history == []
         t.append_message("user", "hi")
         t.append_message("assistant", "hello")
-        updated = t.definition.model_copy()
+        updated = t.draft.model_copy()
         updated.name = "Renamed"
-        t.set_definition(updated)
+        t.set_draft(updated)
     record = store.get(cid)
     assert [m.content for m in record.messages] == ["hi", "hello"]
     assert record.definition.name == "Renamed"
@@ -118,11 +118,11 @@ def test_turn_row_lock_serializes_concurrent_turns(store) -> None:
     def do_turn() -> None:
         barrier.wait()
         with store.turn(cid) as t:
-            current = int(t.definition.description or "0")
+            current = int(t.draft.description or "0")
             time.sleep(0.02)
-            updated = t.definition.model_copy()
+            updated = t.draft.model_copy()
             updated.description = str(current + 1)
-            t.set_definition(updated)
+            t.set_draft(updated)
 
     threads = [threading.Thread(target=do_turn) for _ in range(n)]
     for th in threads:

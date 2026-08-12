@@ -1274,6 +1274,45 @@ class GateEvent(BaseModel):
     timestamp: str
 
 
+class DesignAttemptCheckpoint(BaseModel):
+    """Durable checkpoint of one design attempt's Phase 1 (design + review) output.
+
+    Taken at the design/synthesis boundary inside ``_run_design_attempt``
+    (``strategy_lab/orchestrator_design.py``), so a resumed attempt can skip
+    re-running Phase 1's LLM calls entirely. See ``ADR-012``
+    (``system_design/adr/ADR-012-strategy-lab-design-attempt-checkpoint-contract.md``)
+    for the full contract this DTO implements: checkpoint identity/scoping,
+    the persisted-field set, fencing treatment, and resumability semantics.
+
+    ``gate_results`` is typed as ``List[Dict[str, Any]]`` rather than
+    ``List[QualityGateResult]`` to match ``StrategyLabRecord.quality_gate_results``'s
+    existing precedent: importing ``strategy_lab.quality_gates.models`` from this
+    module would trigger ``strategy_lab/__init__.py``, reintroducing the circular
+    import that module's own docstring documents avoiding.
+
+    Preconditions:
+        ``run_id``/``design_attempt`` identify exactly the attempt this
+        checkpoint was taken during; ``generation`` is the fencing generation
+        active at write time (see ``shared.fencing.check_fencing_token``).
+    Postconditions:
+        Instances are immutable snapshots of Phase 1's output plus the
+        attempt-local drift/gate/budget state needed to resume Phase 1b
+        onward without redoing or double-charging Phase 1's work.
+    """
+
+    run_id: str
+    design_attempt: int = Field(..., ge=0)
+    generation: int = Field(..., ge=1)
+    spec: StrategySpec
+    rationale: str
+    design_context: Dict[str, Any]
+    spec_history: List[SpecRevision] = Field(default_factory=list)
+    code_history: List[CodeRevision] = Field(default_factory=list)
+    gate_timeline: List[GateEvent] = Field(default_factory=list)
+    gate_results: List[Dict[str, Any]] = Field(default_factory=list)
+    budget_calls: int = Field(..., ge=0)
+
+
 class RuleImplementationMap(BaseModel):
     """Per-rule trade coverage: how many trades exercised each spec rule.
 

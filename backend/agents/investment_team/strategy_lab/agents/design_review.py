@@ -65,21 +65,42 @@ def _get_stop_order_semantics() -> str:
     return text
 
 
+# Shared sizing/drawdown risk-framing reference (deployed size IS the
+# per-trade loss cap; no max-drawdown constraint exists). Appended so the
+# reviewer's sizing-related interpretation rules live in one canonical place
+# instead of drifting inline copies.
+@functools.lru_cache(maxsize=None)
+def _get_sizing_risk_framing() -> str:
+    """Load and cache shared sizing/drawdown risk-framing markdown.
+
+    Preconditions: ``_PROMPT_DIR / "_sizing_risk_framing.md"`` exists and is
+    readable UTF-8 text when first invoked.
+    Postconditions: returns a non-empty ``str``; subsequent calls return the
+    same cached value without re-reading the file.
+    Invariants: module import does not invoke this helper.
+    """
+    text = (_PROMPT_DIR / "_sizing_risk_framing.md").read_text(encoding="utf-8")
+    if not text:
+        raise ValueError("_sizing_risk_framing.md must be non-empty")
+    return text
+
+
 @functools.lru_cache(maxsize=None)
 def _get_system_prompt() -> str:
-    """Build and cache the design-review system prompt (body + stop-order block).
+    """Build and cache the design-review system prompt (body + shared reference blocks).
 
-    Preconditions: ``design_review_system.md`` and stop-order semantics file
-    exist when first invoked.
-    Postconditions: returned string contains both the design-review system body
-    and the stop-order semantics text, separated by a blank line; subsequent
-    calls return the same cached composed prompt without re-reading either file.
+    Preconditions: ``design_review_system.md``, stop-order semantics, and
+    sizing/risk framing files exist when first invoked.
+    Postconditions: returned string contains the design-review system body
+    followed by the stop-order semantics text and the sizing/risk framing
+    text, each separated by a blank line; subsequent calls return the same
+    cached composed prompt without re-reading any file.
     Invariants: module import does not invoke this helper.
     """
     body = (_PROMPT_DIR / "design_review_system.md").read_text(encoding="utf-8")
     if not body:
         raise ValueError("design_review_system.md must be non-empty")
-    return body + "\n\n" + _get_stop_order_semantics()
+    return body + "\n\n" + _get_stop_order_semantics() + "\n\n" + _get_sizing_risk_framing()
 
 # The JSON Schema the LLM response must conform to, rendered once for
 # injection into the prompt (mirrors ``refinement._REFINEMENT_SCHEMA_JSON``).

@@ -46,6 +46,13 @@ New agents needing a typed/structured LLM response should default to
 which also documents the v2 marker-template format as the one justified
 exception.
 
+`architect_agents`' Enterprise Orchestrator (`agents/orchestrator.py` and
+its specialist modules) deliberately does not use `BaseTeamLead` — it's an
+LLM-driven Agents-as-Tools `strands.Agent`, a different delegation model
+than `BaseTeamLead`'s hand-authored phase/gate sequencing; see
+[`docs/ARCHITECT_AGENTS_FRAMEWORK_DECISION.md`](docs/ARCHITECT_AGENTS_FRAMEWORK_DECISION.md)
+for the full rationale.
+
 Prompt modules should reuse the shared builders in
 `backend/shared/prompts/templates.py` rather than hand-writing JSON-output or
 context-formatting scaffolding; see
@@ -253,6 +260,8 @@ Ensure Ollama is running with the model (e.g. `ollama run kimi-k2.7-code:cloud`)
 | `CODING_TEAM_IMPLEMENTATION_CONCURRENCY` | Max implementation workers dispatched concurrently in one round | `4` |
 
 **Faster runs:** Set `SW_SKIP_PLANNING_AGENTS=observability,performance_doc` to skip specific planning agents, or `SW_MINIMAL_PLANNING=1` to skip all domain planning (spec → Tech Lead ↔ Architecture → consolidation → execution).
+
+**GitHub issue grooming — Fibonacci scoring mode (`github_source/issue_scorer.py`):** `ISSUE_GROOMING_SCORING_MODE` selects how Phase A scores an issue's complexity — default `auto` tries the LLM scorer (`issue_llm_scorer.score_issue_via_llm`) first and falls back to the heuristic scorer (`issue_heuristic_scorer.score_issue_heuristically`) on any `LLMError` (no provider configured, a client/provider failure, or a response that fails to parse/validate); `heuristic_only` never calls the LLM scorer. An explicit `mode=` argument to `score_issue(...)` overrides the environment variable.
 
 ### Faster runs summary
 
@@ -624,9 +633,16 @@ notes:
   - "OIDC used for GitHub Actions to AWS, no long-lived deploy keys"
 ```
 
-### Backward Compatibility
+### Entry Points
 
-`DevOpsTeamLeadAgent` exposes two structured entry points: `run(spec)` (skips orchestrator-managed artifact writes/branch commits, but Phase 4.5 validation/execution tools such as `terraform init` or `cdk synth` may still write under the working directory as side effects) and `run_task(spec, repo_path=...)` (writes artifacts to a real repo on a feature branch and merges them into `development`). Both take a `DevOpsTaskSpec` directly — the free-text `run_workflow(...)` adapter has been removed. No production caller currently invokes either — `DevOpsTeamLeadAgent` is registered in the SE orchestrator's agent registry but not yet wired into the Tech Lead handoff; DevOps/infrastructure work is routed to `backend_v2` today.
+`DevOpsTeamLeadAgent` exposes two structured entry points, both funneling through the same 5-phase pipeline; the free-text `run_workflow(...)`/`_build_legacy_spec` adapter has been removed:
+
+- **`run(spec: DevOpsTaskSpec) -> DevOpsCompletionPackage`** — model-only: runs the pipeline with `write_changes=False`, so it never commits or merges (Phase 4.5 validation tools like `terraform init`/`helm lint` may still write under the working directory as side effects).
+- **`run_task(spec: DevOpsTaskSpec, *, repo_path, merge_to_development=True, ...) -> DevOpsTeamResult`** — the structured, write-capable entry point: writes artifacts to a real repo on a feature branch. `merge_to_development=True` (the default) merges and deletes the branch; `merge_to_development=False` commits the branch and leaves it for external review instead — the mode the coding-team handoff below uses.
+
+### Coding-Team Handoff (`CODING_TEAM_DEVOPS_ROUTING`)
+
+Opt-in (default off; see `CODING_TEAM_DEVOPS_ROUTING` in `docs/ENV_VARS.md`). When enabled, a coding-team Task Graph task with `target_team="devops"` — genuinely infrastructure-only work: a CI/CD pipeline definition, IaC provisioning, or deployment/container-orchestration configuration — is dispatched to a `DevOpsTeamWorker` (`software_engineering_team/devops_team_worker.py`) instead of being aliased to `backend_v2`. The worker builds a `DevOpsTaskSpec` from the coding-team `Task`, calls `DevOpsTeamLeadAgent.run_task(spec, repo_path=..., merge_to_development=False)`, and returns the resulting feature branch for the normal Tech Lead code-review/merge step — the coding team's generic build/lint gate is skipped for these tasks since DevOps already runs its own internal gates (`DEVOPS_REQUIRED_GATE_NAMES`). With the flag off, `target_team="devops"`/`"dev_ops"`/`"infra"`/`"infrastructure"`/`"ci"`/`"ci_cd"`/`"cicd"` continue to alias to `backend_v2` as before.
 
 ### Expanded Team (Phase 2, not yet implemented)
 

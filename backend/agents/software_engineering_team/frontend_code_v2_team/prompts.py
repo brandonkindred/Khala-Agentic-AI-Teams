@@ -4,6 +4,7 @@ Prompts for the frontend-code-v2 team.
 Written from scratch — no reuse of frontend_team or feature_agent prompts.
 """
 
+from software_engineering_team.shared.coding_standards import CODING_STANDARDS
 from software_engineering_team.shared.prompts import (
     DELIVER_COMMIT_MSG_TEMPLATE as DELIVER_COMMIT_MSG_TEMPLATE,
 )
@@ -24,21 +25,6 @@ from software_engineering_team.shared.security_service import (
     SecurityProfile,
     build_review_prompt,
 )
-
-# ---------------------------------------------------------------------------
-# Shared frontend coding standards
-# ---------------------------------------------------------------------------
-
-FRONTEND_CODING_STANDARDS = """
-**Frontend coding standards (apply to every file you produce):**
-
-1. Accessible by default: semantic HTML, ARIA where needed, keyboard navigation.
-2. Responsive layout; avoid hard-coded pixel widths where breakpoints are expected.
-3. No inline styles in production components; use CSS/SCSS or design tokens.
-4. Component-based structure; single responsibility per component.
-5. Unit tests for components and services where applicable.
-6. No commented-out code in production files.
-"""
 
 TYPESCRIPT_CONVENTIONS = """
 **TypeScript conventions:**
@@ -129,7 +115,7 @@ _EXECUTION_PATH_RULES = """\
 
 EXECUTION_PROMPT = build_execution_prompt(
     engineer_intro="You are an expert Senior Frontend Engineer implementing production-quality UI code.",
-    coding_standards=FRONTEND_CODING_STANDARDS,
+    coding_standards=CODING_STANDARDS,
     has_language_conventions=False,
     file_noun="component/service files",
     path_rules=_EXECUTION_PATH_RULES,
@@ -141,7 +127,7 @@ EXECUTION_PROMPT = build_execution_prompt(
 
 PROBLEM_SOLVING_PROMPT = build_problem_solving_prompt(
     project_kind="frontend",
-    coding_standards=FRONTEND_CODING_STANDARDS,
+    coding_standards=CODING_STANDARDS,
     files_line="Files: for each updated file:",
     has_language_conventions=False,
 )
@@ -152,7 +138,7 @@ _SINGLE_ISSUE_FILE_OUTPUT_BLOCK = """\
 """
 
 PROBLEM_SOLVING_SINGLE_ISSUE_PROMPT = build_problem_solving_single_issue_prompt(
-    coding_standards=FRONTEND_CODING_STANDARDS,
+    coding_standards=CODING_STANDARDS,
     has_language_conventions=False,
     file_output_block=_SINGLE_ISSUE_FILE_OUTPUT_BLOCK,
 )
@@ -264,7 +250,7 @@ brief documentation assessment
 
 BATCH_FIX_PROMPT = build_batch_fix_prompt(
     role_title="Senior Frontend Software Engineer",
-    coding_standards=FRONTEND_CODING_STANDARDS,
+    coding_standards=CODING_STANDARDS,
 )
 
 # ---------------------------------------------------------------------------
