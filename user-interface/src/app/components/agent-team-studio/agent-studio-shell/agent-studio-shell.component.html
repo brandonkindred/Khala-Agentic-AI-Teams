@@ -1,14 +1,15 @@
 <div class="studio">
   <!--
-    Save / Load draft controls (spec §3.5). Placeholders in this scaffold —
-    disabled until the drafts API + AgentStudioStateService persistence land in
-    a later increment.
+    Save / Load draft controls (spec §3.5). Save creates/updates a server
+    draft via the Save-draft popover; Load lists saved drafts and hydrates the
+    session from the selected one. Unsaved-edit conflict prompts and
+    rename/delete affordances land in a later increment (#5914).
   -->
   <header class="studio__header">
     <h1 class="studio__title">Agent Studio</h1>
     <div class="studio__draft-actions">
-      <button mat-stroked-button type="button" class="studio__draft-btn" disabled>Save draft</button>
-      <button mat-stroked-button type="button" class="studio__draft-btn" disabled>Load draft ▾</button>
+      <button mat-stroked-button type="button" class="studio__draft-btn" (click)="openSaveDraftDialog()">Save draft</button>
+      <app-load-draft-menu [busy]="loadingDraft()" (draftSelected)="loadDraft($event)" />
     </div>
   </header>
 

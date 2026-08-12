@@ -3,9 +3,9 @@ import { NoopAnimationsModule } from '@angular/platform-browser/animations';
 import { of } from 'rxjs';
 import { vi } from 'vitest';
 import { MatDialog } from '@angular/material/dialog';
-import { ProductDeliveryService } from '../../../../services/product-delivery.service';
+import { ProductDeliveryService } from '../../../services/product-delivery.service';
 import { BacklogTabComponent } from './backlog-tab.component';
-import { expectNoAxeViolations } from '../../../../testing/a11y';
+import { expectNoAxeViolations } from '../../../testing/a11y';
 
 describe('BacklogTabComponent a11y', () => {
   it('has no axe violations in the empty (no products) state', async () => {
