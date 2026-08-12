@@ -43,6 +43,18 @@ TTL (seconds, default `30`) for the cross-container runtime config cache backing
 supply entry defaults (model/base URL). Each team container caches resolved defaults for this window.
 Garbage → default; negative floors to `0` (read-through every call). No effect when Postgres is unset.
 
+### LLM_USAGE_BUFFER_MAX
+Maximum number of LLM-usage rows held in memory before the oldest is dropped
+(default `1000`; floor `1`). Overflow drops the oldest row and logs a WARNING
+once per burst. Used by `llm_service.usage_flusher`. No-op when Postgres is unset.
+
+### LLM_USAGE_FLUSH_INTERVAL_S
+Seconds between background drains of the in-memory usage buffer to
+`llm_call_records` (default `2`; garbage → `2`, negatives clamped to `0` which
+floors the loop at `0.1s` so it never busy-loops). The observer does zero DB I/O
+on the LLM call path. A final drain runs at Unified API shutdown before the
+Postgres pool closes.
+
 ### LLM_NUM_CTX_FALLBACK_TTL_S
 TTL (seconds, default `300`) for the Ollama client's provisional `num_ctx` fallback. When a model's
 context size is not in `KNOWN_MODEL_CONTEXT` / `LLM_CONTEXT_SIZE` and `/api/show` fails, the client

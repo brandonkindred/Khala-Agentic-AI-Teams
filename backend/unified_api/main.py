@@ -642,6 +642,13 @@ async def lifespan(app: FastAPI):  # noqa: PLR0915 - linear startup orchestrator
         logger.exception("unified_api postgres schema registration failed")
 
     try:
+        from llm_service.usage_flusher import register_usage_flusher
+
+        register_usage_flusher()
+    except Exception:
+        logger.warning("llm usage flusher registration failed", exc_info=True)
+
+    try:
         from shared.postgres import register_team_schemas
         from team_assistant.postgres import SCHEMA as TEAM_ASSISTANT_SCHEMA
 
@@ -821,6 +828,13 @@ async def lifespan(app: FastAPI):  # noqa: PLR0915 - linear startup orchestrator
         await close_graphiti()
     except Exception:
         logger.warning("shared.neo4j close_graphiti failed", exc_info=True)
+
+    try:
+        from llm_service.usage_flusher import shutdown as usage_flush_shutdown
+
+        usage_flush_shutdown()
+    except Exception:
+        logger.warning("llm usage flusher shutdown failed", exc_info=True)
 
     # Close Postgres connection pools owned by shared.postgres.
     try:
