@@ -46,6 +46,13 @@ New agents needing a typed/structured LLM response should default to
 which also documents the v2 marker-template format as the one justified
 exception.
 
+`architect_agents`' Enterprise Orchestrator (`agents/orchestrator.py` and
+its specialist modules) deliberately does not use `BaseTeamLead` — it's an
+LLM-driven Agents-as-Tools `strands.Agent`, a different delegation model
+than `BaseTeamLead`'s hand-authored phase/gate sequencing; see
+[`docs/ARCHITECT_AGENTS_FRAMEWORK_DECISION.md`](docs/ARCHITECT_AGENTS_FRAMEWORK_DECISION.md)
+for the full rationale.
+
 Prompt modules should reuse the shared builders in
 `backend/shared/prompts/templates.py` rather than hand-writing JSON-output or
 context-formatting scaffolding; see
