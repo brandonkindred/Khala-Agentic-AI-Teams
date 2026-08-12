@@ -142,6 +142,16 @@ public APIs serving roughly 140 call sites, and collapsing them into one flat na
 create collisions (registry and console could each plausibly want a `models` submodule) for
 no benefit callers asked for.
 
+**No new coupling is introduced by this move.** Directory co-location under one parent package
+is orthogonal to import coupling in Python — nothing about placing `registry/`, `console/`,
+`sandbox/`, and `studio/` as sibling subpackages forces any of them to import another. The
+dependency graph between the four is unchanged: today's one existing cross-subsystem edge
+(`studio` imports `agent_registry.models.AgentManifest`, one-directional; see Context) is
+preserved as-is post-move, and no new edges are added — `console` and `sandbox` still import
+neither `registry` nor each other. Each subsystem's own `__init__.py` façade stays its
+existing, unchanged public surface (§1 above); intra-package siblings are reached the same way
+inter-package siblings are today, just under a shared dotted prefix (§2).
+
 ```
 backend/agents/agent_platform/
   __init__.py              # thin façade: boundary-rules docstring only, no re-exports
@@ -213,6 +223,16 @@ already proven at scale by `sandbox` and `agent_studio`. This ADR does not presc
 transitional compatibility shim for the old bare-import paths — whether the move stories use
 one as an execution tactic is left to #5950 (migration order); this ADR fixes the destination,
 not the path to it.
+
+**No environment/config changes are needed.** `agent_platform` is placed as a direct child of
+`backend/agents/` specifically so it sits at the same `PYTHONPATH` root its four subsystems
+already do (§1) — `backend/Dockerfile:15`'s `ENV PYTHONPATH=/app:/app/agents`,
+`backend/pytest.ini:11`'s `pythonpath = agents .`, and `backend/conftest.py`'s `sys.path`
+insertion all point at `backend/agents` itself, not at any specific package under it, so they
+need no edits. What changes is only the ~140 call sites' import *statements* (§2's map) —
+`registry`/`console`/`sandbox`/`studio` become grandchildren of `backend/agents` instead of
+children, which is exactly why they lose the bare-import form and gain the
+`agent_platform.` prefix; the root of the `PYTHONPATH` itself never moves.
 
 Representative old → new symbol map (the move stories should treat this as authoritative for
 naming; it is not exhaustive of every symbol):
