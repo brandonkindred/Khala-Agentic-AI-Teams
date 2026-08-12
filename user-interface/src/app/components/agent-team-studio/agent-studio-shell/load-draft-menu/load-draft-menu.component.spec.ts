@@ -2,7 +2,7 @@ import { TestBed } from '@angular/core/testing';
 import { Subject, of, throwError } from 'rxjs';
 import { describe, expect, it, vi } from 'vitest';
 import { LoadDraftMenuComponent } from './load-draft-menu.component';
-import { AgentStudioApiService } from '../../../../services/agent-studio-api.service';
+import { AgentStudioFacade } from '../../../../services/agent-studio.facade';
 import type { AgentStudioDraftSummary } from '../../../../models/agent-studio.model';
 
 const summary = (id: string, name: string): AgentStudioDraftSummary => ({
@@ -12,21 +12,21 @@ const summary = (id: string, name: string): AgentStudioDraftSummary => ({
 });
 
 function configure(listDrafts = vi.fn().mockReturnValue(of([]))) {
-  const api = { listDrafts };
+  const facade = { listDrafts };
   TestBed.configureTestingModule({
     imports: [LoadDraftMenuComponent],
-    providers: [{ provide: AgentStudioApiService, useValue: api }],
+    providers: [{ provide: AgentStudioFacade, useValue: facade }],
   });
   const fixture = TestBed.createComponent(LoadDraftMenuComponent);
-  return { fixture, api };
+  return { fixture, facade };
 }
 
 describe('LoadDraftMenuComponent', () => {
   it('onOpened fetches page 1 and populates drafts()', () => {
     const listDrafts = vi.fn().mockReturnValue(of([summary('d-1', 'A'), summary('d-2', 'B')]));
-    const { fixture, api } = configure(listDrafts);
+    const { fixture, facade } = configure(listDrafts);
     fixture.componentInstance.onOpened();
-    expect(api.listDrafts).toHaveBeenCalledWith(10, 0);
+    expect(facade.listDrafts).toHaveBeenCalledWith(10, 0);
     expect(fixture.componentInstance.drafts()).toEqual([summary('d-1', 'A'), summary('d-2', 'B')]);
     expect(fixture.componentInstance.loading()).toBe(false);
   });
@@ -47,10 +47,10 @@ describe('LoadDraftMenuComponent', () => {
   it('loadMore appends the next page and advances the offset', () => {
     const fullPage = Array.from({ length: 10 }, (_, i) => summary(`d-${i}`, `n${i}`));
     const listDrafts = vi.fn().mockReturnValueOnce(of(fullPage)).mockReturnValueOnce(of([summary('d-10', 'n10')]));
-    const { fixture, api } = configure(listDrafts);
+    const { fixture, facade } = configure(listDrafts);
     fixture.componentInstance.onOpened();
     fixture.componentInstance.loadMore();
-    expect(api.listDrafts).toHaveBeenLastCalledWith(10, 10);
+    expect(facade.listDrafts).toHaveBeenLastCalledWith(10, 10);
     expect(fixture.componentInstance.drafts()).toHaveLength(11);
     expect(fixture.componentInstance.hasMore()).toBe(false);
   });
@@ -58,18 +58,18 @@ describe('LoadDraftMenuComponent', () => {
   it('loadMore is a no-op while loading', () => {
     // A call that never emits keeps loading() true, simulating an in-flight request.
     const listDrafts = vi.fn().mockReturnValue({ subscribe: () => undefined });
-    const { fixture, api } = configure(listDrafts);
+    const { fixture, facade } = configure(listDrafts);
     fixture.componentInstance.onOpened();
     expect(fixture.componentInstance.loading()).toBe(true);
     fixture.componentInstance.loadMore();
-    expect(api.listDrafts).toHaveBeenCalledTimes(1);
+    expect(facade.listDrafts).toHaveBeenCalledTimes(1);
   });
 
   it('loadMore is a no-op once hasMore is false', () => {
-    const { fixture, api } = configure(vi.fn().mockReturnValue(of([summary('d-1', 'A')])));
+    const { fixture, facade } = configure(vi.fn().mockReturnValue(of([summary('d-1', 'A')])));
     fixture.componentInstance.onOpened();
     fixture.componentInstance.loadMore();
-    expect(api.listDrafts).toHaveBeenCalledTimes(1);
+    expect(facade.listDrafts).toHaveBeenCalledTimes(1);
   });
 
   it('renders the empty state when the fetch succeeds with no drafts', () => {
@@ -92,11 +92,11 @@ describe('LoadDraftMenuComponent', () => {
       .fn()
       .mockReturnValueOnce(of([summary('d-1', 'A')]))
       .mockReturnValueOnce(of([summary('d-2', 'B')]));
-    const { fixture, api } = configure(listDrafts);
+    const { fixture, facade } = configure(listDrafts);
     fixture.componentInstance.onOpened();
     expect(fixture.componentInstance.drafts()).toEqual([summary('d-1', 'A')]);
     fixture.componentInstance.onOpened();
-    expect(api.listDrafts).toHaveBeenLastCalledWith(10, 0);
+    expect(facade.listDrafts).toHaveBeenLastCalledWith(10, 0);
     expect(fixture.componentInstance.drafts()).toEqual([summary('d-2', 'B')]);
   });
 
@@ -118,12 +118,12 @@ describe('LoadDraftMenuComponent', () => {
   });
 
   it('select emits draftSelected and makes no HTTP call', () => {
-    const { fixture, api } = configure();
+    const { fixture, facade } = configure();
     const spy = vi.fn();
     fixture.componentInstance.draftSelected.subscribe(spy);
     fixture.componentInstance.select('d-1');
     expect(spy).toHaveBeenCalledWith('d-1');
-    expect(api.listDrafts).not.toHaveBeenCalled();
+    expect(facade.listDrafts).not.toHaveBeenCalled();
   });
 
   it('the busy input disables the trigger button', () => {
