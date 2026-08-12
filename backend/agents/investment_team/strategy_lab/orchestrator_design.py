@@ -59,6 +59,7 @@ from ._orchestrator_helpers import (
     _DriftCollector,
     _emit_phase_transition,
     _env_flag,
+    _has_critical_failures,
     _RefinementAlignmentResult,
 )
 from .agents._llm_budget import DesignBudgetExhausted, active_budget
@@ -910,9 +911,7 @@ class DesignMixin:
             )
             self.record_gates(readiness_results, all_gate_results, refinement_round=-1)
             last_readiness_signature = signature
-        deterministic_ready = not any(
-            (not r.passed) and r.severity == "critical" for r in readiness_results
-        )
+        deterministic_ready = not _has_critical_failures(readiness_results)
         return readiness_results, last_readiness_signature, deterministic_ready
 
     def _run_mechanical_repair_stages(
@@ -971,9 +970,7 @@ class DesignMixin:
                 )
                 self.record_gates(readiness_results, all_gate_results, refinement_round=-1)
                 last_readiness_signature = repaired_signature
-                deterministic_ready = not any(
-                    (not r.passed) and r.severity == "critical" for r in readiness_results
-                )
+                deterministic_ready = not _has_critical_failures(readiness_results)
 
         # Stage 2 — trial compile, only on a readiness-clean spec.
         if deterministic_ready:
@@ -1000,9 +997,7 @@ class DesignMixin:
                     )
                     self.record_gates(readiness_results, all_gate_results, refinement_round=-1)
                     last_readiness_signature = repaired_signature
-                    deterministic_ready = not any(
-                        (not r.passed) and r.severity == "critical" for r in readiness_results
-                    )
+                    deterministic_ready = not _has_critical_failures(readiness_results)
 
         if repair_actions:
             mechanical_repair_count += len(repair_actions)
