@@ -122,6 +122,31 @@ def _extract_llm_client(model: Any) -> LLMClient | None:
     return None
 
 
+def _pinned_max_tokens(model: Any) -> int | None:
+    """Return a positive ``max_tokens`` pin from ``model``'s config, if any.
+
+    Preconditions:
+        ``model`` is the object passed to :func:`run_agent_via_reasoning`.
+
+    Postconditions:
+        Returns a positive int when the model advertises a reserved output
+        cap (``get_config()['max_tokens']`` or ``max_tokens``). Returns
+        ``None`` when no pin is present so the formatter keeps the client
+        default.
+    """
+    get_config = getattr(model, "get_config", None)
+    if callable(get_config):
+        cfg = get_config() or {}
+        if isinstance(cfg, dict):
+            pinned = cfg.get("max_tokens")
+            if isinstance(pinned, int) and pinned > 0:
+                return pinned
+    pinned = getattr(model, "max_tokens", None)
+    if isinstance(pinned, int) and pinned > 0:
+        return pinned
+    return None
+
+
 def _clone_model_for_pass(
     model: Any,
     *,
@@ -238,6 +263,8 @@ def run_agent_via_reasoning(
 
     When a backing ``LLMClient`` is available, call 2 uses
     ``client.complete_json`` and passes ``json.dumps`` output to ``parse``.
+    A positive ``max_tokens`` pin on ``model`` (from ``get_config`` or the
+    attribute) is forwarded so a cloned output reserve is not dropped.
     Otherwise call 2 uses a no-tools ``Agent`` on a JSON-mode model clone.
 
     Preconditions:
@@ -248,6 +275,7 @@ def run_agent_via_reasoning(
 
     Postconditions:
         Returns ``parse``'s result. Tools are attached only to call 1.
+        Call 2 honors ``model``'s reserved ``max_tokens`` when one is set.
     """
     _require_non_empty("reasoning_prompt", reasoning_prompt)
     _require_non_empty("reasoning_system_prompt", reasoning_system_prompt)
@@ -279,13 +307,16 @@ def run_agent_via_reasoning(
 
     backing_client = _extract_llm_client(model)
     if backing_client is not None:
-        data = backing_client.complete_json(
-            format_prompt,
-            objective=f"{agent_key} (format)",
-            system_prompt=format_system,
-            temperature=0.0,
-            think=False,
-        )
+        format_kwargs: dict[str, Any] = {
+            "objective": f"{agent_key} (format)",
+            "system_prompt": format_system,
+            "temperature": 0.0,
+            "think": False,
+        }
+        max_tokens = _pinned_max_tokens(model)
+        if max_tokens is not None:
+            format_kwargs["max_tokens"] = max_tokens
+        data = backing_client.complete_json(format_prompt, **format_kwargs)
         return parse(json.dumps(data))
 
     json_model = _clone_model_for_pass(

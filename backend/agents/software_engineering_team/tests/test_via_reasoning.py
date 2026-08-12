@@ -222,6 +222,83 @@ def test_run_agent_via_reasoning_formats_via_underlying_client(
     assert "REVIEW PROSE" in format_calls[0]["prompt"]
 
 
+def test_run_agent_via_reasoning_forwards_model_max_tokens_to_format_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A cloned model's reserved max_tokens must reach complete_json.
+
+    Submission passes clone the Strands model with the computed output
+    reserve. Call 2 unwraps the backing client, so that pin has to be
+    forwarded explicitly or the formatter ignores the budget.
+    """
+    from llm_service import LLMClientModel
+    from llm_service.clients.dummy import DummyLLMClient
+    from software_engineering_team.code_review_agent import via_reasoning as vr_mod
+
+    format_calls: list[dict[str, Any]] = []
+
+    class _RecordingClient(DummyLLMClient):
+        def complete_json(self, prompt: str, **kwargs: Any) -> dict[str, Any]:
+            format_calls.append({"prompt": prompt, **kwargs})
+            return {"approved": True, "summary": "via client"}
+
+    class _RecordingAgent:
+        def __init__(self, **kwargs: Any) -> None:
+            pass
+
+        def __call__(self, prompt: str) -> str:
+            return "REVIEW PROSE"
+
+    monkeypatch.setattr(vr_mod, "Agent", _RecordingAgent)
+    model = LLMClientModel(_RecordingClient(), agent_key="code_review", max_tokens=4096)
+
+    run_agent_via_reasoning(
+        model=model,
+        reasoning_prompt="Review this",
+        reasoning_system_prompt="Prose reviewer",
+        formatting_instructions='Return {"approved": bool, "summary": str}',
+        parse=lambda raw: _Out.model_validate_json(raw),
+    )
+
+    assert format_calls[0]["max_tokens"] == 4096
+
+
+def test_run_agent_via_reasoning_omits_max_tokens_when_model_has_no_pin(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unset model max_tokens must not invent a formatter cap."""
+    from llm_service import LLMClientModel
+    from llm_service.clients.dummy import DummyLLMClient
+    from software_engineering_team.code_review_agent import via_reasoning as vr_mod
+
+    format_calls: list[dict[str, Any]] = []
+
+    class _RecordingClient(DummyLLMClient):
+        def complete_json(self, prompt: str, **kwargs: Any) -> dict[str, Any]:
+            format_calls.append({"prompt": prompt, **kwargs})
+            return {"approved": True, "summary": "via client"}
+
+    class _RecordingAgent:
+        def __init__(self, **kwargs: Any) -> None:
+            pass
+
+        def __call__(self, prompt: str) -> str:
+            return "REVIEW PROSE"
+
+    monkeypatch.setattr(vr_mod, "Agent", _RecordingAgent)
+    model = LLMClientModel(_RecordingClient(), agent_key="code_review")
+
+    run_agent_via_reasoning(
+        model=model,
+        reasoning_prompt="Review this",
+        reasoning_system_prompt="Prose reviewer",
+        formatting_instructions='Return {"approved": bool, "summary": str}',
+        parse=lambda raw: _Out.model_validate_json(raw),
+    )
+
+    assert "max_tokens" not in format_calls[0]
+
+
 def test_run_agent_via_reasoning_second_call_has_no_tools(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
