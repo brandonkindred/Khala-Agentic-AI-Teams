@@ -250,6 +250,9 @@ def _repair_json(s: str) -> str:
     return re.sub(r",\s*([}\]])", r"\1", s)
 
 
+_FENCED_BLOCK_RE = re.compile(r"```(?:json)?\s*([\s\S]*?)```", re.IGNORECASE)
+
+
 def extract_json_from_response(
     text: str,
     *,
@@ -258,6 +261,29 @@ def extract_json_from_response(
     """
     Extract a single JSON object from model output (e.g. after continuation).
     Raises LLMJsonParseError on failure.
+
+    Preconditions:
+        - ``text`` is a str (may be empty or contain no JSON at all).
+        - ``expected_keys`` is ``None`` (defaults to a broad built-in key set,
+          used only to disambiguate an AMBIGUOUS multi-fenced-block response)
+          or a frozenset of str anchor keys.
+    Postconditions:
+        - When ``text`` contains 0 or 1 fenced code blocks, behavior (and
+          performance) is unchanged from the original single-candidate fast
+          path: the first successful parse among the direct/repaired/regex/
+          stripped-prefix strategies is returned immediately, with no
+          ``expected_keys`` check performed.
+        - When ``text`` contains 2+ fenced code blocks (e.g. an echoed
+          format-example block followed by the real-answer block), the greedy
+          fast-path returns are skipped. Every fenced block is parsed against
+          the ORIGINAL, unmutated ``text`` and the LAST one whose parsed value
+          is a dict carrying at least one of ``expected_keys`` is returned
+          (last-candidate-wins, mirroring ``shared.llm_recovery``'s salvage
+          semantics) -- never the first.
+        - Falls back to the shared ``extract_json_object`` salvage engine,
+          anchored on the caller's original (non-defaulted) ``expected_keys``
+          and run against the original text, when no strategy above succeeds.
+        - Raises ``LLMJsonParseError`` only when every strategy above fails.
     """
     original_text = text
     original_expected_keys = expected_keys
@@ -267,67 +293,74 @@ def extract_json_from_response(
         parts = text.split("---DRAFT---", 1)
         if len(parts) == 2 and parts[1].strip():
             return {"content": parts[1].strip()}
-    json_block_match = re.search(r"```json\s*([\s\S]*?)```", text, re.IGNORECASE)
-    if json_block_match:
-        text = json_block_match.group(1).strip()
-    else:
-        fenced_match = re.search(
-            r"```(?:json)?\s*([\s\S]*?)```", text, flags=re.DOTALL | re.IGNORECASE
-        )
-        if fenced_match:
-            block_content = fenced_match.group(1).strip()
-            if block_content.lstrip().startswith(("{", "[")):
-                text = block_content
-    try:
-        return json.loads(text)
-    except (json.JSONDecodeError, ValueError):
-        pass
-    repaired = _repair_json(text)
-    try:
-        return json.loads(repaired)
-    except (json.JSONDecodeError, ValueError):
-        pass
-    obj_match = re.search(r"\{.*\}", text, flags=re.DOTALL)
-    if obj_match:
-        raw = obj_match.group(0)
+
+    fenced_blocks = _FENCED_BLOCK_RE.findall(text)
+    ambiguous = len(fenced_blocks) > 1
+
+    if not ambiguous:
+        json_block_match = re.search(r"```json\s*([\s\S]*?)```", text, re.IGNORECASE)
+        if json_block_match:
+            text = json_block_match.group(1).strip()
+        else:
+            fenced_match = re.search(
+                r"```(?:json)?\s*([\s\S]*?)```", text, flags=re.DOTALL | re.IGNORECASE
+            )
+            if fenced_match:
+                block_content = fenced_match.group(1).strip()
+                if block_content.lstrip().startswith(("{", "[")):
+                    text = block_content
         try:
-            return json.loads(raw)
+            return json.loads(text)
         except (json.JSONDecodeError, ValueError):
+            pass
+        repaired = _repair_json(text)
+        try:
+            return json.loads(repaired)
+        except (json.JSONDecodeError, ValueError):
+            pass
+        obj_match = re.search(r"\{.*\}", text, flags=re.DOTALL)
+        if obj_match:
+            raw = obj_match.group(0)
             try:
-                return json.loads(_repair_json(raw))
+                return json.loads(raw)
             except (json.JSONDecodeError, ValueError):
-                pass
-    stripped = text.strip()
-    for pattern in (
-        r"^(?:Here(?:'s| is) (?:the )?JSON:?)\s*",
-        r"^(?:The (?:response|output|result) is:?)\s*",
-        r"^(?:JSON:?)\s*",
-        r"^\s*```(?:json)?\s*",
-        r"\s*```\s*$",
-    ):
-        stripped = re.sub(pattern, "", stripped, flags=re.IGNORECASE).strip()
-    if stripped != text.strip():
-        obj_match2 = re.search(r"\{.*\}", stripped, flags=re.DOTALL)
-        if obj_match2:
-            try:
-                return json.loads(obj_match2.group(0))
-            except (json.JSONDecodeError, ValueError):
-                pass
-    for block_match in re.finditer(r"```(?:json)?\s*([\s\S]*?)```", text, re.IGNORECASE):
-        block = block_match.group(1).strip()
+                try:
+                    return json.loads(_repair_json(raw))
+                except (json.JSONDecodeError, ValueError):
+                    pass
+        stripped = text.strip()
+        for pattern in (
+            r"^(?:Here(?:'s| is) (?:the )?JSON:?)\s*",
+            r"^(?:The (?:response|output|result) is:?)\s*",
+            r"^(?:JSON:?)\s*",
+            r"^\s*```(?:json)?\s*",
+            r"\s*```\s*$",
+        ):
+            stripped = re.sub(pattern, "", stripped, flags=re.IGNORECASE).strip()
+        if stripped != text.strip():
+            obj_match2 = re.search(r"\{.*\}", stripped, flags=re.DOTALL)
+            if obj_match2:
+                try:
+                    return json.loads(obj_match2.group(0))
+                except (json.JSONDecodeError, ValueError):
+                    pass
+
+    last_match: Optional[Dict[str, Any]] = None
+    for block in fenced_blocks:
+        block = block.strip()
         if not block:
             continue
         try:
             parsed = json.loads(block)
-            if isinstance(parsed, dict) and expected_keys & set(parsed.keys()):
-                return parsed
         except (json.JSONDecodeError, ValueError):
             try:
                 parsed = json.loads(_repair_json(block))
-                if isinstance(parsed, dict) and expected_keys & set(parsed.keys()):
-                    return parsed
             except (json.JSONDecodeError, ValueError):
                 continue
+        if isinstance(parsed, dict) and expected_keys & set(parsed.keys()):
+            last_match = parsed
+    if last_match is not None:
+        return last_match
     # Last resort: the shared salvage engine (also used by agent_call_json)
     # covers truncation repair, <think>/<thinking>/<reasoning>/<json> tag
     # stripping, envelope descent, and format-echo-before-payload
