@@ -3,6 +3,8 @@
 
 The per-round body was decomposed into named helpers:
 
+- :meth:`_run_synthesis_universe_injection` — the deterministic UNIVERSE +
+  on_bar symbol-guard injection that runs before any gate sees the code.
 - :meth:`_run_synthesis_validation_gates` — the round's validation gates,
   including the predicate-conformance gate that only runs when no earlier gate
   fired a critical (the ordering the refactor must preserve exactly).
@@ -18,11 +20,13 @@ contract is exercised in isolation.
 
 from __future__ import annotations
 
+import textwrap
 from typing import List
 
 from investment_team.models import BacktestConfig, StrategySpec
 from investment_team.strategy_lab.orchestrator import (
     StrategyLabOrchestrator,
+    _DriftCollector,
     _MarketDataFetch,
 )
 from investment_team.strategy_lab.quality_gates.models import QualityGateResult
@@ -66,6 +70,93 @@ def _gate(name: str, *, passed: bool, severity: str = "critical") -> QualityGate
 
 def _orch() -> StrategyLabOrchestrator:
     return StrategyLabOrchestrator()
+
+
+# Strategy class targeting QQQ (matching ``_spec()``'s target_symbols) with
+# neither the UNIVERSE constant nor the on_bar symbol guard.
+_GUARDLESS_CODE = textwrap.dedent(
+    """
+    from contract import Strategy
+
+    class S(Strategy):
+        def on_bar(self, ctx, bar):
+            if sma(ctx.history(bar.symbol, 50), 50) > 0:
+                ctx.submit_order(symbol=bar.symbol, qty=1, side="LONG")
+    """
+)
+
+# Already-canonical form of the same strategy — inject_universe_and_guard
+# returns this verbatim (no-op).
+_CONFORMANT_CODE = textwrap.dedent(
+    """
+    from contract import Strategy
+
+    class S(Strategy):
+        UNIVERSE = ("QQQ",)
+
+        def on_bar(self, ctx, bar):
+            if bar.symbol not in self.UNIVERSE:
+                return
+            if sma(ctx.history(bar.symbol, 50), 50) > 0:
+                ctx.submit_order(symbol=bar.symbol, qty=1, side="LONG")
+    """
+)
+
+
+# ---------------------------------------------------------------------------
+# _run_synthesis_universe_injection
+# ---------------------------------------------------------------------------
+
+
+def test_universe_injection_rewrites_code_updates_spec_and_records_drift() -> None:
+    """Non-conformant code is rewritten, ``spec.strategy_code`` is kept in
+    lockstep, and the change is recorded on the drift collector."""
+    orch = _orch()
+    spec = _spec()
+    spec.strategy_code = _GUARDLESS_CODE
+    collector = _DriftCollector()
+
+    result = orch._run_synthesis_universe_injection(
+        spec=spec, code=_GUARDLESS_CODE, drift_collector=collector
+    )
+
+    assert result != _GUARDLESS_CODE
+    assert "UNIVERSE" in result
+    assert spec.strategy_code == result
+    assert len(collector.code_history) == 1
+    revision = collector.code_history[0]
+    assert revision.phase == "synthesis"
+    assert revision.agent == "universe_injector"
+
+
+def test_universe_injection_is_noop_on_already_conformant_code() -> None:
+    """Already-canonical code is returned verbatim; ``spec.strategy_code`` is
+    left untouched and nothing is recorded on the drift collector."""
+    orch = _orch()
+    spec = _spec()
+    spec.strategy_code = "sentinel — must not be overwritten"
+    collector = _DriftCollector()
+
+    result = orch._run_synthesis_universe_injection(
+        spec=spec, code=_CONFORMANT_CODE, drift_collector=collector
+    )
+
+    assert result == _CONFORMANT_CODE
+    assert spec.strategy_code == "sentinel — must not be overwritten"
+    assert collector.code_history == []
+
+
+def test_universe_injection_without_drift_collector() -> None:
+    """A ``None`` drift collector does not crash the injection path."""
+    orch = _orch()
+    spec = _spec()
+
+    result = orch._run_synthesis_universe_injection(
+        spec=spec, code=_GUARDLESS_CODE, drift_collector=None
+    )
+
+    assert result != _GUARDLESS_CODE
+    assert spec.strategy_code == result
 
 
 # ---------------------------------------------------------------------------
