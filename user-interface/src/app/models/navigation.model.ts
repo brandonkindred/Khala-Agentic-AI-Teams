@@ -101,6 +101,7 @@ export const NAV_GROUPS: NavGroup[] = [
       { id: 'agent-studio', label: 'Agent Studio', icon: 'smart_toy', route: '/agent-studio', group: 'agentic-ai' },
       { id: 'ai-systems', label: 'AI Systems', icon: 'psychology', route: '/ai-systems', group: 'agentic-ai' },
       { id: 'agent-console', label: 'Agent Console', icon: 'hub', route: '/agent-console', group: 'agentic-ai' },
+      { id: 'product-delivery', label: 'Product Delivery', icon: 'assignment_turned_in', route: '/product-delivery', group: 'agentic-ai' },
       { id: 'agentic-teams', label: 'Agentic Teams', icon: 'groups', route: '/agentic-teams', group: 'agentic-ai' },
       { id: 'persona-testing', label: 'Testing Personas', icon: 'science', route: '/persona-testing', group: 'agentic-ai' },
       { id: 'deepthought', label: 'Deepthought', icon: 'psychology', route: '/deepthought', group: 'agentic-ai' },
