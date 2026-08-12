@@ -40,7 +40,7 @@ from branding_team.agents import (
     make_typography_builder,
     make_voice_tone_builder,
 )
-from branding_team.graphs.shared import build_agent, build_fan_out_fan_in
+from branding_team.graphs.shared import COMPOSITOR_AGENT_KEY, build_agent, build_fan_out_fan_in
 
 _PHASE3_CONCEPTUALIST_VARIANTS: tuple[str, ...] = ("Editorial", "Minimalist", "Bold")
 
@@ -111,6 +111,7 @@ def build_phase3_graph() -> Graph:
             "illustration style, photography direction, video direction, motion principles, voice tone "
             "spectrum, language dos/donts, and design system. Output comprehensive valid JSON."
         ),
+        agent_key=COMPOSITOR_AGENT_KEY,
     )
     compositor_node = builder.add_node(compositor, node_id="visual_compositor")
     for node in fan_out_nodes:

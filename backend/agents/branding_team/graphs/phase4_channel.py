@@ -20,7 +20,7 @@ from branding_team.agents import (
     make_social_guide,
     make_website_guide,
 )
-from branding_team.graphs.shared import build_agent, build_fan_out_fan_in
+from branding_team.graphs.shared import COMPOSITOR_AGENT_KEY, build_agent, build_fan_out_fan_in
 
 
 def build_phase4_graph() -> Graph:
@@ -68,6 +68,7 @@ def build_phase4_graph() -> Graph:
                 "- brand_in_action_examples\n\n"
                 "Output valid JSON matching the ChannelActivationOutput schema."
             ),
+            agent_key=COMPOSITOR_AGENT_KEY,
         ),
         node_id="channel_compositor",
     )

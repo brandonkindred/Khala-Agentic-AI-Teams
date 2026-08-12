@@ -26,19 +26,20 @@ if TYPE_CHECKING:
 OutputMode = Literal["json", "text"]
 
 
-# Every branding agent resolves a model keyed by (agent_key, output_mode),
-# defaulting to agent_key="branding". Building the graph instantiates ~40
-# agents per run; without memoisation each one constructs a fresh
-# LLMClientModel. The model is a stateless wrapper over the cached LLM
-# client, so one instance per (agent_key, output_mode) pair is safe to share
-# across all agents and all runs. The Agents themselves are NOT cached —
-# they carry per-invocation conversation state and must stay distinct per
-# graph build.
+# Every branding agent resolves a model keyed by (agent_key, output_mode).
+# Building the graph instantiates ~40 agents per run; without memoisation
+# each one constructs a fresh LLMClientModel. The model is a stateless
+# wrapper over the cached LLM client, so one instance per (agent_key,
+# output_mode) pair is safe to share across all agents and all runs. The
+# Agents themselves are NOT cached — they carry per-invocation conversation
+# state and must stay distinct per graph build.
 #
-# ``maxsize`` bounds the cache: the key space is small (today, just the
-# "branding" default plus any override), so this never holds more than a
-# handful of entries.
-@lru_cache(maxsize=8)
+# ``maxsize`` bounds the cache: the key space is the agent_key tiers below
+# (five phase tiers + "branding.compositor" + the "branding" default +
+# "branding_assistant") crossed with the two output modes — comfortably
+# under 16 today, with headroom for a future tier without a cache eviction
+# cliff.
+@lru_cache(maxsize=16)
 def _branding_model(agent_key: str, output_mode: OutputMode) -> "LLMClientModel":
     return get_strands_model(agent_key, response_format=output_mode)
 
@@ -88,8 +89,11 @@ def build_agent(
     agent_key:
         LLM routing key passed to ``get_strands_model``, controlling which
         ``LLM_MODEL_<agent_key>`` override (if any) resolves the backing
-        model. Defaults to ``"branding"``, preserving the behavior of all
-        existing call sites.
+        model. Defaults to ``"branding"`` for callers that don't need
+        per-tier routing; every pipeline call site instead passes one of the
+        ``branding.<phase>`` / ``branding.compositor`` tiers documented on
+        :func:`phase_agent_key` and ``COMPOSITOR_AGENT_KEY`` below (see also
+        the "LLM routing (agent_key tiers)" section of ``README.md``).
     """
     if output_mode not in ("json", "text"):
         raise ValueError(f"output_mode must be 'json' or 'text', got {output_mode!r}")
@@ -157,6 +161,47 @@ def phase_index(phase: BrandPhase) -> int:
         return PHASE_ORDER.index(phase)
     except ValueError:
         return len(PHASE_ORDER)
+
+
+# ---------------------------------------------------------------------------
+# Agent-key tiers (per-phase LLM routing)
+# ---------------------------------------------------------------------------
+
+# Every pipeline agent now passes an explicit ``agent_key`` instead of
+# resolving ``build_agent``'s implicit "branding" default. The scheme is:
+#
+# - ``branding.<phase value>`` (via ``phase_agent_key``) for each phase's
+#   specialist agents — reusing ``BrandPhase``'s own enum values so the tier
+#   and the phase it routes can never drift apart. This groups each phase's
+#   mix of open-ended strategic/creative work (e.g. Phase 1's
+#   positioning_synthesizer, Phase 2's Storyteller) alongside its more
+#   bounded extraction/list-generation specialists (e.g. Phase 5's
+#   asset_wiki_planner) under one dial, so ops can tune per-phase cost/
+#   quality via ``LLM_MODEL_branding.<phase>`` without a code change.
+# - ``branding.compositor`` (``COMPOSITOR_AGENT_KEY``) for the three
+#   phase-terminal join agents — ``visual_compositor``, ``channel_compositor``,
+#   ``governance_compositor`` — that assemble a phase's full set of upstream
+#   fragments into that phase's structured output. This is a distinct role
+#   from any single phase's specialists (broad-context synthesis across many
+#   fragments, not one bounded task) and cuts across phases 3-5, so it gets
+#   its own tier rather than inheriting its phase's key.
+#
+# ``BrandComplianceAgent`` (outside the graph) is deliberately excluded: it
+# is a keyword-matching ``@dataclass`` with no LLM call, so no agent_key
+# applies to it.
+COMPOSITOR_AGENT_KEY = "branding.compositor"
+
+
+def phase_agent_key(phase: BrandPhase) -> str:
+    """Return the ``agent_key`` tier for *phase*'s specialist agents.
+
+    Preconditions:
+        ``phase`` is a ``BrandPhase`` member.
+    Postconditions:
+        Returns ``f"branding.{phase.value}"`` (e.g.
+        ``"branding.strategic_core"`` for ``BrandPhase.STRATEGIC_CORE``).
+    """
+    return f"branding.{phase.value}"
 
 
 def should_advance_past(phase_idx: int, target_phase: Optional[BrandPhase]) -> bool:

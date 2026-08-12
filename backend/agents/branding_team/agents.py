@@ -16,7 +16,7 @@ from typing import List
 from pydantic import BaseModel
 from strands import Agent
 
-from .graphs.shared import build_agent
+from .graphs.shared import build_agent, phase_agent_key
 from .models import (
     ApprovalWorkflowsOutput,
     AssetWikiOutput,
@@ -31,6 +31,7 @@ from .models import (
     BrandHealthKPIsOutput,
     BrandInActionOutput,
     BrandingMission,
+    BrandPhase,
     BrandStoryOutput,
     ChannelGuidelineOutput,
     ColorPaletteSystemOutput,
@@ -60,6 +61,8 @@ from .models import (
 # Phase 1 — Strategic Core  (Graph: fan-out / fan-in)
 # ===================================================================
 
+_PHASE1_AGENT_KEY = phase_agent_key(BrandPhase.STRATEGIC_CORE)
+
 
 def make_discovery_auditor() -> Agent:
     """Build the Phase 1 Discovery Auditor agent.
@@ -79,6 +82,7 @@ def make_discovery_auditor() -> Agent:
             "in the company description and target audience provided."
         ),
         structured_output=BrandDiscoveryAuditOutput,
+        agent_key=_PHASE1_AGENT_KEY,
     )
 
 
@@ -101,6 +105,7 @@ def make_purpose_vision_writer() -> Agent:
             "Be concise, inspiring, and specific to the company."
         ),
         structured_output=PurposeVisionOutput,
+        agent_key=_PHASE1_AGENT_KEY,
     )
 
 
@@ -123,6 +128,7 @@ def make_values_articulator() -> Agent:
             "- observable_behaviors: 2-3 concrete behaviors that demonstrate this value"
         ),
         structured_output=CoreValuesOutput,
+        agent_key=_PHASE1_AGENT_KEY,
     )
 
 
@@ -144,6 +150,7 @@ def make_audience_segmenter() -> Agent:
             "target audience."
         ),
         structured_output=AudienceSegmentsOutput,
+        agent_key=_PHASE1_AGENT_KEY,
     )
 
 
@@ -167,6 +174,7 @@ def make_differentiation_mapper() -> Agent:
             "- competitive_context: how competitors fall short here"
         ),
         structured_output=DifferentiationPillarsOutput,
+        agent_key=_PHASE1_AGENT_KEY,
     )
 
 
@@ -192,12 +200,15 @@ def make_positioning_synthesizer() -> Agent:
             "2. brand_promise — a one-sentence commitment to the customer"
         ),
         structured_output=PositioningOutput,
+        agent_key=_PHASE1_AGENT_KEY,
     )
 
 
 # ===================================================================
 # Phase 2 — Narrative & Messaging  (Graph: sequential specialists)
 # ===================================================================
+
+_PHASE2_AGENT_KEY = phase_agent_key(BrandPhase.NARRATIVE_MESSAGING)
 
 
 def make_storyteller() -> Agent:
@@ -219,6 +230,7 @@ def make_storyteller() -> Agent:
             "3. boilerplate_variants — 3 versions (short/medium/long) for press and bios"
         ),
         structured_output=BrandStoryOutput,
+        agent_key=_PHASE2_AGENT_KEY,
     )
 
 
@@ -244,6 +256,7 @@ def make_archetype_analyst() -> Agent:
             "- personality_traits: 3-5 traits"
         ),
         structured_output=BrandArchetypesOutput,
+        agent_key=_PHASE2_AGENT_KEY,
     )
 
 
@@ -269,6 +282,7 @@ def make_tagline_writer() -> Agent:
             "   - tier: '2-minute', pitch: ..."
         ),
         structured_output=TaglineOutput,
+        agent_key=_PHASE2_AGENT_KEY,
     )
 
 
@@ -293,6 +307,7 @@ def make_message_mapper() -> Agent:
             "   - audience_segment, primary_message, supporting_messages, tone_adjustments"
         ),
         structured_output=MessagingFrameworkOutput,
+        agent_key=_PHASE2_AGENT_KEY,
     )
 
 
@@ -314,6 +329,7 @@ def make_persona_builder() -> Agent:
             "goals, frustrations, media_habits, jobs_to_be_done."
         ),
         structured_output=PersonaProfilesOutput,
+        agent_key=_PHASE2_AGENT_KEY,
     )
 
 
@@ -340,12 +356,15 @@ def make_voice_principles_drafter() -> Agent:
             "This is the final step in narrative development."
         ),
         structured_output=WritingGuidelinesOutput,
+        agent_key=_PHASE2_AGENT_KEY,
     )
 
 
 # ===================================================================
 # Phase 3 — Visual & Expressive Identity  (Graph: diverge fan-out + converge fan-out)
 # ===================================================================
+
+_PHASE3_AGENT_KEY = phase_agent_key(BrandPhase.VISUAL_IDENTITY)
 
 # --- Diverge fan-out agents ---
 
@@ -373,6 +392,7 @@ def make_creative_director() -> Agent:
             "the winning direction."
         ),
         structured_output=MoodBoardCandidatesOutput,
+        agent_key=_PHASE3_AGENT_KEY,
     )
 
 
@@ -405,6 +425,7 @@ def make_moodboard_conceptualist(variant: str) -> Agent:
             f"- image_style: 3-4 image style descriptions"
         ),
         structured_output=MoodBoardConceptOutput,
+        agent_key=_PHASE3_AGENT_KEY,
     )
 
 
@@ -435,6 +456,7 @@ def make_converge_decider() -> Agent:
             "decision_criteria used."
         ),
         structured_output=CreativeRefinementDecisionOutput,
+        agent_key=_PHASE3_AGENT_KEY,
     )
 
 
@@ -456,6 +478,7 @@ def make_logo_specifier() -> Agent:
             "- variant, usage_context, minimum_size, clear_space"
         ),
         structured_output=LogoSuiteOutput,
+        agent_key=_PHASE3_AGENT_KEY,
     )
 
 
@@ -477,6 +500,7 @@ def make_color_system_builder() -> Agent:
             "secondary, accent, surface, and critical colors."
         ),
         structured_output=ColorPaletteSystemOutput,
+        agent_key=_PHASE3_AGENT_KEY,
     )
 
 
@@ -497,6 +521,7 @@ def make_typography_builder() -> Agent:
             "- role, font_family, weight_range, usage_notes"
         ),
         structured_output=TypographySystemOutput,
+        agent_key=_PHASE3_AGENT_KEY,
     )
 
 
@@ -517,6 +542,7 @@ def make_iconography_director() -> Agent:
             "2. illustration_style — describe the illustration approach (flat, isometric, etc.)"
         ),
         structured_output=IconographyOutput,
+        agent_key=_PHASE3_AGENT_KEY,
     )
 
 
@@ -538,6 +564,7 @@ def make_photography_video_director() -> Agent:
             "3. motion_principles — 3-4 principles for animation/motion design"
         ),
         structured_output=PhotographyVideoOutput,
+        agent_key=_PHASE3_AGENT_KEY,
     )
 
 
@@ -562,6 +589,7 @@ def make_voice_tone_builder() -> Agent:
             "3. language_donts — 4-5 language anti-patterns"
         ),
         structured_output=VoiceToneOutput,
+        agent_key=_PHASE3_AGENT_KEY,
     )
 
 
@@ -583,12 +611,15 @@ def make_design_system_codifier() -> Agent:
             "3. component_standards — 3-5 component rules (buttons, cards, navigation, etc.)"
         ),
         structured_output=DesignSystemDefinitionOutput,
+        agent_key=_PHASE3_AGENT_KEY,
     )
 
 
 # ===================================================================
 # Phase 4 — Experience & Channel Activation  (Graph: fan-out / fan-in)
 # ===================================================================
+
+_PHASE4_AGENT_KEY = phase_agent_key(BrandPhase.CHANNEL_ACTIVATION)
 
 
 def make_brand_experience_principler() -> Agent:
@@ -610,6 +641,7 @@ def make_brand_experience_principler() -> Agent:
             "3. sensory_elements — 2-4 sensory cues (sound, texture, scent, etc.) if applicable"
         ),
         structured_output=BrandExperiencePrinciplesOutput,
+        agent_key=_PHASE4_AGENT_KEY,
     )
 
 
@@ -653,6 +685,7 @@ def _make_channel_guide(
             f"Context: {description}"
         ),
         structured_output=structured_output,
+        agent_key=_PHASE4_AGENT_KEY,
     )
 
 
@@ -747,6 +780,7 @@ def make_brand_architecture_builder() -> Agent:
             "3. terminology_glossary — 5-10 key terms with definitions (dict)\n"
         ),
         structured_output=BrandArchitectureOutput,
+        agent_key=_PHASE4_AGENT_KEY,
     )
 
 
@@ -769,12 +803,15 @@ def make_brand_in_action_illustrator() -> Agent:
             "- rationale: why the correct version is better\n"
         ),
         structured_output=BrandInActionOutput,
+        agent_key=_PHASE4_AGENT_KEY,
     )
 
 
 # ===================================================================
 # Phase 5 — Governance & Evolution  (Graph: fan-out / fan-in)
 # ===================================================================
+
+_PHASE5_AGENT_KEY = phase_agent_key(BrandPhase.GOVERNANCE)
 
 
 def make_ownership_definer() -> Agent:
@@ -795,6 +832,7 @@ def make_ownership_definer() -> Agent:
             "(e.g. 'logo_changes': 'Brand Director', 'campaign_messaging': 'Marketing Lead')"
         ),
         structured_output=OwnershipOutput,
+        agent_key=_PHASE5_AGENT_KEY,
     )
 
 
@@ -816,6 +854,7 @@ def make_approval_workflow_designer() -> Agent:
             "2. agency_briefing_protocols — 3-5 protocols for briefing external agencies"
         ),
         structured_output=ApprovalWorkflowsOutput,
+        agent_key=_PHASE5_AGENT_KEY,
     )
 
 
@@ -837,6 +876,7 @@ def make_asset_wiki_planner() -> Agent:
             "Review Intake, Channel Playbook, Governance Charter."
         ),
         structured_output=AssetWikiOutput,
+        agent_key=_PHASE5_AGENT_KEY,
     )
 
 
@@ -855,6 +895,7 @@ def make_training_planner() -> Agent:
             "initiatives for onboarding new team members and maintaining brand literacy."
         ),
         structured_output=TrainingOnboardingOutput,
+        agent_key=_PHASE5_AGENT_KEY,
     )
 
 
@@ -877,6 +918,7 @@ def make_kpi_designer() -> Agent:
             "3. review_trigger_points — 3-5 events that should trigger a brand health review"
         ),
         structured_output=BrandHealthKPIsOutput,
+        agent_key=_PHASE5_AGENT_KEY,
     )
 
 
@@ -898,6 +940,7 @@ def make_evolution_framer() -> Agent:
             "and versioned"
         ),
         structured_output=EvolutionFrameworkOutput,
+        agent_key=_PHASE5_AGENT_KEY,
     )
 
 
@@ -919,6 +962,7 @@ def make_brand_rules_codifier() -> Agent:
             "asset management, and evolution."
         ),
         structured_output=BrandGuidelinesOutput,
+        agent_key=_PHASE5_AGENT_KEY,
     )
 
 
