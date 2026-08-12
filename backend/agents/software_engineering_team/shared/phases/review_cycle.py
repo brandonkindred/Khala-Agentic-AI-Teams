@@ -3,11 +3,14 @@ skeleton in ``execution.py``.
 
 The gated per-microtask loop (``run_gated_execution_impl``) runs each
 microtask's coded output through a sequential Code Review → QA → Security
-review, batch-fixing issues and restarting from Code Review on a QA/security
-failure, up to a per-run cycle budget. This module holds that loop
-(``_run_review_cycles``) and its supporting gate-outcome/circuit-breaker
-machinery — factored out of ``execution.py`` so the review loop can be read
-and tested independently of the coding/documentation phases that surround it.
+review, batch-fixing issues and restarting from Code Review on a QA failure
+(or a Security failure when Code Review itself needed a fix this cycle) — a
+Security failure whose Code Review pass this cycle was clean and whose QA
+pass already succeeded instead restarts only Security, up to a per-run cycle
+budget. This module holds that loop (``_run_review_cycles``) and its
+supporting gate-outcome/circuit-breaker machinery — factored out of
+``execution.py`` so the review loop can be read and tested independently of
+the coding/documentation phases that surround it.
 """
 
 from __future__ import annotations
@@ -432,8 +435,11 @@ def _run_review_cycles(
     """Run the code review / QA / security gate cycles (Phases 2-4).
 
     Flow per outer cycle: Code Review (with in-place batch-fix retries up to
-    ``code_review_retry_cap``) → QA Testing → Security Testing; a failing QA or
-    security gate is batch-fixed and restarts the outer cycle from Code Review.
+    ``code_review_retry_cap``) → QA Testing → Security Testing; a failing QA
+    gate is batch-fixed and restarts the outer cycle from Code Review. A
+    failing Security gate is batch-fixed and restarts only Security (skipping
+    Code Review and QA) when Code Review needed no retry-fix this cycle;
+    otherwise it restarts the full cycle from Code Review, same as QA.
     When ``gate_config.parallelize_qa_security`` is True and ``llm`` doesn't
     require sequencing (see ``_qa_security_run_sequentially``), QA and Security
     instead run concurrently via ``parallel_map`` against the same
@@ -507,6 +513,13 @@ def _run_review_cycles(
     cycle_limit = int(getattr(config, "grounding_failure_cycle_limit", 3))
     ratio_threshold = float(getattr(config, "grounding_failure_ratio_threshold", 0.75))
 
+    # Persists across outer cycles: once a Security-only failure narrows the
+    # restart (Code Review needed no retry-fix and QA passed this cycle), the
+    # next cycle skips re-running them and goes straight to Security. Stays
+    # False (full restart) whenever Code Review needed a retry-fix this cycle
+    # or QA fails — see the Security section below.
+    security_only_retry = False
+
     # ── Sequential Review Gates with Batch Fixes ──────────────────────────
     # Flow: Code Review -> QA -> Security -> Documentation
     # After QA/Security fixes, restart from Code Review
@@ -520,55 +533,14 @@ def _run_review_cycles(
         cycle_bad = False
         last_bad_cr_outcome: Optional[GateOutcome] = None
 
-        # ── Code Review Phase ─────────────────────────────────────────────
-        mt.status = gate_config.status_code_review
-        logger.info(
-            "[%s] Microtask %s: Cycle %d - Running code review phase",
-            task_id,
-            mt.id,
-            total_cycles,
-        )
-
-        if progress_callback:
-            progress_callback(
-                current_idx,
-                len(completed_ids),
-                total,
-                mt.title or mt.id,
-                "code_review",
-                f"Code review (cycle {total_cycles})...",
-            )
-
-        cr_outcome = gate_config.run_code_review_gate(
-            llm=llm,
-            task=task,
-            microtask=mt,
-            repo_path=repo_path,
-            files=microtask_files,
-            deps=deps,
-            review_context=review_context,
-            enable_llm_review_grounding=getattr(config, "enable_llm_review_grounding", True),
-            detail_callback=lambda d: detail_cb(d, current_idx, "code_review"),
-        )
-        if cr_call_is_grounding_bad(
-            passed=cr_outcome.passed,
-            raw_issue_count=cr_outcome.raw_issue_count,
-            kept_count=len(cr_outcome.issues),
-            ratio_threshold=ratio_threshold,
-        ):
-            cycle_bad = True
-            last_bad_cr_outcome = cr_outcome
-
-        cr_retry = 0
-        while not cr_outcome.passed and cr_retry < code_review_retry_cap:
-            cr_retry += 1
+        if not security_only_retry:
+            # ── Code Review Phase ─────────────────────────────────────────────
+            mt.status = gate_config.status_code_review
             logger.info(
-                "[%s] Microtask %s: Code review failed with %d issues. Batch fixing (attempt %d/%d)",
+                "[%s] Microtask %s: Cycle %d - Running code review phase",
                 task_id,
                 mt.id,
-                len(cr_outcome.issues),
-                cr_retry,
-                code_review_retry_cap,
+                total_cycles,
             )
 
             if progress_callback:
@@ -578,47 +550,7 @@ def _run_review_cycles(
                     total,
                     mt.title or mt.id,
                     "code_review",
-                    f"Batch fixing {len(cr_outcome.issues)} issues (attempt {cr_retry})...",
-                )
-
-            ps_result = gate_config.run_batch_coding_fixes(
-                llm=llm,
-                microtask=mt,
-                issues=_dedup_issues(list(cr_outcome.issues), seen_issues),
-                current_files=microtask_files,
-                language=planning_result.language,
-                task_id=task_id,
-                phase_name="code_review",
-                detail_callback=lambda d: detail_cb(d, current_idx, "code_review"),
-            )
-
-            microtask_files = ps_result.files
-            # Snapshot prior values for any keys the fix introduced, before the
-            # write, so a later rollback restores them (or removes newly-created ones).
-            _record_prior_values(microtask_rollback, repo_path, all_files, microtask_files)
-            if not write_microtask_output_or_fail(
-                repo_path,
-                microtask_files,
-                mt=mt,
-                task_id=task_id,
-                review_failed_ids=review_failed_ids,
-                all_files=all_files,
-                rollback=microtask_rollback,
-                review_failed_status=microtask_status.REVIEW_FAILED,
-            ):
-                phase_failed = True
-                break
-            mt.output_files = microtask_files
-            all_files.update(microtask_files)
-
-            if progress_callback:
-                progress_callback(
-                    current_idx,
-                    len(completed_ids),
-                    total,
-                    mt.title or mt.id,
-                    "code_review",
-                    "Re-running code review...",
+                    f"Code review (cycle {total_cycles})...",
                 )
 
             cr_outcome = gate_config.run_code_review_gate(
@@ -641,28 +573,121 @@ def _run_review_cycles(
                 cycle_bad = True
                 last_bad_cr_outcome = cr_outcome
 
-        # Leaving the CR section: tick the streak and resolve breaker-vs-retry-
-        # exhaustion once per outer cycle (may raise on-failure="stop").
-        phase_failed, grounding_failure_streak = _apply_cr_section_exit(
-            mt=mt,
-            cr_outcome=cr_outcome,
-            cycle_bad=cycle_bad,
-            last_bad_cr_outcome=last_bad_cr_outcome,
-            grounding_failure_streak=grounding_failure_streak,
-            cycle_limit=cycle_limit,
-            code_review_retry_cap=code_review_retry_cap,
-            task_id=task_id,
-            review_failed_ids=review_failed_ids,
-            all_files=all_files,
-            rollback=microtask_rollback,
-            review_failed_status=microtask_status.REVIEW_FAILED,
-            phase_failed=phase_failed,
-            on_failure=config.on_failure,
-            review_failed_error_cls=review_failed_error_cls,
-            review_result_cls=review_result_cls,
-        )
-        if phase_failed:
-            break
+            cr_retry = 0
+            while not cr_outcome.passed and cr_retry < code_review_retry_cap:
+                cr_retry += 1
+                logger.info(
+                    "[%s] Microtask %s: Code review failed with %d issues. Batch fixing (attempt %d/%d)",
+                    task_id,
+                    mt.id,
+                    len(cr_outcome.issues),
+                    cr_retry,
+                    code_review_retry_cap,
+                )
+
+                if progress_callback:
+                    progress_callback(
+                        current_idx,
+                        len(completed_ids),
+                        total,
+                        mt.title or mt.id,
+                        "code_review",
+                        f"Batch fixing {len(cr_outcome.issues)} issues (attempt {cr_retry})...",
+                    )
+
+                ps_result = gate_config.run_batch_coding_fixes(
+                    llm=llm,
+                    microtask=mt,
+                    issues=_dedup_issues(list(cr_outcome.issues), seen_issues),
+                    current_files=microtask_files,
+                    language=planning_result.language,
+                    task_id=task_id,
+                    phase_name="code_review",
+                    detail_callback=lambda d: detail_cb(d, current_idx, "code_review"),
+                )
+
+                microtask_files = ps_result.files
+                # Snapshot prior values for any keys the fix introduced, before the
+                # write, so a later rollback restores them (or removes newly-created ones).
+                _record_prior_values(microtask_rollback, repo_path, all_files, microtask_files)
+                if not write_microtask_output_or_fail(
+                    repo_path,
+                    microtask_files,
+                    mt=mt,
+                    task_id=task_id,
+                    review_failed_ids=review_failed_ids,
+                    all_files=all_files,
+                    rollback=microtask_rollback,
+                    review_failed_status=microtask_status.REVIEW_FAILED,
+                ):
+                    phase_failed = True
+                    break
+                mt.output_files = microtask_files
+                all_files.update(microtask_files)
+
+                if progress_callback:
+                    progress_callback(
+                        current_idx,
+                        len(completed_ids),
+                        total,
+                        mt.title or mt.id,
+                        "code_review",
+                        "Re-running code review...",
+                    )
+
+                cr_outcome = gate_config.run_code_review_gate(
+                    llm=llm,
+                    task=task,
+                    microtask=mt,
+                    repo_path=repo_path,
+                    files=microtask_files,
+                    deps=deps,
+                    review_context=review_context,
+                    enable_llm_review_grounding=getattr(
+                        config, "enable_llm_review_grounding", True
+                    ),
+                    detail_callback=lambda d: detail_cb(d, current_idx, "code_review"),
+                )
+                if cr_call_is_grounding_bad(
+                    passed=cr_outcome.passed,
+                    raw_issue_count=cr_outcome.raw_issue_count,
+                    kept_count=len(cr_outcome.issues),
+                    ratio_threshold=ratio_threshold,
+                ):
+                    cycle_bad = True
+                    last_bad_cr_outcome = cr_outcome
+
+            cr_needed_fix_this_cycle = cr_retry > 0
+
+            # Leaving the CR section: tick the streak and resolve breaker-vs-retry-
+            # exhaustion once per outer cycle (may raise on-failure="stop").
+            phase_failed, grounding_failure_streak = _apply_cr_section_exit(
+                mt=mt,
+                cr_outcome=cr_outcome,
+                cycle_bad=cycle_bad,
+                last_bad_cr_outcome=last_bad_cr_outcome,
+                grounding_failure_streak=grounding_failure_streak,
+                cycle_limit=cycle_limit,
+                code_review_retry_cap=code_review_retry_cap,
+                task_id=task_id,
+                review_failed_ids=review_failed_ids,
+                all_files=all_files,
+                rollback=microtask_rollback,
+                review_failed_status=microtask_status.REVIEW_FAILED,
+                phase_failed=phase_failed,
+                on_failure=config.on_failure,
+                review_failed_error_cls=review_failed_error_cls,
+                review_result_cls=review_result_cls,
+            )
+            if phase_failed:
+                break
+        else:
+            # Code Review and QA both passed cleanly last cycle and only
+            # Security failed; skip re-running Code Review (and, below, QA)
+            # and go straight to re-running Security. ``cr_outcome`` keeps
+            # last cycle's passing result; the grounding-failure streak stays
+            # frozen (no CR call this cycle to update it).
+            cr_needed_fix_this_cycle = False
 
         # ── QA + Security Testing Phase ────────────────────────────────────
         if gate_config.parallelize_qa_security and not _qa_security_run_sequentially(llm):
@@ -813,43 +838,14 @@ def _run_review_cycles(
                 # Restart from code review
                 continue
         else:
-            # ── QA Testing Phase (sequential) ──────────────────────────────
-            mt.status = gate_config.status_qa
-            logger.info(
-                "[%s] Microtask %s: Cycle %d - Running QA testing phase",
-                task_id,
-                mt.id,
-                total_cycles,
-            )
-
-            if progress_callback:
-                progress_callback(
-                    current_idx,
-                    len(completed_ids),
-                    total,
-                    mt.title or mt.id,
-                    "qa_testing",
-                    f"QA testing (cycle {total_cycles})...",
-                )
-
-            qa_outcome = gate_config.run_qa_gate(
-                llm=llm,
-                task=task,
-                microtask=mt,
-                repo_path=repo_path,
-                files=microtask_files,
-                deps=deps,
-                detail_callback=lambda d: detail_cb(d, current_idx, "qa_testing"),
-                cache=agent_review_cache,
-            )
-
-            if not qa_outcome.passed:
+            if not security_only_retry:
+                # ── QA Testing Phase (sequential) ──────────────────────────────
+                mt.status = gate_config.status_qa
                 logger.info(
-                    "[%s] Microtask %s: QA testing %s %d issues. Batch fixing and restarting from code review.",
+                    "[%s] Microtask %s: Cycle %d - Running QA testing phase",
                     task_id,
                     mt.id,
-                    gate_config.gate_issue_log_verb,
-                    len(qa_outcome.issues),
+                    total_cycles,
                 )
 
                 if progress_callback:
@@ -859,41 +855,74 @@ def _run_review_cycles(
                         total,
                         mt.title or mt.id,
                         "qa_testing",
-                        f"Batch fixing {len(qa_outcome.issues)} QA issues...",
+                        f"QA testing (cycle {total_cycles})...",
                     )
 
-                ps_result = gate_config.run_batch_coding_fixes(
+                qa_outcome = gate_config.run_qa_gate(
                     llm=llm,
+                    task=task,
                     microtask=mt,
-                    issues=_dedup_issues(list(qa_outcome.issues), seen_issues),
-                    current_files=microtask_files,
-                    language=planning_result.language,
-                    task_id=task_id,
-                    phase_name="qa",
+                    repo_path=repo_path,
+                    files=microtask_files,
+                    deps=deps,
                     detail_callback=lambda d: detail_cb(d, current_idx, "qa_testing"),
+                    cache=agent_review_cache,
                 )
 
-                microtask_files = ps_result.files
-                # Snapshot prior values for any keys the fix introduced, before the
-                # write, so a later rollback restores them (or removes newly-created ones).
-                _record_prior_values(microtask_rollback, repo_path, all_files, microtask_files)
-                if not write_microtask_output_or_fail(
-                    repo_path,
-                    microtask_files,
-                    mt=mt,
-                    task_id=task_id,
-                    review_failed_ids=review_failed_ids,
-                    all_files=all_files,
-                    rollback=microtask_rollback,
-                    review_failed_status=microtask_status.REVIEW_FAILED,
-                ):
-                    phase_failed = True
-                    break
-                mt.output_files = microtask_files
-                all_files.update(microtask_files)
+                if not qa_outcome.passed:
+                    logger.info(
+                        "[%s] Microtask %s: QA testing %s %d issues. Batch fixing and restarting from code review.",
+                        task_id,
+                        mt.id,
+                        gate_config.gate_issue_log_verb,
+                        len(qa_outcome.issues),
+                    )
 
-                # Restart from code review
-                continue
+                    if progress_callback:
+                        progress_callback(
+                            current_idx,
+                            len(completed_ids),
+                            total,
+                            mt.title or mt.id,
+                            "qa_testing",
+                            f"Batch fixing {len(qa_outcome.issues)} QA issues...",
+                        )
+
+                    ps_result = gate_config.run_batch_coding_fixes(
+                        llm=llm,
+                        microtask=mt,
+                        issues=_dedup_issues(list(qa_outcome.issues), seen_issues),
+                        current_files=microtask_files,
+                        language=planning_result.language,
+                        task_id=task_id,
+                        phase_name="qa",
+                        detail_callback=lambda d: detail_cb(d, current_idx, "qa_testing"),
+                    )
+
+                    microtask_files = ps_result.files
+                    # Snapshot prior values for any keys the fix introduced, before the
+                    # write, so a later rollback restores them (or removes newly-created ones).
+                    _record_prior_values(microtask_rollback, repo_path, all_files, microtask_files)
+                    if not write_microtask_output_or_fail(
+                        repo_path,
+                        microtask_files,
+                        mt=mt,
+                        task_id=task_id,
+                        review_failed_ids=review_failed_ids,
+                        all_files=all_files,
+                        rollback=microtask_rollback,
+                        review_failed_status=microtask_status.REVIEW_FAILED,
+                    ):
+                        phase_failed = True
+                        break
+                    mt.output_files = microtask_files
+                    all_files.update(microtask_files)
+
+                    # Restart from code review
+                    continue
+            # else: Code Review and QA both passed cleanly last cycle
+            # (security_only_retry implies both were clean); skip re-running
+            # QA and go straight to re-running Security below.
 
             # ── Security Testing Phase (sequential) ─────────────────────────
             mt.status = gate_config.status_security
@@ -927,11 +956,12 @@ def _run_review_cycles(
 
             if not sec_outcome.passed:
                 logger.info(
-                    "[%s] Microtask %s: Security testing %s %d issues. Batch fixing and restarting from code review.",
+                    "[%s] Microtask %s: Security testing %s %d issues. Batch fixing and restarting %s.",
                     task_id,
                     mt.id,
                     gate_config.gate_issue_log_verb,
                     len(sec_outcome.issues),
+                    "security only" if not cr_needed_fix_this_cycle else "from code review",
                 )
 
                 if progress_callback:
@@ -974,7 +1004,11 @@ def _run_review_cycles(
                 mt.output_files = microtask_files
                 all_files.update(microtask_files)
 
-                # Restart from code review
+                # A Security-only failure (Code Review needed no retry-fix and
+                # QA passed this cycle) restarts only Security next cycle; any
+                # other in-cycle failure keeps the existing full restart from
+                # Code Review.
+                security_only_retry = not cr_needed_fix_this_cycle
                 continue
 
         # All review phases passed - proceed to documentation

@@ -786,6 +786,64 @@ def test_security_unsafe_fix_breaks(tmp_path):
     assert mt.status == MS.REVIEW_FAILED
 
 
+def test_security_only_failure_restarts_only_security_not_code_review_or_qa(tmp_path):
+    """A Security-only failure (Code Review needed no fix, QA passed) restarts
+    only Security next cycle, not Code Review or QA."""
+    cr = _ScriptedGate()
+    qa = _ScriptedGate()
+    sec = _ScriptedGate([GateOutcome(passed=False, issues=[_issue("security")], summary="sec")])
+    mt = _microtask()
+    _run(
+        _make_gate_config(code_review_gate=cr, qa_gate=qa, security_gate=sec),
+        [mt],
+        tmp_path,
+        review_config=_config(cr=1, qa=1, sec=2),
+        progress=lambda *a: None,
+    )
+
+    assert cr.calls == 1  # not re-run on the Security-only restart
+    assert qa.calls == 1  # not re-run on the Security-only restart
+    assert sec.calls == 2  # failed once (-> restart security only), passed next cycle
+    assert mt.status == MS.COMPLETED
+
+
+class _NeedsOneRetryEachCycleGate:
+    """Fails on its first call, then passes on retry -- every time it's called
+    again after a full-cycle restart (odd calls fail, even calls pass)."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def __call__(self, *, detail_callback=None, **kwargs: Any) -> GateOutcome:
+        self.calls += 1
+        if detail_callback is not None:
+            detail_callback("gate tick")
+        if self.calls % 2 == 1:
+            return GateOutcome(passed=False, issues=[_issue()], summary="bad")
+        return GateOutcome(passed=True)
+
+
+def test_cr_retry_forces_full_restart_even_with_later_security_failure(tmp_path):
+    """Code Review needing a retry-fix this cycle still forces a full restart
+    from Code Review on a later Security failure -- not narrowed to Security."""
+    cr = _NeedsOneRetryEachCycleGate()
+    qa = _ScriptedGate()
+    sec = _ScriptedGate([GateOutcome(passed=False, issues=[_issue("security")], summary="sec")])
+    mt = _microtask()
+    _run(
+        _make_gate_config(code_review_gate=cr, qa_gate=qa, security_gate=sec),
+        [mt],
+        tmp_path,
+        review_config=_config(cr=1, qa=1, sec=2),
+        progress=lambda *a: None,
+    )
+
+    assert cr.calls == 4  # 2 calls (fail + retry-pass) per cycle, across 2 cycles
+    assert qa.calls == 2
+    assert sec.calls == 2
+    assert mt.status == MS.COMPLETED
+
+
 # ---------------------------------------------------------------------------
 # Per-piece QA/security verdict cache (AgentReviewCache)
 # ---------------------------------------------------------------------------

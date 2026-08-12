@@ -43,10 +43,14 @@ runs five phases in strict order:
      QA.
    - **Security** (`gate_config.run_security_gate` →
      `run_security_testing_phase_impl`, `shared/phases/review.py:378-414`, same
-     shared `_run_agent_testing_phase` body). Same restart-from-Code-Review behavior
-     on an *ordinary* per-cycle failure — batch-fix and unconditionally `continue`;
-     `security_failure_always_stops` plays no role in this per-cycle path. That flag
-     only matters later, at the post-loop max-cycles check below.
+     shared `_run_agent_testing_phase` body). On an *ordinary* per-cycle failure,
+     batch-fixes and `continue`s — but the restart is narrower than QA's: it
+     restarts only Security (skipping Code Review and QA) when Code Review
+     needed no retry-fix this cycle, or restarts the full cycle from Code
+     Review otherwise (mirroring QA's own restart-from-Code-Review behavior
+     above). `security_failure_always_stops` plays no role in this per-cycle
+     path either way; it only matters later, at the post-loop max-cycles check
+     below.
    - The loop only `break`s to phase 5 once Code Review, then QA, then Security all
      pass **in the same outer cycle**.
    - **Post-loop max-cycles check** (`shared/phases/execution.py:1189-1192`) runs
@@ -107,10 +111,12 @@ Edge classification:
 - **Hard data dependency**: Coding → {Code Review, QA, Security, Documentation}.
   Every gate reads the file content Coding (or a prior gate's fix-write) produced;
   none can run before Coding completes for that microtask.
-- **Hard data dependency, both directions**: Code Review ⇄ QA and Code Review ⇄
-  Security. A QA or Security failure's batch-fix output is *re-validated by Code
-  Review* before either gate runs again — QA/Security fixes are not accepted
-  standalone.
+- **Hard data dependency, both directions**: Code Review ⇄ QA. A QA failure's
+  batch-fix output is *re-validated by Code Review* before QA runs again — QA
+  fixes are not accepted standalone. Code Review ⇄ Security holds the same way
+  **except** when Code Review needed no retry-fix in the same cycle a Security
+  failure occurs: that fix is validated by re-running Security alone, not by
+  re-validating Code Review (see the narrowed-restart note above).
 - **Second path to `Fail`, independent of Code Review's own retry/circuit-breaker
   path**: QA/Security → `Fail`. The diagram's `CR -->|retry-exhausted /
   circuit-breaker| Fail` edge is driven by `_apply_cr_section_exit`
