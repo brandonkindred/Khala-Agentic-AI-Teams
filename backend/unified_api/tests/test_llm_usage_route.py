@@ -65,7 +65,7 @@ def test_recent_calls_rejects_limit_out_of_range() -> None:
 
 
 def test_postgres_path_does_not_read_ring_buffer() -> None:
-    from llm_service.telemetry import record_llm_call, clear_call_log
+    from llm_service.telemetry import clear_call_log, record_llm_call
 
     clear_call_log()
     record_llm_call(team="blogging", agent_key="writer", model="ring", total_tokens=99)
