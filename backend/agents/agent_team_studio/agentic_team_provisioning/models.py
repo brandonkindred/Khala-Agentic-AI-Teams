@@ -5,9 +5,11 @@ from __future__ import annotations
 from enum import Enum
 from typing import Final, Literal, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from agent_registry.models import AgentManifest
+
+from ..assistant_kernel import ConversationMessage
 
 # ---------------------------------------------------------------------------
 # Enums
@@ -193,32 +195,20 @@ class AddAgentFromRegistryRequest(BaseModel):
 class UpdateAgentRequest(BaseModel):
     """Request body for ``PUT /teams/{team_id}/agents/{agent_name}`` (legacy contract).
 
-    Roster rows are thin refs only; persona lives on ``AgentManifest``. The PUT
-    handler rejects any body that supplies persona fields with ``400``. An empty
-    body is a no-op that returns the current enriched agent. Fields on this model
-    remain for OpenAPI compatibility only — they are not a supported write path.
+    Roster rows are thin refs only; persona lives on ``AgentManifest``. This
+    model declares no editable fields — the OpenAPI schema for this endpoint
+    is an empty object, matching the actual contract instead of advertising
+    persona fields that were never a supported write path. ``extra="allow"``
+    lets the handler see (and reject) *any* key supplied in the body, not just
+    a fixed legacy set. An empty body is a no-op that returns the current
+    enriched agent; any non-empty body returns ``400``.
+
+    Invariants:
+        * No field on this model, declared or supplied, is a supported write
+          path. Edit the linked ``AgentManifest`` instead.
     """
 
-    role: Optional[str] = Field(
-        default=None,
-        description="OpenAPI-only; supplying this field returns 400. Edit the linked AgentManifest instead.",
-    )
-    skills: Optional[list[str]] = Field(
-        default=None,
-        description="OpenAPI-only; supplying this field returns 400. Edit the linked AgentManifest instead.",
-    )
-    capabilities: Optional[list[str]] = Field(
-        default=None,
-        description="OpenAPI-only; supplying this field returns 400. Edit the linked AgentManifest instead.",
-    )
-    tools: Optional[list[str]] = Field(
-        default=None,
-        description="OpenAPI-only; supplying this field returns 400. Edit the linked AgentManifest instead.",
-    )
-    expertise: Optional[list[str]] = Field(
-        default=None,
-        description="OpenAPI-only; supplying this field returns 400. Edit the linked AgentManifest instead.",
-    )
+    model_config = ConfigDict(extra="allow")
 
 
 # ---------------------------------------------------------------------------
@@ -347,12 +337,6 @@ class GeneratedAgentInvokeOutput(BaseModel):
 # ---------------------------------------------------------------------------
 # Conversation models
 # ---------------------------------------------------------------------------
-
-
-class ConversationMessage(BaseModel):
-    role: str = Field(..., pattern=r"^(user|assistant)$")
-    content: str
-    timestamp: str
 
 
 class CreateConversationRequest(BaseModel):

@@ -11,10 +11,11 @@ finding.
 
 Contract for every reader:
 
-    - **Read-only and thread-safe.** Verification fans findings out across a
-      ``ThreadPoolExecutor``; a reader is shared across those workers and must
-      never mutate observable state without its own synchronization. Concrete
-      readers cache lookups under an internal lock.
+    - **Read-only and thread-safe.** Verification fans findings out across
+      ``shared.concurrency.parallel_map``'s worker pool; a reader is shared
+      across those workers and must never mutate observable state without its
+      own synchronization. Concrete readers cache lookups under an internal
+      lock.
     - **Fail-safe.** ``read_file`` returns ``None`` (never raises) for an absent,
       unreadable, or out-of-bounds path, and ``list_files`` returns ``[]`` rather
       than raising. A reader failure therefore only ever *keeps* a finding (the

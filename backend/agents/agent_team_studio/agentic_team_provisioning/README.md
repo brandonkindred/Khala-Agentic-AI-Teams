@@ -42,9 +42,9 @@ and for folding a legacy fat row's persona into the target manifest during migra
 
 | Legacy roster field | Manifest (SoT) | Notes |
 |---|---|---|
-| `agent_name` | `name` | |
+| `agent_name` | `name` | thin ref only; not resolved from the manifest at read time |
 | `role` | `summary` | falls back to `name` when `summary` is empty |
-| `skills` | `tags` | |
+| `skills` | `tags` | marker tags (`"generated"`, team key) stripped |
 | `tools` | `cognition.tools` | empty when the manifest has no `cognition` block |
 | `expertise` | `[team]` | single-element list: the manifest's home team |
 | `capabilities` | *(none)* | never populated from a manifest — open gap |

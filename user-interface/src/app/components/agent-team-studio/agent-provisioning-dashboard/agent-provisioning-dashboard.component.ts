@@ -15,7 +15,7 @@ import { MatTableModule } from '@angular/material/table';
 import { MatTooltipModule } from '@angular/material/tooltip';
 import { Observable, Subscription, interval, switchMap, takeWhile } from 'rxjs';
 import { AgentProvisioningApiService } from '../../../services/agent-provisioning-api.service';
-import { TeamAssistantChatComponent } from '../../team-assistant-chat/team-assistant-chat.component';
+import { AgentProvisioningPanelComponent } from '../agent-provisioning-panel/agent-provisioning-panel.component';
 import { DashboardShellComponent } from '../../../shared/dashboard-shell/dashboard-shell.component';
 import type {
   ProvisionRequest,
@@ -44,7 +44,7 @@ type DashboardTab = 'provision' | 'jobs' | 'environments';
     MatChipsModule,
     MatTableModule,
     MatTooltipModule,
-    TeamAssistantChatComponent,
+    AgentProvisioningPanelComponent,
     DashboardShellComponent,
   ],
   templateUrl: './agent-provisioning-dashboard.component.html',
@@ -139,14 +139,6 @@ export class AgentProvisioningDashboardComponent implements OnInit, OnDestroy {
         this.submitting = false;
       },
     });
-  }
-
-  /** Handle a launch triggered from the assistant chat. */
-  onAssistantLaunched(event: { job_id: string | null; conversation_id: string }): void {
-    if (event.job_id) {
-      this.currentJobId = event.job_id;
-      this.startJobPolling(event.job_id);
-    }
   }
 
   private startJobPolling(jobId: string): void {

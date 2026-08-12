@@ -11,6 +11,8 @@ import re
 import time
 from typing import Any, Awaitable, Callable, Dict, Optional
 
+from shared.llm_recovery import extract_json_object
+
 from .interface import (
     LLMJsonParseError,
     LLMPermanentError,
@@ -257,6 +259,8 @@ def extract_json_from_response(
     Extract a single JSON object from model output (e.g. after continuation).
     Raises LLMJsonParseError on failure.
     """
+    original_text = text
+    original_expected_keys = expected_keys
     if expected_keys is None:
         expected_keys = _DEFAULT_EXPECTED_KEYS
     if "---DRAFT---" in text:
@@ -324,6 +328,17 @@ def extract_json_from_response(
                     return parsed
             except (json.JSONDecodeError, ValueError):
                 continue
+    # Last resort: the shared salvage engine (also used by agent_call_json)
+    # covers truncation repair, <think>/<thinking>/<reasoning>/<json> tag
+    # stripping, envelope descent, and format-echo-before-payload
+    # disambiguation via a string-aware balanced-span scan. Anchored on the
+    # caller's ORIGINAL expected_keys (not the _DEFAULT_EXPECTED_KEYS-defaulted
+    # value above) so a payload with keys outside that broad default set isn't
+    # spuriously rejected, and run against the ORIGINAL text so wrapper tags
+    # this function hasn't stripped are still visible to it.
+    salvaged = extract_json_object(original_text, required_keys=original_expected_keys)
+    if salvaged is not None:
+        return salvaged
     raise LLMJsonParseError(
         "Could not parse structured JSON from LLM response. Model returned invalid or non-JSON output. "
         f"Response preview: {text[:500]!r}...",

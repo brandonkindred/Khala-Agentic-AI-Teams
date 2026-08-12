@@ -68,6 +68,40 @@ def mark_coding_team_job_failed_activity(request: dict[str, Any]) -> dict[str, A
     return get_job(job_id) or {"job_id": job_id, "status": JobStatus.FAILED.value, "error": error}
 
 
+@activity.defn(name="coding_team_mark_job_cancelled")
+def mark_coding_team_job_cancelled_activity(request: dict[str, Any]) -> dict[str, Any]:
+    """Mark a coding-team job cancelled, matching the thread-mode cancel convention.
+
+    Preconditions:
+        - ``request["job_id"]`` is a non-empty str naming an existing job row;
+          violated by raising ``ValueError`` (not ``assert``, which
+          ``python -O`` strips) so this boundary check always runs.
+    Postconditions:
+        - Persists ``status=cancelled`` with ``status_text="Cancelled by user"`` and
+          clears ``current_activity`` -- mirrors
+          ``coding_team_orchestrator._check_cancel``'s cooperative-cancel write
+          (same status/status_text pair), so a Temporal-cancelled job reads
+          identically to a thread-mode-cancelled one. Unlike the failed-job
+          activity, this never touches ``error`` -- a cancellation is a clean
+          terminal outcome, not a fault.
+        - Returns the resulting job snapshot, or a synthetic cancelled dict when
+          the store has no row.
+    """
+    from software_engineering_team.api.coding_team_main import get_job, update_job
+    from software_engineering_team.models import JobStatus
+
+    job_id = request.get("job_id")
+    if not isinstance(job_id, str) or not job_id:
+        raise ValueError("mark_coding_team_job_cancelled_activity requires a non-empty job_id")
+    update_job(
+        job_id,
+        status=JobStatus.CANCELLED.value,
+        status_text="Cancelled by user",
+        current_activity=None,
+    )
+    return get_job(job_id) or {"job_id": job_id, "status": JobStatus.CANCELLED.value}
+
+
 @activity.defn(name="coding_team_run_pipeline")
 def run_pipeline_activity(request: dict[str, Any]) -> dict[str, Any]:
     """Run the coding-team pipeline as a Temporal activity.
@@ -605,6 +639,12 @@ ACTIVITIES = [
     github_publish_activity,
     github_failure_notice_activity,
     mark_coding_team_job_failed_activity,
+    # Not scheduled by CodingTeamWorkflow itself (see the module-level Postconditions
+    # note above) -- registered here because this is the coding-team worker's shared
+    # home for job-terminalization activities; IssueGroomingWorkflow imports and
+    # schedules it directly (issue_grooming_workflow.py), relying on this list's
+    # merge into the coding-team worker (coding_team_worker.py) for registration.
+    mark_coding_team_job_cancelled_activity,
 ]
 
 # NB: no worker self-boot at import time. This module DEFINES CodingTeamWorkflow,

@@ -33,21 +33,10 @@ Return `ready = true` only when **both** of the following hold:
   arithmetic — any `sizing` or `risk_limits` issue you raise is treated as
   advisory only and will **never** block readiness. Two interpretation rules so
   you are not misled into raising spurious sizing critiques:
-  - **How to read the sizing line.** A line like `"risk 5% per trade"` (the
-    system's rendering of `fixed_fraction`) means the capital **DEPLOYED** into
-    the position — a fraction of the account — NOT a stop-multiplied loss budget.
-    The deployed size IS the per-trade loss cap, because a position can lose up
-    to ~100% of what it deploys. `stop_loss.pct` is a separate, optional price
-    move off entry that limits a position's loss *below* a full wipeout. Do
-    **NOT** multiply the stop into the deployment (`fraction × stop` is wrong)
-    and do **NOT** treat the stop as part of sizing. "Risk 5% per trade" with a
-    5% stop is **not** "0.25% per trade" — it is a 5% deployment with an
-    optional within-position safeguard.
-  - **There is NO max-drawdown constraint.** Max drawdown is not a limit in this
-    system. A strategy is an experiment (backtest / paper trading, no real
-    capital) and may lose up to 100% of the account by design. Do **NOT** flag
-    `max_drawdown_pct` reachability, "unreachable drawdown limit," or any
-    drawdown-based risk-control concern — it is not a defect and never blocks.
+  - **Sizing / drawdown framing.** See the sizing/risk framing reference in
+    the system prompt — deployed size is the per-trade loss cap (do not
+    multiply by stop), and there is no max-drawdown constraint (never flag
+    drawdown reachability).
 - **Loose / hand-wavy hypothesis or signal_definition** — a one-line hypothesis with no measurable signal claim is not ready.
 
 You do **not** propose code. You do **not** rewrite the spec. You produce a critique a designer can act on.

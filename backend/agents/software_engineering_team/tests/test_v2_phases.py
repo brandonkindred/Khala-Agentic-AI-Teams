@@ -403,6 +403,7 @@ def test_fe_deliver_git_agent_failure_falls_through_to_inline(tmp_path: Path, mo
     # Stub the inline git helpers so we don't touch a real repo.
     _patch_autospec(monkeypatch, git_utils, "create_feature_branch", return_value=(True, "feature/x"))
     _patch_autospec(monkeypatch, repo_writer, "write_agent_output", return_value=(True, ""))
+    _patch_autospec(monkeypatch, git_utils, "commit_working_tree", return_value=(True, ""))
     _patch_autospec(monkeypatch, git_utils, "merge_branch", return_value=(True, ""))
     _patch_autospec(monkeypatch, git_utils, "delete_branch", return_value=True)
     _patch_autospec(monkeypatch, git_utils, "checkout_branch", return_value=(True, ""))
@@ -454,6 +455,7 @@ def test_fe_deliver_inline_merge_fails(tmp_path: Path, monkeypatch) -> None:
 
     _patch_autospec(monkeypatch, git_utils, "create_feature_branch", return_value=(True, "feature/x"))
     _patch_autospec(monkeypatch, repo_writer, "write_agent_output", return_value=(True, ""))
+    _patch_autospec(monkeypatch, git_utils, "commit_working_tree", return_value=(True, ""))
     _patch_autospec(monkeypatch, git_utils, "merge_branch", return_value=(False, "conflict"))
     _patch_autospec(monkeypatch, git_utils, "abort_merge", return_value=True)
     _patch_autospec(monkeypatch, git_utils, "checkout_branch", return_value=(True, ""))
@@ -561,6 +563,7 @@ def test_fe_deliver_inline_happy_path(tmp_path: Path, monkeypatch) -> None:
     write_mock = _patch_autospec(
         monkeypatch, repo_writer, "write_agent_output", return_value=(True, "")
     )
+    _patch_autospec(monkeypatch, git_utils, "commit_working_tree", return_value=(True, ""))
     merge_mock = _patch_autospec(monkeypatch, git_utils, "merge_branch", return_value=(True, ""))
     delete_mock = _patch_autospec(monkeypatch, git_utils, "delete_branch", return_value=True)
     checkout_mock = _patch_autospec(
@@ -846,6 +849,7 @@ def test_be_deliver_inline_happy_path(tmp_path: Path, monkeypatch) -> None:
     write_mock = _patch_autospec(
         monkeypatch, repo_writer, "write_agent_output", return_value=(True, "")
     )
+    _patch_autospec(monkeypatch, git_utils, "commit_working_tree", return_value=(True, ""))
     merge_mock = _patch_autospec(monkeypatch, git_utils, "merge_branch", return_value=(True, ""))
     delete_mock = _patch_autospec(monkeypatch, git_utils, "delete_branch", return_value=True)
     checkout_mock = _patch_autospec(
@@ -931,6 +935,7 @@ def test_be_deliver_sanitizes_task_id_for_branch_names(tmp_path: Path, monkeypat
         monkeypatch, git_utils, "create_feature_branch", return_value=(True, "feature/api")
     )
     _patch_autospec(monkeypatch, repo_writer, "write_agent_output", return_value=(True, ""))
+    _patch_autospec(monkeypatch, git_utils, "commit_working_tree", return_value=(True, ""))
     _patch_autospec(monkeypatch, git_utils, "merge_branch", return_value=(True, ""))
     _patch_autospec(monkeypatch, git_utils, "delete_branch", return_value=True)
     _patch_autospec(monkeypatch, git_utils, "checkout_branch", return_value=(True, ""))
