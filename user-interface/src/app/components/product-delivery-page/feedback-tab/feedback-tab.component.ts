@@ -14,7 +14,7 @@ import { MatFormFieldModule } from '@angular/material/form-field';
 import { MatIconModule } from '@angular/material/icon';
 import { MatProgressSpinnerModule } from '@angular/material/progress-spinner';
 import { MatSelectModule } from '@angular/material/select';
-import { ProductDeliveryService } from '../../../../services/product-delivery.service';
+import { ProductDeliveryService } from '../../../services/product-delivery.service';
 import {
   LinkStoryDialogComponent,
   LinkStoryDialogData,
@@ -24,7 +24,7 @@ import type {
   FeedbackItem,
   Product,
   Story,
-} from '../../../../models/product-delivery.model';
+} from '../../../models/product-delivery.model';
 
 const STATUS_FILTERS: { label: string; value: string | null }[] = [
   { label: 'All', value: null },
