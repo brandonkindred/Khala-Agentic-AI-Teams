@@ -1,15 +1,22 @@
 """Hermetic route-level tests for the Agent Studio Stage-1 endpoints.
 
-Agent Studio is Temporal-only: each handler dispatches its operation as a workflow →
-activity. These tests exercise the full router → dispatch → activity → service →
-response path **in-process, without a Temporal cluster**, by:
+``dispatch`` picks Temporal vs. direct in-process dispatch per call
+(``dispatch._temporal_enabled()``); this file pins the Temporal branch so it keeps
+exercising the full router → dispatch → workflow → activity → service → response
+path **in-process, without a Temporal cluster**, by:
 
+  * forcing ``agent_team_studio.agent_studio.temporal.dispatch._temporal_enabled`` to
+    ``True`` regardless of whether ``TEMPORAL_ADDRESS`` happens to be set in the
+    environment running the suite,
   * patching ``agent_team_studio.agent_studio.runtime.get_studio_service`` so the activities delegate to
     a scripted assistant + fake registry (no live LLM / Postgres), and
   * patching ``agent_team_studio.agent_studio.temporal.dispatch.execute_workflow_sync`` with an inline
     stand-in that runs the workflow's single activity directly and reproduces
     Temporal's exception wrapping, so the dispatch layer's ``ValueError`` → 400 /
     ``LookupError`` → 404 translation is genuinely exercised.
+
+The direct in-process dispatch branch has its own coverage elsewhere (it reuses this
+same ``AgentStudioService`` unchanged, reached without a workflow round-trip).
 
 ``backend/conftest.py`` already puts ``agents/`` on ``sys.path``.
 """
@@ -102,12 +109,13 @@ def registry() -> FakeRegistry:
 def make_client(monkeypatch: pytest.MonkeyPatch):
     """Factory: a TestClient whose Temporal dispatch runs activities in-process.
 
-    Installs the two patches (runtime singleton + inline execute) via ``monkeypatch``
-    so they auto-revert after the test. Each call builds a fresh app so there is no
-    cross-test router leakage.
+    Installs the three patches (forced Temporal branch, runtime singleton, inline
+    execute) via ``monkeypatch`` so they auto-revert after the test. Each call builds
+    a fresh app so there is no cross-test router leakage.
     """
 
     def _factory(service: object, *, raise_server_exceptions: bool = True) -> TestClient:
+        monkeypatch.setattr(dispatch_mod, "_temporal_enabled", lambda: True)
         monkeypatch.setattr("agent_team_studio.agent_studio.runtime.get_studio_service", lambda: service)
         monkeypatch.setattr(dispatch_mod, "execute_workflow_sync", _inline_execute)
         app = FastAPI()

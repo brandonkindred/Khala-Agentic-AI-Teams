@@ -158,6 +158,15 @@ export const routes: Routes = [
         data: { breadcrumb: 'Product Delivery' },
       },
       {
+        path: 'cognition',
+        loadComponent: () =>
+          import('./components/cognition-page/cognition-page.component').then(
+            (m) => m.CognitionPageComponent,
+          ),
+        title: 'Cognition',
+        data: { breadcrumb: 'Cognition' },
+      },
+      {
         path: 'ai-systems',
         loadComponent: () =>
           import('./components/ai-systems-dashboard/ai-systems-dashboard.component').then(

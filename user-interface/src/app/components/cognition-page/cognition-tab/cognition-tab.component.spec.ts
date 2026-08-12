@@ -4,10 +4,10 @@ import { NoopAnimationsModule } from '@angular/platform-browser/animations';
 import { MatDialog } from '@angular/material/dialog';
 import { NEVER, Subject, of, throwError } from 'rxjs';
 import { CognitionTabComponent } from './cognition-tab.component';
-import { AgentCatalogApiService } from '../../../../services/agent-catalog-api.service';
-import { CognitionApiService } from '../../../../services/cognition-api.service';
-import type { AgentSummary } from '../../../../models/agent-catalog.model';
-import type { MemoryEvent, Rule, RuleProposal } from '../../../../models/cognition.model';
+import { AgentCatalogApiService } from '../../../services/agent-catalog-api.service';
+import { CognitionApiService } from '../../../services/cognition-api.service';
+import type { AgentSummary } from '../../../models/agent-catalog.model';
+import type { MemoryEvent, Rule, RuleProposal } from '../../../models/cognition.model';
 
 const agents: AgentSummary[] = [
   {

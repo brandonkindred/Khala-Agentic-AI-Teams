@@ -1,4 +1,4 @@
-"""Unit tests for the Agent Studio execute-and-wait dispatch layer.
+"""Unit tests for the Agent Studio execute-and-wait Temporal dispatch path.
 
 Covers two things without a Temporal cluster (``execute_workflow_sync`` is patched):
 
@@ -7,6 +7,11 @@ Covers two things without a Temporal cluster (``execute_workflow_sync`` is patch
   * ``_translate_workflow_failure`` maps a ``WorkflowFailureError`` whose cause chain
     carries an ``ApplicationError`` ``type`` marker back to the native
     ``ValueError``/``LookupError`` (and re-raises anything else unchanged).
+
+``dispatch`` also has a direct, in-process path used when Temporal isn't configured
+(exercised separately); every test in this module forces ``_temporal_enabled()`` to
+``True`` so it keeps pinning the Temporal path's behavior regardless of whether
+``TEMPORAL_ADDRESS`` happens to be set in the environment running the suite.
 """
 
 from __future__ import annotations
@@ -31,6 +36,13 @@ from agent_team_studio.agent_studio.temporal import (
     SendMessageWorkflow,
     StartConversationWorkflow,
 )
+
+
+@pytest.fixture(autouse=True)
+def _force_temporal_enabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Force the Temporal branch so these tests exercise ``execute_workflow_sync``
+    regardless of whether ``TEMPORAL_ADDRESS`` is set in the test environment."""
+    monkeypatch.setattr(dispatch, "_temporal_enabled", lambda: True)
 
 
 def _capture(monkeypatch: pytest.MonkeyPatch, result: Any) -> dict:
