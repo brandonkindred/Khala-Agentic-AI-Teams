@@ -639,7 +639,10 @@ def test_synthesis_evaluation_continue_then_success_preserves_outputs(
 
     ``_check_anomalies_cached`` is stubbed with a call counter so the
     attempt-scoped anomaly cache cannot freeze the first critical. The
-    returned trades/metrics are the successful round's ledger.
+    two sandbox invocations return distinguishable ledgers (different
+    trade-price offsets); expected trades/metrics are snapshotted from
+    the round-1 ledger so a split that kept the anomalous round-0
+    trades cannot satisfy the assertion.
     """
     orch = StrategyLabOrchestrator()
     _neutralize_synthesis_gates(monkeypatch, orch)
@@ -660,16 +663,28 @@ def test_synthesis_evaluation_continue_then_success_preserves_outputs(
     monkeypatch.setattr(orch, "_check_anomalies_cached", _anomalies)
     monkeypatch.setattr(orch.refinement_agent, "run", varying_code_refine(_CONFORMANT_CODE))
     monkeypatch.setattr(StrategyLabOrchestrator, "_fetch_market_data", _populated_fetch())
-    exec_result = _code_exec(success=True, raw_trades=_benign_sandbox_trades())
-    monkeypatch.setattr(orchestrator_module, "run_strategy_code", lambda *a, **k: exec_result)
-    expected_trades, expected_metrics = _ledger_expectations(exec_result.trades)
+    round0_result = _code_exec(success=True, raw_trades=_benign_sandbox_trades(offset=0))
+    round1_result = _code_exec(success=True, raw_trades=_benign_sandbox_trades(offset=10))
+    sandbox_calls = {"n": 0}
+
+    def _sandbox(*_a: Any, **_kw: Any) -> StrategyRunResult:
+        sandbox_calls["n"] += 1
+        if sandbox_calls["n"] == 1:
+            return round0_result
+        return round1_result
+
+    monkeypatch.setattr(orchestrator_module, "run_strategy_code", _sandbox)
+    expected_trades, expected_metrics = _ledger_expectations(round1_result.trades)
+    round0_trades = _trade_snapshot(round0_result.trades)
 
     outcome, gates, refinements, _zero_trade = _run_synthesis(orch)
 
     assert outcome.execution_succeeded is True
     assert anomaly_calls["n"] == 2
+    assert sandbox_calls["n"] == 2
     assert _trade_snapshot(outcome.trades) == expected_trades
     assert _metrics_snapshot(outcome.metrics) == expected_metrics
+    assert _trade_snapshot(outcome.trades) != round0_trades
     assert len(refinements) == 1
     anomaly_gates = [g for g in gates if g.gate_name == "backtest_anomaly"]
     assert len(anomaly_gates) == 2
