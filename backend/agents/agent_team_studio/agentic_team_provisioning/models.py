@@ -9,6 +9,8 @@ from pydantic import BaseModel, Field
 
 from agent_registry.models import AgentManifest
 
+from ..assistant_kernel import ConversationMessage
+
 # ---------------------------------------------------------------------------
 # Enums
 # ---------------------------------------------------------------------------
@@ -347,12 +349,6 @@ class GeneratedAgentInvokeOutput(BaseModel):
 # ---------------------------------------------------------------------------
 # Conversation models
 # ---------------------------------------------------------------------------
-
-
-class ConversationMessage(BaseModel):
-    role: str = Field(..., pattern=r"^(user|assistant)$")
-    content: str
-    timestamp: str
 
 
 class CreateConversationRequest(BaseModel):
