@@ -811,7 +811,7 @@ def review_app(monkeypatch: pytest.MonkeyPatch, tmp_path):
         if len(args) >= 3:
             job_id, request, token = args[0:3]
             mock_execute(
-                "PrReviewWorkflow",
+                "CodeReviewWorkflow",
                 args=[job_id, request, token],
                 id=f"pr-review-{job_id}",
                 task_queue="code-review"
