@@ -535,9 +535,7 @@ class SynthesisMixin:
 
             # ── 2e: BACKTEST EVALUATION (anomaly gates → zero-trade-repair → generic refine) ─
             evaluation = self._evaluate_synthesis_round(
-                spec=spec,
-                code=code,
-                trades=trades,
+                state=_DesignAttemptState(spec=spec, code=code, trades=trades, metrics=metrics),
                 exec_result=exec_result,
                 market_data=market_data,
                 config=config,
@@ -883,9 +881,7 @@ class SynthesisMixin:
     def _evaluate_synthesis_round(
         self,
         *,
-        spec: StrategySpec,
-        code: str,
-        trades: List[TradeRecord],
+        state: _DesignAttemptState,
         exec_result: StrategyRunResult,
         market_data: Dict[str, List[OHLCVBar]],
         config: BacktestConfig,
@@ -901,8 +897,10 @@ class SynthesisMixin:
         """Compute metrics, run the anomaly gates, and route any recovery.
 
         Pre: this round executed cleanly and collected ``trades`` through the
-        coverage gate; ``ran_on_non_conforming_code`` is the verdict captured at
-        trade collection.
+        coverage gate; ``state`` carries this round's settled ``spec``/``code``/
+        ``trades`` (``state.metrics`` is unused — this method computes its own
+        metrics from ``state.trades``); ``ran_on_non_conforming_code`` is the
+        verdict captured at trade collection.
         Post: returns a ``_SynthesisEvaluateResult``. ``action="success"`` when
         no critical anomaly fired (the caller marks ``execution_succeeded``);
         otherwise ``_handle_critical_anomalies`` runs and the result carries the
@@ -916,6 +914,8 @@ class SynthesisMixin:
         # ``_cached_run_strategy_code`` above: keeps test monkeypatches of
         # ``orchestrator.compute_metrics`` honored.
         from . import orchestrator as _orchestrator_module
+
+        spec, code, trades = state.spec, state.code, state.trades
 
         metrics = _orchestrator_module.compute_metrics(
             trades, config.initial_capital, config.start_date, config.end_date
