@@ -6,29 +6,24 @@ import { MatButtonModule } from '@angular/material/button';
 import { AgentCatalogComponent } from './agent-catalog/agent-catalog.component';
 import { AgentRunnerComponent } from './agent-runner/agent-runner.component';
 import { AgentProvisioningDashboardComponent } from '../agent-provisioning-dashboard/agent-provisioning-dashboard.component';
-import { BacklogTabComponent } from './backlog-tab/backlog-tab.component';
-import { SprintsTabComponent } from './sprints-tab/sprints-tab.component';
-import { FeedbackTabComponent } from './feedback-tab/feedback-tab.component';
 import { CognitionTabComponent } from './cognition-tab/cognition-tab.component';
 import { MetricsTabComponent } from './metrics-tab/metrics-tab.component';
 
 /**
  * Top-level page for the Agent Console.
  *
- * Hosts eight tabs, in template order:
+ * Hosts five tabs, in template order:
  *   - **Catalog** (default) — browse and inspect every registered agent.
  *   - **Runner** — invoke any agent in a per-team warm Docker sandbox.
  *   - **Provisioning & Environments** — embeds the existing provisioning
  *     dashboard verbatim so its behavior is unchanged.
- *   - **Backlog** — `product_delivery` initiatives/epics/stories with
- *     inline edit + grooming (#243 phase 4).
- *   - **Sprints** — sprint list with `Plan sprint` action (#243 phase 4).
- *   - **Feedback** — auto-promoted feedback with story-linking (#243
- *     phase 4 + the new PATCH /feedback/{id}/link route).
  *   - **Cognition** — operator surface for an agent's rule proposals
  *     (approve/reject), memory timeline, and rules.
  *   - **Metrics** — Software Engineering DORA metrics (deployment frequency,
  *     lead time, change-failure rate, MTTR) and LLM cost over a selectable window.
+ *
+ * Backlog/Sprints/Feedback (formerly tabs here) now live at their own
+ * `/product-delivery` route — see `ProductDeliveryPageComponent`.
  */
 @Component({
   selector: 'app-agent-console',
@@ -41,9 +36,6 @@ import { MetricsTabComponent } from './metrics-tab/metrics-tab.component';
     AgentCatalogComponent,
     AgentRunnerComponent,
     AgentProvisioningDashboardComponent,
-    BacklogTabComponent,
-    SprintsTabComponent,
-    FeedbackTabComponent,
     CognitionTabComponent,
     MetricsTabComponent,
   ],
