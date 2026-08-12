@@ -41,9 +41,9 @@ from llm_service.clients.dummy import DummyLLMClient
 # Same anchor convention as test_architecture_consistency_pass.py /
 # test_side_effect_impact_pass.py / test_merged_architecture_side_effect_pass.py:
 # branch on the user prompt only, never the system prompt.
-_ARCH_PASS_ANCHOR = '"findings" array as instructed'
-_SIDE_EFFECT_PASS_ANCHOR = '"side-effects"/"documentation" findings array'
-_MERGED_PASS_ANCHOR = '"architecture_findings"/"side_effect_findings"'
+_ARCH_PASS_ANCHOR = "Summarize architecture-consistency findings in structured prose"
+_SIDE_EFFECT_PASS_ANCHOR = "Summarize side-effect-impact findings in structured prose"
+_MERGED_PASS_ANCHOR = "Merged submission pass:"
 
 
 def _issue(**overrides: object) -> CodeReviewIssue:

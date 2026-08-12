@@ -43,7 +43,7 @@ from tests.test_false_positive_filter import _SimulatesFileReadToolCall
 from llm_service.clients.dummy import DummyLLMClient
 from tests.submission_pass_two_call_client import SubmissionPassTwoCallClient
 
-_MERGED_PASS_ANCHOR = '"architecture_findings"/"side_effect_findings"'
+_MERGED_PASS_ANCHOR = "Merged submission pass:"
 
 # --------------------------------------------------------------------------- fixture
 

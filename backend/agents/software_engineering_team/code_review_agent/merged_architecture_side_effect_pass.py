@@ -456,9 +456,8 @@ def _build_prompt(
           ``total_batches`` is set (> 1), the content section header names
           this batch's position and points to the manifest/tools for files
           not shown in this call.
-        - Ends with a return instruction containing both response keys so
-          DummyLLMClient tests can anchor on the merged call; disabled halves
-          are told to stay empty.
+        - Ends with a prose-only closer (no JSON schema) per enabled half;
+          disabled halves are told to stay empty in the tool-guidance line above.
     """
     parts: List[str] = []
 
@@ -551,11 +550,27 @@ def _build_prompt(
             "list_changed_files(offset, limit) when recovering omitted submission "
             "paths. Do not run architecture analysis."
         )
-    parts.append(
-        'Return a single JSON object with "architecture_findings"/"side_effect_findings" '
-        "keys as instructed. Return "
-        '{"architecture_findings": [], "side_effect_findings": []} if neither part finds anything.'
-    )
+    if arch_on and side_on:
+        parts.append(
+            "Merged submission pass: summarize Part 1 and Part 2 findings separately in "
+            "structured prose per the system instructions — keep architecture-consistency "
+            "findings distinct from side-effect-impact findings. State clearly when either "
+            "part finds nothing."
+        )
+    elif arch_on:
+        parts.append(
+            "Merged submission pass: summarize architecture-consistency findings in structured "
+            "prose per the system instructions (severity, category, file_path, line, "
+            "description, suggestion, pre_existing). Do not report side-effect findings. "
+            "State clearly when you find nothing."
+        )
+    else:
+        parts.append(
+            "Merged submission pass: summarize side-effect-impact findings in structured prose "
+            "per the system instructions (severity, category, file_path, line, description, "
+            "suggestion, pre_existing). Do not report architecture findings. State clearly "
+            "when you find nothing."
+        )
     return "\n".join(parts)
 
 

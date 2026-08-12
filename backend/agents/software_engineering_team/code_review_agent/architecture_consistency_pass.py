@@ -277,8 +277,9 @@ def _build_prompt(
         "provided, confirm contradictions against established repository structure/patterns."
     )
     parts.append(
-        'Return a single JSON object with a "findings" array as instructed. Return '
-        '{"findings": []} if you find nothing in either category.'
+        "Summarize architecture-consistency findings in structured prose per the system "
+        "instructions (severity, category, file_path, line, description, suggestion, "
+        "pre_existing). State clearly when you find nothing in either category."
     )
     return "\n".join(parts)
 

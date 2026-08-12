@@ -47,9 +47,9 @@ from tests.submission_pass_two_call_client import SubmissionPassTwoCallClient
 # Unique anchor in this pass's user prompt (never the system prompt), distinct
 # from architecture_consistency_pass's own anchor so a DummyLLMClient subclass
 # can route between the two passes' calls without collision.
-_SIDE_EFFECT_PASS_ANCHOR = '"side-effects"/"documentation" findings array'
-_MERGED_PASS_ANCHOR = '"architecture_findings"/"side_effect_findings"'
-_ARCH_PASS_ANCHOR = '"findings" array as instructed'
+_SIDE_EFFECT_PASS_ANCHOR = "Summarize side-effect-impact findings in structured prose"
+_MERGED_PASS_ANCHOR = "Merged submission pass:"
+_ARCH_PASS_ANCHOR = "Summarize architecture-consistency findings in structured prose"
 
 
 def _input(files: Optional[Dict[str, str]] = None) -> CodeReviewInput:

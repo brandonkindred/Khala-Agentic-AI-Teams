@@ -17,7 +17,7 @@ from llm_service.clients.dummy import DummyLLMClient
 from tests.submission_pass_two_call_client import SubmissionPassTwoCallClient
 from shared.dev_models.models import SystemArchitecture
 
-_MERGED_PASS_ANCHOR = '"architecture_findings"/"side_effect_findings"'
+_MERGED_PASS_ANCHOR = "Merged submission pass:"
 
 # Default off-diff excerpt so architecture/redundancy half has evidence when
 # tests do not attach a repo_reader or formal architecture document.

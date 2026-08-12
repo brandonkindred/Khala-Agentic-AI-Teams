@@ -38,10 +38,10 @@ from shared.dev_models.models import ArchitectureComponent, SystemArchitecture
 # DummyLLMClient subclass must branch on the user prompt only, matching the
 # false-positive filter's established rationale for avoiding system-prompt
 # scanning cross-contamination).
-_ARCH_PASS_ANCHOR = '"findings" array as instructed'
-_MERGED_PASS_ANCHOR = '"architecture_findings"/"side_effect_findings"'
+_ARCH_PASS_ANCHOR = "Summarize architecture-consistency findings in structured prose"
+_MERGED_PASS_ANCHOR = "Merged submission pass:"
 
-_SIDE_EFFECT_PASS_ANCHOR = '"side-effects"/"documentation" findings array'
+_SIDE_EFFECT_PASS_ANCHOR = "Summarize side-effect-impact findings in structured prose"
 
 
 def _arch(

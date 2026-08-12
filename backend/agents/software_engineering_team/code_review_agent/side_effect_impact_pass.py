@@ -427,8 +427,9 @@ def _build_prompt(
         "search_repository reaches the rest of the repository."
     )
     parts.append(
-        'Return a single JSON object with a "side-effects"/"documentation" findings array, per the '
-        'output format above. Return {"findings": []} if you find nothing.'
+        "Summarize side-effect-impact findings in structured prose per the system "
+        "instructions (severity, category, file_path, line, description, suggestion, "
+        "pre_existing). State clearly when you find nothing."
     )
     return "\n".join(parts)
 

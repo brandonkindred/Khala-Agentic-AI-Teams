@@ -280,8 +280,7 @@ def build_merged_architecture_side_effect_reasoning_system_prompt(
         parts.append(
             "You are running ONLY the architecture-consistency / cross-codebase-redundancy "
             "check on top of an already-completed per-file code review. Do NOT perform "
-            "side-effect / blast-radius analysis — return "
-            '"side_effect_findings": [] unchanged.'
+            "side-effect / blast-radius analysis — report no side-effect findings."
         )
         parts.append("\n\n## Part 1: Architecture Consistency & Cross-Codebase Redundancy\n\n")
         parts.append(_ARCHITECTURE_CONSISTENCY_BODY)
@@ -289,8 +288,7 @@ def build_merged_architecture_side_effect_reasoning_system_prompt(
         parts.append(
             "You are running ONLY the side-effect / blast-radius check on top of an "
             "already-completed per-file code review. Do NOT perform architecture-consistency "
-            "or cross-codebase-redundancy analysis — return "
-            '"architecture_findings": [] unchanged.'
+            "or cross-codebase-redundancy analysis — report no architecture findings."
         )
         parts.append("\n\n## Part 2: Side-Effect / Blast-Radius Impact\n\n")
         parts.append(_SIDE_EFFECT_IMPACT_BODY)
