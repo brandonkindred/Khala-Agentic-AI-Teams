@@ -7,7 +7,9 @@ import { Subject, of, throwError } from 'rxjs';
 import { vi } from 'vitest';
 import type { AgentStudioDraft, AgentStudioDraftSummary } from '../../../models/agent-studio.model';
 import { AgentStudioApiService } from '../../../services/agent-studio-api.service';
+import { AgentRunnerApiService } from '../../../services/agent-runner-api.service';
 import { AgenticTeamApiService } from '../../../services/agentic-team-api.service';
+import { PersonaTestingApiService } from '../../../services/persona-testing-api.service';
 import type { ProcessDefinition } from '../../../models/agentic-team.model';
 import { AgentCatalogComponent } from '../agent-console/agent-catalog/agent-catalog.component';
 import { AgentProvisioningPanelComponent } from '../agent-provisioning-panel/agent-provisioning-panel.component';
@@ -51,9 +53,11 @@ describe('AgentStudioShellComponent', () => {
   let component: AgentStudioShellComponent;
   let fixture: ComponentFixture<AgentStudioShellComponent>;
   // Build stage isn't stubbed at the shell level (only its catalog/provisioning
-  // children are), so it injects the real AgentStudioApiService — fake it here
-  // so no HTTP client is required. Also backs `app-load-draft-menu` (real,
-  // unstubbed) and the shell's own `loadDraft` hydration.
+  // children are), so it injects the real AgentStudioFacade — which the shell
+  // provides and which delegates to the four HTTP clients. Fake those here so
+  // no HTTP client is required. AgentStudioApiService also backs
+  // `app-load-draft-menu` (real, unstubbed) and the shell's own `loadDraft`
+  // hydration (via the façade).
   let agentStudioApi: {
     cloneFromRegistry: ReturnType<typeof vi.fn>;
     saveAgent: ReturnType<typeof vi.fn>;
@@ -75,6 +79,8 @@ describe('AgentStudioShellComponent', () => {
       providers: [
         { provide: AgentStudioApiService, useValue: agentStudioApi },
         { provide: AgenticTeamApiService, useValue: agenticTeamApi },
+        { provide: AgentRunnerApiService, useValue: {} },
+        { provide: PersonaTestingApiService, useValue: {} },
       ],
     })
       .overrideComponent(AgentStudioTestAgentComponent, {
