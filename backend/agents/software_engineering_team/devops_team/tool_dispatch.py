@@ -9,8 +9,9 @@ agents without each becoming a class method.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Dict, List, NamedTuple
+from typing import Any, Callable, Dict, List, NamedTuple
 
+from shared.concurrency import parallel_map
 from software_engineering_team.shared.security_service import run_policy_scan
 
 from .tool_agents import (
@@ -116,11 +117,25 @@ class ValidationToolResults(NamedTuple):
 
 
 def run_validation_tools(agent: Any, repo_path: Path) -> ValidationToolResults:
-    """Run Phase 4 IaC/policy/CICD/dry-run validation tools against ``repo_path``."""
-    iac_checks = agent.iac_validation_tool.run(IaCValidationInput(repo_path=str(repo_path)))
-    policy_checks = run_policy_scan(str(repo_path), runner=agent.policy_tool)
-    cicd_checks = agent.cicd_lint_tool.run(CICDLintInput(repo_path=str(repo_path)))
-    dry_run_checks = agent.deploy_dry_run_tool.run(DeploymentDryRunInput(repo_path=str(repo_path)))
+    """Run Phase 4 IaC/policy/CICD/dry-run validation tools against ``repo_path``.
+
+    The four tool calls are independent and I/O-bound (subprocess-backed), so
+    they run concurrently via ``parallel_map``. ``preserve_order=True`` (the
+    default) guarantees the unpacked results line up with ``calls`` regardless
+    of which one finishes first, so the ``tool_gate_map`` merge below stays
+    deterministic (iac -> policy -> cicd -> dry_run, last write wins) exactly
+    as when the calls ran sequentially.
+    """
+    repo_str = str(repo_path)
+    calls: List[Callable[[], Any]] = [
+        lambda: agent.iac_validation_tool.run(IaCValidationInput(repo_path=repo_str)),
+        lambda: run_policy_scan(repo_str, runner=agent.policy_tool),
+        lambda: agent.cicd_lint_tool.run(CICDLintInput(repo_path=repo_str)),
+        lambda: agent.deploy_dry_run_tool.run(DeploymentDryRunInput(repo_path=repo_str)),
+    ]
+    iac_checks, policy_checks, cicd_checks, dry_run_checks = parallel_map(
+        calls, lambda fn: fn(), max_workers=len(calls), skip_none=False
+    )
 
     tool_gate_map: Dict[str, str] = {}
     tool_gate_map.update(iac_checks.checks)

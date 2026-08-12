@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import subprocess
 import tempfile
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Callable, Dict, List, Optional
@@ -2333,6 +2334,55 @@ class TestToolDispatchRunValidationTools:
         assert agent.policy_tool.run.call_count == 1
         (call_arg,) = agent.policy_tool.run.call_args.args
         assert call_arg == PolicyAsCodeInput(repo_path=str(repo_path))
+
+    def test_run_validation_tools_executes_the_four_tool_calls_concurrently(self) -> None:
+        """Perf-guard: proves the 4 tool calls run concurrently, not sequentially.
+
+        Each call sleeps ~0.12s (simulating subprocess/I-O-bound work).
+        Sequential execution would take >= 4 * 0.12s == 0.48s; concurrent
+        execution across 4 workers should take roughly one sleep interval.
+        The 2x-one-interval bound sits well below the sequential floor and
+        well above the concurrent expectation, so it isn't flaky under
+        ordinary CI scheduling noise while still failing hard if the four
+        calls ever became sequential again.
+        """
+        sleep_s = 0.12
+
+        def _slow(output: Any) -> Callable[[Any], Any]:
+            def _run(_input: Any) -> Any:
+                time.sleep(sleep_s)
+                return output
+
+            return _run
+
+        agent = MagicMock()
+        agent.iac_validation_tool.run.side_effect = _slow(
+            IaCValidationOutput(success=True, checks={"iac_validate": "pass"})
+        )
+        agent.policy_tool.run.side_effect = _slow(
+            PolicyAsCodeOutput(success=True, checks={"policy_checks": "pass"})
+        )
+        agent.cicd_lint_tool.run.side_effect = _slow(
+            CICDLintOutput(success=True, checks={"pipeline_lint": "pass"})
+        )
+        agent.deploy_dry_run_tool.run.side_effect = _slow(
+            DeploymentDryRunOutput(success=True, checks={"deployment_dry_run": "pass"})
+        )
+
+        start = time.perf_counter()
+        vt = tool_dispatch.run_validation_tools(agent, Path("/tmp/x"))
+        elapsed = time.perf_counter() - start
+
+        assert vt.tool_gate_map == {
+            "iac_validate": "pass",
+            "policy_checks": "pass",
+            "pipeline_lint": "pass",
+            "deployment_dry_run": "pass",
+        }
+        assert elapsed < 2 * sleep_s, (
+            f"run_validation_tools took {elapsed:.3f}s, expected well under "
+            f"{2 * sleep_s:.3f}s if the 4 tool calls run concurrently"
+        )
 
 
 class TestMainOrchestratorRegistration:
