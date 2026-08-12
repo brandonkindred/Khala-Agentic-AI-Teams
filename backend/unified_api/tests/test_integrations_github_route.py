@@ -1393,9 +1393,13 @@ def test_get_review_transcript_404_when_pat_cannot_reach_repo(mock_cfg, mock_cre
 @patch(f"{_M}.get_github_config_meta", return_value=dict(_GH_CFG))
 def test_get_review_transcript_503_when_service_url_unset(mock_cfg, mock_cred, monkeypatch):
     monkeypatch.delenv("CODING_TEAM_SERVICE_URL", raising=False)
-    with patch(f"{_M}._assert_pat_can_reach_repo", new=AsyncMock(return_value=None)):
+    with patch(f"{_M}._assert_pat_can_reach_repo", new=AsyncMock(return_value=None)) as gate:
         resp = client.get(_REVIEW_TRANSCRIPT, params={"owner": "acme", "repo": "widget"})
     assert resp.status_code == 503
+    # The route checks CODING_TEAM_SERVICE_URL (_require_coding_team_url) before
+    # the PAT-reachability gate, same order as GET /github/reviews, so a missing
+    # service URL must fail before the gate is ever reached.
+    gate.assert_not_awaited()
 
 
 def test_get_review_transcript_422_without_owner_repo():

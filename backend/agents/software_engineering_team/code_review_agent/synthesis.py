@@ -167,6 +167,10 @@ def synthesize_review_findings(
           reviewers' actual evidence rather than reconstructing it.
 
     Postconditions:
+        - Records one transcript entry (stage ``synthesis``) for the LLM call
+          once a response is received — the raw response text, whether or not
+          it parses or validates, so a malformed response is visible for
+          debugging rather than silently discarded.
         - Returns a ``SynthesisResult`` with a non-empty ``summary`` on success;
           ``spec_compliance_notes`` may be empty (no spec gaps were recorded).
         - Returns ``None`` on ANY failure — exception, malformed JSON, a missing
@@ -276,6 +280,10 @@ def synthesize_spec_compliance(
           unmerged per-chunk output.
 
     Postconditions:
+        - Records one transcript entry (stage ``spec_compliance``) for the LLM
+          call once a response is received — the raw response text, whether or
+          not it parses or validates, so a malformed response is visible for
+          debugging rather than silently discarded.
         - Returns a string on success: ``""`` when no gaps were found, or the
           consolidated spec/acceptance-criteria gaps otherwise — the same
           shape as ``CodeReviewOutput.spec_compliance_notes``.

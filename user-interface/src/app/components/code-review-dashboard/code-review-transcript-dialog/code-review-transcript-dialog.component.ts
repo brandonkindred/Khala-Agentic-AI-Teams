@@ -16,12 +16,14 @@ export interface CodeReviewTranscriptDialogData {
 }
 
 /**
- * Read-only view of one code review's complete durable transcript: every LLM
- * call the review pipeline made (chunk review, false-positive filter, the
- * merged architecture/side-effect pass, narrative synthesis), in call order,
- * with the full prompt and response text — the reviewer's whole "thinking
- * process" for that run. Fetched once on open; there is no live/streaming
- * view, matching a completed review's transcript being immutable.
+ * Read-only view of one code review's durable transcript: renders whatever
+ * entries the transcript endpoint returns, in call order, with the full
+ * prompt and response text for each — the reviewer's "thinking process" for
+ * that run. Which pipeline stages appear depends entirely on what the backend
+ * recorded (e.g. only the in-process coordinator path records a transcript
+ * today); this component makes no assumption about which stages ran. Fetched
+ * once on open; there is no live/streaming view, matching a completed
+ * review's transcript being immutable.
  */
 @Component({
   selector: 'app-code-review-transcript-dialog',
