@@ -32,6 +32,7 @@ Invariants:
 
 from __future__ import annotations
 
+import json
 import logging
 import time
 from dataclasses import dataclass, replace
@@ -316,16 +317,24 @@ def _call_agent(
         call or ``parse`` raises — recovery is entirely the caller's concern.
         Records this call's prompt/reply into the durable transcript before
         ``parse`` runs, so a reply that ``parse`` goes on to reject is still
-        captured.
+        captured. The recorded response is the full ``agent.messages``
+        conversation (JSON), not just the final text: this call may be
+        tool-using (``tools``), so one invocation can span several model
+        turns, and recording only the final text would silently drop the
+        intermediate turns from the transcript.
     """
     agent = Agent(model=model, system_prompt=system_prompt, tools=tools)
     started = time.monotonic()
     raw = str(agent(prompt)).strip()
+    try:
+        transcript_response = json.dumps(agent.messages, default=str)
+    except Exception:  # noqa: BLE001 - transcript recording must never break the pass
+        transcript_response = raw
     record_transcript_entry(
         pass_label,
         batch_target,
         prompt,
-        raw,
+        transcript_response,
         model=model_label(model),
         duration_ms=(time.monotonic() - started) * 1000,
     )

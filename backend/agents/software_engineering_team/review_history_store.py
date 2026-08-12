@@ -205,13 +205,18 @@ def update_review(
 
 
 @timed_query(store=_STORE, op="append_review_transcript_entries")
-def append_review_transcript_entries(job_id: str, entries: list[dict[str, Any]]) -> None:
-    """Append a batch of LLM-call entries to a review's durable transcript (best-effort).
+def append_review_transcript_entries(job_id: str, entries: list[dict[str, Any]]) -> bool:
+    """Append a batch of LLM-call entries to a review's durable transcript.
 
     Batched (not one call per entry) so the background transcript flusher
     (``code_review_agent.transcript``, mirroring ``shared/trace_flusher.py``'s
     off-hot-path pattern) can drain many buffered entries for one job in a
     single Postgres round-trip instead of one write per LLM call.
+
+    Unlike ``record_review_start``/``update_review`` (fire-and-forget: no
+    caller acts differently on failure), this reports success so the flusher
+    can requeue a batch that failed to write instead of silently discarding
+    it — see :func:`code_review_agent.transcript._drain`.
 
     Preconditions:
         - ``job_id`` is a review job's id; ``entries`` is a non-empty list of
@@ -223,17 +228,19 @@ def append_review_transcript_entries(job_id: str, entries: list[dict[str, Any]])
         - On success, ``entries`` is appended (in order) to the end of that
           job's ``code_review_transcripts.entries`` array, creating the row
           (starting from an empty array) on the first call for a given
-          ``job_id``. Never raises; no-op without Postgres or for an empty
-          ``entries`` list. Concurrent callers for the same ``job_id`` (the
-          background flusher may drain from more than one process) each
-          append exactly their own batch — the ``||`` (JSONB concatenation)
-          read-modify-write happens server-side in one statement, so no entry
-          is lost to a last-writer-wins race.
+          ``job_id``, and returns ``True``. Concurrent callers for the same
+          ``job_id`` (the background flusher may drain from more than one
+          process) each append exactly their own batch — the ``||`` (JSONB
+          concatenation) read-modify-write happens server-side in one
+          statement, so no entry is lost to a last-writer-wins race.
+        - Returns ``False`` without writing anything when Postgres is
+          unavailable, ``entries`` is empty, or the write itself fails (logged
+          as a warning). Never raises.
     """
     if not entries or not is_postgres_enabled():
-        return
+        return False
 
-    def _write() -> None:
+    try:
         with get_conn() as conn, conn.cursor() as cur:
             cur.execute(
                 """INSERT INTO code_review_transcripts (job_id, entries)
@@ -242,8 +249,10 @@ def append_review_transcript_entries(job_id: str, entries: list[dict[str, Any]])
                        SET entries = code_review_transcripts.entries || EXCLUDED.entries""",
                 (job_id, Json(list(entries))),
             )
-
-    _best_effort_write("append_review_transcript_entries", _write)
+        return True
+    except Exception:  # noqa: BLE001 - caller (the flusher) decides whether to requeue
+        logger.warning("code_review_runs: append_review_transcript_entries failed", exc_info=True)
+        return False
 
 
 @timed_query(store=_STORE, op="get_review_transcript")
@@ -255,16 +264,24 @@ def get_review_transcript(job_id: str) -> Optional[list[dict[str, Any]]]:
         - ``job_id`` is a review job's id.
     Postconditions:
         - Returns the job's ``code_review_transcripts.entries`` array (possibly
-          empty, when the review made no LLM calls at all) in append order, or
-          None when no transcript row exists for ``job_id`` (no caller-tracked
-          job, the review hasn't made its first recordable call yet, Postgres is
-          unavailable, or the query fails — never raises).
+          empty, when the review made no LLM calls at all), sorted by
+          ``started_at`` — call order, not the order batches happened to be
+          flushed and appended in (concurrent chunk reviews/tail passes can
+          finish, and so flush, out of the order they started; an entry
+          missing/blank ``started_at`` sorts first and keeps its relative
+          append order against other such entries, since Python's sort is
+          stable) — or None when no transcript row exists for ``job_id`` (no
+          caller-tracked job, the review hasn't made its first recordable
+          call yet, Postgres is unavailable, or the query fails — never
+          raises).
     """
     query = "SELECT entries FROM code_review_transcripts WHERE job_id = %s"
     with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
         cur.execute(query, (job_id,))
         row = cur.fetchone()
-        return row["entries"] if row else None
+        if not row:
+            return None
+        return sorted(row["entries"], key=lambda e: e.get("started_at") or "")
 
 
 @timed_query(store=_STORE, op="get_review")

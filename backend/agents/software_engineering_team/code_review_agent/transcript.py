@@ -197,9 +197,11 @@ def _enqueue(job_id: str, entry: dict[str, Any]) -> None:
 def _drain() -> int:
     """Flush all buffered entries, batched per job_id; return how many were written.
 
-    Failures are swallowed and logged (never raise) — a flush error must not
-    kill the heartbeat thread. The batch is snapshotted under the lock and
-    written outside it so a slow write does not block the call-path recorder.
+    A per-job write failure is requeued (see :func:`_requeue`) rather than
+    discarded — a transient Postgres blip must not permanently drop those
+    calls from the user-facing transcript — and never kills the heartbeat
+    thread. The batch is snapshotted under the lock and written outside it so
+    a slow write does not block the call-path recorder.
     """
     with _buffer_lock:
         if not _buffer:
@@ -209,19 +211,72 @@ def _drain() -> int:
     by_job: dict[str, list[dict[str, Any]]] = {}
     for job_id, entry in batch:
         by_job.setdefault(job_id, []).append(entry)
-    try:
-        from software_engineering_team.review_history_store import (
-            append_review_transcript_entries,
-        )
 
-        for job_id, entries in by_job.items():
-            append_review_transcript_entries(job_id, entries)
-    except Exception:  # noqa: BLE001 - the flusher must never die on a write failure
+    from software_engineering_team.review_history_store import (
+        append_review_transcript_entries,
+    )
+
+    written = 0
+    failed: list[tuple[str, dict[str, Any]]] = []
+    for job_id, entries in by_job.items():
+        try:
+            ok = append_review_transcript_entries(job_id, entries)
+        except Exception:  # noqa: BLE001 - the flusher must never die on a write failure
+            logger.warning(
+                "CodeReview transcript: failed to flush %d entry(ies) for job %s",
+                len(entries),
+                job_id,
+                exc_info=True,
+            )
+            failed.extend((job_id, entry) for entry in entries)
+            continue
+        if ok:
+            written += len(entries)
+        else:
+            logger.warning(
+                "CodeReview transcript: failed to flush %d entry(ies) for job %s",
+                len(entries),
+                job_id,
+            )
+            failed.extend((job_id, entry) for entry in entries)
+
+    if failed:
+        _requeue(failed)
+    return written
+
+
+def _requeue(entries: list[tuple[str, dict[str, Any]]]) -> None:
+    """Push entries that failed to flush back onto the buffer for a later retry.
+
+    Applies the same bounded-buffer overflow policy as :func:`_enqueue`: if
+    requeuing pushes the buffer past its cap, the oldest entries (which may
+    include some just requeued) are dropped rather than growing unboundedly —
+    a sustained outage degrades to "drop the oldest," never unbounded memory
+    growth, matching :func:`_enqueue`'s contract.
+    """
+    global _overflow_warned
+    cap = _max_buffer()
+    with _buffer_lock:
+        # extendleft reverses input order one item at a time, so reverse first
+        # to land the requeued entries back at the front in their original order.
+        _buffer.extendleft(reversed(entries))
+        dropped = 0
+        while len(_buffer) > cap:
+            _buffer.popleft()
+            dropped += 1
+        overflowed = dropped > 0
+        should_warn = overflowed and not _overflow_warned
+        if should_warn:
+            _overflow_warned = True
+        elif not overflowed:
+            _overflow_warned = False
+    if should_warn:
         logger.warning(
-            "CodeReview transcript: failed to flush %d entry(ies)", len(batch), exc_info=True
+            "code review transcript buffer full (cap=%d) after requeuing failed writes; "
+            "dropping oldest %d entry(ies)",
+            cap,
+            dropped,
         )
-        return 0
-    return len(batch)
 
 
 def drain() -> int:

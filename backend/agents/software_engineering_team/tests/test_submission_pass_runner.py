@@ -123,6 +123,44 @@ def test_with_output_budget_returns_same_model_when_cap_already_matches() -> Non
     assert result is model
 
 
+def test_call_agent_records_full_conversation_in_transcript(monkeypatch) -> None:
+    """The transcript entry's response is the full agent.messages conversation
+    (JSON), not just the final text -- this call site is tool-using (``tools``
+    may be non-empty), so recording only the final text would silently drop
+    any intermediate tool-loop turns from the durable transcript."""
+    from llm_service import llm_attribution
+
+    captured: List[Any] = []
+    monkeypatch.setattr(
+        runner_mod,
+        "record_transcript_entry",
+        lambda *args, **kwargs: captured.append(args),
+    )
+    model = LLMClientModel(DummyLLMClient(), max_tokens=4096)
+
+    with llm_attribution(job_id="job-1"):
+        result = runner_mod._call_agent(
+            model,
+            "system prompt",
+            [],
+            "user prompt",
+            parse=lambda raw: raw,
+            pass_label="architecture",
+            batch_target="batch 1/1",
+        )
+
+    assert isinstance(result, str) and result  # parse() got the final text, unchanged
+    assert len(captured) == 1
+    stage, target, prompt, response = captured[0]
+    assert stage == "architecture"
+    assert target == "batch 1/1"
+    assert prompt == "user prompt"
+    messages = json.loads(response)
+    assert isinstance(messages, list)
+    assert len(messages) >= 2  # at least the user turn and the model's reply
+    assert messages[0]["role"] == "user"
+
+
 def test_is_overflow_shaped_classifies_known_and_unknown_exceptions() -> None:
     assert _is_overflow_shaped(ContextWindowOverflowException("x")) is True
     assert _is_overflow_shaped(MaxTokensReachedException("x")) is True

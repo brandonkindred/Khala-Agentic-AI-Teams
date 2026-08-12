@@ -54,9 +54,14 @@ def test_record_is_noop_when_postgres_disabled(monkeypatch) -> None:
 
 def test_record_builds_entry_fields(monkeypatch) -> None:
     captured: list = []
+
+    def _write(job_id, entries):
+        captured.append((job_id, entries))
+        return True
+
     monkeypatch.setattr(
         "software_engineering_team.review_history_store.append_review_transcript_entries",
-        lambda job_id, entries: captured.append((job_id, entries)),
+        _write,
     )
     with llm_attribution(job_id="job-1"):
         transcript.record_transcript_entry(
@@ -99,9 +104,14 @@ def test_overflow_warning_throttled_to_once_per_burst(monkeypatch, caplog) -> No
 def test_drain_batches_entries_per_job(monkeypatch) -> None:
     """Entries for two different jobs flush as two separate batched calls."""
     captured: dict = {}
+
+    def _write(job_id, entries):
+        captured.setdefault(job_id, []).extend(entries)
+        return True
+
     monkeypatch.setattr(
         "software_engineering_team.review_history_store.append_review_transcript_entries",
-        lambda job_id, entries: captured.setdefault(job_id, []).extend(entries),
+        _write,
     )
     with llm_attribution(job_id="job-1"):
         transcript.record_transcript_entry("chunk_review", "a.py", "p1", "r1")
@@ -117,7 +127,24 @@ def test_drain_batches_entries_per_job(monkeypatch) -> None:
     assert transcript._buffer_size() == 0
 
 
-def test_drain_swallows_write_failure(monkeypatch, caplog) -> None:
+def test_drain_requeues_on_write_failure(monkeypatch, caplog) -> None:
+    """A failed write is requeued, not discarded, so the next drain retries it."""
+    caplog.set_level("WARNING", logger="software_engineering_team.code_review_agent.transcript")
+    monkeypatch.setattr(
+        "software_engineering_team.review_history_store.append_review_transcript_entries",
+        lambda job_id, entries: False,
+    )
+    with llm_attribution(job_id="job-1"):
+        transcript.record_transcript_entry("chunk_review", "a.py", "p", "r")
+    n = transcript.drain()
+    assert n == 0
+    assert any("failed to flush" in r.message for r in caplog.records)
+    # Requeued, not dropped — the entry is still buffered for the next drain.
+    assert transcript._buffer_size() == 1
+
+
+def test_drain_requeues_on_write_exception(monkeypatch, caplog) -> None:
+    """A write that raises (rather than returning False) is also requeued."""
     caplog.set_level("WARNING", logger="software_engineering_team.code_review_agent.transcript")
     monkeypatch.setattr(
         "software_engineering_team.review_history_store.append_review_transcript_entries",
@@ -128,6 +155,48 @@ def test_drain_swallows_write_failure(monkeypatch, caplog) -> None:
     n = transcript.drain()
     assert n == 0
     assert any("failed to flush" in r.message for r in caplog.records)
+    assert transcript._buffer_size() == 1
+
+
+def test_drain_requeue_then_succeeds_on_retry(monkeypatch) -> None:
+    """The requeued entry is included in — and cleared by — the next successful drain."""
+    calls: list = []
+
+    def _write(job_id, entries):
+        calls.append(list(entries))
+        return len(calls) > 1  # first call fails, second (the retry) succeeds
+
+    monkeypatch.setattr(
+        "software_engineering_team.review_history_store.append_review_transcript_entries",
+        _write,
+    )
+    with llm_attribution(job_id="job-1"):
+        transcript.record_transcript_entry("chunk_review", "a.py", "p", "r")
+    assert transcript.drain() == 0
+    assert transcript._buffer_size() == 1
+
+    assert transcript.drain() == 1
+    assert transcript._buffer_size() == 0
+    assert len(calls) == 2
+    assert calls[0] == calls[1]  # same entry retried verbatim
+
+
+def test_requeue_drops_oldest_on_overflow(monkeypatch, caplog) -> None:
+    """Requeuing past the buffer cap drops the oldest entries, like _enqueue."""
+    monkeypatch.setenv("CODE_REVIEW_TRANSCRIPT_BUFFER_MAX", "1")
+    caplog.set_level("WARNING", logger="software_engineering_team.code_review_agent.transcript")
+    monkeypatch.setattr(
+        "software_engineering_team.review_history_store.append_review_transcript_entries",
+        lambda job_id, entries: False,
+    )
+    with llm_attribution(job_id="job-1"):
+        transcript.record_transcript_entry("chunk_review", "a.py", "p1", "r1")
+        transcript.record_transcript_entry("chunk_review", "b.py", "p2", "r2")
+    # The cap already dropped one entry on enqueue; only one is buffered to drain.
+    assert transcript._buffer_size() == 1
+    transcript.drain()
+    # The failed write is requeued but still bounded by the cap.
+    assert transcript._buffer_size() == 1
 
 
 def test_drain_empty_buffer_is_zero() -> None:

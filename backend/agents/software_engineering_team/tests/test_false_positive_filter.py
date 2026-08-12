@@ -2213,6 +2213,41 @@ def test_verify_group_disables_strands_tool_result_truncation(monkeypatch) -> No
     assert manager.should_truncate_results is False
 
 
+def test_verify_group_records_full_tool_loop_in_transcript(monkeypatch) -> None:
+    """The durable transcript entry for a tool-using verification call must
+    capture every model turn (the toolUse request, its toolResult, and the
+    follow-up model turn), not just the final text answer -- otherwise the
+    transcript silently drops the intermediate turns for the one call site
+    that actually uses tools."""
+    from llm_service import llm_attribution
+
+    captured: List[Any] = []
+    monkeypatch.setattr(
+        "code_review_agent.false_positive_filter.record_transcript_entry",
+        lambda *args, **kwargs: captured.append(args),
+    )
+
+    keep = _issue(description="real bug", line=5)
+    stub = _VerdictStub(verdicts=[{"index": 0, "is_real_issue": True, "confidence": "high"}])
+    with llm_attribution(job_id="job-1"):
+        filter_false_positives(stub, _input(), [keep])
+
+    assert len(captured) == 1
+    _stage, _target, _prompt, response = captured[0]
+    # A single-turn call would just be [user, assistant] (2 messages) or even
+    # a bare final-text string; the simulated read_file round-trip must widen
+    # this to at least [user, assistant(toolUse), user(toolResult), assistant(final)].
+    messages = json.loads(response)
+    assert isinstance(messages, list)
+    assert len(messages) >= 3
+    assert any(
+        isinstance(block, dict) and "toolUse" in block
+        for message in messages
+        for block in (message.get("content") or [])
+        if isinstance(block, dict)
+    )
+
+
 def test_filter_drop_log_truncates_description(caplog) -> None:
     """Drop INFO logs truncate oversized description and reasoning fields."""
     keep = _issue(description="real", line=5)

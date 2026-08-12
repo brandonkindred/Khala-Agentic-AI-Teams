@@ -50,6 +50,7 @@ Three invariants hold:
 from __future__ import annotations
 
 import ast
+import json
 import logging
 import os
 import re
@@ -1977,12 +1978,17 @@ def _verify_group(
           "keep", so an ungrounded drop never reaches the merge (see
           ``_agent_read_the_cited_file``).
         - On a successful call, buffers a ``false_positive_filter`` transcript
-          entry (target ``file_path``, the full prompt, the raw model reply)
-          for later batched, off-hot-path persistence to
-          ``code_review_transcripts`` — see
-          ``transcript.record_transcript_entry``. A no-op when no ``job_id``
-          is bound on the current ``llm_attribution`` context (see
-          ``CodeReviewAgent.run``); never raises and never blocks on I/O.
+          entry (target ``file_path``, the full prompt) for later batched,
+          off-hot-path persistence to ``code_review_transcripts`` — see
+          ``transcript.record_transcript_entry``. The recorded response is the
+          full ``agent.messages`` conversation (JSON), not just the final
+          text: this call is tool-using (``read_file``), so one invocation can
+          span several model turns (a toolUse request, its toolResult, then a
+          follow-up model turn), and recording only the final text would
+          silently drop the intermediate turns from the "thinking process"
+          transcript. A no-op when no ``job_id`` is bound on the current
+          ``llm_attribution`` context (see ``CodeReviewAgent.run``); never
+          raises and never blocks on I/O.
     """
     prompt = _build_group_prompt(index, file_path, issues, input_data)
     agent = Agent(
@@ -1996,11 +2002,15 @@ def _verify_group(
     )
     started = time.monotonic()
     raw = str(agent(prompt)).strip()
+    try:
+        transcript_response = json.dumps(agent.messages, default=str)
+    except Exception:  # noqa: BLE001 - transcript recording must never break verification
+        transcript_response = raw
     record_transcript_entry(
         "false_positive_filter",
         file_path,
         prompt,
-        raw,
+        transcript_response,
         model=model_label(model),
         duration_ms=(time.monotonic() - started) * 1000,
     )

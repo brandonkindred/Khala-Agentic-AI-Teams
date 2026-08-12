@@ -158,6 +158,50 @@ def test_transcript_entries_batched_in_one_call_preserve_order() -> None:
     assert [e["target"] for e in entries] == ["a.py", "b.py", ""]
 
 
+def test_append_transcript_entries_returns_true_on_success() -> None:
+    record_review_start("j1", "o", "r", 7, "u", "alice")
+    assert (
+        append_review_transcript_entries(
+            "j1", [{"stage": "chunk_review", "target": "a.py", "prompt": "p", "response": "r"}]
+        )
+        is True
+    )
+
+
+def test_transcript_entries_read_back_sorted_by_started_at_not_append_order() -> None:
+    """A later-appended batch with an earlier started_at still sorts first —
+    the flusher can write out of call order (e.g. a short call finishes and
+    flushes before a longer call that started earlier), and the reader must
+    still present entries in call order."""
+    record_review_start("j1", "o", "r", 7, "u", "alice")
+    append_review_transcript_entries(
+        "j1",
+        [
+            {
+                "stage": "synthesis",
+                "target": "",
+                "prompt": "p2",
+                "response": "r2",
+                "started_at": "2024-01-01T00:00:05+00:00",
+            }
+        ],
+    )
+    append_review_transcript_entries(
+        "j1",
+        [
+            {
+                "stage": "chunk_review",
+                "target": "a.py",
+                "prompt": "p1",
+                "response": "r1",
+                "started_at": "2024-01-01T00:00:01+00:00",
+            }
+        ],
+    )
+    entries = get_review_transcript("j1")
+    assert [e["stage"] for e in entries] == ["chunk_review", "synthesis"]
+
+
 def test_transcript_missing_returns_none() -> None:
     record_review_start("j1", "o", "r", 7, "u", "alice")
     # No append_review_transcript_entries call: the row is never created.

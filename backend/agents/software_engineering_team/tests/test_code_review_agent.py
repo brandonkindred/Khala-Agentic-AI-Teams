@@ -46,6 +46,37 @@ def test_small_code_returns_code_review_output() -> None:
     assert result.issues == []
 
 
+def test_run_flushes_transcript_synchronously_when_job_id_bound(monkeypatch) -> None:
+    """When the caller supplied a job_id, the in-process run must synchronously
+    drain the transcript buffer before returning, rather than leaving it to the
+    background heartbeat -- otherwise a caller that immediately marks the review
+    terminal (making the UI's "View Transcript" action appear) could show an
+    incomplete transcript for up to a full flush interval."""
+    from code_review_agent import agent as agent_mod
+
+    calls = []
+    monkeypatch.setattr(agent_mod.transcript, "drain", lambda: calls.append(1))
+
+    reviewer = CodeReviewAgent(llm_client=DummyLLMClient(), force_in_process=True)
+    reviewer.run(_input(job_id="job-1"))
+
+    assert calls == [1]
+
+
+def test_run_does_not_flush_transcript_without_a_job_id(monkeypatch) -> None:
+    """No caller-tracked job means nothing was buffered to flush; skip the
+    synchronous drain call entirely rather than paying for a pointless one."""
+    from code_review_agent import agent as agent_mod
+
+    calls = []
+    monkeypatch.setattr(agent_mod.transcript, "drain", lambda: calls.append(1))
+
+    reviewer = CodeReviewAgent(llm_client=DummyLLMClient(), force_in_process=True)
+    reviewer.run(_input())  # job_id defaults to ""
+
+    assert calls == []
+
+
 def test_small_code_with_all_optional_fields_does_not_crash() -> None:
     """spec_content, task_requirements, acceptance_criteria, architecture,
     existing_codebase all plumbed through the builder."""

@@ -127,10 +127,15 @@ def fetch_review_transcript(
           different (PAT-accessible) repository is refused rather than leaking
           its transcript.
     Postconditions:
-        - Returns the transcript's entries in call order. Returns 404 when
-          ``job_id`` names no known review, or when the review is known but has
-          not yet recorded a transcript (never started, or predates this
-          feature); 409 on an ``owner``/``repo`` mismatch.
+        - Returns the transcript's entries in call order. Returns 404 only
+          when ``job_id`` names no known review; 409 on an ``owner``/``repo``
+          mismatch. A known review with no ``code_review_transcripts`` row
+          (never started, predates this feature, or — the review-level cache
+          short-circuit, which excludes ``job_id`` from its key so an
+          identical resubmission can hit it — made no LLM call at all) still
+          returns 200 with an empty ``entries`` list rather than 404, so the
+          UI's "View Transcript" action (shown for any terminal review) never
+          errors on a review that legitimately has nothing to show.
     """
     review = _main.get_review(job_id)
     if review is None:
@@ -141,9 +146,7 @@ def fetch_review_transcript(
                 status_code=409,
                 detail="The requested repository does not match the reviewed repository.",
             )
-    entries = _main.get_review_transcript(job_id)
-    if entries is None:
-        raise HTTPException(status_code=404, detail=f"no transcript recorded for job {job_id}")
+    entries = _main.get_review_transcript(job_id) or []
     return TranscriptResponse(
         job_id=job_id, entries=[TranscriptEntry.model_validate(e) for e in entries]
     )

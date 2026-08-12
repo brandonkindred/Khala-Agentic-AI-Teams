@@ -2259,7 +2259,11 @@ class TestReviewTranscript:
         resp = review_app["client"].get("/reviews/does-not-exist/transcript")
         assert resp.status_code == 404
 
-    def test_404_when_transcript_not_yet_recorded(self, review_app, monkeypatch) -> None:
+    def test_empty_entries_when_transcript_not_yet_recorded(self, review_app, monkeypatch) -> None:
+        """A known review with no transcript row (not started, predates the
+        feature, or was served entirely from the submission-level cache) is a
+        200 with an empty list, not a 404 — the UI shows "View Transcript" for
+        any terminal review, so a legitimately-empty transcript must not error."""
         api_main = review_app["api"]
         monkeypatch.setattr(
             api_main,
@@ -2268,7 +2272,8 @@ class TestReviewTranscript:
         )
         monkeypatch.setattr(api_main, "get_review_transcript", lambda job_id: None)
         resp = review_app["client"].get("/reviews/j1/transcript")
-        assert resp.status_code == 404
+        assert resp.status_code == 200
+        assert resp.json() == {"job_id": "j1", "entries": []}
 
     def test_409_on_owner_repo_mismatch(self, review_app, monkeypatch) -> None:
         api_main = review_app["api"]

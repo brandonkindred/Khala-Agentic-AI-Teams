@@ -28,6 +28,7 @@ import uuid
 
 from llm_service import get_client, llm_attribution
 
+from . import transcript
 from .coordinator import run_coordinator
 from .models import (
     CodeReviewInput,
@@ -235,12 +236,23 @@ class CodeReviewAgent:
         with llm_attribution(
             job_id=input_data.job_id, team="software_engineering_team", agent_key="code_review"
         ):
-            return run_coordinator(
+            output = run_coordinator(
                 self.llm,
                 input_data,
                 progress_callback=progress_callback,
                 repo_reader=effective_reader,
             )
+        if input_data.job_id:
+            # Synchronously flush this run's buffered transcript entries before
+            # returning, rather than waiting for the background heartbeat
+            # (default 2s interval). The caller (``pr_review.py``) marks the
+            # review COMPLETED/FAILED — which is what makes the UI's "View
+            # Transcript" action appear — only after this call returns, so
+            # without this the dialog could open before the last synthesis/
+            # verification calls made it to Postgres and show a transcript
+            # missing its final entries.
+            transcript.drain()
+        return output
 
     def _run_via_temporal(
         self,

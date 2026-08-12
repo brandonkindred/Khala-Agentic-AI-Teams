@@ -81,8 +81,9 @@ def test_append_transcript_entries_noop_when_postgres_disabled(monkeypatch) -> N
         raise AssertionError("get_conn must not be called when Postgres is disabled")
 
     monkeypatch.setattr(store, "get_conn", _no_conn)
-    # Never raises, never touches the database.
-    store.append_review_transcript_entries("j", [{"stage": "chunk_review"}])
+    # Never raises, never touches the database; reports failure so the caller
+    # (the transcript flusher) knows to requeue rather than treat it as written.
+    assert store.append_review_transcript_entries("j", [{"stage": "chunk_review"}]) is False
 
 
 def test_append_transcript_entries_noop_for_empty_list(monkeypatch) -> None:
@@ -92,7 +93,7 @@ def test_append_transcript_entries_noop_for_empty_list(monkeypatch) -> None:
         raise AssertionError("get_conn must not be called for an empty batch")
 
     monkeypatch.setattr(store, "get_conn", _no_conn)
-    store.append_review_transcript_entries("j", [])
+    assert store.append_review_transcript_entries("j", []) is False
 
 
 def test_append_transcript_entries_swallows_db_errors(monkeypatch) -> None:
@@ -103,8 +104,8 @@ def test_append_transcript_entries_swallows_db_errors(monkeypatch) -> None:
 
     monkeypatch.setattr(store, "get_conn", _boom)
     # Best-effort: a DB failure (including a foreign-key violation for an
-    # unknown job_id) is logged, never raised.
-    store.append_review_transcript_entries("j", [{"stage": "chunk_review"}])
+    # unknown job_id) is logged, never raised, and reported as False.
+    assert store.append_review_transcript_entries("j", [{"stage": "chunk_review"}]) is False
 
 
 def test_get_review_transcript_none_when_postgres_disabled(monkeypatch) -> None:
