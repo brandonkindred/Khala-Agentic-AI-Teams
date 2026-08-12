@@ -2,10 +2,11 @@
 
 The sizing/drawdown policy — "the deployed fraction IS the loss cap, don't
 multiply by stop, there is no max-drawdown constraint" — used to be
-independently restated across the design and design-review system prompts.
-The fix consolidates it into a canonical ``_sizing_risk_framing.md``
-reference, mirroring the existing ``_stop_order_semantics.md`` shared-
-fragment pattern. These tests assert the file exists with its load-bearing
+independently restated across the design, design-review, self-review, and
+zero-trade-repair system prompts. The fix consolidates it into a canonical
+``_sizing_risk_framing.md`` reference, mirroring the existing
+``_stop_order_semantics.md`` shared-fragment pattern. These tests assert the
+file exists with its load-bearing
 content and that each consumer actually concatenates it — without invoking
 any LLM.
 """
@@ -40,3 +41,18 @@ def test_design_review_system_prompt_includes_block() -> None:
 
     assert _LOSS_CAP_MARKER in design_review._get_system_prompt()
     assert _DRAWDOWN_MARKER in design_review._get_system_prompt()
+
+
+def test_design_self_review_system_prompt_includes_block() -> None:
+    from investment_team.strategy_lab.agents import design
+
+    prompt = design._get_self_review_system_prompt()
+    assert _LOSS_CAP_MARKER in prompt
+    assert _DRAWDOWN_MARKER in prompt
+
+
+def test_zero_trade_repair_system_prompt_includes_block() -> None:
+    from investment_team.strategy_lab.agents import zero_trade_repair
+
+    assert _LOSS_CAP_MARKER in zero_trade_repair._SYSTEM_PROMPT
+    assert _DRAWDOWN_MARKER in zero_trade_repair._SYSTEM_PROMPT

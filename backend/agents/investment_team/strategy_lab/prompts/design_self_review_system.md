@@ -23,14 +23,9 @@ critical — is a sizing rule that deploys more than the position cap:
 
 - **`sizing.fraction` vs `risk_limits.max_position_pct`** — `fraction=0.10` (10% deployed) with `max_position_pct=5` is a direct contradiction (sizing exceeds the cap). Flag critical with `field="sizing"`. This is the only sizing/risk check to make here.
 
-Read sizing correctly so you do not flag a coherent spec: `"risk X% per trade"`
-means capital **DEPLOYED** (a fraction of the account, which IS the per-trade
-loss cap), NOT a stop-multiplied loss budget. Never compute per-trade risk as
-`fraction × stop`, and never treat `stop_loss.pct` as part of sizing.
-
-Do **NOT** check max-drawdown reachability or vol-target/stop coherence — neither
-blocks the external reviewer, and max drawdown is not a constraint at all (a
-strategy may lose up to 100% by design).
+See the sizing/risk framing reference in the system prompt for how to read
+`sizing.fraction` correctly and why max-drawdown reachability is never a
+check here.
 
 ### 3. Expectancy / objective sanity
 
