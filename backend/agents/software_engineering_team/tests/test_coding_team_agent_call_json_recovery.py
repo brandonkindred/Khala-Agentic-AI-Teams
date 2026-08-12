@@ -54,16 +54,35 @@ def test_required_keys_anchor_skips_usage_echo() -> None:
 
 
 def test_routes_through_extract_json_from_response(monkeypatch: pytest.MonkeyPatch) -> None:
-    """``_agent_call_json`` must use the canonical ``extract_json_from_response``
-    helper (not the older ``agent_call_json``) — this is the migration's contract."""
+    """``_agent_call_json`` must fall back to the canonical ``extract_json_from_response``
+    helper (not the older ``agent_call_json``) once strict parsing fails — this is the
+    migration's contract."""
     import software_engineering_team.tech_lead_agent.agent as tl_mod
 
     calls: list = []
+    raw = 'Sure! Here is the plan: {"a": 1} Done.'
 
     def fake_extract(text: str, *, expected_keys=None):
         calls.append((text, expected_keys))
         return {"a": 1}
 
     monkeypatch.setattr(tl_mod, "extract_json_from_response", fake_extract)
-    assert _agent_call_json(_FakeAgent('{"a": 1}'), "p", required_keys=("a",)) == {"a": 1}
-    assert calls == [('{"a": 1}', frozenset({"a"}))]
+    assert _agent_call_json(_FakeAgent(raw), "p", required_keys=("a",)) == {"a": 1}
+    assert calls == [(raw, frozenset({"a"}))]
+
+
+def test_strict_valid_json_bypasses_extract_json_from_response(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A well-formed JSON reply must parse via strict ``json.loads`` and never reach
+    ``extract_json_from_response`` — this guards against that helper's own pre-parse
+    heuristics (e.g. its ``---DRAFT---`` shortcut) misfiring on valid payloads whose
+    text happens to contain a matching literal substring."""
+    import software_engineering_team.tech_lead_agent.agent as tl_mod
+
+    def unexpected_extract(text: str, *, expected_keys=None):
+        raise AssertionError("extract_json_from_response should not be called")
+
+    monkeypatch.setattr(tl_mod, "extract_json_from_response", unexpected_extract)
+    agent = _FakeAgent('{"reason": "discusses the ---DRAFT--- marker"}')
+    assert _agent_call_json(agent, "p") == {"reason": "discusses the ---DRAFT--- marker"}

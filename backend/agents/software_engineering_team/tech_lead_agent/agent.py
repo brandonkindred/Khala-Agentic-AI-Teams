@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from typing import Any, Callable, Collection, Dict, List, Optional
 
 from strands import Agent
@@ -145,15 +146,28 @@ def _agent_call_json(
           so a usage/format echo that lacks the anchor cannot be mistaken for the
           answer.
     Postconditions:
-        - Returns the parsed object via the canonical ``extract_json_from_response``
-          recovery ladder (fence stripping, repair, and prose-/think-block-wrapped
-          salvage anchored on ``required_keys``). Raises ``json.JSONDecodeError``
-          only when no object can be recovered — ``LLMJsonParseError`` is caught and
-          re-raised as ``json.JSONDecodeError`` so callers keep retrying JSON-parse
-          failures exactly as before (``LLMJsonParseError`` is otherwise
-          non-retryable in ``call_llm_with_retries``).
+        - Returns the parsed object. Strict ``json.loads`` is tried first (after
+          stripping a single leading/trailing ```` ``` ```` fence) so well-formed
+          JSON is never routed through ``extract_json_from_response``'s own
+          pre-parse heuristics (e.g. its ``---DRAFT---`` shortcut, which would
+          otherwise misfire on a well-formed payload whose text happens to contain
+          that literal substring, such as a code-review reason quoting this
+          repo's blog draft marker). On failure, falls back to the canonical
+          ``extract_json_from_response`` recovery ladder (fence stripping, repair,
+          and prose-/think-block-wrapped salvage anchored on ``required_keys``).
+          Raises ``json.JSONDecodeError`` only when no object can be recovered —
+          ``LLMJsonParseError`` is caught and re-raised as ``json.JSONDecodeError``
+          so callers keep retrying JSON-parse failures exactly as before
+          (``LLMJsonParseError`` is otherwise non-retryable in
+          ``call_llm_with_retries``).
     """
     raw = str(agent(prompt)).strip()
+    fenced = re.sub(r"^```(?:json)?\s*", "", raw)
+    fenced = re.sub(r"\s*```$", "", fenced)
+    try:
+        return json.loads(fenced)
+    except json.JSONDecodeError:
+        pass
     expected_keys = frozenset(required_keys) if required_keys is not None else None
     try:
         return extract_json_from_response(raw, expected_keys=expected_keys)
