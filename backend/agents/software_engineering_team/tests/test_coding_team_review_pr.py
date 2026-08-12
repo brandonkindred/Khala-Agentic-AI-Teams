@@ -3260,6 +3260,33 @@ class TestWholeFileReview:
             )
         assert out == {f"f{i}.py": f"WHOLE-f{i}.py\n" for i in range(num_files)}
 
+    def test_fetch_head_files_propagates_trace_id_into_worker_threads(self, review_app) -> None:
+        """A trace_id bound in the parent thread (shared.observability.bind_trace_id)
+        is visible inside each head-fetch worker thread. The fan-out now goes
+        through parallel_map (propagate_context=True by default), closing the
+        gap the old hand-rolled ThreadPoolExecutor left — it never copied
+        context into its worker threads, so trace_id/LLM attribution was
+        silently dropped."""
+        from shared.observability import bind_trace_id, current_trace_id
+        from software_engineering_team.api.pr_review import _fetch_head_files
+
+        seen_trace_ids: list[str] = []
+        files = [
+            PullRequestFile(f"f{i}.py", "modified", f"@@ -1 +1 @@\n+x{i}", 1, 0, None)
+            for i in range(3)
+        ]
+
+        def _contents(o, r, path, ref):
+            seen_trace_ids.append(current_trace_id())
+            return f"WHOLE-{path}\n"
+
+        with bind_trace_id("trace-abc123"):
+            out = _fetch_head_files(_file_contents_client(_contents), "o", "r", files, "sha1")
+
+        assert out == {f"f{i}.py": f"WHOLE-f{i}.py\n" for i in range(3)}
+        assert len(seen_trace_ids) == 3
+        assert all(tid == "trace-abc123" for tid in seen_trace_ids)
+
     def test_endpoint_uses_change_surface_as_primary_when_reviewable(
         self, review_app, monkeypatch
     ) -> None:
@@ -3700,47 +3727,30 @@ class TestParallelReviewReads:
                 7,
             )
 
-    def test_fetch_pr_metadata_awaits_all_futures_when_first_fails(
-        self, review_app, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """When get_pull_request fails, siblings that also fail must still have
-        ``result()`` called — a generator unpack stops early and leaves secondary
-        exceptions unretrieved on those futures."""
-        from concurrent.futures import ThreadPoolExecutor as _RealTPE
-
-        from software_engineering_team.api import pr_review
+    def test_fetch_pr_metadata_runs_all_fetches_when_first_fails(self, review_app) -> None:
+        """When get_pull_request fails, get_pull_request_files and
+        get_authenticated_login must still run to completion — the
+        parallel_map-based fan-out (via _run_tasks_draining) always awaits
+        every task before re-raising, same as the prior hand-rolled
+        drain-every-future contract. The first-submitted task's error
+        ("missing PR") must still be the one that propagates, not whichever
+        of the two failures happens to finish first."""
         from software_engineering_team.api.pr_review import _fetch_pr_metadata
 
-        result_calls = {"n": 0}
-        futures_seen: list[Any] = []
-
-        class _CountingExecutor(_RealTPE):
-            def submit(self, fn: Any, /, *args: Any, **kwargs: Any) -> Any:
-                fut = super().submit(fn, *args, **kwargs)
-                futures_seen.append(fut)
-                real_result = fut.result
-
-                def _counting_result(*a: Any, **kw: Any) -> Any:
-                    result_calls["n"] += 1
-                    return real_result(*a, **kw)
-
-                fut.result = _counting_result  # type: ignore[method-assign]
-                return fut
-
-        monkeypatch.setattr(pr_review, "ThreadPoolExecutor", _CountingExecutor)
+        calls: list[None] = []
 
         with pytest.raises(GitHubAPIError, match="missing PR"):
             _fetch_pr_metadata(
                 _pr_metadata_client(
                     fail_pr=GitHubAPIError(404, "missing PR"),
                     fail_files=GitHubAPIError(502, "files unavailable"),
+                    on_each=lambda: calls.append(None),
                 ),
                 "o",
                 "r",
                 7,
             )
-        assert len(futures_seen) == 3
-        assert result_calls["n"] == 3
+        assert len(calls) == 3
 
     def test_fetch_pr_metadata_get_authenticated_login_failure_degrades(self, review_app) -> None:
         """A get_authenticated_login failure must degrade to "" without blocking
@@ -3841,48 +3851,31 @@ class TestParallelReviewReads:
 
         assert _fetch_existing_comments(_FakeGitHubClient(), "o", "r", 7) == []
 
-    def test_fetch_existing_comments_awaits_all_futures_when_first_fails(
-        self, review_app, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_fetch_existing_comments_runs_all_fetches_when_first_fails(self, review_app) -> None:
         """When the first concurrent comment fetch fails, siblings that also fail
-        must still have ``result()`` called. The call still degrades to []
-        (best-effort)."""
-        from concurrent.futures import ThreadPoolExecutor as _RealTPE
-
-        from software_engineering_team.api import pr_review
+        must still run to completion — the parallel_map-based fan-out (via
+        _run_tasks_draining) always awaits every task before re-raising, same
+        as the prior hand-rolled drain-every-future contract. The call still
+        degrades to [] (best-effort)."""
         from software_engineering_team.api.pr_review import _fetch_existing_comments
 
-        result_calls = {"n": 0}
-        futures_seen: list[Any] = []
-
-        class _CountingExecutor(_RealTPE):
-            def submit(self, fn: Any, /, *args: Any, **kwargs: Any) -> Any:
-                fut = super().submit(fn, *args, **kwargs)
-                futures_seen.append(fut)
-                real_result = fut.result
-
-                def _counting_result(*a: Any, **kw: Any) -> Any:
-                    result_calls["n"] += 1
-                    return real_result(*a, **kw)
-
-                fut.result = _counting_result  # type: ignore[method-assign]
-                return fut
-
-        monkeypatch.setattr(pr_review, "ThreadPoolExecutor", _CountingExecutor)
+        calls: list[str] = []
 
         class _FakeGitHubClient:
             def list_review_comments(self, o, r, n):
+                calls.append("reviews")
                 raise GitHubAPIError(500, "reviews boom")
 
             def get_resolved_review_thread_comment_ids(self, o, r, n):
+                calls.append("resolved")
                 raise GitHubAPIError(500, "resolved boom")
 
             def list_issue_comments(self, o, r, n):
+                calls.append("issues")
                 raise GitHubAPIError(500, "issues boom")
 
         assert _fetch_existing_comments(_FakeGitHubClient(), "o", "r", 7) == []
-        assert len(futures_seen) == 3
-        assert result_calls["n"] == 3
+        assert sorted(calls) == ["issues", "resolved", "reviews"]
 
     @pytest.mark.parametrize(
         "failing_method",
@@ -4316,6 +4309,7 @@ class TestDuplicateProposalDetection:
                 state="open",
                 html_url="https://example/issues/42",
                 labels=(),
+                id=42,
             )
         ]
         job = _run_review_with(
@@ -4342,6 +4336,7 @@ class TestDuplicateProposalDetection:
                 state="open",
                 html_url="https://example/issues/42",
                 labels=(),
+                id=42,
             )
         ]
         job = _run_review_with(
@@ -4443,6 +4438,7 @@ class TestDuplicateProposalDetection:
                 state="open",
                 html_url="https://example/issues/42",
                 labels=(),
+                id=42,
             )
         ]
         job = _run_review_with(
@@ -4482,6 +4478,7 @@ class TestDuplicateProposalDetection:
                 state="open",
                 html_url=f"https://example/issues/{n}",
                 labels=(),
+                id=n,
             )
             for n in range(1, 3)
         ] + [
@@ -4492,6 +4489,7 @@ class TestDuplicateProposalDetection:
                 state="open",
                 html_url="https://example/issues/99",
                 labels=(),
+                id=99,
             )
         ]
         job = _run_review_with(
@@ -4526,6 +4524,7 @@ class TestDuplicateProposalDetection:
                 state="open",
                 html_url=f"https://example/issues/{n}",
                 labels=(),
+                id=n,
             )
             for n in range(1, 3)
         ] + [
@@ -4536,6 +4535,7 @@ class TestDuplicateProposalDetection:
                 state="open",
                 html_url="https://example/issues/99",
                 labels=(),
+                id=99,
             )
         ]
         job = _run_review_with(
@@ -4604,6 +4604,7 @@ class TestDetectDuplicateProposalsUnit:
                     state="open",
                     html_url="https://example/issues/42",
                     labels=(),
+                    id=42,
                 )
             ]
         )

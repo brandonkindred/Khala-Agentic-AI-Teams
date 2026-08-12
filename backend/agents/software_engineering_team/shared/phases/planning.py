@@ -67,8 +67,13 @@ def parse_planning_output(raw: Dict[str, Any], language: str, *, models: PhaseMo
         ``models`` exposes ``Microtask``, ``MicrotaskStatus``, ``ToolAgentKind``,
         and ``PlanningResult``. ``raw`` is the parsed template dict.
     Postconditions:
-        Returns a ``PlanningResult``; microtasks lacking an ``id`` are skipped
-        and an unknown ``tool_agent`` falls back to ``ToolAgentKind.GENERAL``.
+        Returns a ``PlanningResult``; microtasks lacking an ``id`` are skipped,
+        a microtask whose ``id`` duplicates one already kept from this same
+        ``raw`` payload is skipped (first occurrence wins, logged), and an
+        unknown ``tool_agent`` falls back to ``ToolAgentKind.GENERAL``. This is
+        the only enforcement point for id-uniqueness across the microtask list;
+        ``_schedule_microtask_batches`` in ``phases/execution.py`` depends on it
+        holding and raises defensively if it doesn't.
     """
     microtask_cls = models.Microtask
     microtask_status_cls = models.MicrotaskStatus
@@ -76,9 +81,17 @@ def parse_planning_output(raw: Dict[str, Any], language: str, *, models: PhaseMo
     planning_result_cls = models.PlanningResult
 
     microtasks: List[Any] = []
+    seen_ids: set = set()
     for mt in raw.get("microtasks") or []:
         if not isinstance(mt, dict) or not mt.get("id"):
             continue
+        if mt["id"] in seen_ids:
+            logger.warning(
+                "Duplicate microtask id %r in planner output; keeping first occurrence",
+                mt["id"],
+            )
+            continue
+        seen_ids.add(mt["id"])
         try:
             kind = tool_agent_kind_enum(mt.get("tool_agent", "general"))
         except ValueError:

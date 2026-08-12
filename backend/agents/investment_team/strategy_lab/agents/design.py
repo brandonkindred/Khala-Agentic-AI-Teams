@@ -156,19 +156,20 @@ def _get_design_system_prompt() -> str:
 
 @functools.lru_cache(maxsize=None)
 def _get_self_review_system_prompt() -> str:
-    """Build and cache the self-review system prompt (body + stop-order block).
+    """Build and cache the self-review system prompt (body + shared reference blocks).
 
-    Preconditions: ``design_self_review_system.md`` and stop-order file exist
-    when first invoked.
-    Postconditions: returned string contains both the self-review body and
-    the stop-order semantics text, separated by a blank line; subsequent calls
-    return the same cached composed prompt without re-reading either file.
+    Preconditions: ``design_self_review_system.md``, stop-order semantics, and
+    sizing/risk framing files exist when first invoked.
+    Postconditions: returned string contains the self-review body followed by
+    the stop-order semantics text and the sizing/risk framing text, each
+    separated by a blank line; subsequent calls return the same cached
+    composed prompt without re-reading any file.
     Invariants: module import does not invoke this helper.
     """
     body = (_PROMPT_DIR / "design_self_review_system.md").read_text(encoding="utf-8")
     if not body:
         raise ValueError("design_self_review_system.md must be non-empty")
-    return body + "\n\n" + _get_stop_order_semantics()
+    return body + "\n\n" + _get_stop_order_semantics() + "\n\n" + _get_sizing_risk_framing()
 
 
 # The JSON Schema the LLM response must conform to, rendered once for

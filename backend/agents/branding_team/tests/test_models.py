@@ -31,6 +31,7 @@ from branding_team.models import (
     BrandExperiencePrinciplesOutput,
     BrandStoryOutput,
     ChannelGuidelineOutput,
+    CoreValue,
     CoreValueOutput,
     CoreValuesOutput,
     DifferentiationPillarOutput,
@@ -139,6 +140,34 @@ def test_core_value_output_rejects_blank_content() -> None:
 
     output = CoreValueOutput(**valid_kwargs)
     assert output.value == "clarity"
+
+
+def test_core_value_permits_blank_and_omitted_content() -> None:
+    """``CoreValue`` is the soft merge-target twin: only ``value`` is
+    required; ``behavioral_definition``/``observable_behaviors`` accept
+    blank/empty content, matching ``StrategicCoreOutput.core_values``'s
+    partial-fragment merge contract."""
+    minimal = CoreValue(value="clarity")
+    assert minimal.behavioral_definition == ""
+    assert minimal.observable_behaviors == []
+
+    explicit_blank = CoreValue(value="clarity", behavioral_definition="", observable_behaviors=[])
+    assert explicit_blank.behavioral_definition == ""
+    assert explicit_blank.observable_behaviors == []
+
+    blank_item = CoreValue(value="clarity", observable_behaviors=[""])
+    assert blank_item.observable_behaviors == [""]
+
+
+def test_core_value_output_is_usable_as_a_core_value() -> None:
+    """The derived strict twin stays a normal, directly constructible
+    ``pydantic.BaseModel`` subclass wherever ``CoreValue`` is."""
+    output = CoreValueOutput(
+        value="clarity",
+        behavioral_definition="We demonstrate clarity in every decision.",
+        observable_behaviors=["Plain-language docs"],
+    )
+    assert isinstance(output, CoreValue)
 
 
 def test_audience_segments_output_enforces_stated_cardinality() -> None:
