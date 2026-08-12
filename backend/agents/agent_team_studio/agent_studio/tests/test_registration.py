@@ -4,7 +4,13 @@ from __future__ import annotations
 
 import pytest
 
-from agent_platform.registry.models import AgentManifest, AgentStateSpec, CognitionSpec, IOSchema, SourceInfo
+from agent_platform.registry.models import (
+    AgentManifest,
+    AgentStateSpec,
+    CognitionSpec,
+    IOSchema,
+    SourceInfo,
+)
 from agent_team_studio.agent_studio.agent_states import STATE_ORDER
 from agent_team_studio.agent_studio.models import AgentDefinition, AgentState
 from agent_team_studio.agent_studio.registration import (

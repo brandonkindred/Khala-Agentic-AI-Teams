@@ -13,7 +13,11 @@ Nothing here performs I/O — these are pure constants and pure functions only.
 
 from __future__ import annotations
 
-from agent_platform.registry.models import CognitionKnowledgeGraphSpec, CognitionMemorySpec, CognitionSpec
+from agent_platform.registry.models import (
+    CognitionKnowledgeGraphSpec,
+    CognitionMemorySpec,
+    CognitionSpec,
+)
 
 # The invokable sandbox entrypoint every generated/authored agent shares: one
 # callable that accepts the roster metadata + message, reconstructs the agent,
