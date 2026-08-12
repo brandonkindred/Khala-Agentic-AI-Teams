@@ -203,11 +203,16 @@ def test_dbc_self_review_writes_and_merges_files(tmp_path):
 
 
 def test_dbc_self_review_unsafe_path_skipped_atomically(tmp_path):
+    # The unsafe key must itself already be a key of microtask_files --
+    # otherwise the "discard paths not in the reviewed set" filter would
+    # remove it before write_repo_text_files' own guard is ever reached.
+    # This simulates an unsafe key already present upstream, which
+    # write_repo_text_files' guard exists to catch regardless of origin.
     def _review(*, code, **kwargs: Any) -> SimpleNamespace:
         return SimpleNamespace(files={"a.py": "safe", "../escape.py": "evil"})
 
-    microtask_files = {"a.py": "orig"}
-    all_files = {"a.py": "orig"}
+    microtask_files = {"a.py": "orig", "../escape.py": "orig-evil"}
+    all_files = {"a.py": "orig", "../escape.py": "orig-evil"}
 
     mt, microtask_files, all_files, _ = _call(
         tmp_path=tmp_path,
@@ -217,8 +222,8 @@ def test_dbc_self_review_unsafe_path_skipped_atomically(tmp_path):
     )
 
     assert not (tmp_path / "a.py").exists()
-    assert microtask_files == {"a.py": "orig"}
-    assert all_files == {"a.py": "orig"}
+    assert microtask_files == {"a.py": "orig", "../escape.py": "orig-evil"}
+    assert all_files == {"a.py": "orig", "../escape.py": "orig-evil"}
 
 
 def test_dbc_self_review_gate_config_exception_is_swallowed(tmp_path):
@@ -294,12 +299,20 @@ def test_dbc_self_review_build_verifier_success_keeps_files(tmp_path):
 def test_dbc_self_review_build_verifier_failure_reverts_only_touched_files(tmp_path):
     (tmp_path / "a.py").write_text("orig a\n")
     (tmp_path / "untouched.py").write_text("orig u\n")
+    # "new.py" is a key of microtask_files (so it survives the
+    # only-reviewed-paths filter) but was never actually flushed to disk --
+    # exercises the disk-delete revert branch alongside a.py's
+    # disk-restore branch.
 
     def _review(*, code, **kwargs: Any) -> SimpleNamespace:
         return SimpleNamespace(files={"a.py": "dbc a\n", "new.py": "dbc new\n"})
 
-    microtask_files = {"a.py": "orig a\n", "untouched.py": "orig u\n"}
-    all_files = {"a.py": "orig a\n", "untouched.py": "orig u\n"}
+    microtask_files = {
+        "a.py": "orig a\n",
+        "untouched.py": "orig u\n",
+        "new.py": "not yet on disk\n",
+    }
+    all_files = dict(microtask_files)
     mt = _microtask()
     mt.output_files = dict(microtask_files)
 
@@ -315,9 +328,13 @@ def test_dbc_self_review_build_verifier_failure_reverts_only_touched_files(tmp_p
     assert (tmp_path / "a.py").read_text() == "orig a\n"
     assert not (tmp_path / "new.py").exists()
     assert (tmp_path / "untouched.py").read_text() == "orig u\n"
-    assert microtask_files == {"a.py": "orig a\n", "untouched.py": "orig u\n"}
-    assert all_files == {"a.py": "orig a\n", "untouched.py": "orig u\n"}
-    assert mt.output_files == {"a.py": "orig a\n", "untouched.py": "orig u\n"}
+    assert microtask_files == {
+        "a.py": "orig a\n",
+        "untouched.py": "orig u\n",
+        "new.py": "not yet on disk\n",
+    }
+    assert all_files == microtask_files
+    assert mt.output_files == microtask_files
 
 
 def test_dbc_self_review_build_verifier_raises_reverts(tmp_path):
@@ -343,10 +360,14 @@ def test_dbc_self_review_build_verifier_raises_reverts(tmp_path):
 
 
 def test_dbc_self_review_build_verifier_reverts_key_absent_before(tmp_path):
+    # "a.py" must be a key of microtask_files to survive the
+    # only-reviewed-paths filter -- absent from all_files/mt.output_files
+    # instead, to exercise their own "prior was absent -> pop" branch
+    # independent of microtask_files' own (always-present) branch.
     def _review(*, code, **kwargs: Any) -> SimpleNamespace:
         return SimpleNamespace(files={"a.py": "dbc a\n"})
 
-    microtask_files: Dict[str, str] = {}
+    microtask_files: Dict[str, str] = {"a.py": "orig a\n"}
     all_files: Dict[str, str] = {}
 
     mt, microtask_files, all_files, _ = _call(
@@ -357,7 +378,7 @@ def test_dbc_self_review_build_verifier_reverts_key_absent_before(tmp_path):
         deps=ReviewDependencies(build_verifier=lambda repo, label, tid: (False, "broke")),
     )
 
-    assert "a.py" not in microtask_files
+    assert microtask_files == {"a.py": "orig a\n"}
     assert "a.py" not in all_files
     assert "a.py" not in mt.output_files
     assert not (tmp_path / "a.py").exists()
@@ -386,6 +407,8 @@ def test_dbc_self_review_snapshot_oserror_skips_without_writing(tmp_path, monkey
 
 def test_dbc_self_review_write_oserror_reverts_partial_write(tmp_path, monkeypatch):
     (tmp_path / "a.py").write_text("orig a\n")
+    # "new.py" is a key of microtask_files (so it survives the
+    # only-reviewed-paths filter) but was never flushed to disk yet.
 
     def _review(*, code, **kwargs: Any) -> SimpleNamespace:
         return SimpleNamespace(files={"a.py": "dbc a\n", "new.py": "dbc new\n"})
@@ -397,8 +420,8 @@ def test_dbc_self_review_write_oserror_reverts_partial_write(tmp_path, monkeypat
         raise OSError("no space left on device")
 
     monkeypatch.setattr(dbc_phase, "write_repo_text_files", _fake_write)
-    microtask_files = {"a.py": "orig a\n"}
-    all_files = {"a.py": "orig a\n"}
+    microtask_files = {"a.py": "orig a\n", "new.py": "not yet on disk\n"}
+    all_files = dict(microtask_files)
 
     mt, microtask_files, all_files, _ = _call(
         tmp_path=tmp_path,
@@ -409,8 +432,8 @@ def test_dbc_self_review_write_oserror_reverts_partial_write(tmp_path, monkeypat
 
     assert (tmp_path / "a.py").read_text() == "orig a\n"
     assert not (tmp_path / "new.py").exists()
-    assert microtask_files == {"a.py": "orig a\n"}
-    assert all_files == {"a.py": "orig a\n"}
+    assert microtask_files == {"a.py": "orig a\n", "new.py": "not yet on disk\n"}
+    assert all_files == microtask_files
 
 
 def test_revert_disk_swallows_oserror(tmp_path, monkeypatch):
@@ -421,3 +444,42 @@ def test_revert_disk_swallows_oserror(tmp_path, monkeypatch):
 
     # Should not raise even though the underlying restore attempt fails.
     dbc_phase._revert_disk({tmp_path / "a.py": b"orig a\n"})
+
+
+def test_dbc_self_review_discards_paths_not_in_reviewed_files(tmp_path):
+    def _review(*, code, **kwargs: Any) -> SimpleNamespace:
+        # Simulates a spurious "fake.py" entry from a header-shaped comment
+        # line inside a.py being misread as a chunk boundary by DbC's parser.
+        return SimpleNamespace(files={"a.py": "dbc a\n", "fake.py": "spurious\n"})
+
+    microtask_files = {"a.py": "orig a\n"}
+    all_files = {"a.py": "orig a\n"}
+
+    mt, microtask_files, all_files, _ = _call(
+        tmp_path=tmp_path,
+        gate_config=_gate_config(_review),
+        microtask_files=microtask_files,
+        all_files=all_files,
+    )
+
+    assert (tmp_path / "a.py").read_text() == "dbc a\n"
+    assert not (tmp_path / "fake.py").exists()
+    assert microtask_files == {"a.py": "dbc a\n"}
+    assert all_files == {"a.py": "dbc a\n"}
+    assert "fake.py" not in mt.output_files
+
+
+def test_dbc_self_review_all_paths_spurious_is_noop(tmp_path):
+    def _review(*, code, **kwargs: Any) -> SimpleNamespace:
+        return SimpleNamespace(files={"fake.py": "spurious\n"})
+
+    microtask_files = {"a.py": "orig a\n"}
+
+    mt, microtask_files, all_files, _ = _call(
+        tmp_path=tmp_path,
+        gate_config=_gate_config(_review),
+        microtask_files=microtask_files,
+    )
+
+    assert not (tmp_path / "fake.py").exists()
+    assert microtask_files == {"a.py": "orig a\n"}

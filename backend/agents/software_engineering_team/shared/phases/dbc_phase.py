@@ -170,7 +170,11 @@ def _run_dbc_self_review(
     Postconditions:
         ``microtask_files``, ``all_files``, and ``mt.output_files`` gain any
         DbC comment insertions the review produced, written under
-        ``repo_path``. If ``deps.build_verifier`` is set and reports failure
+        ``repo_path`` -- restricted to paths that were keys of
+        ``microtask_files`` to begin with; a result path DbC invented (e.g.
+        from a header-shaped comment line inside a reviewed file being
+        misread as a chunk boundary) is discarded rather than written. If
+        ``deps.build_verifier`` is set and reports failure
         for the post-insertion tree, ONLY the file(s) this phase's DbC result
         touched are reverted -- on disk (prior content restored, or the file
         deleted if it was newly created) and in ``microtask_files``/
@@ -207,7 +211,25 @@ def _run_dbc_self_review(
         )
         return
 
-    dbc_files: Dict[str, str] = getattr(dbc_result, "files", None) or {}
+    raw_dbc_files: Dict[str, str] = getattr(dbc_result, "files", None) or {}
+    # A reviewed file's own content can contain a line that happens to match
+    # the "### path ###" header DbcCommentsAgent's chunk parser looks for
+    # (e.g. a section-divider comment) -- parse_code_into_file_blocks then
+    # misreads it as a header for a file that was never actually reviewed,
+    # and the merge can attach an insertion to that spurious path. Only
+    # write back paths that were actually part of what we asked to review.
+    dbc_files = {
+        path: content for path, content in raw_dbc_files.items() if path in microtask_files
+    }
+    if len(dbc_files) != len(raw_dbc_files):
+        logger.warning(
+            "[%s] Microtask %s: DbC self-review returned %d file(s) not among the reviewed "
+            "files, discarding: %s",
+            task_id,
+            mt.id,
+            len(raw_dbc_files) - len(dbc_files),
+            sorted(set(raw_dbc_files) - set(dbc_files)),
+        )
     if not dbc_files:
         logger.info("[%s] Microtask %s: DbC self-review made no changes", task_id, mt.id)
         return
