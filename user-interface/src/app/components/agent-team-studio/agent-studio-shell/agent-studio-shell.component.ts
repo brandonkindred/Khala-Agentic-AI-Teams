@@ -1,21 +1,37 @@
-import { ChangeDetectionStrategy, Component, computed, inject } from '@angular/core';
+import { ChangeDetectionStrategy, Component, computed, inject, signal } from '@angular/core';
 import { MatButtonModule } from '@angular/material/button';
 import { MatDialog, MatDialogModule } from '@angular/material/dialog';
 import { MatIconModule } from '@angular/material/icon';
 import { MatTooltipModule } from '@angular/material/tooltip';
+import type { AgentStudioDraft } from '../../../models/agent-studio.model';
 import { STUDIO_STAGES } from '../../../models/agent-studio.model';
+import { AgentStudioApiService } from '../../../services/agent-studio-api.service';
 import { AgentStudioStateService } from '../../../services/agent-studio-state.service';
 import { AgentStudioFacade } from '../../../services/agent-studio.facade';
+import { AgenticTeamApiService } from '../../../services/agentic-team-api.service';
 import { AgentStudioBuildAgentComponent } from './agent-studio-build-agent.component';
 import { AgentStudioComposeTeamComponent } from './agent-studio-compose-team.component';
 import { AgentStudioPersonaComponent } from './agent-studio-persona.component';
 import { AgentStudioStagePlaceholderComponent } from './agent-studio-stage-placeholder.component';
 import { AgentStudioTestAgentComponent } from './agent-studio-test-agent.component';
+import { LoadDraftMenuComponent } from './load-draft-menu/load-draft-menu.component';
 import {
   SaveDraftDialogComponent,
   type SaveDraftDialogData,
   type SaveDraftDialogResult,
 } from './save-draft-dialog/save-draft-dialog.component';
+
+/** Stage indices for `navigateToStage` (mirrors `agent-studio-persona.component.ts`'s convention). */
+const STAGE_BUILD = 0;
+const STAGE_TEST = 1;
+const STAGE_COMPOSE = 2;
+const STAGE_PERSONAS = 3;
+
+/** `draft.payload` is an opaque, backend-unvalidated blob (spec §3.5) — never
+ *  trust a field's type without checking it first. */
+function asNullableString(value: unknown): string | null {
+  return typeof value === 'string' ? value : null;
+}
 
 /**
  * Agent Studio shell — the single `/agent-studio` surface (spec §2.1). Renders
@@ -39,6 +55,7 @@ import {
     AgentStudioPersonaComponent,
     AgentStudioStagePlaceholderComponent,
     AgentStudioTestAgentComponent,
+    LoadDraftMenuComponent,
   ],
   changeDetection: ChangeDetectionStrategy.OnPush,
   providers: [AgentStudioStateService, AgentStudioFacade],
@@ -48,6 +65,15 @@ import {
 export class AgentStudioShellComponent {
   readonly state = inject(AgentStudioStateService);
   private readonly dialog = inject(MatDialog);
+  private readonly api = inject(AgentStudioApiService);
+  private readonly agenticTeamApi = inject(AgenticTeamApiService);
+
+  /** True while a Load-draft selection is being fetched and hydrated. */
+  readonly loadingDraft = signal(false);
+  /** Bumped on every `loadDraft` call; lets a superseded call's late-arriving
+   *  responses (`getDraft`, the nested `getProcess` check) recognize they're
+   *  stale and no-op instead of corrupting a newer load. */
+  private loadDraftToken = 0;
   /** The forward-only stage list rendered by the stepper. */
   readonly stages = STUDIO_STAGES;
 
@@ -155,5 +181,104 @@ export class AgentStudioShellComponent {
       if (!result) return;
       this.state.setCurrentDraft(result.draft_id, result.name);
     });
+  }
+
+  /**
+   * Load a saved draft and hydrate the session from it (spec §3.5). No
+   * unsaved-local-edit conflict check is performed here — that guard is
+   * sibling issue #5914's responsibility; this loads directly.
+   *
+   * Preconditions: `draftId` names a draft the current user owns (rows in
+   *   `LoadDraftMenuComponent` only ever come from that user's own list).
+   * Postconditions: on success, `state` is hydrated from the draft's payload
+   *   and the stepper is moved to the furthest reachable stage.
+   *   `loadingDraft()` stays `true` for the entire chain, including the
+   *   nested process-status check, so a second selection can't race it. On
+   *   failure, `loadingDraft()` returns to `false` and `state` is unchanged
+   *   (surfaced via the global HTTP error toast, not a bespoke inline banner
+   *   — the triggering menu has already closed by the time this runs). A
+   *   call superseded by a later `loadDraft` (its token no longer matches
+   *   `loadDraftToken`) discards its response instead of applying it.
+   */
+  loadDraft(draftId: string): void {
+    if (this.loadingDraft()) return;
+    this.loadingDraft.set(true);
+    const token = ++this.loadDraftToken;
+    this.api.getDraft(draftId).subscribe({
+      next: (draft) => {
+        if (token !== this.loadDraftToken) return;
+        this.hydrateFromDraft(draft, token);
+      },
+      error: () => {
+        if (token !== this.loadDraftToken) return;
+        this.loadingDraft.set(false);
+      },
+    });
+  }
+
+  private hydrateFromDraft(draft: AgentStudioDraft, token: number): void {
+    this.state.setCurrentDraft(draft.draft_id, draft.name);
+    const payload = draft.payload;
+    this.state.setRegistryAgentId(asNullableString(payload['registryAgentId']));
+    this.state.setTeamId(asNullableString(payload['teamId']));
+    this.state.setProcessId(asNullableString(payload['processId']));
+    this.state.setPersonaId(asNullableString(payload['personaId']));
+    this.state.setDraftAgentId(asNullableString(payload['draftAgentId']));
+    this.resolveFurthestStage(token);
+  }
+
+  /**
+   * Move the stepper to the furthest stage the just-hydrated state supports
+   * (spec §3.5's "furthest reachable stage" rule, restricted to what's
+   * actually persisted today — no `stage1AgentDraft`, so Stage 1 always
+   * resumes at its default "Start" sub-stage, explicitly reset here since the
+   * sub-stepper isn't touched by navigating the main stepper alone and may
+   * already be past Start from unrelated in-session Build progress).
+   *
+   * Deliberately does not call `setRosterFullyStaffed`: the spec is explicit
+   * that Stage-4 reachability on load depends only on the process being
+   * complete, not a fresh roster-staffed re-check ("the persisted
+   * teamId/processId already passed the gate when saved, and Stage 4's own
+   * safety net re-checks testability"). A stale `rosterFullyStaffed` from an
+   * unrelated earlier session action is an accepted, spec-mandated tradeoff,
+   * not an oversight.
+   *
+   * `token` guards the async `getProcess` branch against a superseded call's
+   * late response — see `loadDraft`'s contract.
+   */
+  private resolveFurthestStage(token: number): void {
+    const teamId = this.state.teamId();
+    const processId = this.state.processId();
+    if (teamId && processId) {
+      this.agenticTeamApi.getProcess(processId).subscribe({
+        next: (process) => {
+          if (token !== this.loadDraftToken) return;
+          this.state.setComposeProcessStatus(process.status);
+          this.state.navigateToStage(process.status === 'complete' ? STAGE_PERSONAS : STAGE_COMPOSE);
+          this.loadingDraft.set(false);
+        },
+        error: () => {
+          if (token !== this.loadDraftToken) return;
+          // The process may have been deleted/archived since the draft was
+          // saved, or the lookup failed transiently — either way we no longer
+          // know its status, so clear any stale value (e.g. 'complete' left
+          // over from an earlier, unrelated in-session action) rather than
+          // risk it wrongly satisfying the Stage-3→4 gate.
+          this.state.setComposeProcessStatus(null);
+          this.state.navigateToStage(STAGE_COMPOSE);
+          this.loadingDraft.set(false);
+        },
+      });
+      return;
+    }
+    if (teamId) {
+      this.state.navigateToStage(STAGE_COMPOSE);
+    } else if (this.state.registryAgentId()) {
+      this.state.navigateToStage(STAGE_TEST);
+    } else {
+      this.state.resetBuildSubStage();
+      this.state.navigateToStage(STAGE_BUILD);
+    }
+    this.loadingDraft.set(false);
   }
 }
