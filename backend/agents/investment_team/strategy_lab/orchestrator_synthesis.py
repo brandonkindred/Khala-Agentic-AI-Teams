@@ -367,31 +367,10 @@ class SynthesisMixin:
         for round_num in range(_orchestrator_module.MAX_CODE_REFINEMENT_ROUNDS):
             round_gate_results: List[QualityGateResult] = []
 
-            # Deterministic post-synthesis normalization: guarantee the
-            # ``UNIVERSE`` constant and the ``on_bar`` symbol guard are present
-            # and conformant before any gate sees the code, so the conformance
-            # symbol gate never burns a refinement round on boilerplate that is
-            # fully determined by ``spec.target_symbols``. Idempotent (strips
-            # then reinserts), so it is a no-op on already-conformant code and
-            # safe to apply to both the initial and every refined code variant.
-            before_inject = code
-            code = inject_universe_and_guard(code, spec)
-            if code != before_inject:
-                # Keep ``spec.strategy_code`` in lockstep with the code that is
-                # actually executed/gated this round (refinement maintains the
-                # same invariant via ``_apply_updates``). Downstream consumers
-                # such as ``_maybe_attach_coverage_report`` re-run probes off
-                # ``spec.strategy_code`` and would otherwise analyse stale,
-                # pre-injection source.
-                spec.strategy_code = code
-                if drift_collector is not None:
-                    drift_collector.record_code_change(
-                        phase="synthesis",
-                        agent="universe_injector",
-                        before_code=before_inject,
-                        after_code=code,
-                        reason="deterministic UNIVERSE + symbol-guard injection",
-                    )
+            # ── 2a-pre: INJECT UNIVERSE + symbol guard (deterministic) ───
+            code = self._run_synthesis_universe_injection(
+                spec=spec, code=code, drift_collector=drift_collector
+            )
 
             # ── 2a: VALIDATE (code safety + spec readiness on round 0) ───
             round_gate_results, predicate_conformance_attempts = (
@@ -613,6 +592,47 @@ class SynthesisMixin:
             ran_on_non_conforming_code=ran_on_non_conforming_code,
             refinement_stalled=refinement_stalled,
         )
+
+    def _run_synthesis_universe_injection(
+        self,
+        *,
+        spec: StrategySpec,
+        code: str,
+        drift_collector: Optional[_DriftCollector] = None,
+    ) -> str:
+        """Deterministically inject/refresh the UNIVERSE + on_bar symbol guard.
+
+        Guarantees the ``UNIVERSE`` constant and the ``on_bar`` symbol guard are
+        present and conformant before any gate sees the code, so the
+        conformance symbol gate never burns a refinement round on boilerplate
+        that is fully determined by ``spec.target_symbols``. Idempotent (strips
+        then reinserts), so it is a no-op on already-conformant code and safe
+        to apply to both the initial and every refined code variant.
+
+        Pre: ``code`` is the current round's strategy source; ``spec`` is the
+        round's ``StrategySpec``.
+        Post: returns the (possibly unchanged) injected code. When injection
+        changes the code, ``spec.strategy_code`` is updated in lockstep (so
+        downstream consumers such as ``_maybe_attach_coverage_report``, which
+        re-run probes off ``spec.strategy_code``, do not analyse stale,
+        pre-injection source — refinement maintains the same invariant via
+        ``_apply_updates``) and, if ``drift_collector`` is given, the change is
+        recorded against it. When injection is a no-op, neither
+        ``spec.strategy_code`` nor ``drift_collector`` is touched.
+        """
+        before_inject = code
+        code = inject_universe_and_guard(code, spec)
+        if code != before_inject:
+            spec.strategy_code = code
+            if drift_collector is not None:
+                drift_collector.record_code_change(
+                    phase="synthesis",
+                    agent="universe_injector",
+                    before_code=before_inject,
+                    after_code=code,
+                    reason="deterministic UNIVERSE + symbol-guard injection",
+                )
+        return code
 
     def _run_synthesis_validation_gates(
         self,

@@ -34,10 +34,13 @@ def retry_failed_activity(job_id: str, trace_id: str = "") -> None:
     """Re-run failed tasks for a job (run_failed_tasks).
 
     Postconditions:
-        On failure the job is marked FAILED and the exception is re-raised so
-        Temporal can retry (per the workflow retry policy) and fail the workflow.
-        ``trace_id`` (workflow-supplied, or freshly generated when blank) is
-        forwarded to ``run_failed_tasks``, which binds it for the retry.
+        On the final Temporal attempt, the job is marked FAILED; on a non-final
+        attempt the FAILED write is skipped so a retry that later succeeds never
+        leaves a transient FAILED status behind. The exception is always
+        re-raised so Temporal can retry (per the workflow retry policy) and fail
+        the workflow once attempts are exhausted. ``trace_id`` (workflow-supplied,
+        or freshly generated when blank) is forwarded to ``run_failed_tasks``,
+        which binds it for the retry.
     """
     resolved_trace_id = trace_id or new_trace_id()
     try:
@@ -46,7 +49,8 @@ def retry_failed_activity(job_id: str, trace_id: str = "") -> None:
         run_failed_tasks(job_id, trace_id=resolved_trace_id)
     except Exception as e:
         logger.exception("Retry failed activity failed", extra={"trace_id": resolved_trace_id})
-        update_job(job_id, error=str(e), status=JOB_STATUS_FAILED)
+        if is_last_attempt():
+            update_job(job_id, error=str(e), status=JOB_STATUS_FAILED)
         raise
 
 

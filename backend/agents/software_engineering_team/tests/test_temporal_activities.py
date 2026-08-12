@@ -59,6 +59,29 @@ def test_retry_failed_activity_failure(monkeypatch, tmp_path, patched_job_store)
     assert job["status"] == js.JOB_STATUS_FAILED
 
 
+def test_retry_failed_activity_non_final_attempt_does_not_mark_failed(
+    monkeypatch, tmp_path, patched_job_store
+) -> None:
+    """Mirror of the other activities' non-final-attempt tests for retry_failed_activity."""
+    from software_engineering_team.shared import job_store as js
+    from software_engineering_team.temporal import activities
+
+    js.create_job("rf-retry", repo_path=str(tmp_path))
+
+    monkeypatch.setattr(activities.activity, "in_activity", lambda: True)
+    monkeypatch.setattr(activities.activity, "info", lambda: _fake_activity_info(attempt=1))
+
+    def boom(_, **kw):
+        raise RuntimeError("transient retry failure")
+
+    monkeypatch.setattr("software_engineering_team.orchestrator.run_failed_tasks", boom)
+    with pytest.raises(RuntimeError, match="transient retry failure"):
+        activities.retry_failed_activity("rf-retry")
+
+    job = js.get_job("rf-retry")
+    assert job["status"] != js.JOB_STATUS_FAILED
+
+
 def test_run_frontend_code_v2_activity_failure(monkeypatch, tmp_path, patched_job_store) -> None:
     from software_engineering_team.shared import job_store as js
     from software_engineering_team.temporal import activities

@@ -455,6 +455,68 @@ def _execute_coding_phase(
         return None
 
 
+def _schedule_microtask_batches(microtasks: List[Any]) -> List[List[Any]]:
+    """Group ``microtasks`` into ordered, dependency-respecting batches (waves).
+
+    Kahn's-algorithm-style level scheduling: batch 0 holds every microtask whose
+    ``depends_on`` ids are all either not the id of any microtask in this call, or
+    already placed in an earlier batch; batch *k* holds every remaining microtask
+    once all of its in-run dependencies are in batches ``< k``. This function only
+    determines *ordering* -- it does not consult ``completed_ids``/``review_failed_ids``
+    and does not itself skip anything; ``run_gated_execution_impl`` still performs
+    its runtime SKIP-on-review-failed-dependency check against those sets for each
+    microtask as it iterates the flattened batch order, exactly as it did against
+    ``enumerate(microtasks)`` before this change.
+
+    Preconditions:
+        Every ``mt`` in ``microtasks`` has a ``.id: str`` (unique within the list)
+        and a ``.depends_on: List[str]``.
+    Postconditions:
+        Returns a list of non-empty batches whose concatenation is a permutation
+        of ``microtasks`` containing each microtask exactly once, preserving each
+        microtask's original relative order within its batch. A ``depends_on`` id
+        that is not the ``.id`` of any microtask in this call (a stale planner id,
+        or one excluded by ``only_microtask_ids`` filtering upstream) never blocks
+        placement -- mirroring the caller's existing "unmet but not review-failed --
+        running anyway" soft-dependency semantics, which is a *hint*, not a
+        verified DAG. A dependency cycle among the microtasks (never expected from
+        a real planner) does not raise or loop forever: once no further microtask
+        can be placed, every still-unplaced microtask is flushed into one final
+        batch, in original relative order.
+    Invariants:
+        ``sum(len(b) for b in batches) == len(microtasks)``.
+    """
+    id_set = {mt.id for mt in microtasks}
+    indegree: Dict[str, int] = {}
+    dependents: Dict[str, List[str]] = {}
+    for mt in microtasks:
+        in_run_deps = {d for d in mt.depends_on if d in id_set}
+        indegree[mt.id] = len(in_run_deps)
+        for dep_id in in_run_deps:
+            dependents.setdefault(dep_id, []).append(mt.id)
+
+    by_id = {mt.id: mt for mt in microtasks}
+    placed: set = set()
+    batches: List[List[Any]] = []
+
+    while len(placed) < len(microtasks):
+        frontier_ids = [mt.id for mt in microtasks if mt.id not in placed and indegree[mt.id] == 0]
+        if not frontier_ids:
+            # Cycle (or otherwise unresolvable): flush the rest in original order
+            # rather than looping forever -- today's runtime "running anyway"
+            # hint-not-enforced fallback covers the actual dependency check.
+            frontier_ids = [mt.id for mt in microtasks if mt.id not in placed]
+
+        batches.append([by_id[mid] for mid in frontier_ids])
+        for mid in frontier_ids:
+            placed.add(mid)
+        for mid in frontier_ids:
+            for dependent_id in dependents.get(mid, []):
+                indegree[dependent_id] -= 1
+
+    return batches
+
+
 def run_gated_execution_impl(
     *,
     gate_config: GatedExecutionConfig,
@@ -557,6 +619,12 @@ def run_gated_execution_impl(
     review_failed_ids: set[str] = set()
     total = len(microtasks)
 
+    # Wave-based (topological-batch) scheduling only reorders iteration; it does
+    # not change which microtasks run or how many, and ``microtasks`` itself (used
+    # for the final ``ExecutionResult.microtasks``) is left in its original,
+    # planner-emitted order.
+    execution_order = [mt for batch in _schedule_microtask_batches(microtasks) for mt in batch]
+
     task_id = task.id
     logger.info("%s", gate_config.startup_log_message(task_id, total, config))
 
@@ -571,7 +639,7 @@ def run_gated_execution_impl(
             mt = _current_mt[0]
             progress_callback(_idx, len(completed_ids), total, mt.title or mt.id, _phase, detail)
 
-    for idx, mt in enumerate(microtasks):
+    for idx, mt in enumerate(execution_order):
         deps_met = all(d in completed_ids for d in mt.depends_on)
         if not deps_met:
             unmet = [d for d in mt.depends_on if d not in completed_ids]
