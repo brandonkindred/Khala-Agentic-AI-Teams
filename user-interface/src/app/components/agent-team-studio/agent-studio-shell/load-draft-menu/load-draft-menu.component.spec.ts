@@ -1,6 +1,8 @@
 import { TestBed } from '@angular/core/testing';
+import { MatDialog } from '@angular/material/dialog';
+import { NoopAnimationsModule } from '@angular/platform-browser/animations';
 import { Subject, of, throwError } from 'rxjs';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { LoadDraftMenuComponent } from './load-draft-menu.component';
 import { AgentStudioApiService } from '../../../../services/agent-studio-api.service';
 import type { AgentStudioDraftSummary } from '../../../../models/agent-studio.model';
@@ -11,10 +13,13 @@ const summary = (id: string, name: string): AgentStudioDraftSummary => ({
   updated_at: '2026-01-01T00:00:00Z',
 });
 
-function configure(listDrafts = vi.fn().mockReturnValue(of([]))) {
-  const api = { listDrafts };
+function configure(
+  listDrafts = vi.fn().mockReturnValue(of([])),
+  deleteDraft = vi.fn().mockReturnValue(of({ draft_id: 'd-1', status: 'deleted' })),
+) {
+  const api = { listDrafts, deleteDraft };
   TestBed.configureTestingModule({
-    imports: [LoadDraftMenuComponent],
+    imports: [LoadDraftMenuComponent, NoopAnimationsModule],
     providers: [{ provide: AgentStudioApiService, useValue: api }],
   });
   const fixture = TestBed.createComponent(LoadDraftMenuComponent);
@@ -132,5 +137,67 @@ describe('LoadDraftMenuComponent', () => {
     fixture.detectChanges();
     const button: HTMLButtonElement = fixture.nativeElement.querySelector('.studio__draft-btn');
     expect(button.disabled).toBe(true);
+  });
+
+  describe('delete', () => {
+    let openSpy: ReturnType<typeof vi.spyOn>;
+
+    beforeEach(() => {
+      openSpy = vi.spyOn(MatDialog.prototype, 'open');
+    });
+    afterEach(() => {
+      openSpy.mockRestore();
+    });
+
+    it('confirmDelete cancel does not call deleteDraft or emit draftDeleted', () => {
+      openSpy.mockReturnValue({ afterClosed: () => of(false) } as unknown as ReturnType<MatDialog['open']>);
+      const { fixture, api } = configure();
+      const spy = vi.fn();
+      fixture.componentInstance.draftDeleted.subscribe(spy);
+      fixture.componentInstance.confirmDelete(summary('d-1', 'A'));
+      expect(api.deleteDraft).not.toHaveBeenCalled();
+      expect(spy).not.toHaveBeenCalled();
+    });
+
+    it('confirmDelete confirm deletes, drops the row, and emits draftDeleted', () => {
+      openSpy.mockReturnValue({ afterClosed: () => of(true) } as unknown as ReturnType<MatDialog['open']>);
+      const deleteDraft = vi.fn().mockReturnValue(of({ draft_id: 'd-1', status: 'deleted' }));
+      const { fixture } = configure(
+        vi.fn().mockReturnValue(of([summary('d-1', 'A'), summary('d-2', 'B')])),
+        deleteDraft,
+      );
+      fixture.componentInstance.onOpened();
+      const spy = vi.fn();
+      fixture.componentInstance.draftDeleted.subscribe(spy);
+      fixture.componentInstance.confirmDelete(summary('d-1', 'A'));
+      expect(deleteDraft).toHaveBeenCalledWith('d-1');
+      expect(fixture.componentInstance.drafts().map((d) => d.draft_id)).toEqual(['d-2']);
+      expect(spy).toHaveBeenCalledWith('d-1');
+    });
+
+    it('confirmDelete API failure sets error() and leaves the row', () => {
+      openSpy.mockReturnValue({ afterClosed: () => of(true) } as unknown as ReturnType<MatDialog['open']>);
+      const deleteDraft = vi.fn().mockReturnValue(throwError(() => ({ error: { detail: 'nope' } })));
+      const { fixture } = configure(vi.fn().mockReturnValue(of([summary('d-1', 'A')])), deleteDraft);
+      fixture.componentInstance.onOpened();
+      const spy = vi.fn();
+      fixture.componentInstance.draftDeleted.subscribe(spy);
+      fixture.componentInstance.confirmDelete(summary('d-1', 'A'));
+      expect(fixture.componentInstance.error()).toBe('nope');
+      expect(fixture.componentInstance.drafts()).toEqual([summary('d-1', 'A')]);
+      expect(spy).not.toHaveBeenCalled();
+    });
+
+    it('confirmDelete stops the click from selecting the row', () => {
+      openSpy.mockReturnValue({ afterClosed: () => of(false) } as unknown as ReturnType<MatDialog['open']>);
+      const { fixture, api } = configure();
+      const selected = vi.fn();
+      fixture.componentInstance.draftSelected.subscribe(selected);
+      const event = { stopPropagation: vi.fn() } as unknown as Event;
+      fixture.componentInstance.confirmDelete(summary('d-1', 'A'), event);
+      expect(event.stopPropagation).toHaveBeenCalled();
+      expect(selected).not.toHaveBeenCalled();
+      expect(api.deleteDraft).not.toHaveBeenCalled();
+    });
   });
 });

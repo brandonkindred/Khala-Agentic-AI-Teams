@@ -44,6 +44,19 @@
     }
   }
 
+  &__row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+  }
+
+  &__body {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+  }
+
   &__name {
     display: block;
     font-weight: 600;
