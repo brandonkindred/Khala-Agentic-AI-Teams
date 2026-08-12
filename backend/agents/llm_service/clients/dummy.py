@@ -2098,6 +2098,51 @@ class DummyLLMClient(LLMClient):
                 "convert the following analysis into a single json object" in lowered
                 or ("--- analysis " in lowered and "end analysis" in lowered)
             )
+            and "exactly these keys" in lowered
+            and '"summary"' in lowered
+            and "spec_compliance_notes" in lowered
+        ):
+            # Review-synthesis via-reasoning formatting pass
+            # (synthesize_review_findings): summary + spec notes, no approved/issues.
+            return {
+                "summary": "Code review synthesis (dummy).",
+                "spec_compliance_notes": "",
+            }
+        elif (
+            (
+                "convert the following analysis into a single json object" in lowered
+                or ("--- analysis " in lowered and "end analysis" in lowered)
+            )
+            and "exactly this key" in lowered
+            and "spec_compliance_notes" in lowered
+        ):
+            # Dedicated spec-compliance via-reasoning formatting pass
+            # (synthesize_spec_compliance): sole key is spec_compliance_notes.
+            return {"spec_compliance_notes": ""}
+        elif (
+            (
+                "convert the following analysis into a single json object" in lowered
+                or ("--- analysis " in lowered and "end analysis" in lowered)
+            )
+            and '"verdicts"' in lowered
+        ):
+            # False-positive filter via-reasoning formatting pass.
+            return {"verdicts": []}
+        elif (
+            (
+                "convert the following analysis into a single json object" in lowered
+                or ("--- analysis " in lowered and "end analysis" in lowered)
+            )
+            and "architecture_findings" in lowered
+            and "side_effect_findings" in lowered
+        ):
+            # Merged architecture/side-effect via-reasoning formatting pass.
+            return {"architecture_findings": [], "side_effect_findings": []}
+        elif (
+            (
+                "convert the following analysis into a single json object" in lowered
+                or ("--- analysis " in lowered and "end analysis" in lowered)
+            )
             and "spec_compliance_notes" in lowered
             and "approved" in lowered
             and '"issues"' in lowered
@@ -2106,8 +2151,8 @@ class DummyLLMClient(LLMClient):
             # prose plus the chunk-review JSON field contract. Must precede the
             # security/accessibility anchors (formatting instructions mention
             # "security") but must NOT match other via-reasoning format prompts
-            # (sales critics, SOC2, FPF verdicts, merged-pass findings) that
-            # share the ANALYSIS delimiters / convert-preamble alone.
+            # (sales critics, SOC2) that share the ANALYSIS delimiters /
+            # convert-preamble alone.
             return {
                 "approved": True,
                 "issues": [],

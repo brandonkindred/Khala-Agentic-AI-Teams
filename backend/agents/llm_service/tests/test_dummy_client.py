@@ -1039,6 +1039,52 @@ def test_dummy_plan_critic_wins_over_analysis_delimiters() -> None:
     assert "approved" not in j or j.get("issues") is None
 
 
+def test_dummy_via_reasoning_review_synthesis_format_returns_summary() -> None:
+    c = DummyLLMClient()
+    prompt = (
+        "Convert the following analysis into a single JSON object.\n"
+        "--- ANALYSIS abcdef0123456789 ---\n"
+        "Findings look fine.\n"
+        "--- END ANALYSIS abcdef0123456789 ---\n"
+        "Return a single JSON object with exactly these keys:\n"
+        '- "summary": string — the unified review summary (non-empty).\n'
+        '- "spec_compliance_notes": string — consolidated gaps, or "".\n'
+    )
+    j = c.complete_json(prompt, temperature=0.0)
+    assert j["summary"].strip()
+    assert "spec_compliance_notes" in j
+    assert "approved" not in j
+
+
+def test_dummy_via_reasoning_spec_compliance_format_returns_notes_key() -> None:
+    c = DummyLLMClient()
+    prompt = (
+        "Convert the following analysis into a single JSON object.\n"
+        "--- ANALYSIS abcdef0123456789 ---\n"
+        "No gaps.\n"
+        "--- END ANALYSIS abcdef0123456789 ---\n"
+        "Return a single JSON object with exactly this key:\n"
+        '- "spec_compliance_notes": string — concrete gaps, or "".\n'
+    )
+    j = c.complete_json(prompt, temperature=0.0)
+    assert "spec_compliance_notes" in j
+    assert "summary" not in j
+    assert "approved" not in j
+
+
+def test_dummy_via_reasoning_fpf_format_returns_verdicts() -> None:
+    c = DummyLLMClient()
+    prompt = (
+        "Convert the following analysis into a single JSON object.\n"
+        "--- ANALYSIS abcdef0123456789 ---\n"
+        "Keep finding 1.\n"
+        "--- END ANALYSIS abcdef0123456789 ---\n"
+        'Required: "verdicts" list of objects.\n'
+    )
+    j = c.complete_json(prompt, temperature=0.0)
+    assert j == {"verdicts": []}
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", _MODEL_ROUTED_MODEL_NAMES)
 async def test_stream_routes_structured_output_tool_by_name_despite_misleading_prompt(
