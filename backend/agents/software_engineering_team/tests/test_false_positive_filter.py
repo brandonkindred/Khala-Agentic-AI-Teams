@@ -2288,7 +2288,6 @@ def test_verify_group_disables_strands_tool_result_truncation(monkeypatch) -> No
     partially-truncated-but-successful shape left for it to have to detect
     and distinguish from a real, complete read (including one that merely
     mentions truncation-like text as incidental content)."""
-    import code_review_agent.false_positive_filter as fpf
     import code_review_agent.via_reasoning as vr_mod
     from strands.agent.conversation_manager import SlidingWindowConversationManager
 

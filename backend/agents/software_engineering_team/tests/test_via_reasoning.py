@@ -187,7 +187,6 @@ def test_run_agent_via_reasoning_formats_via_underlying_client(
     """When the model exposes a backing LLMClient, call 2 uses complete_json."""
     from llm_service import LLMClientModel
     from llm_service.clients.dummy import DummyLLMClient
-
     from software_engineering_team.code_review_agent import via_reasoning as vr_mod
 
     agent_calls: list[dict[str, Any]] = []
@@ -364,7 +363,6 @@ def test_run_agent_via_reasoning_wraps_bare_llm_client_with_get_strands_model(
 ) -> None:
     """A bare LLMClient without clone uses get_strands_model for the text pass."""
     from llm_service.clients.dummy import DummyLLMClient
-
     from software_engineering_team.code_review_agent import via_reasoning as vr_mod
 
     strands_calls: list[dict[str, Any]] = []

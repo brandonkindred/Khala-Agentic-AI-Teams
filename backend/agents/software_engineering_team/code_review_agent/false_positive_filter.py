@@ -82,8 +82,8 @@ from .prompts import (
     FALSE_POSITIVE_VERIFY_FORMATTING_INSTRUCTIONS,
     FALSE_POSITIVE_VERIFY_REASONING_SYSTEM_PROMPT,
 )
-from .via_reasoning import run_agent_via_reasoning
 from .repo_reader import DEFAULT_MAX_LISTED_FILES, DiskRepoReader, RepoReader
+from .via_reasoning import run_agent_via_reasoning
 
 logger = logging.getLogger(__name__)
 

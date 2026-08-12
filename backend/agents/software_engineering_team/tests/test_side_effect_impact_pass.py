@@ -18,8 +18,6 @@ findings in a single run.
 
 from __future__ import annotations
 
-pytest_plugins = ["tests.submission_pass_two_call_client"]
-
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -39,10 +37,12 @@ from code_review_agent.side_effect_impact_pass import (
     _validate_findings,
     find_side_effect_impact_issues,
 )
+from tests.submission_pass_two_call_client import SubmissionPassTwoCallClient
 
 from llm_service import LLMJsonParseError
 from llm_service.clients.dummy import DummyLLMClient
-from tests.submission_pass_two_call_client import SubmissionPassTwoCallClient
+
+pytest_plugins = ["tests.submission_pass_two_call_client"]
 
 # Unique anchor in this pass's user prompt (never the system prompt), distinct
 # from architecture_consistency_pass's own anchor so a DummyLLMClient subclass

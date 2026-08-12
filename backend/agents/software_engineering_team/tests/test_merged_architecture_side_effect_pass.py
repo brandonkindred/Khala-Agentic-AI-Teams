@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-pytest_plugins = ["tests.submission_pass_two_call_client"]
-
 from typing import Any, Dict, Optional
 
 import pytest
@@ -12,10 +10,12 @@ from code_review_agent.merged_architecture_side_effect_pass import (
 )
 from code_review_agent.models import CodeReviewInput
 from code_review_agent.profiles import ReviewProfile
+from tests.submission_pass_two_call_client import SubmissionPassTwoCallClient
 
 from llm_service.clients.dummy import DummyLLMClient
-from tests.submission_pass_two_call_client import SubmissionPassTwoCallClient
 from shared.dev_models.models import SystemArchitecture
+
+pytest_plugins = ["tests.submission_pass_two_call_client"]
 
 _MERGED_PASS_ANCHOR = "Merged submission pass:"
 

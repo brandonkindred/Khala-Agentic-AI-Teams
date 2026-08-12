@@ -25,14 +25,11 @@ This module instead:
 
 from __future__ import annotations
 
-pytest_plugins = ["tests.submission_pass_two_call_client"]
-
 import re
 import threading
 from typing import Any, Dict, List
 
 import pytest
-
 from code_review_agent.false_positive_filter import (
     _verify_max_findings_per_group,
     filter_false_positives,
@@ -41,10 +38,10 @@ from code_review_agent.merged_architecture_side_effect_pass import (
     find_architecture_and_side_effect_issues,
 )
 from code_review_agent.models import CodeReviewInput, CodeReviewIssue
+from tests.submission_pass_two_call_client import SubmissionPassTwoCallClient
 from tests.test_false_positive_filter import _SimulatesFileReadToolCall
 
-from llm_service.clients.dummy import DummyLLMClient
-from tests.submission_pass_two_call_client import SubmissionPassTwoCallClient
+pytest_plugins = ["tests.submission_pass_two_call_client"]
 
 _MERGED_PASS_ANCHOR = "Merged submission pass:"
 

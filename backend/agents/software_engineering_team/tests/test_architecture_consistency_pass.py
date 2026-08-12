@@ -12,8 +12,6 @@ both the chunk-review call and this pass's call in an end-to-end
 
 from __future__ import annotations
 
-pytest_plugins = ["tests.submission_pass_two_call_client"]
-
 from typing import Any, Dict, Optional
 
 import pytest
@@ -29,10 +27,12 @@ from code_review_agent.architecture_consistency_pass import (
 from code_review_agent.coordinator import run_coordinator
 from code_review_agent.false_positive_filter import CodebaseIndex
 from code_review_agent.models import CodeReviewInput, CodeReviewIssue
+from tests.submission_pass_two_call_client import SubmissionPassTwoCallClient
 
 from llm_service.clients.dummy import DummyLLMClient
-from tests.submission_pass_two_call_client import SubmissionPassTwoCallClient
 from shared.dev_models.models import ArchitectureComponent, SystemArchitecture
+
+pytest_plugins = ["tests.submission_pass_two_call_client"]
 
 # Unique anchor in this pass's user prompt (never the system prompt -- a
 # DummyLLMClient subclass must branch on the user prompt only, matching the
