@@ -741,6 +741,23 @@ class TypographySpec(BaseModel):
     usage_notes: str = ""
 
 
+TypographySpecOutput = _derive_strict_variant(
+    "TypographySpecOutput",
+    TypographySpec,
+    doc=(
+        "Agent-facing typography spec; requires non-empty fields.\n\n"
+        "Field-for-field twin of ``TypographySpec`` with required content — "
+        "``TypographySpec`` itself must stay soft (all-default) since it also "
+        "backs ``VisualIdentityOutput.typography_system``'s merge target. "
+    )
+    + _STRICT_TWIN_DOC_SUFFIX,
+    role=(str, Field(min_length=1)),
+    font_family=(str, Field(min_length=1)),
+    weight_range=(str, Field(min_length=1)),
+    usage_notes=(str, Field(min_length=1)),
+)
+
+
 class LogoUsageRule(BaseModel):
     """Logo suite and usage rules."""
 
@@ -1270,15 +1287,6 @@ class ColorPaletteSystemOutput(BaseModel):
     """
 
     color_palette: List[ColorEntryOutput] = Field(min_length=5, max_length=7)
-
-
-class TypographySpecOutput(BaseModel):
-    """Agent-facing typography spec; requires non-empty fields."""
-
-    role: str = Field(min_length=1)
-    font_family: str = Field(min_length=1)
-    weight_range: str = Field(min_length=1)
-    usage_notes: str = Field(min_length=1)
 
 
 class TypographySystemOutput(BaseModel):

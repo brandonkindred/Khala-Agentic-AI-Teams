@@ -55,6 +55,8 @@ from branding_team.models import (
     PositioningOutput,
     PurposeVisionOutput,
     TaglineOutput,
+    TypographySpec,
+    TypographySpecOutput,
     WritingGuidelinesBody,
     WritingGuidelinesOutput,
 )
@@ -912,3 +914,53 @@ def test_color_entry_output_is_usable_as_a_color_entry() -> None:
         psychological_rationale="Conveys depth and authority",
     )
     assert isinstance(output, ColorEntry)
+
+
+def test_typography_spec_permits_blank_and_omitted_content() -> None:
+    """``TypographySpec`` is the soft merge-target twin: all fields default
+    to empty, matching ``VisualIdentityOutput.typography_system``'s
+    partial-fragment merge contract."""
+    minimal = TypographySpec()
+    assert minimal.role == ""
+    assert minimal.font_family == ""
+    assert minimal.weight_range == ""
+    assert minimal.usage_notes == ""
+
+    explicit_blank = TypographySpec(
+        role="", font_family="", weight_range="", usage_notes=""
+    )
+    assert explicit_blank.role == ""
+
+
+def test_typography_spec_output_rejects_blank_content() -> None:
+    """A blank role, font family, weight range, or usage notes must fail."""
+    valid_kwargs = dict(
+        role="display",
+        font_family="Inter",
+        weight_range="600-800",
+        usage_notes="Headlines and hero type only",
+    )
+
+    with pytest.raises(ValidationError):
+        TypographySpecOutput(**{**valid_kwargs, "role": ""})
+    with pytest.raises(ValidationError):
+        TypographySpecOutput(**{**valid_kwargs, "font_family": ""})
+    with pytest.raises(ValidationError):
+        TypographySpecOutput(**{**valid_kwargs, "weight_range": ""})
+    with pytest.raises(ValidationError):
+        TypographySpecOutput(**{**valid_kwargs, "usage_notes": ""})
+
+    output = TypographySpecOutput(**valid_kwargs)
+    assert output.role == "display"
+
+
+def test_typography_spec_output_is_usable_as_a_typography_spec() -> None:
+    """The derived strict twin stays a normal, directly constructible
+    ``pydantic.BaseModel`` subclass wherever ``TypographySpec`` is."""
+    output = TypographySpecOutput(
+        role="display",
+        font_family="Inter",
+        weight_range="600-800",
+        usage_notes="Headlines and hero type only",
+    )
+    assert isinstance(output, TypographySpec)
