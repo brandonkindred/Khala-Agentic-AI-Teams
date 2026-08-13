@@ -675,7 +675,7 @@ async def lifespan(app: FastAPI):  # noqa: PLR0915 - linear startup orchestrator
 
         register_team_schemas(AGENT_CONSOLE_SCHEMA)
     except Exception:
-        logger.exception("agent_console postgres schema registration failed")
+        logger.exception("agent_platform.console postgres schema registration failed")
 
     try:
         from agent_platform.registry.postgres import SCHEMA as AGENT_REGISTRY_SCHEMA

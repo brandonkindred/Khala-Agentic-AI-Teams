@@ -444,7 +444,7 @@ stateDiagram-v2
 
 ## 10. Interfaces / API
 
-**Manifest block** (new optional `CognitionSpec` in `agent_registry.models`):
+**Manifest block** (new optional `CognitionSpec` in `agent_platform.registry.models`):
 ```yaml
 cognition:
   memory: { retention_days_events: 90 }

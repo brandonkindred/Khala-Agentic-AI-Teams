@@ -1,22 +1,23 @@
 """Validation tests for the Phase 1–5 structured-output models.
 
-These agent-facing models (``BrandDiscoveryAuditOutput``, ``PurposeVisionOutput``,
-``CoreValuesOutput``, ``AudienceSegmentsOutput``, ``DifferentiationPillarsOutput``,
-``PositioningOutput``, plus Phase 2's ``BrandStoryOutput``,
-``BrandArchetypesOutput``, ``TaglineOutput``, ``MessagingFrameworkOutput``
-(and its nested ``MessagingPillarOutput``/``AudienceMessageMapOutput``),
-``PersonaProfilesOutput``, ``WritingGuidelinesOutput``, plus Phase 3's nested
-twins (``LogoUsageRuleOutput``, ``ColorEntryOutput``, ``TypographySpecOutput``,
-``VoiceToneEntryOutput``), plus Phase 4's ``ChannelGuidelineOutput``,
-``BrandArchitectureOutput``, ``BrandArchitectureRuleOutput``,
-``BrandInActionExampleOutput``, and ``BrandExperiencePrinciplesOutput``, plus
-Phase 5's ``ApprovalWorkflowOutput``, ``WikiEntryOutput``, and
-``BrandHealthKPIOutput``) must reject empty/omitted content so Strands'
-structured-output tool retries the LLM instead of silently accepting a blank or
-under-cardinality response (see ``structured_output_tool.py``: a
-``ValidationError`` becomes a tool error the model is asked to fix). Dual-mode
-tests also pin the soft merge-target twins and the ``isinstance(strict, soft)``
-subclass contract produced by ``_derive_strict_variant``.
+Agent-facing ``*Output`` models must reject empty/omitted content so Strands'
+structured-output tool retries the LLM instead of silently accepting a blank
+or under-cardinality response (see ``structured_output_tool.py``: a
+``ValidationError`` becomes a tool error the model is asked to fix).
+
+Collapsed nested-item models (``CoreValue``, ``AudienceSegment``,
+``DifferentiationPillar``, ``BrandArchetype``, ``MessagingPillar``,
+``AudienceMessageMap``, ``ElevatorPitch``, ``PersonaProfile``,
+``LogoUsageRule``, ``ColorEntry``, ``TypographySpec``, ``VoiceToneEntry``,
+``BrandArchitectureRule``, ``BrandInActionExample``, ``ApprovalWorkflow``,
+``WikiEntry``, ``BrandHealthKPI`` and their ``*Output`` subclasses) are
+covered in dual-mode: the soft base still permits blank/omitted content
+(merge-target contract), the strict subclass still rejects blanks, and
+``isinstance(strict, soft)`` holds because ``_derive_strict_variant``
+generates a real subclass. Wrapper and compositor schemas
+(``BrandDiscoveryAuditOutput``, ``PurposeVisionOutput``, ``CoreValuesOutput``,
+Phase 2's cumulative chain, Phase 4/5 compositor models) keep their
+cardinality and blank-rejection tests.
 """
 
 from __future__ import annotations

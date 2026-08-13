@@ -58,8 +58,9 @@ UNIFIED_API_TEAM_ASSISTANTS_ENABLED = os.getenv("UNIFIED_API_TEAM_ASSISTANTS_ENA
 )
 
 # Agent Studio Temporal worker: when True (default), the lifespan starts this
-# process's in-process Agent Studio Temporal worker thread (Agent Studio is
-# Temporal-only). Set false to run unified-api without booting it.
+# process's in-process Agent Studio Temporal worker thread. Set false to run
+# unified-api without booting it; authoring CRUD then uses in-process
+# AgentStudioService. Other teams' Temporal workers are unaffected.
 UNIFIED_API_AGENT_STUDIO_TEMPORAL_WORKER = os.getenv("UNIFIED_API_AGENT_STUDIO_TEMPORAL_WORKER", "true").lower() in (
     "true",
     "1",

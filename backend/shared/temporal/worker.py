@@ -45,6 +45,24 @@ def is_team_worker_alive(team: str) -> bool:
     return thread is not None and thread.is_alive()
 
 
+def is_team_worker_ready(team: str) -> bool:
+    """Return whether ``team``'s Temporal worker is connected and polling.
+
+    ``start_team_worker`` returns True as soon as the daemon thread is spawned;
+    connect happens asynchronously. This is the non-blocking counterpart of
+    :func:`wait_for_team_worker_ready`: False while the thread exists but has
+    not finished connecting, and False if the thread has exited.
+
+    Preconditions:
+        - ``team`` is a non-empty team key (unknown teams report False).
+    Postconditions:
+        - Returns True iff a live worker thread is registered for ``team`` and
+          that team's ready event is set. Never raises. Never blocks.
+    """
+    event = _worker_ready.get(team)
+    return is_team_worker_alive(team) and event is not None and event.is_set()
+
+
 def wait_for_team_worker_ready(team: str, timeout_s: float | None = None) -> None:
     """Block until ``team``'s worker has connected (ready event set).
 
