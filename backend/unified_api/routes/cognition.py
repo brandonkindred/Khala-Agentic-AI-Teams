@@ -50,7 +50,7 @@ from agent_cognition.models import (
 )
 from agent_cognition.rules import store
 from agent_cognition.rules.store import RuleStoreError
-from agent_console import resolve_author
+from agent_platform.console import resolve_author
 
 logger = logging.getLogger(__name__)
 

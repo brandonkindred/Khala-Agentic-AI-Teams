@@ -1,7 +1,13 @@
-# agent_console
+# agent_platform.console
 
 Phase 3 data layer for the Agent Console Runner. Lives **in-process** inside
 the unified API (like `agent_platform.registry`) — it is not a team container.
+
+Import the façade with a fully-qualified dotted path:
+
+```python
+from agent_platform.console import get_store, resolve_author, unified_json_diff
+```
 
 ## What it owns
 
@@ -43,7 +49,7 @@ Routes are mounted on the unified API from
 
 Reuses `shared.postgres` exactly like blogging and branding:
 
-- `SCHEMA: TeamSchema` exported from `agent_console.postgres` (pure data).
+- `SCHEMA: TeamSchema` exported from `agent_platform.console.postgres` (pure data).
 - `register_team_schemas(SCHEMA)` called once from the unified API lifespan.
 - `get_conn()` for queries; `@timed_query(store="agent_console", op=...)` for
   slow-query logging.
@@ -80,14 +86,14 @@ Hermetic (no Postgres):
 
 ```bash
 cd backend
-python3 -m pytest agents/agent_console/tests/test_diff.py agents/agent_console/tests/test_author.py --asyncio-mode=auto
+python3 -m pytest agents/agent_platform/console/tests/test_diff.py agents/agent_platform/console/tests/test_author.py --asyncio-mode=auto
 ```
 
 Live Postgres (skipped when `POSTGRES_HOST` unset):
 
 ```bash
 POSTGRES_HOST=localhost POSTGRES_USER=postgres POSTGRES_PASSWORD=postgres \
-POSTGRES_DB=postgres python3 -m pytest agents/agent_console/tests/ --asyncio-mode=auto
+POSTGRES_DB=postgres python3 -m pytest agents/agent_platform/console/tests/ --asyncio-mode=auto
 ```
 
 Route tests stub the store with an in-memory fake so `test_saved_inputs_route`

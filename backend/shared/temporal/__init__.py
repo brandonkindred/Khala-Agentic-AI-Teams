@@ -55,6 +55,7 @@ from shared.temporal.runner import (
 from shared.temporal.teams_registry import TEAM_TEMPORAL_MODULES, start_all_team_workers
 from shared.temporal.worker import (
     is_team_worker_alive,
+    is_team_worker_ready,
     start_team_worker,
     wait_for_team_worker_ready,
 )
@@ -78,6 +79,7 @@ __all__ = [
     "is_final_attempt",
     "is_last_attempt",
     "is_team_worker_alive",
+    "is_team_worker_ready",
     "is_temporal_enabled",
     "json_safe",
     "load_checkpoint",

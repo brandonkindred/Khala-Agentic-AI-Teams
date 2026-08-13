@@ -23,9 +23,9 @@ if str(_agents) not in sys.path:
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from agent_console import AgentConsoleStorageUnavailable
-from agent_console.models import SavedInput
-from agent_console.store import SavedInputNameConflict
+from agent_platform.console import AgentConsoleStorageUnavailable
+from agent_platform.console.models import SavedInput
+from agent_platform.console.store import SavedInputNameConflict
 
 
 class _FakeStore:

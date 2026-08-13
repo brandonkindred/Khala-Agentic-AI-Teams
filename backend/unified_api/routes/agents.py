@@ -38,14 +38,14 @@ from agent_cognition.invoke_gate import (
     prepare_invoke,
 )
 from agent_cognition.tools.envelope import ENVELOPE_MARKER
-from agent_console import (
+from agent_platform.console import (
     AgentConsoleStorageUnavailable,
     RunRecord,
     RunSummary,
     get_store,
     resolve_author,
 )
-from agent_console.models import RunCreate
+from agent_platform.console.models import RunCreate
 from agent_platform.registry import AgentDetail, AgentSummary, TeamGroup, get_registry
 from agent_platform.registry.schema_resolver import SchemaResolutionError, resolve_schema
 from agent_platform.sandbox import (

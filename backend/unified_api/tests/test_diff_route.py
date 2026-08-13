@@ -18,7 +18,7 @@ if str(_agents) not in sys.path:
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from agent_console.models import RunRecord, SavedInput
+from agent_platform.console.models import RunRecord, SavedInput
 
 
 class _FakeStore:

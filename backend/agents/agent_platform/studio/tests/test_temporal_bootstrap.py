@@ -147,8 +147,8 @@ def test_worker_module_exposes_lifespan_entrypoint():
 
 def test_worker_start_delegates_to_start_team_worker(monkeypatch):
     """The no-arg func delegates to ``start_team_worker`` with the team's own task
-    queue and returns its result. No ``is_temporal_enabled`` guard — Agent Studio
-    assumes Temporal is always configured."""
+    queue and returns its result. No ``is_temporal_enabled`` guard here —
+    ``start_team_worker`` already no-ops when Temporal is unset."""
     from agent_platform.studio.temporal import ACTIVITIES, TASK_QUEUE, WORKFLOWS
     from agent_platform.studio.temporal import worker as worker_mod
 

@@ -79,7 +79,7 @@ Every row carries:
 
 - `id TEXT PRIMARY KEY` — UUID4 hex assigned by the store.
 - `author TEXT NOT NULL` — handle from
-  `agent_console.author.resolve_author()`. When real auth lands we can
+  `agent_platform.console.author.resolve_author()`. When real auth lands we can
   migrate both `agent_console` and `product_delivery` rows to user ids
   in a single pass.
 - `created_at` / `updated_at TIMESTAMPTZ`.
@@ -143,8 +143,8 @@ psql -h localhost -U postgres -c "\dt product_delivery_*"
 - `tests/test_api.py` — FastAPI routes with the store overridden via
   `app.dependency_overrides`-style monkeypatch on `get_store`.
 - `tests/test_store.py` — integration tests against a live Postgres,
-  auto-skipped when `POSTGRES_HOST` is unset (matches the agent_console
-  pattern).
+  auto-skipped when `POSTGRES_HOST` is unset (matches the
+  `agent_platform.console` pattern).
 - `software_engineering_team/tests/test_release_hook.py` — covers
   `_maybe_ship_sprint_release` (no-op on non-sprint runs, skip on open
   stories, ship on completion, non-fatal on agent failure).

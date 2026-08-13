@@ -96,8 +96,8 @@ def test_multi_file_surface_through_coordinator_preserves_per_file_line_citation
     body_a = surface.blocks["mod_a.py"]
     body_b = surface.blocks["mod_b.py"]
 
-    m_a = re.search(r"^(\d+): ", body_a, re.M)
-    m_b = re.search(r"^(\d+): ", body_b, re.M)
+    m_a = re.search(r"^[ ]*(\d+)[:|] ", body_a, re.M)
+    m_b = re.search(r"^[ ]*(\d+)[:|] ", body_b, re.M)
     assert m_a is not None and m_b is not None, "test premise: both bodies must be pre-numbered"
     cited_line_a = int(m_a.group(1))
     cited_line_b = int(m_b.group(1))
