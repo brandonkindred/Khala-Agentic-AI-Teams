@@ -36,7 +36,13 @@ from typing import Any, Callable, TypeVar
 
 from pydantic import BaseModel, ValidationError
 
-from .interface import LLMClient, LLMJsonParseError, LLMSchemaValidationError, LLMTruncatedError
+from .interface import (
+    LLMClient,
+    LLMJsonParseError,
+    LLMSchemaValidationError,
+    LLMTruncatedError,
+    take_complete_json_raw,
+)
 from .util import sha256_fingerprint
 
 logger = logging.getLogger(__name__)
@@ -191,15 +197,20 @@ def complete_json_response_text(client: LLMClient, data: Any) -> str:
     """Best-effort text of a successful ``complete_json`` reply for observers.
 
     Preconditions:
-        ``data`` is the dict ``complete_json`` returned.
+        ``data`` is the dict ``complete_json`` returned. ``client`` is the
+        instance that just returned ``data`` (kept for call-site compatibility;
+        raw text is not read from the client object).
 
     Postconditions:
-        Returns ``client.last_complete_json_raw`` when that is a non-empty
-        string (the model text before parse/unwrap, including fences the
-        shared parser stripped). Otherwise serializes ``data``. Never raises.
+        Returns the per-call raw JSON recorded by the provider client on this
+        context (the model text before parse/unwrap, including fences the
+        shared parser stripped) when that recording is non-empty. Otherwise
+        serializes ``data``. Never raises. The recording is consumed so a
+        later sequential call on the same thread cannot reuse it.
     """
-    raw = getattr(client, "last_complete_json_raw", None)
-    if isinstance(raw, str) and raw:
+    del client  # raw text lives on a ContextVar, not shared client state
+    raw = take_complete_json_raw()
+    if raw:
         return raw
     try:
         return json.dumps(data, default=str)
@@ -254,7 +265,7 @@ def complete_validated(
             came back (the full raw reply on a parse failure when the raise
             site captured it, else the truncated preview; ``partial_content``
             on :class:`LLMTruncatedError`; the model text before parse/unwrap
-            when the client recorded ``last_complete_json_raw``, else the
+            when the provider recorded it on this call's context, else the
             serialized parsed JSON on a validation failure or on success).
             ``None`` (the default) does nothing extra; a caller that wants a
             durable per-call transcript covering every attempt (not just the

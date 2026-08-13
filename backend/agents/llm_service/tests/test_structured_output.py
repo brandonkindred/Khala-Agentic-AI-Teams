@@ -13,6 +13,7 @@ from llm_service.interface import (
     LLMJsonParseError,
     LLMSchemaValidationError,
     LLMTruncatedError,
+    record_complete_json_raw,
 )
 from llm_service.structured import complete_validated
 
@@ -420,13 +421,15 @@ def test_on_attempt_called_for_truncated_complete_json():
     assert attempts == [("prompt", '{"selected_option_id":')]
 
 
-def test_on_attempt_prefers_last_complete_json_raw_over_reserialized_dict():
+def test_on_attempt_prefers_recorded_complete_json_raw_over_reserialized_dict():
     """Successful complete_json may unwrap fenced JSON; the observer must
-    see the model text, not json.dumps of the parsed dict."""
+    see the model text, not json.dumps of the parsed dict. Raw text is
+    stored per-call on a ContextVar so concurrent users of one client
+    cannot overwrite each other's observer payload."""
 
     class _FencedClient(LLMClient):
         def complete_json(self, prompt, **kwargs):
-            self.last_complete_json_raw = (
+            record_complete_json_raw(
                 '```json\n{"selected_option_id": "opt-a", "rationale": "x"}\n```'
             )
             return {"selected_option_id": "opt-a", "rationale": "x"}
@@ -442,6 +445,78 @@ def test_on_attempt_prefers_last_complete_json_raw_over_reserialized_dict():
     assert len(attempts) == 1
     assert attempts[0][1].startswith("```json")
     assert '"selected_option_id": "opt-a"' in attempts[0][1]
+
+
+def test_complete_json_raw_is_isolated_across_threads():
+    """Two concurrent complete_json calls on one client must each observe
+    their own raw text. Instance attributes on the shared client would
+    let the slower observer read the later call's body."""
+    import threading
+
+    barrier = threading.Barrier(2)
+
+    class _SharedClient(LLMClient):
+        def complete_json(self, prompt, **kwargs):
+            record_complete_json_raw(prompt)
+            barrier.wait()
+            return {"selected_option_id": "opt-a", "rationale": prompt}
+
+    client = _SharedClient()
+    seen: list[str | None] = [None, None]
+
+    def _run(index: int, raw: str) -> None:
+        attempts: list[str] = []
+        complete_validated(
+            client,
+            raw,
+            objective="test",
+            schema=FounderAnswer,
+            on_attempt=lambda _p, r: attempts.append(r),
+        )
+        seen[index] = attempts[0]
+
+    t1 = threading.Thread(target=_run, args=(0, "raw-aaaa"))
+    t2 = threading.Thread(target=_run, args=(1, "raw-bbbb"))
+    t1.start()
+    t2.start()
+    t1.join()
+    t2.join()
+    assert seen == ["raw-aaaa", "raw-bbbb"]
+
+
+def test_complete_json_raw_is_consumed_so_later_calls_do_not_reuse_it():
+    """take_complete_json_raw clears the slot; a later call that does not
+    record raw text must serialize its dict instead of leaking the prior body."""
+
+    class _OnceRawClient(LLMClient):
+        def __init__(self) -> None:
+            self.n = 0
+
+        def complete_json(self, prompt, **kwargs):
+            self.n += 1
+            if self.n == 1:
+                record_complete_json_raw("RAW-FIRST")
+            return {"selected_option_id": "opt-a", "rationale": prompt}
+
+    attempts: list[str] = []
+    client = _OnceRawClient()
+    complete_validated(
+        client,
+        "first",
+        objective="test",
+        schema=FounderAnswer,
+        on_attempt=lambda _p, r: attempts.append(r),
+    )
+    complete_validated(
+        client,
+        "second",
+        objective="test",
+        schema=FounderAnswer,
+        on_attempt=lambda _p, r: attempts.append(r),
+    )
+    assert attempts[0] == "RAW-FIRST"
+    assert attempts[1] != "RAW-FIRST"
+    assert '"rationale": "second"' in attempts[1]
 
 
 def test_context_is_isolated_across_retry_attempts():

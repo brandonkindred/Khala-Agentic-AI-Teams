@@ -52,6 +52,7 @@ from ..interface import (
     LLMRateLimitError,
     LLMTemporaryError,
     LLMTruncatedError,
+    record_complete_json_raw,
 )
 from ..telemetry import record_llm_call
 from ..util import extract_json_from_response
@@ -714,7 +715,7 @@ class ClaudeLLMClient(LLMClient):
                     status="success", message=message, latency_ms=latency_ms, caller=caller
                 )
                 return value
-            self.last_complete_json_raw = value
+            record_complete_json_raw(value)
             try:
                 result = extract_json_from_response(value)
             except LLMJsonParseError:

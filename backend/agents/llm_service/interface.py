@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 from abc import ABC, abstractmethod
+from contextvars import ContextVar
 from typing import Any, Dict, Optional
 
 from pydantic import BaseModel
@@ -243,6 +244,46 @@ class LLMTruncatedError(LLMError):
         self.partial_content = partial_content
         self.finish_reason = finish_reason
         self.think_used = think_used
+
+
+_complete_json_raw_var: ContextVar[str | None] = ContextVar("complete_json_raw", default=None)
+"""Per-call raw JSON text from the most recent ``complete_json`` on this context.
+
+Shared ``LLMClient`` instances are reused across concurrent code-review chunk
+and tail-pass calls. Storing the last raw response on the client object would
+let one call overwrite another's text before the observer reads it. A
+``ContextVar`` is isolated per asyncio task and per thread, matching
+``llm_service.attribution``.
+"""
+
+
+def record_complete_json_raw(text: str) -> None:
+    """Store the raw JSON response for the current call on this context.
+
+    Preconditions:
+        - ``text`` is the provider's response body before JSON parse (may be empty).
+    Postconditions:
+        - ``take_complete_json_raw`` on the same context returns ``text`` until
+          it is taken or overwritten by a later ``record_complete_json_raw``.
+    """
+    _complete_json_raw_var.set(text)
+
+
+def take_complete_json_raw() -> str:
+    """Return and clear the raw JSON recorded on this context.
+
+    Preconditions:
+        - none; missing or empty recordings are treated as no raw text.
+    Postconditions:
+        - returns the last recorded string, or ``""`` when none was recorded.
+        - this context's slot is cleared so a later sequential call on the
+          same thread cannot reuse a previous call's raw text.
+    """
+    raw = _complete_json_raw_var.get()
+    _complete_json_raw_var.set(None)
+    if not raw:
+        return ""
+    return raw
 
 
 # Message used when Ollama 429 indicates weekly usage limit exceeded (for logging and job state)

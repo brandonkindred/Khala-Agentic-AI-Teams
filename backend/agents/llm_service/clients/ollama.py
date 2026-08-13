@@ -45,6 +45,7 @@ from ..interface import (
     LLMSemanticExhaustionError,
     LLMTemporaryError,
     LLMTruncatedError,
+    record_complete_json_raw,
 )
 from ..limit_classification import classify_ollama_limit_kind
 from ..telemetry import record_llm_call
@@ -1833,7 +1834,7 @@ class OllamaLLMClient(LLMClient):
                 raise LLMTemporaryError(
                     "Empty response from LLM after retries; try again or pass think=False if thinking is enabled."
                 )
-            self.last_complete_json_raw = content
+            record_complete_json_raw(content)
             result = self._extract_json(content)
             self._record_telemetry(status="success", prompt_text=prompt, response_text=content)
             return result

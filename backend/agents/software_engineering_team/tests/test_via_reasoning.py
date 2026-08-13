@@ -7,7 +7,12 @@ from typing import Any, Optional
 import pytest
 from pydantic import BaseModel
 
-from llm_service.interface import LLMClient, LLMPermanentError, LLMSemanticExhaustionError
+from llm_service.interface import (
+    LLMClient,
+    LLMPermanentError,
+    LLMSemanticExhaustionError,
+    LLMTruncatedError,
+)
 from software_engineering_team.code_review_agent.via_reasoning import (
     complete_validated_via_reasoning_local,
     formatting_system_prompt_with_untrusted_guard,
@@ -195,6 +200,28 @@ def test_validated_via_reasoning_empty_prose_still_notifies_on_attempt() -> None
             on_attempt=lambda prompt, response: seen.append((prompt, response)),
         )
     assert seen == [("Review this code", "")]
+    assert client.format_calls == []
+
+
+def test_validated_via_reasoning_truncated_complete_still_notifies_on_attempt() -> None:
+    """A truncated reasoning complete() is still an LLM call; the observer
+    must see partial_content before LLMTruncatedError is re-raised so the
+    transcript records the attempt that coordinator recovery may retry."""
+    client = _RecordingClient(
+        complete_error=LLMTruncatedError("hit max_tokens", partial_content="PARTIAL REVIEW")
+    )
+    seen: list[tuple[str, str]] = []
+    with pytest.raises(LLMTruncatedError, match="hit max_tokens"):
+        complete_validated_via_reasoning_local(
+            client,
+            schema=_Out,
+            reasoning_prompt="Review this code",
+            reasoning_system_prompt="Prose only.",
+            formatting_instructions="JSON shape here",
+            objective="review code chunk",
+            on_attempt=lambda prompt, response: seen.append((prompt, response)),
+        )
+    assert seen == [("Review this code", "PARTIAL REVIEW")]
     assert client.format_calls == []
 
 
@@ -449,6 +476,39 @@ def test_run_agent_via_reasoning_empty_prose_still_notifies_on_reasoning_agent(
     model = LLMClientModel(DummyLLMClient(), agent_key="code_review")
 
     with pytest.raises(LLMSemanticExhaustionError, match="no usable assistant content"):
+        run_agent_via_reasoning(
+            model=model,
+            reasoning_prompt="Review this",
+            reasoning_system_prompt="Prose reviewer",
+            formatting_instructions='Return {"approved": bool, "summary": str}',
+            parse=lambda raw: _Out.model_validate_json(raw),
+            on_reasoning_agent=lambda agent: seen.append(agent.messages),
+        )
+    assert len(seen) == 1
+
+
+def test_run_agent_via_reasoning_truncated_reasoning_still_notifies_on_reasoning_agent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """on_reasoning_agent must run when the reasoning Agent raises
+    LLMTruncatedError so the caller can record the partial conversation."""
+    from llm_service import LLMClientModel
+    from llm_service.clients.dummy import DummyLLMClient
+    from software_engineering_team.code_review_agent import via_reasoning as vr_mod
+
+    seen: list[Any] = []
+
+    class _RecordingAgent:
+        def __init__(self, **kwargs: Any) -> None:
+            self.messages = [{"role": "assistant", "content": [{"text": "PARTIAL"}]}]
+
+        def __call__(self, prompt: str) -> str:
+            raise LLMTruncatedError("hit max_tokens", partial_content="PARTIAL")
+
+    monkeypatch.setattr(vr_mod, "Agent", _RecordingAgent)
+    model = LLMClientModel(DummyLLMClient(), agent_key="code_review")
+
+    with pytest.raises(LLMTruncatedError, match="hit max_tokens"):
         run_agent_via_reasoning(
             model=model,
             reasoning_prompt="Review this",
@@ -801,6 +861,44 @@ def test_run_agent_via_reasoning_on_formatting_sees_raw_on_json_parse_error(
 
     assert len(seen) == 1
     assert seen[0][1] == "not json at all"
+
+
+def test_run_agent_via_reasoning_on_formatting_sees_partial_on_truncated_complete_json(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A truncated formatting complete_json still notifies on_formatting."""
+    from llm_service import LLMClientModel
+    from llm_service.clients.dummy import DummyLLMClient
+    from software_engineering_team.code_review_agent import via_reasoning as vr_mod
+
+    seen: list[tuple[str, str]] = []
+
+    class _FailingClient(DummyLLMClient):
+        def complete_json(self, prompt: str, **kwargs: Any) -> dict[str, Any]:
+            raise LLMTruncatedError("hit max_tokens", partial_content='{"approved":')
+
+    class _RecordingAgent:
+        def __init__(self, **kwargs: Any) -> None:
+            pass
+
+        def __call__(self, prompt: str) -> str:
+            return "REVIEW PROSE"
+
+    monkeypatch.setattr(vr_mod, "Agent", _RecordingAgent)
+    model = LLMClientModel(_FailingClient(), agent_key="code_review")
+
+    with pytest.raises(LLMTruncatedError, match="hit max_tokens"):
+        run_agent_via_reasoning(
+            model=model,
+            reasoning_prompt="Review this",
+            reasoning_system_prompt="Prose reviewer",
+            formatting_instructions='Return {"approved": bool, "summary": str}',
+            parse=lambda raw: _Out.model_validate_json(raw),
+            on_formatting=lambda prompt, response: seen.append((prompt, response)),
+        )
+
+    assert len(seen) == 1
+    assert seen[0][1] == '{"approved":'
 
 
 def test_run_agent_via_reasoning_on_formatting_exception_is_swallowed(
