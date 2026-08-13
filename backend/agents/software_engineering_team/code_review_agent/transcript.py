@@ -167,28 +167,52 @@ def record_transcript_entry(
           can never grow this process's memory without bound. The recorded
           ``prompt`` field is ``prompt`` prefixed with a ``[system]``/``[user]``
           section split when ``system_prompt`` is non-blank, else ``prompt``
-          unchanged. Never raises.
+          unchanged. Never raises: any failure in buffering is logged and
+          swallowed so transcript recording cannot break a review.
     """
-    job_id = current_attribution().job_id
-    if not job_id or not is_postgres_enabled():
-        return
-    full_prompt = f"[system]\n{system_prompt}\n\n[user]\n{prompt}" if system_prompt else prompt
-    started_at = datetime.now(timezone.utc) - timedelta(milliseconds=max(duration_ms, 0.0))
-    entry = {
-        "stage": stage,
-        "target": target,
-        "model": model,
-        "prompt": full_prompt,
-        "response": response,
-        "started_at": started_at.isoformat(),
-        "duration_ms": int(duration_ms),
-    }
-    _enqueue(job_id, entry)
+    try:
+        job_id = current_attribution().job_id
+        if not job_id or not is_postgres_enabled():
+            return
+        full_prompt = f"[system]\n{system_prompt}\n\n[user]\n{prompt}" if system_prompt else prompt
+        started_at = datetime.now(timezone.utc) - timedelta(milliseconds=max(duration_ms, 0.0))
+        entry = {
+            "stage": stage,
+            "target": target,
+            "model": model,
+            "prompt": full_prompt,
+            "response": response,
+            "started_at": started_at.isoformat(),
+            "duration_ms": int(duration_ms),
+        }
+        _enqueue(job_id, entry)
+    except Exception:  # noqa: BLE001 - transcript recording must never break the caller
+        logger.warning("code review transcript: failed to buffer an entry", exc_info=True)
+
+
+def _note_overflow(dropped: int) -> bool:
+    """Update the overflow-warning throttle. Caller must hold ``_buffer_lock``.
+
+    Preconditions:
+        - ``dropped`` is the number of entries just evicted (>= 0).
+        - ``_buffer_lock`` is held so ``_overflow_warned`` is not raced.
+    Postconditions:
+        - Returns True iff the caller should emit one overflow warning.
+          A burst of overflows logs once; a later non-overflowing enqueue
+          resets the throttle so the next burst can warn again.
+    """
+    global _overflow_warned
+    overflowed = dropped > 0
+    should_warn = overflowed and not _overflow_warned
+    if should_warn:
+        _overflow_warned = True
+    elif not overflowed:
+        _overflow_warned = False
+    return should_warn
 
 
 def _enqueue(job_id: str, entry: dict[str, Any]) -> None:
     """Append one ``(job_id, entry)`` pair to the buffer, dropping oldest on overflow."""
-    global _overflow_warned
     cap = _max_buffer()
     with _buffer_lock:
         _buffer.append((job_id, entry))
@@ -196,12 +220,7 @@ def _enqueue(job_id: str, entry: dict[str, Any]) -> None:
         while len(_buffer) > cap:
             _buffer.popleft()
             dropped += 1
-        overflowed = dropped > 0
-        should_warn = overflowed and not _overflow_warned
-        if should_warn:
-            _overflow_warned = True
-        elif not overflowed:
-            _overflow_warned = False
+        should_warn = _note_overflow(dropped)
     if should_warn:
         logger.warning(
             "code review transcript buffer full (cap=%d); dropping oldest %d entry(ies)",
@@ -274,7 +293,6 @@ def _requeue(entries: list[tuple[str, dict[str, Any]]]) -> None:
     a sustained outage degrades to "drop the oldest," never unbounded memory
     growth, matching :func:`_enqueue`'s contract.
     """
-    global _overflow_warned
     cap = _max_buffer()
     with _buffer_lock:
         # extendleft reverses input order one item at a time, so reverse first
@@ -284,12 +302,7 @@ def _requeue(entries: list[tuple[str, dict[str, Any]]]) -> None:
         while len(_buffer) > cap:
             _buffer.popleft()
             dropped += 1
-        overflowed = dropped > 0
-        should_warn = overflowed and not _overflow_warned
-        if should_warn:
-            _overflow_warned = True
-        elif not overflowed:
-            _overflow_warned = False
+        should_warn = _note_overflow(dropped)
     if should_warn:
         logger.warning(
             "code review transcript buffer full (cap=%d) after requeuing failed writes; "

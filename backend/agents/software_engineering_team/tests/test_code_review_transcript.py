@@ -295,6 +295,20 @@ def test_overlapping_drains_wait_for_in_flight_persist(monkeypatch) -> None:
     assert not t1.is_alive() and not t2.is_alive()
 
 
+def test_record_never_raises_when_enqueue_fails(monkeypatch, caplog) -> None:
+    """record_transcript_entry's contract is never-raises — a buffer failure
+    must not propagate into the review pipeline."""
+    caplog.set_level("WARNING", logger="software_engineering_team.code_review_agent.transcript")
+
+    def _boom(*_a, **_kw):
+        raise RuntimeError("enqueue failed")
+
+    monkeypatch.setattr(transcript, "_enqueue", _boom)
+    with llm_attribution(job_id="job-1"):
+        transcript.record_transcript_entry("chunk_review", "a.py", "p", "r")
+    assert any("failed to buffer" in r.message for r in caplog.records)
+
+
 def test_register_starts_heartbeat_idempotently() -> None:
     started: list = []
     real_start = transcript.BackgroundHeartbeat.start

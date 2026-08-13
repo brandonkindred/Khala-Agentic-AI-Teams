@@ -219,11 +219,12 @@ def append_review_transcript_entries(job_id: str, entries: list[dict[str, Any]])
     it — see :func:`code_review_agent.transcript._drain`.
 
     Preconditions:
-        - ``job_id`` is a review job's id; ``entries`` is a non-empty list of
+        - ``job_id`` is a review job's id; ``entries`` is a list of
           JSON-serializable dicts (stage/target/model/prompt/response/
           started_at/duration_ms — see
           ``code_review_agent.transcript.record_transcript_entry``), in the
-          order they should appear in the transcript.
+          order they should appear in the transcript. An empty list is
+          allowed and is a no-op (see Postconditions).
     Postconditions:
         - On success, ``entries`` is appended (in order) to the end of that
           job's ``code_review_transcripts.entries`` array, creating the row
