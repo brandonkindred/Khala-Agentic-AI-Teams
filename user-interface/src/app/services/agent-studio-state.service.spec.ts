@@ -242,6 +242,28 @@ describe('AgentStudioStateService', () => {
       expect(service.isDirty()).toBe(false);
     });
 
+    it('markSaved records a snapshot that may differ from the current handoff', () => {
+      service.setTeamId('team-1');
+      service.markSaved({
+        registryAgentId: null,
+        teamId: 'team-1',
+        processId: null,
+        personaId: null,
+        draftAgentId: null,
+      });
+      expect(service.isDirty()).toBe(false);
+      service.setTeamId('team-2');
+      service.markSaved({
+        registryAgentId: null,
+        teamId: 'team-1',
+        processId: null,
+        personaId: null,
+        draftAgentId: null,
+      });
+      expect(service.isDirty()).toBe(true);
+      expect(service.teamId()).toBe('team-2');
+    });
+
     it('becomes dirty again when an id changes after markClean', () => {
       service.setTeamId('team-1');
       service.markClean();

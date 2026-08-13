@@ -306,13 +306,24 @@ export class AgentStudioStateService {
   }
 
   /**
+   * Record `snapshot` as the last successfully persisted handoff.
+   *
+   * Preconditions: none — `snapshot` is a full five-id handoff.
+   * Postconditions: `lastSavedHandoff` equals `snapshot`; `isDirty()` is true
+   *   iff the current handoff differs from `snapshot`.
+   */
+  markSaved(snapshot: AgentStudioHandoffState): void {
+    this.lastSavedHandoff.set({ ...snapshot });
+  }
+
+  /**
    * Record the current handoff as the last saved/loaded snapshot.
    *
    * Preconditions: none.
    * Postconditions: `isDirty()` is `false` until a later handoff-id write.
    */
   markClean(): void {
-    this.lastSavedHandoff.set({ ...this.handoff() });
+    this.markSaved(this.handoff());
   }
 
   /**

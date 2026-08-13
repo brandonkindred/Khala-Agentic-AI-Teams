@@ -406,6 +406,53 @@ describe('AgentStudioShellComponent', () => {
       component.loadDraft('d-1');
       expect(agentStudioApi.getDraft).not.toHaveBeenCalled();
       expect(component.state.registryAgentId()).toBe('local-1');
+      expect(component.loadingDraft()).toBe(false);
+    });
+
+    it('Save first keeps loadingDraft true for the duration of the PUT', () => {
+      component.state.setRegistryAgentId('local-1');
+      component.state.setCurrentDraft('bound-1', 'Bound');
+      openSpy.mockReturnValue({ afterClosed: () => of('save') } as unknown as ReturnType<MatDialog['open']>);
+      const pending = new Subject<AgentStudioDraftSummary>();
+      agentStudioApi.updateDraft.mockReturnValue(pending.asObservable());
+      agentStudioApi.getDraft.mockReturnValue(of(draft({ registryAgentId: 'reg-1' })));
+      component.loadDraft('d-1');
+      expect(component.loadingDraft()).toBe(true);
+      expect(agentStudioApi.getDraft).not.toHaveBeenCalled();
+      pending.next({ draft_id: 'bound-1', name: 'Bound', updated_at: '2026-01-01T00:00:00Z' });
+      pending.complete();
+      expect(agentStudioApi.getDraft).toHaveBeenCalledWith('d-1');
+      expect(component.loadingDraft()).toBe(false);
+    });
+
+    it('Save first does not hydrate when the handoff changes during the PUT', () => {
+      component.state.setRegistryAgentId('local-1');
+      component.state.setCurrentDraft('bound-1', 'Bound');
+      openSpy.mockReturnValue({ afterClosed: () => of('save') } as unknown as ReturnType<MatDialog['open']>);
+      const pending = new Subject<AgentStudioDraftSummary>();
+      agentStudioApi.updateDraft.mockReturnValue(pending.asObservable());
+      component.loadDraft('d-1');
+      component.state.setRegistryAgentId('local-2');
+      pending.next({ draft_id: 'bound-1', name: 'Bound', updated_at: '2026-01-01T00:00:00Z' });
+      pending.complete();
+      expect(agentStudioApi.getDraft).not.toHaveBeenCalled();
+      expect(component.state.registryAgentId()).toBe('local-2');
+      expect(component.state.isDirty()).toBe(true);
+      expect(component.loadingDraft()).toBe(false);
+    });
+
+    it('a second Load during save-first PUT is a no-op', () => {
+      component.state.setRegistryAgentId('local-1');
+      component.state.setCurrentDraft('bound-1', 'Bound');
+      openSpy.mockReturnValue({ afterClosed: () => of('save') } as unknown as ReturnType<MatDialog['open']>);
+      const pending = new Subject<AgentStudioDraftSummary>();
+      agentStudioApi.updateDraft.mockReturnValue(pending.asObservable());
+      component.loadDraft('d-1');
+      expect(openSpy).toHaveBeenCalledTimes(1);
+      component.loadDraft('d-2');
+      expect(openSpy).toHaveBeenCalledTimes(1);
+      expect(agentStudioApi.getDraft).not.toHaveBeenCalled();
+      pending.complete();
     });
 
     it('Save first when unbound opens the save dialog; cancel aborts the load', () => {

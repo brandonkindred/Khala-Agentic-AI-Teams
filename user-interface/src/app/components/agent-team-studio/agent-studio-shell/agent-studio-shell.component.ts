@@ -289,26 +289,34 @@ export class AgentStudioShellComponent {
    * Preconditions: caller has already chosen `'save'` from the conflict
    *   dialog; `draftId` is the draft to load after a successful persist.
    * Postconditions: when bound (`currentDraftId` + `currentDraftName`), PUTs
-   *   via `saveDraft`, `markClean`s on success, then hydrates. On PUT
-   *   error, does not hydrate. When unbound, opens the Save-draft dialog;
-   *   truthy result hydrates, empty/cancel aborts with no hydrate.
+   *   via `saveDraft` with `loadingDraft()` true for the whole PUT+hydrate.
+   *   On success, records the submitted snapshot as saved; hydrates only if
+   *   the handoff still matches that snapshot. Concurrent edits stay dirty
+   *   and are not overwritten. On PUT error, does not hydrate and
+   *   `loadingDraft()` returns to false. When unbound, opens the Save-draft
+   *   dialog; truthy result hydrates, empty/cancel aborts with no hydrate.
    */
   private saveFirstThenHydrate(draftId: string): void {
     const boundId = this.state.currentDraftId();
     const boundName = this.state.currentDraftName();
     if (boundId && boundName) {
-      this.facade
-        .saveDraft({ name: boundName, payload: { ...this.state.handoff() } }, boundId)
-        .subscribe({
-          next: (summary) => {
-            this.state.setCurrentDraft(summary.draft_id, summary.name);
-            this.state.markClean();
-            this.fetchAndHydrate(draftId);
-          },
-          error: () => {
-            // Global HTTP interceptor toasts. Do not hydrate.
-          },
-        });
+      this.loadingDraft.set(true);
+      const submitted = { ...this.state.handoff() };
+      this.facade.saveDraft({ name: boundName, payload: submitted }, boundId).subscribe({
+        next: (summary) => {
+          this.state.setCurrentDraft(summary.draft_id, summary.name);
+          this.state.markSaved(submitted);
+          if (this.state.isDirty()) {
+            this.loadingDraft.set(false);
+            return;
+          }
+          this.fetchAndHydrate(draftId);
+        },
+        error: () => {
+          this.loadingDraft.set(false);
+          // Global HTTP interceptor toasts. Do not hydrate.
+        },
+      });
       return;
     }
     this.openSaveDraftDialog().subscribe((result) => {
@@ -332,7 +340,6 @@ export class AgentStudioShellComponent {
    *   its response instead of applying it.
    */
   private fetchAndHydrate(draftId: string): void {
-    if (this.loadingDraft()) return;
     this.loadingDraft.set(true);
     const token = ++this.loadDraftToken;
     this.facade.loadDraft(draftId).subscribe({
