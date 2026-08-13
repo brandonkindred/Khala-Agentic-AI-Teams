@@ -14,9 +14,13 @@ import shared.temporal.worker as worker
 def _clean_worker_registry():
     worker._worker_threads.clear()
     worker._worker_ready.clear()
+    worker._workers.clear()
+    worker._worker_loops.clear()
     yield
     worker._worker_threads.clear()
     worker._worker_ready.clear()
+    worker._workers.clear()
+    worker._worker_loops.clear()
 
 
 def test_is_team_worker_alive_false_when_unregistered():
@@ -172,6 +176,8 @@ async def test_run_worker_async_sets_ready_event_after_connect(monkeypatch):
 
         async def run(self):
             assert ready.is_set(), "ready must be set before Worker.run"
+            assert "async-team" in worker._workers
+            assert "async-team" in worker._worker_loops
             return None
 
     monkeypatch.setattr("temporalio.worker.Worker", _FakeWorker)
@@ -185,3 +191,5 @@ async def test_run_worker_async_sets_ready_event_after_connect(monkeypatch):
     )
 
     assert ready.is_set()
+    assert "async-team" not in worker._workers
+    assert "async-team" not in worker._worker_loops
