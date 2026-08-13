@@ -58,9 +58,11 @@ _HEADER_LIKE_LINE = re.compile(r"^###[ \t]+\S[^\n]*[ \t]+###[ \t]*$", re.MULTILI
 
 # Pruned when snapshotting the worktree so a later build-verifier revert can
 # restore every file the verifier mutated without walking dependency / VCS /
-# artifact trees. Matches ``build_fix._BUILD_FIX_EXCLUDE_DIRS`` plus venvs.
+# artifact trees. Must match ``build_fix._BUILD_FIX_EXCLUDE_DIRS`` exactly:
+# the production fixer can write any path it does not prune, including
+# files under ``venv/`` / ``.venv/``.
 _WORKTREE_SNAPSHOT_EXCLUDE_DIRS = frozenset(
-    {".git", "node_modules", "dist", "build", "__pycache__", ".angular", "venv", ".venv"}
+    {"node_modules", ".git", "dist", "build", "__pycache__", ".angular"}
 )
 
 
@@ -181,6 +183,15 @@ def _revert_disk(prior_disk: Dict[Path, Optional[bytes]]) -> None:
             logger.warning("Failed to revert %s to its prior state (ignored): %s", full_path, exc)
 
 
+def _raise_walk_error(err: OSError) -> None:
+    """Re-raise a walk error so ``os.walk`` cannot swallow a partial scan.
+
+    Postconditions:
+        Always raises ``err``.
+    """
+    raise err
+
+
 def _iter_worktree_files(root: Path) -> Iterator[Path]:
     """Yield resolved regular-file paths under ``root``, pruning excluded dirs.
 
@@ -193,7 +204,7 @@ def _iter_worktree_files(root: Path) -> Iterator[Path]:
         the caller so a "never fails" phase can skip rather than proceed with
         a partial snapshot.
     """
-    for dirpath, dirnames, filenames in os.walk(root):
+    for dirpath, dirnames, filenames in os.walk(root, onerror=_raise_walk_error):
         dirnames[:] = [d for d in dirnames if d not in _WORKTREE_SNAPSHOT_EXCLUDE_DIRS]
         for name in filenames:
             path = Path(dirpath, name)
@@ -239,6 +250,67 @@ def _revert_verifier_side_effects(
         if path not in revert_map:
             revert_map[path] = None
     _revert_disk(revert_map)
+
+
+def _posix_rel(root: Path, path: Path) -> Optional[str]:
+    """Return ``path`` relative to ``root`` as a POSIX string, or ``None``.
+
+    Postconditions:
+        ``None`` when ``path`` is not under ``root``.
+    """
+    try:
+        return path.relative_to(root).as_posix()
+    except ValueError:
+        return None
+
+
+def _sync_verifier_repairs_into_maps(
+    *,
+    root: Path,
+    pre_verify_disk: Dict[Path, bytes],
+    microtask_files: Dict[str, str],
+    all_files: Dict[str, str],
+    mt: Any,
+) -> None:
+    """Copy verifier-mutated worktree files into the in-memory file maps.
+
+    Postconditions:
+        Every non-excluded regular file under ``root`` whose bytes differ from
+        ``pre_verify_disk`` (or that is absent from it) is decoded as UTF-8
+        and written into ``microtask_files``, ``all_files``, and
+        ``mt.output_files``. Unchanged files are left alone. A walk, read, or
+        decode failure is logged and skipped so this never raises.
+    """
+    try:
+        current = list(_iter_worktree_files(root))
+    except OSError as exc:
+        logger.warning("Could not enumerate worktree while syncing verifier repairs: %s", exc)
+        return
+
+    output_files = (
+        mt.output_files if isinstance(getattr(mt, "output_files", None), dict) else microtask_files
+    )
+    for path in current:
+        prior = pre_verify_disk.get(path)
+        try:
+            now = path.read_bytes()
+        except OSError as exc:
+            logger.warning("Could not read %s while syncing verifier repairs: %s", path, exc)
+            continue
+        if prior is not None and prior == now:
+            continue
+        rel = _posix_rel(root, path)
+        if rel is None:
+            continue
+        try:
+            text = now.decode("utf-8")
+        except UnicodeDecodeError:
+            logger.warning("Skipping non-UTF-8 verifier repair at %s", path)
+            continue
+        microtask_files[rel] = text
+        all_files[rel] = text
+        output_files[rel] = text
+    mt.output_files = output_files
 
 
 def _run_dbc_self_review(
@@ -293,7 +365,11 @@ def _run_dbc_self_review(
         repairing files via ``_try_build_fix_one_at_a_time`` before it knows
         whether verification will pass) are also restored or deleted so they
         cannot leak into a later commit; files the verifier did not touch
-        remain unchanged. A ``gate_config.run_dbc_self_review`` exception, an
+        remain unchanged. If the verifier reports success after mutating the
+        worktree, those repaired/created files are copied into
+        ``microtask_files``/``all_files``/``mt.output_files`` so a later
+        Documentation pass cannot overwrite disk from stale map contents. A
+        ``gate_config.run_dbc_self_review`` exception, an
         unsafe write path, an ordinary filesystem failure while snapshotting
         or writing (e.g. a full disk or revoked permissions), or a
         build-verifier exception are all logged and skipped/reverted rather
@@ -450,6 +526,14 @@ def _run_dbc_self_review(
                     root=root, prior_disk=prior_disk, pre_verify_disk=pre_verify_disk
                 )
                 return
+
+            _sync_verifier_repairs_into_maps(
+                root=root,
+                pre_verify_disk=pre_verify_disk,
+                microtask_files=microtask_files,
+                all_files=all_files,
+                mt=mt,
+            )
 
     logger.info(
         "[%s] Microtask %s: DbC comments self-review complete (%d file(s) updated)",

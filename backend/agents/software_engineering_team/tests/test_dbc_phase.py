@@ -8,6 +8,7 @@ isolation, per the module's own docstring.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Dict, Optional
@@ -358,6 +359,101 @@ def test_dbc_self_review_build_verifier_success_keeps_files(tmp_path):
     assert verifier_calls == [(tmp_path, "my-build", "t1")]
 
 
+def test_dbc_self_review_build_verifier_success_syncs_repairs_into_maps(tmp_path):
+    # Production ``_run_build_verification`` can return success after
+    # ``_try_build_fix_one_at_a_time`` writes repairs to disk. Those edits
+    # must land in the in-memory maps or Documentation will overwrite them
+    # from the stale pre-repair contents.
+    (tmp_path / "a.py").write_text("orig a\n")
+    (tmp_path / "other.py").write_text("orig other\n")
+
+    def _review(*, code, **kwargs: Any) -> SimpleNamespace:
+        return SimpleNamespace(files={"a.py": "dbc a\n"})
+
+    def _verify_with_repairs(repo_path, label, tid):
+        (Path(repo_path) / "other.py").write_text("llm repair\n")
+        (Path(repo_path) / "new_fix.py").write_text("new repair\n")
+        return True, "ok"
+
+    microtask_files = {"a.py": "orig a\n", "other.py": "orig other\n"}
+    all_files = dict(microtask_files)
+
+    mt, microtask_files, all_files, _ = _call(
+        tmp_path=tmp_path,
+        gate_config=_gate_config(_review),
+        microtask_files=microtask_files,
+        all_files=all_files,
+        deps=ReviewDependencies(build_verifier=_verify_with_repairs),
+    )
+
+    assert microtask_files["a.py"] == "dbc a\n"
+    assert microtask_files["other.py"] == "llm repair\n"
+    assert microtask_files["new_fix.py"] == "new repair\n"
+    assert all_files == microtask_files
+    assert mt.output_files == microtask_files
+    assert (tmp_path / "other.py").read_text() == "llm repair\n"
+    assert (tmp_path / "new_fix.py").read_text() == "new repair\n"
+
+
+def test_dbc_self_review_reverts_venv_repairs_on_failure(tmp_path):
+    # ``build_fix._BUILD_FIX_EXCLUDE_DIRS`` does not prune venvs, so the
+    # production fixer can overwrite files under venv/. The snapshot must
+    # include those paths or a failed verify cannot restore them.
+    (tmp_path / "a.py").write_text("orig a\n")
+    venv_file = tmp_path / "venv" / "lib" / "site.py"
+    venv_file.parent.mkdir(parents=True)
+    venv_file.write_text("orig venv\n")
+
+    def _review(*, code, **kwargs: Any) -> SimpleNamespace:
+        return SimpleNamespace(files={"a.py": "dbc a\n"})
+
+    def _verify(repo_path, label, tid):
+        (Path(repo_path) / "venv" / "lib" / "site.py").write_text("repaired venv\n")
+        return False, "broke"
+
+    mt, microtask_files, all_files, _ = _call(
+        tmp_path=tmp_path,
+        gate_config=_gate_config(_review),
+        microtask_files={"a.py": "orig a\n"},
+        deps=ReviewDependencies(build_verifier=_verify),
+    )
+
+    assert (tmp_path / "a.py").read_text() == "orig a\n"
+    assert venv_file.read_text() == "orig venv\n"
+
+
+def test_dbc_self_review_walk_error_skips_mutating_verifier(tmp_path, monkeypatch):
+    # os.walk swallows scandir failures unless onerror re-raises; a partial
+    # snapshot must not let the mutating verifier run.
+    (tmp_path / "a.py").write_text("orig a\n")
+    called: list[bool] = []
+
+    def _review(*, code, **kwargs: Any) -> SimpleNamespace:
+        return SimpleNamespace(files={"a.py": "dbc a\n"})
+
+    def _verify(repo_path, label, tid):
+        called.append(True)
+        return True, "ok"
+
+    def _walk(top, topdown=True, onerror=None, followlinks=False):
+        if onerror is not None:
+            onerror(OSError("scandir failed"))
+        return iter([])
+
+    monkeypatch.setattr(os, "walk", _walk)
+
+    mt, microtask_files, all_files, _ = _call(
+        tmp_path=tmp_path,
+        gate_config=_gate_config(_review),
+        microtask_files={"a.py": "orig a\n"},
+        deps=ReviewDependencies(build_verifier=_verify),
+    )
+
+    assert called == []
+    assert microtask_files["a.py"] == "dbc a\n"
+    assert (tmp_path / "a.py").read_text() == "dbc a\n"
+
+
 def test_dbc_self_review_build_verifier_failure_reverts_only_touched_files(tmp_path):
     (tmp_path / "a.py").write_text("orig a\n")
     (tmp_path / "untouched.py").write_text("orig u\n")
@@ -622,6 +718,62 @@ def test_revert_disk_swallows_oserror(tmp_path, monkeypatch):
 
     # Should not raise even though the underlying restore attempt fails.
     dbc_phase._revert_disk({tmp_path / "a.py": b"orig a\n"})
+
+
+def test_sync_verifier_repairs_swallows_walk_oserror(tmp_path, monkeypatch):
+    def _raise_iter(root: Path):
+        raise OSError("walk failed")
+
+    monkeypatch.setattr(dbc_phase, "_iter_worktree_files", _raise_iter)
+    dbc_phase._sync_verifier_repairs_into_maps(
+        root=tmp_path,
+        pre_verify_disk={},
+        microtask_files={},
+        all_files={},
+        mt=_microtask(),
+    )
+
+
+def test_sync_verifier_repairs_skips_unreadable_binary_and_outside(tmp_path, monkeypatch):
+    root = tmp_path.resolve()
+    (root / "good.py").write_text("ok\n")
+    (root / "bin.dat").write_bytes(b"\xff\xfe")
+    unreadable = root / "bad.py"
+    unreadable.write_text("x\n")
+    outside = tmp_path.parent.resolve() / f"dbc-outside-{tmp_path.name}.txt"
+    outside.write_text("out\n")
+
+    orig_read = Path.read_bytes
+
+    def _read(self: Path) -> bytes:
+        if self.resolve() == unreadable:
+            raise OSError("unreadable")
+        return orig_read(self)
+
+    monkeypatch.setattr(Path, "read_bytes", _read)
+    orig_iter = dbc_phase._iter_worktree_files
+
+    def _iter(r: Path):
+        yield from orig_iter(r)
+        yield outside
+
+    monkeypatch.setattr(dbc_phase, "_iter_worktree_files", _iter)
+
+    microtask_files: Dict[str, str] = {}
+    all_files: Dict[str, str] = {}
+    try:
+        dbc_phase._sync_verifier_repairs_into_maps(
+            root=root,
+            pre_verify_disk={},
+            microtask_files=microtask_files,
+            all_files=all_files,
+            mt=_microtask(),
+        )
+    finally:
+        outside.unlink(missing_ok=True)
+
+    assert microtask_files == {"good.py": "ok\n"}
+    assert all_files == microtask_files
 
 
 def test_dbc_self_review_discards_paths_not_in_reviewed_files(tmp_path):
