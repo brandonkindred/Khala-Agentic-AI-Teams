@@ -1920,7 +1920,11 @@ def test_complete_json_continuation_records_each_turn(
     raw = take_complete_json_raw()
     assert len(turns) == 2
     assert turns[0] == ("q", '{"ok":')
-    assert "continue exactly from where you left off" in turns[1][0]
+    continuation_messages = json.loads(turns[1][0])
+    assert continuation_messages[1] == {"role": "user", "content": "q"}
+    assert continuation_messages[2] == {"role": "assistant", "content": '{"ok":'}
+    assert continuation_messages[3]["role"] == "user"
+    assert "continue exactly from where you left off" in continuation_messages[3]["content"]
     assert turns[1][1] == " 1}"
     assert raw == '{"ok": 1}'
 

@@ -1920,6 +1920,18 @@ class OllamaLLMClient(LLMClient):
             f"Continue the response seamlessly without repeating what you already wrote."
         )
 
+    def _observer_prompt_for_messages(self, messages: list[dict[str, str]]) -> str:
+        """Serialize the continuation request body for transcript observers.
+
+        Preconditions:
+            ``messages`` is the ``messages`` list sent on this HTTP call
+            (system, original user, accumulated assistant, continuation user).
+        Postconditions:
+            Returns a JSON array string of those dicts so an observer can
+            reconstruct the prompt actually sent, not only the last user turn.
+        """
+        return json.dumps(messages, default=str)
+
     def _complete_json_with_continuation(
         self,
         initial_partial: str,
@@ -1978,7 +1990,9 @@ class OllamaLLMClient(LLMClient):
                     sem,
                     resolved_think=use_think,
                 )
-                record_complete_json_turn(continuation_prompt, next_content)
+                record_complete_json_turn(
+                    self._observer_prompt_for_messages(messages), next_content
+                )
                 self._record_telemetry(
                     status="success",
                     prompt_text=continuation_prompt,
@@ -1988,7 +2002,9 @@ class OllamaLLMClient(LLMClient):
                 record_complete_json_raw(accumulated)
                 return self._extract_json(accumulated)
             except LLMTruncatedError as e2:
-                record_complete_json_turn(continuation_prompt, e2.partial_content or "")
+                record_complete_json_turn(
+                    self._observer_prompt_for_messages(messages), e2.partial_content or ""
+                )
                 self._record_telemetry(
                     status="truncated",
                     error_type="truncated",

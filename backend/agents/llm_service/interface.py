@@ -302,8 +302,9 @@ def record_complete_json_turn(prompt: str, response: str) -> None:
     """Append one inner ``complete_json`` HTTP turn on this context.
 
     Preconditions:
-        - ``prompt`` is the user text sent for this turn (the original prompt
-          for the truncated first reply, or the continuation user message).
+        - ``prompt`` is the text that identifies this HTTP turn: the original
+          user prompt for the truncated first reply, or a serialization of the
+          full ``messages`` conversation sent on a continuation request.
         - ``response`` is that turn's model text (may be a partial fragment).
     Postconditions:
         - :func:`take_complete_json_turns` on the same context includes this

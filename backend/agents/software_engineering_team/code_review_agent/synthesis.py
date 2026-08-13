@@ -185,7 +185,7 @@ def _run_via_reasoning_with_transcript(
         Raises whatever ``run_agent_via_reasoning`` raises.
     """
     reasoning_agent = None
-    format_turns: list[tuple[str, str]] = []
+    format_turns: list[tuple[str, str, float]] = []
     started = time.monotonic()
     reasoning_done_at = started
 
@@ -195,7 +195,7 @@ def _run_via_reasoning_with_transcript(
         reasoning_done_at = time.monotonic()
 
     def _capture_formatting(prompt: str, response: str) -> None:
-        format_turns.append((prompt, response))
+        format_turns.append((prompt, response, time.monotonic()))
 
     try:
         return run_agent_via_reasoning(
@@ -227,8 +227,8 @@ def _run_via_reasoning_with_transcript(
                 duration_ms=(reasoning_done_at - started) * 1000,
             )
         if format_turns:
-            per_ms = ((now - reasoning_done_at) * 1000) / len(format_turns)
-            for format_prompt, format_response in format_turns:
+            for i, (format_prompt, format_response, turn_started) in enumerate(format_turns):
+                next_started = format_turns[i + 1][2] if i + 1 < len(format_turns) else now
                 record_transcript_entry(
                     stage,
                     "",
@@ -236,7 +236,7 @@ def _run_via_reasoning_with_transcript(
                     format_response,
                     system_prompt=formatting_system_prompt_with_untrusted_guard(None),
                     model=model_label(model),
-                    duration_ms=per_ms,
+                    duration_ms=(next_started - turn_started) * 1000,
                 )
 
 
