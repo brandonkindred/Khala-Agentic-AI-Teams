@@ -17,7 +17,7 @@ import { MatFormFieldModule } from '@angular/material/form-field';
 import { MatIconModule } from '@angular/material/icon';
 import { MatInputModule } from '@angular/material/input';
 import { MatSelectModule } from '@angular/material/select';
-import { AgenticTeamApiService } from '../../../services/agentic-team-api.service';
+import { AgentStudioFacade } from '../../../services/agent-studio.facade';
 import { AgentStudioStateService } from '../../../services/agent-studio-state.service';
 import { ProcessDesignerChatComponent } from '../../process-designer-chat/process-designer-chat.component';
 import type {
@@ -32,6 +32,8 @@ import type {
  * Lets the user pick (or create) a team, then reuses `app-process-designer-chat`
  * as-is for the chat-driven process design *and* the roster panel (which this
  * increment extends with add-from-registry / delete / inline-edit — spec §5.3).
+ * Primary HTTP goes through `AgentStudioFacade`; the embedded chat keeps its
+ * own API client (same documented exception as Stage 2's Console runner).
  *
  * A process selector beside the team picker (auto-selected when the team has
  * exactly one) chooses which process becomes the Stage-4 handoff target,
@@ -59,7 +61,7 @@ import type {
 })
 export class AgentStudioComposeTeamComponent implements OnInit {
   private readonly state = inject(AgentStudioStateService);
-  private readonly api = inject(AgenticTeamApiService);
+  private readonly facade = inject(AgentStudioFacade);
   private readonly fb = inject(FormBuilder);
   private readonly destroyRef = inject(DestroyRef);
 
@@ -105,7 +107,7 @@ export class AgentStudioComposeTeamComponent implements OnInit {
     this.teamFetch
       .pipe(
         switchMap(({ teamId, surfaceError }) =>
-          this.api.getTeam(teamId).pipe(
+          this.facade.getTeam(teamId).pipe(
             // Cast to `AgenticTeam | null` so the defensive "no team in the body"
             // branch below stays reachable — the response type declares `team`
             // non-null, but an empty/HTTP-mapped-null body is still handled.
@@ -143,7 +145,7 @@ export class AgentStudioComposeTeamComponent implements OnInit {
   private loadTeams(): void {
     this.teamsLoading.set(true);
     this.teamsError.set(null);
-    this.api
+    this.facade
       .listTeams()
       .pipe(takeUntilDestroyed(this.destroyRef))
       .subscribe({
@@ -195,14 +197,18 @@ export class AgentStudioComposeTeamComponent implements OnInit {
    * When the user reached Stage 3 via Stage 2's "Add to team →", add the tested
    * agent (handoff `registryAgentId`) to this team's roster so they don't have to
    * search for it again (spec §2.4 handoff). Idempotent:
-   *   - at most one attempt per (team, handoff agent) — tracked in shared studio
-   *     state (not this component), so it holds across team switches, a
-   *     background re-sync, a return visit to the team, AND the Stage-4 "iterate
-   *     roster" back-loop that destroys and recreates this component; a manual
-   *     delete is therefore never undone, and
+   *   - at most one attempt per (team, handoff agent) — the façade owns the
+   *     consumed-handoff set, so it holds across team switches, a background
+   *     re-sync, a return visit to the team, AND the Stage-4 "iterate roster"
+   *     back-loop that destroys and recreates this component; a manual delete
+   *     is therefore never undone, and
    *   - skipped when the team already carries that manifest (no duplicate, and
    *     switching to a team that already has it is a no-op).
    * `registryAgentId` is left set so Stage 4's "fix an agent" back-loop still works.
+   *
+   * Preconditions: `team` is the currently loaded team (non-null).
+   * Postconditions: at most one façade `addAgentToTeam` call is in flight per
+   *   `(teamId, registryAgentId)` this session; `registryAgentId` is unchanged.
    */
   private consumeHandoffAgent(team: AgenticTeam): void {
     const manifestId = this.state.registryAgentId();
@@ -213,18 +219,21 @@ export class AgentStudioComposeTeamComponent implements OnInit {
     if (this.state.hasConsumedHandoff(key)) {
       return; // already attempted for this (team, agent) — don't re-add after a delete
     }
-    this.state.markHandoffConsumed(key);
-    if (team.agents.some((a) => a.manifest_id === manifestId)) {
-      return; // already staffed with this agent
-    }
-    this.api
-      .addAgentFromRegistry(team.team_id, manifestId)
+    this.facade
+      .addAgentToTeam(
+        team.team_id,
+        manifestId,
+        team.agents.some((a) => a.manifest_id === manifestId),
+      )
       .pipe(takeUntilDestroyed(this.destroyRef))
       .subscribe({
         // Reflect the new agent in the roster panel (and re-evaluate the gate).
         // The child owns its roster view, so ask it to reload rather than mutating
-        // its state from here.
-        next: () => this.chat?.refreshRoster(),
+        // its state from here. A null emission means the façade skipped the POST
+        // (already consumed, or already on the roster).
+        next: (added) => {
+          if (added) this.chat?.refreshRoster();
+        },
         // Best-effort: on failure the user can still add it manually via the panel.
         error: () => undefined,
       });
@@ -264,8 +273,8 @@ export class AgentStudioComposeTeamComponent implements OnInit {
     this.creating.set(true);
     this.createError.set(null);
     const { name, description } = this.form.getRawValue();
-    this.api
-      .createTeam({ name, description })
+    this.facade
+      .composeTeam({ name, description })
       .pipe(takeUntilDestroyed(this.destroyRef))
       .subscribe({
         next: (resp) => {

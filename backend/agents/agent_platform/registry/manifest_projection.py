@@ -1,15 +1,15 @@
 """Shared, model-shape-agnostic mechanics for projecting to/from ``AgentManifest``.
 
-Both the Studio (`agent_team_studio.agent_studio`) and agentic
+Both the Studio (`agent_platform.studio`) and agentic
 (`agent_team_studio.agentic_team_provisioning`) authoring surfaces build
 :class:`~agent_platform.registry.models.AgentManifest` instances using the same
 handful of id-construction primitives (slugging, hashed-slug ids, round-trip
 validation). This module single-sources those primitives — as a public,
 stable home independent of either surface's internals — so each surface only
 owns its own team-specific data (digest lengths, id formats), not the
-mechanics themselves. Marker-tag filtering and the other generated-agent
-runtime constants shared by both surfaces live in
-:mod:`agent_team_studio.manifest_shared`.
+mechanics themselves. Marker-tag filtering lives with each surface; the
+generated-agent runtime constants shared by both surfaces live in
+:mod:`shared.manifests`.
 """
 
 from __future__ import annotations

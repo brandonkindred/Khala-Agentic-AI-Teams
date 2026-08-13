@@ -3,7 +3,7 @@ Agent Console Phase 3 — saved inputs CRUD.
 
 Routes live under ``/api/agents/{agent_id}/saved-inputs`` and
 ``/api/agents/saved-inputs/{saved_id}``. Storage is delegated to
-:class:`agent_console.AgentConsoleStore`.
+:class:`agent_platform.console.AgentConsoleStore`.
 """
 
 from __future__ import annotations
@@ -12,14 +12,14 @@ import logging
 
 from fastapi import APIRouter, HTTPException
 
-from agent_console import (
+from agent_platform.console import (
     AgentConsoleStorageUnavailable,
     SavedInput,
     get_store,
     resolve_author,
 )
-from agent_console.models import SavedInputCreate, SavedInputUpdate
-from agent_console.store import SavedInputNameConflict
+from agent_platform.console.models import SavedInputCreate, SavedInputUpdate
+from agent_platform.console.store import SavedInputNameConflict
 from agent_platform.registry import get_registry
 
 logger = logging.getLogger(__name__)
