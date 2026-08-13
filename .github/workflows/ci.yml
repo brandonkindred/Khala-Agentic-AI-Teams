@@ -230,7 +230,7 @@ jobs:
             # Agent Studio authoring + drafts persistence (in-memory unit suite;
             # live-Postgres store tests skip without POSTGRES_HOST).
             agent_studio:
-              - 'backend/agents/agent_team_studio/agent_studio/**'
+              - 'backend/agents/agent_platform/studio/**'
             # Shared design-assistant conversation kernel (message envelope,
             # fenced-JSON helpers, turn-lock protocol) used by agent_studio and
             # agentic_team_provisioning's chat assistants.
@@ -326,7 +326,7 @@ jobs:
               - '!backend/agents/agent_registry/**'
               - '!backend/agents/sales_team/**'
               - '!backend/agents/agent_cognition/**'
-              - '!backend/agents/agent_team_studio/agent_studio/**'
+              - '!backend/agents/agent_platform/studio/**'
               - '!backend/agents/agent_team_studio/assistant_kernel/**'
               - '!backend/agents/agent_team_studio/user_agent_founder/**'
               - '!backend/agents/agent_team_studio/agentic_team_provisioning/**'
@@ -415,11 +415,11 @@ jobs:
               },
               "agent_studio": {
                   "name": "Agent Studio",
-                  "tests": "agent_team_studio/agent_studio/tests/",
-                  "source": "agent_team_studio.agent_studio",
+                  "tests": "agent_platform/studio/tests/",
+                  "source": "agent_platform.studio",
                   # Omit live-Postgres store modules from the unit cov gate
                   # (those suites skip without POSTGRES_HOST).
-                  "cov_config": "agent_team_studio/agent_studio/pyproject.toml",
+                  "cov_config": "agent_platform/studio/pyproject.toml",
               },
               # unified_api lives at backend/unified_api/ (a sibling of backend/agents/,
               # this job's working directory), so its test/source paths are given

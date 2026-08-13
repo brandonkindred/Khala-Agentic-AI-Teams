@@ -276,7 +276,7 @@ Growing the collective is a first-class feature. Three ways in:
 - [`backend/agents/deepthought/`](backend/agents/deepthought/README.md)
 - [`backend/agents/product_delivery/`](backend/agents/product_delivery/README.md)
 - [`backend/agents/user_profile/`](backend/agents/user_profile/README.md)
-- [`backend/agents/agent_team_studio/agent_studio/`](backend/agents/agent_team_studio/agent_studio/README.md) — Agent Studio; `AgentDefinition` view-model ↔ `AgentManifest` SoT field mapping
+- [`backend/agents/agent_platform/studio/`](backend/agents/agent_platform/studio/README.md) — Agent Studio; `AgentDefinition` view-model ↔ `AgentManifest` SoT field mapping
 
 ### Business
 

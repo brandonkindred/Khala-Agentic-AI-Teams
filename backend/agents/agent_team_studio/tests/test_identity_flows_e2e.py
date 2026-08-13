@@ -1,7 +1,7 @@
 """End-to-end identity-epic regression coverage (issue #5904).
 
 Every individual flow — clone, save, roster add-from-registry, mixed roster —
-already has deep isolated coverage elsewhere (``agent_studio/tests/test_registration.py``,
+already has deep isolated coverage elsewhere (``agent_platform/studio/tests/test_registration.py``,
 ``test_service.py``, ``agentic_team_provisioning/tests/test_registry_roster.py``,
 ``test_mixed_roster.py``). What's missing is a test that chains them: proving a
 manifest produced by Studio's *real* clone->edit->save pipeline is the exact thing
@@ -16,9 +16,9 @@ import pytest
 from fastapi.testclient import TestClient
 
 from agent_registry.models import AgentManifest
-from agent_team_studio.agent_studio.models import AgentDefinition
-from agent_team_studio.agent_studio.service import AgentStudioService
-from agent_team_studio.agent_studio.testing import seed_manifest
+from agent_platform.studio.models import AgentDefinition
+from agent_platform.studio.service import AgentStudioService
+from agent_platform.studio.testing import seed_manifest
 from agent_team_studio.agentic_team_provisioning.assistant.store import AgenticTeamStore
 from agent_team_studio.agentic_team_provisioning.manifest_generation import build_agent_manifest
 from agent_team_studio.agentic_team_provisioning.models import AgenticTeamAgent
