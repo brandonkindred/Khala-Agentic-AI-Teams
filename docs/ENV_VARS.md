@@ -341,12 +341,15 @@ and small payloads are nowhere near the warning threshold anyway).
 Security gateway toggle (default: true).
 
 ### UNIFIED_API_SANDBOX_TEMPORAL_WORKER
-Agent Console sandbox reaper/worker toggle (default: true). When true, the
-unified-api `lifespan` starts the Agent Console sandbox idle reaper — a
+Platform sandbox reaper/worker toggle (default: true). When true, the
+unified-api `lifespan` starts the platform sandbox idle reaper — a
 durable `SandboxReaperWorkflow` served by this process's own sandbox-only
-Temporal worker thread when Temporal is enabled, or an in-process asyncio
-task otherwise. Set to `false`/`0`/`no` to run unified-api without starting
-the sandbox reaper or its Temporal worker thread at all.
+Temporal worker thread (`start_agent_platform_sandbox_temporal_worker_thread`
+in `agent_platform.sandbox.temporal.worker`) when Temporal is enabled, or
+an in-process asyncio task otherwise. This lifespan is the sole boot site
+for that worker; the standalone agent-provisioning team container must not
+poll `SANDBOX_TASK_QUEUE`. Set to `false`/`0`/`no` to run unified-api
+without starting the sandbox reaper or its Temporal worker thread at all.
 
 ### UNIFIED_API_TEAM_ASSISTANTS_ENABLED
 Team-assistant conversational sub-app mount toggle (default: true). When

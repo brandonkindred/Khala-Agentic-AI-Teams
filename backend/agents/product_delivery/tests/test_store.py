@@ -1,7 +1,7 @@
 """Integration tests for :class:`ProductDeliveryStore` against live Postgres.
 
 Skipped automatically when ``POSTGRES_HOST`` is unset (matches the
-pattern used by ``agent_console`` / ``shared.postgres`` tests).
+pattern used by ``agent_platform.console`` / ``shared.postgres`` tests).
 """
 
 from __future__ import annotations

@@ -27,6 +27,8 @@ from dataclasses import dataclass, field
 from typing import Collection, Mapping, Optional, Sequence
 
 from software_engineering_team.github_source.pr_review_mapping import (
+    format_numbered_source_line,
+    numbered_line_width,
     parse_valid_lines,
     render_annotated_hunks,
 )
@@ -90,7 +92,7 @@ class ChangeSurface:
     """Chunker-ready change surface for ``CodeReviewInput``.
 
     Invariants:
-        - ``blocks`` maps each path to a pre-numbered body (``N: `` prefixes)
+        - ``blocks`` maps each path to a pre-numbered body (``N| `` prefixes)
           without ``### path ###`` headers.
         - Non-empty surfaces are always consumed with
           ``CodeReviewInput.pre_numbered=True``.
@@ -246,8 +248,10 @@ def _pre_number_ranges(content: str, ranges: Sequence[LineRange]) -> str:
           (caller should merge first when desired).
 
     Postconditions:
-        - Emits ``f\"{n}: {line}\"`` for each line in each range, clamped to the
-          file's last line when ``end_line`` exceeds length.
+        - Emits a column-aligned ``N| <line>`` gutter for each line in each
+          range, clamped to the file's last line when ``end_line`` exceeds
+          length. Gutter width is the widest emitted line number so hanging
+          indents stay visually 4 columns across 9→10 / 99→100.
         - Between successive ranges, inserts a bare ``...`` line.
         - Empty ``ranges`` or empty file with no emitable lines → ``\"\"``.
         - Never raises.
@@ -256,15 +260,18 @@ def _pre_number_ranges(content: str, ranges: Sequence[LineRange]) -> str:
     if not ranges or not lines:
         return ""
     total = len(lines)
-    chunks: list[str] = []
+    rows: list[tuple[Optional[int], str]] = []
     for idx, r in enumerate(ranges):
         if idx > 0:
-            chunks.append("...")
+            rows.append((None, "..."))
         start = min(max(1, r.start_line), total)
         end = min(max(start, r.end_line), total)
         for n in range(start, end + 1):
-            chunks.append(f"{n}: {lines[n - 1]}")
-    return "\n".join(chunks)
+            rows.append((n, lines[n - 1]))
+    width = numbered_line_width(n for n, _ in rows if n is not None)
+    return "\n".join(
+        text if n is None else format_numbered_source_line(n, text, width=width) for n, text in rows
+    )
 
 
 def _assemble_path_block(path: str, patch: str, content: str) -> Optional[str]:
@@ -462,9 +469,7 @@ def _expand_touched_ranges_python(
         construct = enclosing_construct(content, line)
         if construct is not None:
             key = (construct.start_line, construct.end_line)
-            found[key] = LineRange(
-                start_line=construct.start_line, end_line=construct.end_line
-            )
+            found[key] = LineRange(start_line=construct.start_line, end_line=construct.end_line)
             continue
         fb = _capped_fallback_range(content, line)
         found[(fb.start_line, fb.end_line)] = fb

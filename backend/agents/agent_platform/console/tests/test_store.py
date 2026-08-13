@@ -8,9 +8,9 @@ from __future__ import annotations
 
 import pytest
 
-from agent_console.models import RunCreate
-from agent_console.postgres import SCHEMA
-from agent_console.store import (
+from agent_platform.console.models import RunCreate
+from agent_platform.console.postgres import SCHEMA
+from agent_platform.console.store import (
     AgentConsoleStore,
     SavedInputNameConflict,
     get_store,

@@ -107,9 +107,12 @@ _SHARED_OUTPUT_SECTION = (
     '  - "category": "naming" | "structure" | "logic" | "spec-compliance" | "standards" | "integration" | "testing" | "architecture" | "refactor" | "maintainability" | "side-effects" | "documentation"\n'
     '  - "file_path": string (which file has the issue)\n'
     '  - "line": integer (1-based line number in the NEW version of file_path where the issue is). '
-    'When the code is presented with line-number prefixes (e.g. `123: <code>`), set "line" to '
-    "that exact prefixed number. REQUIRED when the issue is tied to a specific line; OMIT it for "
-    "file-wide or structural issues.\n"
+    'When the code is presented with line-number prefixes (e.g. `123| <code>`), set "line" to '
+    "that exact prefixed number. The `N| ` (or legacy `N: `) gutter is metadata, not source — "
+    "ignore it when judging indentation or whitespace. A continuation line indented 4 spaces "
+    "past its opening `(` / `[` / `{` is standard hanging indent (PEP 8 / ruff), not extra "
+    "leading whitespace; do not flag it. REQUIRED when the issue is tied to a specific line; "
+    "OMIT it for file-wide or structural issues.\n"
     '  - "title": string. A short, descriptive title for the issue (roughly 5-12 words) that '
     'names WHAT is wrong, e.g. "Missing pagination in UserListComponent" or "SQL query built via '
     'string concatenation". This is the first thing a developer reads -- it must stand on its own, '

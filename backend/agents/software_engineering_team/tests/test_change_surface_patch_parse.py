@@ -11,13 +11,7 @@ from software_engineering_team.github_source.pr_review_mapping import (
 )
 
 # Realistic single-file hunk: context, removed, added.
-_SINGLE_FILE_PATCH = (
-    "@@ -1,3 +1,3 @@\n"
-    " keep\n"
-    "-deleted\n"
-    "+added\n"
-    " trail\n"
-)
+_SINGLE_FILE_PATCH = "@@ -1,3 +1,3 @@\n keep\n-deleted\n+added\n trail\n"
 
 
 def test_extract_touched_lines_added_only_excludes_context_and_removed() -> None:
@@ -32,9 +26,7 @@ def test_extract_touched_lines_empty_patch() -> None:
 
 
 def test_render_patch_hunks_matches_annotated_helper() -> None:
-    assert render_patch_hunks(_SINGLE_FILE_PATCH) == render_annotated_hunks(
-        _SINGLE_FILE_PATCH
-    )
+    assert render_patch_hunks(_SINGLE_FILE_PATCH) == render_annotated_hunks(_SINGLE_FILE_PATCH)
 
 
 def test_render_patch_hunks_empty_patch() -> None:
@@ -47,7 +39,7 @@ def test_touched_set_diverges_from_annotated_context_lines() -> None:
     touched = extract_touched_lines(_SINGLE_FILE_PATCH)
     annotated = render_patch_hunks(_SINGLE_FILE_PATCH)
     assert touched == frozenset({2})
-    # Annotated includes context lines 1 and 3 as ``N: ...`` prefixes.
-    assert "1:" in annotated
-    assert "2:" in annotated
-    assert "3:" in annotated
+    # Annotated includes context lines 1 and 3 as ``N| ...`` prefixes.
+    assert "1|" in annotated
+    assert "2|" in annotated
+    assert "3|" in annotated

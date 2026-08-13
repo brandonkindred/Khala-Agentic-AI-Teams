@@ -622,8 +622,24 @@ def _start_agent_studio_temporal_worker() -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):  # noqa: PLR0915 - linear startup orchestrator; each numbered step is one registration/boot  # pragma: no cover - startup requires live Postgres schema registration, Temporal worker boot, and sub-app mounting
-    """Application lifespan: register own Postgres schemas, register assistant
-    mount specs (no sub-apps mounted yet), then register proxy routes.
+    """Application lifespan: register Postgres schemas, register assistant
+    mount specs, register proxy routes, then boot in-process workers.
+
+    Platform sandbox Temporal worker ownership: this lifespan is the sole
+    boot site for ``start_agent_platform_sandbox_temporal_worker_thread``
+    (``agent_platform.sandbox.temporal.worker``). The worker polls
+    ``SANDBOX_TASK_QUEUE`` inside this process so sandbox activities share
+    the process-local ``Lifecycle`` singleton. It is never started by
+    package import, by ``team_service`` worker bootstrap, or by the
+    standalone agent-provisioning container's main worker. Gated on
+    ``UNIFIED_API_SANDBOX_TEMPORAL_WORKER`` (see ``_maybe_start_sandbox_reaper``).
+
+    Preconditions:
+        * None — each numbered step self-disables or log-and-continues when
+          its backing service is unset.
+    Postconditions:
+        * Yields with proxy routes registered and in-process workers started
+          (or skipped/logged) according to their gates.
     """
     global _registered_teams
     logger.info("Starting Unified API Server...")
@@ -654,7 +670,7 @@ async def lifespan(app: FastAPI):  # noqa: PLR0915 - linear startup orchestrator
         logger.exception("team_assistant postgres schema registration failed")
 
     try:
-        from agent_console.postgres import SCHEMA as AGENT_CONSOLE_SCHEMA
+        from agent_platform.console.postgres import SCHEMA as AGENT_CONSOLE_SCHEMA
         from shared.postgres import register_team_schemas
 
         register_team_schemas(AGENT_CONSOLE_SCHEMA)
@@ -762,13 +778,13 @@ async def lifespan(app: FastAPI):  # noqa: PLR0915 - linear startup orchestrator
     #    (see shared.temporal.runner._await_client), and a lost race here must
     #    not mean the reaper never starts for the life of the process. See
     #    _start_sandbox_reaper_task's docstring for why the sandbox worker must
-    #    be booted here rather than shared with this team's general worker.
+    #    be booted here rather than the agent-provisioning team_service worker.
     sandbox_reaper_task = await _maybe_start_sandbox_reaper()
 
     # 5. Start the Agent Console run pruner (Phase 3).
     run_pruner_task: asyncio.Task | None = None
     try:
-        from agent_console.prune import run_pruner
+        from agent_platform.console.prune import run_pruner
 
         run_pruner_task = asyncio.create_task(run_pruner())
         logger.info("Started Agent Console run pruner")
@@ -1112,7 +1128,7 @@ def _expected_tables_for(team_key: str) -> list[str]:
         from product_delivery.postgres import SCHEMA as PRODUCT_DELIVERY_SCHEMA
 
         return list(PRODUCT_DELIVERY_SCHEMA.table_names)
-    # Other in-process teams (agent_console, team_assistant, …) don't
+    # Other in-process teams (agent_platform.console, team_assistant, …) don't
     # currently surface table-presence checks in /health. Add cases
     # here as they adopt the pattern.
     return []
@@ -1216,7 +1232,7 @@ def _retry_in_process_schema_registration(team_key: str) -> bool:  # pragma: no 
                 total,
             )
             return True
-        # Other in-process teams (agent_console, team_assistant, etc.)
+        # Other in-process teams (agent_platform.console, team_assistant, etc.)
         # don't currently track their schema-failure flag through this
         # set, so there's nothing to retry. Add cases here as they
         # adopt the pattern.
@@ -1257,7 +1273,7 @@ async def health() -> UnifiedHealthResponse:
         intentionally_unavailable = False
         if config.in_process:
             # No upstream container, but the in-process router still
-            # depends on Postgres for product_delivery / agent_console.
+            # depends on Postgres for product_delivery / agent_platform.console.
             # Four states matter:
             #   * disabled → routes are unmounted; report "unavailable"
             #     (intentional — operator opt-out via TEAM_CONFIGS).
