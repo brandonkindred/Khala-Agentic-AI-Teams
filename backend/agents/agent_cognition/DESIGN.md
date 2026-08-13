@@ -458,7 +458,7 @@ cognition:
 > runs an events pruner — alongside the rollups — that deletes raw `agent_cognition_events`
 > older than each agent's `retention_days_events` (default 90), **after** they have been folded
 > into a non-stale day summary so history isn't lost (rollup summaries are retained long-term;
-> only raw episodic rows are pruned). Mirrors the `agent_console.prune.run_pruner` pattern.
+> only raw episodic rows are pruned). Mirrors the `agent_platform.console.prune.run_pruner` pattern.
 
 **Invoke envelope (cognition kept OUT of the user input contract):** the proxy must **not**
 add `cognition` as a sibling key to the agent's input — `shared.agent_invoke.dispatch.
@@ -506,7 +506,7 @@ vanishingly unlikely; the proxy rejects a caller body that already contains it.)
 
 (Dedicated `/api/cognition` prefix — see the gateway note below.)
 
-All carry an `author` handle (reuse `agent_console.author.resolve_author`).
+All carry an `author` handle (reuse `agent_platform.console.author.resolve_author`).
 
 > **Operator authorization (must-do, distinct from the author handle):** `resolve_author` is
 > *provenance only* — it is a documented pre-auth placeholder that can return `anonymous` and

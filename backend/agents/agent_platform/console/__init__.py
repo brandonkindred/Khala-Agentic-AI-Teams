@@ -9,7 +9,7 @@ diff helper. Consumed by the unified API routes
 
 No FastAPI app of its own — this module runs in-process inside the unified
 API (same pattern as ``agent_platform.registry``). The team's Postgres schema lives
-in :mod:`agent_console.postgres` and is registered from the unified API
+in :mod:`agent_platform.console.postgres` and is registered from the unified API
 lifespan via :func:`shared.postgres.register_team_schemas`.
 """
 

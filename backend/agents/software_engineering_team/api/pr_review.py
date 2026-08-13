@@ -423,11 +423,11 @@ def _build_change_surface_for_reviewable(
 
 
 # Optional dependency: author tagging for persisted review history. Imported once
-# at module load behind a try/except so a missing/broken ``agent_console`` (or its
-# transitive deps) can never break importing this API; ``_review_author`` falls
-# back to "anonymous" when it is unavailable.
+# at module load behind a try/except so a missing/broken ``agent_platform.console``
+# (or its transitive deps) can never break importing this API; ``_review_author``
+# falls back to "anonymous" when it is unavailable.
 try:
-    from agent_console.author import resolve_author as _resolve_author  # noqa: E402
+    from agent_platform.console.author import resolve_author as _resolve_author  # noqa: E402
 except Exception:  # noqa: BLE001 - author tagging is optional, never fatal at import
     _resolve_author = None
 
@@ -437,7 +437,7 @@ def _review_author() -> str:
 
     Postconditions:
         - Returns the resolved author handle, or ``"anonymous"`` when the optional
-          ``agent_console`` author helper is unavailable or raises.
+          ``agent_platform.console`` author helper is unavailable or raises.
     """
     if _resolve_author is None:
         return "anonymous"

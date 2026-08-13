@@ -424,7 +424,7 @@ jobs:
               },
               "agent_platform": {
                   "name": "Agent Platform",
-                  "tests": "agent_platform/sandbox/tests/ agent_platform/registry/tests/",
+                  "tests": "agent_platform/sandbox/tests/ agent_platform/registry/tests/ agent_platform/console/tests/",
                   "source": "agent_platform.sandbox",
               },
               "agent_studio": {
