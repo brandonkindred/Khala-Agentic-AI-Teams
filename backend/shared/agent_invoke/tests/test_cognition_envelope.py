@@ -201,16 +201,16 @@ def client(tmp_path: Path):
             """,
         )
 
-    import agent_registry
-    from agent_registry import loader
+    from agent_platform import registry
+    from agent_platform.registry import loader
 
     if hasattr(loader.get_registry, "cache_clear"):
         loader.get_registry.cache_clear()
     rebuilt = loader.AgentRegistry.load(tmp_path)
     original_loader = loader.get_registry
-    original_pkg = agent_registry.get_registry
+    original_pkg = registry.get_registry
     loader.get_registry = lambda: rebuilt  # type: ignore[assignment]
-    agent_registry.get_registry = lambda: rebuilt  # type: ignore[assignment]
+    registry.get_registry = lambda: rebuilt  # type: ignore[assignment]
 
     app = FastAPI()
     mount_invoke_shim(app)
@@ -218,7 +218,7 @@ def client(tmp_path: Path):
         yield TestClient(app)
     finally:
         loader.get_registry = original_loader  # type: ignore[assignment]
-        agent_registry.get_registry = original_pkg  # type: ignore[assignment]
+        registry.get_registry = original_pkg  # type: ignore[assignment]
         if hasattr(loader.get_registry, "cache_clear"):
             loader.get_registry.cache_clear()
         sys.modules.pop("_cog_shim_test", None)

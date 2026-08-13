@@ -6,7 +6,7 @@ import {
   SaveDraftDialogComponent,
   type SaveDraftDialogData,
 } from './save-draft-dialog.component';
-import { AgentStudioApiService } from '../../../../services/agent-studio-api.service';
+import { AgentStudioFacade } from '../../../../services/agent-studio.facade';
 import type { AgentStudioDraftSummary } from '../../../../models/agent-studio.model';
 
 const summary = (id: string, name: string): AgentStudioDraftSummary => ({
@@ -17,21 +17,20 @@ const summary = (id: string, name: string): AgentStudioDraftSummary => ({
 
 function configure(
   data: SaveDraftDialogData,
-  createDraft = vi.fn().mockReturnValue(of(summary('new-1', 'x'))),
-  updateDraft = vi.fn().mockReturnValue(of(summary('existing-1', 'x'))),
+  saveDraft = vi.fn().mockReturnValue(of(summary('new-1', 'x'))),
 ) {
   const ref = { close: vi.fn() };
-  const api = { createDraft, updateDraft };
+  const facade = { saveDraft };
   TestBed.configureTestingModule({
     imports: [SaveDraftDialogComponent],
     providers: [
       { provide: MAT_DIALOG_DATA, useValue: data },
       { provide: MatDialogRef, useValue: ref },
-      { provide: AgentStudioApiService, useValue: api },
+      { provide: AgentStudioFacade, useValue: facade },
     ],
   });
   const fixture = TestBed.createComponent(SaveDraftDialogComponent);
-  return { fixture, ref, api };
+  return { fixture, ref, facade };
 }
 
 describe('SaveDraftDialogComponent', () => {
@@ -48,49 +47,47 @@ describe('SaveDraftDialogComponent', () => {
   });
 
   it('submit creates a new draft when draftId is null', () => {
-    const createDraft = vi.fn().mockReturnValue(of(summary('new-1', 'My draft')));
+    const saveDraft = vi.fn().mockReturnValue(of(summary('new-1', 'My draft')));
     const payload = { registryAgentId: 'reg-1' };
-    const { fixture, ref, api } = configure(
+    const { fixture, ref, facade } = configure(
       { draftId: null, initialName: 'My draft', payload },
-      createDraft,
+      saveDraft,
     );
     fixture.componentInstance.submit();
-    expect(createDraft).toHaveBeenCalledWith({ name: 'My draft', payload });
-    expect(api.updateDraft).not.toHaveBeenCalled();
+    expect(saveDraft).toHaveBeenCalledWith({ name: 'My draft', payload }, null);
     expect(ref.close).toHaveBeenCalledWith(summary('new-1', 'My draft'));
+    expect(facade.saveDraft).toHaveBeenCalledTimes(1);
   });
 
   it('submit updates the existing draft when draftId is set', () => {
-    const updateDraft = vi.fn().mockReturnValue(of(summary('d-1', 'Renamed')));
+    const saveDraft = vi.fn().mockReturnValue(of(summary('d-1', 'Renamed')));
     const payload = { teamId: 'team-1' };
-    const { fixture, ref, api } = configure(
+    const { fixture, ref } = configure(
       { draftId: 'd-1', initialName: 'Old name', payload },
-      undefined,
-      updateDraft,
+      saveDraft,
     );
     fixture.componentInstance.name.set('Renamed');
     fixture.componentInstance.submit();
-    expect(updateDraft).toHaveBeenCalledWith('d-1', { name: 'Renamed', payload });
-    expect(api.createDraft).not.toHaveBeenCalled();
+    expect(saveDraft).toHaveBeenCalledWith({ name: 'Renamed', payload }, 'd-1');
     expect(ref.close).toHaveBeenCalledWith(summary('d-1', 'Renamed'));
   });
 
   it('a blank name sets a server error and does not call the API', () => {
-    const { fixture, ref, api } = configure({ draftId: null, initialName: null, payload: {} });
+    const { fixture, ref, facade } = configure({ draftId: null, initialName: null, payload: {} });
     fixture.componentInstance.name.set('   ');
     fixture.componentInstance.submit();
     expect(fixture.componentInstance.serverError()).toBe('Name is required.');
-    expect(api.createDraft).not.toHaveBeenCalled();
+    expect(facade.saveDraft).not.toHaveBeenCalled();
     expect(ref.close).not.toHaveBeenCalled();
   });
 
   it('an API error surfaces serverError, resets busy, and keeps the dialog open', () => {
-    const createDraft = vi.fn().mockReturnValue(
+    const saveDraft = vi.fn().mockReturnValue(
       throwError(() => ({ error: { detail: 'Name already taken' } })),
     );
     const { fixture, ref } = configure(
       { draftId: null, initialName: 'My draft', payload: {} },
-      createDraft,
+      saveDraft,
     );
     fixture.componentInstance.submit();
     expect(fixture.componentInstance.busy()).toBe(false);
@@ -99,20 +96,20 @@ describe('SaveDraftDialogComponent', () => {
   });
 
   it('falls back to err.message, then a generic message, when no detail is present', () => {
-    const createDraft = vi.fn().mockReturnValue(throwError(() => ({ message: 'network down' })));
+    const saveDraft = vi.fn().mockReturnValue(throwError(() => ({ message: 'network down' })));
     const { fixture } = configure(
       { draftId: null, initialName: 'My draft', payload: {} },
-      createDraft,
+      saveDraft,
     );
     fixture.componentInstance.submit();
     expect(fixture.componentInstance.serverError()).toBe('network down');
   });
 
   it('falls back to a generic message when the error has neither detail nor message', () => {
-    const createDraft = vi.fn().mockReturnValue(throwError(() => ({})));
+    const saveDraft = vi.fn().mockReturnValue(throwError(() => ({})));
     const { fixture } = configure(
       { draftId: null, initialName: 'My draft', payload: {} },
-      createDraft,
+      saveDraft,
     );
     fixture.componentInstance.submit();
     expect(fixture.componentInstance.serverError()).toBe('Failed to save draft.');
@@ -126,10 +123,10 @@ describe('SaveDraftDialogComponent', () => {
 
   it('cancel is a no-op while a save is in flight', () => {
     // A call that never emits keeps busy() true, simulating an in-flight request.
-    const createDraft = vi.fn().mockReturnValue({ subscribe: () => undefined });
+    const saveDraft = vi.fn().mockReturnValue({ subscribe: () => undefined });
     const { fixture, ref } = configure(
       { draftId: null, initialName: 'My draft', payload: {} },
-      createDraft,
+      saveDraft,
     );
     fixture.componentInstance.submit();
     expect(fixture.componentInstance.busy()).toBe(true);

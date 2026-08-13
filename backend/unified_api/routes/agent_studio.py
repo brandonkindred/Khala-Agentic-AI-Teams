@@ -249,7 +249,7 @@ def clone_from_registry(agent_id: str) -> AgentDefinition:
 
 @router.post("/agents", response_model=SaveAgentResponse)
 def save_agent(req: SaveAgentRequest) -> SaveAgentResponse:
-    """Save + register a finished definition into the live ``agent_registry``.
+    """Save + register a finished definition into the live ``agent_platform.registry``.
 
     Preconditions:
         - ``req`` is a validated ``SaveAgentRequest`` (FastAPI returns 422 otherwise

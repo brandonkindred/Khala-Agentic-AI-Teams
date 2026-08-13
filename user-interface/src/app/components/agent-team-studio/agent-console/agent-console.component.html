@@ -48,22 +48,6 @@
 
   <mat-tab>
     <ng-template mat-tab-label>
-      <mat-icon>psychology</mat-icon>
-      <span class="tab-label">Cognition</span>
-    </ng-template>
-    <!-- Lazy body: Material eagerly instantiates tab content by default, which
-         would fire the catalogue + cognition loads on every Agent Console visit
-         even when Cognition is never opened. matTabContent defers them until the
-         tab is first selected. -->
-    <ng-template matTabContent>
-      <div class="agent-console__tab-content">
-        <app-cognition-tab></app-cognition-tab>
-      </div>
-    </ng-template>
-  </mat-tab>
-
-  <mat-tab>
-    <ng-template mat-tab-label>
       <mat-icon>show_chart</mat-icon>
       <span class="tab-label">Metrics</span>
     </ng-template>
