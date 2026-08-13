@@ -183,6 +183,11 @@ def _build_app() -> FastAPI:
 
     # Mount the shared invoke shim; the middleware above restricts dispatch
     # to the single bound agent.
+    #
+    # Do not register llm_service.usage_flusher here. Sandboxes are
+    # network-isolated from platform Postgres (own khala_sandbox DB, torn
+    # down with the stack); usage persistence belongs on the platform
+    # side of the invoke boundary, not inside the sandbox.
     from shared.agent_invoke import mount_invoke_shim
 
     mount_invoke_shim(app)
