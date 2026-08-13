@@ -7,10 +7,11 @@ inside the unified-API process — the same process that serves the HTTP handler
 that holds the shared :class:`~agent_platform.studio.service.AgentStudioService` singleton the
 activities delegate to.
 
-There is no ``is_temporal_enabled`` guard here: Agent Studio assumes Temporal is
-always configured (the platform requires ``TEMPORAL_ADDRESS``). ``start_team_worker``
-is idempotent per team, so calling this repeatedly (e.g. under uvicorn ``--reload``)
-is safe.
+There is no ``is_temporal_enabled`` guard here: ``start_team_worker`` already
+no-ops when Temporal is unset, and authoring CRUD falls back to in-process
+``AgentStudioService`` when this worker is disabled or absent.
+``start_team_worker`` is idempotent per team, so calling this repeatedly
+(e.g. under uvicorn ``--reload``) is safe.
 """
 
 from __future__ import annotations
