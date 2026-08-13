@@ -72,10 +72,10 @@ class _FailIfAsked(DummyLLMClient):
 
 
 def test_call_agent_records_full_conversation_in_transcript(monkeypatch) -> None:
-    """The transcript entry's response is the full agent.messages conversation
-    (JSON), not just the final text -- this call site is tool-using (``tools``
-    may be non-empty), so recording only the final text would silently drop
-    any intermediate tool-loop turns from the durable transcript.
+    """The transcript records the reasoning ``agent.messages`` conversation and
+    a separate formatting-pass entry (format prompt + JSON reply). This call
+    site is tool-using (``tools`` may be non-empty), so recording only the
+    final text would silently drop any intermediate tool-loop turns.
 
     Stubs ``run_agent_via_reasoning`` so this assertion does not depend on a
     live Strands Agent, and so it still holds when the session-wide
@@ -94,6 +94,9 @@ def test_call_agent_records_full_conversation_in_transcript(monkeypatch) -> None
         on_agent = kwargs.get("on_reasoning_agent")
         if on_agent is not None:
             on_agent(_Agent())
+        on_fmt = kwargs.get("on_formatting")
+        if on_fmt is not None:
+            on_fmt("format prompt", '{"ok": true}')
         return kwargs["parse"]('{"ok": true}')
 
     captured: List[Any] = []
@@ -101,7 +104,7 @@ def test_call_agent_records_full_conversation_in_transcript(monkeypatch) -> None
     monkeypatch.setattr(
         runner_mod,
         "record_transcript_entry",
-        lambda *args, **kwargs: captured.append(args),
+        lambda *args, **kwargs: captured.append((args, kwargs)),
     )
 
     with llm_attribution(job_id="job-1"):
@@ -117,8 +120,8 @@ def test_call_agent_records_full_conversation_in_transcript(monkeypatch) -> None
         )
 
     assert isinstance(result, str) and result  # parse() got the final text, unchanged
-    assert len(captured) == 1
-    stage, target, prompt, response = captured[0]
+    assert len(captured) == 2
+    stage, target, prompt, response = captured[0][0]
     assert stage == "architecture"
     assert target == "batch 1/1"
     assert prompt == "user prompt"
@@ -126,6 +129,14 @@ def test_call_agent_records_full_conversation_in_transcript(monkeypatch) -> None
     assert isinstance(messages, list)
     assert len(messages) >= 2  # at least the user turn and the model's reply
     assert messages[0]["role"] == "user"
+    fmt_stage, fmt_target, fmt_prompt, fmt_response = captured[1][0]
+    assert fmt_stage == "architecture"
+    assert fmt_target == "batch 1/1"
+    assert fmt_prompt == "format prompt"
+    assert fmt_response == '{"ok": true}'
+    from code_review_agent.via_reasoning import formatting_system_prompt_with_untrusted_guard
+
+    assert captured[1][1]["system_prompt"] == formatting_system_prompt_with_untrusted_guard(None)
 
 
 def test_two_call_client_stub_invokes_on_reasoning_agent(monkeypatch) -> None:

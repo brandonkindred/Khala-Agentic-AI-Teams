@@ -20,7 +20,7 @@ from typing import Any, Callable, TypeVar
 from pydantic import BaseModel
 from strands import Agent
 
-from llm_service import LLMClient, LLMSemanticExhaustionError, get_strands_model
+from llm_service import LLMClient, LLMJsonParseError, LLMSemanticExhaustionError, get_strands_model
 from llm_service.structured import complete_validated
 
 logger = logging.getLogger(__name__)
@@ -79,6 +79,29 @@ def formatting_system_prompt_with_untrusted_guard(
     if not base:
         return _FORMAT_ANALYSIS_UNTRUSTED_SYSTEM_SUFFIX.strip()
     return base + _FORMAT_ANALYSIS_UNTRUSTED_SYSTEM_SUFFIX
+
+
+def _invoke_observer(
+    label: str,
+    observer: Callable[[str, str], None] | None,
+    prompt: str,
+    response: str,
+) -> None:
+    """Invoke ``observer(prompt, response)``; never raise.
+
+    Preconditions:
+        ``label`` identifies the caller in the warning log.
+
+    Postconditions:
+        ``observer`` is invoked when not None. Any exception is logged and
+        swallowed so an observer cannot fail the review.
+    """
+    if observer is None:
+        return
+    try:
+        observer(prompt, response)
+    except Exception:  # noqa: BLE001 - observer must never break the review
+        logger.warning("%s callback failed", label, exc_info=True)
 
 
 def _require_non_empty(name: str, value: str) -> None:
@@ -272,14 +295,12 @@ def complete_validated_via_reasoning_local(
             think=_resolve_reasoning_think(reasoning_think),
         )
     )
-    if on_attempt is not None:
-        try:
-            on_attempt(reasoning_prompt, prose)
-        except Exception:  # noqa: BLE001 - observer must never break the review
-            logger.warning(
-                "complete_validated_via_reasoning_local: on_attempt callback failed",
-                exc_info=True,
-            )
+    _invoke_observer(
+        "complete_validated_via_reasoning_local: on_attempt",
+        on_attempt,
+        reasoning_prompt,
+        prose,
+    )
     format_prompt = (
         f"{_DEFAULT_FORMAT_INSTRUCTIONS}\n\n{formatting_instructions}\n\n"
         f"{wrap_with_analysis_delimiters(prose)}"
@@ -311,6 +332,7 @@ def run_agent_via_reasoning(
     agent_key: str = "code_review",
     conversation_manager: Any | None = None,
     on_reasoning_agent: Callable[[Agent], None] | None = None,
+    on_formatting: Callable[[str, str], None] | None = None,
 ) -> T:
     """Two-call split for Strands ``Agent`` JSON outcome paths.
 
@@ -331,12 +353,17 @@ def run_agent_via_reasoning(
         ``formatting_instructions`` are non-empty. ``parse`` accepts the raw
         JSON text from the formatting pass. ``on_reasoning_agent``, when given,
         is invoked with the call-1 ``Agent`` after the reasoning prompt run.
+        ``on_formatting``, when given, is invoked with the formatting prompt
+        and the formatting pass's raw reply (JSON text, or the unparsed body
+        when ``complete_json`` raises ``LLMJsonParseError``).
 
     Postconditions:
         Returns ``parse``'s result. Tools are attached only to call 1.
         Both passes honor ``model``'s reserved ``max_tokens`` when one is set.
         Empty reasoning output raises ``LLMSemanticExhaustionError`` before
-        formatting.
+        formatting. ``on_formatting`` is invoked after the formatting LLM call
+        returns or raises ``LLMJsonParseError`` (so a malformed reply is still
+        observable) and before ``parse``; observer exceptions are swallowed.
     """
     _require_non_empty("reasoning_prompt", reasoning_prompt)
     _require_non_empty("reasoning_system_prompt", reasoning_system_prompt)
@@ -377,8 +404,24 @@ def run_agent_via_reasoning(
         max_tokens = _pinned_max_tokens(model)
         if max_tokens is not None:
             format_kwargs["max_tokens"] = max_tokens
-        data = backing_client.complete_json(format_prompt, **format_kwargs)
-        return parse(json.dumps(data))
+        try:
+            data = backing_client.complete_json(format_prompt, **format_kwargs)
+        except LLMJsonParseError as exc:
+            _invoke_observer(
+                "run_agent_via_reasoning: on_formatting",
+                on_formatting,
+                format_prompt,
+                exc.raw_response,
+            )
+            raise
+        raw_text = json.dumps(data)
+        _invoke_observer(
+            "run_agent_via_reasoning: on_formatting",
+            on_formatting,
+            format_prompt,
+            raw_text,
+        )
+        return parse(raw_text)
 
     json_model = _clone_model_for_pass(
         model,
@@ -392,6 +435,12 @@ def run_agent_via_reasoning(
         tools=[],
     )
     raw = str(formatting_agent(format_prompt)).strip()
+    _invoke_observer(
+        "run_agent_via_reasoning: on_formatting",
+        on_formatting,
+        format_prompt,
+        raw,
+    )
     return parse(raw)
 
 

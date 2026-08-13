@@ -86,7 +86,7 @@ from .prompts import (
 )
 from .repo_reader import DEFAULT_MAX_LISTED_FILES, DiskRepoReader, RepoReader
 from .transcript import model_label, record_transcript_entry
-from .via_reasoning import run_agent_via_reasoning
+from .via_reasoning import formatting_system_prompt_with_untrusted_guard, run_agent_via_reasoning
 
 logger = logging.getLogger(__name__)
 
@@ -1981,26 +1981,36 @@ def _verify_group(
           result rather than returned -- the caller treats an absent index as
           "keep", so an ungrounded drop never reaches the merge (see
           ``_agent_read_the_cited_file``).
-        - On a successful call, buffers a ``false_positive_filter`` transcript
-          entry (target ``file_path``, the full prompt) for later batched,
+        - On a successful call, buffers ``false_positive_filter`` transcript
+          entries (target ``file_path``, the full prompt) for later batched,
           off-hot-path persistence to ``code_review_transcripts`` — see
-          ``transcript.record_transcript_entry``. The recorded response is the
-          full ``agent.messages`` conversation (JSON), not just the final
-          text: this call is tool-using (``read_file``), so one invocation can
-          span several model turns (a toolUse request, its toolResult, then a
-          follow-up model turn), and recording only the final text would
-          silently drop the intermediate turns from the "thinking process"
-          transcript. A no-op when no ``job_id`` is bound on the current
-          ``llm_attribution`` context (see ``CodeReviewAgent.run``); never
-          raises and never blocks on I/O.
+          ``transcript.record_transcript_entry``. The reasoning-pass response
+          is the full ``agent.messages`` conversation (JSON), not just the
+          final text: this call is tool-using (``read_file``), so one
+          invocation can span several model turns (a toolUse request, its
+          toolResult, then a follow-up model turn), and recording only the
+          final text would silently drop the intermediate turns from the
+          "thinking process" transcript. The formatting pass is a second
+          entry (format prompt + JSON reply). A no-op when no ``job_id`` is
+          bound on the current ``llm_attribution`` context (see
+          ``CodeReviewAgent.run``); never raises and never blocks on I/O.
     """
     prompt = _build_group_prompt(index, file_path, issues, input_data)
     reasoning_agent: Agent | None = None
+    format_prompt = ""
+    format_response = ""
     started = time.monotonic()
+    reasoning_done_at = started
 
     def _capture_reasoning_agent(agent: Agent) -> None:
-        nonlocal reasoning_agent
+        nonlocal reasoning_agent, reasoning_done_at
         reasoning_agent = agent
+        reasoning_done_at = time.monotonic()
+
+    def _capture_formatting(prompt_text: str, response: str) -> None:
+        nonlocal format_prompt, format_response
+        format_prompt = prompt_text
+        format_response = response
 
     try:
         data = run_agent_via_reasoning(
@@ -2014,11 +2024,13 @@ def _verify_group(
             agent_key="code_review_verify",
             conversation_manager=SlidingWindowConversationManager(should_truncate_results=False),
             on_reasoning_agent=_capture_reasoning_agent,
+            on_formatting=_capture_formatting,
         )
     finally:
         # Record even when formatting/parse fails after a successful reasoning
         # pass, so a malformed reply is still visible in the transcript. A
         # reasoning-pass exception that never constructed the agent is a no-op.
+        now = time.monotonic()
         if reasoning_agent is not None:
             try:
                 transcript_response = json.dumps(reasoning_agent.messages, default=str)
@@ -2031,7 +2043,17 @@ def _verify_group(
                 transcript_response,
                 system_prompt=FALSE_POSITIVE_VERIFY_REASONING_SYSTEM_PROMPT,
                 model=model_label(model),
-                duration_ms=(time.monotonic() - started) * 1000,
+                duration_ms=(reasoning_done_at - started) * 1000,
+            )
+        if format_prompt:
+            record_transcript_entry(
+                "false_positive_filter",
+                file_path,
+                format_prompt,
+                format_response,
+                system_prompt=formatting_system_prompt_with_untrusted_guard(None),
+                model=model_label(model),
+                duration_ms=(now - reasoning_done_at) * 1000,
             )
     verdicts = _parse_verdicts(data, len(issues))
     if reasoning_agent is None or not _agent_read_the_cited_file(reasoning_agent, index, file_path):

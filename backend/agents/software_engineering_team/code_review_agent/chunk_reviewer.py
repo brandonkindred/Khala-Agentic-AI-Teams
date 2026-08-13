@@ -48,7 +48,10 @@ from .profiles import (
     build_review_reasoning_system_prompt,
 )
 from .transcript import model_label, record_transcript_entry
-from .via_reasoning import complete_validated_via_reasoning_local
+from .via_reasoning import (
+    complete_validated_via_reasoning_local,
+    formatting_system_prompt_with_untrusted_guard,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -326,9 +329,11 @@ def _run_chunk_review(
 
     prompt = "\n".join(context_parts)
     reasoning_system_prompt = build_review_reasoning_system_prompt(input_data.profile)
+    formatting_system_prompt = formatting_system_prompt_with_untrusted_guard(None)
     model_name = model_label(llm)
     target = input_data.file_path_or_label
     last_attempt_start = time.monotonic()
+    attempt_index = 0
 
     def _on_attempt(attempt_prompt: str, attempt_response: str) -> None:
         # One transcript entry per LLM call the via-reasoning path makes: the
@@ -336,14 +341,18 @@ def _run_chunk_review(
         # attempt (initial call and every corrective retry). Recording only
         # the final successful formatting reply would silently drop the
         # reasoning prose and any malformed earlier reply.
-        nonlocal last_attempt_start
+        # First callback is the reasoning pass (reasoning system prompt);
+        # every later callback is a formatting attempt (formatting guard).
+        nonlocal last_attempt_start, attempt_index
         now = time.monotonic()
+        system_prompt = reasoning_system_prompt if attempt_index == 0 else formatting_system_prompt
+        attempt_index += 1
         record_transcript_entry(
             "chunk_review",
             target,
             attempt_prompt,
             attempt_response,
-            system_prompt=reasoning_system_prompt,
+            system_prompt=system_prompt,
             model=model_name,
             duration_ms=(now - last_attempt_start) * 1000,
         )

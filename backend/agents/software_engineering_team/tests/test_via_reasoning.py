@@ -667,3 +667,120 @@ def test_run_agent_via_reasoning_invokes_on_reasoning_agent_after_prompt(
     assert len(captured) == 1
     assert captured[0] is agent_calls[0]
     assert len(agent_calls) == 2
+
+
+def test_run_agent_via_reasoning_invokes_on_formatting_after_complete_json(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """on_formatting observes the format prompt and JSON text of call 2."""
+    from llm_service import LLMClientModel
+    from llm_service.clients.dummy import DummyLLMClient
+    from software_engineering_team.code_review_agent import via_reasoning as vr_mod
+
+    seen: list[tuple[str, str]] = []
+
+    class _RecordingClient(DummyLLMClient):
+        def complete_json(self, prompt: str, **kwargs: Any) -> dict[str, Any]:
+            return {"approved": True, "summary": "via client"}
+
+    class _RecordingAgent:
+        def __init__(self, **kwargs: Any) -> None:
+            pass
+
+        def __call__(self, prompt: str) -> str:
+            return "REVIEW PROSE"
+
+    monkeypatch.setattr(vr_mod, "Agent", _RecordingAgent)
+    model = LLMClientModel(_RecordingClient(), agent_key="code_review")
+
+    result = run_agent_via_reasoning(
+        model=model,
+        reasoning_prompt="Review this",
+        reasoning_system_prompt="Prose reviewer",
+        formatting_instructions='Return {"approved": bool, "summary": str}',
+        parse=lambda raw: _Out.model_validate_json(raw),
+        on_formatting=lambda prompt, response: seen.append((prompt, response)),
+    )
+
+    assert result.summary == "via client"
+    assert len(seen) == 1
+    assert "REVIEW PROSE" in seen[0][0]
+    assert "via client" in seen[0][1]
+
+
+def test_run_agent_via_reasoning_on_formatting_sees_raw_on_json_parse_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A complete_json parse failure still notifies on_formatting with the raw body."""
+    from llm_service import LLMClientModel, LLMJsonParseError
+    from llm_service.clients.dummy import DummyLLMClient
+    from software_engineering_team.code_review_agent import via_reasoning as vr_mod
+
+    seen: list[tuple[str, str]] = []
+
+    class _FailingClient(DummyLLMClient):
+        def complete_json(self, prompt: str, **kwargs: Any) -> dict[str, Any]:
+            raise LLMJsonParseError(
+                "bad json",
+                response_preview="not json",
+                raw_response="not json at all",
+            )
+
+    class _RecordingAgent:
+        def __init__(self, **kwargs: Any) -> None:
+            pass
+
+        def __call__(self, prompt: str) -> str:
+            return "REVIEW PROSE"
+
+    monkeypatch.setattr(vr_mod, "Agent", _RecordingAgent)
+    model = LLMClientModel(_FailingClient(), agent_key="code_review")
+
+    with pytest.raises(LLMJsonParseError):
+        run_agent_via_reasoning(
+            model=model,
+            reasoning_prompt="Review this",
+            reasoning_system_prompt="Prose reviewer",
+            formatting_instructions='Return {"approved": bool, "summary": str}',
+            parse=lambda raw: _Out.model_validate_json(raw),
+            on_formatting=lambda prompt, response: seen.append((prompt, response)),
+        )
+
+    assert len(seen) == 1
+    assert seen[0][1] == "not json at all"
+
+
+def test_run_agent_via_reasoning_on_formatting_exception_is_swallowed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A buggy on_formatting observer must not fail the review."""
+    from llm_service import LLMClientModel
+    from llm_service.clients.dummy import DummyLLMClient
+    from software_engineering_team.code_review_agent import via_reasoning as vr_mod
+
+    class _RecordingClient(DummyLLMClient):
+        def complete_json(self, prompt: str, **kwargs: Any) -> dict[str, Any]:
+            return {"approved": True, "summary": "via client"}
+
+    class _RecordingAgent:
+        def __init__(self, **kwargs: Any) -> None:
+            pass
+
+        def __call__(self, prompt: str) -> str:
+            return "REVIEW PROSE"
+
+    monkeypatch.setattr(vr_mod, "Agent", _RecordingAgent)
+    model = LLMClientModel(_RecordingClient(), agent_key="code_review")
+
+    def _boom(_prompt: str, _response: str) -> None:
+        raise RuntimeError("observer boom")
+
+    result = run_agent_via_reasoning(
+        model=model,
+        reasoning_prompt="Review this",
+        reasoning_system_prompt="Prose reviewer",
+        formatting_instructions='Return {"approved": bool, "summary": str}',
+        parse=lambda raw: _Out.model_validate_json(raw),
+        on_formatting=_boom,
+    )
+    assert result.summary == "via client"

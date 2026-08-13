@@ -45,7 +45,7 @@ from llm_service import LLMClient, LLMTruncatedError
 
 from .model_resolution import resolve_code_review_model
 from .transcript import model_label, record_transcript_entry
-from .via_reasoning import run_agent_via_reasoning
+from .via_reasoning import formatting_system_prompt_with_untrusted_guard, run_agent_via_reasoning
 
 try:
     from strands.models.model import Model as _StrandsModel
@@ -180,18 +180,28 @@ def _call_agent(
         - Tools are attached only to the reasoning pass (call 1).
         - Raises whatever ``run_agent_via_reasoning`` or ``parse`` raises —
           recovery is entirely the caller's concern.
-        - Records the reasoning-pass ``agent.messages`` conversation (JSON) into
-          the durable transcript once the reasoning agent exists, even if the
-          formatting pass or ``parse`` later fails, so a tool-using call's
-          intermediate turns are not silently dropped. A no-op when no
-          ``job_id`` is bound.
+        - Records the reasoning-pass ``agent.messages`` conversation (JSON) and
+          a separate formatting-pass entry (format prompt + JSON reply) into
+          the durable transcript once each call exists, even if the formatting
+          pass or ``parse`` later fails, so a tool-using call's intermediate
+          turns and the subsequent JSON transcription are not silently dropped.
+          A no-op when no ``job_id`` is bound.
     """
     reasoning_agent = None
+    format_prompt = ""
+    format_response = ""
     started = time.monotonic()
+    reasoning_done_at = started
 
     def _capture_reasoning_agent(agent: object) -> None:
-        nonlocal reasoning_agent
+        nonlocal reasoning_agent, reasoning_done_at
         reasoning_agent = agent
+        reasoning_done_at = time.monotonic()
+
+    def _capture_formatting(prompt: str, response: str) -> None:
+        nonlocal format_prompt, format_response
+        format_prompt = prompt
+        format_response = response
 
     try:
         return run_agent_via_reasoning(
@@ -203,8 +213,10 @@ def _call_agent(
             tools=tools,
             reasoning_think=True,
             on_reasoning_agent=_capture_reasoning_agent,
+            on_formatting=_capture_formatting,
         )
     finally:
+        now = time.monotonic()
         if reasoning_agent is not None:
             try:
                 transcript_response = json.dumps(
@@ -219,7 +231,17 @@ def _call_agent(
                 transcript_response,
                 system_prompt=reasoning_system_prompt,
                 model=model_label(model),
-                duration_ms=(time.monotonic() - started) * 1000,
+                duration_ms=(reasoning_done_at - started) * 1000,
+            )
+        if format_prompt:
+            record_transcript_entry(
+                pass_label,
+                batch_target,
+                format_prompt,
+                format_response,
+                system_prompt=formatting_system_prompt_with_untrusted_guard(None),
+                model=model_label(model),
+                duration_ms=(now - reasoning_done_at) * 1000,
             )
 
 

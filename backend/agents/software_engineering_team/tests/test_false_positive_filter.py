@@ -176,7 +176,9 @@ def _chat_tool_result_count(messages: List[Any]) -> int:
     return sum(1 for m in messages if isinstance(m, dict) and m.get("role") == "tool")
 
 
-def _chat_return_tool_call(tool_use_id: str, name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
+def _chat_return_tool_call(
+    tool_use_id: str, name: str, arguments: Dict[str, Any]
+) -> Dict[str, Any]:
     return {
         "__tool_calls__": [
             {
@@ -2329,7 +2331,7 @@ def test_verify_group_records_full_tool_loop_in_transcript(monkeypatch) -> None:
     with llm_attribution(job_id="job-1"):
         filter_false_positives(stub, _input(), [keep])
 
-    assert len(captured) == 1
+    assert len(captured) == 2
     _stage, _target, _prompt, response = captured[0]
     # A single-turn call would just be [user, assistant] (2 messages) or even
     # a bare final-text string; the simulated read_file round-trip must widen
@@ -3080,9 +3082,9 @@ def test_filter_groups_by_file_and_removes_across_groups(monkeypatch, parallelis
         def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:  # type: ignore[override]
             if "verdicts" not in prompt.lower():
                 return super().complete_json(prompt, **kwargs)
-            if 'Verified findings for a.py' in prompt:
+            if "Verified findings for a.py" in prompt:
                 return {"verdicts": [{"index": 0, "is_real_issue": False, "confidence": "high"}]}
-            if 'Verified findings for b.py' in prompt:
+            if "Verified findings for b.py" in prompt:
                 return {"verdicts": [{"index": 0, "is_real_issue": True, "confidence": "high"}]}
             return super().complete_json(prompt, **kwargs)
 

@@ -244,7 +244,18 @@ def _drain() -> int:
     The whole drain (snapshot through persist/requeue) is serialized on
     ``_drain_exec_lock`` so a terminal ``drain()`` cannot return while a
     heartbeat write of a just-cleared batch is still in flight.
+
+    The store import runs *before* the buffer is cleared so an import failure
+    cannot drop in-flight entries. Never raises.
     """
+    try:
+        from software_engineering_team.review_history_store import (
+            append_review_transcript_entries,
+        )
+    except Exception:  # noqa: BLE001 - drain must never raise
+        logger.warning("code review transcript: drain import failed", exc_info=True)
+        return 0
+
     with _drain_exec_lock:
         with _buffer_lock:
             if not _buffer:
@@ -254,10 +265,6 @@ def _drain() -> int:
         by_job: dict[str, list[dict[str, Any]]] = {}
         for job_id, entry in batch:
             by_job.setdefault(job_id, []).append(entry)
-
-        from software_engineering_team.review_history_store import (
-            append_review_transcript_entries,
-        )
 
         written = 0
         failed: list[tuple[str, dict[str, Any]]] = []
@@ -322,9 +329,14 @@ def drain() -> int:
     Postconditions: returns the number of entries written; 0 if the buffer
     was empty or the write failed. Overlapping callers serialize: this
     does not return while another drain's persist of a snapshotted batch
-    is still in flight. Never raises.
+    is still in flight. Never raises: unexpected failures are logged and
+    reported as zero writes so a ``finally`` flush cannot mask a review error.
     """
-    return _drain()
+    try:
+        return _drain()
+    except Exception:  # noqa: BLE001 - public drain contract is never-raises
+        logger.warning("code review transcript: drain failed", exc_info=True)
+        return 0
 
 
 def register_transcript_flusher() -> None:

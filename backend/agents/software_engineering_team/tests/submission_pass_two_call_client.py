@@ -61,10 +61,11 @@ def wire_run_agent_via_reasoning_for_test_clients(
 ) -> None:
     """Drive ``run_agent_via_reasoning`` through ``complete`` + ``complete_json`` stubs.
 
-    Honors ``on_reasoning_agent`` the same way the real helper does after a
-    successful reasoning pass, so transcript-recording call sites still see
-    a ``messages`` conversation when this autouse stub is active (pytest-xdist
-    loads this plugin session-wide from sibling test modules).
+    Honors ``on_reasoning_agent`` and ``on_formatting`` the same way the real
+    helper does after each pass, so transcript-recording call sites still see
+    a ``messages`` conversation and a formatting entry when this autouse stub
+    is active (pytest-xdist loads this plugin session-wide from sibling test
+    modules).
     """
 
     def _fake(**kwargs: Any) -> Any:
@@ -77,7 +78,11 @@ def wire_run_agent_via_reasoning_for_test_clients(
         if on_reasoning_agent is not None:
             on_reasoning_agent(_StubReasoningAgent(reasoning_prompt))
         data = client.complete_json("format", objective="submission-pass-test")
-        return parse(json.dumps(data))
+        raw = json.dumps(data)
+        on_formatting = kwargs.get("on_formatting")
+        if on_formatting is not None:
+            on_formatting("format", raw)
+        return parse(raw)
 
     monkeypatch.setattr(runner_mod, "run_agent_via_reasoning", _fake)
 

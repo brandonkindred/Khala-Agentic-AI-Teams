@@ -127,7 +127,7 @@ def test_chunk_review_records_each_retry_attempt_in_transcript(monkeypatch) -> N
     captured: list = []
     monkeypatch.setattr(
         "code_review_agent.chunk_reviewer.record_transcript_entry",
-        lambda *args, **kwargs: captured.append(args),
+        lambda *args, **kwargs: captured.append((args, kwargs)),
     )
 
     agent = ChunkReviewAgent(llm=client)
@@ -139,9 +139,9 @@ def test_chunk_review_records_each_retry_attempt_in_transcript(monkeypatch) -> N
     # Reasoning complete() plus the failed formatting attempt plus the
     # successful corrective retry — three real LLM calls.
     assert len(captured) == 3
-    assert CODE_TO_REVIEW_HEADER in captured[0][2]
-    first_prompt, first_response = captured[1][2], captured[1][3]
-    second_prompt, second_response = captured[2][2], captured[2][3]
+    assert CODE_TO_REVIEW_HEADER in captured[0][0][2]
+    first_prompt, first_response = captured[1][0][2], captured[1][0][3]
+    second_prompt, second_response = captured[2][0][2], captured[2][0][3]
     # First formatting entry: the format prompt and the failed attempt's raw
     # (unparseable) response.
     assert first_response == "not json at all"
@@ -152,6 +152,12 @@ def test_chunk_review_records_each_retry_attempt_in_transcript(monkeypatch) -> N
     assert second_prompt != first_prompt
     assert "not json" in second_prompt
     assert "approved" in second_response
+    from code_review_agent.via_reasoning import formatting_system_prompt_with_untrusted_guard
+
+    format_system = formatting_system_prompt_with_untrusted_guard(None)
+    assert captured[0][1]["system_prompt"] != format_system
+    assert captured[1][1]["system_prompt"] == format_system
+    assert captured[2][1]["system_prompt"] == format_system
 
 
 def test_chunk_review_raises_llm_json_parse_error_on_non_json_model_output() -> None:

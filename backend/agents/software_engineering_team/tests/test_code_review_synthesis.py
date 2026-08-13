@@ -286,14 +286,14 @@ def test_synthesize_success_returns_result() -> None:
 
 
 def test_synthesize_records_reasoning_conversation_in_transcript(monkeypatch) -> None:
-    """The durable transcript captures the reasoning-pass conversation, not just
-    the formatting JSON, so the synthesizer's thinking is inspectable."""
+    """The durable transcript captures the reasoning-pass conversation and the
+    formatting JSON as two entries, so both LLM calls are inspectable."""
     from llm_service import llm_attribution
 
     captured: list = []
     monkeypatch.setattr(
         "code_review_agent.synthesis.record_transcript_entry",
-        lambda *args, **kwargs: captured.append(args),
+        lambda *args, **kwargs: captured.append((args, kwargs)),
     )
     client = _PayloadClient({"summary": "merged summary", "spec_compliance_notes": ""})
     with llm_attribution(job_id="job-1"):
@@ -305,14 +305,20 @@ def test_synthesize_records_reasoning_conversation_in_transcript(monkeypatch) ->
             chunk_summaries=["s1"],
         )
     assert isinstance(result, SynthesisResult)
-    assert len(captured) == 1
-    stage, _target, prompt, response = captured[0]
+    assert len(captured) == 2
+    stage, _target, prompt, response = captured[0][0]
     assert stage == "synthesis"
     assert "deterministic review verdict" in prompt.lower()
     messages = json.loads(response)
     assert isinstance(messages, list)
     assert len(messages) >= 2
     assert messages[0]["role"] == "user"
+    fmt_stage, _, fmt_prompt, fmt_response = captured[1][0]
+    assert fmt_stage == "synthesis"
+    assert "merged summary" in fmt_response
+    from code_review_agent.via_reasoning import formatting_system_prompt_with_untrusted_guard
+
+    assert captured[1][1]["system_prompt"] == formatting_system_prompt_with_untrusted_guard(None)
 
 
 def test_synthesize_returns_none_on_missing_summary() -> None:

@@ -41,7 +41,7 @@ from .prompts import (
     SPEC_COMPLIANCE_PASS_REASONING_SYSTEM_PROMPT,
 )
 from .transcript import model_label, record_transcript_entry
-from .via_reasoning import run_agent_via_reasoning
+from .via_reasoning import formatting_system_prompt_with_untrusted_guard, run_agent_via_reasoning
 
 logger = logging.getLogger(__name__)
 
@@ -169,7 +169,7 @@ def _run_via_reasoning_with_transcript(
     formatting_instructions: str,
     stage: str,
 ) -> dict:
-    """Run the think-then-format split and buffer a transcript of the reasoning pass.
+    """Run the think-then-format split and buffer both transcript entries.
 
     Preconditions:
         ``prompt``, ``reasoning_system_prompt``, and ``formatting_instructions``
@@ -179,16 +179,26 @@ def _run_via_reasoning_with_transcript(
     Postconditions:
         Returns the parsed JSON object from the formatting pass. Records the
         reasoning-pass ``agent.messages`` conversation once that agent exists,
-        even if formatting or parse later fails. A no-op on the transcript
-        when no ``job_id`` is bound. Raises whatever ``run_agent_via_reasoning``
-        raises.
+        and a separate formatting-pass entry once that call returns (or raises
+        ``LLMJsonParseError`` with a raw body), even if parse later fails. A
+        no-op on the transcript when no ``job_id`` is bound. Raises whatever
+        ``run_agent_via_reasoning`` raises.
     """
     reasoning_agent = None
+    format_prompt = ""
+    format_response = ""
     started = time.monotonic()
+    reasoning_done_at = started
 
     def _capture(agent: object) -> None:
-        nonlocal reasoning_agent
+        nonlocal reasoning_agent, reasoning_done_at
         reasoning_agent = agent
+        reasoning_done_at = time.monotonic()
+
+    def _capture_formatting(prompt: str, response: str) -> None:
+        nonlocal format_prompt, format_response
+        format_prompt = prompt
+        format_response = response
 
     try:
         return run_agent_via_reasoning(
@@ -199,8 +209,10 @@ def _run_via_reasoning_with_transcript(
             parse=_parse_json_object,
             tools=[],
             on_reasoning_agent=_capture,
+            on_formatting=_capture_formatting,
         )
     finally:
+        now = time.monotonic()
         if reasoning_agent is not None:
             try:
                 transcript_response = json.dumps(
@@ -215,7 +227,17 @@ def _run_via_reasoning_with_transcript(
                 transcript_response,
                 system_prompt=reasoning_system_prompt,
                 model=model_label(model),
-                duration_ms=(time.monotonic() - started) * 1000,
+                duration_ms=(reasoning_done_at - started) * 1000,
+            )
+        if format_prompt:
+            record_transcript_entry(
+                stage,
+                "",
+                format_prompt,
+                format_response,
+                system_prompt=formatting_system_prompt_with_untrusted_guard(None),
+                model=model_label(model),
+                duration_ms=(now - reasoning_done_at) * 1000,
             )
 
 
