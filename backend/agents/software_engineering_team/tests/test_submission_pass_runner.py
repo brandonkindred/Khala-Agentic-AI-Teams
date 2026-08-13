@@ -15,7 +15,7 @@ from code_review_agent.submission_pass_runner import (
 )
 from strands.types.exceptions import ContextWindowOverflowException, MaxTokensReachedException
 
-from llm_service import LLMClientModel, LLMTruncatedError
+from llm_service import LLMTruncatedError
 from llm_service.clients.dummy import DummyLLMClient
 
 
@@ -75,20 +75,38 @@ def test_call_agent_records_full_conversation_in_transcript(monkeypatch) -> None
     """The transcript entry's response is the full agent.messages conversation
     (JSON), not just the final text -- this call site is tool-using (``tools``
     may be non-empty), so recording only the final text would silently drop
-    any intermediate tool-loop turns from the durable transcript."""
+    any intermediate tool-loop turns from the durable transcript.
+
+    Stubs ``run_agent_via_reasoning`` so this assertion does not depend on a
+    live Strands Agent, and so it still holds when the session-wide
+    ``submission_pass_two_call_client`` autouse stub is loaded (as in CI
+    pytest-xdist).
+    """
     from llm_service import llm_attribution
 
+    class _Agent:
+        messages = [
+            {"role": "user", "content": [{"text": "user prompt"}]},
+            {"role": "assistant", "content": [{"text": "reply"}]},
+        ]
+
+    def _fake(**kwargs: Any) -> str:
+        on_agent = kwargs.get("on_reasoning_agent")
+        if on_agent is not None:
+            on_agent(_Agent())
+        return kwargs["parse"]('{"ok": true}')
+
     captured: List[Any] = []
+    monkeypatch.setattr(runner_mod, "run_agent_via_reasoning", _fake)
     monkeypatch.setattr(
         runner_mod,
         "record_transcript_entry",
         lambda *args, **kwargs: captured.append(args),
     )
-    model = LLMClientModel(DummyLLMClient(), max_tokens=4096)
 
     with llm_attribution(job_id="job-1"):
         result = runner_mod._call_agent(
-            model,
+            object(),
             "system prompt",
             "format json as an object",
             [],
@@ -108,6 +126,28 @@ def test_call_agent_records_full_conversation_in_transcript(monkeypatch) -> None
     assert isinstance(messages, list)
     assert len(messages) >= 2  # at least the user turn and the model's reply
     assert messages[0]["role"] == "user"
+
+
+def test_two_call_client_stub_invokes_on_reasoning_agent(monkeypatch) -> None:
+    """The session-wide submission-pass stub must still fire on_reasoning_agent
+    so transcript recording is not silently skipped under pytest-xdist."""
+    from tests.submission_pass_two_call_client import (
+        wire_run_agent_via_reasoning_for_test_clients,
+    )
+
+    seen: List[Any] = []
+    wire_run_agent_via_reasoning_for_test_clients(monkeypatch, runner_mod)
+    result = runner_mod.run_agent_via_reasoning(
+        model=DummyLLMClient(),
+        reasoning_prompt="user prompt",
+        reasoning_system_prompt="sys",
+        formatting_instructions="fmt",
+        parse=lambda raw: raw,
+        on_reasoning_agent=lambda agent: seen.append(agent.messages),
+    )
+    assert isinstance(result, str) and result
+    assert len(seen) == 1
+    assert seen[0][0]["role"] == "user"
 
 
 def test_is_overflow_shaped_classifies_known_and_unknown_exceptions() -> None:
