@@ -39,6 +39,56 @@ def test_is_team_worker_alive_true_when_thread_alive():
         thread.join(timeout=2)
 
 
+def test_is_team_worker_ready_false_when_unregistered():
+    assert worker.is_team_worker_ready("missing-team") is False
+
+
+def test_is_team_worker_ready_false_when_alive_but_not_connected():
+    """Thread spawned, connect still in flight — ready event unset."""
+    hold = threading.Event()
+
+    def _target():
+        hold.wait(timeout=2)
+
+    thread = threading.Thread(target=_target, daemon=True)
+    thread.start()
+    ready = threading.Event()
+    worker._worker_threads["connecting-team"] = thread
+    worker._worker_ready["connecting-team"] = ready
+    try:
+        assert worker.is_team_worker_alive("connecting-team") is True
+        assert worker.is_team_worker_ready("connecting-team") is False
+    finally:
+        hold.set()
+        thread.join(timeout=2)
+
+
+def test_is_team_worker_ready_true_when_alive_and_connected():
+    hold = threading.Event()
+
+    def _target():
+        hold.wait(timeout=2)
+
+    thread = threading.Thread(target=_target, daemon=True)
+    thread.start()
+    ready = threading.Event()
+    ready.set()
+    worker._worker_threads["ready-team"] = thread
+    worker._worker_ready["ready-team"] = ready
+    try:
+        assert worker.is_team_worker_ready("ready-team") is True
+    finally:
+        hold.set()
+        thread.join(timeout=2)
+
+
+def test_is_team_worker_ready_false_when_event_set_but_thread_dead():
+    ready = threading.Event()
+    ready.set()
+    worker._worker_ready["ghost-team"] = ready
+    assert worker.is_team_worker_ready("ghost-team") is False
+
+
 def test_wait_for_team_worker_ready_raises_when_not_started():
     with pytest.raises(RuntimeError, match="was not started"):
         worker.wait_for_team_worker_ready("no-such-team", timeout_s=0.05)
