@@ -55,6 +55,10 @@ logger = logging.getLogger(__name__)
 
 _buffer: deque = deque()
 _buffer_lock = threading.Lock()
+# Serializes snapshot+write so an in-flight heartbeat drain cannot overlap
+# shutdown's final drain (or close_pool) after BackgroundHeartbeat.stop()
+# times out its bounded join.
+_flush_lock = threading.Lock()
 _heartbeat: Optional[BackgroundHeartbeat] = None
 _registered = False
 _register_lock = threading.Lock()
@@ -123,19 +127,22 @@ def _drain() -> int:
     """Flush all buffered rows in one batch; return how many were written.
 
     Failures are swallowed and logged (never raise) — a flush error must not kill
-    the heartbeat thread. The batch is snapshotted under the lock and written
-    outside it so a slow ``executemany`` does not block the call-path observer.
+    the heartbeat thread. The batch is snapshotted under ``_buffer_lock`` and
+    written outside it so a slow ``executemany`` does not block the call-path
+    observer. ``_flush_lock`` is held across snapshot+write so ``unregister``
+    can wait for an in-flight write before the caller closes Postgres.
     """
-    with _buffer_lock:
-        if not _buffer:
+    with _flush_lock:
+        with _buffer_lock:
+            if not _buffer:
+                return 0
+            batch = list(_buffer)
+            _buffer.clear()
+        try:
+            return usage_store.write_rows(batch)
+        except Exception:
+            logger.debug("failed to flush %d LLM usage row(s)", len(batch), exc_info=True)
             return 0
-        batch = list(_buffer)
-        _buffer.clear()
-    try:
-        return usage_store.write_rows(batch)
-    except Exception:
-        logger.debug("failed to flush %d LLM usage row(s)", len(batch), exc_info=True)
-        return 0
 
 
 def drain() -> int:
@@ -145,6 +152,19 @@ def drain() -> int:
     empty or the write failed. Never raises.
     """
     return _drain()
+
+
+def _wait_for_in_flight_flush() -> None:
+    """Block until any in-progress ``_drain`` (including ``write_rows``) finishes.
+
+    Preconditions:
+        - May be called from any thread; ``_flush_lock`` must not already be
+          held by this thread (it is not re-entrant).
+    Postconditions:
+        - No other thread holds ``_flush_lock``. Never raises.
+    """
+    with _flush_lock:
+        return
 
 
 def register_usage_flusher() -> None:
@@ -179,10 +199,12 @@ def register_usage_flusher() -> None:
 def unregister() -> None:
     """Stop the heartbeat and remove the observer from :mod:`llm_service`.
 
-    Postconditions: the drain thread is stopped (joined) and the observer is
-    unregistered so no further rows are enqueued. Safe to call when never
-    registered (no-op). Does NOT flush — call :func:`drain` afterward for the
-    final batch, or :func:`shutdown` for both in the right order.
+    Postconditions: the drain thread is signalled to stop (joined, bounded)
+        and any in-flight ``write_rows`` has finished. The observer is
+        unregistered so no further rows are enqueued. Safe to call when never
+        registered (no-op). Does NOT flush leftover buffer rows — call
+        :func:`drain` afterward for the final batch, or :func:`shutdown` for
+        both in the right order.
     """
     global _heartbeat, _registered
     with _register_lock:
@@ -193,6 +215,10 @@ def unregister() -> None:
         _registered = False
     if hb is not None:
         hb.stop()
+    # stop() may return while the heartbeat is still inside write_rows
+    # (join_timeout is bounded). Wait until that drain releases _flush_lock
+    # so shutdown's final drain and the caller's close_pool cannot interrupt it.
+    _wait_for_in_flight_flush()
     try:
         _unregister_call_observer(_usage_observer)
     except Exception:
@@ -202,13 +228,14 @@ def unregister() -> None:
 def shutdown() -> None:
     """Lifecycle shutdown: stop enqueuing, then flush the remaining buffer.
 
-    Order matters: :func:`unregister` first (stop the heartbeat + remove the
-    observer so no new rows arrive), then :func:`drain` for the final synchronous
-    flush.     Called from team-app and Unified API lifespan before the shared Postgres
-    pool closes, so the final drain can still use the pool.
+    Order matters: :func:`unregister` first (stop the heartbeat, wait for any
+    in-flight write, remove the observer so no new rows arrive), then
+    :func:`drain` for the final synchronous flush. Called from team-app and
+    Unified API lifespan before the shared Postgres pool closes, so the final
+    drain can still use the pool.
 
-    Postconditions: observer unregistered, heartbeat stopped, buffer drained
-        (best-effort). Never raises.
+    Postconditions: observer unregistered, heartbeat stopped, any in-flight
+        heartbeat write finished, buffer drained (best-effort). Never raises.
     """
     unregister()
     drain()
@@ -273,8 +300,9 @@ def _reset_for_test() -> None:
             Exception
         ):  # pragma: no cover - BackgroundHeartbeat.stop never raises; defensive only
             pass
-    with _buffer_lock:
-        _buffer.clear()
+    with _flush_lock:
+        with _buffer_lock:
+            _buffer.clear()
     _registered = False
     _overflow_warned = False
 

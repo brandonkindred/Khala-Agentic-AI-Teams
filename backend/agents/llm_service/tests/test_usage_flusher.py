@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 from datetime import datetime, timezone
 from typing import Any
 
@@ -146,6 +147,59 @@ def test_unregister_stops_heartbeat_and_swallows_observer_failure(monkeypatch) -
     usage_flusher._set_heartbeat_for_test()
     usage_flusher.unregister()
     assert usage_flusher._is_registered() is False
+
+
+def test_shutdown_waits_for_in_flight_heartbeat_flush(monkeypatch) -> None:
+    """shutdown() must not return while a heartbeat ``write_rows`` is still running.
+
+    BackgroundHeartbeat.stop() joins for a bounded timeout. If that join
+    returns while ``_drain`` still holds the batch it popped, the lifecycle
+    caller would otherwise close Postgres under the in-flight write.
+    """
+    started = threading.Event()
+    release = threading.Event()
+    written: list = []
+
+    def slow_write(rows):
+        started.set()
+        assert release.wait(timeout=5)
+        written.append(list(rows))
+        return len(rows)
+
+    monkeypatch.setattr(usage_flusher, "is_postgres_enabled", lambda: True)
+    monkeypatch.setattr(usage_flusher.usage_store, "write_rows", slow_write)
+    monkeypatch.setattr(usage_flusher, "_register_call_observer", lambda o: None)
+    monkeypatch.setattr(usage_flusher, "_unregister_call_observer", lambda o: None)
+    monkeypatch.setattr(usage_flusher, "_flush_interval_s", lambda: 0.1)
+
+    usage_flusher.register_usage_flusher()
+    assert usage_flusher._heartbeat is not None
+    usage_flusher._heartbeat._join_timeout = 0.15
+    usage_flusher._usage_observer(_Rec())
+    assert started.wait(timeout=2), "heartbeat should pick up the buffered row"
+
+    finished = threading.Event()
+
+    def _shutdown() -> None:
+        usage_flusher.shutdown()
+        finished.set()
+
+    t = threading.Thread(target=_shutdown, name="usage-shutdown")
+    try:
+        t.start()
+        # stop() times out at 0.15s; without waiting on the in-flight write,
+        # shutdown would return immediately after that. 0.5s is enough for
+        # the join timeout to elapse but not for a hung write.
+        assert not finished.wait(timeout=0.5), "shutdown returned while write_rows was blocked"
+        assert t.is_alive()
+        release.set()
+        t.join(timeout=2)
+        assert not t.is_alive()
+        assert finished.is_set()
+        assert len(written) == 1
+    finally:
+        release.set()
+        t.join(timeout=2)
 
 
 def test_real_wrappers_register_and_unregister_with_llm_service() -> None:
