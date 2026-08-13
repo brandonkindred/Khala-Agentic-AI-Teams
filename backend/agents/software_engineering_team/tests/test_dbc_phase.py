@@ -738,6 +738,81 @@ def test_dbc_self_review_revert_deletes_verifier_created_dir_symlink(tmp_path):
     assert (tmp_path / "real_dir" / "x.txt").read_text() == "x\n"
 
 
+def test_dbc_self_review_revert_replaces_directory_with_file(tmp_path):
+    (tmp_path / "a.py").write_text("orig a\n")
+
+    def _review(*, code, **kwargs: Any) -> SimpleNamespace:
+        return SimpleNamespace(files={"a.py": "dbc a\n"})
+
+    def _verify(repo, label, tid):
+        replaced = Path(repo) / "a.py"
+        replaced.unlink()
+        replaced.mkdir()
+        (replaced / "nested.txt").write_text("nested\n")
+        return False, "broke"
+
+    _call(
+        tmp_path=tmp_path,
+        gate_config=_gate_config(_review),
+        microtask_files={"a.py": "orig a\n"},
+        deps=ReviewDependencies(build_verifier=_verify),
+    )
+
+    assert not (tmp_path / "a.py").is_dir()
+    assert (tmp_path / "a.py").read_text() == "orig a\n"
+
+
+def test_dbc_self_review_revert_restores_deleted_symlink(tmp_path):
+    (tmp_path / "a.py").write_text("orig a\n")
+    (tmp_path / "real.txt").write_text("real\n")
+    (tmp_path / "existing_link.txt").symlink_to("real.txt")
+
+    def _review(*, code, **kwargs: Any) -> SimpleNamespace:
+        return SimpleNamespace(files={"a.py": "dbc a\n"})
+
+    def _verify(repo, label, tid):
+        (Path(repo) / "existing_link.txt").unlink()
+        return False, "broke"
+
+    _call(
+        tmp_path=tmp_path,
+        gate_config=_gate_config(_review),
+        microtask_files={"a.py": "orig a\n"},
+        deps=ReviewDependencies(build_verifier=_verify),
+    )
+
+    link = tmp_path / "existing_link.txt"
+    assert link.is_symlink()
+    assert os.readlink(link) == "real.txt"
+
+
+def test_dbc_self_review_revert_restores_retargeted_symlink(tmp_path):
+    (tmp_path / "a.py").write_text("orig a\n")
+    (tmp_path / "real.txt").write_text("real\n")
+    (tmp_path / "other.txt").write_text("other\n")
+    (tmp_path / "existing_link.txt").symlink_to("real.txt")
+
+    def _review(*, code, **kwargs: Any) -> SimpleNamespace:
+        return SimpleNamespace(files={"a.py": "dbc a\n"})
+
+    def _verify(repo, label, tid):
+        link = Path(repo) / "existing_link.txt"
+        link.unlink()
+        link.symlink_to("other.txt")
+        return False, "broke"
+
+    _call(
+        tmp_path=tmp_path,
+        gate_config=_gate_config(_review),
+        microtask_files={"a.py": "orig a\n"},
+        deps=ReviewDependencies(build_verifier=_verify),
+    )
+
+    link = tmp_path / "existing_link.txt"
+    assert link.is_symlink()
+    assert os.readlink(link) == "real.txt"
+
+
 def test_dbc_self_review_build_verifier_raises_reverts(tmp_path):
     (tmp_path / "a.py").write_text("orig a\n")
 
@@ -871,6 +946,14 @@ def test_revert_disk_swallows_oserror(tmp_path, monkeypatch):
 
     # Should not raise even though the underlying restore attempt fails.
     dbc_phase._revert_disk({tmp_path / "a.py": b"orig a\n"})
+
+
+def test_restore_symlinks_swallows_oserror(tmp_path, monkeypatch):
+    def _raise_symlink_to(self: Path, target: str, *args: Any, **kwargs: Any) -> None:
+        raise OSError("cannot symlink")
+
+    monkeypatch.setattr(Path, "symlink_to", _raise_symlink_to)
+    dbc_phase._restore_symlinks({tmp_path / "link.txt": "real.txt"})
 
 
 def test_sync_verifier_repairs_walk_oserror_returns_false(tmp_path, monkeypatch):

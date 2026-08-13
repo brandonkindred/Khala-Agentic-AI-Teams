@@ -22,17 +22,16 @@ from __future__ import annotations
 import logging
 import os
 import re
+import shutil
 from pathlib import Path
 from typing import (
     TYPE_CHECKING,
     Any,
     Callable,
     Dict,
-    FrozenSet,
     Iterator,
     NamedTuple,
     Optional,
-    Set,
 )
 
 from shared.dev_models.models import SystemArchitecture, Task
@@ -184,30 +183,66 @@ def _restore_dict_entry(d: Dict[str, str], key: str, prior: Optional[str]) -> No
         d[key] = prior
 
 
+def _clear_path(full_path: Path) -> None:
+    """Remove ``full_path`` whether it is a file, symlink, or directory.
+
+    Preconditions:
+        ``full_path`` is the location to clear; it need not exist.
+
+    Postconditions:
+        ``full_path`` does not exist. A symlink is unlinked without following
+        it. A directory tree is removed with ``shutil.rmtree``. Missing paths
+        are ignored.
+    """
+    if full_path.is_symlink() or full_path.is_file():
+        full_path.unlink(missing_ok=True)
+        return
+    if full_path.is_dir():
+        shutil.rmtree(full_path)
+        return
+    full_path.unlink(missing_ok=True)
+
+
 def _revert_disk(prior_disk: Dict[Path, Optional[bytes]]) -> None:
     """Best-effort restore of each snapshotted path to its prior on-disk bytes.
 
     Postconditions:
         Each path with ``prior_bytes is None`` is deleted (it did not exist
         before); each other path is restored to ``prior_bytes``. A current
-        symlink or other non-regular path at that location is unlinked first
-        so ``write_bytes`` cannot follow a verifier-planted link. An ordinary
-        filesystem failure (e.g. the disk that caused the original write to
-        fail is still unwritable) is logged and skipped per-path rather than
-        raised -- this is already the fallback path of a "never fails"
-        phase, so it must not itself introduce a new way to fail loud.
+        symlink, directory, or other non-regular path at that location is
+        removed first so ``write_bytes`` cannot follow a verifier-planted
+        link or fail on ``IsADirectoryError``. An ordinary filesystem
+        failure is logged and skipped per-path rather than raised -- this is
+        already the fallback path of a "never fails" phase, so it must not
+        itself introduce a new way to fail loud.
     """
     for full_path, prior_bytes in prior_disk.items():
         try:
-            if prior_bytes is None:
-                full_path.unlink(missing_ok=True)
-            else:
-                if full_path.is_symlink() or (full_path.exists() and not full_path.is_file()):
-                    full_path.unlink(missing_ok=True)
+            _clear_path(full_path)
+            if prior_bytes is not None:
                 full_path.parent.mkdir(parents=True, exist_ok=True)
                 full_path.write_bytes(prior_bytes)
         except OSError as exc:
             logger.warning("Failed to revert %s to its prior state (ignored): %s", full_path, exc)
+
+
+def _restore_symlinks(symlinks: Dict[Path, str]) -> None:
+    """Recreate snapshotted symlinks at their recorded targets.
+
+    Preconditions:
+        ``symlinks`` maps symlink paths to ``os.readlink`` target strings.
+
+    Postconditions:
+        Each path is a symlink whose ``os.readlink`` value is ``target``.
+        Whatever currently occupies the path is cleared first. Restore
+        failures are logged and skipped per-path.
+    """
+    for full_path, target in symlinks.items():
+        try:
+            _clear_path(full_path)
+            full_path.symlink_to(target)
+        except OSError as exc:
+            logger.warning("Failed to restore symlink %s (ignored): %s", full_path, exc)
 
 
 def _raise_walk_error(err: OSError) -> None:
@@ -258,10 +293,10 @@ def _iter_worktree_files(
 
 
 class _WorktreeSnapshot(NamedTuple):
-    """Pre-verify worktree inventory: regular-file bytes and symlink paths."""
+    """Pre-verify worktree inventory: regular-file bytes and symlink targets."""
 
     files: Dict[Path, bytes]
-    symlinks: FrozenSet[Path]
+    symlinks: Dict[Path, str]
 
 
 def _snapshot_worktree(root: Path) -> _WorktreeSnapshot:
@@ -269,18 +304,18 @@ def _snapshot_worktree(root: Path) -> _WorktreeSnapshot:
 
     Postconditions:
         ``files`` maps resolved regular-file paths to their bytes. ``symlinks``
-        is the set of file- and directory-symlink paths (unfollowed) so revert
-        can leave pre-existing links in place while deleting verifier-created
-        ones. Raises ``OSError`` if a walk or read fails.
+        maps file- and directory-symlink paths (unfollowed) to their
+        ``os.readlink`` targets so revert can restore a deleted or retargeted
+        link. Raises ``OSError`` if a walk, read, or ``readlink`` fails.
     """
     files: Dict[Path, bytes] = {}
-    links: Set[Path] = set()
+    links: Dict[Path, str] = {}
     for path in _iter_worktree_files(root, include_symlinks=True):
         if path.is_symlink():
-            links.add(path)
+            links[path] = os.readlink(path)
             continue
         files[path] = path.read_bytes()
-    return _WorktreeSnapshot(files=files, symlinks=frozenset(links))
+    return _WorktreeSnapshot(files=files, symlinks=links)
 
 
 def _revert_verifier_side_effects(
@@ -288,7 +323,7 @@ def _revert_verifier_side_effects(
     root: Path,
     prior_disk: Dict[Path, Optional[bytes]],
     pre_verify_disk: Dict[Path, bytes],
-    pre_verify_symlinks: FrozenSet[Path],
+    pre_verify_symlinks: Dict[Path, str],
 ) -> None:
     """Restore pre-DbC DbC files and undo any other verifier worktree writes.
 
@@ -298,9 +333,9 @@ def _revert_verifier_side_effects(
         ``pre_verify_disk`` is restored to its post-DbC / pre-verifier bytes.
         Regular files and file/directory-symlinks that exist now under
         ``root`` but were in neither map nor ``pre_verify_symlinks``
-        (verifier-created) are deleted. Pre-existing symlinks are left
-        unfollowed and unrestored. Restore failures are swallowed by
-        ``_revert_disk``.
+        (verifier-created) are deleted. Snapshotted symlinks are recreated
+        at their recorded targets. Restore failures are swallowed by
+        ``_revert_disk`` / ``_restore_symlinks``.
     """
     revert_map: Dict[Path, Optional[bytes]] = dict(pre_verify_disk)
     revert_map.update(prior_disk)
@@ -309,6 +344,7 @@ def _revert_verifier_side_effects(
         if path not in revert_map and path not in pre_verify_symlinks:
             revert_map[path] = None
     _revert_disk(revert_map)
+    _restore_symlinks(pre_verify_symlinks)
 
 
 def _list_worktree_files_for_revert(root: Path) -> list[Path]:
