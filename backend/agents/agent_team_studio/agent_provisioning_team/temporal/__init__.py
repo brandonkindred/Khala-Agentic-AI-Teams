@@ -8,24 +8,8 @@ entrypoint's job via :func:`start_agent_provisioning_temporal_worker_thread`
 (with the API lifespan as a standalone-dev backstop, and
 ``shared.temporal.teams_registry.start_all_team_workers`` as a
 consolidated-process path).
-
-Sandbox workflows/activities are exported separately, as ``SANDBOX_WORKFLOWS``
-/``SANDBOX_ACTIVITIES``. They are never served by the main provisioning worker
-(see their comment below for why); unified-api lifespan boots that worker
-explicitly via
-:func:`.worker.start_agent_provisioning_sandbox_temporal_worker_thread`.
 """
 
-from agent_platform.sandbox.temporal.activities import (
-    sandbox_acquire_activity,
-    sandbox_reap_activity,
-    sandbox_teardown_activity,
-)
-from agent_platform.sandbox.temporal.workflows import (
-    SandboxAcquireWorkflow,
-    SandboxReaperWorkflow,
-    SandboxTeardownWorkflow,
-)
 from agent_team_studio.agent_provisioning_team.temporal.activities import (
     acquire_agent_lock_activity,
     audit_activity,
@@ -70,23 +54,7 @@ ACTIVITIES = [
     deprovision_activity,
 ]
 
-# Sandbox workflows/activities are deliberately NOT part of WORKFLOWS/ACTIVITIES
-# above (and so are never served by the main provisioning worker that team_service
-# and start_all_team_workers boot). They run on their own SANDBOX_TASK_QUEUE,
-# served only by a worker booted explicitly from unified_api/main.py's lifespan
-# (temporal/worker.py::start_agent_provisioning_sandbox_temporal_worker_thread)
-# — see SANDBOX_TASK_QUEUE's docstring in temporal/constants.py for why this
-# separation exists (the sandbox Lifecycle singleton is process-local state).
-SANDBOX_WORKFLOWS = [
-    SandboxAcquireWorkflow,
-    SandboxTeardownWorkflow,
-    SandboxReaperWorkflow,
-]
-SANDBOX_ACTIVITIES = [
-    sandbox_acquire_activity,
-    sandbox_teardown_activity,
-    sandbox_reap_activity,
-]
+# Sandbox Temporal lives in agent_platform.sandbox.temporal and is not served by this worker.
 
 # Deferred: importing ``worker`` above WORKFLOWS/ACTIVITIES would be fine today
 # (worker only imports ``constants`` at module level), but keep the start helper
@@ -100,12 +68,7 @@ __all__ = [
     "TASK_QUEUE",
     "WORKFLOWS",
     "ACTIVITIES",
-    "SANDBOX_WORKFLOWS",
-    "SANDBOX_ACTIVITIES",
     "AgentProvisioningWorkflow",
     "AgentDeprovisioningWorkflow",
-    "SandboxAcquireWorkflow",
-    "SandboxTeardownWorkflow",
-    "SandboxReaperWorkflow",
     "start_agent_provisioning_temporal_worker_thread",
 ]
