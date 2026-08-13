@@ -703,26 +703,39 @@ _PHASE_SPOT_CHECK_IDS: tuple[str, ...] = tuple(
 
 @pytest.fixture
 def force_dummy_llm(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
-    """Pin this test to DummyLLMClient even when the caller exported a live provider.
+    """Pin this test to DummyLLMClient even when a live provider is configured.
 
     ``conftest`` uses ``setdefault``, so an explicit ``LLM_PROVIDER`` survives
-    collection. Combined with ``_branding_model``'s lru cache, that would let
-    this unmarked spot-check hit a live provider (and then the ``real_llm``
-    parametrization would hit it again). Force dummy and drop cached models
-    so ``pytest -m 'not real_llm'`` stays offline.
+    collection. ``resolve_provider`` also prefers UI runtime config over the
+    env var, so Postgres + a saved live provider would ignore
+    ``LLM_PROVIDER=dummy``. Combined with ``_branding_model``'s lru cache,
+    that would let this unmarked spot-check hit a live provider (and then
+    the ``real_llm`` parametrization would hit it again). Blank the runtime
+    lookup so the dummy env wins, stub the provider-list read so Strands
+    model construction does not round-trip Postgres for a fingerprint, and
+    drop cached models so ``pytest -m 'not real_llm'`` stays offline.
 
     Preconditions:
         ``monkeypatch`` is pytest's env-patch fixture.
     Postconditions:
-        For the duration of the test, ``LLM_PROVIDER`` is ``dummy`` and the
-        branding-model / LLM-client caches have been cleared. Caches are
-        cleared again on teardown so a later ``real_llm`` test can resolve
-        the caller's provider.
+        For the duration of the test, ``_runtime`` returns a blank string,
+        ``load_ordered_entries`` returns an empty list, ``LLM_PROVIDER`` is
+        ``dummy``, and the branding-model / LLM-client caches have been
+        cleared. Caches are cleared again on teardown so a later ``real_llm``
+        test can resolve the caller's provider.
     """
+    from llm_service import config as llm_config
     from llm_service import factory as llm_factory
+    from llm_service import provider_store as llm_provider_store
     from llm_service.strands_provider import _clear_strands_model_cache_for_testing
 
     monkeypatch.setenv("LLM_PROVIDER", "dummy")
+    # Runtime UI config outranks the env var in resolve_provider(); a blank
+    # lookup makes the dummy env win even when Postgres has a live provider.
+    monkeypatch.setattr(llm_config, "_runtime", lambda _key: "")
+    # get_strands_model always fingerprints the provider list, even for dummy.
+    # An empty list keeps that path offline when POSTGRES_HOST is set.
+    monkeypatch.setattr(llm_provider_store, "load_ordered_entries", lambda *a, **k: [])
     llm_factory.clear_client_cache()
     _clear_strands_model_cache_for_testing()
     _branding_model.cache_clear()
@@ -750,13 +763,55 @@ def test_one_migrated_agent_per_phase_yields_schema_valid_output(
 
     Preconditions:
         ``factory`` builds an agent with ``structured_output=output_model``.
-        ``force_dummy_llm`` has pinned ``LLM_PROVIDER=dummy`` and cleared caches.
+        ``force_dummy_llm`` has blanked runtime config and pinned
+        ``LLM_PROVIDER=dummy``, then cleared caches.
     Postconditions:
         ``result.structured_output`` is an instance of ``output_model``.
     """
     agent = factory()
     result = agent(serialize_mission(make_mission()))
     assert isinstance(result.structured_output, output_model)
+
+
+def test_runtime_provider_outranks_dummy_env_until_lookup_is_blanked(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """UI runtime config beats ``LLM_PROVIDER=dummy`` until ``_runtime`` is blanked.
+
+    Preconditions:
+        ``monkeypatch`` can replace ``llm_service.config._runtime``.
+    Postconditions:
+        A live runtime provider wins over the dummy env var; blanking the
+        lookup makes ``resolve_provider()`` return ``dummy``.
+    """
+    from llm_service import config as llm_config
+
+    monkeypatch.setenv("LLM_PROVIDER", "dummy")
+    monkeypatch.setattr(llm_config, "_runtime", lambda _key: "claude")
+    assert llm_config.resolve_provider() == "claude"
+    monkeypatch.setattr(llm_config, "_runtime", lambda _key: "")
+    assert llm_config.resolve_provider() == "dummy"
+
+
+def test_force_dummy_llm_overrides_runtime_provider_config(
+    force_dummy_llm: None,
+) -> None:
+    """The dummy fixture blanks runtime lookup so ``get_client`` stays DummyLLMClient.
+
+    Preconditions:
+        ``force_dummy_llm`` has blanked ``_runtime``, stubbed the provider list,
+        and set ``LLM_PROVIDER=dummy``.
+    Postconditions:
+        ``resolve_provider()`` is ``dummy`` and ``get_client()`` returns a
+        ``DummyLLMClient``.
+    """
+    from llm_service import DummyLLMClient
+    from llm_service import config as llm_config
+    from llm_service.factory import get_client
+
+    assert llm_config._runtime("any") == ""
+    assert llm_config.resolve_provider() == "dummy"
+    assert isinstance(get_client(), DummyLLMClient)
 
 
 @pytest.mark.real_llm
