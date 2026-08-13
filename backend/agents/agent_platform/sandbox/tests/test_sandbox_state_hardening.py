@@ -16,9 +16,9 @@ from pathlib import Path
 
 import pytest
 
-from agent_team_studio.agent_provisioning_team.sandbox import lifecycle as lifecycle_mod
-from agent_team_studio.agent_provisioning_team.sandbox import state as state_mod
-from agent_team_studio.agent_provisioning_team.sandbox.lifecycle import Lifecycle
+from agent_platform.sandbox import lifecycle as lifecycle_mod
+from agent_platform.sandbox import state as state_mod
+from agent_platform.sandbox.lifecycle import Lifecycle
 
 
 def _seed(n: int) -> dict:
@@ -309,14 +309,14 @@ def test_save_survives_concurrent_resize_during_iteration(tmp_path: Path, monkey
 
 
 def test_state_load_missing_file_returns_empty(tmp_path: Path) -> None:
-    from agent_team_studio.agent_provisioning_team.sandbox import state as state_mod
+    from agent_platform.sandbox import state as state_mod
 
     out = state_mod.load(tmp_path / "ghost.json")
     assert out == {}
 
 
 def test_state_load_corrupt_returns_empty(tmp_path: Path) -> None:
-    from agent_team_studio.agent_provisioning_team.sandbox import state as state_mod
+    from agent_platform.sandbox import state as state_mod
 
     bad = tmp_path / "bad.json"
     bad.write_text("not json", encoding="utf-8")
@@ -326,7 +326,7 @@ def test_state_load_corrupt_returns_empty(tmp_path: Path) -> None:
 def test_state_load_drops_malformed_entries(tmp_path: Path) -> None:
     import json
 
-    from agent_team_studio.agent_provisioning_team.sandbox import state as state_mod
+    from agent_platform.sandbox import state as state_mod
 
     f = tmp_path / "s.json"
     f.write_text(
@@ -338,7 +338,7 @@ def test_state_load_drops_malformed_entries(tmp_path: Path) -> None:
 
 
 def test_state_save_roundtrip(tmp_path: Path) -> None:
-    from agent_team_studio.agent_provisioning_team.sandbox.state import (
+    from agent_platform.sandbox.state import (
         SandboxStatus,
         load,
         new_state,
@@ -357,7 +357,7 @@ def test_state_save_roundtrip(tmp_path: Path) -> None:
 
 
 def test_boot_timeout_seconds(monkeypatch) -> None:
-    from agent_team_studio.agent_provisioning_team.sandbox.state import boot_timeout_seconds
+    from agent_platform.sandbox.state import boot_timeout_seconds
 
     monkeypatch.delenv("AGENT_PROVISIONING_SANDBOX_BOOT_TIMEOUT_S", raising=False)
     assert boot_timeout_seconds() == 90
@@ -366,7 +366,7 @@ def test_boot_timeout_seconds(monkeypatch) -> None:
 
 
 def test_sandbox_stack_template_path_override(monkeypatch, tmp_path: Path) -> None:
-    from agent_team_studio.agent_provisioning_team.sandbox import state as state_mod
+    from agent_platform.sandbox import state as state_mod
 
     template = tmp_path / "custom.yml"
     template.write_text("services: {}", encoding="utf-8")
@@ -376,7 +376,7 @@ def test_sandbox_stack_template_path_override(monkeypatch, tmp_path: Path) -> No
 
 
 def test_sandbox_stack_template_path_default(monkeypatch) -> None:
-    from agent_team_studio.agent_provisioning_team.sandbox import state as state_mod
+    from agent_platform.sandbox import state as state_mod
 
     monkeypatch.delenv("AGENT_PROVISIONING_SANDBOX_STACK_TEMPLATE", raising=False)
     p = state_mod.sandbox_stack_template_path()
@@ -386,7 +386,7 @@ def test_sandbox_stack_template_path_default(monkeypatch) -> None:
 
 
 def test_state_file_path_with_override(monkeypatch) -> None:
-    from agent_team_studio.agent_provisioning_team.sandbox import state as state_mod
+    from agent_platform.sandbox import state as state_mod
 
     monkeypatch.setenv("AGENT_PROVISIONING_SANDBOX_STATE_FILE", "/tmp/x.json")
     assert str(state_mod.state_file_path()) == "/tmp/x.json"
@@ -398,7 +398,7 @@ def test_state_file_path_with_override(monkeypatch) -> None:
 
 
 def test_sandbox_image_env_override(monkeypatch: pytest.MonkeyPatch) -> None:
-    from agent_team_studio.agent_provisioning_team.sandbox import state as state_mod
+    from agent_platform.sandbox import state as state_mod
 
     monkeypatch.setenv("AGENT_PROVISIONING_SANDBOX_IMAGE", "my/custom:tag")
     assert state_mod.sandbox_image() == "my/custom:tag"
@@ -407,7 +407,7 @@ def test_sandbox_image_env_override(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_idle_threshold_reads_per_agent_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    from agent_team_studio.agent_provisioning_team.sandbox import state as state_mod
+    from agent_platform.sandbox import state as state_mod
 
     monkeypatch.setenv("AGENT_PROVISIONING_SANDBOX_IDLE_MINUTES", "2")
     assert state_mod.idle_teardown_seconds() == 120
@@ -416,7 +416,7 @@ def test_idle_threshold_reads_per_agent_env(monkeypatch: pytest.MonkeyPatch) -> 
 
 
 def test_state_file_path_uses_agent_cache(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    from agent_team_studio.agent_provisioning_team.sandbox import state as state_mod
+    from agent_platform.sandbox import state as state_mod
 
     monkeypatch.delenv("AGENT_PROVISIONING_SANDBOX_STATE_FILE", raising=False)
     monkeypatch.setenv("AGENT_CACHE", str(tmp_path))
