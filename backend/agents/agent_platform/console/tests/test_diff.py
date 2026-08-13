@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from agent_console.diff import unified_json_diff
+from agent_platform.console.diff import unified_json_diff
 
 
 def test_identical_payloads_report_identical_and_empty_diff() -> None:
