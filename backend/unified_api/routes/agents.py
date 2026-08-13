@@ -46,14 +46,14 @@ from agent_console import (
     resolve_author,
 )
 from agent_console.models import RunCreate
-from agent_registry import AgentDetail, AgentSummary, TeamGroup, get_registry
-from agent_registry.schema_resolver import SchemaResolutionError, resolve_schema
 from agent_platform.sandbox import (
     DockerUnavailableError,
     SandboxStatus,
     note_activity,
 )
 from agent_platform.sandbox.state import COLD_START_LOG_PREFIX
+from agent_registry import AgentDetail, AgentSummary, TeamGroup, get_registry
+from agent_registry.schema_resolver import SchemaResolutionError, resolve_schema
 from shared.agent_invoke.limits import (
     RESPONSE_ENVELOPE_OVERHEAD_BYTES,
     max_output_bytes,
