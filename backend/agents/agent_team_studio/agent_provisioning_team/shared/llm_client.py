@@ -1,24 +1,14 @@
-"""
-LLM client adapter for the Agent Provisioning Team.
+"""Async native-Strands LLM client for the Agent Provisioning Team.
 
-This is the integration seam for the LLM-driven phases (currently the
-`documentation` phase, with `setup` planning to follow). It is intentionally
-thin so it can be wired to the shared `backend.agents.llm_service` client
-when that integration lands this week.
+The provisioning pipeline supports the same provider names as the rest of
+Khala: ``ollama`` and ``claude`` (``anthropic`` is accepted as an alias for
+the latter). Each completion uses the provider implementation from
+``strands.models`` directly and consumes its asynchronous event stream.
 
-Until then, `LLMClient.complete()` returns a deterministic, clearly-marked
-fallback string so the rest of the pipeline keeps working and tests stay
-hermetic. The fallback path logs a single WARNING per process so we never
-silently ship un-LLM'd output to users.
-
-Design notes
-------------
-- Inputs that originate from user-controlled manifests (agent_id, tool
-  names, requirements) are sanitized before they ever hit a prompt.
-- The client exposes `complete()` (single-shot) today; tool-call / function
-  schemas will be layered on top once the LLM service exposes them.
-- Provider selection follows the project-wide env vars: LLM_PROVIDER,
-  LLM_BASE_URL, LLM_MODEL.
+When no model is configured, :meth:`LLMClient.complete` preserves the
+deterministic, clearly labelled fallback used by the provisioning phases.
+The fallback path logs a single warning per process so an unconfigured
+deployment does not silently present generated-looking output to users.
 """
 
 from __future__ import annotations
@@ -29,6 +19,9 @@ import re
 from dataclasses import dataclass
 from typing import Optional
 
+from strands.models.model import Model
+from strands.types.content import Message
+
 logger = logging.getLogger(__name__)
 
 # Characters that have no business inside an interpolated prompt variable.
@@ -37,6 +30,7 @@ logger = logging.getLogger(__name__)
 # through manifest fields.
 _PROMPT_VAR_DISALLOWED = re.compile(r"[^A-Za-z0-9 _\-./:@,()\[\]{}+=#'\"\n\t]")
 _PROMPT_VAR_MAX_LEN = 100000
+_SUPPORTED_PROVIDERS = frozenset({"ollama", "claude", "anthropic", "dummy"})
 
 
 def sanitize_prompt_var(value: object, *, max_len: int = _PROMPT_VAR_MAX_LEN) -> str:
@@ -67,12 +61,11 @@ class LLMRequest:
 
 
 class LLMClient:
-    """Thin adapter around the project LLM service.
+    """Thin asynchronous adapter over native Strands model providers.
 
-    The real wiring (Ollama / Claude via `backend.agents.llm_service`) lands
-    this week. Until then `complete()` returns a deterministic fallback so
-    every LLM-driven phase that uses this client (documentation today, setup
-    planning next) still produces output and tests remain stable.
+    A fresh native model is created for each request. Besides matching the
+    lifecycle expected by the provider SDKs, this keeps per-request generation
+    settings isolated when callers use one ``LLMClient`` concurrently.
     """
 
     _warned_fallback = False
@@ -82,37 +75,109 @@ class LLMClient:
         provider: Optional[str] = None,
         base_url: Optional[str] = None,
         model: Optional[str] = None,
+        api_key: Optional[str] = None,
     ) -> None:
-        self.provider = provider or os.getenv("LLM_PROVIDER", "ollama")
-        self.base_url = base_url or os.getenv("LLM_BASE_URL", "")
-        self.model = model or os.getenv("LLM_MODEL", "")
+        self.provider = (
+            provider if provider is not None else os.getenv("LLM_PROVIDER", "ollama")
+        ).strip().lower()
+        self.base_url = (
+            base_url if base_url is not None else os.getenv("LLM_BASE_URL", "")
+        ).strip()
+        self.model = (model if model is not None else os.getenv("LLM_MODEL", "")).strip()
+        self.api_key = self._resolve_api_key(api_key)
+
+        if self.provider not in _SUPPORTED_PROVIDERS:
+            supported = ", ".join(sorted(_SUPPORTED_PROVIDERS))
+            raise ValueError(
+                f"Unsupported LLM provider {self.provider!r}; supported providers: {supported}"
+            )
 
     @property
     def is_configured(self) -> bool:
-        """Temporary stub: always ``False`` until ``llm_service`` is wired in."""
-        # NOTE: flip this to a real readiness check when llm_service lands.
-        return False
+        """Whether this client has a live provider and a non-empty model id."""
+        return self.provider != "dummy" and bool(self.model)
 
-    def complete(self, request: LLMRequest) -> str:
-        """Run a single completion. Returns text.
+    async def complete(self, request: LLMRequest) -> str:
+        """Run one completion asynchronously and return its text content.
 
-        Falls back to a deterministic stub when no LLM is configured. The
-        fallback is clearly labeled so it never gets confused for real LLM
-        output downstream.
+        Native Strands providers expose an async event stream. Only text deltas
+        are accumulated; lifecycle, reasoning, tool-use, and metadata events do
+        not belong in this single-shot text API.
         """
         if not self.is_configured:
             if not LLMClient._warned_fallback:
                 logger.warning(
-                    "LLMClient: no LLM provider wired yet — using deterministic fallback. "
-                    "Wire backend.agents.llm_service to enable real completions."
+                    "LLMClient: no LLM model configured — using deterministic fallback. "
+                    "Set LLM_MODEL and provider credentials to enable native Strands completions."
                 )
                 LLMClient._warned_fallback = True
             return self._fallback(request)
 
-        # TODO(this week): delegate to backend.agents.llm_service
-        raise NotImplementedError("LLM provider wiring pending")
+        native_model = self._create_model(request)
+        messages: list[Message] = [{"role": "user", "content": [{"text": request.user}]}]
+        chunks: list[str] = []
+
+        async for event in native_model.stream(messages, system_prompt=request.system):
+            content_delta = event.get("contentBlockDelta")
+            if not isinstance(content_delta, dict):
+                continue
+            delta = content_delta.get("delta")
+            if not isinstance(delta, dict):
+                continue
+            text = delta.get("text")
+            if isinstance(text, str):
+                chunks.append(text)
+
+        return "".join(chunks)
+
+    def _create_model(self, request: LLMRequest) -> Model:
+        """Construct the configured native Strands provider for ``request``."""
+        if self.provider == "ollama":
+            from strands.models.ollama import OllamaModel
+
+            client_args = (
+                {"headers": {"Authorization": f"Bearer {self.api_key}"}}
+                if self.api_key
+                else None
+            )
+            return OllamaModel(
+                host=self.base_url or None,
+                ollama_client_args=client_args,
+                model_id=self.model,
+                temperature=request.temperature,
+                max_tokens=request.max_tokens,
+            )
+
+        if self.provider in {"claude", "anthropic"}:
+            from strands.models.anthropic import AnthropicModel
+
+            client_args = {}
+            if self.api_key:
+                client_args["api_key"] = self.api_key
+            if self.base_url:
+                client_args["base_url"] = self.base_url
+            return AnthropicModel(
+                client_args=client_args or None,
+                model_id=self.model,
+                max_tokens=request.max_tokens,
+                params={"temperature": request.temperature},
+            )
+
+        # ``dummy`` is deliberately never configured, so complete() returns
+        # before reaching this branch. Keep the guard explicit for subclasses.
+        raise RuntimeError(f"Provider {self.provider!r} cannot create a live Strands model")
+
+    def _resolve_api_key(self, explicit_api_key: Optional[str]) -> str:
+        if explicit_api_key is not None:
+            return explicit_api_key.strip()
+        if self.provider in {"claude", "anthropic"}:
+            return (
+                os.getenv("LLM_CLAUDE_API_KEY") or os.getenv("ANTHROPIC_API_KEY") or ""
+            ).strip()
+        if self.provider == "ollama":
+            return (os.getenv("LLM_OLLAMA_API_KEY") or os.getenv("OLLAMA_API_KEY") or "").strip()
+        return ""
 
     @staticmethod
     def _fallback(request: LLMRequest) -> str:
-        # A small, structured fallback so callers can detect it explicitly.
         return f"[llm-fallback] {request.user.strip()}"

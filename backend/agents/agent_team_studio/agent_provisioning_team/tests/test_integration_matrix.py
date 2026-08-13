@@ -436,9 +436,11 @@ class TestLLMClient:
         assert "truncated" in out
 
     def test_llm_fallback_labeled(self):
+        import asyncio
+
         from agent_team_studio.agent_provisioning_team.shared.llm_client import LLMRequest
 
-        resp = LLMClient().complete(LLMRequest(system="s", user="hello"))
+        resp = asyncio.run(LLMClient(model="").complete(LLMRequest(system="s", user="hello")))
         assert resp.startswith("[llm-fallback]")
 
 
