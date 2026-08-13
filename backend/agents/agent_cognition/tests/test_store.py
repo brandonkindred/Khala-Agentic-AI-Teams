@@ -1,7 +1,7 @@
 """Live-Postgres tests for the cognition memory store (Step 2 DAL).
 
 Skipped automatically when ``POSTGRES_HOST`` is unset, matching the pattern
-used by ``agent_console`` / ``shared.postgres`` store tests. The autouse
+used by ``agent_platform.console`` / ``shared.postgres`` store tests. The autouse
 fixture registers the schema and truncates the cognition tables before each
 test so cases are independent.
 """

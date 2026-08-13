@@ -2,7 +2,7 @@
 
 ``_store_active`` gating is hermetic (env only). The CRUD suite is guarded on a
 live Postgres — skipped when ``POSTGRES_HOST`` is unset — and uses the shared
-schema-registration + truncation helpers, mirroring ``agent_console``'s store
+schema-registration + truncation helpers, mirroring ``agent_platform.console``'s store
 tests.
 """
 
