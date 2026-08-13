@@ -101,7 +101,9 @@ def test_pr_filter() -> None:
 
 def test_record_start_is_idempotent_on_conflict() -> None:
     record_review_start("j1", "o", "r", 7, "u", "alice")
-    record_review_start("j1", "o", "r", 7, "u", "bob")  # duplicate job_id ignored
+    record_review_start(
+        "j1", "o", "r", 7, "u", "bob"
+    )  # first write wins; duplicate job_id discarded
     rows = list_reviews("o", "r")
     assert len(rows) == 1
     assert rows[0]["author"] == "alice"  # first write wins (ON CONFLICT DO NOTHING)

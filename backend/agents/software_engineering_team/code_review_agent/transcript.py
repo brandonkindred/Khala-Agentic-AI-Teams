@@ -201,6 +201,7 @@ def _note_overflow(dropped: int) -> bool:
           A burst of overflows logs once; a later non-overflowing enqueue
           resets the throttle so the next burst can warn again.
     """
+    assert _buffer_lock.locked(), "_note_overflow requires _buffer_lock"
     global _overflow_warned
     overflowed = dropped > 0
     should_warn = overflowed and not _overflow_warned
@@ -337,7 +338,7 @@ def register_transcript_flusher() -> None:
             return
         _heartbeat = BackgroundHeartbeat(
             _drain,
-            max(_flush_interval_s(), 0.1),  # a 0 interval would busy-loop; floor at 0.1s
+            max(_flush_interval_s(), 0.1),  # a zero interval would busy-loop; floor at 0.1s
             name="code-review-transcript-flusher",
         )
         _heartbeat.start()
