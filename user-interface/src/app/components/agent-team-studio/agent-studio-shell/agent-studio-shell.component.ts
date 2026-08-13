@@ -218,13 +218,15 @@ export class AgentStudioShellComponent {
    * Preconditions: `draftId` names a draft the current user owns (rows in
    *   `LoadDraftMenuComponent` only ever come from that user's own list).
    * Postconditions: on success, `state` is hydrated from the draft's payload
-   *   and the stepper is moved to the furthest reachable stage.
-   *   `loadingDraft()` stays `true` for the entire chain, including the
-   *   nested process-status check, so a second selection can't race it. On
-   *   failure, `loadingDraft()` returns to `false` and `state` is unchanged
-   *   (surfaced via the global HTTP error toast, not a bespoke inline banner
-   *   — the triggering menu has already closed by the time this runs). A
-   *   call superseded by a later `loadDraft` (its token no longer matches
+   *   and the stepper is moved to the furthest reachable stage. If a nested
+   *   child (the persona-run audit) is showing, the router returns to this
+   *   shell's default child so the restored stage is visible. `loadingDraft()`
+   *   stays `true` for the entire chain, including the nested process-status
+   *   check, so a second selection can't race it. On failure, `loadingDraft()`
+   *   returns to `false`, `state` is unchanged, and the current child stays
+   *   mounted (surfaced via the global HTTP error toast, not a bespoke inline
+   *   banner — the triggering menu has already closed by the time this runs).
+   *   A call superseded by a later `loadDraft` (its token no longer matches
    *   `loadDraftToken`) discards its response instead of applying it.
    */
   loadDraft(draftId: string): void {
@@ -282,7 +284,7 @@ export class AgentStudioShellComponent {
           if (token !== this.loadDraftToken) return;
           this.state.setComposeProcessStatus(process.status);
           this.state.navigateToStage(process.status === 'complete' ? STAGE_PERSONAS : STAGE_COMPOSE);
-          this.loadingDraft.set(false);
+          this.finishSuccessfulDraftLoad();
         },
         error: () => {
           if (token !== this.loadDraftToken) return;
@@ -293,7 +295,7 @@ export class AgentStudioShellComponent {
           // risk it wrongly satisfying the Stage-3→4 gate.
           this.state.setComposeProcessStatus(null);
           this.state.navigateToStage(STAGE_COMPOSE);
-          this.loadingDraft.set(false);
+          this.finishSuccessfulDraftLoad();
         },
       });
       return;
@@ -306,6 +308,34 @@ export class AgentStudioShellComponent {
       this.state.resetBuildSubStage();
       this.state.navigateToStage(STAGE_BUILD);
     }
+    this.finishSuccessfulDraftLoad();
+  }
+
+  /**
+   * Close out a draft load that already wrote `state` and the stepper.
+   *
+   * Preconditions: the caller's `loadDraftToken` still matches (superseded
+   *   loads must not reach here).
+   * Postconditions: if a non-default child is active, the router is asked to
+   *   show this shell's default child; `loadingDraft()` is `false`.
+   */
+  private finishSuccessfulDraftLoad(): void {
+    this.showStageHostAfterDraftLoad();
     this.loadingDraft.set(false);
+  }
+
+  /**
+   * Leave a nested Studio child so the stage host can show the restored stage.
+   *
+   * Preconditions: none — safe when there is no child (unit tests that
+   *   construct the shell without navigating).
+   * Postconditions: if the active child path is non-empty (today:
+   *   `persona-run/:runId`), navigates to this shell's default child. The
+   *   empty default child and a missing child are left unchanged.
+   */
+  private showStageHostAfterDraftLoad(): void {
+    const childPath = this.route.firstChild?.snapshot?.routeConfig?.path;
+    if (!childPath) return;
+    void this.router.navigate(['.'], { relativeTo: this.route });
   }
 }

@@ -586,4 +586,97 @@ describe('AgentStudioShellComponent', () => {
     expect(harness.routeNativeElement?.querySelector('.studio__footer')).toBeNull();
     expect(harness.routeNativeElement?.querySelector('app-stub-audit-host')).toBeTruthy();
   });
+
+  it('returns to the stage host when a draft is loaded from the persona-run child', async () => {
+    TestBed.resetTestingModule();
+    await TestBed.configureTestingModule({
+      imports: [AgentStudioShellComponent, NoopAnimationsModule],
+      providers: [
+        { provide: AgentStudioApiService, useValue: agentStudioApi },
+        { provide: AgenticTeamApiService, useValue: agenticTeamApi },
+        { provide: AgentRunnerApiService, useValue: {} },
+        { provide: PersonaTestingApiService, useValue: {} },
+        provideRouter([
+          {
+            path: '',
+            component: AgentStudioShellComponent,
+            children: [
+              { path: '', component: StubStageHostComponent },
+              {
+                path: 'persona-run/:runId',
+                component: StubAuditHostComponent,
+                data: { hideStudioFooter: true },
+              },
+            ],
+          },
+        ]),
+      ],
+    }).compileComponents();
+
+    agentStudioApi.getDraft.mockReturnValue(
+      of({
+        draft_id: 'd-1',
+        name: 'My draft',
+        created_at: '2026-01-01T00:00:00Z',
+        updated_at: '2026-01-01T00:00:00Z',
+        payload: { registryAgentId: 'reg-from-draft' },
+      }),
+    );
+
+    const harness = await RouterTestingHarness.create();
+    const shell = await harness.navigateByUrl('/persona-run/run-1', AgentStudioShellComponent);
+    harness.detectChanges();
+    expect(harness.routeNativeElement?.querySelector('app-stub-audit-host')).toBeTruthy();
+
+    shell.loadDraft('d-1');
+    await harness.fixture.whenStable();
+    harness.detectChanges();
+
+    expect(harness.routeNativeElement?.querySelector('app-stub-audit-host')).toBeNull();
+    expect(harness.routeNativeElement?.querySelector('app-stub-stage-host')).toBeTruthy();
+    expect(harness.routeNativeElement?.querySelector('.studio__footer')).toBeTruthy();
+    expect(shell.state.activeStage()).toBe(1);
+    expect(shell.state.registryAgentId()).toBe('reg-from-draft');
+  });
+
+  it('stays on the persona-run child when loadDraft fails', async () => {
+    TestBed.resetTestingModule();
+    await TestBed.configureTestingModule({
+      imports: [AgentStudioShellComponent, NoopAnimationsModule],
+      providers: [
+        { provide: AgentStudioApiService, useValue: agentStudioApi },
+        { provide: AgenticTeamApiService, useValue: agenticTeamApi },
+        { provide: AgentRunnerApiService, useValue: {} },
+        { provide: PersonaTestingApiService, useValue: {} },
+        provideRouter([
+          {
+            path: '',
+            component: AgentStudioShellComponent,
+            children: [
+              { path: '', component: StubStageHostComponent },
+              {
+                path: 'persona-run/:runId',
+                component: StubAuditHostComponent,
+                data: { hideStudioFooter: true },
+              },
+            ],
+          },
+        ]),
+      ],
+    }).compileComponents();
+
+    agentStudioApi.getDraft.mockReturnValue(throwError(() => new Error('404')));
+
+    const harness = await RouterTestingHarness.create();
+    const shell = await harness.navigateByUrl('/persona-run/run-1', AgentStudioShellComponent);
+    harness.detectChanges();
+
+    shell.loadDraft('d-1');
+    await harness.fixture.whenStable();
+    harness.detectChanges();
+
+    expect(harness.routeNativeElement?.querySelector('app-stub-audit-host')).toBeTruthy();
+    expect(shell.state.registryAgentId()).toBeNull();
+    expect(shell.loadingDraft()).toBe(false);
+  });
 });
