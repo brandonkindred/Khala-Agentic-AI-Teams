@@ -2,6 +2,7 @@ import { Component, Input } from '@angular/core';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { NoopAnimationsModule } from '@angular/platform-browser/animations';
 import { MatDialog } from '@angular/material/dialog';
+import { provideRouter, Router } from '@angular/router';
 import { of, throwError, Subject } from 'rxjs';
 import { vi } from 'vitest';
 import type { PersonaInfo, PersonaTestRunDetail } from '../../../models/persona-testing.model';
@@ -143,6 +144,7 @@ describe('AgentStudioPersonaComponent', () => {
       imports: [AgentStudioPersonaComponent, NoopAnimationsModule],
       providers: [
         AgentStudioStateService,
+        provideRouter([]),
         { provide: AgenticTeamApiService, useValue: agenticApi },
         { provide: PersonaTestingApiService, useValue: personaApi },
       ],
@@ -1334,5 +1336,37 @@ describe('AgentStudioPersonaComponent', () => {
     component.launch();
     fixture.detectChanges();
     expect(component.runAnnouncement()).toBe('The persona is answering a question.');
+  });
+
+  it('does not show View full audit when there is no current run', () => {
+    build();
+    fixture.detectChanges();
+    expect(fixture.nativeElement.textContent).not.toContain('View full audit');
+  });
+
+  it('shows View full audit after a run exists and navigates to the Studio audit route', () => {
+    build();
+    fixture.detectChanges();
+    const router = TestBed.inject(Router);
+    const nav = vi.spyOn(router, 'navigate').mockResolvedValue(true);
+    component.launch();
+    fixture.detectChanges();
+    expect(component.run()).toBeTruthy();
+    const btn = Array.from(
+      fixture.nativeElement.querySelectorAll('button') as NodeListOf<HTMLButtonElement>,
+    ).find((b) => b.textContent?.includes('View full audit'));
+    expect(btn).toBeTruthy();
+    btn!.click();
+    expect(nav).toHaveBeenCalledWith(['/agent-studio', 'persona-run', 'run-1']);
+    expect(nav.mock.calls.some((c) => String(c[0]).includes('persona-testing'))).toBe(false);
+  });
+
+  it('openFullAudit is a no-op when there is no run', () => {
+    build();
+    fixture.detectChanges();
+    const router = TestBed.inject(Router);
+    const nav = vi.spyOn(router, 'navigate').mockResolvedValue(true);
+    component.openFullAudit();
+    expect(nav).not.toHaveBeenCalled();
   });
 });

@@ -1,5 +1,6 @@
 import { TestBed } from '@angular/core/testing';
 import { NoopAnimationsModule } from '@angular/platform-browser/animations';
+import { provideRouter } from '@angular/router';
 import { of } from 'rxjs';
 import { vi } from 'vitest';
 import { AgenticTeamApiService } from '../../../services/agentic-team-api.service';
@@ -85,6 +86,7 @@ describe('AgentStudioPersonaComponent a11y', () => {
       imports: [AgentStudioPersonaComponent, NoopAnimationsModule],
       providers: [
         AgentStudioStateService,
+        provideRouter([]),
         { provide: AgenticTeamApiService, useValue: agenticApi },
         { provide: PersonaTestingApiService, useValue: personaApi },
       ],

@@ -234,6 +234,7 @@
                      (which also requires the pipeline live): the founder job stays
                      cancellable during the ~poll-interval lag after the pipeline
                      ends, so Stop must remain available then. -->
+                <div class="persona__run-actions">
                 @if (runInProgress()) {
                   <button
                     mat-stroked-button
@@ -246,6 +247,16 @@
                     {{ cancelling() ? 'Stopping…' : 'Stop run' }}
                   </button>
                 }
+                  <button
+                    mat-stroked-button
+                    type="button"
+                    class="persona__audit"
+                    (click)="openFullAudit()"
+                  >
+                    <mat-icon aria-hidden="true">open_in_new</mat-icon>
+                    View full audit
+                  </button>
+                </div>
               </div>
               @if (runLive()) {
                 <!-- Step progress bar (spec Stage 4): a determinate "step N of M"

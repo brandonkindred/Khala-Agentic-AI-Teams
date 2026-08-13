@@ -13,6 +13,7 @@ import { MatDialog, MatDialogModule } from '@angular/material/dialog';
 import { MatIconModule } from '@angular/material/icon';
 import { MatProgressBarModule } from '@angular/material/progress-bar';
 import { MatTooltipModule } from '@angular/material/tooltip';
+import { Router } from '@angular/router';
 import { EMPTY, Subscription, catchError, interval, switchMap, timeout } from 'rxjs';
 import { AgenticTeamApiService } from '../../../services/agentic-team-api.service';
 import { PersonaTestingApiService } from '../../../services/persona-testing-api.service';
@@ -129,6 +130,7 @@ export class AgentStudioPersonaComponent implements OnInit {
   private readonly personaApi = inject(PersonaTestingApiService);
   private readonly dialog = inject(MatDialog);
   private readonly destroyRef = inject(DestroyRef);
+  private readonly router = inject(Router);
 
   readonly mode = signal<StudioPersonaMode>('persona');
 
@@ -559,6 +561,20 @@ export class AgentStudioPersonaComponent implements OnInit {
           this.error.set('Could not start the persona test.');
         },
       });
+  }
+
+  /**
+   * Open the full audit view for the current persona run inside Studio.
+   *
+   * Preconditions: none (safe to call with no run).
+   * Postconditions: when `run()` is set, navigates to
+   *   `/agent-studio/persona-run/:runId` with that run's `run_id`. When `run()`
+   *   is null, does not navigate.
+   */
+  openFullAudit(): void {
+    const id = this.run()?.run_id;
+    if (!id) return;
+    void this.router.navigate(['/agent-studio', 'persona-run', id]);
   }
 
   /**

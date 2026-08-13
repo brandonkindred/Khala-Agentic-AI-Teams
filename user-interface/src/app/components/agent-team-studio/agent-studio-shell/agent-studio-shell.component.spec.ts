@@ -3,7 +3,7 @@ import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { MatDialog } from '@angular/material/dialog';
 import { By } from '@angular/platform-browser';
 import { NoopAnimationsModule } from '@angular/platform-browser/animations';
-import { provideRouter } from '@angular/router';
+import { provideRouter, RouterOutlet } from '@angular/router';
 import { RouterTestingHarness } from '@angular/router/testing';
 import { Subject, of, throwError } from 'rxjs';
 import { vi } from 'vitest';
@@ -19,6 +19,14 @@ class StubStageHostComponent {}
 
 @Component({ selector: 'app-stub-audit-host', standalone: true, template: '' })
 class StubAuditHostComponent {}
+
+@Component({
+  selector: 'app-stub-nested-parent',
+  standalone: true,
+  imports: [RouterOutlet],
+  template: '<router-outlet />',
+})
+class StubNestedParentComponent {}
 
 describe('AgentStudioShellComponent', () => {
   let component: AgentStudioShellComponent;
@@ -516,5 +524,46 @@ describe('AgentStudioShellComponent', () => {
     harness.detectChanges();
     expect(harness.routeNativeElement?.querySelector('.studio__footer')).toBeTruthy();
     expect(shell.state.registryAgentId()).toBe('reg-keep');
+  });
+
+  it('hides the continue footer when hideStudioFooter is on a nested child', async () => {
+    TestBed.resetTestingModule();
+    await TestBed.configureTestingModule({
+      imports: [AgentStudioShellComponent, NoopAnimationsModule],
+      providers: [
+        { provide: AgentStudioApiService, useValue: agentStudioApi },
+        { provide: AgenticTeamApiService, useValue: agenticTeamApi },
+        provideRouter([
+          {
+            path: '',
+            component: AgentStudioShellComponent,
+            children: [
+              { path: '', component: StubStageHostComponent },
+              {
+                path: 'persona-run/:runId',
+                component: StubNestedParentComponent,
+                children: [
+                  {
+                    path: '',
+                    component: StubAuditHostComponent,
+                    data: { hideStudioFooter: true },
+                  },
+                ],
+              },
+            ],
+          },
+        ]),
+      ],
+    }).compileComponents();
+
+    const harness = await RouterTestingHarness.create();
+    await harness.navigateByUrl('/', AgentStudioShellComponent);
+    harness.detectChanges();
+    expect(harness.routeNativeElement?.querySelector('.studio__footer')).toBeTruthy();
+
+    await harness.navigateByUrl('/persona-run/run-1');
+    harness.detectChanges();
+    expect(harness.routeNativeElement?.querySelector('.studio__footer')).toBeNull();
+    expect(harness.routeNativeElement?.querySelector('app-stub-audit-host')).toBeTruthy();
   });
 });
