@@ -408,9 +408,9 @@ def test_create_worker_constructs_worker_when_enabled() -> None:
     assert kwargs["task_queue"] == worker_mod.TASK_QUEUE
     assert kwargs["workflows"] is WORKFLOWS
     assert kwargs["activities"] is ACTIVITIES
-    # Provisioning/deprovision only — sandbox workflows/activities are
+    # Provisioning/deprovision only — platform sandbox workflows/activities are
     # deliberately excluded (they run on their own SANDBOX_TASK_QUEUE via a
-    # separately-booted worker; see start_agent_provisioning_sandbox_temporal_worker_thread).
+    # separately-booted worker; see start_agent_platform_sandbox_temporal_worker_thread).
     from agent_team_studio.agent_provisioning_team.temporal.workflows import (
         AgentDeprovisioningWorkflow,
         AgentProvisioningWorkflow,

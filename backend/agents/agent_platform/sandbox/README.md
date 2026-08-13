@@ -159,8 +159,7 @@ never join it.
 
 ```bash
 cd backend
-python3 -m pytest agents/agent_provisioning_team/tests/test_sandbox_stack_provisioner.py \
-                  agents/agent_provisioning_team/tests/test_sandbox_lifecycle.py
+python3 -m pytest agents/agent_platform/sandbox/tests/
 ```
 
 Tests patch `provisioner._exec` and `run_container`/`stop_container` so

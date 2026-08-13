@@ -188,7 +188,7 @@ def start_sandbox_reaper_workflow(
     """Start the singleton idle-reaper workflow (fixed id); no-op if already running.
 
     Preconditions:
-        * The Agent Provisioning sandbox Temporal worker
+        * The platform sandbox Temporal worker
           (:func:`agent_platform.sandbox.temporal.worker.start_agent_platform_sandbox_temporal_worker_thread`)
           is running, polling ``SANDBOX_TASK_QUEUE`` inside this same process.
     Postconditions:
