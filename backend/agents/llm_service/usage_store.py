@@ -70,7 +70,8 @@ def window_hours(window: str) -> float:
     Postconditions: returns hours for a known preset (``24h`` / ``7d`` /
         ``30d`` / ``all``) or a finite numeric-hours string (``1.0``, ``24``);
         ``<= 0`` means all-time. Raises ``ValueError`` whose message contains
-        ``unknown window`` otherwise (unknown token, negative, NaN, inf).
+        ``unknown window`` otherwise (unknown token, negative, NaN, inf, or
+        a numeric window whose cutoff is not a representable datetime).
     """
     if window in WINDOWS:
         return WINDOWS[window]
@@ -80,6 +81,11 @@ def window_hours(window: str) -> float:
         raise ValueError(f"unknown window: {window!r}")
     if not math.isfinite(hours) or hours < 0:
         raise ValueError(f"unknown window: {window!r}")
+    if hours > 0:
+        try:
+            _cutoff_datetime(hours)
+        except (OverflowError, ValueError, OSError):
+            raise ValueError(f"unknown window: {window!r}")
     return hours
 
 
@@ -120,11 +126,22 @@ def _failed_summary(*, window: str, team: str | None) -> dict:
     return data
 
 
+def _cutoff_datetime(hours: float) -> datetime:
+    """UTC instant ``hours`` before now.
+
+    Preconditions: ``hours`` is finite and ``> 0``.
+    Postconditions: returns ``now - timedelta(hours=hours)``. Raises
+        ``OverflowError``, ``ValueError``, or ``OSError`` when that instant
+        is not representable as a datetime (e.g. ``hours=1e308``).
+    """
+    return datetime.now(tz=timezone.utc) - timedelta(hours=hours)
+
+
 def _cutoff(window: str) -> datetime | None:
     hours = window_hours(window)
     if hours <= 0:
         return None
-    return datetime.now(tz=timezone.utc) - timedelta(hours=hours)
+    return _cutoff_datetime(hours)
 
 
 def _ensure_table() -> None:

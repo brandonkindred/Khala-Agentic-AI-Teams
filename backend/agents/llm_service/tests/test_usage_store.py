@@ -89,6 +89,10 @@ def test_window_hours_accepts_numeric_hours() -> None:
         us.window_hours("-1")
     with pytest.raises(ValueError, match="unknown window"):
         us.window_hours("inf")
+    with pytest.raises(ValueError, match="unknown window"):
+        us.window_hours("1e308")
+    with pytest.raises(ValueError, match="unknown window"):
+        us.window_hours("1e20")
 
 
 def test_write_rows_noop_when_postgres_off(monkeypatch) -> None:

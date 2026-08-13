@@ -53,6 +53,14 @@ def test_usage_summary_rejects_unknown_window() -> None:
     assert resp.status_code == 422
 
 
+def test_usage_summary_rejects_overflowing_numeric_window() -> None:
+    """Finite hours that overflow timedelta/datetime must 422, not 500."""
+    resp = client.get("/api/llm-usage/", params={"window": "1e308"})
+    assert resp.status_code == 422
+    recent = client.get("/api/llm-usage/recent", params={"window": "1e308"})
+    assert recent.status_code == 422
+
+
 def test_usage_summary_accepts_numeric_hour_window() -> None:
     """Existing clients send window=1.0 (hours), not a preset id."""
     with patch("unified_api.routes.llm_usage.resolve_storage_status", return_value="unconfigured"):
