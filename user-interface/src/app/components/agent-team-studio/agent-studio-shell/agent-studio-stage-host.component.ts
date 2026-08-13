@@ -27,6 +27,7 @@ import { AgentStudioTestAgentComponent } from './agent-studio-test-agent.compone
   ],
   changeDetection: ChangeDetectionStrategy.OnPush,
   templateUrl: './agent-studio-stage-host.component.html',
+  styleUrl: './agent-studio-stage-host.component.scss',
 })
 export class AgentStudioStageHostComponent {
   readonly state = inject(AgentStudioStateService);
