@@ -657,6 +657,30 @@ def test_dbc_self_review_worktree_snapshot_skips_symlinks(tmp_path):
     assert (tmp_path / "link.txt").is_symlink()
 
 
+def test_dbc_self_review_revert_deletes_verifier_created_symlink(tmp_path):
+    (tmp_path / "a.py").write_text("orig a\n")
+    (tmp_path / "real.txt").write_text("real\n")
+    (tmp_path / "existing_link.txt").symlink_to(tmp_path / "real.txt")
+
+    def _review(*, code, **kwargs: Any) -> SimpleNamespace:
+        return SimpleNamespace(files={"a.py": "dbc a\n"})
+
+    def _verify(repo, label, tid):
+        (Path(repo) / "new_link.txt").symlink_to(Path(repo) / "real.txt")
+        return False, "broke"
+
+    _call(
+        tmp_path=tmp_path,
+        gate_config=_gate_config(_review),
+        microtask_files={"a.py": "orig a\n"},
+        deps=ReviewDependencies(build_verifier=_verify),
+    )
+
+    assert (tmp_path / "a.py").read_text() == "orig a\n"
+    assert (tmp_path / "existing_link.txt").is_symlink()
+    assert not (tmp_path / "new_link.txt").exists()
+
+
 def test_dbc_self_review_build_verifier_raises_reverts(tmp_path):
     (tmp_path / "a.py").write_text("orig a\n")
 
@@ -844,6 +868,32 @@ def test_dbc_self_review_sync_walk_failure_reverts(tmp_path, monkeypatch):
     assert microtask_files["other.py"] == "orig other\n"
 
 
+def test_dbc_self_review_sync_removes_deleted_files(tmp_path):
+    (tmp_path / "a.py").write_text("orig a\n")
+    (tmp_path / "gone.py").write_text("orig gone\n")
+
+    def _review(*, code, **kwargs: Any) -> SimpleNamespace:
+        return SimpleNamespace(files={"a.py": "dbc a\n"})
+
+    def _verify(repo, label, tid):
+        (Path(repo) / "gone.py").unlink()
+        return True, "ok"
+
+    mt, microtask_files, all_files, _ = _call(
+        tmp_path=tmp_path,
+        gate_config=_gate_config(_review),
+        microtask_files={"a.py": "orig a\n", "gone.py": "orig gone\n"},
+        all_files={"a.py": "orig a\n", "gone.py": "orig gone\n"},
+        deps=ReviewDependencies(build_verifier=_verify),
+    )
+
+    assert not (tmp_path / "gone.py").exists()
+    assert "gone.py" not in microtask_files
+    assert "gone.py" not in all_files
+    assert "gone.py" not in mt.output_files
+    assert microtask_files["a.py"] == "dbc a\n"
+
+
 def test_sync_verifier_repairs_skips_unreadable_binary_and_outside(tmp_path, monkeypatch):
     root = tmp_path.resolve()
     (root / "good.py").write_text("ok\n")
@@ -852,6 +902,7 @@ def test_sync_verifier_repairs_skips_unreadable_binary_and_outside(tmp_path, mon
     unreadable.write_text("x\n")
     outside = tmp_path.parent.resolve() / f"dbc-outside-{tmp_path.name}.txt"
     outside.write_text("out\n")
+    outside_prior = tmp_path.parent.resolve() / f"dbc-prior-outside-{tmp_path.name}.txt"
 
     orig_read = Path.read_bytes
 
@@ -874,7 +925,7 @@ def test_sync_verifier_repairs_skips_unreadable_binary_and_outside(tmp_path, mon
     try:
         dbc_phase._sync_verifier_repairs_into_maps(
             root=root,
-            pre_verify_disk={},
+            pre_verify_disk={outside_prior: b"out\n"},
             microtask_files=microtask_files,
             all_files=all_files,
             mt=_microtask(),

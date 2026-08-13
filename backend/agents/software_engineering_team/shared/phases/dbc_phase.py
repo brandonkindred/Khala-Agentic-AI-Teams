@@ -23,7 +23,17 @@ import logging
 import os
 import re
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Dict, Iterator, Optional
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Callable,
+    Dict,
+    FrozenSet,
+    Iterator,
+    NamedTuple,
+    Optional,
+    Set,
+)
 
 from shared.dev_models.models import SystemArchitecture, Task
 from software_engineering_team.shared.repo_writer import (
@@ -205,18 +215,21 @@ def _raise_walk_error(err: OSError) -> None:
     raise err
 
 
-def _iter_worktree_files(root: Path, *, strict: bool = True) -> Iterator[Path]:
+def _iter_worktree_files(
+    root: Path, *, strict: bool = True, include_symlinks: bool = False
+) -> Iterator[Path]:
     """Yield resolved regular-file paths under ``root``, pruning excluded dirs.
 
     Preconditions:
         ``root`` is an existing directory.
 
     Postconditions:
-        Directory symlinks are not followed (``os.walk`` default). Symlinked
-        files are skipped. When ``strict`` is true, an ``OSError`` mid-walk
-        is raised to the caller so a snapshot cannot proceed from a partial
-        scan. When ``strict`` is false, walk errors are skipped (best-effort
-        enumeration for revert).
+        Directory symlinks are not followed (``os.walk`` default). File
+        symlinks are skipped unless ``include_symlinks`` is true, in which
+        case they are yielded unfollowed (not ``resolve()``'d). When
+        ``strict`` is true, an ``OSError`` mid-walk is raised to the caller
+        so a snapshot cannot proceed from a partial scan. When ``strict`` is
+        false, walk errors are skipped (best-effort enumeration for revert).
     """
     onerror = _raise_walk_error if strict else None
     for dirpath, dirnames, filenames in os.walk(root, onerror=onerror):
@@ -224,18 +237,36 @@ def _iter_worktree_files(root: Path, *, strict: bool = True) -> Iterator[Path]:
         for name in filenames:
             path = Path(dirpath, name)
             if path.is_symlink() or not path.is_file():
+                if include_symlinks and path.is_symlink():
+                    yield path
                 continue
             yield path.resolve()
 
 
-def _snapshot_worktree(root: Path) -> Dict[Path, bytes]:
+class _WorktreeSnapshot(NamedTuple):
+    """Pre-verify worktree inventory: regular-file bytes and symlink paths."""
+
+    files: Dict[Path, bytes]
+    symlinks: FrozenSet[Path]
+
+
+def _snapshot_worktree(root: Path) -> _WorktreeSnapshot:
     """Read every non-excluded regular file under ``root``.
 
     Postconditions:
-        Keys are resolved paths; values are the file bytes at snapshot time.
+        ``files`` maps resolved regular-file paths to their bytes. ``symlinks``
+        is the set of file-symlink paths (unfollowed) so revert can leave
+        pre-existing links in place while deleting verifier-created ones.
         Raises ``OSError`` if a walk or read fails.
     """
-    return {path: path.read_bytes() for path in _iter_worktree_files(root)}
+    files: Dict[Path, bytes] = {}
+    links: Set[Path] = set()
+    for path in _iter_worktree_files(root, include_symlinks=True):
+        if path.is_symlink():
+            links.add(path)
+            continue
+        files[path] = path.read_bytes()
+    return _WorktreeSnapshot(files=files, symlinks=frozenset(links))
 
 
 def _revert_verifier_side_effects(
@@ -243,6 +274,7 @@ def _revert_verifier_side_effects(
     root: Path,
     prior_disk: Dict[Path, Optional[bytes]],
     pre_verify_disk: Dict[Path, bytes],
+    pre_verify_symlinks: FrozenSet[Path],
 ) -> None:
     """Restore pre-DbC DbC files and undo any other verifier worktree writes.
 
@@ -250,15 +282,16 @@ def _revert_verifier_side_effects(
         ``prior_disk`` paths are restored to their pre-DbC bytes (or deleted
         if they did not exist). Every other path present in
         ``pre_verify_disk`` is restored to its post-DbC / pre-verifier bytes.
-        Files that exist now under ``root`` but were in neither map
-        (verifier-created) are deleted. Restore failures are swallowed by
-        ``_revert_disk``.
+        Regular files and file-symlinks that exist now under ``root`` but
+        were in neither map nor ``pre_verify_symlinks`` (verifier-created)
+        are deleted. Pre-existing symlinks are left unfollowed and unrestored.
+        Restore failures are swallowed by ``_revert_disk``.
     """
     revert_map: Dict[Path, Optional[bytes]] = dict(pre_verify_disk)
     revert_map.update(prior_disk)
     current = _list_worktree_files_for_revert(root)
     for path in current:
-        if path not in revert_map:
+        if path not in revert_map and path not in pre_verify_symlinks:
             revert_map[path] = None
     _revert_disk(revert_map)
 
@@ -276,17 +309,17 @@ def _list_worktree_files_for_revert(root: Path) -> list[Path]:
         still marked for delete rather than left on disk.
     """
     try:
-        return list(_iter_worktree_files(root))
+        return list(_iter_worktree_files(root, include_symlinks=True))
     except OSError as exc:
         logger.warning("Could not enumerate worktree while reverting verifier edits: %s", exc)
     try:
-        return list(_iter_worktree_files(root))
+        return list(_iter_worktree_files(root, include_symlinks=True))
     except OSError as exc:
         logger.warning(
             "Retry failed; using best-effort walk while reverting verifier edits: %s",
             exc,
         )
-        return list(_iter_worktree_files(root, strict=False))
+        return list(_iter_worktree_files(root, strict=False, include_symlinks=True))
 
 
 def _posix_rel(root: Path, path: Path) -> Optional[str]:
@@ -315,11 +348,13 @@ def _sync_verifier_repairs_into_maps(
         Every non-excluded regular file under ``root`` whose bytes differ from
         ``pre_verify_disk`` (or that is absent from it) is decoded as UTF-8
         and written into ``microtask_files``, ``all_files``, and
-        ``mt.output_files``. Unchanged files are left alone. A per-file read
-        or decode failure is logged and skipped. Returns ``False`` (without
-        mutating the maps) when the walk itself fails, so the caller can
-        treat the verify as unsuccessful and revert. Returns ``True`` when
-        the walk completed.
+        ``mt.output_files``. Unchanged files are left alone. Paths present in
+        ``pre_verify_disk`` but absent from the current walk (verifier
+        deletions) are removed from those maps. A per-file read or decode
+        failure is logged and skipped. Returns ``False`` (without mutating
+        the maps) when the walk itself fails, so the caller can treat the
+        verify as unsuccessful and revert. Returns ``True`` when the walk
+        completed.
     """
     try:
         current = list(_iter_worktree_files(root))
@@ -350,6 +385,16 @@ def _sync_verifier_repairs_into_maps(
         microtask_files[rel] = text
         all_files[rel] = text
         output_files[rel] = text
+    current_set = set(current)
+    for path in pre_verify_disk:
+        if path in current_set:
+            continue
+        rel = _posix_rel(root, path)
+        if rel is None:
+            continue
+        microtask_files.pop(rel, None)
+        all_files.pop(rel, None)
+        output_files.pop(rel, None)
     mt.output_files = output_files
     return True
 
@@ -528,9 +573,9 @@ def _run_dbc_self_review(
     mt.output_files = microtask_files
 
     if deps.build_verifier is not None:
-        pre_verify_disk: Optional[Dict[Path, bytes]]
+        pre_verify: Optional[_WorktreeSnapshot]
         try:
-            pre_verify_disk = _snapshot_worktree(root)
+            pre_verify = _snapshot_worktree(root)
         except OSError as exc:
             logger.warning(
                 "[%s] Microtask %s: could not snapshot worktree before DbC build "
@@ -539,9 +584,9 @@ def _run_dbc_self_review(
                 mt.id,
                 exc,
             )
-            pre_verify_disk = None
+            pre_verify = None
 
-        if pre_verify_disk is not None:
+        if pre_verify is not None:
             try:
                 ok, msg = deps.build_verifier(repo_path, build_verify_label, task_id)
             except Exception as exc:
@@ -564,13 +609,16 @@ def _run_dbc_self_review(
                     _restore_dict_entry(output_files, rel_path, prior_output[rel_path])
                 mt.output_files = output_files
                 _revert_verifier_side_effects(
-                    root=root, prior_disk=prior_disk, pre_verify_disk=pre_verify_disk
+                    root=root,
+                    prior_disk=prior_disk,
+                    pre_verify_disk=pre_verify.files,
+                    pre_verify_symlinks=pre_verify.symlinks,
                 )
                 return
 
             if not _sync_verifier_repairs_into_maps(
                 root=root,
-                pre_verify_disk=pre_verify_disk,
+                pre_verify_disk=pre_verify.files,
                 microtask_files=microtask_files,
                 all_files=all_files,
                 mt=mt,
@@ -588,7 +636,10 @@ def _run_dbc_self_review(
                     _restore_dict_entry(output_files, rel_path, prior_output[rel_path])
                 mt.output_files = output_files
                 _revert_verifier_side_effects(
-                    root=root, prior_disk=prior_disk, pre_verify_disk=pre_verify_disk
+                    root=root,
+                    prior_disk=prior_disk,
+                    pre_verify_disk=pre_verify.files,
+                    pre_verify_symlinks=pre_verify.symlinks,
                 )
                 return
 
