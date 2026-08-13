@@ -84,6 +84,15 @@ function humanizeStatus(status: string): string {
   );
 }
 
+/** Parse an ISO (or Date-parseable) timestamp to epoch ms; `null` if unusable. */
+function parseTimestampMs(value: unknown): number | null {
+  if (typeof value !== 'string' || value.trim() === '') {
+    return null;
+  }
+  const ms = Date.parse(value);
+  return Number.isFinite(ms) ? ms : null;
+}
+
 // Back-loop destinations as 0-based indices into STUDIO_STAGES
 // (build=0, test=1, compose=2, personas=3). Named so the back-loops don't carry
 // bare magic numbers; keep in sync with the STUDIO_STAGES order.
@@ -630,8 +639,11 @@ export class AgentStudioPersonaComponent implements OnInit {
   private startPolling(runId: string): void {
     this.stopPolling();
     this.activeRunId = runId;
-    const resumeMs =
-      this.state.personaLiveRunId() === runId ? this.state.personaLiveRunStartedAtMs() : null;
+    const sameRun = this.state.personaLiveRunId() === runId;
+    const resumeMs = sameRun ? this.state.personaLiveRunStartedAtMs() : null;
+    if (!sameRun) {
+      this.state.setPersonaLiveRunEndedAtMs(null);
+    }
     const startedAtMs = resumeMs ?? Date.now();
     this.state.setPersonaLiveRunStartedAtMs(startedAtMs);
     this.state.setPersonaLiveRunId(runId);
@@ -641,14 +653,17 @@ export class AgentStudioPersonaComponent implements OnInit {
     this.pipelineRun.set(null);
     // A fresh run can't be mid-stop; clear a stale "Stopping…" from a prior run.
     this.cancelling.set(false);
-    this.elapsedSec.set(Math.max(0, Math.floor((Date.now() - startedAtMs) / 1000)));
-    this.elapsedSub = interval(1000)
-      .pipe(takeUntilDestroyed(this.destroyRef))
-      .subscribe(() => {
-        if (!this.runTerminal()) {
-          this.elapsedSec.update((s) => s + 1);
-        }
-      });
+    const endedAtMs = sameRun ? this.state.personaLiveRunEndedAtMs() : null;
+    this.elapsedSec.set(Math.max(0, Math.floor(((endedAtMs ?? Date.now()) - startedAtMs) / 1000)));
+    if (endedAtMs == null) {
+      this.elapsedSub = interval(1000)
+        .pipe(takeUntilDestroyed(this.destroyRef))
+        .subscribe(() => {
+          if (!this.runTerminal()) {
+            this.elapsedSec.update((s) => s + 1);
+          }
+        });
+    }
     this.pollSub = interval(POLL_MS)
       .pipe(
         // Handle the failure INSIDE switchMap: a transient getRunStatus error
@@ -709,8 +724,29 @@ export class AgentStudioPersonaComponent implements OnInit {
       this.fetchPipelineRun(teamId, detail.se_job_id);
     }
     if (terminal) {
+      this.freezeElapsedAtTerminal(detail);
       this.stopPolling();
     }
+  }
+
+  /**
+   * Cap elapsed time at the run's completion rather than wall-clock since launch.
+   *
+   * Preconditions: `detail` is the active run and is terminal.
+   * Postconditions: `personaLiveRunEndedAtMs` is set; `elapsedSec` is
+   *   `endedAt - startedAt` in seconds (0 if startedAt is missing). Prefers
+   *   `detail.updated_at` so a run that finished while Stage 4 was unmounted
+   *   does not include time spent on the audit child.
+   */
+  private freezeElapsedAtTerminal(detail: PersonaTestRunDetail): void {
+    const startedAt = this.state.personaLiveRunStartedAtMs();
+    if (startedAt == null) {
+      return;
+    }
+    const endedAt =
+      parseTimestampMs(detail.updated_at) ?? this.state.personaLiveRunEndedAtMs() ?? Date.now();
+    this.state.setPersonaLiveRunEndedAtMs(endedAt);
+    this.elapsedSec.set(Math.max(0, Math.floor((endedAt - startedAt) / 1000)));
   }
 
   /**
