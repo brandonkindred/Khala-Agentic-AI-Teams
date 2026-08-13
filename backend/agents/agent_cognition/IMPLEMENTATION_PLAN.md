@@ -206,7 +206,7 @@ flowchart TB
 
 ### Step 9 — Manifest `CognitionSpec`
 - **Goal:** Declarative per-agent cognition config.
-- **Files:** add optional `CognitionSpec` to `agent_registry/models.py` (memory retention,
+- **Files:** add optional `CognitionSpec` to `agent_platform/registry/models.py` (memory retention,
   tools, rule_packs, `requires_idempotency_key`); loader tolerates its absence (lazy, like
   `InvokeSpec`/`SandboxSpec`).
 - **Depends:** 1
