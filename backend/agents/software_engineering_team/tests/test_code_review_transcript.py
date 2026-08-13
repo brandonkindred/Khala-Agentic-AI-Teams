@@ -151,7 +151,7 @@ def test_overflow_warning_throttled_to_once_per_burst(monkeypatch, caplog) -> No
 def test_note_overflow_requires_buffer_lock() -> None:
     """_note_overflow mutates the overflow throttle; calling it without
     ``_buffer_lock`` is a caller bug and must fail the precondition."""
-    with pytest.raises(AssertionError, match="_buffer_lock"):
+    with pytest.raises(RuntimeError, match="_buffer_lock"):
         transcript._note_overflow(1)
 
 
