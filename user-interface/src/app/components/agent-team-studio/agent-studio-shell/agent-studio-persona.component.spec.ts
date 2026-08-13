@@ -1391,6 +1391,27 @@ describe('AgentStudioPersonaComponent', () => {
     expect(fixture.nativeElement.querySelector('.persona__stop')).toBeTruthy();
   });
 
+  it('preserves elapsed time when the component is recreated mid-run', () => {
+    vi.useFakeTimers();
+    try {
+      build();
+      facade.getPersonaRunStatus.mockReturnValue(of(statusWithJob({ status: 'polling_build' })));
+      fixture.detectChanges();
+      component.launch();
+      vi.advanceTimersByTime(5_000);
+      expect(component.elapsedSec()).toBe(5);
+
+      fixture.destroy();
+      fixture = TestBed.createComponent(AgentStudioPersonaComponent);
+      component = fixture.componentInstance;
+      fixture.detectChanges();
+
+      expect(component.elapsedSec()).toBe(5);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('restores a completed run after the component is recreated', () => {
     build();
     fixture.detectChanges();

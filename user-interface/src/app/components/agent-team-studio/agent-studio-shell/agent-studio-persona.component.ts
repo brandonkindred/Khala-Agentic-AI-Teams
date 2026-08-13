@@ -630,6 +630,10 @@ export class AgentStudioPersonaComponent implements OnInit {
   private startPolling(runId: string): void {
     this.stopPolling();
     this.activeRunId = runId;
+    const resumeMs =
+      this.state.personaLiveRunId() === runId ? this.state.personaLiveRunStartedAtMs() : null;
+    const startedAtMs = resumeMs ?? Date.now();
+    this.state.setPersonaLiveRunStartedAtMs(startedAtMs);
     this.state.setPersonaLiveRunId(runId);
     this.run.set(null);
     // Clear the prior run's pipeline state so a new launch doesn't briefly show
@@ -637,7 +641,7 @@ export class AgentStudioPersonaComponent implements OnInit {
     this.pipelineRun.set(null);
     // A fresh run can't be mid-stop; clear a stale "Stopping…" from a prior run.
     this.cancelling.set(false);
-    this.elapsedSec.set(0);
+    this.elapsedSec.set(Math.max(0, Math.floor((Date.now() - startedAtMs) / 1000)));
     this.elapsedSub = interval(1000)
       .pipe(takeUntilDestroyed(this.destroyRef))
       .subscribe(() => {

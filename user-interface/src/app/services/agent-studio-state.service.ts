@@ -31,6 +31,7 @@ const CONFIGURE_SUB_STAGE_INDEX = BUILD_SUB_STAGES.findIndex((s) => s.key === 'c
  *     BUILD_SUB_STAGE_COUNT − 1] and never decreases except via `reset()`.
  *   - `personaLiveRunId()` is session-ephemeral (not part of `handoff()` /
  *     drafts) and is cleared by `reset()`, a team change, and draft hydrate.
+ *     `personaLiveRunStartedAtMs()` is cleared with it.
  */
 @Injectable()
 export class AgentStudioStateService {
@@ -52,6 +53,11 @@ export class AgentStudioStateService {
    * Stage 3/2 back-loop.
    */
   readonly personaLiveRunId = signal<string | null>(null);
+  /**
+   * Epoch-ms when this session started watching `personaLiveRunId`. Used to
+   * restore elapsed time after Stage 4 is destroyed (audit child / back-loop).
+   */
+  readonly personaLiveRunStartedAtMs = signal<number | null>(null);
 
   // ── Server draft binding (spec §3.5) ───────────────────────────────────────
   /**
@@ -242,7 +248,7 @@ export class AgentStudioStateService {
   }
   setTeamId(id: string | null): void {
     if (id !== this.teamId()) {
-      this.personaLiveRunId.set(null);
+      this.setPersonaLiveRunId(null);
     }
     this.teamId.set(id);
   }
@@ -266,10 +272,24 @@ export class AgentStudioStateService {
    * Persist or clear the Stage-4 persona run this session is watching.
    *
    * Preconditions: none.
-   * Postconditions: `personaLiveRunId() === id`.
+   * Postconditions: `personaLiveRunId() === id`. When `id` is `null`,
+   *   `personaLiveRunStartedAtMs()` is also `null`.
    */
   setPersonaLiveRunId(id: string | null): void {
     this.personaLiveRunId.set(id);
+    if (id === null) {
+      this.personaLiveRunStartedAtMs.set(null);
+    }
+  }
+
+  /**
+   * Record when this session started watching the current persona live-run.
+   *
+   * Preconditions: none.
+   * Postconditions: `personaLiveRunStartedAtMs() === ms`.
+   */
+  setPersonaLiveRunStartedAtMs(ms: number | null): void {
+    this.personaLiveRunStartedAtMs.set(ms);
   }
 
   /**
@@ -314,7 +334,7 @@ export class AgentStudioStateService {
    * Reset the session — clear handoff state and return to Stage 1.
    * Postconditions: every id is null; `activeStage() === 0`; `maxReachedStage() === 0`;
    *   `activeBuildSubStage() === 0`; `maxReachedBuildSubStage() === 0`;
-   *   `personaLiveRunId() === null`.
+   *   `personaLiveRunId() === null`; `personaLiveRunStartedAtMs() === null`.
    */
   reset(): void {
     this.registryAgentId.set(null);
@@ -325,6 +345,7 @@ export class AgentStudioStateService {
     this.rosterFullyStaffed.set(false);
     this.composeProcessStatus.set(null);
     this.personaLiveRunId.set(null);
+    this.personaLiveRunStartedAtMs.set(null);
     this.currentDraftId.set(null);
     this.currentDraftName.set(null);
     this.handoffConsumed.clear();
