@@ -581,19 +581,23 @@ def _start_agent_studio_temporal_worker() -> None:
     Agent Studio is an in-process team (mounted on this app, not a separate
     ``team_service`` container), so its worker runs here and its activity threads
     share this process's :class:`AgentStudioService` singleton. Gated on
-    ``UNIFIED_API_AGENT_STUDIO_TEMPORAL_WORKER`` and on the team being enabled —
-    Agent Studio assumes Temporal is always configured. The worker is a daemon
+    ``UNIFIED_API_AGENT_STUDIO_TEMPORAL_WORKER`` and on the team being enabled.
+    Authoring CRUD (start conversation / send message / clone / save) no longer
+    requires this worker: ``agent_team_studio.agent_studio.temporal.dispatch``
+    falls back to calling :class:`AgentStudioService` directly, in-process, when
+    Temporal isn't configured — so a missing ``TEMPORAL_ADDRESS`` here is a
+    (fully-functional) mode switch, not a degraded state. The worker is a daemon
     thread (no shutdown handle needed); log-and-continue on failure, matching
     the other lifespan startup steps.
 
     Postconditions:
         - Logs at INFO and returns without starting a worker when
           ``UNIFIED_API_AGENT_STUDIO_TEMPORAL_WORKER`` is false.
-        - Logs at INFO only when a worker actually started; when ``start_team_worker``
-          returns ``False`` (``TEMPORAL_ADDRESS`` unset → no worker), logs a WARNING
-          instead of a misleading success line, since Agent Studio is Temporal-only and
-          its requests will fail until Temporal is configured. Startup is not aborted
-          (that would take down every other team for one in-process team's config).
+        - Logs at INFO when a worker actually started, or when ``start_team_worker``
+          returns ``False`` (``TEMPORAL_ADDRESS`` unset → no worker) — Agent Studio
+          serves authoring requests via direct in-process dispatch instead. Startup is
+          not aborted either way (that would take down every other team for one
+          in-process team's config).
     """
     if not UNIFIED_API_AGENT_STUDIO_TEMPORAL_WORKER:
         logger.info("Agent Studio Temporal worker disabled (UNIFIED_API_AGENT_STUDIO_TEMPORAL_WORKER=false)")
@@ -610,9 +614,9 @@ def _start_agent_studio_temporal_worker() -> None:
     if started:
         logger.info("Started Agent Studio Temporal worker")
     else:
-        logger.warning(
+        logger.info(
             "Agent Studio Temporal worker NOT started (TEMPORAL_ADDRESS unset); "
-            "Agent Studio requests will fail until Temporal is configured."
+            "authoring requests will dispatch directly in-process instead."
         )
 
 
@@ -658,12 +662,12 @@ async def lifespan(app: FastAPI):  # noqa: PLR0915 - linear startup orchestrator
         logger.exception("agent_console postgres schema registration failed")
 
     try:
-        from agent_registry.postgres import SCHEMA as AGENT_REGISTRY_SCHEMA
+        from agent_platform.registry.postgres import SCHEMA as AGENT_REGISTRY_SCHEMA
         from shared.postgres import register_team_schemas
 
         register_team_schemas(AGENT_REGISTRY_SCHEMA)
     except Exception:
-        logger.exception("agent_registry postgres schema registration failed")
+        logger.exception("agent_platform.registry postgres schema registration failed")
 
     # Gate on the team's `enabled` flag, same rationale as product_delivery
     # below: disabling agent_studio must also disable its startup side

@@ -80,9 +80,13 @@ from .function_boundaries import (
 )
 from .model_resolution import resolve_code_review_verify_model
 from .models import CodeReviewInput, CodeReviewIssue
-from .prompts import FALSE_POSITIVE_VERIFY_PROMPT
+from .prompts import (
+    FALSE_POSITIVE_VERIFY_FORMATTING_INSTRUCTIONS,
+    FALSE_POSITIVE_VERIFY_REASONING_SYSTEM_PROMPT,
+)
 from .repo_reader import DEFAULT_MAX_LISTED_FILES, DiskRepoReader, RepoReader
 from .transcript import model_label, record_transcript_entry
+from .via_reasoning import run_agent_via_reasoning
 
 logger = logging.getLogger(__name__)
 
@@ -1814,10 +1818,10 @@ def _build_group_prompt(
         parts.extend(_render_finding_block(i, issue))
     parts.append("")
     parts.append(
-        'Return a JSON object with a "verdicts" array containing exactly one verdict per finding '
-        "index above. Mark is_real_issue=false ONLY when you have confirmed from the actual code "
-        "that the finding does not hold; otherwise keep it (is_real_issue=true). Be conservative — "
-        "dropping a real issue is worse than keeping a questionable one."
+        "For EACH finding above, state in structured prose whether it is a real issue "
+        "or a false positive, with your confidence and reasoning citing the code you "
+        "inspected. Be conservative — dropping a real issue is worse than keeping a "
+        "questionable one."
     )
     return "\n".join(parts)
 
@@ -1991,33 +1995,46 @@ def _verify_group(
           raises and never blocks on I/O.
     """
     prompt = _build_group_prompt(index, file_path, issues, input_data)
-    agent = Agent(
-        model=model,
-        system_prompt=FALSE_POSITIVE_VERIFY_PROMPT,
-        tools=_build_tools(index),
-        # Disabled so a large cited file can never be silently truncated to a
-        # sliver in place (with status left as "success") and mistaken for a
-        # complete read; see _agent_read_the_cited_file for the full rationale.
-        conversation_manager=SlidingWindowConversationManager(should_truncate_results=False),
-    )
+    reasoning_agent: Agent | None = None
     started = time.monotonic()
-    raw = str(agent(prompt)).strip()
+
+    def _capture_reasoning_agent(agent: Agent) -> None:
+        nonlocal reasoning_agent
+        reasoning_agent = agent
+
     try:
-        transcript_response = json.dumps(agent.messages, default=str)
-    except Exception:  # noqa: BLE001 - transcript recording must never break verification
-        transcript_response = raw
-    record_transcript_entry(
-        "false_positive_filter",
-        file_path,
-        prompt,
-        transcript_response,
-        system_prompt=FALSE_POSITIVE_VERIFY_PROMPT,
-        model=model_label(model),
-        duration_ms=(time.monotonic() - started) * 1000,
-    )
-    data = extract_json_from_response(raw)
+        data = run_agent_via_reasoning(
+            model=model,
+            reasoning_prompt=prompt,
+            reasoning_system_prompt=FALSE_POSITIVE_VERIFY_REASONING_SYSTEM_PROMPT,
+            formatting_instructions=FALSE_POSITIVE_VERIFY_FORMATTING_INSTRUCTIONS,
+            parse=extract_json_from_response,
+            tools=_build_tools(index),
+            reasoning_think=True,
+            agent_key="code_review_verify",
+            conversation_manager=SlidingWindowConversationManager(should_truncate_results=False),
+            on_reasoning_agent=_capture_reasoning_agent,
+        )
+    finally:
+        # Record even when formatting/parse fails after a successful reasoning
+        # pass, so a malformed reply is still visible in the transcript. A
+        # reasoning-pass exception that never constructed the agent is a no-op.
+        if reasoning_agent is not None:
+            try:
+                transcript_response = json.dumps(reasoning_agent.messages, default=str)
+            except Exception:  # noqa: BLE001 - transcript recording must never break verification
+                transcript_response = ""
+            record_transcript_entry(
+                "false_positive_filter",
+                file_path,
+                prompt,
+                transcript_response,
+                system_prompt=FALSE_POSITIVE_VERIFY_REASONING_SYSTEM_PROMPT,
+                model=model_label(model),
+                duration_ms=(time.monotonic() - started) * 1000,
+            )
     verdicts = _parse_verdicts(data, len(issues))
-    if not _agent_read_the_cited_file(agent, index, file_path):
+    if reasoning_agent is None or not _agent_read_the_cited_file(reasoning_agent, index, file_path):
         false_positive_count = sum(1 for v in verdicts.values() if v.is_false_positive)
         if false_positive_count:
             logger.warning(

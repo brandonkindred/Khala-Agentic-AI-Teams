@@ -43,7 +43,7 @@ def _seed_team_with_process(api_main) -> tuple[str, str]:
     team = store.create_team(name="Ops", description="")
     team_id = team.team_id
     agent_name = "worker"
-    from agent_registry import get_registry
+    from agent_platform.registry import get_registry
 
     manifest_id = manifest_agent_id(team_id, agent_name)
     registry = get_registry()

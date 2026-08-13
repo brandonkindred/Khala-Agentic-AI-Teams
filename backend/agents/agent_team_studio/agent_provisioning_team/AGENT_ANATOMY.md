@@ -66,7 +66,7 @@ The executor delegates to **`shared.git.git_utils`** so subprocess Git behavior 
 
 ### 3.2 Agent Cognition Core (batteries-included)
 
-Newly generated agents are stamped with a default `cognition` manifest block (`agent_registry.CognitionSpec`) so the tools layer, memory, and guardrails of the **Agent Cognition Core** are wired by default — no per-agent boilerplate. Note that an agent's **roster tools** (free-text labels like "Git" or "Slack API") are deliberately **not** mapped into `cognition.tools`: those ids resolve against the cognition tool registries (`LlmToolsService` + a caller-supplied integration registry + `agent_git_tools`), so `cognition.tools` ships empty and is widened explicitly when a real, resolvable tool is bound.
+Newly generated agents are stamped with a default `cognition` manifest block (`agent_platform.registry.CognitionSpec`) so the tools layer, memory, and guardrails of the **Agent Cognition Core** are wired by default — no per-agent boilerplate. Note that an agent's **roster tools** (free-text labels like "Git" or "Slack API") are deliberately **not** mapped into `cognition.tools`: those ids resolve against the cognition tool registries (`LlmToolsService` + a caller-supplied integration registry + `agent_git_tools`), so `cognition.tools` ships empty and is widened explicitly when a real, resolvable tool is bound.
 
 ---
 

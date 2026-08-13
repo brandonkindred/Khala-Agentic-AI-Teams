@@ -59,7 +59,7 @@ def test_list_team_agents_migrates_fat_row(fake_pg: dict, monkeypatch: pytest.Mo
             self._m[manifest.id] = manifest
 
     reg = _Reg()
-    monkeypatch.setattr("agent_registry.get_registry", lambda: reg)
+    monkeypatch.setattr("agent_platform.registry.get_registry", lambda: reg)
 
     loaded = store.list_team_agents(team_id)
     assert len(loaded) == 1
@@ -116,7 +116,7 @@ def test_delete_team_agent_migrates_fat_returning(
             self._m[manifest.id] = manifest
 
     reg = _Reg()
-    monkeypatch.setattr("agent_registry.get_registry", lambda: reg)
+    monkeypatch.setattr("agent_platform.registry.get_registry", lambda: reg)
 
     deleted = store.delete_team_agent(team_id, "Writer")
     assert deleted is not None
@@ -163,7 +163,7 @@ def test_list_team_agents_keeps_fat_row_when_manifest_persist_fails(
             assert require_persist is True
             raise RuntimeError("boom:upsert")
 
-    monkeypatch.setattr("agent_registry.get_registry", lambda: _Reg())
+    monkeypatch.setattr("agent_platform.registry.get_registry", lambda: _Reg())
 
     with pytest.raises(RuntimeError, match="boom:upsert"):
         store.list_team_agents(team_id)

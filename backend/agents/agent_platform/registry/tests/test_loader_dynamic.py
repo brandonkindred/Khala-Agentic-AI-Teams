@@ -10,9 +10,9 @@ from __future__ import annotations
 
 import pytest
 
-from agent_registry import dynamic_store as ds_mod
-from agent_registry.loader import AgentRegistry
-from agent_registry.models import AgentManifest, IOSchema, SourceInfo
+from agent_platform.registry import dynamic_store as ds_mod
+from agent_platform.registry.loader import AgentRegistry
+from agent_platform.registry.models import AgentManifest, IOSchema, SourceInfo
 
 
 def _manifest(agent_id: str, team: str = "agent_studio", name: str = "N") -> AgentManifest:
@@ -292,7 +292,7 @@ def test_replace_dynamic_manifests_leaves_local_unchanged_on_store_failure(
 
 def test_replace_manifests_rejects_empty_id_and_overlap() -> None:
     # Hit the real validators before any Postgres work (no fake_store patch).
-    from agent_registry.dynamic_store import replace_manifests
+    from agent_platform.registry.dynamic_store import replace_manifests
 
     with pytest.raises(ValueError, match="non-empty id"):
         replace_manifests([_manifest("")], [])
@@ -303,7 +303,7 @@ def test_replace_manifests_rejects_empty_id_and_overlap() -> None:
 
 
 def test_upsert_rejects_empty_id() -> None:
-    from agent_registry.dynamic_store import upsert
+    from agent_platform.registry.dynamic_store import upsert
 
     with pytest.raises(ValueError, match="non-empty"):
         upsert(_manifest(""))
@@ -313,7 +313,7 @@ def test_replace_manifests_shared_conn_avoids_nested_pool(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Shared-conn path must not call _ensure_schema (nested get_conn deadlock)."""
-    from agent_registry import dynamic_store as ds
+    from agent_platform.registry import dynamic_store as ds
 
     monkeypatch.setattr(ds, "_schema_ensured", False)
 
@@ -348,7 +348,7 @@ def test_replace_manifests_shared_conn_propagates_execute_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Shared-conn write failures must raise without flipping ``_schema_ensured``."""
-    from agent_registry import dynamic_store as ds
+    from agent_platform.registry import dynamic_store as ds
 
     monkeypatch.setattr(ds, "_schema_ensured", True)  # skip DDL; hit _execute only
 
@@ -378,7 +378,7 @@ def test_replace_manifests_shared_conn_propagates_schema_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Shared-conn DDL failures propagate and must not set ``_schema_ensured``."""
-    from agent_registry import dynamic_store as ds
+    from agent_platform.registry import dynamic_store as ds
 
     monkeypatch.setattr(ds, "_schema_ensured", False)
 

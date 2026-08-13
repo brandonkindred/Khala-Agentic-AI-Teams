@@ -29,14 +29,19 @@ import time
 from typing import List, Optional
 
 from pydantic import BaseModel, Field
-from strands import Agent
 
 from llm_service import LLMClient
 
 from .model_resolution import resolve_code_review_model
 from .models import CodeReviewInput, CodeReviewIssue
-from .prompts import REVIEW_SYNTHESIS_PROMPT, SPEC_COMPLIANCE_PASS_PROMPT
+from .prompts import (
+    REVIEW_SYNTHESIS_FORMATTING_INSTRUCTIONS,
+    REVIEW_SYNTHESIS_REASONING_SYSTEM_PROMPT,
+    SPEC_COMPLIANCE_PASS_FORMATTING_INSTRUCTIONS,
+    SPEC_COMPLIANCE_PASS_REASONING_SYSTEM_PROMPT,
+)
 from .transcript import model_label, record_transcript_entry
+from .via_reasoning import run_agent_via_reasoning
 
 logger = logging.getLogger(__name__)
 
@@ -140,6 +145,80 @@ def build_findings_digest(
     return "\n".join(lines)
 
 
+def _parse_json_object(raw: str) -> dict:
+    """Parse formatting-pass JSON text into a dict.
+
+    Preconditions:
+        ``raw`` is the JSON text from the formatting pass.
+
+    Postconditions:
+        Returns a ``dict`` on success; raises ``json.JSONDecodeError`` or
+        ``TypeError`` when the payload is not a JSON object.
+    """
+    data = json.loads(raw)
+    if not isinstance(data, dict):
+        raise TypeError("model returned non-object JSON")
+    return data
+
+
+def _run_via_reasoning_with_transcript(
+    model: object,
+    *,
+    prompt: str,
+    reasoning_system_prompt: str,
+    formatting_instructions: str,
+    stage: str,
+) -> dict:
+    """Run the think-then-format split and buffer a transcript of the reasoning pass.
+
+    Preconditions:
+        ``prompt``, ``reasoning_system_prompt``, and ``formatting_instructions``
+        are non-empty (enforced by ``run_agent_via_reasoning``). ``stage`` is
+        the durable-transcript stage label (``synthesis`` or ``spec_compliance``).
+
+    Postconditions:
+        Returns the parsed JSON object from the formatting pass. Records the
+        reasoning-pass ``agent.messages`` conversation once that agent exists,
+        even if formatting or parse later fails. A no-op on the transcript
+        when no ``job_id`` is bound. Raises whatever ``run_agent_via_reasoning``
+        raises.
+    """
+    reasoning_agent = None
+    started = time.monotonic()
+
+    def _capture(agent: object) -> None:
+        nonlocal reasoning_agent
+        reasoning_agent = agent
+
+    try:
+        return run_agent_via_reasoning(
+            model=model,
+            reasoning_prompt=prompt,
+            reasoning_system_prompt=reasoning_system_prompt,
+            formatting_instructions=formatting_instructions,
+            parse=_parse_json_object,
+            tools=[],
+            on_reasoning_agent=_capture,
+        )
+    finally:
+        if reasoning_agent is not None:
+            try:
+                transcript_response = json.dumps(
+                    getattr(reasoning_agent, "messages", []), default=str
+                )
+            except Exception:  # noqa: BLE001 - transcript recording must never break synthesis
+                transcript_response = ""
+            record_transcript_entry(
+                stage,
+                "",
+                prompt,
+                transcript_response,
+                system_prompt=reasoning_system_prompt,
+                model=model_label(model),
+                duration_ms=(time.monotonic() - started) * 1000,
+            )
+
+
 def synthesize_review_findings(
     llm: LLMClient,
     *,
@@ -167,10 +246,11 @@ def synthesize_review_findings(
           reviewers' actual evidence rather than reconstructing it.
 
     Postconditions:
-        - Records one transcript entry (stage ``synthesis``) for the LLM call
-          once a response is received — the raw response text, whether or not
-          it parses or validates, so a malformed response is visible for
-          debugging rather than silently discarded.
+        - Records one transcript entry (stage ``synthesis``) for the reasoning
+          pass once the reasoning agent exists — the full ``agent.messages``
+          conversation, whether or not the formatting reply parses or
+          validates, so a malformed response is visible for debugging rather
+          than silently discarded.
         - Returns a ``SynthesisResult`` with a non-empty ``summary`` on success;
           ``spec_compliance_notes`` may be empty (no spec gaps were recorded).
         - Returns ``None`` on ANY failure — exception, malformed JSON, a missing
@@ -184,24 +264,13 @@ def synthesize_review_findings(
         prompt = f"{framing}\n\n{digest}"
 
         _model = resolve_code_review_model(llm)
-        agent = Agent(model=_model, system_prompt=REVIEW_SYNTHESIS_PROMPT)
-        started = time.monotonic()
-        result = agent(prompt)
-        raw = str(result).strip()
-        record_transcript_entry(
-            "synthesis",
-            "",
-            prompt,
-            raw,
-            system_prompt=REVIEW_SYNTHESIS_PROMPT,
-            model=model_label(_model),
-            duration_ms=(time.monotonic() - started) * 1000,
+        data = _run_via_reasoning_with_transcript(
+            _model,
+            prompt=prompt,
+            reasoning_system_prompt=REVIEW_SYNTHESIS_REASONING_SYSTEM_PROMPT,
+            formatting_instructions=REVIEW_SYNTHESIS_FORMATTING_INSTRUCTIONS,
+            stage="synthesis",
         )
-        data = json.loads(raw)
-
-        if not isinstance(data, dict):
-            logger.warning("ReviewSynthesis: model returned non-object JSON; falling back")
-            return None
 
         summary = str(data.get("summary", "") or "").strip()
         spec_notes = str(data.get("spec_compliance_notes", "") or "").strip()
@@ -281,9 +350,10 @@ def synthesize_spec_compliance(
           unmerged per-chunk output.
 
     Postconditions:
-        - Records one transcript entry (stage ``spec_compliance``) for the LLM
-          call once a response is received — the raw response text, whether or
-          not it parses or validates, so a malformed response is visible for
+        - Records one transcript entry (stage ``spec_compliance``) for the
+          reasoning pass once the reasoning agent exists — the full
+          ``agent.messages`` conversation, whether or not the formatting reply
+          parses or validates, so a malformed response is visible for
           debugging rather than silently discarded.
         - Returns a string on success: ``""`` when no gaps were found, or the
           consolidated spec/acceptance-criteria gaps otherwise — the same
@@ -300,24 +370,14 @@ def synthesize_spec_compliance(
         prompt = f"{framing}\n\n{digest}"
 
         _model = resolve_code_review_model(llm)
-        agent = Agent(model=_model, system_prompt=SPEC_COMPLIANCE_PASS_PROMPT)
-        started = time.monotonic()
-        result = agent(prompt)
-        raw = str(result).strip()
-        record_transcript_entry(
-            "spec_compliance",
-            "",
-            prompt,
-            raw,
-            system_prompt=SPEC_COMPLIANCE_PASS_PROMPT,
-            model=model_label(_model),
-            duration_ms=(time.monotonic() - started) * 1000,
+        data = _run_via_reasoning_with_transcript(
+            _model,
+            prompt=prompt,
+            reasoning_system_prompt=SPEC_COMPLIANCE_PASS_REASONING_SYSTEM_PROMPT,
+            formatting_instructions=SPEC_COMPLIANCE_PASS_FORMATTING_INSTRUCTIONS,
+            stage="spec_compliance",
         )
-        data = json.loads(raw)
 
-        if not isinstance(data, dict):
-            logger.warning("SpecCompliancePass: model returned non-object JSON; skipping")
-            return None
         if "spec_compliance_notes" not in data:
             logger.warning("SpecCompliancePass: missing spec_compliance_notes key; skipping")
             return None

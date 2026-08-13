@@ -2,7 +2,7 @@
 
 Both ``agent_studio`` (Stage-1 single-agent authoring) and
 ``agentic_team_provisioning`` (team roster/process authoring) register agents
-into the same process-wide ``agent_registry`` through the shared
+into the same process-wide ``agent_platform.registry`` through the shared
 generated-agent runtime (``runtime.agent_builder:invoke_generated_agent``).
 Before this module existed, each package independently hardcoded the same
 dotted refs and tag-filtering pattern; this module is their single source so
@@ -13,7 +13,11 @@ Nothing here performs I/O — these are pure constants and pure functions only.
 
 from __future__ import annotations
 
-from agent_registry.models import CognitionKnowledgeGraphSpec, CognitionMemorySpec, CognitionSpec
+from agent_platform.registry.models import (
+    CognitionKnowledgeGraphSpec,
+    CognitionMemorySpec,
+    CognitionSpec,
+)
 
 # The invokable sandbox entrypoint every generated/authored agent shares: one
 # callable that accepts the roster metadata + message, reconstructs the agent,

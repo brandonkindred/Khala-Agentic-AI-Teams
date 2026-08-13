@@ -1,10 +1,11 @@
 """Chunk Reviewer: the map step of the map-reduce code review.
 
-``ChunkReviewAgent`` reviews exactly one ``ReviewChunk`` in a single LLM call
-and returns that chunk's findings. The coordinator (``coordinator.py``) owns
-splitting the submission into bounded chunks, recovering failed chunks, and
-reducing the per-chunk findings into one verdict; this module owns only the
-single bounded review pass.
+``ChunkReviewAgent`` reviews exactly one ``ReviewChunk`` via a two-call
+via-reasoning path (prose review with thinking, then schema-validated JSON
+formatting with thinking off) and returns that chunk's findings. The coordinator
+(``coordinator.py``) owns splitting the submission into bounded chunks,
+recovering failed chunks, and reducing the per-chunk findings into one verdict;
+this module owns only the single bounded review pass.
 
 Preconditions:
     - The caller (the coordinator) has already bounded the chunk: the
@@ -24,11 +25,12 @@ Postconditions:
       the reduce phase's job.
 
 Invariants:
-    - Stateless apart from the injected ``llm`` handle: every call goes
-      straight to ``llm.complete_json`` (via ``complete_validated``), so
-      concurrent reviews share no mutable state. No strands ``Agent``/``Model``
-      is built for this call path. The code under review is sent verbatim and
-      is never compacted.
+    - Stateless apart from the injected ``llm`` handle: every chunk review issues
+      two LLM requests (call 1: ``llm.complete`` with thinking; call 2:
+      ``llm.complete_json`` with thinking off, via
+      ``complete_validated_via_reasoning_local``), so concurrent reviews share
+      no mutable state. No strands ``Agent``/``Model`` is built for this call
+      path. The code under review is sent verbatim and is never compacted.
 """
 
 from __future__ import annotations
@@ -38,11 +40,15 @@ import os
 import time
 from typing import Optional, Union
 
-from llm_service import LLMClient, complete_validated
+from llm_service import LLMClient
 
 from .models import ChunkReviewInput, ChunkReviewLLMResponse, ChunkReviewOutput
-from .profiles import build_review_system_prompt
+from .profiles import (
+    build_review_formatting_instructions,
+    build_review_reasoning_system_prompt,
+)
 from .transcript import model_label, record_transcript_entry
+from .via_reasoning import complete_validated_via_reasoning_local
 
 logger = logging.getLogger(__name__)
 
@@ -81,16 +87,6 @@ REVIEW_GUARDRAILS_NOTE = (
 # named constant so callers/tests can identify a map-phase review prompt without
 # duplicating the literal (it is unique to this prompt template).
 CODE_TO_REVIEW_HEADER = "**Code to review:**"
-
-# Output-contract reminder appended AFTER the code block (the last thing the
-# model reads). Keeps a thinking model from returning reasoning-only output with
-# no final answer — the semantic-exhaustion failure mode. Rides the user prompt
-# because the CODE_REVIEW system prompt is byte-locked.
-FINAL_OUTPUT_CONTRACT_NOTE = (
-    "\nRespond with ONLY the single JSON object your instructions specify "
-    "(approved, issues, summary, spec_compliance_notes). "
-    "Do not emit reasoning, analysis, or any prose outside that JSON object."
-)
 
 
 def _guess_language_from_label(file_path_or_label: str) -> Optional[str]:
@@ -148,12 +144,11 @@ class ChunkReviewAgent:
 
     Invariants:
         - Stateless apart from the injected ``llm`` handle: every ``run`` call
-          invokes the injected ``llm``'s own ``complete_json`` directly (via
-          ``complete_validated``), so concurrent ``run`` calls share no mutable
-          state. The injected ``llm`` must itself support concurrent calls —
-          the central ``llm_service`` clients do (they guard shared state
-          internally); test doubles used with the parallel coordinator must do
-          the same.
+          invokes the two-call via-reasoning path on the injected ``llm``, so
+          concurrent ``run`` calls share no mutable state. The injected ``llm``
+          must itself support concurrent calls — the central ``llm_service``
+          clients do (they guard shared state internally); test doubles used
+          with the parallel coordinator must do the same.
     """
 
     def __init__(self, llm: LLMClient) -> None:
@@ -165,11 +160,11 @@ class ChunkReviewAgent:
         """Review one chunk and return approved, issues, summary, and spec_compliance_notes.
 
         Preconditions:
-            - ``think`` is ``None`` (use the client's default thinking level) or an
-              explicit override forwarded verbatim to ``complete_validated``/
-              ``llm.complete_json`` — e.g. ``False`` for the coordinator's
-              last-resort thinking-off retry of a chunk whose default-thinking
-              review returned no usable content.
+            - ``think`` is ``None`` (defaults to max thinking on the reasoning
+              pass) or an explicit override forwarded to the reasoning call —
+              e.g. ``False`` for the coordinator's last-resort thinking-off
+              retry of a chunk whose default-thinking review returned no usable
+              content. The formatting pass always uses ``think=False``.
 
         Postconditions:
             - ``spec_compliance_notes`` from the LLM is passed through so
@@ -195,9 +190,9 @@ def _run_chunk_review(
         - ``input_data.code_chunk`` is already bounded by the coordinator
           (≤ ``compute_code_review_map_chunk_chars``); it is reviewed verbatim,
           never compacted or truncated here.
-        - ``think`` is ``None`` (client default) or an explicit thinking
-          override forwarded verbatim to ``complete_validated``/
-          ``llm.complete_json``.
+        - ``think`` is ``None`` (defaults to max thinking on the reasoning pass)
+          or an explicit override for the reasoning call only; formatting always
+          uses ``think=False``.
 
     Postconditions:
         - Shared context (spec/architecture/existing code) is passed through
@@ -212,38 +207,38 @@ def _run_chunk_review(
           ``architecture_overview`` and ``existing_codebase_excerpt`` are
           always passed through verbatim regardless of the flag.
         - Buffers one ``chunk_review`` transcript entry (target
-          ``input_data.file_path_or_label``) per ``complete_validated``
-          attempt — the initial call plus every corrective retry it makes
-          internally, whether that attempt succeeded or failed — for later
-          batched, off-hot-path persistence to ``code_review_transcripts``;
-          see ``transcript.record_transcript_entry`` and this function's
-          ``on_attempt`` callback. A no-op when no ``job_id`` is bound on the
-          current ``llm_attribution`` context (see ``CodeReviewAgent.run``);
-          never raises and never blocks on I/O.
+          ``input_data.file_path_or_label``) per LLM call the via-reasoning
+          path makes: the reasoning ``complete`` call, then each
+          ``complete_validated`` formatting attempt (the initial call plus
+          every corrective retry), whether that attempt succeeded or failed —
+          for later batched, off-hot-path persistence to
+          ``code_review_transcripts``; see ``transcript.record_transcript_entry``
+          and this function's ``on_attempt`` callback. A no-op when no
+          ``job_id`` is bound on the current ``llm_attribution`` context (see
+          ``CodeReviewAgent.run``); never raises and never blocks on I/O.
 
     Raises:
-        LLMJsonParseError: the injected ``llm``'s ``complete_json`` could not
-            produce parseable JSON on any of ``complete_validated``'s attempts
-            (the initial call plus its corrective retries). The coordinator's
-            recovery layer (``mapping.py``) classifies this as a recoverable
-            content failure like any other malformed response.
-        LLMSchemaValidationError: the LLM returned parseable JSON that fails
-            ``ChunkReviewLLMResponse`` validation on every attempt — e.g. an
-            out-of-set ``severity``/``category``, a non-strict-bool
+        LLMJsonParseError: the formatting pass could not produce parseable JSON
+            on any of ``complete_validated``'s attempts (the initial call plus
+            its corrective retries). The coordinator's recovery layer
+            (``mapping.py``) classifies this as a recoverable content failure
+            like any other malformed response.
+        LLMSchemaValidationError: the formatting pass returned parseable JSON
+            that fails ``ChunkReviewLLMResponse`` validation on every attempt —
+            e.g. an out-of-set ``severity``/``category``, a non-strict-bool
             ``pre_existing``, a missing required top-level field, or an
             ``approved`` verdict inconsistent with its own issues list (see
             ``ChunkReviewLLMResponse._require_approval_consistent_with_issues``).
             Also classified as a recoverable content failure by ``mapping.py``.
-        LLMSemanticExhaustionError: the model produced no usable assistant
-            content (a reasoning-only reply with no final answer). Propagates
-            unchanged from ``complete_validated``; also a recoverable content
-            failure downstream.
-        LLMTruncatedError: the reply hit the output-token limit
-            (``finish_reason=length``). Propagates unchanged from
-            ``complete_validated``; also a recoverable content failure
-            downstream — a smaller chunk yields a smaller review.
-        LLMPermanentError: other unrecoverable LLM failures propagate
-            unchanged from ``complete_validated``.
+        LLMSemanticExhaustionError: the reasoning pass produced no usable
+            assistant content (a reasoning-only reply with no final answer).
+            Propagates unchanged from ``complete_validated_via_reasoning_local``;
+            also a recoverable content failure downstream.
+        LLMTruncatedError: the reasoning or formatting reply hit the output-token
+            limit (``finish_reason=length``). Propagates unchanged; also a
+            recoverable content failure downstream — a smaller chunk yields a
+            smaller review.
+        LLMPermanentError: other unrecoverable LLM failures propagate unchanged.
     """
     code_chunk = input_data.code_chunk
     spec_excerpt = input_data.spec_excerpt
@@ -326,28 +321,21 @@ def _run_chunk_review(
             "```",
             code_chunk,
             "```",
-            # Last thing the model sees: a plain output-contract reminder. The
-            # CODE_REVIEW system prompt is byte-locked, so this rides the user
-            # prompt (like REVIEW_GUARDRAILS_NOTE). It nudges a thinking model to
-            # emit the final JSON rather than reasoning-only output, the failure
-            # mode that otherwise raises LLMSemanticExhaustionError.
-            FINAL_OUTPUT_CONTRACT_NOTE,
         ]
     )
 
     prompt = "\n".join(context_parts)
-    system_prompt = build_review_system_prompt(input_data.profile)
+    reasoning_system_prompt = build_review_reasoning_system_prompt(input_data.profile)
     model_name = model_label(llm)
     target = input_data.file_path_or_label
     last_attempt_start = time.monotonic()
 
     def _on_attempt(attempt_prompt: str, attempt_response: str) -> None:
-        # One transcript entry per attempt (initial call plus every corrective
-        # retry ``complete_validated`` makes internally on a malformed/invalid
-        # reply) rather than one entry for only the final, successful attempt —
-        # otherwise a retried call's earlier failed reply (and the corrective
-        # prompt that followed it) would be silently missing from the
-        # transcript even though it is a real LLM call the pipeline made.
+        # One transcript entry per LLM call the via-reasoning path makes: the
+        # reasoning ``complete`` plus every ``complete_validated`` formatting
+        # attempt (initial call and every corrective retry). Recording only
+        # the final successful formatting reply would silently drop the
+        # reasoning prose and any malformed earlier reply.
         nonlocal last_attempt_start
         now = time.monotonic()
         record_transcript_entry(
@@ -355,20 +343,21 @@ def _run_chunk_review(
             target,
             attempt_prompt,
             attempt_response,
-            system_prompt=system_prompt,
+            system_prompt=reasoning_system_prompt,
             model=model_name,
             duration_ms=(now - last_attempt_start) * 1000,
         )
         last_attempt_start = now
 
-    response = complete_validated(
+    response = complete_validated_via_reasoning_local(
         llm,
-        prompt,
         schema=ChunkReviewLLMResponse,
+        reasoning_prompt=prompt,
+        reasoning_system_prompt=reasoning_system_prompt,
+        formatting_instructions=build_review_formatting_instructions(input_data.profile),
         objective="review code chunk",
-        system_prompt=system_prompt,
+        reasoning_think=True if think is None else think,
         temperature=0.0,
-        think=think,
         on_attempt=_on_attempt,
     )
 

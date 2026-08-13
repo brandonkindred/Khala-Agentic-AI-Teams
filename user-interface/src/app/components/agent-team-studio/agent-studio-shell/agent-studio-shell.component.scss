@@ -1,3 +1,5 @@
+@use 'draft-btn';
+
 .studio {
   display: flex;
   flex-direction: column;
@@ -26,7 +28,7 @@
   }
 
   &__draft-btn {
-    font-size: 0.8125rem;
+    @include draft-btn.look;
   }
 
   // ── Forward-only stepper header ────────────────────────────────────────────

@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from typing import Callable, Protocol
 
-from agent_registry.models import AgentManifest
+from agent_platform.registry.models import AgentManifest
 
 from .assistant import DEFAULT_SUGGESTIONS, GREETING, AgentDesignerAgent
 from .models import AgentDefinition, ConversationStateResponse, StudioMode
@@ -22,7 +22,7 @@ from .store import AgentStudioConversationStore
 
 
 class RegistryLike(Protocol):
-    """The slice of ``agent_registry.AgentRegistry`` this service depends on."""
+    """The slice of ``agent_platform.registry.AgentRegistry`` this service depends on."""
 
     def get(self, agent_id: str) -> AgentManifest | None: ...
 
@@ -34,7 +34,7 @@ RegistryGetter = Callable[[], RegistryLike]
 
 
 def _default_registry_getter() -> RegistryLike:  # pragma: no cover - thin import wrapper
-    from agent_registry import get_registry
+    from agent_platform.registry import get_registry
 
     return get_registry()
 
@@ -170,7 +170,7 @@ class AgentStudioService:
         ``True``. This is benign — ``created`` is an advisory UI hint (warn before a
         same-name overwrite), not a correctness guarantee, and ``register`` is
         idempotent by id so the final stored manifest is consistent regardless. A
-        truly atomic flag needs the shared ``agent_registry`` to return creation
+        truly atomic flag needs the shared ``agent_platform.registry`` to return creation
         status from ``register`` itself; that's a registry-level change, out of scope
         for this Stage-1 slice and in the same deferred concurrency class as the
         per-conversation turn serialization.

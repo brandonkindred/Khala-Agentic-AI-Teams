@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import pytest
 
-from agent_registry.manifest_projection import hash_suffix, revalidate, slug
-from agent_registry.models import AgentManifest, SourceInfo
+from agent_platform.registry.manifest_projection import hash_suffix, revalidate, slug
+from agent_platform.registry.models import AgentManifest, SourceInfo
 
 
 def _manifest(**overrides) -> AgentManifest:

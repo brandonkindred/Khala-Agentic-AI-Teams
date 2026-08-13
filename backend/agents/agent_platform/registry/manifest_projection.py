@@ -2,7 +2,7 @@
 
 Both the Studio (`agent_team_studio.agent_studio`) and agentic
 (`agent_team_studio.agentic_team_provisioning`) authoring surfaces build
-:class:`~agent_registry.models.AgentManifest` instances using the same
+:class:`~agent_platform.registry.models.AgentManifest` instances using the same
 handful of id-construction primitives (slugging, hashed-slug ids, round-trip
 validation). This module single-sources those primitives — as a public,
 stable home independent of either surface's internals — so each surface only

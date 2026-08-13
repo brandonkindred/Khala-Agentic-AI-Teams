@@ -275,21 +275,26 @@ def test_small_code_routes_through_coordinator_chunk_path() -> None:
     class _Recorder(DummyLLMClient):
         def __init__(self) -> None:
             super().__init__()
-            self.prompts: list[str] = []
+            self.reasoning_prompts: list[str] = []
+            self.format_prompts: list[str] = []
+
+        def complete(self, prompt: str, **kwargs: Any) -> str:
+            self.reasoning_prompts.append(prompt)
+            return super().complete(prompt, **kwargs)
 
         def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
-            self.prompts.append(prompt)
+            self.format_prompts.append(prompt)
             return super().complete_json(prompt, **kwargs)
 
     client = _Recorder()
     agent = CodeReviewAgent(llm_client=client, force_in_process=True)
     result = agent.run(_input())
     assert result.approved is True
-    # 1 chunk-review call + 1 side-effect/blast-radius pass call (additive,
-    # runs once per submission regardless of chunk count).
-    assert len(client.prompts) == 2
-    # CHUNK_REVIEW_NOTE marker proves the coordinator's map path was used.
-    assert "one chunk of the full codebase" in client.prompts[0]
+    # CHUNK_REVIEW_NOTE lives on the reasoning pass, not the JSON format wrap.
+    assert any("one chunk of the full codebase" in p for p in client.reasoning_prompts)
+    # Map format call plus at least one tail-pass format call (side-effect
+    # and/or architecture, depending on which additive passes are enabled).
+    assert len(client.format_prompts) >= 2
 
 
 def test_single_chunk_propagates_notes_through_agent() -> None:
