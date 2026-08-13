@@ -36,7 +36,7 @@ class _EmptyRegistry:
 
 @pytest.fixture
 def empty_registry(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("agent_registry.get_registry", lambda: _EmptyRegistry())
+    monkeypatch.setattr("agent_platform.registry.get_registry", lambda: _EmptyRegistry())
 
 
 @pytest.fixture

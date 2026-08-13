@@ -23,8 +23,8 @@ rules, proposals approve/reject) already exists; this work consumes it.
 | `models/cognition.model.ts` | TS interfaces + enums mirroring backend Pydantic models | §11 |
 | `models/cognition-labels.ts` | Pure backend-value → UI-copy mapping (the §8 glossary) | §8 |
 | `models/cognition-labels.spec.ts` | Unit tests for every glossary mapping | §8 |
-| `components/agent-console/cognition-tab/cognition-tab.component.{ts,html,scss}` | The tab: picker + 3 sections | §3–§7 |
-| `components/agent-console/cognition-tab/cognition-tab.component.spec.ts` | Component tests (mocked service) | §11 testing |
+| `components/cognition-page/cognition-tab/cognition-tab.component.{ts,html,scss}` | The tab: picker + 3 sections | §3–§7 |
+| `components/cognition-page/cognition-tab/cognition-tab.component.spec.ts` | Component tests (mocked service) | §11 testing |
 
 ### Modified
 

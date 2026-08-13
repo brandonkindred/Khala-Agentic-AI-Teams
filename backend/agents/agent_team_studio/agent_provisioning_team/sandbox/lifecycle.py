@@ -64,7 +64,7 @@ class UnknownAgentError(ValueError):
 
 
 async def _resolve_team(agent_id: str) -> str:
-    """Look up the agent's team via :mod:`agent_registry`.
+    """Look up the agent's team via :mod:`agent_platform.registry`.
 
     Wrapped so tests can patch it without importing the whole registry.
 
@@ -84,7 +84,7 @@ async def _resolve_team(agent_id: str) -> str:
     """
 
     def _lookup():
-        from agent_registry import get_registry
+        from agent_platform.registry import get_registry
 
         return get_registry().get(agent_id)
 

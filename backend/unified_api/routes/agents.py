@@ -46,8 +46,8 @@ from agent_console import (
     resolve_author,
 )
 from agent_console.models import RunCreate
-from agent_registry import AgentDetail, AgentSummary, TeamGroup, get_registry
-from agent_registry.schema_resolver import SchemaResolutionError, resolve_schema
+from agent_platform.registry import AgentDetail, AgentSummary, TeamGroup, get_registry
+from agent_platform.registry.schema_resolver import SchemaResolutionError, resolve_schema
 from agent_team_studio.agent_provisioning_team.sandbox import (
     DockerUnavailableError,
     SandboxStatus,
@@ -226,7 +226,7 @@ async def invoke_agent(
         warming 202, or an ``HTTPException`` mapped to the status codes above);
         no claimed run is both finalized and abandoned.
     """
-    # get() can hit Postgres for a dynamically-registered agent id (agent_registry's
+    # get() can hit Postgres for a dynamically-registered agent id (agent_platform.registry's
     # dynamic-manifest overlay); this is an async route, so a blocking round trip here
     # would stall the whole worker's event loop. Run it in a worker thread.
     manifest = await asyncio.to_thread(get_registry().get, agent_id)

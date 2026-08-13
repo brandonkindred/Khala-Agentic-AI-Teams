@@ -155,7 +155,7 @@ async def _resolve_manifest_json(agent_id: str) -> str:
           fast here, before ``docker compose up``, rather than let the sandbox
           boot and exit ``EXIT_UNKNOWN_AGENT``.
     """
-    from agent_registry import get_registry
+    from agent_platform.registry import get_registry
 
     manifest = await asyncio.to_thread(get_registry().get, agent_id)
     if manifest is None:
