@@ -62,6 +62,14 @@ logger = logging.getLogger(__name__)
 # see the module docstring's "Persistence is off the hot path" section.
 _buffer: "deque[tuple[str, dict[str, Any]]]" = deque()
 _buffer_lock = threading.Lock()
+# Serializes the entire drain (snapshot + persist + requeue). ``_buffer_lock``
+# only covers enqueue/snapshot so a slow Postgres write does not block
+# ``record_transcript_entry``. Without this, a heartbeat can snapshot+clear
+# the buffer and then a terminal ``drain()`` (``CodeReviewAgent.run``'s
+# ``finally``) sees an empty buffer and returns while that write is still in
+# flight — the UI's one-shot fetch can miss the batch. Lock order is always
+# ``_drain_exec_lock`` then ``_buffer_lock``; never the reverse.
+_drain_exec_lock = threading.Lock()
 _heartbeat: Optional[BackgroundHeartbeat] = None
 _registered = False
 _register_lock = threading.Lock()
@@ -208,49 +216,53 @@ def _drain() -> int:
     A per-job write failure is requeued (see :func:`_requeue`) rather than
     discarded — a transient Postgres blip must not permanently drop those
     calls from the user-facing transcript — and never kills the heartbeat
-    thread. The batch is snapshotted under the lock and written outside it so
-    a slow write does not block the call-path recorder.
+    thread. The batch is snapshotted under ``_buffer_lock`` and written
+    outside that lock so a slow write does not block the call-path recorder.
+    The whole drain (snapshot through persist/requeue) is serialized on
+    ``_drain_exec_lock`` so a terminal ``drain()`` cannot return while a
+    heartbeat write of a just-cleared batch is still in flight.
     """
-    with _buffer_lock:
-        if not _buffer:
-            return 0
-        batch = list(_buffer)
-        _buffer.clear()
-    by_job: dict[str, list[dict[str, Any]]] = {}
-    for job_id, entry in batch:
-        by_job.setdefault(job_id, []).append(entry)
+    with _drain_exec_lock:
+        with _buffer_lock:
+            if not _buffer:
+                return 0
+            batch = list(_buffer)
+            _buffer.clear()
+        by_job: dict[str, list[dict[str, Any]]] = {}
+        for job_id, entry in batch:
+            by_job.setdefault(job_id, []).append(entry)
 
-    from software_engineering_team.review_history_store import (
-        append_review_transcript_entries,
-    )
+        from software_engineering_team.review_history_store import (
+            append_review_transcript_entries,
+        )
 
-    written = 0
-    failed: list[tuple[str, dict[str, Any]]] = []
-    for job_id, entries in by_job.items():
-        try:
-            ok = append_review_transcript_entries(job_id, entries)
-        except Exception:  # noqa: BLE001 - the flusher must never die on a write failure
-            logger.warning(
-                "CodeReview transcript: failed to flush %d entry(ies) for job %s",
-                len(entries),
-                job_id,
-                exc_info=True,
-            )
-            failed.extend((job_id, entry) for entry in entries)
-            continue
-        if ok:
-            written += len(entries)
-        else:
-            logger.warning(
-                "CodeReview transcript: failed to flush %d entry(ies) for job %s",
-                len(entries),
-                job_id,
-            )
-            failed.extend((job_id, entry) for entry in entries)
+        written = 0
+        failed: list[tuple[str, dict[str, Any]]] = []
+        for job_id, entries in by_job.items():
+            try:
+                ok = append_review_transcript_entries(job_id, entries)
+            except Exception:  # noqa: BLE001 - the flusher must never die on a write failure
+                logger.warning(
+                    "CodeReview transcript: failed to flush %d entry(ies) for job %s",
+                    len(entries),
+                    job_id,
+                    exc_info=True,
+                )
+                failed.extend((job_id, entry) for entry in entries)
+                continue
+            if ok:
+                written += len(entries)
+            else:
+                logger.warning(
+                    "CodeReview transcript: failed to flush %d entry(ies) for job %s",
+                    len(entries),
+                    job_id,
+                )
+                failed.extend((job_id, entry) for entry in entries)
 
-    if failed:
-        _requeue(failed)
-    return written
+        if failed:
+            _requeue(failed)
+        return written
 
 
 def _requeue(entries: list[tuple[str, dict[str, Any]]]) -> None:
@@ -291,7 +303,9 @@ def drain() -> int:
     """Synchronous one-shot drain of the buffer (used by shutdown and tests).
 
     Postconditions: returns the number of entries written; 0 if the buffer
-    was empty or the write failed. Never raises.
+    was empty or the write failed. Overlapping callers serialize: this
+    does not return while another drain's persist of a snapshotted batch
+    is still in flight. Never raises.
     """
     return _drain()
 
@@ -367,8 +381,9 @@ def _reset_for_test() -> None:
             hb.stop()
         except Exception:  # pragma: no cover - BackgroundHeartbeat.stop never raises
             pass
-    with _buffer_lock:
-        _buffer.clear()
+    with _drain_exec_lock:
+        with _buffer_lock:
+            _buffer.clear()
     _registered = False
     _overflow_warned = False
 

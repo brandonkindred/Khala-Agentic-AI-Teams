@@ -347,6 +347,38 @@ def test_on_attempt_called_on_terminal_failure_too():
     assert attempts[1][1] == "raw-1"
 
 
+def test_on_attempt_receives_full_raw_response_on_parse_failure():
+    """Parse-failure observers get the untruncated reply, not the log-safe preview.
+
+    ``response_preview`` stays truncated for corrective prompts; ``raw_response``
+    is what transcript recorders need.
+    """
+    full = "malformed reply " + ("y" * 800)
+
+    def handler(prompt: str, *, call_index: int) -> dict[str, Any]:
+        raise LLMJsonParseError(
+            "bad json",
+            response_preview=full[:500],
+            raw_response=full,
+        )
+
+    client = _StubClient(handler)
+    attempts: list[tuple[str, str]] = []
+    with pytest.raises(LLMJsonParseError):
+        complete_validated(
+            client,
+            "prompt",
+            objective="test",
+            schema=FounderAnswer,
+            correction_attempts=0,
+            on_attempt=lambda p, r: attempts.append((p, r)),
+        )
+
+    assert len(attempts) == 1
+    assert attempts[0][1] == full
+    assert len(attempts[0][1]) > 500
+
+
 def test_on_attempt_exception_is_swallowed(caplog):
     """A broken observer must never break the underlying structured-output call."""
 

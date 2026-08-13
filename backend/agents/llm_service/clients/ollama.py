@@ -950,6 +950,7 @@ class OllamaLLMClient(LLMClient):
             f"Response preview: {text[:500]!r}...",
             error_kind="json_parse",
             response_preview=text[:500],
+            raw_response=text,
         )
 
     def _resolve_think(

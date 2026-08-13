@@ -9,6 +9,8 @@ overflow semantics, batching-by-job_id, and zero DB I/O on enqueue.
 
 from __future__ import annotations
 
+import threading
+
 import pytest
 
 from llm_service import llm_attribution
@@ -246,6 +248,51 @@ def test_requeue_drops_oldest_on_overflow(monkeypatch, caplog) -> None:
 
 def test_drain_empty_buffer_is_zero() -> None:
     assert transcript.drain() == 0
+
+
+def test_overlapping_drains_wait_for_in_flight_persist(monkeypatch) -> None:
+    """A terminal drain() must not return while another drain has snapshotted
+    the buffer but not yet finished writing — otherwise the UI's one-shot
+    fetch after CodeReviewAgent.run's finally can miss that batch.
+    """
+    first_entered = threading.Event()
+    release_first = threading.Event()
+    first_finished = threading.Event()
+    second_finished = threading.Event()
+
+    def _write(job_id, entries):
+        first_entered.set()
+        assert release_first.wait(timeout=2.0)
+        return True
+
+    monkeypatch.setattr(
+        "software_engineering_team.review_history_store.append_review_transcript_entries",
+        _write,
+    )
+    with llm_attribution(job_id="job-1"):
+        transcript.record_transcript_entry("chunk_review", "a.py", "p", "r")
+
+    def _first() -> None:
+        transcript.drain()
+        first_finished.set()
+
+    def _second() -> None:
+        transcript.drain()
+        second_finished.set()
+
+    t1 = threading.Thread(target=_first)
+    t1.start()
+    assert first_entered.wait(timeout=2.0)
+    t2 = threading.Thread(target=_second)
+    t2.start()
+    # Second drain must not complete while the first persist is in flight.
+    assert not second_finished.wait(timeout=0.3)
+    release_first.set()
+    assert second_finished.wait(timeout=2.0)
+    assert first_finished.is_set()
+    t1.join(timeout=2.0)
+    t2.join(timeout=2.0)
+    assert not t1.is_alive() and not t2.is_alive()
 
 
 def test_register_starts_heartbeat_idempotently() -> None:

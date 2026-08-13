@@ -167,7 +167,20 @@ class LLMNotConfiguredError(LLMPermanentError):
 
 
 class LLMJsonParseError(LLMPermanentError):
-    """Raised when LLM returned a 200 response but the content is not valid JSON."""
+    """Raised when LLM returned a 200 response but the content is not valid JSON.
+
+    ``response_preview`` is a truncated, log-safe slice (corrective prompts and
+    logs). ``raw_response`` is the full untruncated reply when the raise site
+    still has it; an empty ``raw_response`` falls back to ``response_preview``
+    so callers that only pass a preview still expose a usable body to observers.
+
+    Preconditions:
+        - ``message``, ``response_preview``, and ``raw_response`` are strs.
+    Postconditions:
+        - ``self.response_preview`` is the truncated preview unchanged.
+        - ``self.raw_response`` is ``raw_response`` when non-empty, else
+          ``response_preview``.
+    """
 
     def __init__(
         self,
@@ -175,11 +188,13 @@ class LLMJsonParseError(LLMPermanentError):
         *,
         error_kind: str = "json_parse",
         response_preview: str = "",
+        raw_response: str = "",
         correction_attempts_used: int = 0,
     ):
         super().__init__(message)
         self.error_kind = error_kind
         self.response_preview = response_preview
+        self.raw_response = raw_response if raw_response else response_preview
         self.correction_attempts_used = correction_attempts_used
 
 

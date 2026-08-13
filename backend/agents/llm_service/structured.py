@@ -231,7 +231,8 @@ def complete_validated(
             plus every corrective retry, whether that attempt succeeded or
             failed) with ``(attempt_prompt, response_text)`` — the exact
             prompt sent for that attempt and a best-effort text form of what
-            came back (the raw preview on a parse failure, the parsed JSON on
+            came back (the full raw reply on a parse failure when the raise
+            site captured it, else the truncated preview; the parsed JSON on
             a validation failure or on success). ``None`` (the default) does
             nothing extra; a caller that wants a durable per-call transcript
             covering every attempt (not just the final one) passes a recorder
@@ -276,7 +277,9 @@ def complete_validated(
             last_parse_error = exc
             last_validation_error = None
             last_validation_data = None
-            _invoke_on_attempt(on_attempt, attempt_prompt, exc.response_preview or "")
+            _invoke_on_attempt(
+                on_attempt, attempt_prompt, exc.raw_response or exc.response_preview or ""
+            )
             if attempt >= correction_attempts:
                 break
             attempts_used = attempt + 1
