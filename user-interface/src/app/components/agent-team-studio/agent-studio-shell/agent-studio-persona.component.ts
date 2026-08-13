@@ -656,13 +656,7 @@ export class AgentStudioPersonaComponent implements OnInit {
     const endedAtMs = sameRun ? this.state.personaLiveRunEndedAtMs() : null;
     this.elapsedSec.set(Math.max(0, Math.floor(((endedAtMs ?? Date.now()) - startedAtMs) / 1000)));
     if (endedAtMs == null) {
-      this.elapsedSub = interval(1000)
-        .pipe(takeUntilDestroyed(this.destroyRef))
-        .subscribe(() => {
-          if (!this.runTerminal()) {
-            this.elapsedSec.update((s) => s + 1);
-          }
-        });
+      this.startElapsedTicker();
     }
     this.pollSub = interval(POLL_MS)
       .pipe(
@@ -726,7 +720,46 @@ export class AgentStudioPersonaComponent implements OnInit {
     if (terminal) {
       this.freezeElapsedAtTerminal(detail);
       this.stopPolling();
+    } else if (this.state.personaLiveRunEndedAtMs() != null) {
+      this.reseedElapsedAfterRestart();
     }
+  }
+
+  /**
+   * A run this session had frozen as terminal is running again (resume/restart
+   * on the same `run_id` from Testing Personas). Drop the stale end timestamp
+   * and start a new elapsed window from now.
+   *
+   * Preconditions: `personaLiveRunEndedAtMs()` is non-null and the latest
+   *   status for the active run is non-terminal.
+   * Postconditions: `personaLiveRunEndedAtMs()` is null,
+   *   `personaLiveRunStartedAtMs()` is `Date.now()`, `elapsedSec` is 0, and
+   *   the per-second ticker is running.
+   */
+  private reseedElapsedAfterRestart(): void {
+    this.state.setPersonaLiveRunEndedAtMs(null);
+    this.state.setPersonaLiveRunStartedAtMs(Date.now());
+    this.elapsedSec.set(0);
+    this.startElapsedTicker();
+  }
+
+  /**
+   * Start the per-second elapsed ticker if it is not already running.
+   *
+   * Preconditions: none.
+   * Postconditions: `elapsedSub` is subscribed; a second call is a no-op.
+   */
+  private startElapsedTicker(): void {
+    if (this.elapsedSub) {
+      return;
+    }
+    this.elapsedSub = interval(1000)
+      .pipe(takeUntilDestroyed(this.destroyRef))
+      .subscribe(() => {
+        if (!this.runTerminal()) {
+          this.elapsedSec.update((s) => s + 1);
+        }
+      });
   }
 
   /**

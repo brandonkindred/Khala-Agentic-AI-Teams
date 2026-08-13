@@ -1440,6 +1440,36 @@ describe('AgentStudioPersonaComponent', () => {
     }
   });
 
+  it('reseeds elapsed when a persisted terminal run is running again', () => {
+    vi.useFakeTimers();
+    try {
+      build();
+      facade.getPersonaRunStatus.mockReturnValue(
+        of({ run_id: 'run-1', status: 'completed', decisions: [] }),
+      );
+      fixture.detectChanges();
+      component.launch();
+      expect(component.runTerminal()).toBe(true);
+      expect(state.personaLiveRunEndedAtMs()).not.toBeNull();
+
+      fixture.destroy();
+      facade.getPersonaRunStatus.mockReturnValue(
+        of({ run_id: 'run-1', status: 'polling_build', decisions: [] }),
+      );
+      fixture = TestBed.createComponent(AgentStudioPersonaComponent);
+      component = fixture.componentInstance;
+      fixture.detectChanges();
+
+      expect(component.runTerminal()).toBe(false);
+      expect(component.elapsedSec()).toBe(0);
+      expect(state.personaLiveRunEndedAtMs()).toBeNull();
+      vi.advanceTimersByTime(3_000);
+      expect(component.elapsedSec()).toBe(3);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('restores a completed run after the component is recreated', () => {
     build();
     fixture.detectChanges();
