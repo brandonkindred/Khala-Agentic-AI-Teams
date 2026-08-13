@@ -296,9 +296,7 @@ def test_voice_tone_builder_prompt_matches_original_wording() -> None:
 
 
 def test_design_system_codifier_prompt_matches_original_wording() -> None:
-    assert (
-        make_design_system_codifier().system_prompt == _EXPECTED_DESIGN_SYSTEM_CODIFIER_PROMPT
-    )
+    assert make_design_system_codifier().system_prompt == _EXPECTED_DESIGN_SYSTEM_CODIFIER_PROMPT
 
 
 def test_moodboard_conceptualist_editorial_prompt_matches_spec() -> None:
