@@ -424,7 +424,11 @@ jobs:
               },
               "agent_platform": {
                   "name": "Agent Platform",
-                  "tests": "agent_platform/sandbox/tests/ agent_platform/registry/tests/",
+                  # In-package sandbox/registry suites plus unified-API sandbox
+                  # lifecycle, invoke HTTP, and dual-path residue tests (cwd is
+                  # backend/agents; space-separated paths word-split in
+                  # `pytest ${{ matrix.tests }}`).
+                  "tests": "agent_platform/sandbox/tests/ agent_platform/registry/tests/ ../unified_api/tests/test_sandboxes_route.py ../unified_api/tests/test_sandbox_reaper_startup.py ../unified_api/tests/test_agents_route.py ../unified_api/tests/test_agents_route_lazy_temporal_import.py ../unified_api/tests/test_agents_dual_path_residue.py",
                   "source": "agent_platform.sandbox",
               },
               "agent_studio": {
