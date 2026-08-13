@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import pytest
-
 from agent_registry.models import AgentManifest, AgentStateSpec, CognitionSpec, SourceInfo
+
 from shared.manifests import build_manifest, clone_manifest, io_schema, project_manifest
 
 
