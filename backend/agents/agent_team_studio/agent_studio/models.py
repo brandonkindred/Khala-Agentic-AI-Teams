@@ -11,7 +11,7 @@ from typing import Annotated, Any, Literal
 
 from pydantic import AfterValidator, BaseModel, Field
 
-from agent_registry.models import AgentManifest
+from agent_platform.registry.models import AgentManifest
 
 from ..assistant_kernel import ConversationMessage
 from .agent_states import default_agent_states, normalize_agent_states

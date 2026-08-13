@@ -1,7 +1,7 @@
 # agent_console
 
 Phase 3 data layer for the Agent Console Runner. Lives **in-process** inside
-the unified API (like `agent_registry`) — it is not a team container.
+the unified API (like `agent_platform.registry`) — it is not a team container.
 
 ## What it owns
 

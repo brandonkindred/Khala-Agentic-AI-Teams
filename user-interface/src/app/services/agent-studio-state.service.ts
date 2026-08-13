@@ -316,6 +316,17 @@ export class AgentStudioStateService {
   }
 
   /**
+   * Drop the last saved/loaded snapshot so the current handoff is unsaved.
+   *
+   * Preconditions: none.
+   * Postconditions: `lastSavedHandoff` is null; `isDirty()` is true iff any
+   *   handoff id is set. Handoff ids themselves are unchanged.
+   */
+  invalidateSavedSnapshot(): void {
+    this.lastSavedHandoff.set(null);
+  }
+
+  /**
    * Whether the Stage-2 handoff agent has already been auto-added for `key`
    * (`${teamId}::${manifestId}`) this session.
    *

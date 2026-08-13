@@ -4,7 +4,7 @@ import { NoopAnimationsModule } from '@angular/platform-browser/animations';
 import { Subject, of, throwError } from 'rxjs';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { LoadDraftMenuComponent } from './load-draft-menu.component';
-import { AgentStudioApiService } from '../../../../services/agent-studio-api.service';
+import { AgentStudioFacade } from '../../../../services/agent-studio.facade';
 import type { AgentStudioDraftSummary } from '../../../../models/agent-studio.model';
 
 const summary = (id: string, name: string): AgentStudioDraftSummary => ({
@@ -17,21 +17,21 @@ function configure(
   listDrafts = vi.fn().mockReturnValue(of([])),
   deleteDraft = vi.fn().mockReturnValue(of({ draft_id: 'd-1', status: 'deleted' })),
 ) {
-  const api = { listDrafts, deleteDraft };
+  const facade = { listDrafts, deleteDraft };
   TestBed.configureTestingModule({
     imports: [LoadDraftMenuComponent, NoopAnimationsModule],
-    providers: [{ provide: AgentStudioApiService, useValue: api }],
+    providers: [{ provide: AgentStudioFacade, useValue: facade }],
   });
   const fixture = TestBed.createComponent(LoadDraftMenuComponent);
-  return { fixture, api };
+  return { fixture, facade };
 }
 
 describe('LoadDraftMenuComponent', () => {
   it('onOpened fetches page 1 and populates drafts()', () => {
     const listDrafts = vi.fn().mockReturnValue(of([summary('d-1', 'A'), summary('d-2', 'B')]));
-    const { fixture, api } = configure(listDrafts);
+    const { fixture, facade } = configure(listDrafts);
     fixture.componentInstance.onOpened();
-    expect(api.listDrafts).toHaveBeenCalledWith(10, 0);
+    expect(facade.listDrafts).toHaveBeenCalledWith(10, 0);
     expect(fixture.componentInstance.drafts()).toEqual([summary('d-1', 'A'), summary('d-2', 'B')]);
     expect(fixture.componentInstance.loading()).toBe(false);
   });
@@ -52,10 +52,10 @@ describe('LoadDraftMenuComponent', () => {
   it('loadMore appends the next page and advances the offset', () => {
     const fullPage = Array.from({ length: 10 }, (_, i) => summary(`d-${i}`, `n${i}`));
     const listDrafts = vi.fn().mockReturnValueOnce(of(fullPage)).mockReturnValueOnce(of([summary('d-10', 'n10')]));
-    const { fixture, api } = configure(listDrafts);
+    const { fixture, facade } = configure(listDrafts);
     fixture.componentInstance.onOpened();
     fixture.componentInstance.loadMore();
-    expect(api.listDrafts).toHaveBeenLastCalledWith(10, 10);
+    expect(facade.listDrafts).toHaveBeenLastCalledWith(10, 10);
     expect(fixture.componentInstance.drafts()).toHaveLength(11);
     expect(fixture.componentInstance.hasMore()).toBe(false);
   });
@@ -63,18 +63,18 @@ describe('LoadDraftMenuComponent', () => {
   it('loadMore is a no-op while loading', () => {
     // A call that never emits keeps loading() true, simulating an in-flight request.
     const listDrafts = vi.fn().mockReturnValue({ subscribe: () => undefined });
-    const { fixture, api } = configure(listDrafts);
+    const { fixture, facade } = configure(listDrafts);
     fixture.componentInstance.onOpened();
     expect(fixture.componentInstance.loading()).toBe(true);
     fixture.componentInstance.loadMore();
-    expect(api.listDrafts).toHaveBeenCalledTimes(1);
+    expect(facade.listDrafts).toHaveBeenCalledTimes(1);
   });
 
   it('loadMore is a no-op once hasMore is false', () => {
-    const { fixture, api } = configure(vi.fn().mockReturnValue(of([summary('d-1', 'A')])));
+    const { fixture, facade } = configure(vi.fn().mockReturnValue(of([summary('d-1', 'A')])));
     fixture.componentInstance.onOpened();
     fixture.componentInstance.loadMore();
-    expect(api.listDrafts).toHaveBeenCalledTimes(1);
+    expect(facade.listDrafts).toHaveBeenCalledTimes(1);
   });
 
   it('renders the empty state when the fetch succeeds with no drafts', () => {
@@ -97,11 +97,11 @@ describe('LoadDraftMenuComponent', () => {
       .fn()
       .mockReturnValueOnce(of([summary('d-1', 'A')]))
       .mockReturnValueOnce(of([summary('d-2', 'B')]));
-    const { fixture, api } = configure(listDrafts);
+    const { fixture, facade } = configure(listDrafts);
     fixture.componentInstance.onOpened();
     expect(fixture.componentInstance.drafts()).toEqual([summary('d-1', 'A')]);
     fixture.componentInstance.onOpened();
-    expect(api.listDrafts).toHaveBeenLastCalledWith(10, 0);
+    expect(facade.listDrafts).toHaveBeenLastCalledWith(10, 0);
     expect(fixture.componentInstance.drafts()).toEqual([summary('d-2', 'B')]);
   });
 
@@ -123,12 +123,12 @@ describe('LoadDraftMenuComponent', () => {
   });
 
   it('select emits draftSelected and makes no HTTP call', () => {
-    const { fixture, api } = configure();
+    const { fixture, facade } = configure();
     const spy = vi.fn();
     fixture.componentInstance.draftSelected.subscribe(spy);
     fixture.componentInstance.select('d-1');
     expect(spy).toHaveBeenCalledWith('d-1');
-    expect(api.listDrafts).not.toHaveBeenCalled();
+    expect(facade.listDrafts).not.toHaveBeenCalled();
   });
 
   it('the busy input disables the trigger button', () => {
@@ -151,11 +151,11 @@ describe('LoadDraftMenuComponent', () => {
 
     it('confirmDelete cancel does not call deleteDraft or emit draftDeleted', () => {
       openSpy.mockReturnValue({ afterClosed: () => of(false) } as unknown as ReturnType<MatDialog['open']>);
-      const { fixture, api } = configure();
+      const { fixture, facade } = configure();
       const spy = vi.fn();
       fixture.componentInstance.draftDeleted.subscribe(spy);
       fixture.componentInstance.confirmDelete(summary('d-1', 'A'));
-      expect(api.deleteDraft).not.toHaveBeenCalled();
+      expect(facade.deleteDraft).not.toHaveBeenCalled();
       expect(spy).not.toHaveBeenCalled();
     });
 
@@ -188,16 +188,47 @@ describe('LoadDraftMenuComponent', () => {
       expect(spy).not.toHaveBeenCalled();
     });
 
-    it('confirmDelete stops the click from selecting the row', () => {
+    it('confirmDelete does not emit draftSelected', () => {
       openSpy.mockReturnValue({ afterClosed: () => of(false) } as unknown as ReturnType<MatDialog['open']>);
-      const { fixture, api } = configure();
+      const { fixture, facade } = configure();
       const selected = vi.fn();
       fixture.componentInstance.draftSelected.subscribe(selected);
-      const event = { stopPropagation: vi.fn() } as unknown as Event;
-      fixture.componentInstance.confirmDelete(summary('d-1', 'A'), event);
-      expect(event.stopPropagation).toHaveBeenCalled();
+      fixture.componentInstance.confirmDelete(summary('d-1', 'A'));
       expect(selected).not.toHaveBeenCalled();
-      expect(api.deleteDraft).not.toHaveBeenCalled();
+      expect(facade.deleteDraft).not.toHaveBeenCalled();
+    });
+
+    it('confirmDelete of an id already deleting is a no-op', () => {
+      const pending = new Subject<{ draft_id: string; status: string }>();
+      const deleteDraft = vi.fn().mockReturnValue(pending.asObservable());
+      openSpy.mockReturnValue({ afterClosed: () => of(true) } as unknown as ReturnType<MatDialog['open']>);
+      const { fixture } = configure(vi.fn().mockReturnValue(of([summary('d-1', 'A')])), deleteDraft);
+      fixture.componentInstance.onOpened();
+      fixture.componentInstance.confirmDelete(summary('d-1', 'A'));
+      fixture.componentInstance.confirmDelete(summary('d-1', 'A'));
+      expect(deleteDraft).toHaveBeenCalledTimes(1);
+      expect(fixture.componentInstance.isDeleting('d-1')).toBe(true);
+    });
+
+    it('allows deleting a different draft while another DELETE is in flight', () => {
+      const first = new Subject<{ draft_id: string; status: string }>();
+      const deleteDraft = vi
+        .fn()
+        .mockReturnValueOnce(first.asObservable())
+        .mockReturnValueOnce(of({ draft_id: 'd-2', status: 'deleted' }));
+      openSpy.mockReturnValue({ afterClosed: () => of(true) } as unknown as ReturnType<MatDialog['open']>);
+      const { fixture } = configure(
+        vi.fn().mockReturnValue(of([summary('d-1', 'A'), summary('d-2', 'B')])),
+        deleteDraft,
+      );
+      fixture.componentInstance.onOpened();
+      fixture.componentInstance.confirmDelete(summary('d-1', 'A'));
+      fixture.componentInstance.confirmDelete(summary('d-2', 'B'));
+      expect(deleteDraft).toHaveBeenCalledWith('d-1');
+      expect(deleteDraft).toHaveBeenCalledWith('d-2');
+      expect(fixture.componentInstance.drafts().map((d) => d.draft_id)).toEqual(['d-1']);
+      expect(fixture.componentInstance.isDeleting('d-1')).toBe(true);
+      expect(fixture.componentInstance.isDeleting('d-2')).toBe(false);
     });
   });
 });

@@ -10,7 +10,7 @@ import {
   ConfirmDialogComponent,
   type ConfirmDialogData,
 } from '../../../../shared/confirm-dialog/confirm-dialog.component';
-import { AgentStudioApiService } from '../../../../services/agent-studio-api.service';
+import { AgentStudioFacade } from '../../../../services/agent-studio.facade';
 import type { AgentStudioDraftSummary } from '../../../../models/agent-studio.model';
 
 /** Number of draft summaries fetched per page (spec §3.5: "show older" via offset). */
@@ -20,7 +20,7 @@ const PAGE_SIZE = 10;
  * Load-draft dropdown (spec §3.5). Lists saved-draft summaries, paginated via
  * a trailing "Show older" control, and emits `draftSelected` when a row is
  * picked — hydration itself is the shell's responsibility (it needs
- * `AgentStudioStateService` and a second API call this menu has no reason to
+ * `AgentStudioStateService` and a second façade call this menu has no reason to
  * know about). Per-row delete emits `draftDeleted` for the shell to clear
  * loaded state when the active draft is removed.
  */
@@ -33,7 +33,7 @@ const PAGE_SIZE = 10;
   styleUrl: './load-draft-menu.component.scss',
 })
 export class LoadDraftMenuComponent {
-  private readonly api = inject(AgentStudioApiService);
+  private readonly facade = inject(AgentStudioFacade);
   private readonly dialog = inject(MatDialog);
 
   /** Disables the trigger while the shell is mid-hydration from a prior selection. */
@@ -49,8 +49,8 @@ export class LoadDraftMenuComponent {
   readonly loading = signal(false);
   readonly error = signal<string | null>(null);
   readonly hasMore = signal(false);
-  /** Id of the draft whose DELETE is in flight; disables that row's overflow while set. */
-  readonly deletingId = signal<string | null>(null);
+  /** Draft ids whose DELETE is in flight; disables that row's trigger while present. */
+  readonly deletingIds = signal<ReadonlySet<string>>(new Set());
   private nextOffset = 0;
   /** Bumped on every `onOpened()`; lets a fetch from a since-reopened menu
    *  recognize its response is stale and discard it instead of appending
@@ -100,17 +100,27 @@ export class LoadDraftMenuComponent {
   }
 
   /**
+   * Whether `draftId` currently has a DELETE in flight.
+   *
+   * Preconditions: none.
+   * Postconditions: true iff `confirmDelete` has started HTTP for `draftId`
+   *   that has not yet settled.
+   */
+  isDeleting(draftId: string): boolean {
+    return this.deletingIds().has(draftId);
+  }
+
+  /**
    * Open the danger confirm, then DELETE the draft.
    *
    * Preconditions: `draft.draft_id` is a non-empty id from a rendered row.
    * Postconditions: on confirm+success, that id is absent from `drafts()` and
    *   `draftDeleted` emitted once. On cancel or failure, `drafts()` unchanged
-   *   and `draftDeleted` not emitted. `event` is stopPropagation'd when passed
-   *   so the parent row does not select.
+   *   and `draftDeleted` not emitted. A DELETE already in flight for this id
+   *   is a no-op; other ids remain independently deletable.
    */
-  confirmDelete(draft: AgentStudioDraftSummary, event?: Event): void {
-    event?.stopPropagation();
-    if (this.deletingId()) return;
+  confirmDelete(draft: AgentStudioDraftSummary): void {
+    if (this.isDeleting(draft.draft_id)) return;
     const data: ConfirmDialogData = {
       title: 'Delete this draft?',
       message: `"${draft.name}" will be permanently deleted. This cannot be undone.`,
@@ -123,15 +133,23 @@ export class LoadDraftMenuComponent {
       .afterClosed()
       .subscribe((confirmed) => {
         if (confirmed !== true) return;
-        this.deletingId.set(draft.draft_id);
-        this.api.deleteDraft(draft.draft_id).subscribe({
+        this.deletingIds.update((ids) => new Set(ids).add(draft.draft_id));
+        this.facade.deleteDraft(draft.draft_id).subscribe({
           next: () => {
             this.drafts.update((rows) => rows.filter((row) => row.draft_id !== draft.draft_id));
-            this.deletingId.set(null);
+            this.deletingIds.update((ids) => {
+              const next = new Set(ids);
+              next.delete(draft.draft_id);
+              return next;
+            });
             this.draftDeleted.emit(draft.draft_id);
           },
           error: (err) => {
-            this.deletingId.set(null);
+            this.deletingIds.update((ids) => {
+              const next = new Set(ids);
+              next.delete(draft.draft_id);
+              return next;
+            });
             this.error.set(extractErrorDetail(err, 'Failed to delete draft.'));
           },
         });
@@ -141,7 +159,7 @@ export class LoadDraftMenuComponent {
   private fetchPage(token: number): void {
     this.loading.set(true);
     this.error.set(null);
-    this.api.listDrafts(PAGE_SIZE, this.nextOffset).subscribe({
+    this.facade.listDrafts(PAGE_SIZE, this.nextOffset).subscribe({
       next: (rows) => {
         if (token !== this.openToken) return;
         this.drafts.update((existing) => [...existing, ...rows]);

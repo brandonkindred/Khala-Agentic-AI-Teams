@@ -1,4 +1,4 @@
-import { Component, EventEmitter, Input, Output } from '@angular/core';
+import { Component, EventEmitter, Injector, Input, Output } from '@angular/core';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { MatDialog } from '@angular/material/dialog';
 import { By } from '@angular/platform-browser';
@@ -7,7 +7,10 @@ import { Subject, of, throwError } from 'rxjs';
 import { vi } from 'vitest';
 import type { AgentStudioDraft, AgentStudioDraftSummary } from '../../../models/agent-studio.model';
 import { AgentStudioApiService } from '../../../services/agent-studio-api.service';
+import { AgentRunnerApiService } from '../../../services/agent-runner-api.service';
 import { AgenticTeamApiService } from '../../../services/agentic-team-api.service';
+import { PersonaTestingApiService } from '../../../services/persona-testing-api.service';
+import { AgentStudioFacade } from '../../../services/agent-studio.facade';
 import type { ProcessDefinition } from '../../../models/agentic-team.model';
 import { AgentCatalogComponent } from '../agent-console/agent-catalog/agent-catalog.component';
 import { AgentProvisioningPanelComponent } from '../agent-provisioning-panel/agent-provisioning-panel.component';
@@ -51,9 +54,11 @@ describe('AgentStudioShellComponent', () => {
   let component: AgentStudioShellComponent;
   let fixture: ComponentFixture<AgentStudioShellComponent>;
   // Build stage isn't stubbed at the shell level (only its catalog/provisioning
-  // children are), so it injects the real AgentStudioApiService — fake it here
-  // so no HTTP client is required. Also backs `app-load-draft-menu` (real,
-  // unstubbed) and the shell's own `loadDraft` hydration.
+  // children are), so it injects the real AgentStudioFacade — which the shell
+  // provides and which delegates to the four HTTP clients. Fake those here so
+  // no HTTP client is required. AgentStudioApiService also backs
+  // `app-load-draft-menu` (real, unstubbed) and the shell's own `loadDraft`
+  // hydration (via the façade).
   let agentStudioApi: {
     cloneFromRegistry: ReturnType<typeof vi.fn>;
     saveAgent: ReturnType<typeof vi.fn>;
@@ -61,6 +66,7 @@ describe('AgentStudioShellComponent', () => {
     getDraft: ReturnType<typeof vi.fn>;
     updateDraft: ReturnType<typeof vi.fn>;
     renameDraft: ReturnType<typeof vi.fn>;
+    deleteDraft: ReturnType<typeof vi.fn>;
   };
   let agenticTeamApi: { getProcess: ReturnType<typeof vi.fn> };
 
@@ -80,6 +86,7 @@ describe('AgentStudioShellComponent', () => {
       getDraft: vi.fn(),
       updateDraft: vi.fn(),
       renameDraft: vi.fn(),
+      deleteDraft: vi.fn().mockReturnValue(of({ draft_id: 'd-1', status: 'deleted' })),
     };
     agenticTeamApi = { getProcess: vi.fn() };
     await TestBed.configureTestingModule({
@@ -87,6 +94,8 @@ describe('AgentStudioShellComponent', () => {
       providers: [
         { provide: AgentStudioApiService, useValue: agentStudioApi },
         { provide: AgenticTeamApiService, useValue: agenticTeamApi },
+        { provide: AgentRunnerApiService, useValue: {} },
+        { provide: PersonaTestingApiService, useValue: {} },
       ],
     })
       .overrideComponent(AgentStudioTestAgentComponent, {
@@ -444,9 +453,17 @@ describe('AgentStudioShellComponent', () => {
     it('disables backdrop/Escape/browser-navigation dismissal so an in-flight save cannot be bypassed', () => {
       openSpy.mockReturnValue({ afterClosed: () => of(undefined) } as unknown as ReturnType<MatDialog['open']>);
       component.openSaveDraftDialog();
-      const config = openSpy.mock.calls[0][1] as { disableClose?: boolean; closeOnNavigation?: boolean };
+      const config = openSpy.mock.calls[0][1] as {
+        disableClose?: boolean;
+        closeOnNavigation?: boolean;
+        injector?: Injector;
+      };
       expect(config.disableClose).toBe(true);
       expect(config.closeOnNavigation).toBe(false);
+      // Overlay dialogs otherwise resolve from the root injector, where the
+      // session-scoped AgentStudioFacade is not provided.
+      expect(config.injector).toBeDefined();
+      expect(config.injector!.get(AgentStudioFacade)).toBeTruthy();
     });
 
     it('passes the current handoff state and no draftId as the dialog payload on first save', () => {
@@ -551,19 +568,24 @@ describe('AgentStudioShellComponent', () => {
       expect(openSpy).not.toHaveBeenCalled();
     });
 
-    it('onDraftDeleted of the current id unbinds without clearing handoff', () => {
+    it('onDraftDeleted of the current id unbinds and marks the retained handoff dirty', () => {
       component.state.setRegistryAgentId('reg-1');
+      component.state.markClean();
       component.state.setCurrentDraft('d-1', 'My draft');
       component.onDraftDeleted('d-1');
       expect(component.state.currentDraftId()).toBeNull();
       expect(component.state.currentDraftName()).toBeNull();
       expect(component.state.registryAgentId()).toBe('reg-1');
+      expect(component.state.isDirty()).toBe(true);
     });
 
-    it('onDraftDeleted of a different id leaves the bound draft alone', () => {
+    it('onDraftDeleted of a different id leaves the bound draft and snapshot alone', () => {
+      component.state.setRegistryAgentId('reg-1');
+      component.state.markClean();
       component.state.setCurrentDraft('d-1', 'My draft');
       component.onDraftDeleted('other');
       expect(component.state.currentDraftId()).toBe('d-1');
+      expect(component.state.isDirty()).toBe(false);
     });
   });
 

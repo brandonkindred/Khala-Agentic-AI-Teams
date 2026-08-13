@@ -271,6 +271,19 @@ describe('AgentStudioStateService', () => {
       expect(service.isDirty()).toBe(false);
     });
 
+    it('invalidateSavedSnapshot makes a retained handoff dirty without clearing ids', () => {
+      service.setRegistryAgentId('reg-1');
+      service.markClean();
+      service.invalidateSavedSnapshot();
+      expect(service.isDirty()).toBe(true);
+      expect(service.registryAgentId()).toBe('reg-1');
+    });
+
+    it('invalidateSavedSnapshot on a blank session stays clean', () => {
+      service.invalidateSavedSnapshot();
+      expect(service.isDirty()).toBe(false);
+    });
+
     it('compares all five ids, not just the one that was last written', () => {
       service.setRegistryAgentId('reg-1');
       service.setDraftAgentId('draft-1');

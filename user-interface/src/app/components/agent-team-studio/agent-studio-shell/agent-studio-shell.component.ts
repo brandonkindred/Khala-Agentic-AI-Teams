@@ -1,4 +1,4 @@
-import { ChangeDetectionStrategy, Component, computed, inject, signal } from '@angular/core';
+import { ChangeDetectionStrategy, Component, Injector, computed, inject, signal } from '@angular/core';
 import { MatButtonModule } from '@angular/material/button';
 import { MatDialog, MatDialogModule } from '@angular/material/dialog';
 import { MatIconModule } from '@angular/material/icon';
@@ -6,9 +6,8 @@ import { MatTooltipModule } from '@angular/material/tooltip';
 import { Observable } from 'rxjs';
 import type { AgentStudioDraft } from '../../../models/agent-studio.model';
 import { STUDIO_STAGES } from '../../../models/agent-studio.model';
-import { AgentStudioApiService } from '../../../services/agent-studio-api.service';
-import { AgentStudioStateService } from '../../../services/agent-studio-state.service';
 import { AgentStudioFacade } from '../../../services/agent-studio.facade';
+import { AgentStudioStateService } from '../../../services/agent-studio-state.service';
 import { AgenticTeamApiService } from '../../../services/agentic-team-api.service';
 import { AgentStudioBuildAgentComponent } from './agent-studio-build-agent.component';
 import { AgentStudioComposeTeamComponent } from './agent-studio-compose-team.component';
@@ -75,13 +74,14 @@ function asNullableString(value: unknown): string | null {
 export class AgentStudioShellComponent {
   readonly state = inject(AgentStudioStateService);
   private readonly dialog = inject(MatDialog);
-  private readonly api = inject(AgentStudioApiService);
+  private readonly facade = inject(AgentStudioFacade);
+  private readonly injector = inject(Injector);
   private readonly agenticTeamApi = inject(AgenticTeamApiService);
 
   /** True while a Load-draft selection is being fetched and hydrated. */
   readonly loadingDraft = signal(false);
   /** Bumped on every `loadDraft` call; lets a superseded call's late-arriving
-   *  responses (`getDraft`, the nested `getProcess` check) recognize they're
+   *  responses (`loadDraft`, the nested `getProcess` check) recognize they're
    *  stale and no-op instead of corrupting a newer load. */
   private loadDraftToken = 0;
   /** The forward-only stage list rendered by the stepper. */
@@ -184,7 +184,12 @@ export class AgentStudioShellComponent {
       // one that was actually created. `disableClose` only covers Escape/
       // backdrop — `closeOnNavigation` (Material default `true`) is a
       // separate flag that must be turned off too.
-      { data, width: '420px', disableClose: true, closeOnNavigation: false },
+      //
+      // `injector` is the shell's session injector so the overlay can resolve
+      // `AgentStudioFacade` (provided here, not `root`). Without it, MatDialog
+      // instantiates the dialog from the root injector and the façade inject
+      // throws NullInjectorError.
+      { data, width: '420px', disableClose: true, closeOnNavigation: false, injector: this.injector },
     );
     const closed$ = ref.afterClosed();
     closed$.subscribe((result) => {
@@ -222,12 +227,14 @@ export class AgentStudioShellComponent {
    *
    * Preconditions: `draftId` is a non-empty id.
    * Postconditions: if it was the bound draft, `currentDraftId()` /
-   *   `currentDraftName()` are null and handoff ids are unchanged. Otherwise
-   *   state is unchanged.
+   *   `currentDraftName()` are null, the saved snapshot is dropped so
+   *   `isDirty()` is true while any handoff id remains, and handoff ids are
+   *   unchanged. Otherwise state is unchanged.
    */
   onDraftDeleted(draftId: string): void {
     if (this.state.currentDraftId() === draftId) {
       this.state.setCurrentDraft(null, null);
+      this.state.invalidateSavedSnapshot();
     }
   }
 
@@ -282,7 +289,7 @@ export class AgentStudioShellComponent {
    * Preconditions: caller has already chosen `'save'` from the conflict
    *   dialog; `draftId` is the draft to load after a successful persist.
    * Postconditions: when bound (`currentDraftId` + `currentDraftName`), PUTs
-   *   via `updateDraft`, `markClean`s on success, then hydrates. On PUT
+   *   via `saveDraft`, `markClean`s on success, then hydrates. On PUT
    *   error, does not hydrate. When unbound, opens the Save-draft dialog;
    *   truthy result hydrates, empty/cancel aborts with no hydrate.
    */
@@ -290,8 +297,8 @@ export class AgentStudioShellComponent {
     const boundId = this.state.currentDraftId();
     const boundName = this.state.currentDraftName();
     if (boundId && boundName) {
-      this.api
-        .updateDraft(boundId, { name: boundName, payload: { ...this.state.handoff() } })
+      this.facade
+        .saveDraft({ name: boundName, payload: { ...this.state.handoff() } }, boundId)
         .subscribe({
           next: (summary) => {
             this.state.setCurrentDraft(summary.draft_id, summary.name);
@@ -328,7 +335,7 @@ export class AgentStudioShellComponent {
     if (this.loadingDraft()) return;
     this.loadingDraft.set(true);
     const token = ++this.loadDraftToken;
-    this.api.getDraft(draftId).subscribe({
+    this.facade.loadDraft(draftId).subscribe({
       next: (draft) => {
         if (token !== this.loadDraftToken) return;
         this.hydrateFromDraft(draft, token);

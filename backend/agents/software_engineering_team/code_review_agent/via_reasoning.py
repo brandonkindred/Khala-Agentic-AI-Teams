@@ -304,11 +304,10 @@ def run_agent_via_reasoning(
     When a backing ``LLMClient`` is available, call 2 uses
     ``client.complete_json`` and passes ``json.dumps`` output to ``parse``.
     A positive ``max_tokens`` pin on ``model`` (from ``get_config`` or the
-    attribute) is kept on the reasoning-pass clone and forwarded to
-    ``complete_json`` so a submission-pass output reserve still bounds
-    advertised completion size. Clearing that pin would let the client
-    default (up to 32,768) exceed the packed prompt's leftover window.
-    Otherwise call 2 uses a no-tools ``Agent`` on a JSON-mode model clone.
+    attribute), when present, is kept on the reasoning-pass clone and
+    forwarded to ``complete_json``. The submission-pass runner does not set
+    such a pin. Otherwise call 2 uses a no-tools ``Agent`` on a JSON-mode
+    model clone.
 
     Preconditions:
         ``reasoning_prompt``, ``reasoning_system_prompt``, and

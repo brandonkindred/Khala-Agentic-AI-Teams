@@ -27,7 +27,7 @@ import time
 import uuid
 from typing import TYPE_CHECKING
 
-from agent_registry.manifest_projection import slug
+from agent_platform.registry.manifest_projection import slug
 
 if TYPE_CHECKING:
     from agent_team_studio.agentic_team_provisioning.assistant.store import AgenticTeamStore

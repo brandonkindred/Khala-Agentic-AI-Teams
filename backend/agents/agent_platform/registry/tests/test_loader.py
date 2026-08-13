@@ -1,4 +1,4 @@
-"""Unit tests for the agent_registry loader."""
+"""Unit tests for the agent_platform.registry loader."""
 
 from __future__ import annotations
 
@@ -10,8 +10,8 @@ import pytest
 import yaml
 from pydantic import ValidationError
 
-from agent_registry.loader import AgentRegistry
-from agent_registry.models import AgentManifest
+from agent_platform.registry.loader import AgentRegistry, _agents_root
+from agent_platform.registry.models import AgentManifest
 
 
 @pytest.fixture(autouse=True)
@@ -32,6 +32,19 @@ def _write_manifest(root: Path, team: str, filename: str, body: str) -> Path:
     path = directory / filename
     path.write_text(dedent(body).lstrip(), encoding="utf-8")
     return path
+
+
+def test_agents_root_is_the_agents_package_directory() -> None:
+    """Disk discovery must start at ``backend/agents/``, not this package's parent.
+
+    The registry is nested under ``agent_platform/``, so a naive
+    ``Path(__file__).parent.parent`` would land on ``agent_platform/`` and miss
+    every team's ``agent_console/manifests/``.
+    """
+    root = _agents_root()
+    assert root.name == "agents"
+    assert (root / "blogging").is_dir()
+    assert (root / "llm_service").is_dir()
 
 
 def test_loader_discovers_manifests_and_groups_by_team(tmp_path: Path) -> None:
@@ -81,7 +94,7 @@ def test_loader_skips_malformed_yaml(tmp_path: Path) -> None:
 
 
 def _manifest(agent_id: str, name: str) -> AgentManifest:
-    from agent_registry.models import SourceInfo
+    from agent_platform.registry.models import SourceInfo
 
     return AgentManifest(
         id=agent_id,
@@ -95,17 +108,17 @@ def _manifest(agent_id: str, name: str) -> AgentManifest:
 def test_agent_state_spec_is_exported_from_package_root() -> None:
     # AgentManifest.states is list[AgentStateSpec], so the spec must be reachable
     # via the package-root import style like the other registry spec models.
-    import agent_registry
+    from agent_platform import registry
 
-    assert "AgentStateSpec" in agent_registry.__all__
-    spec = agent_registry.AgentStateSpec
+    assert "AgentStateSpec" in registry.__all__
+    spec = registry.AgentStateSpec
     assert spec is AgentManifest.model_fields["states"].annotation.__args__[0]
 
 
 def test_manifest_states_field_is_additive_and_backward_compatible() -> None:
     # `states` is an optional additive field: a manifest validates with it omitted
     # (defaults to []) and with a populated list — old YAML keeps loading.
-    from agent_registry.models import AgentStateSpec
+    from agent_platform.registry.models import AgentStateSpec
 
     legacy = _manifest("gen.legacy", "Legacy")
     assert legacy.states == []
@@ -645,7 +658,7 @@ def test_cognition_retention_must_be_positive(tmp_path: Path) -> None:
 def test_cognition_example_manifest_is_valid() -> None:
     """The shipped standalone example manifest parses as a valid AgentManifest."""
     example = (
-        Path(__file__).resolve().parents[2]
+        Path(__file__).resolve().parents[3]
         / "agent_cognition"
         / "examples"
         / "cognition_manifest.example.yaml"
