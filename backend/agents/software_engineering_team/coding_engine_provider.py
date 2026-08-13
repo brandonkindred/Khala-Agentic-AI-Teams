@@ -93,7 +93,7 @@ class SECodeEngineProvider:
 
         Preconditions:
             - ``files`` is a non-empty ``{path: content}`` mapping. ``pre_numbered``
-              describes whether its content already carries ``N: `` line-number
+              describes whether its content already carries ``N| `` line-number
               prefixes (diff-hunk submissions) or is whole-file content.
             - ``repo_reader`` is None or a duck-typed ``RepoReader`` (``list_files``
               /``read_file``) giving the false-positive verifier read access to
