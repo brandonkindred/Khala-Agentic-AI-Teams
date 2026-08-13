@@ -41,6 +41,7 @@ import time
 from typing import Optional, Union
 
 from llm_service import LLMClient
+from llm_service.interface import observer_turn_started_monotonic
 
 from .models import ChunkReviewInput, ChunkReviewLLMResponse, ChunkReviewOutput
 from .profiles import (
@@ -345,6 +346,9 @@ def _run_chunk_review(
         # every later callback is a formatting attempt (formatting guard).
         nonlocal last_attempt_start, attempt_index
         now = time.monotonic()
+        started = observer_turn_started_monotonic()
+        if started is None:
+            started = last_attempt_start
         system_prompt = reasoning_system_prompt if attempt_index == 0 else formatting_system_prompt
         attempt_index += 1
         record_transcript_entry(
@@ -354,7 +358,7 @@ def _run_chunk_review(
             attempt_response,
             system_prompt=system_prompt,
             model=model_name,
-            duration_ms=(now - last_attempt_start) * 1000,
+            duration_ms=(now - started) * 1000,
         )
         last_attempt_start = now
 

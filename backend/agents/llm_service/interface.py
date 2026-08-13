@@ -8,9 +8,11 @@ construct provider-specific clients directly.
 from __future__ import annotations
 
 import json
+import time
 from abc import ABC, abstractmethod
+from contextlib import contextmanager
 from contextvars import ContextVar
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Iterator, Optional
 
 from pydantic import BaseModel
 
@@ -286,43 +288,60 @@ def take_complete_json_raw() -> str:
     return raw
 
 
-_complete_json_turns_var: ContextVar[list[tuple[str, str]] | None] = ContextVar(
+_complete_json_turns_var: ContextVar[list[tuple[str, str, float]] | None] = ContextVar(
     "complete_json_turns", default=None
 )
-"""Per-call ``(prompt, response)`` turns for a ``complete_json`` that continued.
+"""Per-call ``(prompt, response, started_monotonic)`` turns for a provider
+call that continued.
 
-Ollama's truncation path issues extra HTTP requests with continuation prompts.
-Those inner turns never return to ``complete_validated`` as separate calls, so
-the provider records them here and the observer drains them with
-:func:`take_complete_json_turns`.
+Ollama's truncation path issues extra HTTP requests with continuation prompts
+for both ``complete_json`` and text ``complete``. Those inner turns never
+return to ``complete_validated`` as separate calls, so the provider records
+them here and the observer drains them with :func:`take_complete_json_turns`.
+``started_monotonic`` is ``time.monotonic()`` captured immediately before
+that turn's HTTP request began.
 """
 
+_observer_turn_started_var: ContextVar[float | None] = ContextVar(
+    "complete_json_observer_turn_started", default=None
+)
 
-def record_complete_json_turn(prompt: str, response: str) -> None:
-    """Append one inner ``complete_json`` HTTP turn on this context.
+
+def record_complete_json_turn(
+    prompt: str,
+    response: str,
+    *,
+    started_monotonic: float | None = None,
+) -> None:
+    """Append one inner HTTP turn on this context.
 
     Preconditions:
         - ``prompt`` is the text that identifies this HTTP turn: the original
           user prompt for the truncated first reply, or a serialization of the
           full ``messages`` conversation sent on a continuation request.
         - ``response`` is that turn's model text (may be a partial fragment).
+        - ``started_monotonic``, when given, is ``time.monotonic()`` from
+          immediately before this turn's provider request; omitted recordings
+          stamp ``time.monotonic()`` at record time.
     Postconditions:
         - :func:`take_complete_json_turns` on the same context includes this
-          pair after any previously recorded turns, in record order.
+          triple after any previously recorded turns, in record order.
     """
     turns = list(_complete_json_turns_var.get() or [])
-    turns.append((prompt, response))
+    turns.append(
+        (prompt, response, time.monotonic() if started_monotonic is None else started_monotonic)
+    )
     _complete_json_turns_var.set(turns)
 
 
-def take_complete_json_turns() -> list[tuple[str, str]]:
-    """Return and clear inner ``complete_json`` turns recorded on this context.
+def take_complete_json_turns() -> list[tuple[str, str, float]]:
+    """Return and clear inner HTTP turns recorded on this context.
 
     Preconditions:
         - none; missing recordings are treated as no inner turns.
     Postconditions:
-        - returns a new list of ``(prompt, response)`` pairs in record order,
-          or ``[]`` when none were recorded.
+        - returns a new list of ``(prompt, response, started_monotonic)``
+          triples in record order, or ``[]`` when none were recorded.
         - this context's slot is cleared so a later sequential call cannot
           reuse a previous call's turns.
     """
@@ -333,6 +352,36 @@ def take_complete_json_turns() -> list[tuple[str, str]]:
     return list(turns)
 
 
+@contextmanager
+def observer_turn_started(started_monotonic: float | None) -> Iterator[None]:
+    """Bind this continuation turn's start time for transcript writers.
+
+    Preconditions:
+        ``started_monotonic`` is the provider-stamped start, or ``None``.
+    Postconditions:
+        :func:`observer_turn_started_monotonic` returns that value inside the
+        ``with`` block and restores the previous binding on exit.
+    """
+    token = _observer_turn_started_var.set(started_monotonic)
+    try:
+        yield
+    finally:
+        _observer_turn_started_var.reset(token)
+
+
+def observer_turn_started_monotonic() -> float | None:
+    """Return the start time bound for the in-flight observer callback.
+
+    Preconditions:
+        none.
+    Postconditions:
+        The monotonic timestamp from :func:`observer_turn_started`, or
+        ``None`` when the observer is not inside a recorded inner turn
+        (a single outer call with no continuation).
+    """
+    return _observer_turn_started_var.get()
+
+
 def reset_complete_json_observer_state() -> None:
     """Drop any raw JSON or continuation turns left on this context.
 
@@ -341,8 +390,9 @@ def reset_complete_json_observer_state() -> None:
     Postconditions:
         - ``take_complete_json_raw`` and ``take_complete_json_turns`` return
           empty until a later ``record_*`` on this context. Call at the start
-          of every ``complete_json`` so a previous call that raised after
-          recording a turn cannot leak that turn into the next observer.
+          of every ``complete_json`` / ``complete`` so a previous call that
+          raised after recording a turn cannot leak that turn into the next
+          observer.
     """
     _complete_json_raw_var.set(None)
     _complete_json_turns_var.set(None)

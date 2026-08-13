@@ -1919,7 +1919,9 @@ def test_complete_json_continuation_records_each_turn(
     turns = take_complete_json_turns()
     raw = take_complete_json_raw()
     assert len(turns) == 2
-    assert turns[0] == ("q", '{"ok":')
+    assert turns[0][0] == "q"
+    assert turns[0][1] == '{"ok":'
+    assert isinstance(turns[0][2], float)
     continuation_messages = json.loads(turns[1][0])
     assert continuation_messages[1] == {"role": "user", "content": "q"}
     assert continuation_messages[2] == {"role": "assistant", "content": '{"ok":'}
@@ -1927,6 +1929,44 @@ def test_complete_json_continuation_records_each_turn(
     assert "continue exactly from where you left off" in continuation_messages[3]["content"]
     assert turns[1][1] == " 1}"
     assert raw == '{"ok": 1}'
+    assert turns[0][2] <= turns[1][2]
+
+
+def test_complete_text_continuation_records_each_turn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Text complete() continuation HTTP turns must each be recorded, matching
+    complete_json, so reasoning transcripts are per-LLM-call not merged-only."""
+    monkeypatch.setenv("LLM_PROVIDER", "ollama")
+    truncated_partial_sse = [
+        'data: {"choices":[{"delta":{"content":"PARTIAL "},"finish_reason":null}]}',
+        'data: {"choices":[{"delta":{},"finish_reason":"length"}]}',
+        "data: [DONE]",
+    ]
+    continuation_ok_sse = [
+        'data: {"choices":[{"delta":{"content":"REVIEW"},"finish_reason":null}]}',
+        'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}',
+        "data: [DONE]",
+    ]
+    cms = [
+        _stream_cm(200, sse_lines=truncated_partial_sse),
+        _stream_cm(200, sse_lines=continuation_ok_sse),
+    ]
+    with patch("httpx.Client") as mock_client_cls:
+        mock_client, _captured = _capturing_multi_client(cms)
+        mock_client_cls.return_value = mock_client
+        client = OllamaLLMClient(model="test", base_url="http://localhost:9999", timeout=5)
+        result = client.complete("q", objective="test", think=False)
+    assert result == "PARTIAL REVIEW"
+    turns = take_complete_json_turns()
+    assert len(turns) == 2
+    assert turns[0][0] == "q"
+    assert turns[0][1] == "PARTIAL "
+    continuation_messages = json.loads(turns[1][0])
+    assert continuation_messages[0] == {"role": "user", "content": "q"}
+    assert continuation_messages[1] == {"role": "assistant", "content": "PARTIAL "}
+    assert turns[1][1] == "REVIEW"
+    assert turns[0][2] <= turns[1][2]
 
 
 def test_generic_temporary_error_retries_on_transient_schedule(

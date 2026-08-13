@@ -41,6 +41,7 @@ from .interface import (
     LLMJsonParseError,
     LLMSchemaValidationError,
     LLMTruncatedError,
+    observer_turn_started,
     reset_complete_json_observer_state,
     take_complete_json_raw,
     take_complete_json_turns,
@@ -214,8 +215,9 @@ def _observe_complete_json_reply(
     """
     turns = take_complete_json_turns()
     if turns:
-        for turn_prompt, turn_response in turns:
-            _invoke_on_attempt(on_attempt, turn_prompt, turn_response)
+        for turn_prompt, turn_response, started in turns:
+            with observer_turn_started(started):
+                _invoke_on_attempt(on_attempt, turn_prompt, turn_response)
         return
     _invoke_on_attempt(on_attempt, attempt_prompt, fallback_response)
 
@@ -358,8 +360,9 @@ def complete_validated(
         except Exception:
             turns = take_complete_json_turns()
             take_complete_json_raw()
-            for turn_prompt, turn_response in turns:
-                _invoke_on_attempt(on_attempt, turn_prompt, turn_response)
+            for turn_prompt, turn_response, started in turns:
+                with observer_turn_started(started):
+                    _invoke_on_attempt(on_attempt, turn_prompt, turn_response)
             raise
 
         preview = complete_json_response_text(client, data)

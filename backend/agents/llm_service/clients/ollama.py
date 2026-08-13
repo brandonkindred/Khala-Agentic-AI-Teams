@@ -1815,6 +1815,7 @@ class OllamaLLMClient(LLMClient):
             schema_forced = True
         else:
             payload["response_format"] = {"type": "json_object"}
+        request_started = time.monotonic()
         try:
             content = self._ollama_post(
                 payload,
@@ -1851,7 +1852,9 @@ class OllamaLLMClient(LLMClient):
                 prompt_text=prompt,
                 response_text=e.partial_content,
             )
-            record_complete_json_turn(prompt, e.partial_content or "")
+            record_complete_json_turn(
+                prompt, e.partial_content or "", started_monotonic=request_started
+            )
             return self._complete_json_with_continuation(
                 initial_partial=e.partial_content,
                 prompt=prompt,
@@ -1880,7 +1883,9 @@ class OllamaLLMClient(LLMClient):
                     "JSON parse failed on content starting with '%s'; treating as implicit truncation and attempting continuation.",
                     stripped[0],
                 )
-                record_complete_json_turn(prompt, content or "")
+                record_complete_json_turn(
+                    prompt, content or "", started_monotonic=request_started
+                )
                 return self._complete_json_with_continuation(
                     initial_partial=content,
                     prompt=prompt,
@@ -1979,6 +1984,7 @@ class OllamaLLMClient(LLMClient):
             }
 
             try:
+                turn_started = time.monotonic()
                 next_content = self._ollama_post(
                     payload,
                     max_retries,
@@ -1991,7 +1997,9 @@ class OllamaLLMClient(LLMClient):
                     resolved_think=use_think,
                 )
                 record_complete_json_turn(
-                    self._observer_prompt_for_messages(messages), next_content
+                    self._observer_prompt_for_messages(messages),
+                    next_content,
+                    started_monotonic=turn_started,
                 )
                 self._record_telemetry(
                     status="success",
@@ -2003,7 +2011,9 @@ class OllamaLLMClient(LLMClient):
                 return self._extract_json(accumulated)
             except LLMTruncatedError as e2:
                 record_complete_json_turn(
-                    self._observer_prompt_for_messages(messages), e2.partial_content or ""
+                    self._observer_prompt_for_messages(messages),
+                    e2.partial_content or "",
+                    started_monotonic=turn_started,
                 )
                 self._record_telemetry(
                     status="truncated",
@@ -2069,6 +2079,7 @@ class OllamaLLMClient(LLMClient):
         think: "bool | str | None" = None,
     ) -> str:
         think = self._resolve_think(think)
+        reset_complete_json_observer_state()
         max_retries, backoff_base, backoff_max = _parse_retry_config()
         rl_max_retries, rl_initial, rl_cap = self._rate_limit_retry_config()
         sem = get_llm_semaphore()
@@ -2098,6 +2109,7 @@ class OllamaLLMClient(LLMClient):
             ]
         if tools:
             payload["tools"] = tools
+        request_started = time.monotonic()
         try:
             result = self._ollama_post(
                 payload,
@@ -2117,6 +2129,9 @@ class OllamaLLMClient(LLMClient):
             raise
         except LLMTruncatedError as e:
             self._record_telemetry(status="truncated", error_type="truncated")
+            record_complete_json_turn(
+                prompt, e.partial_content or "", started_monotonic=request_started
+            )
             return self._complete_text_with_continuation(
                 initial_partial=e.partial_content,
                 prompt=prompt,
@@ -2175,6 +2190,7 @@ class OllamaLLMClient(LLMClient):
                 **_think_payload_fields(use_think),
             }
             try:
+                turn_started = time.monotonic()
                 next_content = self._ollama_post(
                     payload,
                     max_retries,
@@ -2186,9 +2202,19 @@ class OllamaLLMClient(LLMClient):
                     sem,
                     resolved_think=use_think,
                 )
+                record_complete_json_turn(
+                    self._observer_prompt_for_messages(messages),
+                    next_content,
+                    started_monotonic=turn_started,
+                )
                 accumulated = self._merge_continuation(accumulated, next_content)
                 return accumulated
             except LLMTruncatedError as e2:
+                record_complete_json_turn(
+                    self._observer_prompt_for_messages(messages),
+                    e2.partial_content or "",
+                    started_monotonic=turn_started,
+                )
                 accumulated = self._merge_continuation(accumulated, e2.partial_content)
         logger.warning(
             "Continuation exhausted after %d cycles (text, %d chars). Re-raising truncation.",

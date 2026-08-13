@@ -42,6 +42,7 @@ from dataclasses import dataclass
 from typing import Callable, List, Tuple, TypeVar, Union
 
 from llm_service import LLMClient, LLMTruncatedError
+from llm_service.interface import observer_turn_started_monotonic
 
 from .model_resolution import resolve_code_review_model
 from .transcript import model_label, record_transcript_entry
@@ -204,9 +205,11 @@ def _call_agent(
         format_turn_started_at = time.monotonic()
 
     def _capture_formatting(prompt: str, response: str) -> None:
-        turn_started = (
-            format_turn_started_at if format_turn_started_at is not None else time.monotonic()
-        )
+        turn_started = observer_turn_started_monotonic()
+        if turn_started is None:
+            turn_started = (
+                format_turn_started_at if format_turn_started_at is not None else time.monotonic()
+            )
         format_turns.append((prompt, response, turn_started))
 
     try:

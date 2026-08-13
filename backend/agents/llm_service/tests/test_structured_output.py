@@ -453,6 +453,30 @@ def test_on_attempt_sees_each_complete_json_continuation_turn():
     assert attempts[1][1] == ' "opt-a", "rationale": "x"}'
 
 
+def test_on_attempt_binds_continuation_turn_start_times():
+    """Each inner turn's started_monotonic must be visible to on_attempt so
+    transcript writers can backdate started_at from the HTTP request, not
+    from the post-complete_json callback burst."""
+    from llm_service.interface import observer_turn_started_monotonic
+
+    class _ContinuationClient(LLMClient):
+        def complete_json(self, prompt, **kwargs):
+            record_complete_json_turn(prompt, '{"selected_option_id":', started_monotonic=10.0)
+            record_complete_json_turn("continue", ' "opt-a"}', started_monotonic=20.0)
+            record_complete_json_raw('{"selected_option_id": "opt-a", "rationale": "x"}')
+            return {"selected_option_id": "opt-a", "rationale": "x"}
+
+    seen_starts: list[float | None] = []
+    complete_validated(
+        _ContinuationClient(),
+        "prompt",
+        objective="test",
+        schema=FounderAnswer,
+        on_attempt=lambda _p, _r: seen_starts.append(observer_turn_started_monotonic()),
+    )
+    assert seen_starts == [10.0, 20.0]
+
+
 def test_stale_turns_from_prior_call_do_not_leak_into_next_observer():
     """A previous complete_json that recorded a turn then raised must not
     attach that turn to the next attempt's on_attempt payload."""

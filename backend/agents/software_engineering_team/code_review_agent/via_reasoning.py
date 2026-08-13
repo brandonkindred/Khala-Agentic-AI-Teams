@@ -28,7 +28,11 @@ from llm_service import (
     LLMTruncatedError,
     get_strands_model,
 )
-from llm_service.interface import reset_complete_json_observer_state, take_complete_json_turns
+from llm_service.interface import (
+    observer_turn_started,
+    reset_complete_json_observer_state,
+    take_complete_json_turns,
+)
 from llm_service.structured import complete_json_response_text, complete_validated
 
 logger = logging.getLogger(__name__)
@@ -149,34 +153,29 @@ def _observe_formatting_turns(
     on_formatting: Callable[[str, str], None] | None,
     format_prompt: str,
     fallback_response: str,
+    *,
+    label: str = "run_agent_via_reasoning: on_formatting",
 ) -> None:
     """Notify ``on_formatting`` for each recorded continuation turn, else once.
 
     Preconditions:
-        ``format_prompt`` is the prompt passed to ``complete_json``.
-        ``fallback_response`` is used when the provider recorded no inner turns.
+        ``format_prompt`` is the prompt passed to ``complete_json`` or
+        ``complete``. ``fallback_response`` is used when the provider
+        recorded no inner turns.
 
     Postconditions:
         Inner continuation turns, when present, are each observed in record
-        order. Otherwise ``on_formatting`` is invoked once with
+        order with that turn's start time bound for transcript writers.
+        Otherwise ``on_formatting`` is invoked once with
         ``(format_prompt, fallback_response)``. Never raises.
     """
     turns = take_complete_json_turns()
     if turns:
-        for turn_prompt, turn_response in turns:
-            _invoke_observer(
-                "run_agent_via_reasoning: on_formatting",
-                on_formatting,
-                turn_prompt,
-                turn_response,
-            )
+        for turn_prompt, turn_response, started in turns:
+            with observer_turn_started(started):
+                _invoke_observer(label, on_formatting, turn_prompt, turn_response)
         return
-    _invoke_observer(
-        "run_agent_via_reasoning: on_formatting",
-        on_formatting,
-        format_prompt,
-        fallback_response,
-    )
+    _invoke_observer(label, on_formatting, format_prompt, fallback_response)
 
 
 def _require_non_empty(name: str, value: str) -> None:
@@ -352,13 +351,14 @@ def complete_validated_via_reasoning_local(
         reasoning output raises ``LLMSemanticExhaustionError`` before
         formatting so coordinator recovery still runs. ``on_attempt``, when
         given, is invoked once for the reasoning ``complete`` call (including
-        an empty or whitespace-only reply, before that reply is rejected, and
-        including :class:`LLMTruncatedError` ``partial_content`` and other
-        :class:`LLMError` completions such as :class:`LLMSemanticExhaustionError`
-        before that error is re-raised) and then forwarded to
-        :func:`complete_validated` so each formatting attempt (initial plus
-        corrective retries) is observed too; observer exceptions are swallowed
-        and never fail the review.
+        an empty or whitespace-only reply, before that reply is rejected;
+        including each inner text-continuation HTTP turn when the provider
+        recorded them; and including :class:`LLMTruncatedError`
+        ``partial_content`` and other :class:`LLMError` completions such as
+        :class:`LLMSemanticExhaustionError` before that error is re-raised)
+        and then forwarded to :func:`complete_validated` so each formatting
+        attempt (initial plus corrective retries) is observed too; observer
+        exceptions are swallowed and never fail the review.
     """
     _require_non_empty("objective", objective)
     _require_non_empty("reasoning_prompt", reasoning_prompt)
@@ -374,18 +374,18 @@ def complete_validated_via_reasoning_local(
             think=_resolve_reasoning_think(reasoning_think),
         )
     except LLMError as exc:
-        _invoke_observer(
-            "complete_validated_via_reasoning_local: on_attempt",
+        _observe_formatting_turns(
             on_attempt,
             reasoning_prompt,
             _complete_error_observer_text(exc),
+            label="complete_validated_via_reasoning_local: on_attempt",
         )
         raise
-    _invoke_observer(
-        "complete_validated_via_reasoning_local: on_attempt",
+    _observe_formatting_turns(
         on_attempt,
         reasoning_prompt,
         raw_prose,
+        label="complete_validated_via_reasoning_local: on_attempt",
     )
     prose = _require_reasoning_prose(raw_prose)
     format_prompt = (
@@ -522,13 +522,14 @@ def run_agent_via_reasoning(
             raise
         except Exception:
             leftover = take_complete_json_turns()
-            for turn_prompt, turn_response in leftover:
-                _invoke_observer(
-                    "run_agent_via_reasoning: on_formatting",
-                    on_formatting,
-                    turn_prompt,
-                    turn_response,
-                )
+            for turn_prompt, turn_response, started in leftover:
+                with observer_turn_started(started):
+                    _invoke_observer(
+                        "run_agent_via_reasoning: on_formatting",
+                        on_formatting,
+                        turn_prompt,
+                        turn_response,
+                    )
             raise
         raw_text = json.dumps(data)
         _observe_formatting_turns(

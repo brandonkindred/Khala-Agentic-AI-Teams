@@ -225,6 +225,33 @@ def test_validated_via_reasoning_truncated_complete_still_notifies_on_attempt() 
     assert client.format_calls == []
 
 
+def test_validated_via_reasoning_on_attempt_sees_text_continuation_turns() -> None:
+    """Truncated reasoning complete() that continued must notify on_attempt
+    once per HTTP turn, not once with the merged prose."""
+    from llm_service.interface import record_complete_json_turn
+
+    class _ContinuingClient(_RecordingClient):
+        def complete(self, prompt: str, **kwargs: Any) -> str:
+            self.order.append("complete")
+            record_complete_json_turn(prompt, "PARTIAL ", started_monotonic=1.0)
+            record_complete_json_turn("Please continue.", "REVIEW", started_monotonic=2.0)
+            return "PARTIAL REVIEW"
+
+    seen: list[tuple[str, str]] = []
+    result = complete_validated_via_reasoning_local(
+        _ContinuingClient(),
+        schema=_Out,
+        reasoning_prompt="Review this code",
+        reasoning_system_prompt="Prose only.",
+        formatting_instructions="JSON shape here",
+        objective="review code chunk",
+        on_attempt=lambda prompt, response: seen.append((prompt, response)),
+    )
+    assert result.summary == "ok"
+    assert seen[0] == ("Review this code", "PARTIAL ")
+    assert seen[1] == ("Please continue.", "REVIEW")
+
+
 def test_validated_via_reasoning_semantic_exhaustion_still_notifies_on_attempt() -> None:
     """Ollama complete() raises LLMSemanticExhaustionError after a finished
     HTTP attempt; the observer must still see that call before the error is
