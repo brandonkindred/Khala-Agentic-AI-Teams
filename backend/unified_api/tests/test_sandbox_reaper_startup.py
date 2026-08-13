@@ -236,3 +236,22 @@ async def test_maybe_start_sandbox_reaper_swallows_startup_failure(monkeypatch: 
     result = await main._maybe_start_sandbox_reaper()
 
     assert result is None
+
+
+def test_lifespan_docstring_documents_sandbox_worker_boot_ownership() -> None:
+    """This lifespan is the citable sole boot site for the platform sandbox
+    Temporal worker. A later demotion or move must not drop that sentence
+    without failing CI.
+    """
+    doc = main.lifespan.__doc__
+    assert doc
+    assert "start_agent_platform_sandbox_temporal_worker_thread" in doc
+    assert "agent_platform.sandbox" in doc
+    assert "SANDBOX_TASK_QUEUE" in doc
+    assert "UNIFIED_API_SANDBOX_TEMPORAL_WORKER" in doc
+    assert "Preconditions:" in doc
+    assert "Postconditions:" in doc
+
+    helper = main._start_sandbox_reaper_task.__doc__
+    assert helper
+    assert "start_agent_platform_sandbox_temporal_worker_thread" in helper

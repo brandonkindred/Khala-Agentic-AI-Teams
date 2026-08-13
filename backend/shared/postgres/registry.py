@@ -41,7 +41,7 @@ TEAM_POSTGRES_MODULES: dict[str, str] = {
     # Agent Registry — cross-worker overlay of dynamically registered manifests.
     "agent_registry": "agent_platform.registry.postgres",
     # Agent Studio — durable authoring-conversation store.
-    "agent_studio": "agent_team_studio.agent_studio.postgres",
+    "agent_studio": "agent_platform.studio.postgres",
     # Issue #376 — investment team's first Postgres table: snapshot index
     # for the durable, content-hashed market-data cache.
     "investment_market_data": "investment_team.market_data_cache.postgres",

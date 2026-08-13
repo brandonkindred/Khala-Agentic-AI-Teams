@@ -522,6 +522,12 @@ def test_symbol_surface_pre_numbered_still_excludes_indented_defs() -> None:
     assert coord._symbol_surface(content) == ["C", "top"]
 
 
+def test_symbol_surface_strips_padded_pipe_gutter() -> None:
+    """Live ``N| `` prefixes (width-padded) must de-number to column zero too."""
+    content = "  9| def foo():\n 10|     pass\n"
+    assert coord._symbol_surface(content) == ["foo"]
+
+
 def test_half_sibling_surface_falls_back_without_map() -> None:
     """With no surface map (a direct caller), a bisected half keeps the parent's surface."""
     from code_review_agent.models import FileSegment, ReviewChunk
