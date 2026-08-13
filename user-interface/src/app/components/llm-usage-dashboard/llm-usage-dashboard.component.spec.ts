@@ -163,6 +163,27 @@ describe('LlmUsageDashboardComponent', () => {
     const el: HTMLElement = fixture.nativeElement;
     expect(el.querySelector('app-inline-banner')).not.toBeNull();
     expect(component.displaySummary.total_calls).toBe(0);
+    expect(el.textContent).not.toMatch(/No LLM calls/i);
+  });
+
+  it('does not show empty state when storage is unreachable even if recent has rows', () => {
+    apiSpy.getSummary.mockReturnValue(
+      of(
+        summary({
+          storage_available: false,
+          storage_status: 'unreachable',
+          total_calls: 0,
+          total_tokens: 0,
+          by_model: {},
+        }),
+      ),
+    );
+    apiSpy.getRecent.mockReturnValue(of([callRow()]));
+    component.load();
+    fixture.detectChanges();
+    const el: HTMLElement = fixture.nativeElement;
+    expect(el.querySelector('app-inline-banner')).not.toBeNull();
+    expect(el.textContent).not.toMatch(/No LLM calls/i);
   });
 
   it('shows an error banner when the load fails', () => {
