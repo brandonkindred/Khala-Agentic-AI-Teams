@@ -3,8 +3,12 @@ import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { NoopAnimationsModule } from '@angular/platform-browser/animations';
 import { of } from 'rxjs';
 import { vi } from 'vitest';
+import { AgentRunnerApiService } from '../../../services/agent-runner-api.service';
 import { AgentStudioApiService } from '../../../services/agent-studio-api.service';
+import { AgentStudioFacade } from '../../../services/agent-studio.facade';
 import { AgentStudioStateService } from '../../../services/agent-studio-state.service';
+import { AgenticTeamApiService } from '../../../services/agentic-team-api.service';
+import { PersonaTestingApiService } from '../../../services/persona-testing-api.service';
 import { AgentCatalogComponent } from '../agent-console/agent-catalog/agent-catalog.component';
 import { AgentRunnerComponent } from '../agent-console/agent-runner/agent-runner.component';
 import { AgentProvisioningPanelComponent } from '../agent-provisioning-panel/agent-provisioning-panel.component';
@@ -63,7 +67,11 @@ describe('AgentStudioStageHostComponent', () => {
       imports: [AgentStudioStageHostComponent, NoopAnimationsModule],
       providers: [
         AgentStudioStateService,
+        AgentStudioFacade,
         { provide: AgentStudioApiService, useValue: agentStudioApi },
+        { provide: AgentRunnerApiService, useValue: {} },
+        { provide: AgenticTeamApiService, useValue: {} },
+        { provide: PersonaTestingApiService, useValue: {} },
       ],
     })
       .overrideComponent(AgentStudioTestAgentComponent, {

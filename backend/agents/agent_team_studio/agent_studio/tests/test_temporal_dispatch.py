@@ -9,9 +9,10 @@ Covers two things without a Temporal cluster (``execute_workflow_sync`` is patch
     ``ValueError``/``LookupError`` (and re-raises anything else unchanged).
 
 ``dispatch`` also has a direct, in-process path used when Temporal isn't configured
-(exercised separately); every test in this module forces ``_temporal_enabled()`` to
-``True`` so it keeps pinning the Temporal path's behavior regardless of whether
-``TEMPORAL_ADDRESS`` happens to be set in the environment running the suite.
+(see ``test_direct_dispatch.py``); every test in this module forces
+``_temporal_enabled()`` to ``True`` so it keeps pinning the Temporal path's behavior
+regardless of whether ``TEMPORAL_ADDRESS`` happens to be set in the environment
+running the suite.
 """
 
 from __future__ import annotations

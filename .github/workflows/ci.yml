@@ -179,7 +179,9 @@ jobs:
               - 'backend/shared/neo4j/**'
               - 'backend/shared/postgres/**'
               - 'backend/agents/llm_service/**'
-              - 'backend/agents/agent_registry/**'
+              - 'backend/agents/agent_platform/registry/**'
+              - 'backend/agents/agent_platform/__init__.py'
+              - 'backend/agents/agent_platform/README.md'
               - 'backend/agents/requirements.txt'
               - '.github/workflows/ci.yml'
             # job_matching: narrowly triggers the fresh-database schema-registration
@@ -220,13 +222,15 @@ jobs:
               - 'backend/agents/investment_team/**'
             social_marketing:
               - 'backend/agents/social_media_marketing_team/**'
-            # agent_provisioning_team imports agent_registry; agent_registry
-            # is also covered by shared_backend so that fan-out catches it
-            # too, but listing it here keeps the matrix narrow on the common
-            # provisioning-only PR.
+            # agent_provisioning_team imports agent_platform.registry; the
+            # registry package is also covered by shared_backend so that
+            # fan-out catches it too, but listing it here keeps the matrix
+            # narrow on the common provisioning-only PR.
             agent_provisioning:
               - 'backend/agents/agent_team_studio/agent_provisioning_team/**'
-              - 'backend/agents/agent_registry/**'
+              - 'backend/agents/agent_platform/registry/**'
+              - 'backend/agents/agent_platform/__init__.py'
+              - 'backend/agents/agent_platform/README.md'
             # Agent Studio authoring + drafts persistence (in-memory unit suite;
             # live-Postgres store tests skip without POSTGRES_HOST).
             agent_studio:
@@ -240,7 +244,7 @@ jobs:
               - 'backend/agents/sales_team/**'
             # user_agent_founder's drift tripwire imports the real
             # agentic_team_provisioning models and app routes (and, via its
-            # models, agent_registry), so provisioning-side changes must run
+            # models, agent_platform.registry), so provisioning-side changes must run
             # the founder suite — that tripwire is the only cross-team guard
             # on the founder↔agentic-team contract boundary (see
             # system_design/adr/ADR-007). agentic_team_provisioning's own
@@ -249,7 +253,9 @@ jobs:
             user_agent_founder:
               - 'backend/agents/agent_team_studio/user_agent_founder/**'
               - 'backend/agents/agent_team_studio/agentic_team_provisioning/**'
-              - 'backend/agents/agent_registry/**'
+              - 'backend/agents/agent_platform/registry/**'
+              - 'backend/agents/agent_platform/__init__.py'
+              - 'backend/agents/agent_platform/README.md'
             # Each docker_* filter mirrors what its Dockerfile actually
             # copies into the image, so a change to any baked-in source
             # triggers a rebuild and main never publishes stale code.
@@ -323,7 +329,7 @@ jobs:
               - '!backend/agents/investment_team/**'
               - '!backend/agents/social_media_marketing_team/**'
               - '!backend/agents/agent_team_studio/agent_provisioning_team/**'
-              - '!backend/agents/agent_registry/**'
+              - '!backend/agents/agent_platform/**'
               - '!backend/agents/sales_team/**'
               - '!backend/agents/agent_cognition/**'
               - '!backend/agents/agent_team_studio/agent_studio/**'

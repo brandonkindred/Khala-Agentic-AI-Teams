@@ -93,7 +93,7 @@ def _derive_strict_variant(
 
 
 # Common closing sentence for every strict-twin ``doc=`` below — factored out
-# so the 8 call sites don't each hand-duplicate the same boilerplate tail.
+# so the 12 call sites don't each hand-duplicate the same boilerplate tail.
 _STRICT_TWIN_DOC_SUFFIX = (
     "Generated via ``_derive_strict_variant`` — see that helper's docstring "
     "for the shared strict/soft twin pattern this file uses."
@@ -715,6 +715,23 @@ class ColorEntry(BaseModel):
     psychological_rationale: str = ""
 
 
+ColorEntryOutput = _derive_strict_variant(
+    "ColorEntryOutput",
+    ColorEntry,
+    doc=(
+        "Agent-facing color entry; requires non-empty fields.\n\n"
+        "Field-for-field twin of ``ColorEntry`` with required content — "
+        "``ColorEntry`` itself must stay soft (only ``name`` required) since "
+        "it also backs ``VisualIdentityOutput.color_palette``'s merge target. "
+    )
+    + _STRICT_TWIN_DOC_SUFFIX,
+    name=(str, Field(min_length=1)),
+    hex_value=(str, Field(min_length=1)),
+    usage=(str, Field(min_length=1)),
+    psychological_rationale=(str, Field(min_length=1)),
+)
+
+
 class TypographySpec(BaseModel):
     """Typography system specification."""
 
@@ -722,6 +739,23 @@ class TypographySpec(BaseModel):
     font_family: str = ""
     weight_range: str = ""
     usage_notes: str = ""
+
+
+TypographySpecOutput = _derive_strict_variant(
+    "TypographySpecOutput",
+    TypographySpec,
+    doc=(
+        "Agent-facing typography spec; requires non-empty fields.\n\n"
+        "Field-for-field twin of ``TypographySpec`` with required content — "
+        "``TypographySpec`` itself must stay soft (all-default) since it also "
+        "backs ``VisualIdentityOutput.typography_system``'s merge target. "
+    )
+    + _STRICT_TWIN_DOC_SUFFIX,
+    role=(str, Field(min_length=1)),
+    font_family=(str, Field(min_length=1)),
+    weight_range=(str, Field(min_length=1)),
+    usage_notes=(str, Field(min_length=1)),
+)
 
 
 class LogoUsageRule(BaseModel):
@@ -733,12 +767,45 @@ class LogoUsageRule(BaseModel):
     clear_space: str = ""
 
 
+LogoUsageRuleOutput = _derive_strict_variant(
+    "LogoUsageRuleOutput",
+    LogoUsageRule,
+    doc=(
+        "Agent-facing logo usage rule; requires non-empty fields.\n\n"
+        "Field-for-field twin of ``LogoUsageRule`` with required content — "
+        "``LogoUsageRule`` itself must stay soft (all-default) since it also "
+        "backs ``VisualIdentityOutput.logo_suite``'s merge target. "
+    )
+    + _STRICT_TWIN_DOC_SUFFIX,
+    variant=(str, Field(min_length=1)),
+    usage_context=(str, Field(min_length=1)),
+    minimum_size=(str, Field(min_length=1)),
+    clear_space=(str, Field(min_length=1)),
+)
+
+
 class VoiceToneEntry(BaseModel):
     """Voice and tone spectrum entry."""
 
     context: str = ""  # e.g., "marketing", "support", "legal"
     tone: str = ""
     examples: List[str] = Field(default_factory=list)
+
+
+VoiceToneEntryOutput = _derive_strict_variant(
+    "VoiceToneEntryOutput",
+    VoiceToneEntry,
+    doc=(
+        "Agent-facing voice/tone entry; requires non-empty fields.\n\n"
+        "Field-for-field twin of ``VoiceToneEntry`` with required content — "
+        "``VoiceToneEntry`` itself must stay soft (all-default) since it also "
+        "backs ``VisualIdentityOutput.voice_tone_spectrum``'s merge target. "
+    )
+    + _STRICT_TWIN_DOC_SUFFIX,
+    context=(str, Field(min_length=1)),
+    tone=(str, Field(min_length=1)),
+    examples=(List[str], Field(min_length=1)),
+)
 
 
 class VisualIdentityOutput(BaseModel):
@@ -1219,15 +1286,6 @@ class CreativeRefinementDecisionOutput(BaseModel):
     decision_criteria: List[str] = Field(min_length=1)
 
 
-class LogoUsageRuleOutput(BaseModel):
-    """Agent-facing logo usage rule; requires non-empty fields."""
-
-    variant: str = Field(min_length=1)
-    usage_context: str = Field(min_length=1)
-    minimum_size: str = Field(min_length=1)
-    clear_space: str = Field(min_length=1)
-
-
 class LogoSuiteOutput(BaseModel):
     """Agent-facing logo_specifier schema.
 
@@ -1235,15 +1293,6 @@ class LogoSuiteOutput(BaseModel):
     """
 
     logo_suite: List[LogoUsageRuleOutput] = Field(min_length=4, max_length=4)
-
-
-class ColorEntryOutput(BaseModel):
-    """Agent-facing color entry; requires non-empty fields."""
-
-    name: str = Field(min_length=1)
-    hex_value: str = Field(min_length=1)
-    usage: str = Field(min_length=1)
-    psychological_rationale: str = Field(min_length=1)
 
 
 class ColorPaletteSystemOutput(BaseModel):
@@ -1254,15 +1303,6 @@ class ColorPaletteSystemOutput(BaseModel):
     """
 
     color_palette: List[ColorEntryOutput] = Field(min_length=5, max_length=7)
-
-
-class TypographySpecOutput(BaseModel):
-    """Agent-facing typography spec; requires non-empty fields."""
-
-    role: str = Field(min_length=1)
-    font_family: str = Field(min_length=1)
-    weight_range: str = Field(min_length=1)
-    usage_notes: str = Field(min_length=1)
 
 
 class TypographySystemOutput(BaseModel):
@@ -1290,14 +1330,6 @@ class PhotographyVideoOutput(BaseModel):
     photography_direction: str = Field(min_length=1)
     video_direction: str = Field(min_length=1)
     motion_principles: List[str] = Field(min_length=3, max_length=4)
-
-
-class VoiceToneEntryOutput(BaseModel):
-    """Agent-facing voice/tone entry; requires non-empty fields."""
-
-    context: str = Field(min_length=1)
-    tone: str = Field(min_length=1)
-    examples: List[str] = Field(min_length=1)
 
 
 class VoiceToneOutput(BaseModel):

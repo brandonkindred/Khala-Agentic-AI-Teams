@@ -29,8 +29,8 @@ logger = logging.getLogger(__name__)
 
 
 def _agents_root() -> Path:
-    """Path to ``backend/agents/``. We live at ``backend/agents/agent_registry/loader.py``."""
-    return Path(__file__).resolve().parent.parent
+    """Path to ``backend/agents/``. We live at ``backend/agents/agent_platform/registry/loader.py``."""
+    return Path(__file__).resolve().parent.parent.parent
 
 
 def _discover_manifest_files(root: Path) -> list[Path]:

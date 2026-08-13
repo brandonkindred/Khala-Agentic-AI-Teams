@@ -16,7 +16,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from agent_registry.models import AgentManifest
+from agent_platform.registry.models import AgentManifest
 from agent_team_studio.agentic_team_provisioning.manifest_generation import build_agent_manifest
 from agent_team_studio.agentic_team_provisioning.models import (
     AgenticTeamAgent,
@@ -46,7 +46,7 @@ class _FakeRegistry:
 @pytest.fixture
 def registry(monkeypatch: pytest.MonkeyPatch) -> _FakeRegistry:
     reg = _FakeRegistry()
-    monkeypatch.setattr("agent_registry.get_registry", lambda: reg)
+    monkeypatch.setattr("agent_platform.registry.get_registry", lambda: reg)
     return reg
 
 

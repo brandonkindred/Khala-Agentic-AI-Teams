@@ -154,11 +154,14 @@ defaulting to current behavior."
   chunk/file/line it was actively reviewing, because it holds both the spec and that chunk's code
   simultaneously. A single post-merge pass instead sees the whole diff at once and must
   self-attribute file/line references across every changed file, so attribution precision may
-  degrade on very large, many-file submissions. Large submissions may also require the same kind of
-  content budgeting/truncation the architecture pass already accepts
-  (`compute_code_review_merged_pass_budgets`), which the per-chunk model — each chunk individually
-  bounded, but never truncating
-  the spec itself — does not need.
+  degrade on very large, many-file submissions. Additive whole-submission passes (architecture /
+  side-effect / a future post-merge spec pass) no longer character-budget or truncate inlined
+  content: they send the full architecture body, path manifest, and changed-file set in one
+  think-then-format call, and on a model context overflow they reactively bisect the file list to
+  whole-file leaves via `run_submission_pass` (never shrinking file, body, or manifest text). The
+  per-chunk map phase remains separately bounded; the tradeoff for the post-merge pass is that a
+  single oversized file (or a non-file payload that cannot be bisected) may skip rather than run
+  under a truncated view.
 - **Token-cost efficiency.** Duplication drops from O(chunks × spec/AC size) to O(1) for the
   spec/AC text; the new pass still inlines the full changed-code content once (comparable to what
   the merged architecture/side-effect pass already pays), so net savings scale with chunk count and
@@ -168,11 +171,12 @@ defaulting to current behavior."
 - **Fail-safe posture changes from N independent chances to one.** Today, if one chunk's reviewer
   fails to produce a usable spec note, the other N-1 chunks' notes are unaffected — partial
   degradation. A single pass is fail-safe (failure → empty note, never blocks) but is a single point
-  of failure for spec-compliance findings specifically: one bad LLM call or a truncated budget can
-  silently zero out spec-compliance narrative for the entire submission where today's per-chunk
-  model would have caught at least some violations independently. This is an accepted tradeoff of
-  centralizing the check, not an oversight, and should be watched via the token/cost and quality
-  measurement called for separately.
+  of failure for spec-compliance findings specifically: one bad LLM call or an unrecoverable
+  context overflow (after whole-file bisection has been exhausted) can silently zero out
+  spec-compliance narrative for the entire submission where today's per-chunk model would have
+  caught at least some violations independently. This is an accepted tradeoff of centralizing the
+  check, not an oversight, and should be watched via the token/cost and quality measurement called
+  for separately.
 - **Two materially different code paths behind one flag increase testing burden.** Per-chunk-inclusion
   mode and single-pass mode diverge in prompt content, tail-pass scheduling, and the
   `_merge_narrative` fast-path condition — both modes need dedicated test coverage, not just a

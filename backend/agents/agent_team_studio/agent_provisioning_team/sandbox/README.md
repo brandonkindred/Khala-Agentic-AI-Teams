@@ -107,7 +107,7 @@ loop.
 ## SandboxSpec (manifest side)
 
 Each agent's YAML manifest may declare a `sandbox:` block consumed by the
-provisioner. Fields live on `agent_registry.models.SandboxSpec`:
+provisioner. Fields live on `agent_platform.registry.models.SandboxSpec`:
 
 | Field | Purpose |
 |---|---|

@@ -34,7 +34,7 @@ def _seed_team_with_agent() -> tuple[str, str]:
     store = AgenticTeamStore()
     team = store.create_team(name="Support", description="")
     agent_name = "Triage Agent"
-    from agent_registry import get_registry
+    from agent_platform.registry import get_registry
 
     manifest_id = manifest_agent_id(team.team_id, agent_name)
     registry = get_registry()

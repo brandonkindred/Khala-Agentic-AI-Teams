@@ -1,4 +1,4 @@
-import { ChangeDetectionStrategy, Component, computed, inject, signal } from '@angular/core';
+import { ChangeDetectionStrategy, Component, Injector, computed, inject, signal } from '@angular/core';
 import { toSignal } from '@angular/core/rxjs-interop';
 import { MatButtonModule } from '@angular/material/button';
 import { MatDialog, MatDialogModule } from '@angular/material/dialog';
@@ -8,9 +8,8 @@ import { ActivatedRoute, NavigationEnd, Router, RouterOutlet } from '@angular/ro
 import { filter, map, startWith } from 'rxjs';
 import type { AgentStudioDraft } from '../../../models/agent-studio.model';
 import { STUDIO_STAGES } from '../../../models/agent-studio.model';
-import { AgentStudioApiService } from '../../../services/agent-studio-api.service';
-import { AgentStudioStateService } from '../../../services/agent-studio-state.service';
 import { AgentStudioFacade } from '../../../services/agent-studio.facade';
+import { AgentStudioStateService } from '../../../services/agent-studio-state.service';
 import { AgenticTeamApiService } from '../../../services/agentic-team-api.service';
 import { LoadDraftMenuComponent } from './load-draft-menu/load-draft-menu.component';
 import {
@@ -59,7 +58,8 @@ function asNullableString(value: unknown): string | null {
 export class AgentStudioShellComponent {
   readonly state = inject(AgentStudioStateService);
   private readonly dialog = inject(MatDialog);
-  private readonly api = inject(AgentStudioApiService);
+  private readonly facade = inject(AgentStudioFacade);
+  private readonly injector = inject(Injector);
   private readonly agenticTeamApi = inject(AgenticTeamApiService);
   private readonly router = inject(Router);
   private readonly route = inject(ActivatedRoute);
@@ -93,7 +93,7 @@ export class AgentStudioShellComponent {
   /** True while a Load-draft selection is being fetched and hydrated. */
   readonly loadingDraft = signal(false);
   /** Bumped on every `loadDraft` call; lets a superseded call's late-arriving
-   *  responses (`getDraft`, the nested `getProcess` check) recognize they're
+   *  responses (`loadDraft`, the nested `getProcess` check) recognize they're
    *  stale and no-op instead of corrupting a newer load. */
   private loadDraftToken = 0;
   /** The forward-only stage list rendered by the stepper. */
@@ -197,7 +197,12 @@ export class AgentStudioShellComponent {
       // one that was actually created. `disableClose` only covers Escape/
       // backdrop — `closeOnNavigation` (Material default `true`) is a
       // separate flag that must be turned off too.
-      { data, width: '420px', disableClose: true, closeOnNavigation: false },
+      //
+      // `injector` is the shell's session injector so the overlay can resolve
+      // `AgentStudioFacade` (provided here, not `root`). Without it, MatDialog
+      // instantiates the dialog from the root injector and the façade inject
+      // throws NullInjectorError.
+      { data, width: '420px', disableClose: true, closeOnNavigation: false, injector: this.injector },
     );
     ref.afterClosed().subscribe((result) => {
       if (!result) return;
@@ -226,7 +231,7 @@ export class AgentStudioShellComponent {
     if (this.loadingDraft()) return;
     this.loadingDraft.set(true);
     const token = ++this.loadDraftToken;
-    this.api.getDraft(draftId).subscribe({
+    this.facade.loadDraft(draftId).subscribe({
       next: (draft) => {
         if (token !== this.loadDraftToken) return;
         this.hydrateFromDraft(draft, token);

@@ -288,13 +288,10 @@ def test_run_agent_via_reasoning_forwards_model_max_tokens_to_format_call(
 def test_run_agent_via_reasoning_keeps_output_pin_on_reasoning_clone(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The packed prompt's output reserve must still cap the reasoning pass.
+    """A positive max_tokens pin on the model must survive the reasoning clone.
 
-    Submission passes size the prompt against reserved_response_tokens and pin
-    the model. Clearing that pin lets the client advertise up to 32,768 output
-    tokens; providers that check input plus max output against the context
-    window then reject a near-full prompt. Truncation is overflow-shaped;
-    a generic rejection is swallowed and drops findings.
+    When a caller has pinned max_tokens on the model, clearing it on the text
+    clone would drop the advertised cap before formatting forwards it.
     """
     from llm_service import LLMClientModel
     from llm_service.clients.dummy import DummyLLMClient

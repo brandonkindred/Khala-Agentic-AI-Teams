@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
-from agent_registry.models import IOSchema
+from agent_platform.registry.models import IOSchema
 
 
 def test_inline_schema_accepts_a_well_formed_json_schema() -> None:
