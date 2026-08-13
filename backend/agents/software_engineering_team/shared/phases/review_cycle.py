@@ -13,9 +13,10 @@ and tested independently of the coding/documentation phases that surround it.
 from __future__ import annotations
 
 import logging
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Callable, Dict, Iterable, Iterator, List, Optional, Tuple
 
 from llm_service import LLMClient
 from shared.concurrency import KeyedLockManager, parallel_map
@@ -23,6 +24,7 @@ from shared.dev_models.models import ReviewContext, Task
 from software_engineering_team.shared.agent_review import AgentReviewCache
 from software_engineering_team.shared.gate_outcomes import record_gate_outcome
 from software_engineering_team.shared.phases.rollback import (
+    _file_lock_keys,
     _MicrotaskRollback,
     _record_prior_values,
     _rollback_microtask_files,
@@ -40,6 +42,23 @@ if TYPE_CHECKING:
     )
 
 logger = logging.getLogger(__name__)
+
+
+class _HeldFileLockManager(KeyedLockManager[str]):
+    """No-op :class:`KeyedLockManager` used when the caller already holds the pipeline locks.
+
+    :class:`KeyedLockManager` is not reentrant. Inner snapshot/write/rollback/doc
+    helpers must not re-acquire keys the outer per-microtask ``with file_locks.lock``
+    already holds for the full overlapping pipeline.
+    """
+
+    @contextmanager
+    def lock(self, keys: Iterable[str]) -> Iterator[None]:
+        del keys
+        yield
+
+
+_HELD_FILE_LOCKS: KeyedLockManager[str] = _HeldFileLockManager()
 
 
 def _dedup_issues(issues: List[Any], seen: set[tuple[str, str]]) -> List[Any]:
@@ -126,6 +145,8 @@ def _locked_write_and_merge(
     Holds the per-path write lock across the rollback snapshot, the worktree
     write, and the ``all_files`` / ``mt.output_files`` merge so concurrent
     microtasks that touch overlapping paths cannot tear those two views apart.
+    Lock keys are physical (``realpath``) paths, so ``shared.py`` and
+    ``./shared.py`` serialize against each other.
 
     Preconditions:
         ``file_locks`` is the per-run :class:`KeyedLockManager`; ``rollback`` is
@@ -136,7 +157,7 @@ def _locked_write_and_merge(
         unsafe-path rejection, rollback has already run under the same lock
         and False is returned.
     """
-    with file_locks.lock(files.keys()):
+    with file_locks.lock(_file_lock_keys(repo_path, files.keys())):
         _record_prior_values(rollback, repo_path, all_files, files)
         if not write_microtask_output_or_fail(
             repo_path,
@@ -163,12 +184,15 @@ def _locked_rollback(
     """Run :func:`_rollback_microtask_files` while holding this microtask's file keys.
 
     Preconditions:
-        ``rollback.all_files_prior`` lists the raw keys this microtask wrote.
+        ``rollback.disk_prior`` lists the physical paths this microtask wrote
+        (preferred lock keys); ``rollback.all_files_prior`` is the fallback
+        when nothing was snapshotted on disk.
     Postconditions:
         ``all_files`` and the worktree match the pre-microtask snapshot. An
         empty key set is a no-op lock (the rollback still runs).
     """
-    with file_locks.lock(rollback.all_files_prior.keys()):
+    lock_keys = [str(path) for path in rollback.disk_prior] or list(rollback.all_files_prior)
+    with file_locks.lock(lock_keys):
         _rollback_microtask_files(rollback, all_files, mt)
 
 
@@ -514,10 +538,11 @@ def _run_review_cycles(
 
     Preconditions:
         ``microtask_rollback`` was created and pre-populated by Phase 1
-        (:func:`_execute_coding_phase`) for ``microtask_files``'s initial write.
+        (:func:`_commit_coding_write`) for ``microtask_files``'s initial write.
         ``detail_cb(detail, idx, phase)`` forwards to ``progress_callback``.
-        ``file_locks`` is the per-run :class:`~shared.concurrency.KeyedLockManager`
-        used to serialize overlapping snapshot/write/merge/rollback.
+        ``file_locks`` is the per-run manager, or ``_HELD_FILE_LOCKS`` when the
+        caller already holds the physical-path locks for this microtask's
+        overlapping pipeline (KeyedLockManager is not reentrant).
     Postconditions:
         Returns ``(phase_failed, microtask_files, total_cycles)``: ``phase_failed``
         is True iff the microtask's review was rejected (retry exhaustion, the

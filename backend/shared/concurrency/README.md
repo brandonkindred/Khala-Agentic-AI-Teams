@@ -182,18 +182,22 @@ Motivating use case: the SE code-v2 gated execution loop
 (`software_engineering_team/shared/phases/execution.py`) accumulates every
 microtask's output into a shared `all_files: Dict[str, str]` dict and writes
 it to a shared `repo_path` git worktree. Independent microtasks in the same
-scheduled wave run concurrently via `parallel_map`; `_locked_write_and_merge`
-in `review_cycle.py` holds one `KeyedLockManager` (constructed once per run)
-across the snapshot, worktree write, and `all_files.update()` so overlapping
-paths serialize while disjoint paths proceed in parallel. Rollbacks use the
-same manager so a failed microtask cannot tear `all_files` apart from disk.
+scheduled wave run concurrently via `parallel_map` with `wait_for_stragglers=True`
+so a stop-on-review-failure does not return while a sibling is still writing
+the worktree. Generation runs unlocked; overlapping paths then hold one
+`KeyedLockManager` (constructed once per run) from the first write through
+review, docs, and rollback. Lock keys are physical (`realpath`) paths, so
+`shared.py` and `./shared.py` serialize against each other. Inner
+snapshot/write/rollback helpers receive a no-op manager because
+`KeyedLockManager` is not reentrant. Disjoint paths proceed in parallel.
 
 ```python
 from shared.concurrency import KeyedLockManager
 
 file_locks: KeyedLockManager[str] = KeyedLockManager()  # one instance per task run
 
-with file_locks.lock(microtask_files.keys()):
+# Keys are physical (realpath) paths so aliases of one file serialize together.
+with file_locks.lock(physical_lock_keys):
     write_repo_text_files(repo_path, microtask_files)
     all_files.update(microtask_files)
 ```

@@ -888,6 +888,16 @@ def test_resolve_physical_path_and_snapshot_states(tmp_path: Path):
     assert sh_rollback._snapshot_disk_state(root / "missing").absent
 
 
+def test_file_lock_keys_collapse_lexical_aliases(tmp_path: Path):
+    """``shared.py`` and ``./shared.py`` map to the same physical lock key."""
+    root = tmp_path.resolve()
+    (tmp_path / "shared.py").write_text("x", encoding="utf-8")
+    keys = sh_rollback._file_lock_keys(root, ["shared.py", "./shared.py", "shared.py"])
+    expected = sh_rollback._resolve_physical_path_in_repo(root, root / "shared.py")
+    assert expected is not None
+    assert keys == [str(expected)]
+
+
 def test_snapshot_disk_state_degrades_on_read_error(tmp_path: Path, monkeypatch):
     """A read/stat OSError during snapshot degrades to a leave-alone entry, never raised,
     so rollback bookkeeping cannot abort the run."""

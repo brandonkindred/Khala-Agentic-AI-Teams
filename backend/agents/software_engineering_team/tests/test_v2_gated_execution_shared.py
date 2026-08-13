@@ -1955,7 +1955,62 @@ def test_in_wave_review_failure_stop_does_not_start_next_wave(tmp_path):
         )
 
     assert exc.value.microtask.id == "mt-1"
+    assert mt2.status == MS.COMPLETED
     assert mt3.status == MS.PENDING
+
+
+def test_in_wave_review_failure_stop_waits_for_in_flight_sibling(tmp_path):
+    """on_failure=stop waits for an in-flight sibling to finish writing before raising."""
+    sibling_finished = threading.Event()
+
+    def coder(**kwargs: Any) -> Dict[str, str]:
+        mid = kwargs["microtask"].id
+        if mid == "mt-2":
+            time.sleep(0.3)
+            sibling_finished.set()
+            return {"src/mt-2.py": "print(2)\n"}
+        return {"src/mt-1.py": "print(1)\n"}
+
+    mt1, mt2 = _microtask("mt-1"), _microtask("mt-2")
+    with pytest.raises(be_models.MicrotaskReviewFailedError):
+        _run(
+            _make_gate_config(
+                coder=coder,
+                code_review_gate=_cr_gate_fails_for("mt-1"),
+            ),
+            [mt1, mt2],
+            tmp_path,
+            review_config=_config(cr=1, on_failure="stop"),
+        )
+
+    assert sibling_finished.is_set()
+    assert mt2.status == MS.COMPLETED
+    assert (tmp_path / "src" / "mt-2.py").read_text(encoding="utf-8") == "print(2)\n"
+
+
+def test_overlapping_independent_review_failure_preserves_sibling_content(tmp_path):
+    """A review-failed overlapping sibling must not restore a snapshot that wipes a completed one."""
+
+    def same_file_coder(**kwargs: Any) -> Dict[str, str]:
+        if kwargs["microtask"].id == "mt-a":
+            return {"shared.py": "owned-by-a\n"}
+        return {"shared.py": "owned-by-b\n"}
+
+    mt_a, mt_b = _microtask("mt-a"), _microtask("mt-b")
+    result = _run(
+        _make_gate_config(
+            coder=same_file_coder,
+            code_review_gate=_cr_gate_fails_for("mt-b"),
+        ),
+        [mt_a, mt_b],
+        tmp_path,
+        review_config=_config(cr=1, on_failure="skip_continue"),
+    )
+
+    assert mt_a.status == MS.COMPLETED
+    assert mt_b.status == MS.REVIEW_FAILED
+    assert result.files["shared.py"] == "owned-by-a\n"
+    assert (tmp_path / "shared.py").read_text(encoding="utf-8") == "owned-by-a\n"
 
 
 def test_overlapping_writes_keep_all_files_and_disk_in_sync(tmp_path):

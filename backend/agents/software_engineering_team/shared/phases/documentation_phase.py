@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Any, Callable, Dict, Optional
 from llm_service import LLMClient
 from shared.concurrency import KeyedLockManager
 from shared.dev_models.models import Task
+from software_engineering_team.shared.phases.rollback import _file_lock_keys
 from software_engineering_team.shared.repo_writer import (
     UnsafeRepoPathError,
     write_repo_text_files,
@@ -139,7 +140,9 @@ def _run_documentation_phase(
     # path is best-effort: log and skip it — the microtask still completes.
     if self_review_result.documentation:
         try:
-            with file_locks.lock(self_review_result.documentation.keys()):
+            with file_locks.lock(
+                _file_lock_keys(repo_path, self_review_result.documentation.keys())
+            ):
                 write_repo_text_files(repo_path, self_review_result.documentation)
                 microtask_files.update(self_review_result.documentation)
                 mt.output_files = microtask_files

@@ -19,11 +19,13 @@ from software_engineering_team.shared.agent_review import AgentReviewCache
 from software_engineering_team.shared.code_completeness import reject_invalid_python
 from software_engineering_team.shared.phases.documentation_phase import _run_documentation_phase
 from software_engineering_team.shared.phases.review_cycle import (
+    _HELD_FILE_LOCKS,
     GateOutcome,
     _locked_write_and_merge,
     _run_review_cycles,
 )
 from software_engineering_team.shared.phases.rollback import (
+    _file_lock_keys,
     _MicrotaskRollback,
 )
 from software_engineering_team.shared.stack_profile import PhaseModels, StackProfile
@@ -267,7 +269,13 @@ def run_execution_impl(
             for pair in indexed:
                 _run_one(pair)
         else:
-            parallel_map(indexed, _run_one, max_workers=len(indexed), skip_none=False)
+            parallel_map(
+                indexed,
+                _run_one,
+                max_workers=len(indexed),
+                skip_none=False,
+                wait_for_stragglers=True,
+            )
 
     summary = f"Executed {len(completed_ids)}/{total} microtasks; {len(all_files)} files produced."
     return execution_result_cls(files=all_files, microtasks=microtasks, summary=summary)
@@ -350,7 +358,7 @@ class GatedExecutionConfig:
     status_qa_security: Any = None
 
 
-def _execute_coding_phase(
+def _generate_coding_phase(
     *,
     llm: LLMClient,
     mt: Any,
@@ -363,39 +371,29 @@ def _execute_coding_phase(
     runners: Dict[Any, Any],
     models: PhaseModels,
     run_general_microtask: Callable[..., Dict[str, str]],
-    all_files: Dict[str, str],
-    review_failed_ids: set,
     microtask_status: Any,
     progress_callback: Optional[Callable[[int, int, int, str, str, str], None]],
     current_idx: int,
     completed_ids: set,
     total: int,
-    file_locks: KeyedLockManager[str],
-) -> Optional[Tuple[Dict[str, str], _MicrotaskRollback]]:
-    """Run a microtask's coding phase: generate its files, then guard-write them.
+) -> Optional[Dict[str, str]]:
+    """Generate a microtask's files without writing them (Phase 1, generate half).
 
-    Split out of :func:`run_gated_execution_impl` (Phase 1 of the gated loop).
+    Runs outside the per-path pipeline lock so overlapping siblings can generate
+    concurrently; the caller then holds those locks from the first write through
+    review, docs, and rollback.
 
     Preconditions:
-        ``mt.status`` is already ``IN_PROGRESS``; ``all_files`` is the running
-        ``{path: content}`` map across all microtasks executed so far.
+        ``mt.status`` is already ``IN_PROGRESS``.
     Postconditions:
-        On success, returns ``(microtask_files, rollback)`` with a fresh
-        :class:`_MicrotaskRollback` snapshotting the pre-write state, and
-        ``all_files`` updated in place. Returns ``None`` when this microtask is
-        finished and the caller must move on to the next one without running
-        the review-gate cycles, in one of two ways that intentionally differ in
-        their progress-callback tick (both pinned by existing tests):
-        - A coding exception: ``mt`` is marked ``FAILED`` with the exception text
-          in ``mt.notes``, and exactly one ``"completed"`` progress tick is fired
-          here (the caller's own trailing tick never runs for a microtask this
-          function finishes).
-        - An unsafe initial write: :func:`write_microtask_output_or_fail` has
-          already marked ``mt`` ``REVIEW_FAILED`` and rolled back ``all_files``/
-          the worktree; no extra progress tick is fired for this case.
+        On success, returns the generated ``{path: content}`` map. On a coding
+        exception, ``mt`` is marked ``FAILED`` with the exception text in
+        ``mt.notes``, exactly one ``"completed"`` progress tick is fired here
+        (the caller's own trailing tick never runs for a microtask this
+        function finishes), and ``None`` is returned.
     """
     try:
-        microtask_files = generate_microtask_files(
+        return generate_microtask_files(
             llm=llm,
             mt=mt,
             task=task,
@@ -407,30 +405,6 @@ def _execute_coding_phase(
             models=models,
             run_general_microtask=run_general_microtask,
         )
-        # Rollback manifest: before every write (initial + fixes), snapshot what
-        # to restore on failure — the prior ``all_files`` value per raw key and the
-        # prior on-disk content per resolved path — so a rollback reverts both the
-        # result and the worktree to the pre-microtask state. Recorded ahead of the
-        # write and of ``all_files.update``, under the per-path write lock.
-        microtask_rollback = _MicrotaskRollback()
-        # Route the initial write through the same guarded helper the review
-        # cycles use, so an unsafe path in the first emission is a handled
-        # REVIEW_FAILED (rolled back + recorded in review_failed_ids so
-        # dependents SKIP) rather than a bare FAILED that skips that bookkeeping.
-        if not _locked_write_and_merge(
-            file_locks=file_locks,
-            repo_path=repo_path,
-            files=microtask_files,
-            mt=mt,
-            task_id=task_id,
-            review_failed_ids=review_failed_ids,
-            all_files=all_files,
-            rollback=microtask_rollback,
-            review_failed_status=microtask_status.REVIEW_FAILED,
-        ):
-            return None
-        return microtask_files, microtask_rollback
-
     except Exception as exc:
         logger.error("[%s] Microtask %s execution failed: %s", task_id, mt.id, exc)
         mt.status = microtask_status.FAILED
@@ -440,6 +414,47 @@ def _execute_coding_phase(
                 current_idx, len(completed_ids), total, mt.title or mt.id, "completed", ""
             )
         return None
+
+
+def _commit_coding_write(
+    *,
+    file_locks: KeyedLockManager[str],
+    repo_path: Path,
+    microtask_files: Dict[str, str],
+    mt: Any,
+    task_id: str,
+    review_failed_ids: set,
+    all_files: Dict[str, str],
+    microtask_status: Any,
+) -> Optional[Tuple[Dict[str, str], _MicrotaskRollback]]:
+    """Guard-write generated files and return the rollback manifest (Phase 1, write half).
+
+    Preconditions:
+        ``microtask_files`` was produced by :func:`_generate_coding_phase`;
+        ``file_locks`` is either the per-run manager or ``_HELD_FILE_LOCKS``
+        when the caller already holds the pipeline lock for these paths.
+    Postconditions:
+        On success, returns ``(microtask_files, rollback)`` with a fresh
+        :class:`_MicrotaskRollback` snapshotting the pre-write state, and
+        ``all_files`` updated in place. On an unsafe initial write,
+        :func:`write_microtask_output_or_fail` has already marked ``mt``
+        ``REVIEW_FAILED`` and rolled back ``all_files`` / the worktree; no extra
+        progress tick is fired for this case, and ``None`` is returned.
+    """
+    microtask_rollback = _MicrotaskRollback()
+    if not _locked_write_and_merge(
+        file_locks=file_locks,
+        repo_path=repo_path,
+        files=microtask_files,
+        mt=mt,
+        task_id=task_id,
+        review_failed_ids=review_failed_ids,
+        all_files=all_files,
+        rollback=microtask_rollback,
+        review_failed_status=microtask_status.REVIEW_FAILED,
+    ):
+        return None
+    return microtask_files, microtask_rollback
 
 
 def _schedule_microtask_batches(microtasks: List[Any]) -> List[List[Any]]:
@@ -621,6 +636,9 @@ def _run_one_gated_microtask(
         ``config.on_failure == "stop"`` (or a security failure with
         ``security_failure_always_stops``). Shared ``all_files`` /
         ``completed_ids`` / ``review_failed_ids`` are updated in place.
+        Generation runs unlocked; the first write through review, docs, and
+        rollback holds the physical-path locks so overlapping siblings cannot
+        interleave snapshot/write/rollback.
     """
     deps_met = all(d in completed_ids for d in mt.depends_on)
     if not deps_met:
@@ -664,7 +682,7 @@ def _run_one_gated_microtask(
             "Generating code...",
         )
 
-    coding_result = _execute_coding_phase(
+    microtask_files = _generate_coding_phase(
         llm=llm,
         mt=mt,
         task=task,
@@ -676,49 +694,35 @@ def _run_one_gated_microtask(
         runners=runners,
         models=models,
         run_general_microtask=gate_config.run_general_microtask,
-        all_files=all_files,
-        review_failed_ids=review_failed_ids,
         microtask_status=microtask_status,
         progress_callback=progress_callback,
         current_idx=current_idx,
         completed_ids=completed_ids,
         total=total,
-        file_locks=file_locks,
     )
-    if coding_result is None:
+    if microtask_files is None:
         return
-    microtask_files, microtask_rollback = coding_result
 
-    phase_failed, microtask_files, total_cycles = _run_review_cycles(
-        gate_config=gate_config,
-        llm=llm,
-        task=task,
-        task_id=task_id,
-        mt=mt,
-        microtask_files=microtask_files,
-        repo_path=repo_path,
-        deps=deps,
-        review_context=review_context,
-        config=config,
-        planning_result=planning_result,
-        all_files=all_files,
-        review_failed_ids=review_failed_ids,
-        microtask_rollback=microtask_rollback,
-        microtask_status=microtask_status,
-        review_result_cls=review_result_cls,
-        review_failed_error_cls=review_failed_error_cls,
-        max_total_cycles=max_total_cycles,
-        code_review_retry_cap=code_review_retry_cap,
-        progress_callback=progress_callback,
-        current_idx=current_idx,
-        completed_ids=completed_ids,
-        total=total,
-        detail_cb=_detail_cb,
-        file_locks=file_locks,
-    )
+    # Hold physical-path locks from the first write through review + docs +
+    # rollback so an overlapping sibling cannot snapshot/write while this
+    # microtask still has an in-flight rollback. Inner helpers receive
+    # ``_HELD_FILE_LOCKS`` because KeyedLockManager is not reentrant.
+    with file_locks.lock(_file_lock_keys(repo_path, microtask_files.keys())):
+        coding_result = _commit_coding_write(
+            file_locks=_HELD_FILE_LOCKS,
+            repo_path=repo_path,
+            microtask_files=microtask_files,
+            mt=mt,
+            task_id=task_id,
+            review_failed_ids=review_failed_ids,
+            all_files=all_files,
+            microtask_status=microtask_status,
+        )
+        if coding_result is None:
+            return
+        microtask_files, microtask_rollback = coding_result
 
-    if not phase_failed:
-        _run_documentation_phase(
+        phase_failed, microtask_files, total_cycles = _run_review_cycles(
             gate_config=gate_config,
             llm=llm,
             task=task,
@@ -727,17 +731,46 @@ def _run_one_gated_microtask(
             microtask_files=microtask_files,
             repo_path=repo_path,
             deps=deps,
-            tool_agent_kind=tool_agent_kind,
+            review_context=review_context,
+            config=config,
+            planning_result=planning_result,
             all_files=all_files,
+            review_failed_ids=review_failed_ids,
+            microtask_rollback=microtask_rollback,
             microtask_status=microtask_status,
-            completed_ids=completed_ids,
-            total_cycles=total_cycles,
+            review_result_cls=review_result_cls,
+            review_failed_error_cls=review_failed_error_cls,
+            max_total_cycles=max_total_cycles,
+            code_review_retry_cap=code_review_retry_cap,
             progress_callback=progress_callback,
             current_idx=current_idx,
+            completed_ids=completed_ids,
             total=total,
             detail_cb=_detail_cb,
-            file_locks=file_locks,
+            file_locks=_HELD_FILE_LOCKS,
         )
+
+        if not phase_failed:
+            _run_documentation_phase(
+                gate_config=gate_config,
+                llm=llm,
+                task=task,
+                task_id=task_id,
+                mt=mt,
+                microtask_files=microtask_files,
+                repo_path=repo_path,
+                deps=deps,
+                tool_agent_kind=tool_agent_kind,
+                all_files=all_files,
+                microtask_status=microtask_status,
+                completed_ids=completed_ids,
+                total_cycles=total_cycles,
+                progress_callback=progress_callback,
+                current_idx=current_idx,
+                total=total,
+                detail_cb=_detail_cb,
+                file_locks=_HELD_FILE_LOCKS,
+            )
 
     if progress_callback:
         progress_callback(
@@ -816,7 +849,7 @@ def _run_one_ungated_microtask(
             models=models,
             run_general_microtask=run_general_microtask,
         )
-        with file_locks.lock(mt.output_files.keys()):
+        with file_locks.lock(_file_lock_keys(repo_path, mt.output_files.keys())):
             all_files.update(mt.output_files)
         mt.status = microtask_status_enum.COMPLETED
         completed_ids.add(mt.id)
@@ -860,7 +893,7 @@ def run_gated_execution_impl(
     behaviour, rollback, and the ``progress_callback`` contract are identical to
     the pre-refactor per-team ``run_execution_with_review_gates`` loops. The
     per-microtask work itself is delegated to three helpers, one per group of
-    phases: :func:`_execute_coding_phase` (Phase 1), :func:`_run_review_cycles`
+    phases: :func:`_generate_coding_phase` / :func:`_commit_coding_write` (Phase 1), :func:`_run_review_cycles`
     (Phases 2-4: code review/QA/security with retries, the grounding circuit
     breaker, and max-cycles resolution), and :func:`_run_documentation_phase`
     (Phase 5). This function is the orchestrator: per-microtask setup (the
@@ -905,8 +938,9 @@ def run_gated_execution_impl(
         can observe an in-batch predecessor. When a microtask's review fails
         and ``on_failure == "stop"`` (or a security failure with
         ``security_failure_always_stops``), raises ``MicrotaskReviewFailedError``
-        and the next wave is not started; independent siblings already running
-        in the failing wave finish in the background.
+        and the next wave is not started; ``wait_for_stragglers=True`` so
+        independent siblings already running in the failing wave finish their
+        worktree writes before the exception propagates.
     """
     models = gate_config.models
     microtask_status = models.MicrotaskStatus
@@ -997,7 +1031,13 @@ def run_gated_execution_impl(
             for pair in indexed:
                 _run_one(pair)
         else:
-            parallel_map(indexed, _run_one, max_workers=len(indexed), skip_none=False)
+            parallel_map(
+                indexed,
+                _run_one,
+                max_workers=len(indexed),
+                skip_none=False,
+                wait_for_stragglers=True,
+            )
 
     completed_count = len(completed_ids)
     failed_count = len(review_failed_ids)
