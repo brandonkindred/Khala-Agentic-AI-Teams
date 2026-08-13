@@ -358,6 +358,47 @@ def test_shared_context_compaction_is_memoized_across_runs() -> None:
     assert client.compaction_calls == first_run_calls
 
 
+def test_shared_context_compaction_is_recorded_in_transcript(monkeypatch) -> None:
+    """Oversized spec/architecture/existing-codebase compaction is an LLM call
+    and must appear in the durable transcript, not only the later chunk review."""
+    from llm_service import llm_attribution
+    from shared.dev_models.models import SystemArchitecture
+
+    over_budget = "specification detail line. " * 4000
+    arch = SystemArchitecture(
+        overview="architecture overview line. " * 4000,
+        architecture_document="# Arch",
+        components=[],
+        decisions=[],
+        diagrams={},
+    )
+    captured: list = []
+    monkeypatch.setattr(
+        "code_review_agent.coordinator.record_transcript_entry",
+        lambda *args, **kwargs: captured.append(args),
+    )
+    client = _CompactionCountingClient()
+    with llm_attribution(job_id="job-1"):
+        run_coordinator(
+            client,
+            CodeReviewInput(
+                files={"app/main.py": "x" * 500},
+                task_description="Add feature",
+                language="python",
+                spec_content=over_budget,
+                architecture=arch,
+                existing_codebase="prior codebase line. " * 4000,
+            ),
+        )
+    compaction = [args for args in captured if args and args[0] == "compaction"]
+    assert len(compaction) == client.compaction_calls
+    assert {args[1] for args in compaction} == {
+        "specification",
+        "architecture overview",
+        "existing codebase",
+    }
+
+
 def test_render_architecture_context_folds_in_components_and_decisions() -> None:
     """The architecture excerpt built for the reviewer includes not just the
     overview prose but component responsibilities and architecture decisions

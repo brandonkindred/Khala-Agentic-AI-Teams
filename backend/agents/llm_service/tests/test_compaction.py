@@ -101,6 +101,21 @@ def test_repeated_identical_call_reuses_cached_result() -> None:
     assert client.calls == 1  # second call served from cache
 
 
+def test_on_attempt_sees_each_complete_not_cache_hits() -> None:
+    """on_attempt is invoked for the LLM compaction call, not for a cache hit."""
+    client = _CountingClient(result="COMPACTED SPEC")
+    text = "x" * 200
+    seen: list[tuple[str, str]] = []
+    compact_text(text, 50, client, "spec", on_attempt=lambda p, r: seen.append((p, r)))
+    assert len(seen) == 1
+    assert "precise technical content compactor" in seen[0][0]
+    assert seen[0][1] == "COMPACTED SPEC"
+    seen.clear()
+    compact_text(text, 50, client, "spec", on_attempt=lambda p, r: seen.append((p, r)))
+    assert seen == []
+    assert client.calls == 1
+
+
 def test_cache_hit_survives_across_client_instances_of_same_model() -> None:
     text = "y" * 200
     a = _CountingClient()

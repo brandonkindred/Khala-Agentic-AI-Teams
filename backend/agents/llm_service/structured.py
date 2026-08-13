@@ -36,7 +36,7 @@ from typing import Any, Callable, TypeVar
 
 from pydantic import BaseModel, ValidationError
 
-from .interface import LLMClient, LLMJsonParseError, LLMSchemaValidationError
+from .interface import LLMClient, LLMJsonParseError, LLMSchemaValidationError, LLMTruncatedError
 from .util import sha256_fingerprint
 
 logger = logging.getLogger(__name__)
@@ -187,6 +187,26 @@ def _invoke_on_attempt(
         logger.warning("complete_validated: on_attempt callback failed", exc_info=True)
 
 
+def complete_json_response_text(client: LLMClient, data: Any) -> str:
+    """Best-effort text of a successful ``complete_json`` reply for observers.
+
+    Preconditions:
+        ``data`` is the dict ``complete_json`` returned.
+
+    Postconditions:
+        Returns ``client.last_complete_json_raw`` when that is a non-empty
+        string (the model text before parse/unwrap, including fences the
+        shared parser stripped). Otherwise serializes ``data``. Never raises.
+    """
+    raw = getattr(client, "last_complete_json_raw", None)
+    if isinstance(raw, str) and raw:
+        return raw
+    try:
+        return json.dumps(data, default=str)
+    except (TypeError, ValueError):
+        return repr(data)
+
+
 def complete_validated(
     client: LLMClient,
     prompt: str,
@@ -232,13 +252,15 @@ def complete_validated(
             failed) with ``(attempt_prompt, response_text)`` — the exact
             prompt sent for that attempt and a best-effort text form of what
             came back (the full raw reply on a parse failure when the raise
-            site captured it, else the truncated preview; the parsed JSON on
-            a validation failure or on success). ``None`` (the default) does
-            nothing extra; a caller that wants a durable per-call transcript
-            covering every attempt (not just the final one) passes a recorder
-            here instead of only logging the function's return value. Never
-            allowed to affect control flow: any exception it raises is
-            logged and swallowed.
+            site captured it, else the truncated preview; ``partial_content``
+            on :class:`LLMTruncatedError`; the model text before parse/unwrap
+            when the client recorded ``last_complete_json_raw``, else the
+            serialized parsed JSON on a validation failure or on success).
+            ``None`` (the default) does nothing extra; a caller that wants a
+            durable per-call transcript covering every attempt (not just the
+            final one) passes a recorder here instead of only logging the
+            function's return value. Never allowed to affect control flow:
+            any exception it raises is logged and swallowed.
         **kwargs: Forwarded to ``client.complete_json``.
 
     Returns:
@@ -273,6 +295,9 @@ def complete_validated(
                 think=think,
                 **kwargs,
             )
+        except LLMTruncatedError as exc:
+            _invoke_on_attempt(on_attempt, attempt_prompt, exc.partial_content or "")
+            raise
         except LLMJsonParseError as exc:
             last_parse_error = exc
             last_validation_error = None
@@ -291,10 +316,7 @@ def complete_validated(
             )
             continue
 
-        try:
-            preview = json.dumps(data, default=str)
-        except (TypeError, ValueError):
-            preview = repr(data)
+        preview = complete_json_response_text(client, data)
 
         try:
             # Deep-copy the context on every attempt so mutations performed by

@@ -21,7 +21,7 @@ from pydantic import BaseModel
 from strands import Agent
 
 from llm_service import LLMClient, LLMJsonParseError, LLMSemanticExhaustionError, get_strands_model
-from llm_service.structured import complete_validated
+from llm_service.structured import complete_json_response_text, complete_validated
 
 logger = logging.getLogger(__name__)
 
@@ -423,7 +423,7 @@ def run_agent_via_reasoning(
             "run_agent_via_reasoning: on_formatting",
             on_formatting,
             format_prompt,
-            raw_text,
+            complete_json_response_text(backing_client, data),
         )
         return parse(raw_text)
 

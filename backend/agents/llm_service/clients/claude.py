@@ -714,6 +714,7 @@ class ClaudeLLMClient(LLMClient):
                     status="success", message=message, latency_ms=latency_ms, caller=caller
                 )
                 return value
+            self.last_complete_json_raw = value
             try:
                 result = extract_json_from_response(value)
             except LLMJsonParseError:

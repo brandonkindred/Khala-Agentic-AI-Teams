@@ -12,6 +12,7 @@ from llm_service.interface import (
     LLMClient,
     LLMJsonParseError,
     LLMSchemaValidationError,
+    LLMTruncatedError,
 )
 from llm_service.structured import complete_validated
 
@@ -397,6 +398,50 @@ def test_on_attempt_exception_is_swallowed(caplog):
 
     assert isinstance(result, FounderAnswer)
     assert any("on_attempt callback failed" in r.message for r in caplog.records)
+
+
+def test_on_attempt_called_for_truncated_complete_json():
+    """A token-limit truncation is a completed LLM call; on_attempt must see
+    the partial content even though complete_validated does not JSON-retry it."""
+
+    def handler(prompt: str, *, call_index: int) -> dict[str, Any]:
+        raise LLMTruncatedError("hit max_tokens", partial_content='{"selected_option_id":')
+
+    client = _StubClient(handler)
+    attempts: list[tuple[str, str]] = []
+    with pytest.raises(LLMTruncatedError):
+        complete_validated(
+            client,
+            "prompt",
+            objective="test",
+            schema=FounderAnswer,
+            on_attempt=lambda p, r: attempts.append((p, r)),
+        )
+    assert attempts == [("prompt", '{"selected_option_id":')]
+
+
+def test_on_attempt_prefers_last_complete_json_raw_over_reserialized_dict():
+    """Successful complete_json may unwrap fenced JSON; the observer must
+    see the model text, not json.dumps of the parsed dict."""
+
+    class _FencedClient(LLMClient):
+        def complete_json(self, prompt, **kwargs):
+            self.last_complete_json_raw = (
+                '```json\n{"selected_option_id": "opt-a", "rationale": "x"}\n```'
+            )
+            return {"selected_option_id": "opt-a", "rationale": "x"}
+
+    attempts: list[tuple[str, str]] = []
+    complete_validated(
+        _FencedClient(),
+        "prompt",
+        objective="test",
+        schema=FounderAnswer,
+        on_attempt=lambda p, r: attempts.append((p, r)),
+    )
+    assert len(attempts) == 1
+    assert attempts[0][1].startswith("```json")
+    assert '"selected_option_id": "opt-a"' in attempts[0][1]
 
 
 def test_context_is_isolated_across_retry_attempts():
