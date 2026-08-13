@@ -6,8 +6,8 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from agent_team_studio.agent_studio.drafts_store import AgentStudioDraftStore
-from unified_api.routes import agent_studio as routes
+from agent_platform.studio import routes
+from agent_platform.studio.drafts_store import AgentStudioDraftStore
 
 
 @pytest.fixture()
