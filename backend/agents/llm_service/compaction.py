@@ -31,6 +31,8 @@ from typing import TYPE_CHECKING, Any, Callable, List, Tuple
 
 from shared.cache import get_shared_cache, with_cache_build_id
 
+from .interface import LLMTruncatedError
+
 if TYPE_CHECKING:
     from .interface import LLMClient
 
@@ -216,6 +218,9 @@ def _compact_single(
         result = llm.complete(
             prompt, objective=f"compact oversized {content_description}", temperature=0.0
         )
+    except LLMTruncatedError as exc:
+        _invoke_on_attempt(on_attempt, prompt, exc.partial_content or "")
+        raise
     except Exception:
         _invoke_on_attempt(on_attempt, prompt, "")
         raise
@@ -261,8 +266,9 @@ def compact_text(
         knows what it is summarising.
     on_attempt:
         Optional observer invoked with ``(prompt, response)`` for each
-        ``llm.complete`` this call actually makes (not on cache hits). Observer
-        exceptions are swallowed.
+        ``llm.complete`` this call actually makes (not on cache hits). A
+        truncated reply is reported with its ``partial_content`` rather than
+        an empty string. Observer exceptions are swallowed.
 
     Returns
     -------

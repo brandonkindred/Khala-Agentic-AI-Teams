@@ -139,7 +139,10 @@ def fetch_review_transcript(
           errors on a review that legitimately has nothing to show. Entries
           still sitting in this process's in-memory buffer (a final ``drain()``
           that requeued after a Postgres blip) are included, so the one-shot
-          dialog is not empty while the heartbeat retries.
+          dialog is not empty while the heartbeat retries. The durable read
+          runs while holding the drain lock so an in-flight flush cannot
+          clear the buffer after this query but before the snapshot, or
+          commit after this query has already returned a stale list.
     """
     review = _main.get_review(job_id)
     if review is None:
@@ -150,7 +153,7 @@ def fetch_review_transcript(
                 status_code=409,
                 detail="The requested repository does not match the reviewed repository.",
             )
-    entries = transcript.merge_unflushed(job_id, _main.get_review_transcript(job_id) or [])
+    entries = transcript.merge_unflushed(job_id, lambda: _main.get_review_transcript(job_id) or [])
     return TranscriptResponse(
         job_id=job_id, entries=[TranscriptEntry.model_validate(e) for e in entries]
     )

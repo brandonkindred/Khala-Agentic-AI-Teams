@@ -27,6 +27,7 @@ from llm_service import (
     LLMTruncatedError,
     get_strands_model,
 )
+from llm_service.interface import take_complete_json_turns
 from llm_service.structured import complete_json_response_text, complete_validated
 
 logger = logging.getLogger(__name__)
@@ -108,6 +109,40 @@ def _invoke_observer(
         observer(prompt, response)
     except Exception:  # noqa: BLE001 - observer must never break the review
         logger.warning("%s callback failed", label, exc_info=True)
+
+
+def _observe_formatting_turns(
+    on_formatting: Callable[[str, str], None] | None,
+    format_prompt: str,
+    fallback_response: str,
+) -> None:
+    """Notify ``on_formatting`` for each recorded continuation turn, else once.
+
+    Preconditions:
+        ``format_prompt`` is the prompt passed to ``complete_json``.
+        ``fallback_response`` is used when the provider recorded no inner turns.
+
+    Postconditions:
+        Inner continuation turns, when present, are each observed in record
+        order. Otherwise ``on_formatting`` is invoked once with
+        ``(format_prompt, fallback_response)``. Never raises.
+    """
+    turns = take_complete_json_turns()
+    if turns:
+        for turn_prompt, turn_response in turns:
+            _invoke_observer(
+                "run_agent_via_reasoning: on_formatting",
+                on_formatting,
+                turn_prompt,
+                turn_response,
+            )
+        return
+    _invoke_observer(
+        "run_agent_via_reasoning: on_formatting",
+        on_formatting,
+        format_prompt,
+        fallback_response,
+    )
 
 
 def _require_non_empty(name: str, value: str) -> None:
@@ -436,24 +471,13 @@ def run_agent_via_reasoning(
         try:
             data = backing_client.complete_json(format_prompt, **format_kwargs)
         except LLMJsonParseError as exc:
-            _invoke_observer(
-                "run_agent_via_reasoning: on_formatting",
-                on_formatting,
-                format_prompt,
-                exc.raw_response,
-            )
+            _observe_formatting_turns(on_formatting, format_prompt, exc.raw_response)
             raise
         except LLMTruncatedError as exc:
-            _invoke_observer(
-                "run_agent_via_reasoning: on_formatting",
-                on_formatting,
-                format_prompt,
-                exc.partial_content or "",
-            )
+            _observe_formatting_turns(on_formatting, format_prompt, exc.partial_content or "")
             raise
         raw_text = json.dumps(data)
-        _invoke_observer(
-            "run_agent_via_reasoning: on_formatting",
+        _observe_formatting_turns(
             on_formatting,
             format_prompt,
             complete_json_response_text(backing_client, data),

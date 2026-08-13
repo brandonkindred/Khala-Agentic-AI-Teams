@@ -20,6 +20,8 @@ from llm_service.interface import (
     LLMRateLimitError,
     LLMSemanticExhaustionError,
     LLMTemporaryError,
+    take_complete_json_raw,
+    take_complete_json_turns,
 )
 
 
@@ -1863,6 +1865,41 @@ def test_continuation_resumes_at_downgraded_thinking_level(
     assert captured[0]["reasoning_effort"] == "max"
     assert captured[1]["reasoning_effort"] == "high"
     assert captured[2]["reasoning_effort"] == "high"  # continuation inherits the downgrade
+
+
+def test_complete_json_continuation_records_each_turn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Each continuation HTTP turn (initial partial + continuation reply) is
+    recorded for observers, and the merged raw text is stored for take()."""
+    monkeypatch.setenv("LLM_PROVIDER", "ollama")
+    truncated_partial_sse = [
+        'data: {"choices":[{"delta":{"content":"{\\"ok\\":"},"finish_reason":null}]}',
+        'data: {"choices":[{"delta":{},"finish_reason":"length"}]}',
+        "data: [DONE]",
+    ]
+    continuation_ok_sse = [
+        'data: {"choices":[{"delta":{"content":" 1}"},"finish_reason":null}]}',
+        'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}',
+        "data: [DONE]",
+    ]
+    cms = [
+        _stream_cm(200, sse_lines=truncated_partial_sse),
+        _stream_cm(200, sse_lines=continuation_ok_sse),
+    ]
+    with patch("httpx.Client") as mock_client_cls:
+        mock_client, _captured = _capturing_multi_client(cms)
+        mock_client_cls.return_value = mock_client
+        client = OllamaLLMClient(model="test", base_url="http://localhost:9999", timeout=5)
+        result = client.complete_json("q", objective="test", temperature=0, think=False)
+    assert result == {"ok": 1}
+    turns = take_complete_json_turns()
+    raw = take_complete_json_raw()
+    assert len(turns) == 2
+    assert turns[0] == ("q", '{"ok":')
+    assert "continue exactly from where you left off" in turns[1][0]
+    assert turns[1][1] == " 1}"
+    assert raw == '{"ok": 1}'
 
 
 def test_generic_temporary_error_retries_on_transient_schedule(

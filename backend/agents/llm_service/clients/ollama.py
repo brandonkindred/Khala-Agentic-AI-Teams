@@ -46,6 +46,7 @@ from ..interface import (
     LLMTemporaryError,
     LLMTruncatedError,
     record_complete_json_raw,
+    record_complete_json_turn,
 )
 from ..limit_classification import classify_ollama_limit_kind
 from ..telemetry import record_llm_call
@@ -1842,7 +1843,13 @@ class OllamaLLMClient(LLMClient):
             self._record_telemetry(status="error", error_type="semantic_exhaustion")
             raise
         except LLMTruncatedError as e:
-            self._record_telemetry(status="truncated", error_type="truncated")
+            self._record_telemetry(
+                status="truncated",
+                error_type="truncated",
+                prompt_text=prompt,
+                response_text=e.partial_content,
+            )
+            record_complete_json_turn(prompt, e.partial_content or "")
             return self._complete_json_with_continuation(
                 initial_partial=e.partial_content,
                 prompt=prompt,
@@ -1871,6 +1878,7 @@ class OllamaLLMClient(LLMClient):
                     "JSON parse failed on content starting with '%s'; treating as implicit truncation and attempting continuation.",
                     stripped[0],
                 )
+                record_complete_json_turn(prompt, content or "")
                 return self._complete_json_with_continuation(
                     initial_partial=content,
                     prompt=prompt,
@@ -1935,11 +1943,12 @@ class OllamaLLMClient(LLMClient):
                 MAX_CONTINUATION_CYCLES,
                 len(accumulated),
             )
+            continuation_prompt = self._continuation_user_message(accumulated)
             messages = [
                 {"role": "system", "content": system_message},
                 {"role": "user", "content": prompt},
                 {"role": "assistant", "content": accumulated},
-                {"role": "user", "content": self._continuation_user_message(accumulated)},
+                {"role": "user", "content": continuation_prompt},
             ]
             payload = {
                 "model": self.model,
@@ -1967,9 +1976,23 @@ class OllamaLLMClient(LLMClient):
                     sem,
                     resolved_think=use_think,
                 )
+                record_complete_json_turn(continuation_prompt, next_content)
+                self._record_telemetry(
+                    status="success",
+                    prompt_text=continuation_prompt,
+                    response_text=next_content,
+                )
                 accumulated = self._merge_continuation(accumulated, next_content)
+                record_complete_json_raw(accumulated)
                 return self._extract_json(accumulated)
             except LLMTruncatedError as e2:
+                record_complete_json_turn(continuation_prompt, e2.partial_content or "")
+                self._record_telemetry(
+                    status="truncated",
+                    error_type="truncated",
+                    prompt_text=continuation_prompt,
+                    response_text=e2.partial_content,
+                )
                 accumulated = self._merge_continuation(accumulated, e2.partial_content)
         logger.warning(
             "Continuation exhausted after %d cycles (%d chars). Re-raising truncation.",

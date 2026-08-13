@@ -821,6 +821,48 @@ def test_run_agent_via_reasoning_invokes_on_formatting_after_complete_json(
     assert "via client" in seen[0][1]
 
 
+def test_run_agent_via_reasoning_on_formatting_sees_continuation_turns(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Inner complete_json continuation turns each notify on_formatting."""
+    from llm_service import LLMClientModel
+    from llm_service.clients.dummy import DummyLLMClient
+    from llm_service.interface import record_complete_json_turn
+    from software_engineering_team.code_review_agent import via_reasoning as vr_mod
+
+    seen: list[tuple[str, str]] = []
+
+    class _ContinuationClient(DummyLLMClient):
+        def complete_json(self, prompt: str, **kwargs: Any) -> dict[str, Any]:
+            record_complete_json_turn(prompt, '{"approved":')
+            record_complete_json_turn("Please continue.", ' true, "summary": "ok"}')
+            return {"approved": True, "summary": "ok"}
+
+    class _RecordingAgent:
+        def __init__(self, **kwargs: Any) -> None:
+            pass
+
+        def __call__(self, prompt: str) -> str:
+            return "REVIEW PROSE"
+
+    monkeypatch.setattr(vr_mod, "Agent", _RecordingAgent)
+    model = LLMClientModel(_ContinuationClient(), agent_key="code_review")
+
+    result = run_agent_via_reasoning(
+        model=model,
+        reasoning_prompt="Review this",
+        reasoning_system_prompt="Prose reviewer",
+        formatting_instructions='Return {"approved": bool, "summary": str}',
+        parse=lambda raw: _Out.model_validate_json(raw),
+        on_formatting=lambda prompt, response: seen.append((prompt, response)),
+    )
+
+    assert result.summary == "ok"
+    assert len(seen) == 2
+    assert seen[0][1] == '{"approved":'
+    assert seen[1] == ("Please continue.", ' true, "summary": "ok"}')
+
+
 def test_run_agent_via_reasoning_on_formatting_sees_raw_on_json_parse_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

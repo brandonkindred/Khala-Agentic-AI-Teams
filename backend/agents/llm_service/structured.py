@@ -42,6 +42,7 @@ from .interface import (
     LLMSchemaValidationError,
     LLMTruncatedError,
     take_complete_json_raw,
+    take_complete_json_turns,
 )
 from .util import sha256_fingerprint
 
@@ -193,6 +194,31 @@ def _invoke_on_attempt(
         logger.warning("complete_validated: on_attempt callback failed", exc_info=True)
 
 
+def _observe_complete_json_reply(
+    on_attempt: "Callable[[str, str], None] | None",
+    attempt_prompt: str,
+    fallback_response: str,
+) -> None:
+    """Notify ``on_attempt`` for each recorded continuation turn, else once.
+
+    Preconditions:
+        ``attempt_prompt`` is the prompt ``complete_json`` was called with.
+        ``fallback_response`` is the text to report when the provider recorded
+        no inner turns (success raw / parse preview / truncation partial).
+
+    Postconditions:
+        Inner continuation turns, when present, are each observed in record
+        order and then cleared. Otherwise ``on_attempt`` is invoked once with
+        ``(attempt_prompt, fallback_response)``. Never raises.
+    """
+    turns = take_complete_json_turns()
+    if turns:
+        for turn_prompt, turn_response in turns:
+            _invoke_on_attempt(on_attempt, turn_prompt, turn_response)
+        return
+    _invoke_on_attempt(on_attempt, attempt_prompt, fallback_response)
+
+
 def complete_json_response_text(client: LLMClient, data: Any) -> str:
     """Best-effort text of a successful ``complete_json`` reply for observers.
 
@@ -264,7 +290,8 @@ def complete_validated(
             prompt sent for that attempt and a best-effort text form of what
             came back (the full raw reply on a parse failure when the raise
             site captured it, else the truncated preview; ``partial_content``
-            on :class:`LLMTruncatedError`; the model text before parse/unwrap
+            on :class:`LLMTruncatedError`; each inner continuation turn when
+            the provider recorded them; the model text before parse/unwrap
             when the provider recorded it on this call's context, else the
             serialized parsed JSON on a validation failure or on success).
             ``None`` (the default) does nothing extra; a caller that wants a
@@ -307,13 +334,13 @@ def complete_validated(
                 **kwargs,
             )
         except LLMTruncatedError as exc:
-            _invoke_on_attempt(on_attempt, attempt_prompt, exc.partial_content or "")
+            _observe_complete_json_reply(on_attempt, attempt_prompt, exc.partial_content or "")
             raise
         except LLMJsonParseError as exc:
             last_parse_error = exc
             last_validation_error = None
             last_validation_data = None
-            _invoke_on_attempt(
+            _observe_complete_json_reply(
                 on_attempt, attempt_prompt, exc.raw_response or exc.response_preview or ""
             )
             if attempt >= correction_attempts:
@@ -341,7 +368,7 @@ def complete_validated(
             last_validation_error = exc
             last_parse_error = None
             last_validation_data = data
-            _invoke_on_attempt(on_attempt, attempt_prompt, preview)
+            _observe_complete_json_reply(on_attempt, attempt_prompt, preview)
             if attempt >= correction_attempts:
                 break
             attempts_used = attempt + 1
@@ -353,7 +380,7 @@ def complete_validated(
             )
             continue
 
-        _invoke_on_attempt(on_attempt, attempt_prompt, preview)
+        _observe_complete_json_reply(on_attempt, attempt_prompt, preview)
         if attempts_used > 0:
             logger.info(
                 "json_self_correction succeeded after %d retry (schema=%s, prompt_hash=%s)",

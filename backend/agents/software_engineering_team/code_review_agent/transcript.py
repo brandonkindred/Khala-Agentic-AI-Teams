@@ -49,7 +49,7 @@ import logging
 import threading
 from collections import deque
 from datetime import datetime, timedelta, timezone
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from llm_service import current_attribution
 from shared.concurrency.heartbeat import BackgroundHeartbeat
@@ -360,29 +360,52 @@ def unflushed_entries(job_id: str) -> list[dict[str, Any]]:
         return []
     try:
         with _drain_exec_lock:
-            with _buffer_lock:
-                return [entry for jid, entry in _buffer if jid == job_id]
+            return _snapshot_unflushed(job_id)
     except Exception:  # noqa: BLE001 - a GET must not fail because the buffer is busy
         logger.warning("code review transcript: unflushed_entries failed", exc_info=True)
         return []
 
 
-def merge_unflushed(job_id: str, durable: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _snapshot_unflushed(job_id: str) -> list[dict[str, Any]]:
+    """Copy buffered entries for ``job_id``. Caller holds ``_drain_exec_lock``."""
+    with _buffer_lock:
+        return [entry for jid, entry in _buffer if jid == job_id]
+
+
+def merge_unflushed(
+    job_id: str,
+    durable: list[dict[str, Any]] | Callable[[], list[dict[str, Any]] | None],
+) -> list[dict[str, Any]]:
     """Append this job's buffered entries onto a durable transcript list.
 
     Preconditions:
-        ``durable`` is the list returned by ``get_review_transcript`` (or []).
+        ``durable`` is the list returned by ``get_review_transcript`` (or []),
+        or a zero-arg callable that loads that list. A callable is invoked
+        while holding ``_drain_exec_lock`` after the buffer snapshot so an
+        in-flight persist has committed before the durable query runs, and a
+        drain cannot clear the buffer between the two reads.
 
     Postconditions:
-        Returns ``durable`` unchanged when the buffer has nothing for
+        Returns the durable list unchanged when the buffer has nothing for
         ``job_id``. Otherwise returns a new list of durable + buffered
         entries sorted by ``started_at`` (same order as the durable GET).
         Never raises.
     """
-    extra = unflushed_entries(job_id)
+    try:
+        with _drain_exec_lock:
+            extra = _snapshot_unflushed(job_id) if job_id else []
+            loaded = durable() if callable(durable) else durable
+            loaded = loaded or []
+    except Exception:  # noqa: BLE001 - a GET must not fail because the buffer is busy
+        logger.warning("code review transcript: merge_unflushed failed", exc_info=True)
+        try:
+            loaded = durable() if callable(durable) else list(durable or [])
+        except Exception:  # noqa: BLE001
+            loaded = []
+        extra = []
     if not extra:
-        return durable
-    return sorted(list(durable) + extra, key=lambda e: e.get("started_at") or "")
+        return loaded
+    return sorted(list(loaded) + extra, key=lambda e: e.get("started_at") or "")
 
 
 def register_transcript_flusher() -> None:

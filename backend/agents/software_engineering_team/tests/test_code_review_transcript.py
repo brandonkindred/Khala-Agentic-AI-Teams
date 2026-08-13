@@ -393,3 +393,48 @@ def test_unflushed_entries_returns_requeued_batch(monkeypatch) -> None:
     assert transcript.unflushed_entries("other-job") == []
     assert transcript.merge_unflushed("job-1", []) == extra
     assert transcript.merge_unflushed("job-1", [{"stage": "durable"}])[0]["stage"] == "durable"
+
+
+def test_merge_unflushed_loads_durable_after_in_flight_drain(monkeypatch) -> None:
+    """GET must not snapshot an empty buffer against a durable list that was
+    read before an in-flight persist committed — the loader runs after waiting
+    for that drain, so the one-shot dialog sees the just-flushed batch."""
+    first_entered = threading.Event()
+    release_first = threading.Event()
+    persisted: list[dict] = []
+
+    def _write(_job_id, entries):
+        first_entered.set()
+        assert release_first.wait(timeout=2.0)
+        persisted.extend(entries)
+        return True
+
+    monkeypatch.setattr(
+        "software_engineering_team.review_history_store.append_review_transcript_entries",
+        _write,
+    )
+    with llm_attribution(job_id="job-1"):
+        transcript.record_transcript_entry("chunk_review", "a.py", "p", "r")
+
+    t_drain = threading.Thread(target=transcript.drain)
+    t_drain.start()
+    assert first_entered.wait(timeout=2.0)
+
+    result: list = []
+
+    def _load():
+        return list(persisted)
+
+    def _merge() -> None:
+        result.append(transcript.merge_unflushed("job-1", _load))
+
+    t_get = threading.Thread(target=_merge)
+    t_get.start()
+    t_get.join(timeout=0.3)
+    assert t_get.is_alive()
+    release_first.set()
+    t_get.join(timeout=2.0)
+    t_drain.join(timeout=2.0)
+    assert not t_get.is_alive() and not t_drain.is_alive()
+    assert len(result[0]) == 1
+    assert result[0][0]["target"] == "a.py"

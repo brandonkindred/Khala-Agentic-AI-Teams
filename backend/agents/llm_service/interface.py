@@ -286,6 +286,52 @@ def take_complete_json_raw() -> str:
     return raw
 
 
+_complete_json_turns_var: ContextVar[list[tuple[str, str]] | None] = ContextVar(
+    "complete_json_turns", default=None
+)
+"""Per-call ``(prompt, response)`` turns for a ``complete_json`` that continued.
+
+Ollama's truncation path issues extra HTTP requests with continuation prompts.
+Those inner turns never return to ``complete_validated`` as separate calls, so
+the provider records them here and the observer drains them with
+:func:`take_complete_json_turns`.
+"""
+
+
+def record_complete_json_turn(prompt: str, response: str) -> None:
+    """Append one inner ``complete_json`` HTTP turn on this context.
+
+    Preconditions:
+        - ``prompt`` is the user text sent for this turn (the original prompt
+          for the truncated first reply, or the continuation user message).
+        - ``response`` is that turn's model text (may be a partial fragment).
+    Postconditions:
+        - :func:`take_complete_json_turns` on the same context includes this
+          pair after any previously recorded turns, in record order.
+    """
+    turns = list(_complete_json_turns_var.get() or [])
+    turns.append((prompt, response))
+    _complete_json_turns_var.set(turns)
+
+
+def take_complete_json_turns() -> list[tuple[str, str]]:
+    """Return and clear inner ``complete_json`` turns recorded on this context.
+
+    Preconditions:
+        - none; missing recordings are treated as no inner turns.
+    Postconditions:
+        - returns a new list of ``(prompt, response)`` pairs in record order,
+          or ``[]`` when none were recorded.
+        - this context's slot is cleared so a later sequential call cannot
+          reuse a previous call's turns.
+    """
+    turns = _complete_json_turns_var.get()
+    _complete_json_turns_var.set(None)
+    if not turns:
+        return []
+    return list(turns)
+
+
 # Message used when Ollama 429 indicates weekly usage limit exceeded (for logging and job state)
 OLLAMA_WEEKLY_LIMIT_MESSAGE = "Ollama LLM usage limit exceeded for week"
 

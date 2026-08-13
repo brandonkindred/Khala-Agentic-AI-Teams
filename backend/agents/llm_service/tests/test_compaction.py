@@ -116,6 +116,25 @@ def test_on_attempt_sees_each_complete_not_cache_hits() -> None:
     assert client.calls == 1
 
 
+def test_on_attempt_sees_truncated_partial_content() -> None:
+    """A truncated compaction complete() still produced model text; the
+    observer must record partial_content, not an empty string, even though
+    compact_text falls back to the original input."""
+    from llm_service.interface import LLMTruncatedError
+
+    client = _CountingClient(
+        raise_exc=LLMTruncatedError("hit max_tokens", partial_content="PARTIAL COMPACT")
+    )
+    text = "x" * 200
+    seen: list[tuple[str, str]] = []
+    assert (
+        compact_text(text, 50, client, "spec", on_attempt=lambda p, r: seen.append((p, r))) == text
+    )
+    assert len(seen) == 1
+    assert "precise technical content compactor" in seen[0][0]
+    assert seen[0][1] == "PARTIAL COMPACT"
+
+
 def test_cache_hit_survives_across_client_instances_of_same_model() -> None:
     text = "y" * 200
     a = _CountingClient()

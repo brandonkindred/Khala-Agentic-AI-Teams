@@ -14,6 +14,7 @@ from llm_service.interface import (
     LLMSchemaValidationError,
     LLMTruncatedError,
     record_complete_json_raw,
+    record_complete_json_turn,
 )
 from llm_service.structured import complete_validated
 
@@ -419,6 +420,35 @@ def test_on_attempt_called_for_truncated_complete_json():
             on_attempt=lambda p, r: attempts.append((p, r)),
         )
     assert attempts == [("prompt", '{"selected_option_id":')]
+
+
+def test_on_attempt_sees_each_complete_json_continuation_turn():
+    """Inner continuation HTTP turns must each reach on_attempt so the
+    transcript records the truncated first reply and the continuation call,
+    not only json.dumps of the merged parse."""
+
+    class _ContinuationClient(LLMClient):
+        def complete_json(self, prompt, **kwargs):
+            record_complete_json_turn(prompt, '{"selected_option_id":')
+            record_complete_json_turn(
+                "Please continue exactly from where you left off.",
+                ' "opt-a", "rationale": "x"}',
+            )
+            record_complete_json_raw('{"selected_option_id": "opt-a", "rationale": "x"}')
+            return {"selected_option_id": "opt-a", "rationale": "x"}
+
+    attempts: list[tuple[str, str]] = []
+    complete_validated(
+        _ContinuationClient(),
+        "prompt",
+        objective="test",
+        schema=FounderAnswer,
+        on_attempt=lambda p, r: attempts.append((p, r)),
+    )
+    assert len(attempts) == 2
+    assert attempts[0] == ("prompt", '{"selected_option_id":')
+    assert "continue exactly from where you left off" in attempts[1][0]
+    assert attempts[1][1] == ' "opt-a", "rationale": "x"}'
 
 
 def test_on_attempt_prefers_recorded_complete_json_raw_over_reserialized_dict():
