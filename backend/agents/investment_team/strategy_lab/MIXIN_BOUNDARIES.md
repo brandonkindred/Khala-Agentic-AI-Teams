@@ -146,13 +146,17 @@ than just move code, which is out of this issue's scope:
   single-file dataclasses and no glue-method involvement.
 - **`orchestrator_record_assembly.py`** (`RecordAssemblyMixin`) — building
   the final `StrategyLabRecord`. Also untouched.
-- **`_orchestrator_helpers.py`** — now holds only the 9 dataclasses that
-  are genuinely constructed in one mixin and consumed in another
-  (`_MarketDataFetch`, `_VerificationOutcome`, `_AlignmentLoopOutcome`,
-  `_DesignPersistContext`, `_DriftCollector`, `RefinementStallTracker`,
-  `_CodeSynthesisPhaseResult`, `_RefinementAlignmentResult`,
-  `_SynthesisLoopOutcome`), plus the dependency-free pure functions every
-  mixin needs and that cannot import from `orchestrator.py` or each other.
+- **`_orchestrator_helpers.py`** — now holds the 10 dataclasses that are
+  genuinely constructed in one mixin and consumed in another
+  (`_MarketDataFetch`, `_VerificationOutcome`, `_DesignAttemptState`,
+  `_AlignmentLoopOutcome`, `_DesignPersistContext`, `_DriftCollector`,
+  `RefinementStallTracker`, `_CodeSynthesisPhaseResult`,
+  `_RefinementAlignmentResult`, `_SynthesisLoopOutcome`), plus the
+  dependency-free pure functions every mixin needs and that cannot import
+  from `orchestrator.py` or each other. `_DesignAttemptState` is the shared
+  `spec`/`code`/`trades`/`metrics` base the dedup item above describes — it
+  is constructed directly (not just via its five subclasses) at two call
+  sites in `orchestrator_design.py` and two in `orchestrator_synthesis.py`.
 
 Pipeline behavior (design → synthesis → alignment → verification → record
 assembly) is unchanged by every step above — each was either a field-for-field

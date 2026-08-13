@@ -281,7 +281,7 @@ def _install_upstream(
     import types
 
     import unified_api.routes.agents as agents_route_mod
-    from agent_team_studio.agent_provisioning_team.sandbox import SandboxStatus
+    from agent_platform.sandbox import SandboxStatus
 
     handle = types.SimpleNamespace(status=SandboxStatus.WARM, url="http://sandbox.local", error=None, boot_ms=1)
     body_bytes = (
@@ -504,7 +504,7 @@ def _install_warming_sandbox(monkeypatch: pytest.MonkeyPatch) -> None:
     import types
 
     import unified_api.routes.agents as agents_route_mod
-    from agent_team_studio.agent_provisioning_team.sandbox import SandboxStatus
+    from agent_platform.sandbox import SandboxStatus
 
     handle = types.SimpleNamespace(status=SandboxStatus.WARMING, url=None, error=None, boot_ms=None)
 

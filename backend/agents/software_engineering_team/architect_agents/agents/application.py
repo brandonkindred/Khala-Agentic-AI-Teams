@@ -9,10 +9,9 @@ _root = Path(__file__).resolve().parent.parent
 if str(_root) not in sys.path:
     sys.path.insert(0, str(_root))
 
+from agents.prompts import APPLICATION_PROMPT  # noqa: E402
 from strands import Agent, tool  # noqa: E402
 from tools import document_writer_tool, file_read_tool, web_search_tool  # noqa: E402
-
-_PROMPT_PATH = _root / "prompts" / "application.md"
 
 
 @tool
@@ -32,10 +31,9 @@ def application_architect(
     Returns:
         Component/service diagram, API contract stubs, data flow, tech stack recommendation.
     """
-    prompt = _PROMPT_PATH.read_text(encoding="utf-8")
     agent = Agent(
         model=_get_sonnet_model(),
-        system_prompt=prompt,
+        system_prompt=APPLICATION_PROMPT,
         tools=[file_read_tool, web_search_tool, document_writer_tool],
         callback_handler=None,
     )

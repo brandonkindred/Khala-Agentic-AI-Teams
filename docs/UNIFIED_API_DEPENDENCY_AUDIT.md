@@ -42,7 +42,7 @@ at lifespan startup):
 - `agent_studio` (including its Temporal worker, started in-process)
 - Platform modules that aren't "teams" in `TEAM_CONFIGS` but are always mounted:
   `agent_console`, `agent_platform.registry`, `agent_cognition`, `team_assistant`, `llm_service`,
-  `agent_llm_tools_service`, `agent_team_studio.agent_provisioning_team.sandbox` (sandbox reaper + routes)
+  `agent_llm_tools_service`, `agent_platform.sandbox` (sandbox reaper + routes)
 
 Every other team (`software_engineering`, `investment`, `blogging`, `branding`,
 `market_research`, `soc2_compliance`, `social_marketing`, `accessibility_audit`,

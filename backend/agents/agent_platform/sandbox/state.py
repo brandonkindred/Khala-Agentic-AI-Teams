@@ -204,7 +204,7 @@ def sandbox_stack_template_path() -> Path:
     override = os.environ.get("AGENT_PROVISIONING_SANDBOX_STACK_TEMPLATE")
     if override:
         return Path(override)
-    return Path(__file__).resolve().parents[4] / "agent_sandbox_image" / "sandbox-stack.yml"
+    return Path(__file__).resolve().parents[3] / "agent_sandbox_image" / "sandbox-stack.yml"
 
 
 def sandbox_stack_assets_dir() -> Path:

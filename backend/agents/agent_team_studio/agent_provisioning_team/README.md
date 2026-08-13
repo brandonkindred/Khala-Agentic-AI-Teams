@@ -47,15 +47,11 @@ served by the worker started explicitly via
 entrypoint (`TEAM_TEMPORAL_WORKER_MODULE` / `TEAM_TEMPORAL_WORKER_FUNC`), with
 the API lifespan as a standalone-dev backstop (`uvicorn ...:app`).
 Importing the package does not start a worker.
-**Sandbox workflows/activities are the exception**: they are exported
-separately as `SANDBOX_WORKFLOWS` / `SANDBOX_ACTIVITIES` and are *not* part of
-`WORKFLOWS`/`ACTIVITIES` — they run on a dedicated `SANDBOX_TASK_QUEUE`, served
-only by a worker started explicitly from `unified_api/main.py`'s own lifespan
-(never by the team-service main-queue worker). This keeps the sandbox
-`Lifecycle` singleton's process-local state from being mutated by an activity
-dispatched into the wrong process — see `temporal/constants.py`'s
-`SANDBOX_TASK_QUEUE` docstring and `sandbox/README.md`'s "Durable execution"
-section for the full rationale.
+**Sandbox workflows/activities are not part of this team.** They live in
+`agent_platform.sandbox.temporal` (`SANDBOX_WORKFLOWS` / `SANDBOX_ACTIVITIES`)
+and run on `SANDBOX_TASK_QUEUE`, served only by a worker started from
+`unified_api/main.py`'s lifespan. This team's worker serves provisioning /
+deprovision only. See `agent_platform/sandbox/README.md`.
 
 ### Coverage — every team operation → its workflow/activity
 
@@ -64,12 +60,12 @@ section for the full rationale.
 | Provision | `POST /provision` | `AgentProvisioningWorkflow` | `setup` / `credentials` / per-tool `provision_tool` (parallel) / `audit` / `documentation` / `deliver` / `compensate` |
 | Resume / restart | `POST /provision/job/{id}/resume`·`/restart` | `AgentProvisioningWorkflow` (`skip_phases` + `prior_results`) | same |
 | Deprovision | `DELETE /environments/{agent_id}` | `AgentDeprovisioningWorkflow` | `deprovision_activity` |
-| Sandbox warm | `POST /api/agents/sandboxes/{id}/warm`, Agent Console invoke | `SandboxAcquireWorkflow` | `sandbox_acquire_activity` |
+| Sandbox warm | `POST /api/agents/sandboxes/{id}/warm`, invoke proxy | `SandboxAcquireWorkflow` | `sandbox_acquire_activity` |
 | Sandbox teardown | `DELETE /api/agents/sandboxes/{id}` | `SandboxTeardownWorkflow` | `sandbox_teardown_activity` |
 | Sandbox idle reaper | started once at API boot | `SandboxReaperWorkflow` (self-scheduling, fixed id, `continue_as_new`) | `sandbox_reap_activity` |
 
 Deprovision uses `execute_workflow_sync` (sync `DELETE /environments` handler).
-Sandbox dispatch branches on `is_temporal_enabled()` and uses
+Platform sandbox dispatch (`agent_platform.sandbox.temporal.dispatch`) branches on `is_temporal_enabled()` and uses
 `execute_workflow_async` (`async def` sandbox routes) so the API event loop is
 never blocked.
 

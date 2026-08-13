@@ -10,10 +10,9 @@ _root = Path(__file__).resolve().parent.parent
 if str(_root) not in sys.path:
     sys.path.insert(0, str(_root))
 
+from agents.prompts import SCRUTINEER_PROMPT  # noqa: E402
 from strands import Agent, tool  # noqa: E402
 from tools import document_writer_tool, file_read_tool, web_search_tool  # noqa: E402
-
-_PROMPT_PATH = _root / "prompts" / "scrutineer.md"
 
 
 @tool
@@ -37,10 +36,9 @@ def architecture_scrutineer(
     Returns:
         Scrutiny report with findings (CRITICAL/HIGH/MEDIUM/LOW), remediations, and re-run recommendations.
     """
-    prompt = _PROMPT_PATH.read_text(encoding="utf-8")
     agent = Agent(
         model=_get_opus_model(),
-        system_prompt=prompt,
+        system_prompt=SCRUTINEER_PROMPT,
         tools=[file_read_tool, web_search_tool, document_writer_tool],
         callback_handler=None,
     )
