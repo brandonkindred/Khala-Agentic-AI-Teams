@@ -1,7 +1,10 @@
 """Shared ``AgentManifest`` construction: helpers, constants, and canonical rules.
 
-This package is the single source for generated/studio manifest construction
-*before* call sites migrate onto it. :mod:`shared.manifests.builders` owns the
+This package is the single source for generated/studio manifest construction.
+Studio (``agent_platform.studio.registration``) and agentic provisioning
+(``agent_team_studio.agentic_team_provisioning.manifest_generation``)
+construct and project manifests through the helpers here.
+:mod:`shared.manifests.builders` owns the
 value-driven helper functions (``build_manifest``, ``clone_manifest``,
 ``io_schema``, ``project_manifest``). :mod:`shared.manifests.constants` owns
 the generated-agent entrypoint, invoke-schema refs, anatomy path, default
