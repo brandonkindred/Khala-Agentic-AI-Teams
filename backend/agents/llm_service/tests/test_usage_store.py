@@ -106,34 +106,119 @@ def test_write_rows_inserts_tuple(fake_db) -> None:
     assert params == [row]
 
 
-def test_fetch_summary_24h_and_all(fake_db) -> None:
-    fake_db._fetchone = [
+def test_fetch_summary_uses_one_snapshot_query(fake_db) -> None:
+    """Totals, by_model, and by_agent must come from one statement.
+
+    Separate SELECTs under READ COMMITTED can see different snapshots if the
+    flusher commits between them (total_calls then disagreeing with
+    sum(by_model[*].calls)). GROUPING SETS keeps one snapshot.
+    """
+    fake_db._fetchall = [
         {
-            "total_calls": 2,
-            "total_prompt_tokens": 30,
-            "total_completion_tokens": 10,
+            "bucket": "total",
+            "model": None,
+            "agent_key": None,
+            "calls": 2,
+            "prompt_tokens": 30,
+            "completion_tokens": 10,
             "total_tokens": 40,
             "error_count": 1,
-        }
+        },
+        {
+            "bucket": "model",
+            "model": "claude-opus-4-8",
+            "agent_key": None,
+            "calls": 2,
+            "prompt_tokens": 30,
+            "completion_tokens": 10,
+            "total_tokens": 40,
+            "error_count": 1,
+        },
+        {
+            "bucket": "agent",
+            "model": None,
+            "agent_key": "writer",
+            "calls": 2,
+            "prompt_tokens": 30,
+            "completion_tokens": 10,
+            "total_tokens": 40,
+            "error_count": 0,
+        },
     ]
+    summary = us.fetch_summary(window="24h")
+    assert len(fake_db.executed) == 1
+    sql, _params = fake_db.executed[0]
+    assert "GROUPING SETS" in sql
+    assert summary["total_calls"] == 2
+    assert summary["by_model"]["claude-opus-4-8"]["calls"] == 2
+    assert summary["by_agent"]["writer"]["calls"] == 2
+    assert summary["by_agent"]["writer"]["tokens"] == 40
+
+
+def test_fetch_summary_skips_blank_agent_and_missing_totals(fake_db) -> None:
+    """Blank agent_key rows are omitted; a missing totals bucket zeros the header."""
     fake_db._fetchall = [
-        [
-            {
-                "model": "claude-opus-4-8",
-                "calls": 1,
-                "prompt_tokens": 10,
-                "completion_tokens": 5,
-                "total_tokens": 15,
-            },
-            {
-                "model": "qwen3.5:cloud",
-                "calls": 1,
-                "prompt_tokens": 20,
-                "completion_tokens": 5,
-                "total_tokens": 25,
-            },
-        ],
-        [],  # by_agent query
+        {
+            "bucket": "model",
+            "model": "",
+            "agent_key": None,
+            "calls": 1,
+            "prompt_tokens": None,
+            "completion_tokens": None,
+            "total_tokens": None,
+            "error_count": None,
+        },
+        {
+            "bucket": "agent",
+            "model": None,
+            "agent_key": "",
+            "calls": 1,
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 4,
+            "error_count": 0,
+        },
+    ]
+    summary = us.fetch_summary(window="all")
+    assert summary["total_calls"] == 0
+    assert summary["total_tokens"] == 0
+    assert summary["by_model"][""]["calls"] == 1
+    assert summary["by_model"][""]["total_tokens"] == 0
+    assert summary["by_agent"] == {}
+
+
+def test_fetch_summary_24h_and_all(fake_db) -> None:
+    fake_db._fetchall = [
+        {
+            "bucket": "total",
+            "model": None,
+            "agent_key": None,
+            "calls": 2,
+            "prompt_tokens": 30,
+            "completion_tokens": 10,
+            "total_tokens": 40,
+            "error_count": 1,
+        },
+        {
+            "bucket": "model",
+            "model": "claude-opus-4-8",
+            "agent_key": None,
+            "calls": 1,
+            "prompt_tokens": 10,
+            "completion_tokens": 5,
+            "total_tokens": 15,
+            "error_count": 0,
+        },
+        {
+            "bucket": "model",
+            "model": "qwen3.5:cloud",
+            "agent_key": None,
+            "calls": 1,
+            "prompt_tokens": 20,
+            "completion_tokens": 5,
+            "total_tokens": 25,
+            "error_count": 1,
+        },
     ]
     summary = us.fetch_summary(window="24h")
     assert summary["window"] == "24h"
@@ -152,16 +237,18 @@ def test_fetch_summary_24h_and_all(fake_db) -> None:
     assert "ts >=" in cutoff_sql
 
     fake_db.executed.clear()
-    fake_db._fetchone = [
+    fake_db._fetchall = [
         {
-            "total_calls": 0,
-            "total_prompt_tokens": 0,
-            "total_completion_tokens": 0,
+            "bucket": "total",
+            "model": None,
+            "agent_key": None,
+            "calls": 0,
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
             "total_tokens": 0,
             "error_count": 0,
         }
     ]
-    fake_db._fetchall = [[], []]
     all_summary = us.fetch_summary(window="all")
     assert all_summary["window_hours"] == 0.0
     assert "ts >=" not in fake_db.executed[0][0]

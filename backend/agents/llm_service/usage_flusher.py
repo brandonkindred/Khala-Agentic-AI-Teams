@@ -16,6 +16,13 @@ Temporal worker starts so in-process activities are captured). The blogging
 service's custom entrypoint registers before ``_start_temporal_worker`` for
 the same reason.
 
+Agent-sandbox containers are intentionally **not** registered. Each sandbox
+runs on an isolated compose network with its own ephemeral ``khala_sandbox``
+database and no route to platform Postgres (see ``docker/README.md``).
+Registering here would write rows that vanish on ``compose down -v``; pointing
+the sandbox at the platform DSN would break that isolation. Sandbox LLM usage
+is therefore out of this ledger.
+
 Unlike the SE-only :mod:`software_engineering_team.shared.trace_flusher`, this
 flusher enqueues **every** team when Postgres is enabled (no opt-in flag, no
 ``job_id`` / team filter).

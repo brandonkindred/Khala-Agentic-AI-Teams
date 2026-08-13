@@ -202,7 +202,10 @@ def fetch_summary(*, window: str, team: str | None = None) -> dict:
         :data:`QUERY_FAILED_KEY` so the HTTP layer can report storage as
         unreachable. ``avg_latency_ms`` is always ``0.0`` (latency is not
         persisted). ``by_model`` values have ``calls``, ``prompt_tokens``,
-        ``completion_tokens``, ``total_tokens``.
+        ``completion_tokens``, ``total_tokens``. Totals, ``by_model``, and
+        ``by_agent`` come from one ``GROUPING SETS`` statement so they share
+        a single snapshot (Postgres ``READ COMMITTED`` would otherwise let
+        the background flusher commit between successive SELECT statements).
     """
     empty = empty_summary(window=window, team=team)
     if not is_postgres_enabled():
@@ -214,31 +217,22 @@ def fetch_summary(*, window: str, team: str | None = None) -> dict:
             if cur is None:
                 return _failed_summary(window=window, team=team)
             cur.execute(
-                "SELECT COUNT(*) AS total_calls, "
-                "COALESCE(SUM(prompt_tokens), 0) AS total_prompt_tokens, "
-                "COALESCE(SUM(completion_tokens), 0) AS total_completion_tokens, "
-                "COALESCE(SUM(total_tokens), 0) AS total_tokens, "
-                "COUNT(*) FILTER (WHERE status <> 'success') AS error_count "
-                f"FROM llm_call_records{where_sql}",
-                params,
-            )
-            totals = cur.fetchone() or {}
-            cur.execute(
-                "SELECT model, COUNT(*) AS calls, "
+                "SELECT CASE "
+                "WHEN GROUPING(model) = 0 AND GROUPING(agent_key) = 1 THEN 'model' "
+                "WHEN GROUPING(model) = 1 AND GROUPING(agent_key) = 0 THEN 'agent' "
+                "ELSE 'total' END AS bucket, "
+                "model, agent_key, "
+                "COUNT(*) AS calls, "
                 "COALESCE(SUM(prompt_tokens), 0) AS prompt_tokens, "
                 "COALESCE(SUM(completion_tokens), 0) AS completion_tokens, "
-                "COALESCE(SUM(total_tokens), 0) AS total_tokens "
-                f"FROM llm_call_records{where_sql} GROUP BY model",
+                "COALESCE(SUM(total_tokens), 0) AS total_tokens, "
+                "COUNT(*) FILTER (WHERE status <> 'success') AS error_count "
+                f"FROM llm_call_records{where_sql} "
+                "GROUP BY GROUPING SETS ((), (model), (agent_key))",
                 params,
             )
-            model_rows = cur.fetchall() or []
-            cur.execute(
-                "SELECT agent_key, COUNT(*) AS calls, "
-                "COALESCE(SUM(total_tokens), 0) AS tokens "
-                f"FROM llm_call_records{where_sql} GROUP BY agent_key",
-                params,
-            )
-            agent_rows = cur.fetchall() or []
+            rows = cur.fetchall() or []
+        totals = next((r for r in rows if r.get("bucket") == "total"), {})
         by_model = {
             (r["model"] or ""): {
                 "calls": int(r["calls"] or 0),
@@ -246,23 +240,24 @@ def fetch_summary(*, window: str, team: str | None = None) -> dict:
                 "completion_tokens": int(r["completion_tokens"] or 0),
                 "total_tokens": int(r["total_tokens"] or 0),
             }
-            for r in model_rows
+            for r in rows
+            if r.get("bucket") == "model"
         }
         by_agent = {
             (r["agent_key"] or ""): {
                 "calls": int(r["calls"] or 0),
-                "tokens": int(r["tokens"] or 0),
+                "tokens": int(r["total_tokens"] or 0),
             }
-            for r in agent_rows
-            if r.get("agent_key")
+            for r in rows
+            if r.get("bucket") == "agent" and r.get("agent_key")
         }
         return {
             "team": team or "all",
             "window": window,
             "window_hours": window_hours(window),
-            "total_calls": int(totals.get("total_calls") or 0),
-            "total_prompt_tokens": int(totals.get("total_prompt_tokens") or 0),
-            "total_completion_tokens": int(totals.get("total_completion_tokens") or 0),
+            "total_calls": int(totals.get("calls") or 0),
+            "total_prompt_tokens": int(totals.get("prompt_tokens") or 0),
+            "total_completion_tokens": int(totals.get("completion_tokens") or 0),
             "total_tokens": int(totals.get("total_tokens") or 0),
             "avg_latency_ms": 0.0,
             "error_count": int(totals.get("error_count") or 0),
