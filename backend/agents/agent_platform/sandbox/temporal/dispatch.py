@@ -1,7 +1,7 @@
 """Dispatch helpers that route sandbox lifecycle ops to Temporal.
 
 The unified-API sandbox routes / runner / reaper-startup call these instead of
-``agent_team_studio.agent_provisioning_team.sandbox`` directly when Temporal is enabled. Keeping
+``agent_platform.sandbox`` directly when Temporal is enabled. Keeping
 the branch here (rather than inside the sandbox package) preserves layering: the
 sandbox package stays unaware of Temporal, and these helpers depend on both.
 
@@ -19,28 +19,28 @@ import uuid
 
 from temporalio.exceptions import WorkflowAlreadyStartedError
 
-from agent_team_studio.agent_provisioning_team.sandbox import (
+from agent_platform.sandbox import (
     DockerUnavailableError,
     SandboxAcquireFailedError,
     UnknownAgentError,
 )
-from agent_team_studio.agent_provisioning_team.sandbox import (
+from agent_platform.sandbox import (
     acquire as _acquire_sandbox_inprocess,
 )
-from agent_team_studio.agent_provisioning_team.sandbox import (
+from agent_platform.sandbox import (
     teardown as _teardown_sandbox_inprocess,
 )
-from agent_team_studio.agent_provisioning_team.sandbox.provisioner import DockerError
-from agent_team_studio.agent_provisioning_team.sandbox.state import SandboxHandle
-from agent_team_studio.agent_provisioning_team.temporal.constants import (
+from agent_platform.sandbox.provisioner import DockerError
+from agent_platform.sandbox.state import SandboxHandle
+from agent_platform.sandbox.temporal.constants import (
     SANDBOX_ACQUIRE_CLIENT_TIMEOUT_S,
     SANDBOX_REAPER_INTERVAL_S,
     SANDBOX_REAPER_WORKFLOW_ID,
     SANDBOX_TASK_QUEUE,
     SANDBOX_TEARDOWN_CLIENT_TIMEOUT_S,
-    WORKFLOW_ID_PREFIX,
+    SANDBOX_WORKFLOW_ID_PREFIX,
 )
-from agent_team_studio.agent_provisioning_team.temporal.sandbox_workflows import (
+from agent_platform.sandbox.temporal.workflows import (
     SandboxAcquireWorkflow,
     SandboxReaperWorkflow,
     SandboxTeardownWorkflow,
@@ -109,7 +109,7 @@ async def acquire_sandbox_via_temporal(agent_id: str) -> SandboxHandle:
           acquire is not mistaken for a hung one.
     """
     assert agent_id, "agent_id must be non-empty"
-    workflow_id = f"{WORKFLOW_ID_PREFIX}sandbox-acquire-{agent_id}-{uuid.uuid4().hex[:8]}"
+    workflow_id = f"{SANDBOX_WORKFLOW_ID_PREFIX}sandbox-acquire-{agent_id}-{uuid.uuid4().hex[:8]}"
     try:
         dump = await execute_workflow_async(
             SandboxAcquireWorkflow.run,
@@ -166,7 +166,7 @@ async def teardown_sandbox_via_temporal(agent_id: str) -> None:
           mistaken for a hung one.
     """
     assert agent_id, "agent_id must be non-empty"
-    workflow_id = f"{WORKFLOW_ID_PREFIX}sandbox-teardown-{agent_id}-{uuid.uuid4().hex[:8]}"
+    workflow_id = f"{SANDBOX_WORKFLOW_ID_PREFIX}sandbox-teardown-{agent_id}-{uuid.uuid4().hex[:8]}"
     try:
         await execute_workflow_async(
             SandboxTeardownWorkflow.run,
@@ -188,8 +188,8 @@ def start_sandbox_reaper_workflow(
     """Start the singleton idle-reaper workflow (fixed id); no-op if already running.
 
     Preconditions:
-        * The Agent Provisioning sandbox Temporal worker
-          (:func:`agent_team_studio.agent_provisioning_team.temporal.worker.start_agent_provisioning_sandbox_temporal_worker_thread`)
+        * The platform sandbox Temporal worker
+          (:func:`agent_platform.sandbox.temporal.worker.start_agent_platform_sandbox_temporal_worker_thread`)
           is running, polling ``SANDBOX_TASK_QUEUE`` inside this same process.
     Postconditions:
         * Exactly one ``SandboxReaperWorkflow`` runs on ``SANDBOX_TASK_QUEUE``. A
