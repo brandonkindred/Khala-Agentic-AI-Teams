@@ -749,6 +749,9 @@ def test_design_attempt_happy_path_preserves_spec_code_trades_metrics_gates(
     Walk-forward is off, so verification stamps
     ``acceptance_reason`` to ``publication_disabled: walk_forward_enabled=False``
     — a split that persisted the pre-verification metrics would drop it.
+    Fetch provenance from ``_populated_fetch`` must land on the record
+    (``requested_symbols`` / ``fetched_symbols`` / ``data_provenance.provider_used``);
+    empty defaults mean the synthesis outputs were not threaded into assembly.
     """
     orch = StrategyLabOrchestrator()
     stub_design_loop(monkeypatch, orch, _spec_dict(), _CONFORMANT_CODE)
@@ -780,6 +783,9 @@ def test_design_attempt_happy_path_preserves_spec_code_trades_metrics_gates(
         record.backtest.result.acceptance_reason
         == "publication_disabled: walk_forward_enabled=False"
     )
+    assert record.backtest.requested_symbols == ["QQQ"]
+    assert record.backtest.fetched_symbols == ["QQQ"]
+    assert record.backtest.data_provenance.provider_used == {"QQQ": "stub"}
     assert record.analysis_narrative == "scripted narrative"
     assert record.strategy_rationale == "scripted rationale"
     assert _record_gate_snapshot(record.quality_gate_results) == _gate_snapshot(
