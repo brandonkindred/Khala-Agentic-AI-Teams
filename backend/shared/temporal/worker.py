@@ -276,7 +276,30 @@ def start_team_worker(
     return True
 
 
-def stop_team_worker(team: str, *, timeout_s: float = 5.0) -> None:
+def _clear_team_registry(team: str) -> None:
+    """Drop one team's worker-thread registry entries and shut its executor.
+
+    Preconditions:
+        - ``team`` is a team key (unknown keys are a no-op).
+        - The worker thread for ``team`` is not alive (callers must join first).
+    Postconditions:
+        - Thread, worker, loop, ready-event, and activity-executor slots for
+          ``team`` are removed. The executor is shut down if one existed.
+          Never raises.
+    """
+    _worker_threads.pop(team, None)
+    _workers.pop(team, None)
+    _worker_loops.pop(team, None)
+    _worker_ready.pop(team, None)
+    executor = _activity_executors.pop(team, None)
+    if executor is not None:
+        try:
+            executor.shutdown(wait=False, cancel_futures=True)
+        except Exception:  # pragma: no cover - ThreadPoolExecutor.shutdown does not raise
+            logger.debug("activity executor shutdown failed for team=%s", team, exc_info=True)
+
+
+def stop_team_worker(team: str, *, timeout_s: float = 5.0) -> bool:
     """Stop one in-process Temporal worker and join its daemon thread.
 
     Preconditions:
@@ -286,7 +309,10 @@ def stop_team_worker(team: str, *, timeout_s: float = 5.0) -> None:
     Postconditions:
         - ``Worker.shutdown()`` has been requested on that team's loop when a
           live worker exists; the daemon thread has been joined for at most
-          ``timeout_s`` seconds. Registry entries for the team are cleared.
+          ``timeout_s`` seconds.
+        - Returns True iff the worker thread is gone (or never existed). Registry
+          entries are cleared only in that case — a still-running thread keeps
+          its handles so a later wait can join it before storage teardown.
           Never raises.
     """
     assert team, "team must be a non-empty team key"
@@ -302,33 +328,27 @@ def stop_team_worker(team: str, *, timeout_s: float = 5.0) -> None:
             logger.warning("Temporal worker.shutdown failed for team=%s", team, exc_info=True)
     if thread is not None and thread.is_alive():
         thread.join(timeout=timeout_s)
-        if thread.is_alive():
-            logger.warning("Temporal worker thread did not exit for team=%s", team)
-    _worker_threads.pop(team, None)
-    _workers.pop(team, None)
-    _worker_loops.pop(team, None)
-    _worker_ready.pop(team, None)
-    executor = _activity_executors.pop(team, None)
-    if executor is not None:
-        try:
-            executor.shutdown(wait=False, cancel_futures=True)
-        except Exception:  # pragma: no cover - ThreadPoolExecutor.shutdown does not raise
-            logger.debug("activity executor shutdown failed for team=%s", team, exc_info=True)
+    if thread is not None and thread.is_alive():
+        logger.warning("Temporal worker thread did not exit for team=%s; keeping registry", team)
+        return False
+    _clear_team_registry(team)
+    return True
 
 
 def stop_all_team_workers(*, timeout_s: float = 5.0) -> None:
     """Stop every in-process Temporal worker started via :func:`start_team_worker`.
 
-    Used on Unified API graceful shutdown so LLM-producing activities finish
-    (or are cancelled by ``Worker.shutdown``) before the usage flusher
-    unregisters and Postgres closes.
+    Used on graceful shutdown so LLM-producing activities finish before the
+    usage flusher unregisters and Postgres closes. ``timeout_s`` bounds each
+    ``Worker.shutdown()`` wait; any thread that outlives that bound is joined
+    until it actually exits so in-flight usage can still be persisted.
 
     Preconditions:
-        - ``timeout_s`` >= 0 (applied per team).
+        - ``timeout_s`` >= 0 (applied per team for the shutdown request).
 
     Postconditions:
-        - Every registered team has been passed to :func:`stop_team_worker`.
-          Never raises.
+        - Every registered team has been asked to stop, and no worker thread
+          from this registry is still alive. Never raises.
     """
     assert timeout_s >= 0, "timeout_s must be non-negative"
     teams = list(dict.fromkeys([*_worker_threads, *_workers]))
@@ -337,3 +357,12 @@ def stop_all_team_workers(*, timeout_s: float = 5.0) -> None:
             stop_team_worker(team, timeout_s=timeout_s)
         except Exception:  # pragma: no cover - stop_team_worker never raises; defensive
             logger.warning("stop_team_worker failed for team=%s", team, exc_info=True)
+    for team, thread in list(_worker_threads.items()):
+        if thread.is_alive():
+            logger.warning(
+                "Temporal worker thread still running after shutdown timeout; waiting: team=%s",
+                team,
+            )
+            thread.join()
+        if not thread.is_alive():
+            _clear_team_registry(team)

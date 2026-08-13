@@ -88,6 +88,29 @@ def _shutdown_usage_flusher(team_key: str) -> None:
         logger.warning("%s llm usage flusher shutdown failed", team_key, exc_info=True)
 
 
+def _stop_in_process_temporal_workers(team_key: str) -> None:
+    """Stop in-process Temporal workers before usage-flusher / Postgres teardown.
+
+    Team-service containers start a Temporal worker from the generated wrapper.
+    Many teams (e.g. personal assistant) supply no ``on_shutdown`` hook, so this
+    factory teardown is the only place that can join that worker before the
+    usage observer unregisters and the shared pool closes.
+
+    Preconditions:
+        - ``team_key`` is a non-empty string used only in log messages.
+        - Safe to call when no workers are registered (no-op).
+    Postconditions:
+        - :func:`shared.temporal.worker.stop_all_team_workers` has been invoked.
+          Failures are logged and swallowed. Never raises.
+    """
+    try:
+        from shared.temporal.worker import stop_all_team_workers
+
+        stop_all_team_workers()
+    except Exception:
+        logger.warning("%s in-process Temporal worker shutdown failed", team_key, exc_info=True)
+
+
 def create_team_app(
     *,
     service_name: str,
@@ -116,10 +139,11 @@ def create_team_app(
           passing it raises ``ValueError``. ``title``/``version`` are named
           parameters, so duplicating them raises ``TypeError`` from Python itself.
         - ``on_startup`` runs after schema registration and LLM-usage-flusher
-          registration; ``on_shutdown`` runs before the usage flusher drains and
-          the pool is closed. Teardown (``on_shutdown`` + usage flush + pool
-          close) runs even if ``on_startup`` **or** ``on_shutdown`` raises, so
-          neither a startup nor a shutdown failure ever leaks the pool.
+          registration; ``on_shutdown`` runs before in-process Temporal workers
+          are stopped, the usage flusher drains, and the pool is closed.
+          Teardown (``on_shutdown`` + worker stop + usage flush + pool close)
+          runs even if ``on_startup`` **or** ``on_shutdown`` raises, so neither
+          a startup nor a shutdown failure ever leaks the pool.
     Postconditions:
         - :func:`init_otel` has been called and the returned app is OTel-
           instrumented; ``excluded_urls`` (when given) is forwarded to the
@@ -128,7 +152,8 @@ def create_team_app(
           lifespan registers every schema in ``postgres_schema`` plus
           ``extra_postgres_schemas`` on startup and closes the Postgres pool on
           wrapping the optional hooks. The same lifespan registers the process-local
-          LLM usage flusher after schema registration and shuts it down after
+          LLM usage flusher after schema registration and, on shutdown, stops
+          in-process Temporal workers, then shuts the flusher down after
           ``on_shutdown`` and before ``close_pool``. Pool close always runs after
           that drain, even when ``postgres_schema`` is ``None``, because the
           flusher may have opened the default shared pool. A single schema's
@@ -207,6 +232,9 @@ def create_team_app(
                 await _maybe_call(on_shutdown)
             except Exception:
                 logger.exception("%s on_shutdown hook failed", team_key)
+            # Stop Temporal workers before the usage observer unregisters and
+            # the pool closes, so in-flight LLM activities can still persist.
+            _stop_in_process_temporal_workers(team_key)
             # Drain before close_pool so the final INSERT can still use the pool.
             # Always close the pool: the usage flusher may have opened it even
             # when this app registered no postgres_schema.

@@ -170,14 +170,17 @@ def test_wrapper_registers_usage_flusher_before_temporal_worker() -> None:
     _compile(body)
     assert "register_usage_flusher" in body
     assert "atexit" in body
+    assert "stop_all_team_workers" in body
     flusher_idx = body.index("register_usage_flusher")
     worker_idx = body.index("_il.import_module('planning_team.temporal.worker')")
     assert flusher_idx < worker_idx
+    assert body.index("_satw()") < body.index("_usage_shutdown()")
 
     body_no_temporal = entrypoint.build_wrapper_body("coding_team", "coding_team.api.main", "app")
     _compile(body_no_temporal)
     assert "register_usage_flusher" in body_no_temporal
     assert "atexit" in body_no_temporal
+    assert "stop_all_team_workers" in body_no_temporal
 
 
 def test_wrapper_omits_temporal_worker_when_not_configured() -> None:

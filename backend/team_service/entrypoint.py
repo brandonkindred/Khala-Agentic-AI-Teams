@@ -286,14 +286,22 @@ def build_wrapper_body(
     # call made here (request handlers and Temporal activities). Register before
     # the Temporal worker starts so in-process activities are captured; the
     # function is idempotent with create_team_app's lifespan. atexit covers
-    # router-only teams that have no FastAPI lifespan shutdown.
+    # router-only teams that have no FastAPI lifespan shutdown: stop in-process
+    # Temporal workers first so in-flight LLM calls can still be persisted.
     body += (
         "try:\n"
         "    import atexit as _atexit\n"
         "    from llm_service.usage_flusher import register_usage_flusher as _ruf\n"
         "    from llm_service.usage_flusher import shutdown as _usage_shutdown\n"
+        "    def _usage_teardown():\n"
+        "        try:\n"
+        "            from shared.temporal.worker import stop_all_team_workers as _satw\n"
+        "            _satw()\n"
+        "        except Exception:\n"
+        "            _log.warning('in-process Temporal worker shutdown failed', exc_info=True)\n"
+        "        _usage_shutdown()\n"
         "    _ruf()\n"
-        "    _atexit.register(_usage_shutdown)\n"
+        "    _atexit.register(_usage_teardown)\n"
         "except Exception:\n"
         "    _log.warning('llm usage flusher registration failed', exc_info=True)\n"
     )

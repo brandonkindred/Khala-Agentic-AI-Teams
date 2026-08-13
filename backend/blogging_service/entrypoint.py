@@ -14,7 +14,8 @@ def _register_usage_flusher() -> None:
 
     This entrypoint starts the Temporal worker before uvicorn runs the FastAPI
     lifespan, so ``create_team_app``'s registration is too late for activities
-    that run in that window. ``atexit`` covers a crash before lifespan shutdown.
+    that run in that window. ``atexit`` covers a crash before lifespan shutdown
+    and stops in-process Temporal workers before draining usage.
     Idempotent with the team-app lifespan hook.
 
     Postconditions:
@@ -27,8 +28,17 @@ def _register_usage_flusher() -> None:
         from llm_service.usage_flusher import register_usage_flusher
         from llm_service.usage_flusher import shutdown as usage_flush_shutdown
 
+        def _teardown() -> None:
+            try:
+                from shared.temporal.worker import stop_all_team_workers
+
+                stop_all_team_workers()
+            except Exception:
+                logger.warning("in-process Temporal worker shutdown failed", exc_info=True)
+            usage_flush_shutdown()
+
         register_usage_flusher()
-        atexit.register(usage_flush_shutdown)
+        atexit.register(_teardown)
     except Exception:
         logger.warning("llm usage flusher registration failed", exc_info=True)
 
