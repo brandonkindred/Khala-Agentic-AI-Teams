@@ -626,53 +626,75 @@ def _is_expected_prompt_operand(node: ast.expr) -> bool:
     return isinstance(node, ast.Name) and node.id.startswith("_EXPECTED")
 
 
+def _snapshot_factory_from_assert_compare(node: ast.Compare) -> str | None:
+    """Return ``make_*`` if ``node`` is ``make_*(...).system_prompt == _EXPECTED_*``.
+
+    Preconditions:
+        ``node`` is an ``ast.Compare`` (the ``test`` of an ``ast.Assert``).
+    Postconditions:
+        The factory name when the comparison is an equality against an expected
+        prompt operand; ``None`` otherwise.
+    """
+    if not any(isinstance(op, ast.Eq) for op in node.ops):
+        return None
+    factory_name: str | None = None
+    saw_expected = False
+    for expr in [node.left, *node.comparators]:
+        extracted = _make_factory_from_system_prompt_expr(expr)
+        if extracted is not None:
+            factory_name = extracted
+        if _is_expected_prompt_operand(expr):
+            saw_expected = True
+    if factory_name is not None and saw_expected:
+        return factory_name
+    return None
+
+
 def _make_factories_with_prompt_snapshots(tree: ast.AST) -> set[str]:
-    """Return ``make_*`` names equality-compared to an expected prompt in a test.
+    """Return ``make_*`` names locked by an ``assert`` of ``system_prompt`` equality.
 
     A name-only registry is not a snapshot: adding ``make_foo`` to a set would
-    pass a completeness check without locking ``system_prompt``. This walks
-    ``test_*`` functions for ``make_*(...).system_prompt == _EXPECTED...``.
+    pass a completeness check without locking ``system_prompt``. A bare
+    comparison (assignment or expression) also cannot fail pytest. This walks
+    ``test_*`` functions for ``assert make_*(...).system_prompt == _EXPECTED...``.
 
     Preconditions:
         ``tree`` is a parsed Python module AST.
     Postconditions:
         The set of ``make_*`` names that appear in a ``test_*`` function as
-        ``make_*(...).system_prompt == <expected prompt>``. Empty when none match.
+        ``assert make_*(...).system_prompt == <expected prompt>``. Empty when
+        none match.
     """
     names: set[str] = set()
     for func in ast.walk(tree):
         if not isinstance(func, ast.FunctionDef) or not func.name.startswith("test_"):
             continue
         for node in ast.walk(func):
-            if not isinstance(node, ast.Compare):
+            if not isinstance(node, ast.Assert):
                 continue
-            if not any(isinstance(op, ast.Eq) for op in node.ops):
+            if not isinstance(node.test, ast.Compare):
                 continue
-            operands = [node.left, *node.comparators]
-            factory_name: str | None = None
-            saw_expected = False
-            for expr in operands:
-                extracted = _make_factory_from_system_prompt_expr(expr)
-                if extracted is not None:
-                    factory_name = extracted
-                if _is_expected_prompt_operand(expr):
-                    saw_expected = True
-            if factory_name is not None and saw_expected:
+            factory_name = _snapshot_factory_from_assert_compare(node.test)
+            if factory_name is not None:
                 names.add(factory_name)
     return names
 
 
 def test_prompt_snapshot_guard_requires_system_prompt_equality() -> None:
-    """A factory name with no ``system_prompt == _EXPECTED_*`` assertion is not covered.
+    """A factory is covered only by ``assert make_*(...).system_prompt == _EXPECTED_*``.
 
     Preconditions:
         The helpers parse a synthetic module AST.
     Postconditions:
-        A bare ``make_*()`` call is ignored; an equality against ``_EXPECTED_*``
-        is counted.
+        A bare ``make_*()`` call, a non-assert comparison, and an assignment of
+        that comparison are ignored; an ``assert`` equality is counted.
     """
     uncovered = ast.parse("def test_x():\n    make_new_agent()\n")
     assert _make_factories_with_prompt_snapshots(uncovered) == set()
+    assigned = ast.parse("def test_x():\n    ok = make_new_agent().system_prompt == _EXPECTED_X\n")
+    assert _make_factories_with_prompt_snapshots(assigned) == set()
+    expr = ast.parse("def test_x():\n    make_new_agent().system_prompt == _EXPECTED_X\n")
+    assert _make_factories_with_prompt_snapshots(expr) == set()
     covered = ast.parse("def test_x():\n    assert make_new_agent().system_prompt == _EXPECTED_X\n")
     assert _make_factories_with_prompt_snapshots(covered) == {"make_new_agent"}
 
@@ -685,8 +707,8 @@ def test_every_make_factory_has_a_prompt_snapshot() -> None:
         callables. This module contains the snapshot tests.
     Postconditions:
         Every discovered ``make_*`` name appears in a ``test_*`` function as
-        ``make_*(...).system_prompt == _EXPECTED...`` (parameterized factories
-        count once; variants are locked by those individual tests).
+        ``assert make_*(...).system_prompt == _EXPECTED...`` (parameterized
+        factories count once; variants are locked by those individual tests).
     """
     discovered = {
         name
