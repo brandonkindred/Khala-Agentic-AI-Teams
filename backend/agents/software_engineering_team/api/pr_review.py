@@ -270,6 +270,9 @@ _DIFF_FIRST_FOCUS_NOTE = (
     "6. New issues introduced by the change\n"
     "7. Does the change actually implement/fix the ticket/spec?\n"
     "8. Project style preferences\n"
+    "Line-number prefixes (`N| `) are a gutter, not source. Ignore them when judging "
+    "indentation. A continuation line indented 4 spaces past its opening `(` / `[` / `{` "
+    "is standard hanging indent (PEP 8 / ruff), not extra leading whitespace — do not flag it.\n"
     f"{_PRE_EXISTING_TAG_INSTRUCTIONS}"
 )
 

@@ -840,12 +840,15 @@ _TS_EXPORT_LIST_RE = re.compile(r"^[ \t]*export[ \t]*\{([^}]*)\}", re.MULTILINE)
 
 # Pre-numbered content (``FileSegment.pre_numbered`` / ``ChangeSurface`` blocks,
 # e.g. a diff-first submission's ``files=<surface.blocks>``) prefixes every line with its
-# original line number (``"42: def f():"``), which would otherwise shift every
-# line off column zero and make the anchored symbol patterns above match
-# nothing. Only a genuine ``N: `` prefix at the very start of a line matches
-# (never mid-line, e.g. inside a dict literal or docstring), so stripping it
-# is safe for already-plain content too -- there is nothing to strip there.
-_LINE_NUMBER_PREFIX_RE = re.compile(r"^\d+: ", re.MULTILINE)
+# original line number (``"42| def f():"``, or the legacy ``"42: def f():"``),
+# which would otherwise shift every line off column zero and make the anchored
+# symbol patterns above match nothing. Only a genuine numbered gutter at the
+# very start of a line matches (never mid-line, e.g. inside a dict literal or
+# docstring), so stripping it is safe for already-plain content too -- there is
+# nothing to strip there. Indented dict keys (``    1: value``) do not match:
+# they use ``: `` after a 4-space indent, whereas the live ``| `` gutter never
+# uses ``: ``, and the legacy ``N: `` gutter is column-zero only.
+_LINE_NUMBER_PREFIX_RE = re.compile(r"^(?:\d+: |[ ]*\d+\| )", re.MULTILINE)
 
 
 def _symbol_surface(content: str) -> List[str]:
@@ -862,7 +865,7 @@ def _symbol_surface(content: str) -> List[str]:
         - Pre-numbered content is de-numbered first (see
           ``_LINE_NUMBER_PREFIX_RE``) so each line's original column position
           -- and therefore top-level-vs-nested classification -- is unchanged
-          by whether the submission carried ``N: `` prefixes.
+          by whether the submission carried numbered ``N| `` / ``N: `` prefixes.
     """
     content = _LINE_NUMBER_PREFIX_RE.sub("", content)
     names: set[str] = set()

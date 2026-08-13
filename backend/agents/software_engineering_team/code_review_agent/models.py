@@ -167,7 +167,7 @@ class FileSegment(BaseModel):
         - A file's segments, in list order, partition its content exactly:
           concatenating their ``content`` reproduces the file.
         - Cited line numbers are always original-file absolute: ``pre_numbered``
-          segments already carry ``N: `` prefixes in their content (the coding
+          segments already carry ``N| `` prefixes in their content (the coding
           team's PR-diff hunks), and partial segments are *rendered* with their
           original line numbers prefixed (``prompt_content``), so the reviewer
           never reports snippet-relative numbers that would need re-anchoring.
@@ -182,7 +182,7 @@ class FileSegment(BaseModel):
     total_lines: int = Field(default=1, description="Total line count of the original file")
     pre_numbered: bool = Field(
         default=False,
-        description="True when content lines carry original line-number prefixes (e.g. '123: code')",
+        description="True when content lines carry original line-number prefixes (e.g. '123| code')",
     )
 
     @property
@@ -212,7 +212,7 @@ class FileSegment(BaseModel):
         """The content as rendered into the review prompt.
 
         Partial segments are prefixed with their original line numbers
-        (``"50: code"``) so cited lines are absolute by construction — a
+        (``"50| code"``) so cited lines are absolute by construction — a
         snippet-relative citation and an absolute one are indistinguishable
         when the segment's absolute range overlaps ``[1, line_count]``, so the
         numbering convention removes the ambiguity instead of guessing.
@@ -220,12 +220,17 @@ class FileSegment(BaseModel):
         Postconditions:
             - Whole files and ``pre_numbered`` segments (which already carry
               prefixes) render verbatim as ``content``.
+            - Partial segments use a right-aligned ``N| `` gutter whose width
+              is the last line number in the segment, so hanging indents stay
+              visually 4 columns across 9→10 / 99→100.
         """
         if self.pre_numbered or not self.is_partial:
             return self.content
-        return "\n".join(
-            f"{self.start_line + i}: {line}" for i, line in enumerate(self.content.splitlines())
-        )
+        lines = self.content.splitlines()
+        if not lines:
+            return self.content
+        width = len(str(self.start_line + len(lines) - 1))
+        return "\n".join(f"{self.start_line + i:>{width}}| {line}" for i, line in enumerate(lines))
 
     @model_validator(mode="after")
     def _validate_segment(self) -> "FileSegment":
@@ -816,7 +821,7 @@ class CodeReviewInput(BaseModel):
     pre_numbered: bool = Field(
         default=False,
         description="True when every content line already carries its original line number "
-        "as an 'N: ' prefix (the coding team's PR-diff hunks); issue lines are then "
+        "as an 'N| ' prefix (the coding team's PR-diff hunks); issue lines are then "
         "reported verbatim instead of re-anchored.",
     )
     full_content: Optional[Dict[str, str]] = Field(
