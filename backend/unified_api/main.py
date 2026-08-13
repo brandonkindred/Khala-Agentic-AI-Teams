@@ -583,7 +583,7 @@ def _start_agent_studio_temporal_worker() -> None:
     share this process's :class:`AgentStudioService` singleton. Gated on
     ``UNIFIED_API_AGENT_STUDIO_TEMPORAL_WORKER`` and on the team being enabled.
     Authoring CRUD (start conversation / send message / clone / save) no longer
-    requires this worker: ``agent_team_studio.agent_studio.temporal.dispatch``
+    requires this worker: ``agent_platform.studio.temporal.dispatch``
     falls back to calling :class:`AgentStudioService` directly, in-process, when
     Temporal isn't configured — so a missing ``TEMPORAL_ADDRESS`` here is a
     (fully-functional) mode switch, not a degraded state. The worker is a daemon
@@ -605,7 +605,7 @@ def _start_agent_studio_temporal_worker() -> None:
     if not TEAM_CONFIGS["agent_studio"].enabled:
         return
     try:
-        from agent_team_studio.agent_studio.temporal.worker import start_agent_studio_temporal_worker_thread
+        from agent_platform.studio.temporal.worker import start_agent_studio_temporal_worker_thread
 
         started = start_agent_studio_temporal_worker_thread()
     except Exception:
@@ -682,7 +682,7 @@ async def lifespan(app: FastAPI):  # noqa: PLR0915 - linear startup orchestrator
     # to run unconditionally regardless of config.
     if TEAM_CONFIGS["agent_studio"].enabled:
         try:
-            from agent_team_studio.agent_studio.postgres import SCHEMA as AGENT_STUDIO_SCHEMA
+            from agent_platform.studio.postgres import SCHEMA as AGENT_STUDIO_SCHEMA
             from shared.postgres import register_team_schemas
 
             register_team_schemas(AGENT_STUDIO_SCHEMA)
@@ -982,7 +982,7 @@ if TEAM_CONFIGS["product_delivery"].enabled:
 # unified API at startup.
 if TEAM_CONFIGS["agent_studio"].enabled:
     try:
-        from unified_api.routes.agent_studio import router as agent_studio_router
+        from agent_platform.studio import router as agent_studio_router
     except Exception:  # pragma: no cover - defensive import-failure guard
         logger.warning("Failed to import agent_studio routes; skipping mount", exc_info=True)
     else:
