@@ -22,15 +22,17 @@ worker and the per-invoke sandbox resolve it — not just this process. Local-on
 
 from __future__ import annotations
 
-from agent_platform.registry.manifest_projection import hash_suffix, revalidate, slug
-from agent_platform.registry.models import AgentManifest, AgentStateSpec, IOSchema, SourceInfo
-from agent_team_studio.manifest_shared import (
+from agent_platform.registry.manifest_projection import hash_suffix, slug
+from agent_platform.registry.models import AgentManifest, AgentStateSpec, SourceInfo
+from shared.manifests import (
     AGENT_ANATOMY_REF,
     GENERATED_AGENT_ENTRYPOINT,
     GENERATED_AGENT_INPUT_REF,
     GENERATED_AGENT_OUTPUT_REF,
+    build_manifest,
     default_cognition_block,
-    strip_marker_tags,
+    io_schema,
+    project_manifest,
 )
 
 from .agent_states import EXECUTING_KEY, STATE_ORDER, normalize_agent_states
@@ -62,32 +64,6 @@ def studio_agent_id(name: str) -> str:
     # Non-cryptographic: a short, stable suffix that disambiguates equal slugs.
     digest = hash_suffix(name, 8)
     return f"{STUDIO_TEAM}.{slug(name)}-{digest}"
-
-
-def _io_schema(
-    inline: dict | None,
-    *,
-    schema_ref: str,
-    ref_description: str,
-    inline_description: str,
-) -> IOSchema:
-    """Build an :class:`IOSchema` advertising an authored inline schema when present.
-
-    Preconditions:
-        * ``schema_ref`` is a non-empty dotted ref (the shared-entrypoint fallback).
-    Postconditions:
-        * Returns ``IOSchema(inline_schema=inline, ...)`` when ``inline is not None``
-          (an authored schema was supplied — including the empty schema ``{}``, which
-          is a valid JSON Schema meaning "accept anything"), else
-          ``IOSchema(schema_ref=schema_ref, ...)``. Only an *omitted* schema (``None``)
-          falls back to the ref; this matches the presence test (``inline_schema is
-          not None``) used by the summary flags, the ``/schema/{input|output}`` route,
-          and :func:`clone_from_manifest`, so an authored ``{}`` round-trips instead of
-          being silently replaced by the generic ref.
-    """
-    if inline is not None:
-        return IOSchema(inline_schema=inline, description=inline_description)
-    return IOSchema(schema_ref=schema_ref, description=ref_description)
 
 
 def _manifest_states(definition: AgentDefinition) -> list[AgentStateSpec]:
@@ -137,20 +113,20 @@ def build_studio_agent_manifest(definition: AgentDefinition) -> AgentManifest:
     """
     if not definition.name.strip():
         raise ValueError("build_studio_agent_manifest: name must be non-empty")
-    manifest = AgentManifest(
+    return build_manifest(
         id=studio_agent_id(definition.name),
         team=STUDIO_TEAM,
         name=definition.name,
         summary=definition.role or f"Studio agent {definition.name}",
         description=definition.description,
         tags=sorted({"studio", *definition.tags}),
-        inputs=_io_schema(
+        inputs=io_schema(
             definition.input_schema,
             schema_ref=GENERATED_AGENT_INPUT_REF,
             ref_description="Roster metadata + user message (shared generated-agent entrypoint).",
             inline_description="Authored input schema.",
         ),
-        outputs=_io_schema(
+        outputs=io_schema(
             definition.output_schema,
             schema_ref=GENERATED_AGENT_OUTPUT_REF,
             ref_description="The agent's response text.",
@@ -160,8 +136,6 @@ def build_studio_agent_manifest(definition: AgentDefinition) -> AgentManifest:
         states=_manifest_states(definition),
         source=SourceInfo(entrypoint=GENERATED_AGENT_ENTRYPOINT, anatomy_ref=AGENT_ANATOMY_REF),
     )
-    # Round-trip so the returned object is guaranteed fully validated and serializable.
-    return revalidate(manifest)
 
 
 def clone_from_manifest(manifest: AgentManifest) -> AgentDefinition:
@@ -185,12 +159,13 @@ def clone_from_manifest(manifest: AgentManifest) -> AgentDefinition:
     seeded states via the ``AgentDefinition`` normalizer, so every refine draft has
     exactly the three states.
 
+    Preconditions:
+        * ``manifest`` is a validated :class:`AgentManifest`.
     Postconditions:
         * ``mode == "refine"`` and ``cloned_from == manifest.id``.
         * The returned definition has exactly three operating states.
     """
-    tools = list(manifest.cognition.tools) if manifest.cognition else []
-    tags = strip_marker_tags(manifest.tags, _PLUMBING_TAGS)
+    projected = project_manifest(manifest, strip_tags=_PLUMBING_TAGS)
     # Keep only canonical keys: AgentState.key is a Literal, so a manifest carrying
     # an unsupported (permissive-str) key would raise here and surface as a 500.
     # Normalize up front (not just left to the AgentDefinition field validator) so
@@ -198,27 +173,25 @@ def clone_from_manifest(manifest: AgentManifest) -> AgentDefinition:
     # manifest carries no (or an incomplete) states list.
     states = normalize_agent_states(
         [
-            AgentState(key=s.key, label=s.label, system_prompt=s.system_prompt)
-            for s in manifest.states
-            if s.key in _KNOWN_STATE_KEYS
+            AgentState(key=s["key"], label=s["label"], system_prompt=s["system_prompt"])
+            for s in projected["states"]
+            if s["key"] in _KNOWN_STATE_KEYS
         ]
     )
     # Avoid a confusing "name.copy.copy" when cloning an already-cloned name.
     # Per-team disambiguation (".copy-2", …) is the frontend's job — it knows the
     # team's existing names; the backend only avoids the doubled suffix here.
-    name = manifest.name if manifest.name.endswith(".copy") else f"{manifest.name}.copy"
-    input_schema = manifest.inputs.inline_schema if manifest.inputs else None
-    output_schema = manifest.outputs.inline_schema if manifest.outputs else None
+    name = projected["name"] if projected["name"].endswith(".copy") else f"{projected['name']}.copy"
     system_prompt = next((s.system_prompt for s in states if s.key == EXECUTING_KEY), "")
     return AgentDefinition(
         name=name,
-        role=manifest.summary,
-        description=manifest.description,
-        tags=tags,
-        tools=tools,
+        role=projected["summary"],
+        description=projected["description"],
+        tags=projected["tags"],
+        tools=projected["tools"],
         system_prompt=system_prompt,
-        input_schema=input_schema,
-        output_schema=output_schema,
+        input_schema=projected["input_schema"],
+        output_schema=projected["output_schema"],
         states=states,
         mode="refine",
         cloned_from=manifest.id,
