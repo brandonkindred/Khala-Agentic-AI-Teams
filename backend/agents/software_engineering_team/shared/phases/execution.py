@@ -437,8 +437,10 @@ def _commit_coding_write(
         :class:`_MicrotaskRollback` snapshotting the pre-write state, and
         ``all_files`` updated in place. On an unsafe initial write,
         :func:`write_microtask_output_or_fail` has already marked ``mt``
-        ``REVIEW_FAILED`` and rolled back ``all_files`` / the worktree; no extra
-        progress tick is fired for this case, and ``None`` is returned.
+        ``REVIEW_FAILED`` and rolled back ``all_files`` / the worktree, and
+        ``None`` is returned. The caller emits the terminal ``completed``
+        progress tick so ``_serialize_progress`` can drop this index from
+        its active set.
     """
     microtask_rollback = _MicrotaskRollback()
     if not _locked_write_and_merge(
@@ -674,7 +676,13 @@ def _run_one_gated_microtask(
         Generation runs unlocked; the first write through review, docs, and
         rollback holds ``worktree_lock`` so siblings cannot interleave
         snapshot/write/rollback, introduce colliding new paths, or run
-        repo-wide build/lint against an in-progress sibling worktree.
+        repo-wide build/lint against an in-progress sibling worktree. After
+        the ``coding`` progress tick, a terminal ``completed`` tick always
+        fires so ``_serialize_progress`` can drop this index from its
+        active set — including on an unsafe initial write and when
+        ``review_failed_error_cls`` is raised. ``_generate_coding_phase``
+        already fires that tick on a coding exception, so this function
+        returns without a second one.
     """
     deps_met = all(d in completed_ids for d in mt.depends_on)
     if not deps_met:
@@ -743,52 +751,26 @@ def _run_one_gated_microtask(
     # and rollback hold ``worktree_lock``: review tools (build/lint) observe
     # the whole repo, and review/docs can introduce paths that were not in
     # the initial generation set, so per-file locks on those initial keys
-    # are not enough.
-    with worktree_lock:
-        coding_result = _commit_coding_write(
-            file_locks=file_locks,
-            repo_path=repo_path,
-            microtask_files=microtask_files,
-            mt=mt,
-            task_id=task_id,
-            review_failed_ids=review_failed_ids,
-            all_files=all_files,
-            microtask_status=microtask_status,
-        )
-        if coding_result is None:
-            return
-        microtask_files, microtask_rollback = coding_result
+    # are not enough. The terminal ``completed`` tick lives in ``finally`` so
+    # an unsafe initial write or a stop-on-review-failure raise still clears
+    # this index from ``_serialize_progress``'s active set.
+    try:
+        with worktree_lock:
+            coding_result = _commit_coding_write(
+                file_locks=file_locks,
+                repo_path=repo_path,
+                microtask_files=microtask_files,
+                mt=mt,
+                task_id=task_id,
+                review_failed_ids=review_failed_ids,
+                all_files=all_files,
+                microtask_status=microtask_status,
+            )
+            if coding_result is None:
+                return
+            microtask_files, microtask_rollback = coding_result
 
-        phase_failed, microtask_files, total_cycles = _run_review_cycles(
-            gate_config=gate_config,
-            llm=llm,
-            task=task,
-            task_id=task_id,
-            mt=mt,
-            microtask_files=microtask_files,
-            repo_path=repo_path,
-            deps=deps,
-            review_context=review_context,
-            config=config,
-            planning_result=planning_result,
-            all_files=all_files,
-            review_failed_ids=review_failed_ids,
-            microtask_rollback=microtask_rollback,
-            microtask_status=microtask_status,
-            review_result_cls=review_result_cls,
-            review_failed_error_cls=review_failed_error_cls,
-            max_total_cycles=max_total_cycles,
-            code_review_retry_cap=code_review_retry_cap,
-            progress_callback=progress_callback,
-            current_idx=current_idx,
-            completed_ids=completed_ids,
-            total=total,
-            detail_cb=_detail_cb,
-            file_locks=file_locks,
-        )
-
-        if not phase_failed:
-            _run_documentation_phase(
+            phase_failed, microtask_files, total_cycles = _run_review_cycles(
                 gate_config=gate_config,
                 llm=llm,
                 task=task,
@@ -797,22 +779,51 @@ def _run_one_gated_microtask(
                 microtask_files=microtask_files,
                 repo_path=repo_path,
                 deps=deps,
-                tool_agent_kind=tool_agent_kind,
+                review_context=review_context,
+                config=config,
+                planning_result=planning_result,
                 all_files=all_files,
+                review_failed_ids=review_failed_ids,
+                microtask_rollback=microtask_rollback,
                 microtask_status=microtask_status,
-                completed_ids=completed_ids,
-                total_cycles=total_cycles,
+                review_result_cls=review_result_cls,
+                review_failed_error_cls=review_failed_error_cls,
+                max_total_cycles=max_total_cycles,
+                code_review_retry_cap=code_review_retry_cap,
                 progress_callback=progress_callback,
                 current_idx=current_idx,
+                completed_ids=completed_ids,
                 total=total,
                 detail_cb=_detail_cb,
                 file_locks=file_locks,
             )
 
-    if progress_callback:
-        progress_callback(
-            current_idx, len(completed_ids), total, mt.title or mt.id, "completed", ""
-        )
+            if not phase_failed:
+                _run_documentation_phase(
+                    gate_config=gate_config,
+                    llm=llm,
+                    task=task,
+                    task_id=task_id,
+                    mt=mt,
+                    microtask_files=microtask_files,
+                    repo_path=repo_path,
+                    deps=deps,
+                    tool_agent_kind=tool_agent_kind,
+                    all_files=all_files,
+                    microtask_status=microtask_status,
+                    completed_ids=completed_ids,
+                    total_cycles=total_cycles,
+                    progress_callback=progress_callback,
+                    current_idx=current_idx,
+                    total=total,
+                    detail_cb=_detail_cb,
+                    file_locks=file_locks,
+                )
+    finally:
+        if progress_callback:
+            progress_callback(
+                current_idx, len(completed_ids), total, mt.title or mt.id, "completed", ""
+            )
 
 
 def _run_one_ungated_microtask(

@@ -598,9 +598,40 @@ def test_coding_exception_marks_failed(tmp_path):
 
 def test_unsafe_initial_write_marks_review_failed(tmp_path):
     mt = _microtask()
-    _run(_make_gate_config(coder=_coder_unsafe), [mt], tmp_path, review_config=_config())
+    calls: List[tuple] = []
+    _run(
+        _make_gate_config(coder=_coder_unsafe),
+        [mt],
+        tmp_path,
+        review_config=_config(),
+        progress=lambda *a: calls.append(a),
+    )
 
     assert mt.status == MS.REVIEW_FAILED
+    assert calls[-1][4] == "completed"
+
+
+def test_unsafe_initial_write_does_not_block_sibling_completed_progress(tmp_path):
+    """A rejected initial write must still emit completed so a sibling can finish progress."""
+    calls: List[tuple] = []
+
+    def coder(**kwargs: Any) -> Dict[str, str]:
+        if kwargs["microtask"].id == "mt-1":
+            return {"../evil.py": "x"}
+        return {"src/mt-2.py": "print(2)\n"}
+
+    mt1, mt2 = _microtask("mt-1"), _microtask("mt-2")
+    _run(
+        _make_gate_config(coder=coder),
+        [mt1, mt2],
+        tmp_path,
+        review_config=_config(),
+        progress=lambda *a: calls.append(a),
+    )
+
+    assert mt1.status == MS.REVIEW_FAILED
+    assert mt2.status == MS.COMPLETED
+    assert calls[-1][4] == "completed"
 
 
 # ---------------------------------------------------------------------------
