@@ -740,6 +740,9 @@ def test_design_attempt_happy_path_preserves_spec_code_trades_metrics_gates(
     The thin ``_run_design_attempt`` orchestrator must thread the
     synthesis-loop spec/code/trades/metrics onto the assembled record
     together with the pre-synthesis + synthesis + verification gates.
+    Walk-forward is off, so verification stamps
+    ``acceptance_reason`` to ``publication_disabled: walk_forward_enabled=False``
+    — a split that persisted the pre-verification metrics would drop it.
     """
     orch = StrategyLabOrchestrator()
     stub_design_loop(monkeypatch, orch, _spec_dict(), _CONFORMANT_CODE)
@@ -767,6 +770,10 @@ def test_design_attempt_happy_path_preserves_spec_code_trades_metrics_gates(
     assert record.original_code == _CONFORMANT_CODE
     assert _trade_snapshot(record.backtest.trades) == expected_trades
     assert _metrics_snapshot(record.backtest.result) == expected_metrics
+    assert (
+        record.backtest.result.acceptance_reason
+        == "publication_disabled: walk_forward_enabled=False"
+    )
     assert record.analysis_narrative == "scripted narrative"
     assert record.strategy_rationale == "scripted rationale"
     assert _record_gate_snapshot(record.quality_gate_results) == _gate_snapshot(
