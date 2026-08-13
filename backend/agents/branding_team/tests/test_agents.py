@@ -10,28 +10,44 @@ rather than silently drifting.
 from __future__ import annotations
 
 from branding_team.agents import (
+    make_approval_workflow_designer,
     make_archetype_analyst,
+    make_asset_wiki_planner,
     make_audience_segmenter,
+    make_brand_architecture_builder,
+    make_brand_experience_principler,
+    make_brand_in_action_illustrator,
+    make_brand_rules_codifier,
     make_color_system_builder,
     make_converge_decider,
     make_creative_director,
     make_design_system_codifier,
     make_differentiation_mapper,
     make_discovery_auditor,
+    make_email_guide,
+    make_events_guide,
+    make_evolution_framer,
     make_iconography_director,
+    make_internal_guide,
+    make_kpi_designer,
     make_logo_specifier,
     make_message_mapper,
     make_moodboard_conceptualist,
+    make_ownership_definer,
+    make_partnerships_guide,
     make_persona_builder,
     make_photography_video_director,
     make_positioning_synthesizer,
     make_purpose_vision_writer,
+    make_social_guide,
     make_storyteller,
     make_tagline_writer,
+    make_training_planner,
     make_typography_builder,
     make_values_articulator,
     make_voice_principles_drafter,
     make_voice_tone_builder,
+    make_website_guide,
 )
 
 _EXPECTED_PURPOSE_VISION_PROMPT = (
@@ -229,6 +245,127 @@ _EXPECTED_TYPOGRAPHY_BUILDER_PROMPT = (
     "1. typography_system — role, font_family, weight_range, usage_notes"
 )
 
+_EXPECTED_BRAND_EXPERIENCE_PRINCIPLER_PROMPT = (
+    "You are a Brand Experience Architect. Define:\n"
+    "1. brand_experience_principles — 3-5 principles that govern every brand touchpoint\n"
+    "2. signature_moments — 3-5 key moments in the customer journey that should feel "
+    "distinctly on-brand\n"
+    "3. sensory_elements — 2-4 sensory cues (sound, texture, scent, etc.) if applicable"
+)
+
+_EXPECTED_BRAND_ARCHITECTURE_BUILDER_PROMPT = (
+    "You are a Brand Architecture Specialist. Define:\n"
+    "1. brand_architecture — rules for parent brand, sub-brands, product lines. Each "
+    "with: entity, relationship, naming_convention, visual_treatment\n"
+    "2. naming_conventions — 3-5 naming rules\n"
+    "3. terminology_glossary — 5-10 key terms with definitions (dict)"
+)
+
+_EXPECTED_OWNERSHIP_DEFINER_PROMPT = (
+    "You are a Brand Ownership Definer. Define:\n"
+    "1. ownership_model — who owns the brand (paragraph)\n"
+    "2. decision_authority — a dict mapping decision types to responsible roles "
+    "(e.g. 'logo_changes': 'Brand Director', 'campaign_messaging': 'Marketing Lead')"
+)
+
+_EXPECTED_APPROVAL_WORKFLOW_DESIGNER_PROMPT = (
+    "You are an Approval Workflow Designer. Define:\n"
+    "1. approval_workflows — 3-5 workflows, each with: asset_type, approvers (list), "
+    "sla, escalation_path\n"
+    "2. agency_briefing_protocols — 3-5 protocols for briefing external agencies"
+)
+
+_EXPECTED_ASSET_WIKI_PLANNER_PROMPT = (
+    "You are an Asset & Wiki Planner. Define:\n"
+    "1. asset_management_guidance — 3-5 guidelines for managing brand assets\n"
+    "2. wiki_backlog — 4-6 wiki entries, each with: title, summary, owners (list), "
+    "update_cadence. Cover: Brand North Star, Voice Playbook, Design System, Brand "
+    "Review Intake, Channel Playbook, Governance Charter."
+)
+
+_EXPECTED_KPI_DESIGNER_PROMPT = (
+    "You are a Brand KPI Designer. Define:\n"
+    "1. brand_health_kpis — 4-6 KPIs, each with: metric, measurement_method, target, "
+    "review_frequency\n"
+    "2. tracking_methodology — paragraph describing the measurement approach\n"
+    "3. review_trigger_points — 3-5 events that should trigger a brand health review"
+)
+
+_EXPECTED_EVOLUTION_FRAMER_PROMPT = (
+    "You are a Brand Evolution Framer. Define:\n"
+    "1. evolution_framework — paragraph describing how the brand evolves over time\n"
+    "2. version_control_cadence — how often the brand system is formally reviewed "
+    "and versioned"
+)
+
+
+# Dash-colon field bullets (`- channel: 'website'`) become numbered em-dash
+# lines; ``Context: {description}`` is the spec closing sentence. Same
+# conversion MoodBoardConceptualist used for its parameterized variants.
+def _expected_channel_guide_prompt(channel: str, description: str) -> str:
+    return (
+        f"You are a {channel.title()} Channel Specialist. Define guidelines for the "
+        f"{channel} channel:\n"
+        f"1. channel — '{channel}'\n"
+        f"2. strategy — overall approach for this channel\n"
+        f"3. dos — 3-4 best practices\n"
+        f"4. donts — 3-4 things to avoid\n"
+        f"5. content_types — 3-5 recommended content formats\n"
+        f"6. frequency_guidance — recommended cadence\n"
+        f"Context: {description}"
+    )
+
+
+_EXPECTED_WEBSITE_GUIDE_PROMPT = _expected_channel_guide_prompt(
+    "website", "Company website, landing pages, product pages."
+)
+_EXPECTED_SOCIAL_GUIDE_PROMPT = _expected_channel_guide_prompt(
+    "social", "Social media platforms (LinkedIn, Twitter, Instagram)."
+)
+_EXPECTED_EMAIL_GUIDE_PROMPT = _expected_channel_guide_prompt(
+    "email", "Email marketing, newsletters, transactional emails."
+)
+_EXPECTED_EVENTS_GUIDE_PROMPT = _expected_channel_guide_prompt(
+    "events", "Conferences, webinars, meetups, trade shows."
+)
+_EXPECTED_PARTNERSHIPS_GUIDE_PROMPT = _expected_channel_guide_prompt(
+    "partnerships", "Co-branding, sponsorships, partner marketing."
+)
+_EXPECTED_INTERNAL_GUIDE_PROMPT = _expected_channel_guide_prompt(
+    "internal", "Internal comms, employee branding, onboarding."
+)
+
+# Nested dash-colon bullets (`- context: ...`) collapsed into the
+# ``brand_in_action`` field description, matching Phase 3 logo/color nested
+# member style. Trailing newline dropped (renderer has none).
+_EXPECTED_BRAND_IN_ACTION_ILLUSTRATOR_PROMPT = (
+    "You are a Brand-in-Action Illustrator. Create 3-5 applied examples showing correct "
+    "vs incorrect brand usage:\n"
+    "1. brand_in_action — each example has: context (where this applies, e.g. 'sales deck "
+    "header'), correct_example (the on-brand version), incorrect_example (the off-brand "
+    "version), rationale (why the correct version is better)"
+)
+
+# Original was a single unnumbered sentence; the renderer requires a numbered
+# field line, so ``Define training_onboarding_plan —`` becomes ``Define:`` plus
+# ``1. training_onboarding_plan —``.
+_EXPECTED_TRAINING_PLANNER_PROMPT = (
+    "You are a Training Planner. Define:\n"
+    "1. training_onboarding_plan — 4-6 training initiatives for onboarding new team "
+    "members and maintaining brand literacy."
+)
+
+# ``produce brand_guidelines — ...`` split into a numbered field; the ``Cover:``
+# clause moves to the spec closing sentence.
+_EXPECTED_BRAND_RULES_CODIFIER_PROMPT = (
+    "You are a Brand Rules Codifier. Using the full brand context (positioning, promise, "
+    "values, narrative, visual identity), produce:\n"
+    "1. brand_guidelines — a list of 5-8 governance rules that everyone in the organisation "
+    "must follow. Each rule is a single clear sentence.\n"
+    "Cover: identity usage, messaging hierarchy, approval gates, asset management, and "
+    "evolution."
+)
+
 
 def test_purpose_vision_writer_prompt_matches_original_wording() -> None:
     assert make_purpose_vision_writer().system_prompt == _EXPECTED_PURPOSE_VISION_PROMPT
@@ -335,3 +472,79 @@ def test_color_system_builder_prompt_matches_spec() -> None:
 
 def test_typography_builder_prompt_matches_spec() -> None:
     assert make_typography_builder().system_prompt == _EXPECTED_TYPOGRAPHY_BUILDER_PROMPT
+
+
+def test_brand_experience_principler_prompt_matches_original_wording() -> None:
+    assert (
+        make_brand_experience_principler().system_prompt
+        == _EXPECTED_BRAND_EXPERIENCE_PRINCIPLER_PROMPT
+    )
+
+
+def test_brand_architecture_builder_prompt_matches_original_wording() -> None:
+    assert (
+        make_brand_architecture_builder().system_prompt
+        == _EXPECTED_BRAND_ARCHITECTURE_BUILDER_PROMPT
+    )
+
+
+def test_ownership_definer_prompt_matches_original_wording() -> None:
+    assert make_ownership_definer().system_prompt == _EXPECTED_OWNERSHIP_DEFINER_PROMPT
+
+
+def test_approval_workflow_designer_prompt_matches_original_wording() -> None:
+    assert (
+        make_approval_workflow_designer().system_prompt
+        == _EXPECTED_APPROVAL_WORKFLOW_DESIGNER_PROMPT
+    )
+
+
+def test_asset_wiki_planner_prompt_matches_original_wording() -> None:
+    assert make_asset_wiki_planner().system_prompt == _EXPECTED_ASSET_WIKI_PLANNER_PROMPT
+
+
+def test_kpi_designer_prompt_matches_original_wording() -> None:
+    assert make_kpi_designer().system_prompt == _EXPECTED_KPI_DESIGNER_PROMPT
+
+
+def test_evolution_framer_prompt_matches_original_wording() -> None:
+    assert make_evolution_framer().system_prompt == _EXPECTED_EVOLUTION_FRAMER_PROMPT
+
+
+def test_website_guide_prompt_matches_spec() -> None:
+    assert make_website_guide().system_prompt == _EXPECTED_WEBSITE_GUIDE_PROMPT
+
+
+def test_social_guide_prompt_matches_spec() -> None:
+    assert make_social_guide().system_prompt == _EXPECTED_SOCIAL_GUIDE_PROMPT
+
+
+def test_email_guide_prompt_matches_spec() -> None:
+    assert make_email_guide().system_prompt == _EXPECTED_EMAIL_GUIDE_PROMPT
+
+
+def test_events_guide_prompt_matches_spec() -> None:
+    assert make_events_guide().system_prompt == _EXPECTED_EVENTS_GUIDE_PROMPT
+
+
+def test_partnerships_guide_prompt_matches_spec() -> None:
+    assert make_partnerships_guide().system_prompt == _EXPECTED_PARTNERSHIPS_GUIDE_PROMPT
+
+
+def test_internal_guide_prompt_matches_spec() -> None:
+    assert make_internal_guide().system_prompt == _EXPECTED_INTERNAL_GUIDE_PROMPT
+
+
+def test_brand_in_action_illustrator_prompt_matches_spec() -> None:
+    assert (
+        make_brand_in_action_illustrator().system_prompt
+        == _EXPECTED_BRAND_IN_ACTION_ILLUSTRATOR_PROMPT
+    )
+
+
+def test_training_planner_prompt_matches_spec() -> None:
+    assert make_training_planner().system_prompt == _EXPECTED_TRAINING_PLANNER_PROMPT
+
+
+def test_brand_rules_codifier_prompt_matches_spec() -> None:
+    assert make_brand_rules_codifier().system_prompt == _EXPECTED_BRAND_RULES_CODIFIER_PROMPT

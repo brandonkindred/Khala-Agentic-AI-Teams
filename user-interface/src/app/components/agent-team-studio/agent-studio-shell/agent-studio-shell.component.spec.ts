@@ -6,10 +6,7 @@ import { NoopAnimationsModule } from '@angular/platform-browser/animations';
 import { Subject, of, throwError } from 'rxjs';
 import { vi } from 'vitest';
 import type { AgentStudioDraft, AgentStudioDraftSummary } from '../../../models/agent-studio.model';
-import { AgentStudioApiService } from '../../../services/agent-studio-api.service';
-import { AgentRunnerApiService } from '../../../services/agent-runner-api.service';
 import { AgenticTeamApiService } from '../../../services/agentic-team-api.service';
-import { PersonaTestingApiService } from '../../../services/persona-testing-api.service';
 import { AgentStudioFacade } from '../../../services/agent-studio.facade';
 import type { ProcessDefinition } from '../../../models/agentic-team.model';
 import { AgentCatalogComponent } from '../agent-console/agent-catalog/agent-catalog.component';
@@ -53,20 +50,17 @@ class StubComposeTeamComponent {}
 describe('AgentStudioShellComponent', () => {
   let component: AgentStudioShellComponent;
   let fixture: ComponentFixture<AgentStudioShellComponent>;
-  // Build stage isn't stubbed at the shell level (only its catalog/provisioning
-  // children are), so it injects the real AgentStudioFacade — which the shell
-  // provides and which delegates to the four HTTP clients. Fake those here so
-  // no HTTP client is required. AgentStudioApiService also backs
-  // `app-load-draft-menu` (real, unstubbed) and the shell's own `loadDraft`
-  // hydration (via the façade).
-  let agentStudioApi: {
-    cloneFromRegistry: ReturnType<typeof vi.fn>;
-    saveAgent: ReturnType<typeof vi.fn>;
+  // The shell provides AgentStudioFacade at the component level, so TestBed
+  // root providers cannot replace it — override the shell's own provider.
+  // Build and Load-draft-menu stay real and consume this same mock. The
+  // leftover getProcess lookup is still a direct AgenticTeamApiService call.
+  let facade: {
+    loadDraft: ReturnType<typeof vi.fn>;
     listDrafts: ReturnType<typeof vi.fn>;
-    getDraft: ReturnType<typeof vi.fn>;
-    updateDraft: ReturnType<typeof vi.fn>;
-    renameDraft: ReturnType<typeof vi.fn>;
+    saveDraft: ReturnType<typeof vi.fn>;
     deleteDraft: ReturnType<typeof vi.fn>;
+    selectAgent: ReturnType<typeof vi.fn>;
+    saveAgent: ReturnType<typeof vi.fn>;
   };
   let agenticTeamApi: { getProcess: ReturnType<typeof vi.fn> };
 
@@ -79,24 +73,18 @@ describe('AgentStudioShellComponent', () => {
   });
 
   beforeEach(async () => {
-    agentStudioApi = {
-      cloneFromRegistry: vi.fn().mockReturnValue(of({})),
-      saveAgent: vi.fn().mockReturnValue(of({})),
+    facade = {
+      loadDraft: vi.fn(),
       listDrafts: vi.fn().mockReturnValue(of([])),
-      getDraft: vi.fn(),
-      updateDraft: vi.fn(),
-      renameDraft: vi.fn(),
+      saveDraft: vi.fn(),
       deleteDraft: vi.fn().mockReturnValue(of({ draft_id: 'd-1', status: 'deleted' })),
+      selectAgent: vi.fn().mockReturnValue(of({})),
+      saveAgent: vi.fn().mockReturnValue(of({})),
     };
     agenticTeamApi = { getProcess: vi.fn() };
     await TestBed.configureTestingModule({
       imports: [AgentStudioShellComponent, NoopAnimationsModule],
-      providers: [
-        { provide: AgentStudioApiService, useValue: agentStudioApi },
-        { provide: AgenticTeamApiService, useValue: agenticTeamApi },
-        { provide: AgentRunnerApiService, useValue: {} },
-        { provide: PersonaTestingApiService, useValue: {} },
-      ],
+      providers: [{ provide: AgenticTeamApiService, useValue: agenticTeamApi }],
     })
       .overrideComponent(AgentStudioTestAgentComponent, {
         remove: { imports: [AgentRunnerComponent] },
@@ -107,8 +95,14 @@ describe('AgentStudioShellComponent', () => {
         add: { imports: [StubAgentCatalogComponent, StubAgentProvisioningPanelComponent] },
       })
       .overrideComponent(AgentStudioShellComponent, {
-        remove: { imports: [AgentStudioPersonaComponent, AgentStudioComposeTeamComponent] },
-        add: { imports: [StubPersonaComponent, StubComposeTeamComponent] },
+        remove: {
+          imports: [AgentStudioPersonaComponent, AgentStudioComposeTeamComponent],
+          providers: [AgentStudioFacade],
+        },
+        add: {
+          imports: [StubPersonaComponent, StubComposeTeamComponent],
+          providers: [{ provide: AgentStudioFacade, useValue: facade }],
+        },
       })
       .compileComponents();
 
@@ -154,14 +148,14 @@ describe('AgentStudioShellComponent', () => {
     });
 
     it('binds currentDraftId/currentDraftName from the response, not from payload', () => {
-      agentStudioApi.getDraft.mockReturnValue(of(draft({})));
+      facade.loadDraft.mockReturnValue(of(draft({})));
       component.loadDraft('d-1');
       expect(component.state.currentDraftId()).toBe('d-1');
       expect(component.state.currentDraftName()).toBe('My draft');
     });
 
     it('hydrates the handoff signals from payload, defensively coercing non-strings to null', () => {
-      agentStudioApi.getDraft.mockReturnValue(
+      facade.loadDraft.mockReturnValue(
         of(draft({ registryAgentId: 'reg-1', teamId: 42, personaId: null })),
       );
       component.loadDraft('d-1');
@@ -173,7 +167,7 @@ describe('AgentStudioShellComponent', () => {
     });
 
     it('Stage 4: teamId + processId set and the process is complete', () => {
-      agentStudioApi.getDraft.mockReturnValue(of(draft({ teamId: 'team-1', processId: 'proc-1' })));
+      facade.loadDraft.mockReturnValue(of(draft({ teamId: 'team-1', processId: 'proc-1' })));
       agenticTeamApi.getProcess.mockReturnValue(of(process('complete')));
       component.loadDraft('d-1');
       expect(agenticTeamApi.getProcess).toHaveBeenCalledWith('proc-1');
@@ -182,14 +176,14 @@ describe('AgentStudioShellComponent', () => {
     });
 
     it('Stage 3: teamId + processId set but the process is not complete', () => {
-      agentStudioApi.getDraft.mockReturnValue(of(draft({ teamId: 'team-1', processId: 'proc-1' })));
+      facade.loadDraft.mockReturnValue(of(draft({ teamId: 'team-1', processId: 'proc-1' })));
       agenticTeamApi.getProcess.mockReturnValue(of(process('draft')));
       component.loadDraft('d-1');
       expect(component.state.activeStage()).toBe(2);
     });
 
     it('Stage 3: falls back when the process lookup fails (e.g. deleted since save)', () => {
-      agentStudioApi.getDraft.mockReturnValue(of(draft({ teamId: 'team-1', processId: 'proc-1' })));
+      facade.loadDraft.mockReturnValue(of(draft({ teamId: 'team-1', processId: 'proc-1' })));
       agenticTeamApi.getProcess.mockReturnValue(throwError(() => new Error('404')));
       component.loadDraft('d-1');
       expect(component.state.activeStage()).toBe(2);
@@ -198,28 +192,28 @@ describe('AgentStudioShellComponent', () => {
     });
 
     it('Stage 3: only teamId set — no process lookup performed', () => {
-      agentStudioApi.getDraft.mockReturnValue(of(draft({ teamId: 'team-1' })));
+      facade.loadDraft.mockReturnValue(of(draft({ teamId: 'team-1' })));
       component.loadDraft('d-1');
       expect(agenticTeamApi.getProcess).not.toHaveBeenCalled();
       expect(component.state.activeStage()).toBe(2);
     });
 
     it('Stage 2: only registryAgentId set', () => {
-      agentStudioApi.getDraft.mockReturnValue(of(draft({ registryAgentId: 'reg-1' })));
+      facade.loadDraft.mockReturnValue(of(draft({ registryAgentId: 'reg-1' })));
       component.loadDraft('d-1');
       expect(component.state.activeStage()).toBe(1);
     });
 
     it('Stage 1: nothing set, including moving backward from a later active stage', () => {
       component.state.navigateToStage(3);
-      agentStudioApi.getDraft.mockReturnValue(of(draft({})));
+      facade.loadDraft.mockReturnValue(of(draft({})));
       component.loadDraft('d-1');
       expect(component.state.activeStage()).toBe(0);
     });
 
     it('never re-validates rosterFullyStaffed', () => {
       component.state.setRosterFullyStaffed(true);
-      agentStudioApi.getDraft.mockReturnValue(of(draft({ teamId: 'team-1', processId: 'proc-1' })));
+      facade.loadDraft.mockReturnValue(of(draft({ teamId: 'team-1', processId: 'proc-1' })));
       agenticTeamApi.getProcess.mockReturnValue(of(process('complete')));
       component.loadDraft('d-1');
       expect(component.state.rosterFullyStaffed()).toBe(true);
@@ -229,8 +223,8 @@ describe('AgentStudioShellComponent', () => {
       expect(component.state.rosterFullyStaffed()).toBe(false);
     });
 
-    it('a getDraft failure clears loadingDraft and leaves state unchanged', () => {
-      agentStudioApi.getDraft.mockReturnValue(throwError(() => new Error('404')));
+    it('a loadDraft failure clears loadingDraft and leaves state unchanged', () => {
+      facade.loadDraft.mockReturnValue(throwError(() => new Error('404')));
       component.loadDraft('d-1');
       expect(component.loadingDraft()).toBe(false);
       expect(component.state.currentDraftId()).toBeNull();
@@ -239,24 +233,24 @@ describe('AgentStudioShellComponent', () => {
 
     it('loadingDraft reflects the in-flight request and guards re-entrancy', () => {
       const pending = new Subject<AgentStudioDraft>();
-      agentStudioApi.getDraft.mockReturnValue(pending.asObservable());
+      facade.loadDraft.mockReturnValue(pending.asObservable());
       component.loadDraft('d-1');
       expect(component.loadingDraft()).toBe(true);
 
       component.loadDraft('d-2');
-      expect(agentStudioApi.getDraft).toHaveBeenCalledTimes(1);
+      expect(facade.loadDraft).toHaveBeenCalledTimes(1);
 
       pending.next(draft({}));
       pending.complete();
       expect(component.loadingDraft()).toBe(false);
     });
 
-    it('loadingDraft stays true through the nested process-status check, not just the getDraft call', () => {
-      agentStudioApi.getDraft.mockReturnValue(of(draft({ teamId: 'team-1', processId: 'proc-1' })));
+    it('loadingDraft stays true through the nested process-status check, not just the loadDraft call', () => {
+      facade.loadDraft.mockReturnValue(of(draft({ teamId: 'team-1', processId: 'proc-1' })));
       const pendingProcess = new Subject<ProcessDefinition>();
       agenticTeamApi.getProcess.mockReturnValue(pendingProcess.asObservable());
       component.loadDraft('d-1');
-      // getDraft already resolved (synchronous `of`), but the process check is
+      // loadDraft already resolved (synchronous `of`), but the process check is
       // still pending — loadingDraft must not have gone false in between.
       expect(component.loadingDraft()).toBe(true);
       pendingProcess.next(process('complete'));
@@ -266,7 +260,7 @@ describe('AgentStudioShellComponent', () => {
 
     it('clears a stale composeProcessStatus when the process lookup fails', () => {
       component.state.setComposeProcessStatus('complete');
-      agentStudioApi.getDraft.mockReturnValue(of(draft({ teamId: 'team-1', processId: 'proc-1' })));
+      facade.loadDraft.mockReturnValue(of(draft({ teamId: 'team-1', processId: 'proc-1' })));
       agenticTeamApi.getProcess.mockReturnValue(throwError(() => new Error('404')));
       component.loadDraft('d-1');
       expect(component.state.composeProcessStatus()).toBeNull();
@@ -276,18 +270,18 @@ describe('AgentStudioShellComponent', () => {
       component.state.advanceBuildSubStage();
       component.state.advanceBuildSubStage();
       expect(component.state.activeBuildSubStage()).toBe(2);
-      agentStudioApi.getDraft.mockReturnValue(of(draft({})));
+      facade.loadDraft.mockReturnValue(of(draft({})));
       component.loadDraft('d-1');
       expect(component.state.activeBuildSubStage()).toBe(0);
       expect(component.state.maxReachedBuildSubStage()).toBe(0);
     });
 
-    it('a superseded loadDraft call discards its late getDraft response instead of corrupting the newer load', () => {
+    it('a superseded loadDraft call discards its late loadDraft response instead of corrupting the newer load', () => {
       const firstDraft = new Subject<AgentStudioDraft>();
-      agentStudioApi.getDraft.mockReturnValueOnce(firstDraft.asObservable());
+      facade.loadDraft.mockReturnValueOnce(firstDraft.asObservable());
       component.loadDraft('d-1'); // in flight, not yet resolved
 
-      agentStudioApi.getDraft.mockReturnValueOnce(of(draft({ registryAgentId: 'reg-2' })));
+      facade.loadDraft.mockReturnValueOnce(of(draft({ registryAgentId: 'reg-2' })));
       // Simulate the busy-guard having been bypassed (e.g. a direct call) —
       // force loadingDraft back to false so the second call isn't blocked,
       // to isolate the token guard's own protection from the busy guard's.
@@ -302,14 +296,14 @@ describe('AgentStudioShellComponent', () => {
     });
 
     it('a superseded loadDraft call discards its late getProcess response', () => {
-      agentStudioApi.getDraft.mockReturnValueOnce(
+      facade.loadDraft.mockReturnValueOnce(
         of(draft({ teamId: 'team-1', processId: 'proc-1' })),
       );
       const firstProcess = new Subject<ProcessDefinition>();
       agenticTeamApi.getProcess.mockReturnValueOnce(firstProcess.asObservable());
-      component.loadDraft('d-1'); // getDraft resolves, getProcess left pending
+      component.loadDraft('d-1'); // loadDraft resolves, getProcess left pending
 
-      agentStudioApi.getDraft.mockReturnValueOnce(of(draft({ registryAgentId: 'reg-2' })));
+      facade.loadDraft.mockReturnValueOnce(of(draft({ registryAgentId: 'reg-2' })));
       component.loadingDraft.set(false); // bypass the busy-guard, isolate the token guard
       component.loadDraft('d-2'); // resolves synchronously to Stage 2
 
@@ -321,7 +315,7 @@ describe('AgentStudioShellComponent', () => {
     });
 
     it('the Load-draft menu is wired to loadDraft and reflects loadingDraft as busy', () => {
-      agentStudioApi.getDraft.mockReturnValue(of(draft({})));
+      facade.loadDraft.mockReturnValue(of(draft({})));
       const menu = fixture.debugElement.query(By.directive(LoadDraftMenuComponent));
       expect(menu).toBeTruthy();
       menu.triggerEventHandler('draftSelected', 'd-1');
@@ -337,7 +331,7 @@ describe('AgentStudioShellComponent', () => {
 
     it('markClean after hydrate so a just-loaded draft is not dirty', () => {
       expect(component.state.isDirty()).toBe(false);
-      agentStudioApi.getDraft.mockReturnValue(of(draft({ registryAgentId: 'reg-1' })));
+      facade.loadDraft.mockReturnValue(of(draft({ registryAgentId: 'reg-1' })));
       component.loadDraft('d-1');
       expect(component.state.registryAgentId()).toBe('reg-1');
       expect(component.state.isDirty()).toBe(false);
@@ -355,10 +349,10 @@ describe('AgentStudioShellComponent', () => {
     });
 
     it('hydrates immediately when clean and does not open the conflict dialog', () => {
-      agentStudioApi.getDraft.mockReturnValue(of(draft({})));
+      facade.loadDraft.mockReturnValue(of(draft({})));
       component.loadDraft('d-1');
       expect(openSpy).not.toHaveBeenCalled();
-      expect(agentStudioApi.getDraft).toHaveBeenCalledWith('d-1');
+      expect(facade.loadDraft).toHaveBeenCalledWith('d-1');
     });
 
     it('Cancel leaves the session unchanged and does not getDraft', () => {
@@ -367,7 +361,7 @@ describe('AgentStudioShellComponent', () => {
       component.loadDraft('d-1');
       const config = openSpy.mock.calls[0][1] as { disableClose?: boolean };
       expect(config.disableClose).not.toBe(true);
-      expect(agentStudioApi.getDraft).not.toHaveBeenCalled();
+      expect(facade.loadDraft).not.toHaveBeenCalled();
       expect(component.state.registryAgentId()).toBe('local-1');
       expect(component.loadingDraft()).toBe(false);
     });
@@ -375,7 +369,7 @@ describe('AgentStudioShellComponent', () => {
     it('Discard hydrates the chosen draft', () => {
       component.state.setRegistryAgentId('local-1');
       openSpy.mockReturnValue({ afterClosed: () => of('discard') } as unknown as ReturnType<MatDialog['open']>);
-      agentStudioApi.getDraft.mockReturnValue(of(draft({ registryAgentId: 'reg-1' })));
+      facade.loadDraft.mockReturnValue(of(draft({ registryAgentId: 'reg-1' })));
       component.loadDraft('d-1');
       expect(component.state.registryAgentId()).toBe('reg-1');
       expect(component.state.isDirty()).toBe(false);
@@ -385,16 +379,19 @@ describe('AgentStudioShellComponent', () => {
       component.state.setRegistryAgentId('local-1');
       component.state.setCurrentDraft('bound-1', 'Bound');
       openSpy.mockReturnValue({ afterClosed: () => of('save') } as unknown as ReturnType<MatDialog['open']>);
-      agentStudioApi.updateDraft.mockReturnValue(
+      facade.saveDraft.mockReturnValue(
         of({ draft_id: 'bound-1', name: 'Bound', updated_at: '2026-01-01T00:00:00Z' }),
       );
-      agentStudioApi.getDraft.mockReturnValue(of(draft({ registryAgentId: 'reg-1' })));
+      facade.loadDraft.mockReturnValue(of(draft({ registryAgentId: 'reg-1' })));
       component.loadDraft('d-1');
-      expect(agentStudioApi.updateDraft).toHaveBeenCalledWith('bound-1', {
-        name: 'Bound',
-        payload: expect.objectContaining({ registryAgentId: 'local-1' }),
-      });
-      expect(agentStudioApi.getDraft).toHaveBeenCalledWith('d-1');
+      expect(facade.saveDraft).toHaveBeenCalledWith(
+        {
+          name: 'Bound',
+          payload: expect.objectContaining({ registryAgentId: 'local-1' }),
+        },
+        'bound-1',
+      );
+      expect(facade.loadDraft).toHaveBeenCalledWith('d-1');
       expect(component.state.registryAgentId()).toBe('reg-1');
     });
 
@@ -402,9 +399,9 @@ describe('AgentStudioShellComponent', () => {
       component.state.setRegistryAgentId('local-1');
       component.state.setCurrentDraft('bound-1', 'Bound');
       openSpy.mockReturnValue({ afterClosed: () => of('save') } as unknown as ReturnType<MatDialog['open']>);
-      agentStudioApi.updateDraft.mockReturnValue(throwError(() => ({ error: { detail: 'nope' } })));
+      facade.saveDraft.mockReturnValue(throwError(() => ({ error: { detail: 'nope' } })));
       component.loadDraft('d-1');
-      expect(agentStudioApi.getDraft).not.toHaveBeenCalled();
+      expect(facade.loadDraft).not.toHaveBeenCalled();
       expect(component.state.registryAgentId()).toBe('local-1');
       expect(component.loadingDraft()).toBe(false);
     });
@@ -414,14 +411,14 @@ describe('AgentStudioShellComponent', () => {
       component.state.setCurrentDraft('bound-1', 'Bound');
       openSpy.mockReturnValue({ afterClosed: () => of('save') } as unknown as ReturnType<MatDialog['open']>);
       const pending = new Subject<AgentStudioDraftSummary>();
-      agentStudioApi.updateDraft.mockReturnValue(pending.asObservable());
-      agentStudioApi.getDraft.mockReturnValue(of(draft({ registryAgentId: 'reg-1' })));
+      facade.saveDraft.mockReturnValue(pending.asObservable());
+      facade.loadDraft.mockReturnValue(of(draft({ registryAgentId: 'reg-1' })));
       component.loadDraft('d-1');
       expect(component.loadingDraft()).toBe(true);
-      expect(agentStudioApi.getDraft).not.toHaveBeenCalled();
+      expect(facade.loadDraft).not.toHaveBeenCalled();
       pending.next({ draft_id: 'bound-1', name: 'Bound', updated_at: '2026-01-01T00:00:00Z' });
       pending.complete();
-      expect(agentStudioApi.getDraft).toHaveBeenCalledWith('d-1');
+      expect(facade.loadDraft).toHaveBeenCalledWith('d-1');
       expect(component.loadingDraft()).toBe(false);
     });
 
@@ -430,12 +427,12 @@ describe('AgentStudioShellComponent', () => {
       component.state.setCurrentDraft('bound-1', 'Bound');
       openSpy.mockReturnValue({ afterClosed: () => of('save') } as unknown as ReturnType<MatDialog['open']>);
       const pending = new Subject<AgentStudioDraftSummary>();
-      agentStudioApi.updateDraft.mockReturnValue(pending.asObservable());
+      facade.saveDraft.mockReturnValue(pending.asObservable());
       component.loadDraft('d-1');
       component.state.setRegistryAgentId('local-2');
       pending.next({ draft_id: 'bound-1', name: 'Bound', updated_at: '2026-01-01T00:00:00Z' });
       pending.complete();
-      expect(agentStudioApi.getDraft).not.toHaveBeenCalled();
+      expect(facade.loadDraft).not.toHaveBeenCalled();
       expect(component.state.registryAgentId()).toBe('local-2');
       expect(component.state.isDirty()).toBe(true);
       expect(component.loadingDraft()).toBe(false);
@@ -446,12 +443,12 @@ describe('AgentStudioShellComponent', () => {
       component.state.setCurrentDraft('bound-1', 'Bound');
       openSpy.mockReturnValue({ afterClosed: () => of('save') } as unknown as ReturnType<MatDialog['open']>);
       const pending = new Subject<AgentStudioDraftSummary>();
-      agentStudioApi.updateDraft.mockReturnValue(pending.asObservable());
+      facade.saveDraft.mockReturnValue(pending.asObservable());
       component.loadDraft('d-1');
       expect(openSpy).toHaveBeenCalledTimes(1);
       component.loadDraft('d-2');
       expect(openSpy).toHaveBeenCalledTimes(1);
-      expect(agentStudioApi.getDraft).not.toHaveBeenCalled();
+      expect(facade.loadDraft).not.toHaveBeenCalled();
       pending.complete();
     });
 
@@ -462,7 +459,7 @@ describe('AgentStudioShellComponent', () => {
         .mockReturnValueOnce({ afterClosed: () => of('save') } as unknown as ReturnType<MatDialog['open']>)
         .mockReturnValueOnce({ afterClosed: () => of(undefined) } as unknown as ReturnType<MatDialog['open']>);
       component.loadDraft('d-1');
-      expect(agentStudioApi.getDraft).not.toHaveBeenCalled();
+      expect(facade.loadDraft).not.toHaveBeenCalled();
       expect(component.state.registryAgentId()).toBe('local-1');
     });
 
@@ -476,7 +473,7 @@ describe('AgentStudioShellComponent', () => {
       component.state.setRegistryAgentId('local-2');
       saveClosed.next({ draft_id: 'new-1', name: 'Saved', updated_at: '2026-01-01T00:00:00Z' });
       saveClosed.complete();
-      expect(agentStudioApi.getDraft).not.toHaveBeenCalled();
+      expect(facade.loadDraft).not.toHaveBeenCalled();
       expect(component.state.registryAgentId()).toBe('local-2');
       expect(component.state.isDirty()).toBe(true);
     });

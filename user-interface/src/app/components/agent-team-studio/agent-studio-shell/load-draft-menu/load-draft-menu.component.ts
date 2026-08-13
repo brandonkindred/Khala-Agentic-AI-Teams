@@ -114,10 +114,12 @@ export class LoadDraftMenuComponent {
    * Open the danger confirm, then DELETE the draft.
    *
    * Preconditions: `draft.draft_id` is a non-empty id from a rendered row.
-   * Postconditions: on confirm+success, that id is absent from `drafts()` and
-   *   `draftDeleted` emitted once. On cancel or failure, `drafts()` unchanged
-   *   and `draftDeleted` not emitted. A DELETE already in flight for this id
-   *   is a no-op; other ids remain independently deletable.
+   * Postconditions: on confirm+success, that id is absent from `drafts()`,
+   *   `nextOffset` equals `drafts().length` so a later Show-older fetch does
+   *   not skip a shifted row, and `draftDeleted` emitted once. On cancel or
+   *   failure, `drafts()` unchanged and `draftDeleted` not emitted. A DELETE
+   *   already in flight for this id is a no-op; other ids remain independently
+   *   deletable.
    */
   confirmDelete(draft: AgentStudioDraftSummary): void {
     if (this.isDeleting(draft.draft_id)) return;
@@ -137,6 +139,7 @@ export class LoadDraftMenuComponent {
         this.facade.deleteDraft(draft.draft_id).subscribe({
           next: () => {
             this.drafts.update((rows) => rows.filter((row) => row.draft_id !== draft.draft_id));
+            this.nextOffset = this.drafts().length;
             this.deletingIds.update((ids) => {
               const next = new Set(ids);
               next.delete(draft.draft_id);

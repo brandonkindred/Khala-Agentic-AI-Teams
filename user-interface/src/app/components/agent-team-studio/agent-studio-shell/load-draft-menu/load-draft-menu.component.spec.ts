@@ -175,6 +175,27 @@ describe('LoadDraftMenuComponent', () => {
       expect(spy).toHaveBeenCalledWith('d-1');
     });
 
+    it('confirmDelete recomputes the Show-older offset from the remaining rows', () => {
+      openSpy.mockReturnValue({ afterClosed: () => of(true) } as unknown as ReturnType<MatDialog['open']>);
+      const fullPage = Array.from({ length: 10 }, (_, i) => summary(`d-${i}`, `n${i}`));
+      const listDrafts = vi
+        .fn()
+        .mockReturnValueOnce(of(fullPage))
+        .mockReturnValueOnce(of([summary('d-10', 'n10')]));
+      const { fixture, facade } = configure(
+        listDrafts,
+        vi.fn().mockReturnValue(of({ draft_id: 'd-0', status: 'deleted' })),
+      );
+      fixture.componentInstance.onOpened();
+      fixture.componentInstance.confirmDelete(summary('d-0', 'n0'));
+      fixture.componentInstance.loadMore();
+      expect(facade.listDrafts).toHaveBeenLastCalledWith(10, 9);
+      expect(fixture.componentInstance.drafts().map((d) => d.draft_id)).toEqual([
+        ...fullPage.slice(1).map((d) => d.draft_id),
+        'd-10',
+      ]);
+    });
+
     it('confirmDelete API failure sets error() and leaves the row', () => {
       openSpy.mockReturnValue({ afterClosed: () => of(true) } as unknown as ReturnType<MatDialog['open']>);
       const deleteDraft = vi.fn().mockReturnValue(throwError(() => ({ error: { detail: 'nope' } })));
