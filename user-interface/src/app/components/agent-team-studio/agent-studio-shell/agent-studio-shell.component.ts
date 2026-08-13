@@ -165,15 +165,18 @@ export class AgentStudioShellComponent {
    *
    * Preconditions: none — always safe to call.
    * Postconditions: on a successful save, `state.currentDraftId()` /
-   *   `currentDraftName()` reflect the saved draft and `state.isDirty()` is
-   *   false. On cancel or failure, state is unchanged. The returned
-   *   observable is the dialog's `afterClosed()`.
+   *   `currentDraftName()` reflect the saved draft and `markSaved` records
+   *   the payload submitted at open (not response-time handoff). `isDirty()`
+   *   is then false iff the current handoff still matches that payload. On
+   *   cancel or failure, state is unchanged. The returned observable is the
+   *   dialog's `afterClosed()`.
    */
   openSaveDraftDialog(): Observable<SaveDraftDialogResult | undefined> {
+    const submitted = { ...this.state.handoff() };
     const data: SaveDraftDialogData = {
       draftId: this.state.currentDraftId(),
       initialName: this.state.currentDraftName(),
-      payload: { ...this.state.handoff() },
+      payload: submitted,
     };
     const ref = this.dialog.open<SaveDraftDialogComponent, SaveDraftDialogData, SaveDraftDialogResult>(
       SaveDraftDialogComponent,
@@ -195,7 +198,7 @@ export class AgentStudioShellComponent {
     closed$.subscribe((result) => {
       if (!result) return;
       this.state.setCurrentDraft(result.draft_id, result.name);
-      this.state.markClean();
+      this.state.markSaved(submitted);
     });
     return closed$;
   }
@@ -205,7 +208,9 @@ export class AgentStudioShellComponent {
    *
    * Preconditions: none — no-op when unbound or when the bound name is null.
    * Postconditions: on success, `currentDraftName()` matches the PATCH
-   *   response; `isDirty()` is unchanged. On cancel/failure, state unchanged.
+   *   response iff the session is still bound to `draftId`; a load that
+   *   rebound the session while the dialog was open leaves state unchanged.
+   *   `isDirty()` is unchanged. On cancel/failure, state unchanged.
    */
   openRenameDraftDialog(): void {
     const draftId = this.state.currentDraftId();
@@ -218,6 +223,7 @@ export class AgentStudioShellComponent {
     );
     ref.afterClosed().subscribe((result) => {
       if (!result) return;
+      if (this.state.currentDraftId() !== draftId) return;
       this.state.setCurrentDraft(result.draft_id, result.name);
     });
   }
@@ -294,7 +300,8 @@ export class AgentStudioShellComponent {
    *   the handoff still matches that snapshot. Concurrent edits stay dirty
    *   and are not overwritten. On PUT error, does not hydrate and
    *   `loadingDraft()` returns to false. When unbound, opens the Save-draft
-   *   dialog; truthy result hydrates, empty/cancel aborts with no hydrate.
+   *   dialog; hydrates only if the handoff still matches the submitted
+   *   payload; empty/cancel aborts with no hydrate.
    */
   private saveFirstThenHydrate(draftId: string): void {
     const boundId = this.state.currentDraftId();
@@ -321,6 +328,7 @@ export class AgentStudioShellComponent {
     }
     this.openSaveDraftDialog().subscribe((result) => {
       if (!result) return;
+      if (this.state.isDirty()) return;
       this.fetchAndHydrate(draftId);
     });
   }

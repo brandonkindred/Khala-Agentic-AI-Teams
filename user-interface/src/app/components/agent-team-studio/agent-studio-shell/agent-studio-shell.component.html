@@ -17,6 +17,7 @@
             type="button"
             class="studio__rename-draft"
             aria-label="Rename draft"
+            [disabled]="loadingDraft()"
             (click)="openRenameDraftDialog()"
           >
             <mat-icon>edit</mat-icon>
