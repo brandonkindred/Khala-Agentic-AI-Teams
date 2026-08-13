@@ -770,7 +770,7 @@ async def test_resolve_team_success() -> None:
     fake_registry.get.return_value = fake_manifest
 
     with patch(
-        "agent_registry.get_registry",
+        "agent_platform.registry.get_registry",
         return_value=fake_registry,
     ):
         assert await _resolve_team("agent.x") == "myteam"
@@ -786,7 +786,7 @@ async def test_resolve_team_unknown() -> None:
     fake_registry = MagicMock()
     fake_registry.get.return_value = None
 
-    with patch("agent_registry.get_registry", return_value=fake_registry):
+    with patch("agent_platform.registry.get_registry", return_value=fake_registry):
         with pytest.raises(UnknownAgentError):
             await _resolve_team("ghost")
 
@@ -814,7 +814,7 @@ async def test_resolve_team_calls_get_registry_off_the_event_loop_thread() -> No
 
     from agent_platform.sandbox.lifecycle import _resolve_team
 
-    with patch("agent_registry.get_registry", side_effect=_recording_get_registry):
+    with patch("agent_platform.registry.get_registry", side_effect=_recording_get_registry):
         assert await _resolve_team("agent.x") == "myteam"
 
     assert captured["thread"] is not caller_thread

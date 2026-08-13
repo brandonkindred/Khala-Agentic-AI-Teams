@@ -18,6 +18,7 @@ from agents.data import data_architect  # noqa: E402
 from agents.data_streaming import data_streaming_architect  # noqa: E402
 from agents.devops import devops_architect  # noqa: E402
 from agents.observability import observability_architect  # noqa: E402
+from agents.prompts import ORCHESTRATOR_PROMPT  # noqa: E402
 from agents.security import security_architect  # noqa: E402
 from strands import Agent  # noqa: E402
 from tools import (  # noqa: E402
@@ -26,8 +27,6 @@ from tools import (  # noqa: E402
     file_read_tool,
     web_search_tool,
 )
-
-_PROMPT_PATH = _root / "prompts" / "orchestrator.md"
 
 
 def create_orchestrator(session_manager=None):
@@ -40,7 +39,6 @@ def create_orchestrator(session_manager=None):
     Returns:
         Configured Agent instance.
     """
-    prompt = _PROMPT_PATH.read_text(encoding="utf-8")
     model = os.environ.get(
         "ARCHITECT_MODEL_ORCHESTRATOR",
         "anthropic.claude-opus-4-6-v1",
@@ -67,7 +65,7 @@ def create_orchestrator(session_manager=None):
     ]
     kwargs = {
         "model": model,
-        "system_prompt": prompt,
+        "system_prompt": ORCHESTRATOR_PROMPT,
         "tools": tools,
         "callback_handler": None,
     }

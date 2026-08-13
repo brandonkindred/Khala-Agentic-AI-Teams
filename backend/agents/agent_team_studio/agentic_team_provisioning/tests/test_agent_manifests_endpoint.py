@@ -24,7 +24,7 @@ def client(monkeypatch: pytest.MonkeyPatch) -> TestClient:
 
 
 def _thin_generated(team_id: str, agent_name: str, *, summary: str) -> AgenticTeamAgent:
-    from agent_registry import get_registry
+    from agent_platform.registry import get_registry
 
     manifest_id = manifest_agent_id(team_id, agent_name)
     registry = get_registry()

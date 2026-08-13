@@ -87,7 +87,7 @@ _TEAM_AGENTS = [
 
 
 def _ensure_worker_manifest() -> None:
-    from agent_registry import get_registry
+    from agent_platform.registry import get_registry
 
     registry = get_registry()
     if registry.get(_WORKER_MANIFEST_ID) is None:

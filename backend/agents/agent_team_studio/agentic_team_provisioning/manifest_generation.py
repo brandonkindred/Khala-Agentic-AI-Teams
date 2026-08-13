@@ -1,9 +1,9 @@
-"""Generate ``agent_registry`` manifests for agents this team produces.
+"""Generate ``agent_platform.registry`` manifests for agents this team produces.
 
 Every agent the agentic-team designer rosters should join the platform with the
 batteries-included Agent Cognition Core attached. The pure builder helpers in this
 module turn a roster :class:`~agent_team_studio.agentic_team_provisioning.models.AgenticTeamAgent`
-into a validated :class:`~agent_registry.models.AgentManifest` whose ``cognition``
+into a validated :class:`~agent_platform.registry.models.AgentManifest` whose ``cognition``
 block carries the core defaults (day-one ``default_guardrails`` seed pack, 90-day
 episodic memory, a default-on knowledge graph). Those builders perform no
 Postgres, LLM, or filesystem I/O.
@@ -17,8 +17,8 @@ from __future__ import annotations
 
 from typing import NamedTuple
 
-from agent_registry.manifest_projection import hash_suffix, revalidate, slug
-from agent_registry.models import AgentManifest, IOSchema, SourceInfo
+from agent_platform.registry.manifest_projection import hash_suffix, revalidate, slug
+from agent_platform.registry.models import AgentManifest, IOSchema, SourceInfo
 from agent_team_studio.agentic_team_provisioning.models import SOURCE_GENERATED, AgenticTeamAgent
 
 from ..manifest_shared import (
@@ -88,7 +88,7 @@ def build_agent_manifest(
     summary: str | None = None,
     skill_tags: list[str] | None = None,
 ) -> AgentManifest:
-    """Build a validated ``agent_registry`` manifest for one roster agent.
+    """Build a validated ``agent_platform.registry`` manifest for one roster agent.
 
     Preconditions:
         * ``team_id`` is a non-empty string.
@@ -196,7 +196,7 @@ def register_team_manifests(
     """Build and install the live registry entries for a team's roster.
 
     Generated agents are not discovered from disk, so they are registered into the
-    process-wide :class:`~agent_registry.loader.AgentRegistry` here — making them
+    process-wide :class:`~agent_platform.registry.loader.AgentRegistry` here — making them
     resolvable by the Agent Console catalog and the ``/api/agents/{id}/invoke``
     route (cognition injection + seed-pack install then happen on first invoke).
 
@@ -249,7 +249,7 @@ def register_team_manifests(
     # recovery path, which passes the whole roster. The stale-cleanup below then also
     # drops any such wrapper left behind by an older build.
     agents = [a for a in agents if a.source == SOURCE_GENERATED]
-    from agent_registry import get_registry
+    from agent_platform.registry import get_registry
 
     registry = get_registry()
     summary_map = summaries or {}

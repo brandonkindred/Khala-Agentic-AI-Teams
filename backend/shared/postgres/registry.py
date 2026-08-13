@@ -39,7 +39,7 @@ TEAM_POSTGRES_MODULES: dict[str, str] = {
     # Agent Cognition Core — memory, rules, and the invoke idempotency ledger.
     "agent_cognition": "agent_cognition.postgres",
     # Agent Registry — cross-worker overlay of dynamically registered manifests.
-    "agent_registry": "agent_registry.postgres",
+    "agent_registry": "agent_platform.registry.postgres",
     # Agent Studio — durable authoring-conversation store.
     "agent_studio": "agent_team_studio.agent_studio.postgres",
     # Issue #376 — investment team's first Postgres table: snapshot index

@@ -2,10 +2,10 @@ import { Component, EventEmitter, Output } from '@angular/core';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { By } from '@angular/platform-browser';
 import { NoopAnimationsModule } from '@angular/platform-browser/animations';
-import { Subject, of, throwError } from 'rxjs';
+import { Subject, of, tap, throwError } from 'rxjs';
 import { vi } from 'vitest';
 import { AgentStudioStateService } from '../../../services/agent-studio-state.service';
-import { AgentStudioApiService } from '../../../services/agent-studio-api.service';
+import { AgentStudioFacade } from '../../../services/agent-studio.facade';
 import { AgentCatalogComponent } from '../agent-console/agent-catalog/agent-catalog.component';
 import { AgentProvisioningPanelComponent } from '../agent-provisioning-panel/agent-provisioning-panel.component';
 import { AgentStudioBuildAgentComponent } from './agent-studio-build-agent.component';
@@ -43,15 +43,15 @@ describe('AgentStudioBuildAgentComponent', () => {
   let fixture: ComponentFixture<AgentStudioBuildAgentComponent>;
   let component: AgentStudioBuildAgentComponent;
   let state: AgentStudioStateService;
-  let api: {
-    cloneFromRegistry: ReturnType<typeof vi.fn>;
+  let facade: {
+    selectAgent: ReturnType<typeof vi.fn>;
     saveAgent: ReturnType<typeof vi.fn>;
   };
 
   function configure(): void {
     TestBed.configureTestingModule({
       imports: [AgentStudioBuildAgentComponent, NoopAnimationsModule],
-      providers: [AgentStudioStateService, { provide: AgentStudioApiService, useValue: api }],
+      providers: [AgentStudioStateService, { provide: AgentStudioFacade, useValue: facade }],
     })
       .overrideComponent(AgentStudioBuildAgentComponent, {
         remove: { imports: [AgentCatalogComponent, AgentProvisioningPanelComponent] },
@@ -72,9 +72,15 @@ describe('AgentStudioBuildAgentComponent', () => {
   }
 
   beforeEach(async () => {
-    api = {
-      cloneFromRegistry: vi.fn().mockReturnValue(of(definition())),
-      saveAgent: vi.fn().mockReturnValue(of({ agent_id: 'blogging.planner.v2', manifest: {}, created: true })),
+    facade = {
+      selectAgent: vi.fn().mockImplementation(() =>
+        of(definition()).pipe(tap(() => state.setDraftAgentId(crypto.randomUUID()))),
+      ),
+      saveAgent: vi.fn().mockImplementation(() =>
+        of({ agent_id: 'blogging.planner.v2', manifest: {}, created: true }).pipe(
+          tap((response) => state.setRegistryAgentId(response.agent_id)),
+        ),
+      ),
     };
     configure();
   });
@@ -88,10 +94,10 @@ describe('AgentStudioBuildAgentComponent', () => {
     expect(fixture.nativeElement.querySelector('.studio-build__selected')).toBeNull();
   });
 
-  it('clones the catalog selection via AgentStudioApiService and shows the cloned bar', () => {
+  it('clones the catalog selection via AgentStudioFacade and shows the cloned bar', () => {
     selectAgent('blogging.planner');
 
-    expect(api.cloneFromRegistry).toHaveBeenCalledWith('blogging.planner');
+    expect(facade.selectAgent).toHaveBeenCalledWith('blogging.planner');
     expect(component.draftDefinition()).toEqual(definition());
     expect(state.registryAgentId()).toBeNull();
     expect(state.draftAgentId()).toEqual(expect.any(String));
@@ -103,7 +109,7 @@ describe('AgentStudioBuildAgentComponent', () => {
   });
 
   it('surfaces a clone failure without breaking the sub-stepper, and allows retry', () => {
-    api.cloneFromRegistry.mockReturnValueOnce(throwError(() => ({ error: { detail: 'source agent missing' } })));
+    facade.selectAgent.mockReturnValueOnce(throwError(() => ({ error: { detail: 'source agent missing' } })));
     selectAgent('blogging.planner');
 
     expect(component.cloneError()).toBe('source agent missing');
@@ -119,18 +125,18 @@ describe('AgentStudioBuildAgentComponent', () => {
   });
 
   it('falls back to a generic message when a clone error has no detail', () => {
-    api.cloneFromRegistry.mockReturnValueOnce(throwError(() => ({})));
+    facade.selectAgent.mockReturnValueOnce(throwError(() => ({})));
     selectAgent('blogging.planner');
     expect(component.cloneError()).toBe('Could not clone this agent — try again.');
   });
 
   it('ignores a repeat clone request while one is already in flight', () => {
     const pending = new Subject<AgentDefinition>();
-    api.cloneFromRegistry.mockReturnValue(pending.asObservable());
+    facade.selectAgent.mockReturnValue(pending.asObservable());
 
     component.onSelectAgent('blogging.planner');
     component.onSelectAgent('blogging.planner');
-    expect(api.cloneFromRegistry).toHaveBeenCalledTimes(1);
+    expect(facade.selectAgent).toHaveBeenCalledTimes(1);
 
     pending.next(definition());
     pending.complete();
@@ -139,7 +145,7 @@ describe('AgentStudioBuildAgentComponent', () => {
 
   it('does not save without a cloned draft', () => {
     component.saveAgent();
-    expect(api.saveAgent).not.toHaveBeenCalled();
+    expect(facade.saveAgent).not.toHaveBeenCalled();
   });
 
   it('keeps the provisioning slide-out closed until requested', () => {
@@ -261,7 +267,7 @@ describe('AgentStudioBuildAgentComponent', () => {
 
     it('shows the "Cloning agent…" hint only while a clone is in flight', () => {
       const pending = new Subject<AgentDefinition>();
-      api.cloneFromRegistry.mockReturnValue(pending.asObservable());
+      facade.selectAgent.mockReturnValue(pending.asObservable());
 
       component.onSelectAgent('blogging.planner');
       fixture.detectChanges();
@@ -298,14 +304,14 @@ describe('AgentStudioBuildAgentComponent', () => {
       fixture.detectChanges();
     }
 
-    it('saves and registers the draft via AgentStudioApiService, unlocking the journey gate', () => {
+    it('saves and registers the draft via AgentStudioFacade, unlocking the journey gate', () => {
       goToConfigure();
       const draftAgentIdBeforeSave = state.draftAgentId();
 
       fixture.nativeElement.querySelector('.studio-build__save-sub').click();
       fixture.detectChanges();
 
-      expect(api.saveAgent).toHaveBeenCalledWith({
+      expect(facade.saveAgent).toHaveBeenCalledWith({
         name: 'blogging.planner.v2',
         role: 'Plans SEO-aware outlines',
         description: null,
@@ -323,7 +329,7 @@ describe('AgentStudioBuildAgentComponent', () => {
     });
 
     it('surfaces a save failure without leaving the sub-stepper in a broken state', () => {
-      api.saveAgent.mockReturnValueOnce(throwError(() => ({ error: { detail: 'name already taken' } })));
+      facade.saveAgent.mockReturnValueOnce(throwError(() => ({ error: { detail: 'name already taken' } })));
       goToConfigure();
 
       fixture.nativeElement.querySelector('.studio-build__save-sub').click();
@@ -343,7 +349,7 @@ describe('AgentStudioBuildAgentComponent', () => {
     });
 
     it('falls back to a generic message when a save error has no detail', () => {
-      api.saveAgent.mockReturnValueOnce(throwError(() => ({})));
+      facade.saveAgent.mockReturnValueOnce(throwError(() => ({})));
       goToConfigure();
 
       fixture.nativeElement.querySelector('.studio-build__save-sub').click();
@@ -354,12 +360,14 @@ describe('AgentStudioBuildAgentComponent', () => {
 
     it('ignores a repeat save request while one is already in flight', () => {
       const pending = new Subject<{ agent_id: string; manifest: unknown; created: boolean }>();
-      api.saveAgent.mockReturnValue(pending.asObservable());
+      facade.saveAgent.mockReturnValue(
+        pending.asObservable().pipe(tap((response) => state.setRegistryAgentId(response.agent_id))),
+      );
       goToConfigure();
 
       component.saveAgent();
       component.saveAgent();
-      expect(api.saveAgent).toHaveBeenCalledTimes(1);
+      expect(facade.saveAgent).toHaveBeenCalledTimes(1);
 
       pending.next({ agent_id: 'blogging.planner.v2', manifest: {}, created: true });
       pending.complete();
@@ -368,7 +376,7 @@ describe('AgentStudioBuildAgentComponent', () => {
 
     it('disables the Save button and relabels it "Saving…" while the save is in flight, then re-enables it', () => {
       const pending = new Subject<{ agent_id: string; manifest: unknown; created: boolean }>();
-      api.saveAgent.mockReturnValue(pending.asObservable());
+      facade.saveAgent.mockReturnValue(pending.asObservable());
       goToConfigure();
 
       const saveButton = (): HTMLButtonElement => fixture.nativeElement.querySelector('.studio-build__save-sub');

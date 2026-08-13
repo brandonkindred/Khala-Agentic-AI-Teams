@@ -12,7 +12,7 @@ for built-in agents; there is no Temporal or LLM dependency in this package.
 | Kind | Source | Persistence |
 |---|---|---|
 | **Static / disk** | YAML under each team's `agent_console/manifests/` | Loaded into process memory at startup; never written to Postgres |
-| **Dynamic** | Runtime registration (e.g. generated roster agents via `AgentRegistry.register` / `replace_dynamic_manifests`) | Optional Postgres overlay (`dynamic_store.py` / `agent_registry.postgres`) when `POSTGRES_HOST` is set |
+| **Dynamic** | Runtime registration (e.g. generated roster agents via `AgentRegistry.register` / `replace_dynamic_manifests`) | Optional Postgres overlay (`dynamic_store.py` / `agent_platform.registry.postgres`) when `POSTGRES_HOST` is set |
 
 When Postgres is unset or the store is unavailable, dynamic registration stays
 **local-only** (same process). Store read failures degrade to the local view for
@@ -23,13 +23,13 @@ in-process registry APIs used by teams that generate agents.
 Agent Studio's save/register path is one such writer: it projects its editable
 `AgentDefinition` view-model into an `AgentManifest` before calling
 `AgentRegistry.register`. See
-[`agent_team_studio/agent_studio/README.md`](../agent_team_studio/agent_studio/README.md#identity-agentdefinition-view-model-vs-agentmanifest-sot)
+[`agent_team_studio/agent_studio/README.md`](../../agent_team_studio/agent_studio/README.md#identity-agentdefinition-view-model-vs-agentmanifest-sot)
 for the full `AgentDefinition` ↔ `AgentManifest` field mapping.
 
 ## Why it exists
 
 Historically, Khala had a flat, team-level roster in
-[`unified_api/config.py`](../../unified_api/config.py) and no structured
+[`unified_api/config.py`](../../../unified_api/config.py) and no structured
 metadata for individual specialist agents. `AGENT_ANATOMY.md` prescribed a
 contract in prose but nothing queried it. The Agent Console needed a way to
 browse, describe, and (eventually) invoke every agent in the system — the
@@ -140,7 +140,7 @@ Malformed YAML and manifests that fail validation are skipped with a warning.
 | `GET /api/agents/{agent_id}/schema/input` | Resolve input `schema_ref` to JSON Schema. 404 if missing or unimportable. |
 | `GET /api/agents/{agent_id}/schema/output` | Same, for output. |
 
-The router lives at [`backend/unified_api/routes/agents.py`](../../unified_api/routes/agents.py)
+The router lives at [`backend/unified_api/routes/agents.py`](../../../unified_api/routes/agents.py)
 and is wired in `unified_api/main.py` alongside `llm_tools`, `llm_usage`, etc.
 
 ## Reloading
@@ -149,7 +149,7 @@ The registry is a process-wide `lru_cache` singleton. To force a reload without
 restarting the server:
 
 ```python
-from agent_registry import get_registry
+from agent_platform.registry import get_registry
 get_registry.cache_clear()
 ```
 
@@ -157,13 +157,13 @@ get_registry.cache_clear()
 
 ```bash
 cd backend
-python3 -m pytest agents/agent_registry/tests/ unified_api/tests/test_agents_route.py -v
+python3 -m pytest agents/agent_platform/registry/tests/ unified_api/tests/test_agents_route.py -v
 ```
 
 ## Roadmap
 
 1. **Phase 1 — Catalog** *(shipped)*: registry + API + browsable UI.
-2. **Phase 2 — Runner + Sandboxes** *(shipped)*: `POST /api/agents/{id}/invoke`, per-agent ephemeral Docker sandboxes (`agent_platform.sandbox`, unified `khala-agent-sandbox` image), invoke shim (`shared.agent_invoke`), auto-generated golden samples. See [`agent_platform/sandbox/README.md`](../agent_platform/sandbox/README.md) and [`shared.agent_invoke/README.md`](../../shared/agent_invoke/README.md).
+2. **Phase 2 — Runner + Sandboxes** *(shipped)*: `POST /api/agents/{id}/invoke`, per-agent ephemeral Docker sandboxes (`agent_platform.sandbox`, unified `khala-agent-sandbox` image), invoke shim (`shared.agent_invoke`), auto-generated golden samples. See [`sandbox/README.md`](../sandbox/README.md) and [`shared.agent_invoke/README.md`](../../../shared/agent_invoke/README.md).
 3. **Phase 3 — Runs**: Postgres-backed run history, user-saved ad-hoc inputs, run diffing, JSON-schema-driven form UI.
 4. **Phase 4 — Breadth**: manifest coverage for all 24 teams, pre-warming, batch invocation.
 
@@ -177,7 +177,7 @@ Auto-generate a minimal skeleton for every manifest with `inputs.schema_ref`:
 
 ```bash
 cd backend
-PYTHONPATH="agents:." python3 -m agent_registry.scripts.generate_sample_skeletons
+PYTHONPATH="agents:." python3 -m agent_platform.registry.scripts.generate_sample_skeletons
 ```
 
 The script never clobbers hand-edited samples. Edit the emitted

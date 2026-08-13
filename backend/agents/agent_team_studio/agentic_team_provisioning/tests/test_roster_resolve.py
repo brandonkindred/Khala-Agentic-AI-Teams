@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
-from agent_registry.models import AgentManifest, CognitionSpec, SourceInfo
+from agent_platform.registry.models import AgentManifest, CognitionSpec, SourceInfo
 from agent_team_studio.agentic_team_provisioning.manifest_generation import (
     build_agent_manifest,
     manifest_agent_id,
@@ -94,7 +94,7 @@ def test_coerce_roster_agent_accepts_fat_history_with_null_manifest_id(
             self._m[manifest.id] = manifest
 
     reg = _Reg()
-    monkeypatch.setattr("agent_registry.get_registry", lambda: reg)
+    monkeypatch.setattr("agent_platform.registry.get_registry", lambda: reg)
 
     with pytest.raises(ValidationError):
         AgenticTeamAgent.model_validate(raw)
@@ -115,7 +115,7 @@ def test_resolve_persona_looks_up_registry(monkeypatch: pytest.MonkeyPatch) -> N
         def get(self, agent_id: str, *, conn=None):
             return m if agent_id == m.id else None
 
-    monkeypatch.setattr("agent_registry.get_registry", lambda: _Reg())
+    monkeypatch.setattr("agent_platform.registry.get_registry", lambda: _Reg())
     assert resolve_persona("demo.planner").role == "Plans work"
 
 
@@ -124,7 +124,7 @@ def test_resolve_persona_missing_raises(monkeypatch: pytest.MonkeyPatch) -> None
         def get(self, agent_id: str, *, conn=None):
             return None
 
-    monkeypatch.setattr("agent_registry.get_registry", lambda: _Reg())
+    monkeypatch.setattr("agent_platform.registry.get_registry", lambda: _Reg())
     with pytest.raises(LookupError):
         resolve_persona("missing.id")
 
@@ -156,7 +156,7 @@ def test_migrate_generated_stamps_manifest_id_and_strips_fat(
             self._m[manifest.id] = manifest
 
     reg = _Reg()
-    monkeypatch.setattr("agent_registry.get_registry", lambda: reg)
+    monkeypatch.setattr("agent_platform.registry.get_registry", lambda: reg)
 
     agent, changed = migrate_roster_row(team_id, raw)
     assert changed is True
@@ -198,7 +198,7 @@ def test_migrate_folds_fat_tools_capabilities_expertise_into_tags(
             self._m[manifest.id] = manifest
 
     reg = _Reg()
-    monkeypatch.setattr("agent_registry.get_registry", lambda: reg)
+    monkeypatch.setattr("agent_platform.registry.get_registry", lambda: reg)
 
     agent, changed = migrate_roster_row(team_id, raw)
     assert changed is True
@@ -237,7 +237,7 @@ def test_migrate_with_manifest_id_merges_fat_skills(monkeypatch: pytest.MonkeyPa
             self._m[manifest.id] = manifest
 
     reg = _Reg()
-    monkeypatch.setattr("agent_registry.get_registry", lambda: reg)
+    monkeypatch.setattr("agent_platform.registry.get_registry", lambda: reg)
 
     agent, changed = migrate_roster_row(team_id, raw)
     assert changed is True
@@ -270,7 +270,7 @@ def test_migrate_persist_failure_raises_before_thin_return(
             assert require_persist is True
             raise RuntimeError("boom:upsert")
 
-    monkeypatch.setattr("agent_registry.get_registry", lambda: _Reg())
+    monkeypatch.setattr("agent_platform.registry.get_registry", lambda: _Reg())
 
     with pytest.raises(RuntimeError, match="boom:upsert"):
         migrate_roster_row(team_id, raw)
@@ -318,7 +318,7 @@ def test_migrate_with_manifest_id_and_fat_keys_changed(monkeypatch: pytest.Monke
             self._m[manifest.id] = manifest
 
     reg = _Reg()
-    monkeypatch.setattr("agent_registry.get_registry", lambda: reg)
+    monkeypatch.setattr("agent_platform.registry.get_registry", lambda: reg)
 
     agent, changed = migrate_roster_row(team_id, raw)
     assert changed is True

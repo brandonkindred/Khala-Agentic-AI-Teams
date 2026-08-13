@@ -1,22 +1,27 @@
-# agent_platform
+# Agent platform
 
-In-process platform package for discover / author / run / sandbox agents.
+In-process backend for discovering, authoring, running, and sandboxing specialist
+agents. Lives at `backend/agents/agent_platform/` so it sits on the same
+`PYTHONPATH` root (`backend/agents`) as every other agent package.
 
-Today this package contains **sandbox** only. Registry, console, and studio
-move here in later changes. Import with a dotted prefix:
-`from agent_platform.sandbox import acquire`.
+## Members
 
-## What is in this package
+| Subpackage | Role | Public import |
+|---|---|---|
+| [`registry/`](registry/README.md) | Manifest catalog serving `/api/agents` | `from agent_platform.registry import …` |
+| `console/` | Runs / saved-inputs / diff data layer | not yet relocated |
+| [`sandbox/`](sandbox/README.md) | Per-agent ephemeral sandbox lifecycle and sandbox-only Temporal wiring | `from agent_platform.sandbox import acquire` |
+| `studio/` | Conversational single-agent authoring | not yet relocated |
 
-| Subpackage | Role |
-|---|---|
-| `sandbox/` | Per-agent ephemeral sandbox lifecycle and sandbox-only Temporal wiring. |
+This package's `__init__.py` is a thin boundary docstring only — it re-exports
+nothing. Callers import from the subpackage façades.
 
-## What is not in this package
+## Not in this package
 
-- Docker/env provisioning (`agent_team_studio.agent_provisioning_team`)
-- Agentic compose and persona runner (consumers, not members)
+- Docker/environment provisioning infra (`agent_team_studio/agent_provisioning_team/`)
+- Domain apps that consume the platform (`agentic_team_provisioning/`, `user_agent_founder/`)
 - Unified-API HTTP route modules (`unified_api/routes/sandboxes.py` stays
   a bare `include_router` mount)
 
-See `sandbox/README.md` for the runner itself.
+Layout and import map: `system_design/adr/ADR-013-agent-platform-package-layout.md`.
+Migration order and non-goals: `system_design/adr/ADR-014-agent-platform-non-goals-and-migration-order.md`.

@@ -10,10 +10,9 @@ _root = Path(__file__).resolve().parent.parent
 if str(_root) not in sys.path:
     sys.path.insert(0, str(_root))
 
+from agents.prompts import API_DESIGN_PROMPT  # noqa: E402
 from strands import Agent, tool  # noqa: E402
 from tools import document_writer_tool, file_read_tool, web_search_tool  # noqa: E402
-
-_PROMPT_PATH = _root / "prompts" / "api_design.md"
 
 
 @tool
@@ -37,10 +36,9 @@ def api_design_architect(
     Returns:
         API contracts/stubs, gateway topology, auth flow, versioning strategy.
     """
-    prompt = _PROMPT_PATH.read_text(encoding="utf-8")
     agent = Agent(
         model=_get_sonnet_model(),
-        system_prompt=prompt,
+        system_prompt=API_DESIGN_PROMPT,
         tools=[file_read_tool, web_search_tool, document_writer_tool],
         callback_handler=None,
     )
