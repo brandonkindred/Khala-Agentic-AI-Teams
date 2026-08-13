@@ -996,6 +996,111 @@ async def test_stream_unrecognized_tool_name_falls_back_to_text_scan() -> None:
     assert "architecture_document" in data
 
 
+def test_dummy_via_reasoning_analysis_alone_is_not_chunk_review_shape() -> None:
+    """Bare ANALYSIS / convert-preamble must not hijack other via-reasoning formatters."""
+    c = DummyLLMClient()
+    prompt = (
+        "Convert the following analysis into a single JSON object.\n"
+        "--- ANALYSIS abcdef0123456789 ---\n"
+        "Sales notes here.\n"
+        "--- END ANALYSIS abcdef0123456789 ---\n"
+        "Return fields: status, score.\n"
+    )
+    j = c.complete_json(prompt, temperature=0.0)
+    assert "approved" not in j or "issues" not in j or "spec_compliance_notes" not in j
+
+
+def test_dummy_via_reasoning_chunk_review_format_markers_return_chunk_stub() -> None:
+    c = DummyLLMClient()
+    prompt = (
+        "Convert the following analysis into a single JSON object.\n"
+        "--- ANALYSIS abcdef0123456789 ---\n"
+        "Review prose.\n"
+        "--- END ANALYSIS abcdef0123456789 ---\n"
+        'Required keys: "approved", "issues", "summary", "spec_compliance_notes".\n'
+    )
+    j = c.complete_json(prompt, temperature=0.0)
+    assert j["approved"] is True
+    assert j["issues"] == []
+    assert "spec_compliance_notes" in j
+
+
+def test_dummy_plan_critic_wins_over_analysis_delimiters() -> None:
+    c = DummyLLMClient()
+    prompt = (
+        "Convert the following analysis into a single JSON object.\n"
+        "--- ANALYSIS abcdef0123456789 ---\n"
+        "Plan looks fine.\n"
+        "--- END ANALYSIS abcdef0123456789 ---\n"
+        "Schema: PlanCriticReport with status and notes.\n"
+    )
+    j = c.complete_json(prompt, temperature=0.0)
+    assert "notes" in j
+    assert "approved" not in j or j.get("issues") is None
+
+
+def test_dummy_via_reasoning_review_synthesis_format_returns_summary() -> None:
+    c = DummyLLMClient()
+    prompt = (
+        "Convert the following analysis into a single JSON object.\n"
+        "--- ANALYSIS abcdef0123456789 ---\n"
+        "Findings look fine.\n"
+        "--- END ANALYSIS abcdef0123456789 ---\n"
+        "Return a single JSON object with exactly these keys:\n"
+        '- "summary": string — the unified review summary (non-empty).\n'
+        '- "spec_compliance_notes": string — consolidated gaps, or "".\n'
+    )
+    j = c.complete_json(prompt, temperature=0.0)
+    assert j["summary"].strip()
+    assert "spec_compliance_notes" in j
+    assert "approved" not in j
+
+
+def test_dummy_via_reasoning_spec_compliance_format_returns_notes_key() -> None:
+    c = DummyLLMClient()
+    prompt = (
+        "Convert the following analysis into a single JSON object.\n"
+        "--- ANALYSIS abcdef0123456789 ---\n"
+        "No gaps.\n"
+        "--- END ANALYSIS abcdef0123456789 ---\n"
+        "Return a single JSON object with exactly this key:\n"
+        '- "spec_compliance_notes": string — concrete gaps, or "".\n'
+    )
+    j = c.complete_json(prompt, temperature=0.0)
+    assert "spec_compliance_notes" in j
+    assert "summary" not in j
+    assert "approved" not in j
+
+
+def test_dummy_via_reasoning_fpf_format_returns_verdicts() -> None:
+    c = DummyLLMClient()
+    prompt = (
+        "Convert the following analysis into a single JSON object.\n"
+        "--- ANALYSIS abcdef0123456789 ---\n"
+        "Keep finding 1.\n"
+        "--- END ANALYSIS abcdef0123456789 ---\n"
+        'Required: "verdicts" list of objects.\n'
+    )
+    j = c.complete_json(prompt, temperature=0.0)
+    assert j == {"verdicts": []}
+
+
+def test_dummy_via_reasoning_standalone_submission_pass_returns_findings() -> None:
+    """Architecture / side-effect standalone format contracts use exactly one key."""
+    c = DummyLLMClient()
+    prompt = (
+        "Convert the following analysis into a single JSON object.\n"
+        "--- ANALYSIS abcdef0123456789 ---\n"
+        "No architecture issues.\n"
+        "--- END ANALYSIS abcdef0123456789 ---\n"
+        "Return a single JSON object with exactly one key:\n"
+        '- "findings": a list of objects.\n'
+        'Return {"findings": []} when you find nothing.\n'
+    )
+    j = c.complete_json(prompt, temperature=0.0)
+    assert j == {"findings": []}
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", _MODEL_ROUTED_MODEL_NAMES)
 async def test_stream_routes_structured_output_tool_by_name_despite_misleading_prompt(

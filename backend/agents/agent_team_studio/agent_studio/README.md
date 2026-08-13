@@ -15,9 +15,9 @@ registered agent back into an editable draft.
 
 ## Identity: `AgentDefinition` view-model vs. `AgentManifest` SoT
 
-`agent_registry.models.AgentManifest` is the only persisted, writable **catalog**
+`agent_platform.registry.models.AgentManifest` is the only persisted, writable **catalog**
 identity for an authored agent (dynamic Postgres overlay when `POSTGRES_HOST` is
-set, in-process otherwise — see `agent_registry/README.md`). `AgentDefinition`
+set, in-process otherwise — see `agent_platform.registry/README.md`). `AgentDefinition`
 (`models.py`) is an **ephemeral authoring view-model**: it lives only as the
 in-progress `definition_json` on an Agent Studio conversation row
 (`agent_studio_conversations`), never as a second catalog identity. Saving a

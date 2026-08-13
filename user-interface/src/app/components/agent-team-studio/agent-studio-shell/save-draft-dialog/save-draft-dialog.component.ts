@@ -7,7 +7,7 @@ import { MatFormFieldModule } from '@angular/material/form-field';
 import { MatIconModule } from '@angular/material/icon';
 import { MatInputModule } from '@angular/material/input';
 import { MatProgressSpinnerModule } from '@angular/material/progress-spinner';
-import { AgentStudioApiService } from '../../../../services/agent-studio-api.service';
+import { AgentStudioFacade } from '../../../../services/agent-studio.facade';
 import type { AgentStudioDraftSummary } from '../../../../models/agent-studio.model';
 
 /**
@@ -28,9 +28,9 @@ export type SaveDraftDialogResult = AgentStudioDraftSummary;
 
 /**
  * Save-draft name popover (spec §3.5). Unlike `SaveInputDialogComponent`,
- * this dialog performs its own create/update HTTP call and stays open on
- * failure so the user can retry without retyping the name — the same
- * "dialog owns its own I/O" pattern already used by
+ * this dialog performs its own create/update via `AgentStudioFacade.saveDraft`
+ * and stays open on failure so the user can retry without retyping the name —
+ * the same "dialog owns its own I/O" pattern already used by
  * `AddAgentFromRegistryDialogComponent`.
  */
 @Component({
@@ -51,7 +51,7 @@ export type SaveDraftDialogResult = AgentStudioDraftSummary;
   styleUrl: './save-draft-dialog.component.scss',
 })
 export class SaveDraftDialogComponent {
-  private readonly api = inject(AgentStudioApiService);
+  private readonly facade = inject(AgentStudioFacade);
   readonly data = inject<SaveDraftDialogData>(MAT_DIALOG_DATA);
   readonly ref = inject<MatDialogRef<SaveDraftDialogComponent, SaveDraftDialogResult>>(
     MatDialogRef,
@@ -94,10 +94,7 @@ export class SaveDraftDialogComponent {
     this.busy.set(true);
     this.serverError.set(null);
     const req = { name: trimmed, payload: this.data.payload };
-    const call = this.data.draftId
-      ? this.api.updateDraft(this.data.draftId, req)
-      : this.api.createDraft(req);
-    call.subscribe({
+    this.facade.saveDraft(req, this.data.draftId).subscribe({
       next: (summary) => this.ref.close(summary),
       error: (err) => {
         this.busy.set(false);

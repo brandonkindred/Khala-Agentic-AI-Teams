@@ -1,7 +1,9 @@
 """
-IssueGroomingRunner: drives GitHub issue grooming Phase A (heuristic Fibonacci
-scoring) then Phase B (sub-issue splitting) for one issue, reporting incremental
-progress to the coding-team job store.
+IssueGroomingRunner: drives GitHub issue grooming Phase A (Fibonacci complexity
+scoring via the LLM/heuristic mode facade in ``issue_scorer`` -- LLM-first with a
+deterministic heuristic fallback in the default ``auto`` mode) then Phase B
+(sub-issue splitting) for one issue, reporting incremental progress to the
+coding-team job store.
 
 This is the business-logic layer the Temporal activity (``temporal.issue_grooming_workflow.
 run_issue_grooming_activity``) wraps with a heartbeat and terminal-failure handling; nothing
@@ -17,9 +19,10 @@ from software_engineering_team.models import JobStatus
 from .client import GitHubClient
 from .issue_grooming_scoring import (
     ScoreBreakdown,
+    from_unified_score,
     inject_complexity_block,
     merge_complexity_label,
-    score_issue,
+    strip_grooming_blocks,
 )
 from .issue_grooming_split import (
     build_sub_issue,
@@ -28,6 +31,7 @@ from .issue_grooming_split import (
     plan_sub_issue_items,
     should_split,
 )
+from .issue_scorer import score_issue as score_issue_by_mode
 
 # Mirrors coding_team_orchestrator.CANCEL_KEY -- the coding-team job-cancellation
 # convention (a job field the cancel endpoint sets, polled cooperatively by
@@ -99,8 +103,15 @@ class IssueGroomingRunner:
             - ``owner``/``repo``/``issue_number`` name an existing, accessible
               GitHub issue; ``self._client`` is authorized for ``owner/repo``.
         Postconditions:
-            - Always runs Phase A: scores the issue (:func:`score_issue`),
-              injects the complexity table into its body, merges the
+            - Always runs Phase A: scores the issue via the LLM/heuristic mode
+              facade (``issue_scorer.score_issue``, imported here as
+              ``score_issue_by_mode``; see that module for the ``auto``/
+              ``heuristic_only`` mode contract and ``ISSUE_GROOMING_SCORING_MODE``),
+              adapted to this package's legacy :class:`ScoreBreakdown` shape via
+              :func:`issue_grooming_scoring.from_unified_score` so
+              ``grooming["score"]``'s field names stay exactly what they were
+              before this facade existed, regardless of which scoring path
+              answered. Injects the complexity table into its body, merges the
               ``complexity: N`` label, and PATCHes the issue. Reports progress
               via ``update_job_fn`` after each step.
             - If a cancellation is observed after Phase A (``update_job_fn``'s
@@ -123,16 +134,21 @@ class IssueGroomingRunner:
               B did not run, or ``{"score": ..., "sub_issues": [...]}`` when it
               did -- the same shape written via the last ``update_job_fn(grooming=...)``
               call.
-            - Raises whatever ``self._client``'s methods raise
-              (``GitHubAPIError``) on any GitHub failure; does not catch or
-              translate them; does not itself write a ``FAILED`` status -- that
-              is the Temporal activity wrapper's responsibility.
+            - Raises whatever ``self._client``'s methods raise (``GitHubAPIError``)
+              on any GitHub failure, and whatever ``score_issue_by_mode`` raises
+              that is not an ``LLMError`` (an ``LLMError`` itself is always caught
+              inside the facade's ``auto`` mode and turned into a heuristic-fallback
+              return, never raised out of Phase A) -- neither is caught or
+              translated here, and this method does not itself write a ``FAILED``
+              status on either path; that is the Temporal activity wrapper's
+              responsibility.
         """
         update = self._update_job_fn
         update(phase="fetching", status_text="Fetching issue", progress=10)
         issue = self._client.get_issue(owner, repo, issue_number)
 
-        score = score_issue(issue.title, issue.body)
+        clean_body = strip_grooming_blocks(issue.body)
+        score = from_unified_score(score_issue_by_mode(issue.title, clean_body, list(issue.labels)))
         scored_body = inject_complexity_block(issue.body, score)
         new_labels = merge_complexity_label(issue.labels, score)
         self._client.update_issue(owner, repo, issue_number, body=scored_body, labels=new_labels)

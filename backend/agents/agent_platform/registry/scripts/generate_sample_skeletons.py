@@ -4,7 +4,7 @@ minimal ``default.json`` sample file if none exists yet.
 
 Run from ``backend/``::
 
-    python3 -m agent_registry.scripts.generate_sample_skeletons
+    python3 -m agent_platform.registry.scripts.generate_sample_skeletons
 
 Never clobbers hand-edited samples (skips when ``default.json`` already exists).
 Prints a one-line summary per agent so reruns are reviewable.
@@ -16,9 +16,9 @@ import json
 import logging
 import sys
 
-from agent_registry import get_registry
-from agent_registry.pydantic_examples import example_from_schema
-from agent_registry.schema_resolver import SchemaResolutionError, resolve_schema
+from agent_platform.registry import get_registry
+from agent_platform.registry.pydantic_examples import example_from_schema
+from agent_platform.registry.schema_resolver import SchemaResolutionError, resolve_schema
 
 logger = logging.getLogger("generate_sample_skeletons")
 

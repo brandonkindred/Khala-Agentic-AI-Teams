@@ -28,13 +28,18 @@ import logging
 from typing import List, Optional
 
 from pydantic import BaseModel, Field
-from strands import Agent
 
 from llm_service import LLMClient
 
 from .model_resolution import resolve_code_review_model
 from .models import CodeReviewInput, CodeReviewIssue
-from .prompts import REVIEW_SYNTHESIS_PROMPT, SPEC_COMPLIANCE_PASS_PROMPT
+from .prompts import (
+    REVIEW_SYNTHESIS_FORMATTING_INSTRUCTIONS,
+    REVIEW_SYNTHESIS_REASONING_SYSTEM_PROMPT,
+    SPEC_COMPLIANCE_PASS_FORMATTING_INSTRUCTIONS,
+    SPEC_COMPLIANCE_PASS_REASONING_SYSTEM_PROMPT,
+)
+from .via_reasoning import run_agent_via_reasoning
 
 logger = logging.getLogger(__name__)
 
@@ -138,6 +143,22 @@ def build_findings_digest(
     return "\n".join(lines)
 
 
+def _parse_json_object(raw: str) -> dict:
+    """Parse formatting-pass JSON text into a dict.
+
+    Preconditions:
+        ``raw`` is the JSON text from the formatting pass.
+
+    Postconditions:
+        Returns a ``dict`` on success; raises ``json.JSONDecodeError`` or
+        ``TypeError`` when the payload is not a JSON object.
+    """
+    data = json.loads(raw)
+    if not isinstance(data, dict):
+        raise TypeError("model returned non-object JSON")
+    return data
+
+
 def synthesize_review_findings(
     llm: LLMClient,
     *,
@@ -178,13 +199,14 @@ def synthesize_review_findings(
         prompt = f"{framing}\n\n{digest}"
 
         _model = resolve_code_review_model(llm)
-        agent = Agent(model=_model, system_prompt=REVIEW_SYNTHESIS_PROMPT)
-        result = agent(prompt)
-        data = json.loads(str(result).strip())
-
-        if not isinstance(data, dict):
-            logger.warning("ReviewSynthesis: model returned non-object JSON; falling back")
-            return None
+        data = run_agent_via_reasoning(
+            model=_model,
+            reasoning_prompt=prompt,
+            reasoning_system_prompt=REVIEW_SYNTHESIS_REASONING_SYSTEM_PROMPT,
+            formatting_instructions=REVIEW_SYNTHESIS_FORMATTING_INSTRUCTIONS,
+            parse=_parse_json_object,
+            tools=[],
+        )
 
         summary = str(data.get("summary", "") or "").strip()
         spec_notes = str(data.get("spec_compliance_notes", "") or "").strip()
@@ -279,13 +301,15 @@ def synthesize_spec_compliance(
         prompt = f"{framing}\n\n{digest}"
 
         _model = resolve_code_review_model(llm)
-        agent = Agent(model=_model, system_prompt=SPEC_COMPLIANCE_PASS_PROMPT)
-        result = agent(prompt)
-        data = json.loads(str(result).strip())
+        data = run_agent_via_reasoning(
+            model=_model,
+            reasoning_prompt=prompt,
+            reasoning_system_prompt=SPEC_COMPLIANCE_PASS_REASONING_SYSTEM_PROMPT,
+            formatting_instructions=SPEC_COMPLIANCE_PASS_FORMATTING_INSTRUCTIONS,
+            parse=_parse_json_object,
+            tools=[],
+        )
 
-        if not isinstance(data, dict):
-            logger.warning("SpecCompliancePass: model returned non-object JSON; skipping")
-            return None
         if "spec_compliance_notes" not in data:
             logger.warning("SpecCompliancePass: missing spec_compliance_notes key; skipping")
             return None

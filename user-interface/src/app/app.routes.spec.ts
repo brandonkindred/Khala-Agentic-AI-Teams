@@ -46,6 +46,13 @@ describe('App routes', () => {
     expect(await loadedComponent('product-delivery')).toBe(ProductDeliveryPageComponent);
   });
 
+  it('lazily loads CognitionPageComponent for cognition', async () => {
+    const { CognitionPageComponent } = await import(
+      './components/cognition-page/cognition-page.component'
+    );
+    expect(await loadedComponent('cognition')).toBe(CognitionPageComponent);
+  });
+
   it('redirects empty path to /dashboard', () => {
     const shell = routes[0];
     const children = shell?.children as { path: string; redirectTo: string }[];

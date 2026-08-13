@@ -29,7 +29,7 @@ interchangeable; these helpers preserve the existing code-review behavior.
 from __future__ import annotations
 
 import os
-from typing import Optional, Union
+from typing import Any, Optional, Union
 
 from strands.models.model import Model as _StrandsModel
 
@@ -37,10 +37,77 @@ from llm_service import LLMClient, LLMClientModel, get_strands_model, with_model
 from llm_service.config import AGENT_DEFAULT_MODELS, ENV_LLM_MODEL
 
 _VERIFY_AGENT_KEY = "code_review_verify"
+_DEFAULT_RESPONSE_FORMAT = "json"
+
+
+def _production_resolve_kwargs(
+    *,
+    think: Optional[Union[bool, str]] = None,
+    response_format: str = _DEFAULT_RESPONSE_FORMAT,
+) -> dict[str, Any]:
+    """Build optional kwargs for ``get_strands_model`` on the production path.
+
+    Preconditions:
+        - ``response_format`` is ``"json"`` or ``"text"``.
+
+    Postconditions:
+        - Omits keys whose values match the factory defaults so cached
+          canonical models stay keyed the same way as before.
+    """
+    kwargs: dict[str, Any] = {}
+    if think is not None:
+        kwargs["think"] = think
+    if response_format != _DEFAULT_RESPONSE_FORMAT:
+        kwargs["response_format"] = response_format
+    return kwargs
+
+
+def _resolve_injected_strands_model(
+    llm: _StrandsModel,
+    *,
+    think: Optional[Union[bool, str]] = None,
+    response_format: str = _DEFAULT_RESPONSE_FORMAT,
+) -> _StrandsModel:
+    """Return a cloned injected model when ``response_format`` must change.
+
+    Injected strands ``Model`` instances cannot be re-resolved via
+    ``get_strands_model``; when callers request a different
+    ``response_format`` and the model exposes ``clone``, derive a sibling.
+    Opaque test doubles without ``clone`` are returned unchanged.
+
+    Preconditions:
+        - ``llm`` implements the strands ``Model`` interface.
+        - ``response_format`` is ``"json"`` or ``"text"``.
+
+    Postconditions:
+        - Returns ``llm`` when ``response_format`` matches the model config
+          (or when cloning is unavailable). Otherwise returns
+          ``llm.clone(response_format=..., think=...)`` when ``think`` is
+          supported, falling back to ``response_format`` only.
+    """
+    cfg = llm.get_config()
+    current_format = (
+        cfg.get("response_format", _DEFAULT_RESPONSE_FORMAT) if isinstance(cfg, dict) else _DEFAULT_RESPONSE_FORMAT
+    )
+    if response_format == current_format:
+        return llm
+
+    clone_fn = getattr(llm, "clone", None)
+    if not callable(clone_fn):
+        return llm
+
+    try:
+        if think is not None:
+            return clone_fn(response_format=response_format, think=think)
+        return clone_fn(response_format=response_format)
+    except TypeError:
+        return clone_fn(response_format=response_format)
 
 
 def resolve_code_review_model(
-    llm: "Union[LLMClient, _StrandsModel]", think: Optional[Union[bool, str]] = None
+    llm: "Union[LLMClient, _StrandsModel]",
+    think: Optional[Union[bool, str]] = None,
+    response_format: str = _DEFAULT_RESPONSE_FORMAT,
 ) -> "Union[LLMClient, _StrandsModel]":
     """Resolve the strands model a code-review agent should run on.
 
@@ -50,24 +117,27 @@ def resolve_code_review_model(
         - ``think`` is ``None`` (use the model's default thinking level), or an
           explicit override (``False`` to force reasoning off, a level string,
           etc.) applied only on the production path.
+        - ``response_format`` is ``"json"`` (default) or ``"text"``.
 
     Postconditions:
         - Returns ``llm`` itself when it already implements the strands ``Model``
-          interface (the test path injects such a client) — an injected model
-          cannot have its thinking level overridden, so ``think`` is ignored for
-          it (see ``thinking_override_supported``). Otherwise returns
-          ``get_strands_model("code_review", think=think)``: with ``think=None``
-          this is the default production model (unchanged behavior); with an
-          explicit override it is a fresh wrapper over the same cached client
-          with the requested thinking level. The result is safe to share across
-          concurrent ``Agent`` calls — the central ``llm_service`` client guards
-          its shared state internally.
+          interface and no ``response_format`` change is requested (the test
+          path injects such a client). When ``response_format`` differs from
+          the injected model's config and ``clone`` is available, returns a
+          cloned sibling; opaque doubles without ``clone`` are unchanged.
+          ``think`` is ignored for injected models unless cloning for
+          ``response_format`` (see ``thinking_override_supported``). Otherwise
+          returns ``get_strands_model("code_review", ...)`` with non-default
+          ``think`` / ``response_format`` forwarded. The result is safe to
+          share across concurrent ``Agent`` calls — the central ``llm_service``
+          client guards its shared state internally.
     """
     if isinstance(llm, _StrandsModel):
-        return llm
-    if think is None:
+        return _resolve_injected_strands_model(llm, think=think, response_format=response_format)
+    kwargs = _production_resolve_kwargs(think=think, response_format=response_format)
+    if not kwargs:
         return get_strands_model("code_review")
-    return get_strands_model("code_review", think=think)
+    return get_strands_model("code_review", **kwargs)
 
 
 def _code_review_verify_model_pin() -> str:
@@ -127,7 +197,9 @@ def _apply_code_review_verify_model_pin(
 
 
 def resolve_code_review_verify_model(
-    llm: "Union[LLMClient, _StrandsModel]", think: Optional[Union[bool, str]] = None
+    llm: "Union[LLMClient, _StrandsModel]",
+    think: Optional[Union[bool, str]] = None,
+    response_format: str = _DEFAULT_RESPONSE_FORMAT,
 ) -> "Union[LLMClient, _StrandsModel]":
     """Resolve the strands model for code-review's narrower verify/synthesis sub-passes.
 
@@ -151,21 +223,25 @@ def resolve_code_review_verify_model(
           ``Model`` interface.
         - ``think`` is ``None`` (use the model's default thinking level), or an
           explicit override applied only on the production path.
+        - ``response_format`` is ``"json"`` (default) or ``"text"``.
 
     Postconditions:
         - Returns ``llm`` itself when it already implements the strands ``Model``
-          interface (the test path injects such a client); ``think`` is ignored
-          for it (see ``thinking_override_supported``). Otherwise returns a
-          ``code_review_verify``-keyed model whose Ollama failover candidates
-          use the verify pin (Claude candidates keep their configured model),
-          safe to share across concurrent ``Agent`` calls.
+          interface and no ``response_format`` change is requested; when
+          ``response_format`` differs and ``clone`` is available, returns a
+          cloned sibling. ``think`` is ignored for injected models unless
+          cloning for ``response_format`` (see ``thinking_override_supported``).
+          Otherwise returns a ``code_review_verify``-keyed model whose Ollama
+          failover candidates use the verify pin (Claude candidates keep their
+          configured model), safe to share across concurrent ``Agent`` calls.
     """
     if isinstance(llm, _StrandsModel):
-        return llm
-    if think is None:
+        return _resolve_injected_strands_model(llm, think=think, response_format=response_format)
+    kwargs = _production_resolve_kwargs(think=think, response_format=response_format)
+    if not kwargs:
         base = get_strands_model(_VERIFY_AGENT_KEY)
     else:
-        base = get_strands_model(_VERIFY_AGENT_KEY, think=think)
+        base = get_strands_model(_VERIFY_AGENT_KEY, **kwargs)
     return _apply_code_review_verify_model_pin(base)
 
 

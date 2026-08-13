@@ -37,16 +37,19 @@ from code_review_agent.side_effect_impact_pass import (
     _validate_findings,
     find_side_effect_impact_issues,
 )
+from tests.submission_pass_two_call_client import SubmissionPassTwoCallClient
 
 from llm_service import LLMJsonParseError
 from llm_service.clients.dummy import DummyLLMClient
 
+pytest_plugins = ["tests.submission_pass_two_call_client"]
+
 # Unique anchor in this pass's user prompt (never the system prompt), distinct
 # from architecture_consistency_pass's own anchor so a DummyLLMClient subclass
 # can route between the two passes' calls without collision.
-_SIDE_EFFECT_PASS_ANCHOR = '"side-effects"/"documentation" findings array'
-_MERGED_PASS_ANCHOR = '"architecture_findings"/"side_effect_findings"'
-_ARCH_PASS_ANCHOR = '"findings" array as instructed'
+_SIDE_EFFECT_PASS_ANCHOR = "Summarize side-effect-impact findings in structured prose"
+_MERGED_PASS_ANCHOR = "Merged submission pass:"
+_ARCH_PASS_ANCHOR = "Summarize architecture-consistency findings in structured prose"
 
 
 def _input(files: Optional[Dict[str, str]] = None) -> CodeReviewInput:
@@ -87,31 +90,27 @@ def _tool_by_name(tools, name: str):
 def test_build_prompt_includes_changed_files() -> None:
     """User prompt inlines submission file paths and bodies."""
     index = CodebaseIndex.from_input(_input())
-    prompt = _build_prompt(index, max_inline_chars=100_000, max_manifest_chars=100_000)
+    prompt = _build_prompt(index)
     assert "app/main.py" in prompt
     assert "def bar():" in prompt
 
 
-def test_build_prompt_omits_files_beyond_inline_budget() -> None:
+def test_build_prompt_inlines_all_changed_files_in_full() -> None:
+    """Every changed file's full content reaches the prompt."""
     file_a_content = "x" * 50
-    files = {"a.py": file_a_content, "b.py": "y" * 50}
+    file_b_content = "y" * 50
+    files = {"a.py": file_a_content, "b.py": file_b_content}
     index = CodebaseIndex.from_input(_input(files=files))
-    prompt = _build_prompt(index, max_inline_chars=len(file_a_content), max_manifest_chars=100_000)
-    assert file_a_content in prompt  # inlined in full (fits the budget exactly)
-    assert "more changed file(s) not shown above" in prompt
-    assert "list_files()" in prompt
-
-
-def test_build_prompt_notes_mid_file_truncation() -> None:
-    files = {"a.py": "x" * 100}
-    index = CodebaseIndex.from_input(_input(files=files))
-    prompt = _build_prompt(index, max_inline_chars=30, max_manifest_chars=100_000)
-    assert "Only the first 30 characters of `a.py` are shown above" in prompt
+    prompt = _build_prompt(index)
+    assert file_a_content in prompt
+    assert file_b_content in prompt
+    assert "more changed file(s) not shown above" not in prompt
+    assert "Only the first" not in prompt
 
 
 def test_build_prompt_mentions_search_repository_tool() -> None:
     index = CodebaseIndex.from_input(_input())
-    prompt = _build_prompt(index, max_inline_chars=100_000, max_manifest_chars=100_000)
+    prompt = _build_prompt(index)
     assert "search_repository" in prompt
 
 
@@ -597,7 +596,7 @@ def test_returns_empty_when_submission_has_no_readable_files() -> None:
 
 
 def test_fails_safe_on_llm_error() -> None:
-    class _Raiser(DummyLLMClient):
+    class _Raiser(SubmissionPassTwoCallClient):
         def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
             raise RuntimeError("boom")
 
@@ -606,7 +605,7 @@ def test_fails_safe_on_llm_error() -> None:
 
 
 def test_fails_safe_on_unparsable_reply() -> None:
-    class _Gibberish(DummyLLMClient):
+    class _Gibberish(SubmissionPassTwoCallClient):
         def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
             raise LLMJsonParseError("not even a dict-shaped reply")
 
@@ -617,10 +616,10 @@ def test_fails_safe_on_unparsable_reply() -> None:
 def test_returns_empty_for_non_code_review_profile() -> None:
     from code_review_agent.profiles import ReviewProfile
 
-    class _FailIfAskedClient(DummyLLMClient):
+    class _FailIfAskedClient(SubmissionPassTwoCallClient):
         def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
-            assert _SIDE_EFFECT_PASS_ANCHOR not in prompt, "side-effect pass should not run"
-            assert _MERGED_PASS_ANCHOR not in prompt, "merged pass should not run"
+            assert _SIDE_EFFECT_PASS_ANCHOR not in self.latest_reasoning_prompt(), "side-effect pass should not run"
+            assert _MERGED_PASS_ANCHOR not in self.latest_reasoning_prompt(), "merged pass should not run"
             return {"approved": True, "issues": [], "summary": "ok", "spec_compliance_notes": ""}
 
     result = find_side_effect_impact_issues(
@@ -642,9 +641,9 @@ def test_returns_empty_when_pre_numbered() -> None:
         this pass cannot verify a finding against content it never fully saw.
     """
 
-    class _FailIfAskedClient(DummyLLMClient):
+    class _FailIfAskedClient(SubmissionPassTwoCallClient):
         def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
-            assert _SIDE_EFFECT_PASS_ANCHOR not in prompt, "side-effect pass should not run"
+            assert _SIDE_EFFECT_PASS_ANCHOR not in self.latest_reasoning_prompt(), "side-effect pass should not run"
             return {"approved": True, "issues": [], "summary": "ok", "spec_compliance_notes": ""}
 
     result = find_side_effect_impact_issues(
@@ -664,11 +663,11 @@ def test_runs_when_pre_numbered_with_full_content_supplied() -> None:
     the pass must run its normal caller-impact analysis instead of treating the
     submission as unverifiable hunk-fallback mode."""
 
-    class _FindingsClient(DummyLLMClient):
+    class _FindingsClient(SubmissionPassTwoCallClient):
         def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
-            if _SIDE_EFFECT_PASS_ANCHOR in prompt:
+            if _SIDE_EFFECT_PASS_ANCHOR in self.latest_reasoning_prompt():
                 assert (
-                    "def bar():" in prompt
+                    "def bar():" in self.latest_reasoning_prompt()
                 )  # full_content reached the prompt, not "1: def bar():"
                 return {
                     "findings": [
@@ -704,9 +703,9 @@ def test_stays_disabled_when_full_content_covers_only_some_paths() -> None:
     if they were complete files is exactly the "flag from a guess" failure mode
     this pass's ``pre_numbered`` guard exists to prevent."""
 
-    class _FailIfAskedClient(DummyLLMClient):
+    class _FailIfAskedClient(SubmissionPassTwoCallClient):
         def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
-            assert _SIDE_EFFECT_PASS_ANCHOR not in prompt, "pass should stay disabled"
+            assert _SIDE_EFFECT_PASS_ANCHOR not in self.latest_reasoning_prompt(), "pass should stay disabled"
             return {"approved": True, "issues": [], "summary": "ok", "spec_compliance_notes": ""}
 
     result = find_side_effect_impact_issues(
@@ -729,9 +728,9 @@ def test_stays_disabled_when_full_content_covers_only_some_paths() -> None:
 
 
 def test_finds_and_returns_new_findings() -> None:
-    class _FindingsClient(DummyLLMClient):
+    class _FindingsClient(SubmissionPassTwoCallClient):
         def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
-            if _SIDE_EFFECT_PASS_ANCHOR in prompt:
+            if _SIDE_EFFECT_PASS_ANCHOR in self.latest_reasoning_prompt():
                 return {
                     "findings": [
                         {
@@ -755,9 +754,9 @@ def test_finds_and_returns_new_findings() -> None:
 
 
 def test_finds_and_returns_new_findings_drops_hallucinated_line() -> None:
-    class _FindingsClient(DummyLLMClient):
+    class _FindingsClient(SubmissionPassTwoCallClient):
         def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
-            if _SIDE_EFFECT_PASS_ANCHOR in prompt:
+            if _SIDE_EFFECT_PASS_ANCHOR in self.latest_reasoning_prompt():
                 return {
                     "findings": [
                         {
@@ -790,10 +789,10 @@ def test_finds_caller_impact_across_the_repository() -> None:
 
     caller_content = "from app.main import bar\n\ndef use_bar():\n    return bar() + 1\n"
 
-    class _FindingsClient(DummyLLMClient):
+    class _FindingsClient(SubmissionPassTwoCallClient):
         def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
-            if _SIDE_EFFECT_PASS_ANCHOR in prompt:
-                assert "def bar():" in prompt  # the changed function reached the prompt
+            if _SIDE_EFFECT_PASS_ANCHOR in self.latest_reasoning_prompt():
+                assert "def bar():" in self.latest_reasoning_prompt()  # the changed function reached the prompt
                 return {
                     "findings": [
                         {
@@ -822,16 +821,14 @@ def test_finds_caller_impact_across_the_repository() -> None:
 # --------------------------------------------------------------------------- batching / reactive recovery
 
 
-def test_no_extra_batching_for_small_multi_file_submission_under_budget() -> None:
-    """Several small files that together still fit the per-call budget must
-    make exactly one LLM call, not one per file -- no behavior change for
-    submissions under the budget."""
+def test_single_call_for_multi_file_submission() -> None:
+    """Several small files are reviewed in one LLM call when no overflow occurs."""
     prompts: list = []
 
-    class _Client(DummyLLMClient):
+    class _Client(SubmissionPassTwoCallClient):
         def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
-            if _SIDE_EFFECT_PASS_ANCHOR in prompt:
-                prompts.append(prompt)
+            if _SIDE_EFFECT_PASS_ANCHOR in self.latest_reasoning_prompt():
+                prompts.append(self.latest_reasoning_prompt())
                 return {"findings": []}
             return {"approved": True, "issues": [], "summary": "ok", "spec_compliance_notes": ""}
 
@@ -842,157 +839,28 @@ def test_no_extra_batching_for_small_multi_file_submission_under_budget() -> Non
     }
     find_side_effect_impact_issues(_Client(), _input(files=files))
     assert len(prompts) == 1
+    for path in files:
+        assert f"### {path} ###" in prompts[0]
 
 
-def test_splits_into_multiple_batches_for_oversized_submission(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """When the changed-file set's total estimated size exceeds one call's
-    inline-code budget, the pass issues one independent LLM call per batch and
-    concatenates each batch's findings into a single list."""
-    import code_review_agent.submission_pass_runner as runner_mod
-
-    from software_engineering_team.shared.context_sizing import MergedPassBudgets
-
-    monkeypatch.setattr(
-        runner_mod,
-        "compute_code_review_merged_pass_budgets",
-        lambda *a, **k: MergedPassBudgets(
-            max_architecture_chars=0,
-            max_inline_code_chars=200,
-            max_manifest_chars=2_000,
-            reserved_response_tokens=4096,
-        ),
-    )
-
-    prompts: list = []
-
-    class _Client(DummyLLMClient):
-        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
-            if _SIDE_EFFECT_PASS_ANCHOR in prompt:
-                prompts.append(prompt)
-                for path in ("a.py", "b.py", "c.py"):
-                    if f"### {path} ###" in prompt:
-                        return {
-                            "findings": [
-                                {
-                                    "severity": "medium",
-                                    "category": "side-effects",
-                                    "file_path": path,
-                                    "description": f"finding for {path}",
-                                    "suggestion": "n/a",
-                                }
-                            ]
-                        }
-                return {"findings": []}
-            return {"approved": True, "issues": [], "summary": "ok", "spec_compliance_notes": ""}
-
-    files = {
-        "a.py": "x = 1\n" * 10,
-        "b.py": "y = 2\n" * 10,
-        "c.py": "z = 3\n" * 10,
-    }
-    result = find_side_effect_impact_issues(_Client(), _input(files=files))
-
-    assert len(prompts) == 3
-    assert {f.description for f in result} == {
-        "finding for a.py",
-        "finding for b.py",
-        "finding for c.py",
-    }
-    # Every batch's manifest still lists all three changed files (whole-
-    # submission awareness), even though its content section shows only one.
-    for prompt in prompts:
-        manifest_section = prompt.split("**Full content of the changed files", 1)[0]
-        assert "a.py" in manifest_section
-        assert "b.py" in manifest_section
-        assert "c.py" in manifest_section
-    assert any("batch 1 of 3" in p for p in prompts)
-    assert any("batch 3 of 3" in p for p in prompts)
-
-
-def test_one_batch_failure_does_not_discard_other_batches(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A malformed reply for one batch must not wipe out findings already
-    collected from other, successful batches."""
-    import code_review_agent.submission_pass_runner as runner_mod
-
-    from software_engineering_team.shared.context_sizing import MergedPassBudgets
-
-    monkeypatch.setattr(
-        runner_mod,
-        "compute_code_review_merged_pass_budgets",
-        lambda *a, **k: MergedPassBudgets(
-            max_architecture_chars=0,
-            max_inline_code_chars=200,
-            max_manifest_chars=2_000,
-            reserved_response_tokens=4096,
-        ),
-    )
-
-    class _Client(DummyLLMClient):
-        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
-            if _SIDE_EFFECT_PASS_ANCHOR in prompt:
-                if "### a.py ###" in prompt:
-                    return "not even a dict-shaped reply"  # type: ignore[return-value]
-                if "### b.py ###" in prompt:
-                    return {
-                        "findings": [
-                            {
-                                "severity": "medium",
-                                "category": "side-effects",
-                                "file_path": "b.py",
-                                "description": "finding for b.py",
-                                "suggestion": "n/a",
-                            }
-                        ]
-                    }
-                return {"findings": []}
-            return {"approved": True, "issues": [], "summary": "ok", "spec_compliance_notes": ""}
-
-    files = {
-        "a.py": "x = 1\n" * 10,
-        "b.py": "y = 2\n" * 10,
-        "c.py": "z = 3\n" * 10,
-    }
-    result = find_side_effect_impact_issues(_Client(), _input(files=files))
-    assert [f.description for f in result] == ["finding for b.py"]
-
-
-def test_reactive_recovery_bisects_overflowing_batch_through_public_entry_point(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The pass must now benefit from the shared runner's reactive bisect
-    recovery: a combined batch call that overflows mid-turn is retried as two
-    single-file calls, rather than simply skipped (the pre-runner behavior --
-    this pass had no reactive recovery of its own)."""
-    import code_review_agent.submission_pass_runner as runner_mod
+def test_reactive_recovery_bisects_overflowing_batch_through_public_entry_point() -> None:
+    """The pass benefits from the shared runner's reactive bisect recovery."""
     from strands.types.exceptions import ContextWindowOverflowException
-
-    from software_engineering_team.shared.context_sizing import MergedPassBudgets
-
-    monkeypatch.setattr(
-        runner_mod,
-        "compute_code_review_merged_pass_budgets",
-        lambda *a, **k: MergedPassBudgets(
-            max_architecture_chars=0,
-            max_inline_code_chars=100_000,
-            max_manifest_chars=2_000,
-            reserved_response_tokens=4096,
-        ),
-    )
 
     call_count = {"n": 0}
 
-    class _Client(DummyLLMClient):
-        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+    class _Client(SubmissionPassTwoCallClient):
+        def complete(self, prompt: str, **kwargs: Any) -> str:
             if _SIDE_EFFECT_PASS_ANCHOR in prompt:
                 call_count["n"] += 1
                 if "### a.py ###" in prompt and "### b.py ###" in prompt:
                     raise ContextWindowOverflowException("combined batch too large")
+            return super().complete(prompt, **kwargs)
+
+        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+            if _SIDE_EFFECT_PASS_ANCHOR in self.latest_reasoning_prompt():
                 for path in ("a.py", "b.py"):
-                    if f"### {path} ###" in prompt:
+                    if f"### {path} ###" in self.latest_reasoning_prompt():
                         return {
                             "findings": [
                                 {
@@ -1011,8 +879,6 @@ def test_reactive_recovery_bisects_overflowing_batch_through_public_entry_point(
     result = find_side_effect_impact_issues(_Client(), _input(files=files))
 
     assert {f.description for f in result} == {"finding for a.py", "finding for b.py"}
-    # More than one call proves the overflowing combined attempt was actually
-    # retried (bisected), not that the test happened to pass on the first try.
     assert call_count["n"] > 1
 
 
@@ -1023,15 +889,15 @@ def test_coordinator_runs_pass_once_per_submission_not_per_chunk() -> None:
     """Merged pass runs once per submission; standalone arch/side-effect passes do not."""
     calls = {"merged_pass": 0, "arch_pass": 0, "side_effect_pass": 0, "chunk_review": 0}
 
-    class _CountingClient(DummyLLMClient):
+    class _CountingClient(SubmissionPassTwoCallClient):
         def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
-            if _MERGED_PASS_ANCHOR in prompt:
+            if _MERGED_PASS_ANCHOR in self.latest_reasoning_prompt():
                 calls["merged_pass"] += 1
                 return {"architecture_findings": [], "side_effect_findings": []}
-            if _ARCH_PASS_ANCHOR in prompt:
+            if _ARCH_PASS_ANCHOR in self.latest_reasoning_prompt():
                 calls["arch_pass"] += 1
                 return {"findings": []}
-            if _SIDE_EFFECT_PASS_ANCHOR in prompt:
+            if _SIDE_EFFECT_PASS_ANCHOR in self.latest_reasoning_prompt():
                 calls["side_effect_pass"] += 1
                 return {"findings": []}
             calls["chunk_review"] += 1
@@ -1050,15 +916,15 @@ def test_coordinator_merges_side_effect_findings_into_final_output() -> None:
     docstring/implementation mismatch surfaces under ``documentation`` -- both fold
     into the final output, and neither blocks approval on its own at medium/low."""
 
-    class _FindingsClient(DummyLLMClient):
+    class _FindingsClient(SubmissionPassTwoCallClient):
         def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
-            assert _SIDE_EFFECT_PASS_ANCHOR not in prompt, (
+            assert _SIDE_EFFECT_PASS_ANCHOR not in self.latest_reasoning_prompt(), (
                 "standalone side-effect pass should not run when merged pass is enabled"
             )
-            assert _ARCH_PASS_ANCHOR not in prompt, (
+            assert _ARCH_PASS_ANCHOR not in self.latest_reasoning_prompt(), (
                 "standalone architecture pass should not run when merged pass is enabled"
             )
-            if _MERGED_PASS_ANCHOR in prompt:
+            if _MERGED_PASS_ANCHOR in self.latest_reasoning_prompt():
                 return {
                     "architecture_findings": [],
                     "side_effect_findings": [
@@ -1100,10 +966,10 @@ def test_coordinator_merges_side_effect_findings_into_final_output() -> None:
 def test_coordinator_skips_pass_for_non_default_profile() -> None:
     from code_review_agent.profiles import ReviewProfile
 
-    class _FailIfAskedClient(DummyLLMClient):
+    class _FailIfAskedClient(SubmissionPassTwoCallClient):
         def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
-            assert _SIDE_EFFECT_PASS_ANCHOR not in prompt, "side-effect pass should not run"
-            assert _MERGED_PASS_ANCHOR not in prompt, "merged pass should not run"
+            assert _SIDE_EFFECT_PASS_ANCHOR not in self.latest_reasoning_prompt(), "side-effect pass should not run"
+            assert _MERGED_PASS_ANCHOR not in self.latest_reasoning_prompt(), "merged pass should not run"
             return {
                 "index": 0,
                 "is_real_issue": True,
