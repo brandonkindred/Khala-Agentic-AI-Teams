@@ -670,7 +670,7 @@ async def lifespan(app: FastAPI):  # noqa: PLR0915 - linear startup orchestrator
         logger.exception("team_assistant postgres schema registration failed")
 
     try:
-        from agent_console.postgres import SCHEMA as AGENT_CONSOLE_SCHEMA
+        from agent_platform.console.postgres import SCHEMA as AGENT_CONSOLE_SCHEMA
         from shared.postgres import register_team_schemas
 
         register_team_schemas(AGENT_CONSOLE_SCHEMA)
@@ -784,7 +784,7 @@ async def lifespan(app: FastAPI):  # noqa: PLR0915 - linear startup orchestrator
     # 5. Start the Agent Console run pruner (Phase 3).
     run_pruner_task: asyncio.Task | None = None
     try:
-        from agent_console.prune import run_pruner
+        from agent_platform.console.prune import run_pruner
 
         run_pruner_task = asyncio.create_task(run_pruner())
         logger.info("Started Agent Console run pruner")
@@ -1128,7 +1128,7 @@ def _expected_tables_for(team_key: str) -> list[str]:
         from product_delivery.postgres import SCHEMA as PRODUCT_DELIVERY_SCHEMA
 
         return list(PRODUCT_DELIVERY_SCHEMA.table_names)
-    # Other in-process teams (agent_console, team_assistant, …) don't
+    # Other in-process teams (agent_platform.console, team_assistant, …) don't
     # currently surface table-presence checks in /health. Add cases
     # here as they adopt the pattern.
     return []
@@ -1232,7 +1232,7 @@ def _retry_in_process_schema_registration(team_key: str) -> bool:  # pragma: no 
                 total,
             )
             return True
-        # Other in-process teams (agent_console, team_assistant, etc.)
+        # Other in-process teams (agent_platform.console, team_assistant, etc.)
         # don't currently track their schema-failure flag through this
         # set, so there's nothing to retry. Add cases here as they
         # adopt the pattern.
@@ -1273,7 +1273,7 @@ async def health() -> UnifiedHealthResponse:
         intentionally_unavailable = False
         if config.in_process:
             # No upstream container, but the in-process router still
-            # depends on Postgres for product_delivery / agent_console.
+            # depends on Postgres for product_delivery / agent_platform.console.
             # Four states matter:
             #   * disabled → routes are unmounted; report "unavailable"
             #     (intentional — operator opt-out via TEAM_CONFIGS).

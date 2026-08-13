@@ -14,7 +14,7 @@ Design contract:
     is unavailable or the query fails, so the page renders without history
     rather than erroring.
 
-Mirrors the ``agent_console`` store idioms (``get_conn`` / ``Json`` /
+Mirrors the ``agent_platform.console`` store idioms (``get_conn`` / ``Json`` /
 ``dict_row`` / ``@timed_query``).
 """
 
