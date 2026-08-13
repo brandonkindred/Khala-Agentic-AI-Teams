@@ -15,11 +15,20 @@ from agent_platform.studio.agent_states import STATE_ORDER
 from agent_platform.studio.models import AgentDefinition, AgentState
 from agent_platform.studio.registration import (
     STUDIO_TEAM,
+    _manifest_states,
     build_studio_agent_manifest,
     clone_from_manifest,
     studio_agent_id,
 )
-from agent_team_studio.manifest_shared import default_cognition_block
+from shared.manifests import (
+    AGENT_ANATOMY_REF,
+    GENERATED_AGENT_ENTRYPOINT,
+    GENERATED_AGENT_INPUT_REF,
+    GENERATED_AGENT_OUTPUT_REF,
+    build_manifest,
+    default_cognition_block,
+    io_schema,
+)
 
 
 def test_studio_agent_id_is_stable_and_slugged() -> None:
@@ -106,6 +115,49 @@ def test_build_manifest_summary_fallback_when_no_role() -> None:
 def test_build_manifest_rejects_blank_name() -> None:
     with pytest.raises(ValueError):
         build_studio_agent_manifest(AgentDefinition(name="  "))
+
+
+def test_build_studio_agent_manifest_delegates_to_shared_builders() -> None:
+    # Guard: the Studio wrapper must compose shared.manifests helpers rather than
+    # keep a parallel AgentManifest / IOSchema construction body.
+    import agent_platform.studio.registration as registration
+
+    assert not hasattr(registration, "_io_schema")
+
+    definition = AgentDefinition(
+        name="Planner",
+        role="Plans things",
+        description="desc",
+        tags=["content", "seo"],
+        tools=["web.search"],
+        input_schema={"type": "object"},
+        system_prompt="Be terse.",
+    )
+    via_studio = build_studio_agent_manifest(definition)
+    via_shared = build_manifest(
+        id=studio_agent_id(definition.name),
+        team=STUDIO_TEAM,
+        name=definition.name,
+        summary=definition.role or f"Studio agent {definition.name}",
+        description=definition.description,
+        tags=sorted({"studio", *definition.tags}),
+        inputs=io_schema(
+            definition.input_schema,
+            schema_ref=GENERATED_AGENT_INPUT_REF,
+            ref_description="Roster metadata + user message (shared generated-agent entrypoint).",
+            inline_description="Authored input schema.",
+        ),
+        outputs=io_schema(
+            definition.output_schema,
+            schema_ref=GENERATED_AGENT_OUTPUT_REF,
+            ref_description="The agent's response text.",
+            inline_description="Authored output schema.",
+        ),
+        cognition=default_cognition_block().model_copy(update={"tools": list(definition.tools)}),
+        states=_manifest_states(definition),
+        source=SourceInfo(entrypoint=GENERATED_AGENT_ENTRYPOINT, anatomy_ref=AGENT_ANATOMY_REF),
+    )
+    assert via_studio == via_shared
 
 
 def test_build_manifest_folds_system_prompt_into_executing_state() -> None:

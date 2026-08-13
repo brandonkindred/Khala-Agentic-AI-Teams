@@ -32,6 +32,13 @@ describe('App routes', () => {
     expect(await loadedComponent('llm-config')).toBe(LlmConfigDashboardComponent);
   });
 
+  it('lazily loads LlmUsageDashboardComponent for llm-usage', async () => {
+    const { LlmUsageDashboardComponent } = await import(
+      './components/llm-usage-dashboard/llm-usage-dashboard.component'
+    );
+    expect(await loadedComponent('llm-usage')).toBe(LlmUsageDashboardComponent);
+  });
+
   it('lazily loads JobMatchingDashboardComponent for job-matching', async () => {
     const { JobMatchingDashboardComponent } = await import(
       './components/job-matching-dashboard/job-matching-dashboard.component'
