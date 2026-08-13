@@ -42,6 +42,7 @@ from software_engineering_team.shared.phases.execution import (
     GateOutcome,
     ReviewDependencies,
     _schedule_microtask_batches,
+    _serialize_progress,
     run_gated_execution_impl,
 )
 from software_engineering_team.shared.v2_models import ReviewIssue
@@ -375,6 +376,41 @@ def test_progress_callback_contract(tmp_path):
         "documentation",
         "completed",
     } <= phases_seen
+
+
+def test_serialize_progress_completed_count_is_monotonic():
+    """A stale worker-local completed count cannot decrease the published value."""
+    calls: List[tuple] = []
+    cb = _serialize_progress(lambda *a: calls.append(a), threading.Lock())
+    assert cb is not None
+    cb(1, 0, 2, "mt-1", "coding", "")
+    cb(2, 1, 2, "mt-2", "completed", "")
+    cb(1, 0, 2, "mt-1", "code_review", "")
+
+    completed_counts = [c[1] for c in calls]
+    assert completed_counts == sorted(completed_counts)
+    assert calls[-1][1] == 1
+    assert calls[-1][4] == "code_review"
+
+
+def test_serialize_progress_does_not_publish_completed_while_sibling_active():
+    """A faster sibling's completed tick must not freeze the dashboard while another runs."""
+    calls: List[tuple] = []
+    cb = _serialize_progress(lambda *a: calls.append(a), threading.Lock())
+    assert cb is not None
+    cb(1, 0, 2, "mt-1", "coding", "")
+    cb(2, 0, 2, "mt-2", "coding", "")
+    cb(2, 1, 2, "mt-2", "completed", "")
+
+    assert calls[-1][3] == "mt-1"
+    assert calls[-1][4] == "coding"
+    assert calls[-1][1] == 1
+    assert not any(c[3] == "mt-2" and c[4] == "completed" for c in calls)
+
+    cb(1, 1, 2, "mt-1", "completed", "")
+    assert calls[-1][3] == "mt-1"
+    assert calls[-1][4] == "completed"
+    assert calls[-1][1] == 1
 
 
 # ---------------------------------------------------------------------------

@@ -568,7 +568,21 @@ def _serialize_progress(
     progress_callback: Optional[Callable[[int, int, int, str, str, str], None]],
     lock: threading.Lock,
 ) -> Optional[Callable[[int, int, int, str, str, str], None]]:
-    """Wrap ``progress_callback`` so concurrent workers cannot interleave ticks.
+    """Wrap ``progress_callback`` so concurrent workers cannot regress dashboard state.
+
+    ``shared.v2_orchestrator._build_progress_callback`` persists every tick's
+    index, phase, and completed count directly. A mutex alone still lets a
+    slower sibling overwrite a later snapshot (index 2 / ``completed`` /
+    ``completed`` phase) with an earlier one (index 1 / ``coding``).
+
+    Coalescing under ``lock``:
+        - Published ``completed`` is monotonic.
+        - A ``completed``-phase tick is not forwarded while another index is
+          still in a non-completed phase. Instead the still-active sibling's
+          last in-progress snapshot is re-emitted with the updated completed
+          count so the progress bar can advance without freezing on a
+          sibling's ``completed`` snapshot.
+        - In-progress ticks always forward (they are live work).
 
     Preconditions:
         ``lock`` is dedicated to this callback (not reused for file writes).
@@ -579,6 +593,10 @@ def _serialize_progress(
     if progress_callback is None:
         return None
 
+    active: set[int] = set()
+    max_completed = 0
+    in_progress: Dict[int, Tuple[int, str, str, str]] = {}
+
     def _wrapped(
         current_index: int,
         completed: int,
@@ -587,8 +605,23 @@ def _serialize_progress(
         microtask_phase: str,
         phase_detail: str,
     ) -> None:
+        nonlocal max_completed
         with lock:
-            progress_callback(current_index, completed, total, title, microtask_phase, phase_detail)
+            if microtask_phase == "completed":
+                active.discard(current_index)
+                in_progress.pop(current_index, None)
+            else:
+                active.add(current_index)
+                in_progress[current_index] = (total, title, microtask_phase, phase_detail)
+            max_completed = max(max_completed, completed)
+            if microtask_phase == "completed" and active:
+                live_idx = max(active)
+                tot, live_title, live_phase, live_detail = in_progress[live_idx]
+                progress_callback(live_idx, max_completed, tot, live_title, live_phase, live_detail)
+                return
+            progress_callback(
+                current_index, max_completed, total, title, microtask_phase, phase_detail
+            )
 
     return _wrapped
 
