@@ -36,15 +36,37 @@ USAGE_TABLE_DDL = (
     "completion_tokens INTEGER NOT NULL DEFAULT 0, "
     "total_tokens INTEGER NOT NULL DEFAULT 0, "
     "latency_ms INTEGER NOT NULL DEFAULT 0, "
-    "status TEXT NOT NULL DEFAULT '')"
+    "status TEXT NOT NULL DEFAULT '', "
+    "caller_tag TEXT NOT NULL DEFAULT '', "
+    "cost_usd DOUBLE PRECISION NOT NULL DEFAULT 0, "
+    "outcome TEXT NOT NULL DEFAULT '', "
+    "error_type TEXT, "
+    "job_id TEXT, "
+    "objective TEXT NOT NULL DEFAULT '', "
+    "request_id TEXT NOT NULL DEFAULT '', "
+    "task_id TEXT NOT NULL DEFAULT '', "
+    "phase TEXT NOT NULL DEFAULT '')"
 )
 USAGE_TABLE_INDEX_DDL = (
     "CREATE INDEX IF NOT EXISTS idx_llm_call_records_ts ON llm_call_records (ts)"
 )
-USAGE_TABLE_LATENCY_DDL = (
-    "ALTER TABLE llm_call_records ADD COLUMN IF NOT EXISTS latency_ms INTEGER NOT NULL DEFAULT 0"
+# ALTER for tables created before these columns existed. CREATE TABLE IF NOT
+# EXISTS does not add columns to an already-created table.
+USAGE_TABLE_ALTER_DDL = (
+    "ALTER TABLE llm_call_records ADD COLUMN IF NOT EXISTS latency_ms INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE llm_call_records ADD COLUMN IF NOT EXISTS caller_tag TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE llm_call_records ADD COLUMN IF NOT EXISTS cost_usd DOUBLE PRECISION NOT NULL DEFAULT 0",
+    "ALTER TABLE llm_call_records ADD COLUMN IF NOT EXISTS outcome TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE llm_call_records ADD COLUMN IF NOT EXISTS error_type TEXT",
+    "ALTER TABLE llm_call_records ADD COLUMN IF NOT EXISTS job_id TEXT",
+    "ALTER TABLE llm_call_records ADD COLUMN IF NOT EXISTS objective TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE llm_call_records ADD COLUMN IF NOT EXISTS request_id TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE llm_call_records ADD COLUMN IF NOT EXISTS task_id TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE llm_call_records ADD COLUMN IF NOT EXISTS phase TEXT NOT NULL DEFAULT ''",
 )
-USAGE_TABLE_STATEMENTS = (USAGE_TABLE_DDL, USAGE_TABLE_INDEX_DDL, USAGE_TABLE_LATENCY_DDL)
+USAGE_TABLE_STATEMENTS = (USAGE_TABLE_DDL, USAGE_TABLE_INDEX_DDL, *USAGE_TABLE_ALTER_DDL)
+
+_OPTIONAL_RECENT_KEYS = ("error_type", "job_id", "objective", "request_id", "task_id", "phase")
 
 WINDOWS: dict[str, float] = {
     "24h": 24.0,
@@ -55,8 +77,10 @@ WINDOWS: dict[str, float] = {
 
 _INSERT_SQL = (
     "INSERT INTO llm_call_records (ts, team, agent_key, model, "
-    "prompt_tokens, completion_tokens, total_tokens, latency_ms, status) VALUES "
-    "(%s, %s, %s, %s, %s, %s, %s, %s, %s)"
+    "prompt_tokens, completion_tokens, total_tokens, latency_ms, status, "
+    "caller_tag, cost_usd, outcome, error_type, job_id, objective, "
+    "request_id, task_id, phase) VALUES "
+    "(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
 )
 
 _table_ensured = False
@@ -156,23 +180,38 @@ def _ensure_table() -> None:
             with pg_cursor() as cur:
                 if cur is None:
                     return
-                cur.execute(USAGE_TABLE_DDL)
-                cur.execute(USAGE_TABLE_INDEX_DDL)
-                cur.execute(USAGE_TABLE_LATENCY_DDL)
+                for stmt in USAGE_TABLE_STATEMENTS:
+                    cur.execute(stmt)
             _table_ensured = True
         except Exception:
             logger.warning("llm_call_records table ensure failed", exc_info=True)
 
 
+def _nonneg_float(value: Any) -> float:
+    """Coerce ``value`` to a finite non-negative float (else ``0.0``)."""
+    try:
+        n = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    if not math.isfinite(n) or n < 0:
+        return 0.0
+    return n
+
+
 def record_to_row(record: Any) -> tuple:
-    """Build the 9-element INSERT tuple from an LLMCallRecord-shaped object.
+    """Build the INSERT tuple from an LLMCallRecord-shaped object.
 
     Preconditions: ``record`` exposes ``timestamp``, ``team``, ``agent_key``,
         ``model``, ``prompt_tokens``, ``completion_tokens``, ``total_tokens``,
-        ``latency_ms``, ``status`` (missing numerics → 0, missing strings → "").
-    Postconditions: returns ``(ts, team, agent_key, model, prompt_tokens,
-        completion_tokens, total_tokens, latency_ms, status)`` with
-        timezone-aware UTC ``ts``.
+        ``latency_ms``, ``status``, plus the recent-call metadata fields
+        (``caller_tag``, ``cost_usd``, ``outcome``, ``error_type``, ``job_id``,
+        ``objective``, ``request_id``, ``task_id``, ``phase``). Missing
+        numerics → 0; missing strings → ``""``; missing optional nullable
+        fields → ``None``.
+    Postconditions: returns an 18-tuple ``(ts, team, agent_key, model,
+        prompt_tokens, completion_tokens, total_tokens, latency_ms, status,
+        caller_tag, cost_usd, outcome, error_type, job_id, objective,
+        request_id, task_id, phase)`` with timezone-aware UTC ``ts``.
     """
     raw_ts = getattr(record, "timestamp", None)
     epoch = raw_ts if isinstance(raw_ts, (int, float)) and raw_ts > 0 else time.time()
@@ -187,13 +226,22 @@ def record_to_row(record: Any) -> tuple:
         int(getattr(record, "total_tokens", 0) or 0),
         int(getattr(record, "latency_ms", 0) or 0),
         getattr(record, "status", "") or "",
+        getattr(record, "caller_tag", "") or "",
+        _nonneg_float(getattr(record, "cost_usd", 0)),
+        getattr(record, "outcome", "") or "",
+        getattr(record, "error_type", None) or None,
+        getattr(record, "job_id", None) or None,
+        getattr(record, "objective", "") or "",
+        getattr(record, "request_id", "") or "",
+        getattr(record, "task_id", "") or "",
+        getattr(record, "phase", "") or "",
     )
 
 
 def write_rows(rows: Sequence[tuple]) -> int:
     """Batch-insert pre-built row tuples. Never raises.
 
-    Preconditions: each element is a 9-tuple from :func:`record_to_row`.
+    Preconditions: each element is an 18-tuple from :func:`record_to_row`.
     Postconditions: returns the number of rows written; 0 when Postgres is off,
         ``rows`` is empty, or the write failed.
     """
@@ -312,13 +360,15 @@ def fetch_recent(*, window: str, team: str | None = None, limit: int = 100) -> l
 
     Preconditions: ``window`` is a key of :data:`WINDOWS` or a finite
         numeric-hours string accepted by :func:`window_hours`; ``limit`` >= 1.
-    Postconditions: list of dicts with ``timestamp`` (unix float), ``team``,
-        ``agent_key``, ``model``, ``prompt_tokens``, ``completion_tokens``,
-        ``total_tokens``, ``latency_ms``, ``status``, oldest-to-newest (the
-        newest ``limit`` rows, most recent last — matching pre-change
-        ``get_recent_calls``). Empty list when Postgres is off or the
-        window has no rows. Returns ``None`` when the query fails or the cursor
-        is ``None`` so the HTTP layer can distinguish failure from zero calls.
+    Postconditions: list of dicts matching pre-change ``get_recent_calls`` /
+        ``LLMCallRecord.to_dict`` (always ``timestamp``, ``team``, ``agent_key``,
+        ``model``, ``caller_tag``, token counts, ``latency_ms``, ``status``,
+        ``cost_usd``, ``outcome``; optional ``error_type`` / ``job_id`` /
+        ``objective`` / ``request_id`` / ``task_id`` / ``phase`` when set),
+        oldest-to-newest (the newest ``limit`` rows, most recent last). Empty
+        list when Postgres is off or the window has no rows. Returns ``None``
+        when the query fails or the cursor is ``None`` so the HTTP layer can
+        distinguish failure from zero calls.
     """
     if not is_postgres_enabled():
         return []
@@ -331,38 +381,55 @@ def fetch_recent(*, window: str, team: str | None = None, limit: int = 100) -> l
                 return None
             cur.execute(
                 "SELECT ts, team, agent_key, model, prompt_tokens, completion_tokens, "
-                f"total_tokens, latency_ms, status FROM llm_call_records{where_sql} "
+                "total_tokens, latency_ms, status, caller_tag, cost_usd, outcome, "
+                "error_type, job_id, objective, request_id, task_id, phase "
+                f"FROM llm_call_records{where_sql} "
                 "ORDER BY ts DESC LIMIT %s",
                 params,
             )
             rows = cur.fetchall() or []
-        out: list[dict] = []
-        for r in rows:
-            ts = r["ts"]
-            if isinstance(ts, datetime):
-                if ts.tzinfo is None:
-                    ts = ts.replace(tzinfo=timezone.utc)
-                epoch = ts.timestamp()
-            else:
-                epoch = float(ts or 0)
-            out.append(
-                {
-                    "timestamp": epoch,
-                    "team": r.get("team") or "",
-                    "agent_key": r.get("agent_key") or "",
-                    "model": r.get("model") or "",
-                    "prompt_tokens": int(r.get("prompt_tokens") or 0),
-                    "completion_tokens": int(r.get("completion_tokens") or 0),
-                    "total_tokens": int(r.get("total_tokens") or 0),
-                    "latency_ms": int(r.get("latency_ms") or 0),
-                    "status": r.get("status") or "",
-                }
-            )
+        out = [_recent_dict_from_pg(r) for r in rows]
         out.reverse()
         return out
     except Exception:
         logger.debug("failed to fetch recent llm calls", exc_info=True)
         return None
+
+
+def _recent_dict_from_pg(r: dict) -> dict:
+    """Map a ``llm_call_records`` row to the pre-change recent-call dict.
+
+    Preconditions: ``r`` is a dict-row from the recent SELECT (``ts`` may be
+        datetime, epoch float, or ``None``).
+    Postconditions: returns a dict with the always-present ``to_dict`` keys
+        and optional metadata keys only when they are non-empty.
+    """
+    ts = r.get("ts")
+    if isinstance(ts, datetime):
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        epoch = ts.timestamp()
+    else:
+        epoch = float(ts or 0)
+    out: dict[str, Any] = {
+        "timestamp": epoch,
+        "team": r.get("team") or "",
+        "agent_key": r.get("agent_key") or "",
+        "model": r.get("model") or "",
+        "caller_tag": r.get("caller_tag") or "",
+        "prompt_tokens": int(r.get("prompt_tokens") or 0),
+        "completion_tokens": int(r.get("completion_tokens") or 0),
+        "total_tokens": int(r.get("total_tokens") or 0),
+        "latency_ms": int(r.get("latency_ms") or 0),
+        "status": r.get("status") or "",
+        "cost_usd": _nonneg_float(r.get("cost_usd")),
+        "outcome": r.get("outcome") or "",
+    }
+    for key in _OPTIONAL_RECENT_KEYS:
+        value = r.get(key)
+        if value:
+            out[key] = value
+    return out
 
 
 __all__ = [

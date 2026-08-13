@@ -81,6 +81,18 @@ def test_recent_query_failure_returns_503() -> None:
     assert resp.status_code == 503
 
 
+def test_recent_defaults_to_unbounded_window() -> None:
+    """Omitting window must not silently drop calls older than 24h."""
+    with (
+        patch("unified_api.routes.llm_usage.is_postgres_enabled", return_value=True),
+        patch("unified_api.routes.llm_usage.fetch_recent", return_value=[]) as fetch,
+    ):
+        resp = client.get("/api/llm-usage/recent")
+    assert resp.status_code == 200
+    fetch.assert_called_once()
+    assert fetch.call_args.kwargs["window"] == "all"
+
+
 def test_recent_postgres_path_returns_rows() -> None:
     rows = [
         {

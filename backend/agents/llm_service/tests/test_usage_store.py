@@ -109,12 +109,15 @@ def test_write_rows_noop_when_postgres_off(monkeypatch) -> None:
 def test_write_rows_inserts_tuple(fake_db) -> None:
     rec = _Rec()
     row = us.record_to_row(rec)
-    assert len(row) == 9
+    assert len(row) == 18
     assert row[1] == "blogging"
     assert row[4] == 10
     assert row[5] == 5
     assert row[6] == 15
     assert row[7] == 0
+    assert row[9] == ""
+    assert row[10] == 0.0
+    assert row[11] == ""
     n = us.write_rows([row])
     assert n == 1
     sql, params = fake_db.executed[0]
@@ -314,11 +317,97 @@ def test_fetch_recent_oldest_to_newest_and_limit(fake_db) -> None:
     assert len(rows) == 2
     assert rows[0]["model"] == "m2"
     assert rows[0]["timestamp"] == ts_old.timestamp()
+    assert rows[0]["caller_tag"] == ""
+    assert rows[0]["cost_usd"] == 0.0
+    assert rows[0]["outcome"] == ""
+    assert "error_type" not in rows[0]
     assert rows[1]["model"] == "m1"
     assert rows[1]["latency_ms"] == 10
     sql, params = fake_db.executed[0]
     assert "ORDER BY ts DESC" in sql
+    assert "caller_tag" in sql
+    assert "cost_usd" in sql
+    assert "outcome" in sql
     assert params[-1] == 2
+
+
+def test_record_to_row_and_fetch_recent_preserve_call_metadata(fake_db) -> None:
+    rec = _Rec(
+        caller_tag="writer.agent.write_draft",
+        latency_ms=42,
+        cost_usd=0.12,
+        outcome="success",
+        error_type="TimeoutError",
+        job_id="job-9",
+        objective="draft",
+        request_id="req-1",
+        task_id="task-2",
+        phase="execute",
+    )
+    row = us.record_to_row(rec)
+    assert row[7] == 42
+    assert row[9] == "writer.agent.write_draft"
+    assert row[10] == 0.12
+    assert row[11] == "success"
+    assert row[12] == "TimeoutError"
+    assert row[13] == "job-9"
+    assert row[14] == "draft"
+    assert row[15] == "req-1"
+    assert row[16] == "task-2"
+    assert row[17] == "execute"
+
+    ts = datetime(2026, 8, 12, 12, 0, tzinfo=timezone.utc)
+    fake_db._fetchall = [
+        {
+            "ts": ts,
+            "team": "blogging",
+            "agent_key": "writer",
+            "model": "m1",
+            "prompt_tokens": 1,
+            "completion_tokens": 2,
+            "total_tokens": 3,
+            "latency_ms": 42,
+            "status": "success",
+            "caller_tag": "writer.agent.write_draft",
+            "cost_usd": 0.12,
+            "outcome": "success",
+            "error_type": "TimeoutError",
+            "job_id": "job-9",
+            "objective": "draft",
+            "request_id": "req-1",
+            "task_id": "task-2",
+            "phase": "execute",
+        }
+    ]
+    rows = us.fetch_recent(window="all", limit=1)
+    assert rows == [
+        {
+            "timestamp": ts.timestamp(),
+            "team": "blogging",
+            "agent_key": "writer",
+            "model": "m1",
+            "caller_tag": "writer.agent.write_draft",
+            "prompt_tokens": 1,
+            "completion_tokens": 2,
+            "total_tokens": 3,
+            "latency_ms": 42,
+            "status": "success",
+            "cost_usd": 0.12,
+            "outcome": "success",
+            "error_type": "TimeoutError",
+            "job_id": "job-9",
+            "objective": "draft",
+            "request_id": "req-1",
+            "task_id": "task-2",
+            "phase": "execute",
+        }
+    ]
+
+
+def test_record_to_row_sanitizes_invalid_cost() -> None:
+    assert us.record_to_row(_Rec(cost_usd=-1))[10] == 0.0
+    assert us.record_to_row(_Rec(cost_usd=float("inf")))[10] == 0.0
+    assert us.record_to_row(_Rec(cost_usd=float("nan")))[10] == 0.0
 
 
 def test_write_rows_empty_returns_zero() -> None:
@@ -367,10 +456,14 @@ def test_ensure_table_executes_ddl(monkeypatch) -> None:
     monkeypatch.setattr(us, "_table_ensured", False)
     us._ensure_table()
     assert us._table_ensured is True
-    assert len(cursor.executed) == 3
+    assert [sql for sql, _ in cursor.executed] == list(us.USAGE_TABLE_STATEMENTS)
     assert "CREATE TABLE IF NOT EXISTS llm_call_records" in cursor.executed[0][0]
     assert "CREATE INDEX IF NOT EXISTS idx_llm_call_records_ts" in cursor.executed[1][0]
     assert "ADD COLUMN IF NOT EXISTS latency_ms" in cursor.executed[2][0]
+    joined = "\n".join(sql for sql, _ in cursor.executed)
+    assert "ADD COLUMN IF NOT EXISTS caller_tag" in joined
+    assert "ADD COLUMN IF NOT EXISTS cost_usd" in joined
+    assert "ADD COLUMN IF NOT EXISTS outcome" in joined
 
 
 def test_ensure_table_exception_leaves_flag_false(monkeypatch) -> None:

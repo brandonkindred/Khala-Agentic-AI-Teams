@@ -84,10 +84,15 @@ def usage_summary(
 @router.get("/recent")
 def recent_calls(
     team: Annotated[str | None, Query(description="Filter by team name")] = None,
-    window: Annotated[str, Query(description="Preset (24h, 7d, 30d, all) or hours (e.g. 1.0)")] = "24h",
+    window: Annotated[str, Query(description="Preset (24h, 7d, 30d, all) or hours (e.g. 1.0)")] = "all",
     limit: Annotated[int, Query(ge=1, le=1000, description="Max records to return")] = 100,
 ) -> list:
-    """Recent individual LLM call records, oldest-to-newest (most recent last)."""
+    """Recent individual LLM call records, oldest-to-newest (most recent last).
+
+    ``window`` defaults to ``all`` so clients that omit it still receive the
+    newest records regardless of age (pre-change contract). The dashboard
+    sends an explicit window.
+    """
     _require_window(window)
     if is_postgres_enabled():
         rows = fetch_recent(window=window, team=team, limit=limit)
