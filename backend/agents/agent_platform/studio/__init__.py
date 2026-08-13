@@ -20,11 +20,45 @@ Public façade (import these four from ``agent_platform.studio``). Everything el
 (``temporal``, ``postgres``, ``drafts_runtime``, models) is a submodule import.
 Internal modules in this package must import sibling submodules, never this
 façade, so these re-exports cannot create an import cycle.
+
+The four public names resolve lazily via PEP 562 ``__getattr__`` so
+``import agent_platform.studio.temporal.workflows`` does not pull ``routes`` or
+``runtime`` (those construct process singletons and are not sandbox-safe).
 """
 
-from .registration import build_studio_agent_manifest, clone_from_manifest
-from .routes import router
-from .runtime import get_studio_service
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:  # pragma: no cover - for type checkers only
+    from .registration import build_studio_agent_manifest, clone_from_manifest
+    from .routes import router
+    from .runtime import get_studio_service
+
+_LAZY_RUNTIME_EXPORTS = {"get_studio_service"}
+_LAZY_REGISTRATION_EXPORTS = {"build_studio_agent_manifest", "clone_from_manifest"}
+_LAZY_ROUTES_EXPORTS = {"router"}
+
+
+def __getattr__(name: str) -> Any:
+    if name in _LAZY_RUNTIME_EXPORTS:
+        from . import runtime  # noqa: PLC0415 - intentional lazy import
+
+        value = getattr(runtime, name)
+        globals()[name] = value
+        return value
+    if name in _LAZY_REGISTRATION_EXPORTS:
+        from . import registration  # noqa: PLC0415 - intentional lazy import
+
+        value = getattr(registration, name)
+        globals()[name] = value
+        return value
+    if name in _LAZY_ROUTES_EXPORTS:
+        from . import routes  # noqa: PLC0415 - intentional lazy import
+
+        value = getattr(routes, name)
+        globals()[name] = value
+        return value
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
 
 __all__ = [
     "get_studio_service",
