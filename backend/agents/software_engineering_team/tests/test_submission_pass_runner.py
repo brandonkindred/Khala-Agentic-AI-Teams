@@ -193,10 +193,11 @@ def test_call_agent_records_each_formatting_continuation_turn(
 def test_call_agent_records_formatting_turn_start_times(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Each formatting callback's duration_ms must be the interval from that
-    callback to the next (or to finally), not an equal split of the whole
-    formatting window — otherwise started_at backdating collapses concurrent
-    turns onto the same timestamp."""
+    """duration_ms must be measured from on_formatting_start (before the LLM
+    call) to finally, not from the completion callback. A lone formatting
+    call that stamps time only after complete_json returns would get ~0 ms
+    and a started_at that sorts after concurrent work that actually started
+    later."""
     from llm_service import llm_attribution
 
     class _Agent:
@@ -211,11 +212,14 @@ def test_call_agent_records_formatting_turn_start_times(
         on_agent = kwargs.get("on_reasoning_agent")
         if on_agent is not None:
             on_agent(_Agent())
+        on_start = kwargs.get("on_formatting_start")
+        if on_start is not None:
+            clock["t"] = 1010.0
+            on_start()
         on_fmt = kwargs.get("on_formatting")
         if on_fmt is not None:
-            clock["t"] = 1010.0
-            on_fmt("format prompt", '{"approved":')
             clock["t"] = 1030.0
+            on_fmt("format prompt", '{"approved":')
             on_fmt("Please continue.", " true}")
         clock["t"] = 1035.0
         return kwargs["parse"]('{"approved": true}')
@@ -241,8 +245,8 @@ def test_call_agent_records_formatting_turn_start_times(
             batch_target="batch 1/1",
         )
 
-    assert captured[1][1]["duration_ms"] == 20000.0
-    assert captured[2][1]["duration_ms"] == 5000.0
+    assert captured[1][1]["duration_ms"] == 25000.0
+    assert captured[2][1]["duration_ms"] == 25000.0
 
 
 def test_two_call_client_stub_invokes_on_reasoning_agent(monkeypatch) -> None:

@@ -188,14 +188,22 @@ def _run_via_reasoning_with_transcript(
     format_turns: list[tuple[str, str, float]] = []
     started = time.monotonic()
     reasoning_done_at = started
+    format_turn_started_at: float | None = None
 
     def _capture(agent: object) -> None:
         nonlocal reasoning_agent, reasoning_done_at
         reasoning_agent = agent
         reasoning_done_at = time.monotonic()
 
+    def _on_formatting_start() -> None:
+        nonlocal format_turn_started_at
+        format_turn_started_at = time.monotonic()
+
     def _capture_formatting(prompt: str, response: str) -> None:
-        format_turns.append((prompt, response, time.monotonic()))
+        turn_started = (
+            format_turn_started_at if format_turn_started_at is not None else time.monotonic()
+        )
+        format_turns.append((prompt, response, turn_started))
 
     try:
         return run_agent_via_reasoning(
@@ -207,6 +215,7 @@ def _run_via_reasoning_with_transcript(
             tools=[],
             on_reasoning_agent=_capture,
             on_formatting=_capture_formatting,
+            on_formatting_start=_on_formatting_start,
         )
     finally:
         now = time.monotonic()
@@ -227,8 +236,7 @@ def _run_via_reasoning_with_transcript(
                 duration_ms=(reasoning_done_at - started) * 1000,
             )
         if format_turns:
-            for i, (format_prompt, format_response, turn_started) in enumerate(format_turns):
-                next_started = format_turns[i + 1][2] if i + 1 < len(format_turns) else now
+            for format_prompt, format_response, turn_started in format_turns:
                 record_transcript_entry(
                     stage,
                     "",
@@ -236,7 +244,7 @@ def _run_via_reasoning_with_transcript(
                     format_response,
                     system_prompt=formatting_system_prompt_with_untrusted_guard(None),
                     model=model_label(model),
-                    duration_ms=(next_started - turn_started) * 1000,
+                    duration_ms=(now - turn_started) * 1000,
                 )
 
 
