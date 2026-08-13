@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 import threading
 import time
 from typing import Any
@@ -703,7 +704,8 @@ def test_split_reassembles_content_exactly_and_tracks_lines() -> None:
     # and the rendered size stays within the budget the splitter was given
     for seg in segments:
         first_rendered = seg.prompt_content.splitlines()[0]
-        assert first_rendered.startswith(f"{seg.start_line}: ")
+        prefix = re.match(r"^[ ]*(\d+)[:|] ", first_rendered)
+        assert prefix is not None and int(prefix.group(1)) == seg.start_line
         assert len(seg.prompt_content) <= 4_000
 
 
@@ -818,7 +820,8 @@ def test_int_keyed_mapping_content_is_not_treated_as_pre_numbered() -> None:
     assert len(segments) > 1
     assert all(not s.pre_numbered for s in segments)
     for seg in segments:
-        assert seg.prompt_content.splitlines()[0].startswith(f"{seg.start_line}: ")
+        prefix = re.match(r"^[ ]*(\d+)[:|] ", seg.prompt_content.splitlines()[0])
+        assert prefix is not None and int(prefix.group(1)) == seg.start_line
 
 
 def test_segment_range_label_uses_embedded_numbers_for_pre_numbered() -> None:
@@ -839,6 +842,23 @@ def test_segment_range_label_uses_embedded_numbers_for_pre_numbered() -> None:
 def test_file_segment_valid_constructs() -> None:
     seg = FileSegment(path="a.py", content="x = 1\ny = 2", start_line=5, total_lines=20)
     assert seg.end_line == 6
+
+
+def test_partial_segment_prompt_content_aligns_source_across_digit_widths() -> None:
+    """Partial-file prefixes must not shift hanging indents at the 9→10 boundary."""
+    content = "    foo(\n        'bar',\n    )\n"
+    seg = FileSegment(path="a.py", content=content, start_line=9, total_lines=20)
+    match = re.compile(r"^([ ]*\d+(?:: |\| ))(.*)$")
+    gutters, sources = zip(
+        *(
+            (m.group(1), m.group(2))
+            for ln in seg.prompt_content.splitlines()
+            if (m := match.match(ln))
+        )
+    )
+    assert list(sources) == ["    foo(", "        'bar',", "    )"]
+    assert len({len(g) for g in gutters}) == 1
+    assert sources[1].index("'") - sources[0].index("f") == 4
 
 
 def test_file_segment_rejects_zero_start_line() -> None:
@@ -1386,7 +1406,11 @@ def test_transient_failure_in_bisected_child_recovers() -> None:
                 self.calls += 1
                 if "### a.py ###" in prompt and "### b.py ###" in prompt:
                     raise _bisecting_failure("no content")  # force bisection
-                if "### a.py ###" in prompt and "### b.py ###" not in prompt and self.a_failures == 0:
+                if (
+                    "### a.py ###" in prompt
+                    and "### b.py ###" not in prompt
+                    and self.a_failures == 0
+                ):
                     self.a_failures += 1
                     raise _bisecting_failure("transient child hiccup")
             return super().complete(prompt, **kwargs)

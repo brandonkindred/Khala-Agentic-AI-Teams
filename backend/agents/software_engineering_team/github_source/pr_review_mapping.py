@@ -56,6 +56,12 @@ _BLOCKING_SEVERITIES = {"critical", "high"}
 # Captures the new-file start line from a hunk header: ``@@ -a,b +c,d @@``.
 _HUNK_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@")
 
+# Gutter between a right-aligned line number and the source: ``  9|     foo(``.
+# A pipe (not ``: ``) so the prefix cannot be mistaken for Python ``def``/dict
+# syntax, and so width-padding cannot collide with an indented ``    1: value``
+# dict key. Source text always starts at column ``width + 2``.
+_NUMBERED_LINE_SEP = "| "
+
 
 class ReviewFinding(Protocol):
     """Duck-typed shape consumed by PR review comment mappers."""
@@ -111,6 +117,32 @@ class ExistingCommentRef(Protocol):
     html_url: str
 
 
+def numbered_line_width(line_numbers: Iterable[int]) -> int:
+    """Width of the widest 1-based line number in ``line_numbers``.
+
+    Postconditions:
+        - Returns ``len(str(max(line_numbers)))`` when the iterable yields at
+          least one int; ``1`` when it is empty so a caller can still format
+          a blank excerpt without a zero/negative width.
+    """
+    widest = 0
+    for n in line_numbers:
+        widest = max(widest, n)
+    return len(str(widest)) if widest else 1
+
+
+def format_numbered_source_line(n: int, text: str, *, width: int) -> str:
+    """Render one source line with a column-aligned ``N| `` gutter.
+
+    Preconditions:
+        - ``n`` is a positive 1-based line number; ``width >= len(str(n))``.
+    Postconditions:
+        - Returns ``f"{n:>width}| {text}"``. Equal ``width`` across an excerpt
+          keeps hanging indents visually 4 columns, not 5, at 9→10 / 99→100.
+    """
+    return f"{n:>{width}}{_NUMBERED_LINE_SEP}{text}"
+
+
 def parse_valid_lines(patch: str, *, added_only: bool = COMMENT_ON_ADDED_LINES_ONLY) -> set[int]:
     """Return the new-file line numbers commentable on ``side="RIGHT"``.
 
@@ -159,15 +191,18 @@ def render_annotated_hunks(patch: str) -> str:
           or empty for a binary/oversized/unchanged file.
     Postconditions:
         - Returns the added (``+``) and context (`` ``) lines of each hunk, each
-          prefixed with its 1-based new-file line number (``123: <code>``), with a
-          ``...`` marker between non-contiguous hunks. Removed (``-``) lines are
-          omitted (they are not in the new file). The emitted line numbers align
-          1:1 with ``parse_valid_lines`` so a cited line maps to a real location.
-          Scoping the reviewer to the diff (plus its context) — rather than whole
-          files — keeps the review on what the PR actually changed. An empty/binary
-          patch yields an empty string.
+          prefixed with a right-aligned 1-based new-file line number and a
+          ``| `` gutter (``  9| <code>``), with a ``...`` marker between
+          non-contiguous hunks. Removed (``-``) lines are omitted (they are
+          not in the new file). Gutter width is the widest line number in the
+          excerpt so source columns (and therefore hanging indents) stay
+          aligned across 9→10 / 99→100. The emitted line numbers align 1:1
+          with ``parse_valid_lines`` so a cited line maps to a real location.
+          Scoping the reviewer to the diff (plus its context) — rather than
+          whole files — keeps the review on what the PR actually changed. An
+          empty/binary patch yields an empty string.
     """
-    out: list[str] = []
+    rows: list[tuple[Optional[int], str]] = []
     new_line = 0
     in_hunk = False
     first_hunk = True
@@ -175,7 +210,7 @@ def render_annotated_hunks(patch: str) -> str:
         header = _HUNK_RE.match(raw)
         if header:
             if not first_hunk:
-                out.append("...")
+                rows.append((None, "..."))
             first_hunk = False
             new_line = int(header.group(1))
             in_hunk = True
@@ -184,10 +219,13 @@ def render_annotated_hunks(patch: str) -> str:
             continue
         tag = raw[:1]
         if tag == "+" or tag == " " or raw == "":
-            out.append(f"{new_line}: {raw[1:] if raw else ''}")
+            rows.append((new_line, raw[1:] if raw else ""))
             new_line += 1
         # '-' removed lines and '\' ("\ No newline...") have no new-file line.
-    return "\n".join(out)
+    width = numbered_line_width(n for n, _ in rows if n is not None)
+    return "\n".join(
+        text if n is None else format_numbered_source_line(n, text, width=width) for n, text in rows
+    )
 
 
 def _normalize_path(file_path: str, valid_by_path: dict[str, set[int]]) -> Optional[str]:
