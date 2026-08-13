@@ -513,7 +513,9 @@ def test_synthesis_validation_critical_then_success_preserves_outputs(
     The refined code (a trailing comment from ``varying_code_refine``) is
     what the loop returns, together with the sandbox trades and the
     round-1 anomaly gate. Round 0's critical is preserved on the running
-    gate list.
+    gate list. ``_apply_updates`` must copy that code onto a new spec so
+    ``outcome.spec.strategy_code`` stays synchronized; other spec fields
+    stay the input snapshot (refinement is code-only).
     """
     orch = StrategyLabOrchestrator()
     _neutralize_synthesis_gates(monkeypatch, orch)
@@ -536,14 +538,18 @@ def test_synthesis_validation_critical_then_success_preserves_outputs(
     monkeypatch.setattr(StrategyLabOrchestrator, "_fetch_market_data", _populated_fetch())
     exec_result = _code_exec(success=True, raw_trades=_benign_sandbox_trades())
     monkeypatch.setattr(orchestrator_module, "run_strategy_code", lambda *a, **k: exec_result)
+    spec = _spec()
+    expected_spec = _spec_snapshot(spec, exclude=("strategy_code",))
     expected_trades, expected_metrics = _ledger_expectations(exec_result.trades)
 
-    outcome, gates, refinements, _zero_trade = _run_synthesis(orch)
+    outcome, gates, refinements, _zero_trade = _run_synthesis(orch, spec=spec)
 
     assert outcome.execution_succeeded is True
     assert outcome.max_rounds_exhausted is False
     assert outcome.code != _CONFORMANT_CODE
     assert "# refinement round 0" in outcome.code
+    assert outcome.spec.strategy_code == outcome.code
+    assert _spec_snapshot(outcome.spec, exclude=("strategy_code",)) == expected_spec
     assert _trade_snapshot(outcome.trades) == expected_trades
     assert _metrics_snapshot(outcome.metrics) == expected_metrics
     assert len(refinements) == 1
