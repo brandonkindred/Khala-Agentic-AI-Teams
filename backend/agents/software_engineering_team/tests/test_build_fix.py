@@ -73,6 +73,7 @@ def test_safe_repair_write_path_rejects_traversal(tmp_path: Path) -> None:
     root = tmp_path.resolve()
     assert _safe_repair_write_path(root, "../escape.py") is None
     assert _safe_repair_write_path(root, "") is None
+    assert _safe_repair_write_path(root, "/tmp/fix.py") is None
 
 
 def test_safe_repair_write_path_rejects_venv(tmp_path: Path) -> None:
@@ -81,6 +82,19 @@ def test_safe_repair_write_path_rejects_venv(tmp_path: Path) -> None:
     root = tmp_path.resolve()
     assert _safe_repair_write_path(root, "venv/lib/site.py") is None
     assert _safe_repair_write_path(root, ".venv/lib/site.py") is None
+
+
+def test_safe_repair_write_path_rejects_unsnapshotted_dirs(tmp_path: Path) -> None:
+    from software_engineering_team.build_fix import _safe_repair_write_path
+
+    root = tmp_path.resolve()
+    assert _safe_repair_write_path(root, "build/out.js") is None
+    assert _safe_repair_write_path(root, "dist/app.js") is None
+    assert _safe_repair_write_path(root, "node_modules/pkg/index.js") is None
+    assert _safe_repair_write_path(root, ".pytest_cache/README.md") is None
+    assert _safe_repair_write_path(root, "__pycache__/a.pyc") is None
+    assert _safe_repair_write_path(root, ".angular/cache") is None
+    assert _safe_repair_write_path(root, ".git/config") is None
 
 
 def test_safe_repair_write_path_accepts_in_repo_source(tmp_path: Path) -> None:

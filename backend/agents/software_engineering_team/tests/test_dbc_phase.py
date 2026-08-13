@@ -572,16 +572,19 @@ def test_dbc_self_review_revert_enumerate_oserror_still_restores_snapshot(tmp_pa
 
     def _verify(repo, label, tid):
         (Path(repo) / "other.py").write_text("llm repair\n")
+        (Path(repo) / "new_fix.py").write_text("created\n")
         return False, "broke"
 
     original_iter = dbc_phase._iter_worktree_files
     calls = {"n": 0}
 
-    def _iter(root: Path):
+    def _iter(root: Path, **kwargs):
         calls["n"] += 1
         if calls["n"] == 1:
-            return original_iter(root)
-        raise OSError("walk failed")
+            return original_iter(root, **kwargs)
+        if calls["n"] == 2:
+            raise OSError("walk failed")
+        return original_iter(root, **kwargs)
 
     monkeypatch.setattr(dbc_phase, "_iter_worktree_files", _iter)
 
@@ -594,6 +597,44 @@ def test_dbc_self_review_revert_enumerate_oserror_still_restores_snapshot(tmp_pa
 
     assert (tmp_path / "a.py").read_text() == "orig a\n"
     assert (tmp_path / "other.py").read_text() == "orig other\n"
+    assert not (tmp_path / "new_fix.py").exists()
+
+
+def test_dbc_self_review_revert_best_effort_walk_deletes_created_file(tmp_path, monkeypatch):
+    (tmp_path / "a.py").write_text("orig a\n")
+    (tmp_path / "other.py").write_text("orig other\n")
+
+    def _review(*, code, **kwargs: Any) -> SimpleNamespace:
+        return SimpleNamespace(files={"a.py": "dbc a\n"})
+
+    def _verify(repo, label, tid):
+        (Path(repo) / "other.py").write_text("llm repair\n")
+        (Path(repo) / "new_fix.py").write_text("created\n")
+        return False, "broke"
+
+    original_iter = dbc_phase._iter_worktree_files
+    calls = {"n": 0}
+
+    def _iter(root: Path, *, strict: bool = True, **kwargs):
+        if not strict:
+            return original_iter(root, strict=False, **kwargs)
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return original_iter(root)
+        raise OSError("walk failed")
+
+    monkeypatch.setattr(dbc_phase, "_iter_worktree_files", _iter)
+
+    _call(
+        tmp_path=tmp_path,
+        gate_config=_gate_config(_review),
+        microtask_files={"a.py": "orig a\n", "other.py": "orig other\n"},
+        deps=ReviewDependencies(build_verifier=_verify),
+    )
+
+    assert (tmp_path / "a.py").read_text() == "orig a\n"
+    assert (tmp_path / "other.py").read_text() == "orig other\n"
+    assert not (tmp_path / "new_fix.py").exists()
 
 
 def test_dbc_self_review_worktree_snapshot_skips_symlinks(tmp_path):
@@ -751,18 +792,56 @@ def test_revert_disk_swallows_oserror(tmp_path, monkeypatch):
     dbc_phase._revert_disk({tmp_path / "a.py": b"orig a\n"})
 
 
-def test_sync_verifier_repairs_swallows_walk_oserror(tmp_path, monkeypatch):
-    def _raise_iter(root: Path):
+def test_sync_verifier_repairs_walk_oserror_returns_false(tmp_path, monkeypatch):
+    def _raise_iter(root: Path, **kwargs):
         raise OSError("walk failed")
 
     monkeypatch.setattr(dbc_phase, "_iter_worktree_files", _raise_iter)
-    dbc_phase._sync_verifier_repairs_into_maps(
+    synced = dbc_phase._sync_verifier_repairs_into_maps(
         root=tmp_path,
         pre_verify_disk={},
         microtask_files={},
         all_files={},
         mt=_microtask(),
     )
+    assert synced is False
+
+
+def test_dbc_self_review_sync_walk_failure_reverts(tmp_path, monkeypatch):
+    (tmp_path / "a.py").write_text("orig a\n")
+    (tmp_path / "other.py").write_text("orig other\n")
+
+    def _review(*, code, **kwargs: Any) -> SimpleNamespace:
+        return SimpleNamespace(files={"a.py": "dbc a\n"})
+
+    def _verify(repo, label, tid):
+        (Path(repo) / "other.py").write_text("llm repair\n")
+        return True, "ok"
+
+    original_iter = dbc_phase._iter_worktree_files
+    calls = {"n": 0}
+
+    def _iter(root: Path, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return original_iter(root, **kwargs)
+        if calls["n"] == 2:
+            raise OSError("sync walk failed")
+        return original_iter(root, **kwargs)
+
+    monkeypatch.setattr(dbc_phase, "_iter_worktree_files", _iter)
+
+    mt, microtask_files, all_files, _ = _call(
+        tmp_path=tmp_path,
+        gate_config=_gate_config(_review),
+        microtask_files={"a.py": "orig a\n", "other.py": "orig other\n"},
+        deps=ReviewDependencies(build_verifier=_verify),
+    )
+
+    assert (tmp_path / "a.py").read_text() == "orig a\n"
+    assert (tmp_path / "other.py").read_text() == "orig other\n"
+    assert microtask_files["a.py"] == "orig a\n"
+    assert microtask_files["other.py"] == "orig other\n"
 
 
 def test_sync_verifier_repairs_skips_unreadable_binary_and_outside(tmp_path, monkeypatch):
@@ -784,8 +863,8 @@ def test_sync_verifier_repairs_skips_unreadable_binary_and_outside(tmp_path, mon
     monkeypatch.setattr(Path, "read_bytes", _read)
     orig_iter = dbc_phase._iter_worktree_files
 
-    def _iter(r: Path):
-        yield from orig_iter(r)
+    def _iter(r: Path, **kwargs):
+        yield from orig_iter(r, **kwargs)
         yield outside
 
     monkeypatch.setattr(dbc_phase, "_iter_worktree_files", _iter)

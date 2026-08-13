@@ -58,10 +58,12 @@ _HEADER_LIKE_LINE = re.compile(r"^###[ \t]+\S[^\n]*[ \t]+###[ \t]*$", re.MULTILI
 
 # Pruned when snapshotting the worktree so a later build-verifier revert /
 # success-sync does not walk dependency, VCS, artifact, venv, or pytest-cache
-# trees. Virtualenvs are pruned here (and the production fixer refuses to
-# write into them) so a per-microtask snapshot cannot load hundreds of MB of
-# site-packages. ``.pytest_cache`` is pruned so a passing pytest run cannot
-# be classified as an LLM repair.
+# trees. The production fixer refuses writes into every name in this set (see
+# ``_REPAIR_SKIP_WRITE_DIRS`` in ``build_fix``) so a repair cannot land in a
+# tree this snapshot would not restore. Virtualenvs are pruned so a
+# per-microtask snapshot cannot load hundreds of MB of site-packages.
+# ``.pytest_cache`` is pruned so a passing pytest run cannot be classified as
+# an LLM repair.
 _WORKTREE_SNAPSHOT_EXCLUDE_DIRS = frozenset(
     {
         "node_modules",
@@ -203,7 +205,7 @@ def _raise_walk_error(err: OSError) -> None:
     raise err
 
 
-def _iter_worktree_files(root: Path) -> Iterator[Path]:
+def _iter_worktree_files(root: Path, *, strict: bool = True) -> Iterator[Path]:
     """Yield resolved regular-file paths under ``root``, pruning excluded dirs.
 
     Preconditions:
@@ -211,11 +213,13 @@ def _iter_worktree_files(root: Path) -> Iterator[Path]:
 
     Postconditions:
         Directory symlinks are not followed (``os.walk`` default). Symlinked
-        files are skipped. An ``OSError`` mid-walk or per-entry is raised to
-        the caller so a "never fails" phase can skip rather than proceed with
-        a partial snapshot.
+        files are skipped. When ``strict`` is true, an ``OSError`` mid-walk
+        is raised to the caller so a snapshot cannot proceed from a partial
+        scan. When ``strict`` is false, walk errors are skipped (best-effort
+        enumeration for revert).
     """
-    for dirpath, dirnames, filenames in os.walk(root, onerror=_raise_walk_error):
+    onerror = _raise_walk_error if strict else None
+    for dirpath, dirnames, filenames in os.walk(root, onerror=onerror):
         dirnames[:] = [d for d in dirnames if d not in _WORKTREE_SNAPSHOT_EXCLUDE_DIRS]
         for name in filenames:
             path = Path(dirpath, name)
@@ -252,15 +256,37 @@ def _revert_verifier_side_effects(
     """
     revert_map: Dict[Path, Optional[bytes]] = dict(pre_verify_disk)
     revert_map.update(prior_disk)
-    try:
-        current = list(_iter_worktree_files(root))
-    except OSError as exc:
-        logger.warning("Could not enumerate worktree while reverting verifier edits: %s", exc)
-        current = []
+    current = _list_worktree_files_for_revert(root)
     for path in current:
         if path not in revert_map:
             revert_map[path] = None
     _revert_disk(revert_map)
+
+
+def _list_worktree_files_for_revert(root: Path) -> list[Path]:
+    """Enumerate worktree files for revert, retrying then falling back.
+
+    Preconditions:
+        ``root`` is an existing directory.
+
+    Postconditions:
+        Returns the strict walk result when it succeeds. On ``OSError``,
+        retries once; if that also fails, returns a best-effort walk
+        (``strict=False``) so verifier-created files in accessible dirs are
+        still marked for delete rather than left on disk.
+    """
+    try:
+        return list(_iter_worktree_files(root))
+    except OSError as exc:
+        logger.warning("Could not enumerate worktree while reverting verifier edits: %s", exc)
+    try:
+        return list(_iter_worktree_files(root))
+    except OSError as exc:
+        logger.warning(
+            "Retry failed; using best-effort walk while reverting verifier edits: %s",
+            exc,
+        )
+        return list(_iter_worktree_files(root, strict=False))
 
 
 def _posix_rel(root: Path, path: Path) -> Optional[str]:
@@ -282,21 +308,24 @@ def _sync_verifier_repairs_into_maps(
     microtask_files: Dict[str, str],
     all_files: Dict[str, str],
     mt: Any,
-) -> None:
+) -> bool:
     """Copy verifier-mutated worktree files into the in-memory file maps.
 
     Postconditions:
         Every non-excluded regular file under ``root`` whose bytes differ from
         ``pre_verify_disk`` (or that is absent from it) is decoded as UTF-8
         and written into ``microtask_files``, ``all_files``, and
-        ``mt.output_files``. Unchanged files are left alone. A walk, read, or
-        decode failure is logged and skipped so this never raises.
+        ``mt.output_files``. Unchanged files are left alone. A per-file read
+        or decode failure is logged and skipped. Returns ``False`` (without
+        mutating the maps) when the walk itself fails, so the caller can
+        treat the verify as unsuccessful and revert. Returns ``True`` when
+        the walk completed.
     """
     try:
         current = list(_iter_worktree_files(root))
     except OSError as exc:
         logger.warning("Could not enumerate worktree while syncing verifier repairs: %s", exc)
-        return
+        return False
 
     output_files = (
         mt.output_files if isinstance(getattr(mt, "output_files", None), dict) else microtask_files
@@ -322,6 +351,7 @@ def _sync_verifier_repairs_into_maps(
         all_files[rel] = text
         output_files[rel] = text
     mt.output_files = output_files
+    return True
 
 
 def _run_dbc_self_review(
@@ -538,13 +568,29 @@ def _run_dbc_self_review(
                 )
                 return
 
-            _sync_verifier_repairs_into_maps(
+            if not _sync_verifier_repairs_into_maps(
                 root=root,
                 pre_verify_disk=pre_verify_disk,
                 microtask_files=microtask_files,
                 all_files=all_files,
                 mt=mt,
-            )
+            ):
+                logger.warning(
+                    "[%s] Microtask %s: could not sync verifier repairs into maps, "
+                    "reverting %d file(s)",
+                    task_id,
+                    mt.id,
+                    len(dbc_files),
+                )
+                for rel_path in dbc_files:
+                    _restore_dict_entry(microtask_files, rel_path, prior_microtask[rel_path])
+                    _restore_dict_entry(all_files, rel_path, prior_all[rel_path])
+                    _restore_dict_entry(output_files, rel_path, prior_output[rel_path])
+                mt.output_files = output_files
+                _revert_verifier_side_effects(
+                    root=root, prior_disk=prior_disk, pre_verify_disk=pre_verify_disk
+                )
+                return
 
     logger.info(
         "[%s] Microtask %s: DbC comments self-review complete (%d file(s) updated)",
