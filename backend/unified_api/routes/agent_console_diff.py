@@ -13,14 +13,14 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException
 
-from agent_console import (
+from agent_platform.console import (
     AgentConsoleStorageUnavailable,
     DiffRequest,
     DiffResult,
     get_store,
     unified_json_diff,
 )
-from agent_console.models import DiffSide
+from agent_platform.console.models import DiffSide
 
 logger = logging.getLogger(__name__)
 

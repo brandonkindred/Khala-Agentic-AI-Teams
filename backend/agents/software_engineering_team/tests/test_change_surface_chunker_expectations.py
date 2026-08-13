@@ -97,7 +97,7 @@ def test_change_surface_through_coordinator_preserves_original_line_citations() 
     client cites a line pulled straight out of the surface body."""
     surface = _single_file_surface()
     path, body = next(iter(surface.blocks.items()))
-    m = re.search(r"^(\d+): ", body, re.M)
+    m = re.search(r"^[ ]*(\d+)[:|] ", body, re.M)
     assert m is not None, "test premise: surface body must carry a pre-numbered line"
     cited_line = int(m.group(1))
 

@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import pytest
 
-from agent_console.models import RunCreate
-from agent_console.postgres import SCHEMA
-from agent_console.store import get_store
+from agent_platform.console.models import RunCreate
+from agent_platform.console.postgres import SCHEMA
+from agent_platform.console.store import get_store
 from shared.postgres import is_postgres_enabled, register_team_schemas
 from shared.postgres.testing import truncate_team_tables
 

@@ -207,6 +207,26 @@ def test_strip_numbered_prefixes_detects_and_strips() -> None:
     assert mapper(3) == 4242
 
 
+def test_strip_numbered_prefixes_detects_padded_pipe_gutter() -> None:
+    """Live ``N| `` gutters (width-padded across 9→10) strip to exact source indent."""
+    content = "  9|     foo(\n 10|         'bar',\n"
+    stripped, physical, mapper = strip_numbered_prefixes(content, line_number=10)
+    assert stripped == "    foo(\n        'bar',"
+    assert physical == 2
+    assert mapper is not None
+    assert mapper(1) == 9
+    assert mapper(2) == 10
+
+
+def test_strip_numbered_prefixes_ignores_indented_dict_keys() -> None:
+    """An indented ``    1: value`` dict entry is source, not a numbered gutter."""
+    content = "STATUS = {\n    1: 'v1',\n    2: 'v2',\n}\n"
+    stripped, physical, mapper = strip_numbered_prefixes(content, line_number=2)
+    assert mapper is None
+    assert stripped == content
+    assert physical == 2
+
+
 def test_strip_numbered_prefixes_preserves_inter_hunk_separators() -> None:
     """Bare ``...`` gap markers are kept so annotated hunks resolve independently."""
     content = "\n".join(
@@ -330,14 +350,7 @@ def test_strip_numbered_prefixes_empty_content() -> None:
 
 
 def test_iter_constructs_qualifies_methods_and_lists_all() -> None:
-    src = (
-        "class C:\n"
-        "    def m(self):\n"
-        "        return 1\n"
-        "\n"
-        "def top():\n"
-        "    return 2\n"
-    )
+    src = "class C:\n    def m(self):\n        return 1\n\ndef top():\n    return 2\n"
     constructs = iter_constructs(src)
     names = {c.name for c in constructs}
     assert names == {"C", "C.m", "top"}
@@ -378,15 +391,7 @@ def test_iter_constructs_parse_failure_returns_empty() -> None:
 
 def test_iter_constructs_annotated_hunks_skips_unparseable_sibling() -> None:
     """With annotated_hunks, an indented continuation hunk does not hide other defs."""
-    content = (
-        "def alpha():\n"
-        "    return 1\n"
-        "...\n"
-        "    changed()\n"
-        "...\n"
-        "def beta():\n"
-        "    return 2\n"
-    )
+    content = "def alpha():\n    return 1\n...\n    changed()\n...\ndef beta():\n    return 2\n"
     # Whole-file parse fails; hunk-aware listing still finds alpha and beta.
     assert iter_constructs(content) == []
     names = {c.name for c in iter_constructs(content, annotated_hunks=True)}
