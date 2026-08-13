@@ -20,6 +20,7 @@ from llm_service.interface import (
     LLMRateLimitError,
     LLMSemanticExhaustionError,
     LLMTemporaryError,
+    record_complete_json_turn,
     take_complete_json_raw,
     take_complete_json_turns,
 )
@@ -273,6 +274,28 @@ def test_ollama_complete_json_parses_response(monkeypatch: pytest.MonkeyPatch) -
         client = OllamaLLMClient(model="test", base_url="http://localhost:9999", timeout=5)
         result = client.complete_json("What is 6*7?", objective="test", temperature=0)
     assert result == {"answer": 42}
+
+
+def test_complete_json_clears_stale_turns_from_prior_failed_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A turn recorded before this complete_json must not survive a successful
+    call that does not continue — otherwise the next observer would attribute
+    the stale partial to the new prompt."""
+    monkeypatch.setenv("LLM_PROVIDER", "ollama")
+    record_complete_json_turn("stale", "old-partial")
+    sse_lines = [
+        'data: {"choices":[{"delta":{"content":"{\\"answer\\": 42}"},"finish_reason":null}]}',
+        'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}',
+        "data: [DONE]",
+    ]
+    mock_client, _ = _make_streaming_mock(200, sse_lines)
+    with patch("httpx.Client") as mock_client_cls:
+        mock_client_cls.return_value = mock_client
+        client = OllamaLLMClient(model="test", base_url="http://localhost:9999", timeout=5)
+        result = client.complete_json("What is 6*7?", objective="test", temperature=0)
+    assert result == {"answer": 42}
+    assert take_complete_json_turns() == []
 
 
 def test_ollama_streams_and_accumulates_chunks(monkeypatch: pytest.MonkeyPatch) -> None:

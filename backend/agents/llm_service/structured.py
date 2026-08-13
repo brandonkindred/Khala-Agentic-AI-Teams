@@ -41,6 +41,7 @@ from .interface import (
     LLMJsonParseError,
     LLMSchemaValidationError,
     LLMTruncatedError,
+    reset_complete_json_observer_state,
     take_complete_json_raw,
     take_complete_json_turns,
 )
@@ -324,6 +325,7 @@ def complete_validated(
     # Total call budget = 1 initial + correction_attempts follow-ups.
     for attempt in range(correction_attempts + 1):
         attempt_prompt = current_prompt
+        reset_complete_json_observer_state()
         try:
             data = client.complete_json(
                 current_prompt,
@@ -353,6 +355,12 @@ def complete_validated(
                 preview=exc.response_preview or "",
             )
             continue
+        except Exception:
+            turns = take_complete_json_turns()
+            take_complete_json_raw()
+            for turn_prompt, turn_response in turns:
+                _invoke_on_attempt(on_attempt, turn_prompt, turn_response)
+            raise
 
         preview = complete_json_response_text(client, data)
 

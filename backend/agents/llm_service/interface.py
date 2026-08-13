@@ -332,6 +332,21 @@ def take_complete_json_turns() -> list[tuple[str, str]]:
     return list(turns)
 
 
+def reset_complete_json_observer_state() -> None:
+    """Drop any raw JSON or continuation turns left on this context.
+
+    Preconditions:
+        - none.
+    Postconditions:
+        - ``take_complete_json_raw`` and ``take_complete_json_turns`` return
+          empty until a later ``record_*`` on this context. Call at the start
+          of every ``complete_json`` so a previous call that raised after
+          recording a turn cannot leak that turn into the next observer.
+    """
+    _complete_json_raw_var.set(None)
+    _complete_json_turns_var.set(None)
+
+
 # Message used when Ollama 429 indicates weekly usage limit exceeded (for logging and job state)
 OLLAMA_WEEKLY_LIMIT_MESSAGE = "Ollama LLM usage limit exceeded for week"
 

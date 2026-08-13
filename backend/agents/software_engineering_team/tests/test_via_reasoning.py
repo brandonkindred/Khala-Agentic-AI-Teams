@@ -943,6 +943,47 @@ def test_run_agent_via_reasoning_on_formatting_sees_partial_on_truncated_complet
     assert seen[0][1] == '{"approved":'
 
 
+def test_run_agent_via_reasoning_on_formatting_sees_turns_when_complete_json_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A non-parse error after a recorded continuation turn still notifies
+    on_formatting so the transcript can persist the partial HTTP body."""
+    from llm_service import LLMClientModel, LLMRateLimitError
+    from llm_service.clients.dummy import DummyLLMClient
+    from llm_service.interface import record_complete_json_turn
+    from software_engineering_team.code_review_agent import via_reasoning as vr_mod
+
+    seen: list[tuple[str, str]] = []
+
+    class _FailingClient(DummyLLMClient):
+        def complete_json(self, prompt: str, **kwargs: Any) -> dict[str, Any]:
+            record_complete_json_turn(prompt, '{"approved":')
+            raise LLMRateLimitError("429")
+
+    class _RecordingAgent:
+        def __init__(self, **kwargs: Any) -> None:
+            pass
+
+        def __call__(self, prompt: str) -> str:
+            return "REVIEW PROSE"
+
+    monkeypatch.setattr(vr_mod, "Agent", _RecordingAgent)
+    model = LLMClientModel(_FailingClient(), agent_key="code_review")
+
+    with pytest.raises(LLMRateLimitError):
+        run_agent_via_reasoning(
+            model=model,
+            reasoning_prompt="Review this",
+            reasoning_system_prompt="Prose reviewer",
+            formatting_instructions='Return {"approved": bool, "summary": str}',
+            parse=lambda raw: _Out.model_validate_json(raw),
+            on_formatting=lambda prompt, response: seen.append((prompt, response)),
+        )
+
+    assert len(seen) == 1
+    assert seen[0][1] == '{"approved":'
+
+
 def test_run_agent_via_reasoning_on_formatting_exception_is_swallowed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

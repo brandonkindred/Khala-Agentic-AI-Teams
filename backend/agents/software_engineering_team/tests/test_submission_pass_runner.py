@@ -139,6 +139,57 @@ def test_call_agent_records_full_conversation_in_transcript(monkeypatch) -> None
     assert captured[1][1]["system_prompt"] == formatting_system_prompt_with_untrusted_guard(None)
 
 
+def test_call_agent_records_each_formatting_continuation_turn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """on_formatting may fire once per continuation HTTP turn; each pair must
+    become its own transcript entry rather than overwriting a single slot."""
+    from llm_service import llm_attribution
+
+    class _Agent:
+        messages = [{"role": "user", "content": [{"text": "user prompt"}]}]
+
+    def _fake(**kwargs: Any) -> str:
+        on_agent = kwargs.get("on_reasoning_agent")
+        if on_agent is not None:
+            on_agent(_Agent())
+        on_fmt = kwargs.get("on_formatting")
+        if on_fmt is not None:
+            on_fmt("format prompt", '{"approved":')
+            on_fmt("Please continue.", " true}")
+        return kwargs["parse"]('{"approved": true}')
+
+    captured: List[Any] = []
+    monkeypatch.setattr(runner_mod, "run_agent_via_reasoning", _fake)
+    monkeypatch.setattr(
+        runner_mod,
+        "record_transcript_entry",
+        lambda *args, **kwargs: captured.append((args, kwargs)),
+    )
+
+    with llm_attribution(job_id="job-1"):
+        runner_mod._call_agent(
+            object(),
+            "system prompt",
+            "format json as an object",
+            [],
+            "user prompt",
+            parse=lambda raw: raw,
+            pass_label="architecture",
+            batch_target="batch 1/1",
+        )
+
+    assert len(captured) == 3
+    assert captured[1][0][2] == "format prompt"
+    assert captured[1][0][3] == '{"approved":'
+    assert captured[2][0][2] == "Please continue."
+    assert captured[2][0][3] == " true}"
+    from code_review_agent.via_reasoning import formatting_system_prompt_with_untrusted_guard
+
+    assert captured[1][1]["system_prompt"] == formatting_system_prompt_with_untrusted_guard(None)
+    assert captured[2][1]["system_prompt"] == formatting_system_prompt_with_untrusted_guard(None)
+
+
 def test_two_call_client_stub_invokes_on_reasoning_agent(monkeypatch) -> None:
     """The session-wide submission-pass stub must still fire on_reasoning_agent
     so transcript recording is not silently skipped under pytest-xdist."""

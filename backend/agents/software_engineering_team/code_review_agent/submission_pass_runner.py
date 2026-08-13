@@ -181,15 +181,15 @@ def _call_agent(
         - Raises whatever ``run_agent_via_reasoning`` or ``parse`` raises —
           recovery is entirely the caller's concern.
         - Records the reasoning-pass ``agent.messages`` conversation (JSON) and
-          a separate formatting-pass entry (format prompt + JSON reply) into
-          the durable transcript once each call exists, even if the formatting
-          pass or ``parse`` later fails, so a tool-using call's intermediate
-          turns and the subsequent JSON transcription are not silently dropped.
+          a separate formatting-pass entry per formatting LLM turn (format
+          prompt + JSON reply, including continuation turns) into the durable
+          transcript once each call exists, even if the formatting pass or
+          ``parse`` later fails, so a tool-using call's intermediate turns
+          and the subsequent JSON transcription are not silently dropped.
           A no-op when no ``job_id`` is bound.
     """
     reasoning_agent = None
-    format_prompt = ""
-    format_response = ""
+    format_turns: list[tuple[str, str]] = []
     started = time.monotonic()
     reasoning_done_at = started
 
@@ -199,9 +199,7 @@ def _call_agent(
         reasoning_done_at = time.monotonic()
 
     def _capture_formatting(prompt: str, response: str) -> None:
-        nonlocal format_prompt, format_response
-        format_prompt = prompt
-        format_response = response
+        format_turns.append((prompt, response))
 
     try:
         return run_agent_via_reasoning(
@@ -233,16 +231,18 @@ def _call_agent(
                 model=model_label(model),
                 duration_ms=(reasoning_done_at - started) * 1000,
             )
-        if format_prompt:
-            record_transcript_entry(
-                pass_label,
-                batch_target,
-                format_prompt,
-                format_response,
-                system_prompt=formatting_system_prompt_with_untrusted_guard(None),
-                model=model_label(model),
-                duration_ms=(now - reasoning_done_at) * 1000,
-            )
+        if format_turns:
+            per_ms = ((now - reasoning_done_at) * 1000) / len(format_turns)
+            for format_prompt, format_response in format_turns:
+                record_transcript_entry(
+                    pass_label,
+                    batch_target,
+                    format_prompt,
+                    format_response,
+                    system_prompt=formatting_system_prompt_with_untrusted_guard(None),
+                    model=model_label(model),
+                    duration_ms=per_ms,
+                )
 
 
 def _run_batch_with_recovery(

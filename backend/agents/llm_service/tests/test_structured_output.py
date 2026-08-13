@@ -11,10 +11,12 @@ from pydantic import BaseModel
 from llm_service.interface import (
     LLMClient,
     LLMJsonParseError,
+    LLMRateLimitError,
     LLMSchemaValidationError,
     LLMTruncatedError,
     record_complete_json_raw,
     record_complete_json_turn,
+    take_complete_json_turns,
 )
 from llm_service.structured import complete_validated
 
@@ -449,6 +451,49 @@ def test_on_attempt_sees_each_complete_json_continuation_turn():
     assert attempts[0] == ("prompt", '{"selected_option_id":')
     assert "continue exactly from where you left off" in attempts[1][0]
     assert attempts[1][1] == ' "opt-a", "rationale": "x"}'
+
+
+def test_stale_turns_from_prior_call_do_not_leak_into_next_observer():
+    """A previous complete_json that recorded a turn then raised must not
+    attach that turn to the next attempt's on_attempt payload."""
+    record_complete_json_turn("stale", "old-partial")
+
+    class _OkClient(LLMClient):
+        def complete_json(self, prompt, **kwargs):
+            return {"selected_option_id": "opt-a", "rationale": "x"}
+
+    attempts: list[tuple[str, str]] = []
+    complete_validated(
+        _OkClient(),
+        "prompt",
+        objective="test",
+        schema=FounderAnswer,
+        on_attempt=lambda p, r: attempts.append((p, r)),
+    )
+    assert all(p != "stale" for p, _ in attempts)
+    assert take_complete_json_turns() == []
+
+
+def test_on_attempt_sees_turns_when_complete_json_raises_after_recording():
+    """Turns recorded before a non-parse error still reach on_attempt, and
+    are consumed so they cannot leak into a later call."""
+
+    class _BoomAfterTurn(LLMClient):
+        def complete_json(self, prompt, **kwargs):
+            record_complete_json_turn(prompt, "PARTIAL")
+            raise LLMRateLimitError("429")
+
+    attempts: list[tuple[str, str]] = []
+    with pytest.raises(LLMRateLimitError):
+        complete_validated(
+            _BoomAfterTurn(),
+            "prompt",
+            objective="test",
+            schema=FounderAnswer,
+            on_attempt=lambda p, r: attempts.append((p, r)),
+        )
+    assert attempts == [("prompt", "PARTIAL")]
+    assert take_complete_json_turns() == []
 
 
 def test_on_attempt_prefers_recorded_complete_json_raw_over_reserialized_dict():

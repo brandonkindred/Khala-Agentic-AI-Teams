@@ -179,14 +179,13 @@ def _run_via_reasoning_with_transcript(
     Postconditions:
         Returns the parsed JSON object from the formatting pass. Records the
         reasoning-pass ``agent.messages`` conversation once that agent exists,
-        and a separate formatting-pass entry once that call returns (or raises
-        ``LLMJsonParseError`` with a raw body), even if parse later fails. A
-        no-op on the transcript when no ``job_id`` is bound. Raises whatever
-        ``run_agent_via_reasoning`` raises.
+        and a formatting-pass entry per formatting LLM turn once those calls
+        return (or raise ``LLMJsonParseError`` with a raw body), even if parse
+        later fails. A no-op on the transcript when no ``job_id`` is bound.
+        Raises whatever ``run_agent_via_reasoning`` raises.
     """
     reasoning_agent = None
-    format_prompt = ""
-    format_response = ""
+    format_turns: list[tuple[str, str]] = []
     started = time.monotonic()
     reasoning_done_at = started
 
@@ -196,9 +195,7 @@ def _run_via_reasoning_with_transcript(
         reasoning_done_at = time.monotonic()
 
     def _capture_formatting(prompt: str, response: str) -> None:
-        nonlocal format_prompt, format_response
-        format_prompt = prompt
-        format_response = response
+        format_turns.append((prompt, response))
 
     try:
         return run_agent_via_reasoning(
@@ -229,16 +226,18 @@ def _run_via_reasoning_with_transcript(
                 model=model_label(model),
                 duration_ms=(reasoning_done_at - started) * 1000,
             )
-        if format_prompt:
-            record_transcript_entry(
-                stage,
-                "",
-                format_prompt,
-                format_response,
-                system_prompt=formatting_system_prompt_with_untrusted_guard(None),
-                model=model_label(model),
-                duration_ms=(now - reasoning_done_at) * 1000,
-            )
+        if format_turns:
+            per_ms = ((now - reasoning_done_at) * 1000) / len(format_turns)
+            for format_prompt, format_response in format_turns:
+                record_transcript_entry(
+                    stage,
+                    "",
+                    format_prompt,
+                    format_response,
+                    system_prompt=formatting_system_prompt_with_untrusted_guard(None),
+                    model=model_label(model),
+                    duration_ms=per_ms,
+                )
 
 
 def synthesize_review_findings(

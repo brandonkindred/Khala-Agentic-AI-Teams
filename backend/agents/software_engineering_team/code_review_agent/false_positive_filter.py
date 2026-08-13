@@ -1990,15 +1990,15 @@ def _verify_group(
           invocation can span several model turns (a toolUse request, its
           toolResult, then a follow-up model turn), and recording only the
           final text would silently drop the intermediate turns from the
-          "thinking process" transcript. The formatting pass is a second
-          entry (format prompt + JSON reply). A no-op when no ``job_id`` is
-          bound on the current ``llm_attribution`` context (see
-          ``CodeReviewAgent.run``); never raises and never blocks on I/O.
+          "thinking process" transcript. Each formatting-pass callback is a
+          separate entry (format prompt + JSON reply, including continuation
+          turns). A no-op when no ``job_id`` is bound on the current
+          ``llm_attribution`` context (see ``CodeReviewAgent.run``); never
+          raises and never blocks on I/O.
     """
     prompt = _build_group_prompt(index, file_path, issues, input_data)
     reasoning_agent: Agent | None = None
-    format_prompt = ""
-    format_response = ""
+    format_turns: list[tuple[str, str]] = []
     started = time.monotonic()
     reasoning_done_at = started
 
@@ -2008,9 +2008,7 @@ def _verify_group(
         reasoning_done_at = time.monotonic()
 
     def _capture_formatting(prompt_text: str, response: str) -> None:
-        nonlocal format_prompt, format_response
-        format_prompt = prompt_text
-        format_response = response
+        format_turns.append((prompt_text, response))
 
     try:
         data = run_agent_via_reasoning(
@@ -2045,16 +2043,18 @@ def _verify_group(
                 model=model_label(model),
                 duration_ms=(reasoning_done_at - started) * 1000,
             )
-        if format_prompt:
-            record_transcript_entry(
-                "false_positive_filter",
-                file_path,
-                format_prompt,
-                format_response,
-                system_prompt=formatting_system_prompt_with_untrusted_guard(None),
-                model=model_label(model),
-                duration_ms=(now - reasoning_done_at) * 1000,
-            )
+        if format_turns:
+            per_ms = ((now - reasoning_done_at) * 1000) / len(format_turns)
+            for format_prompt, format_response in format_turns:
+                record_transcript_entry(
+                    "false_positive_filter",
+                    file_path,
+                    format_prompt,
+                    format_response,
+                    system_prompt=formatting_system_prompt_with_untrusted_guard(None),
+                    model=model_label(model),
+                    duration_ms=per_ms,
+                )
     verdicts = _parse_verdicts(data, len(issues))
     if reasoning_agent is None or not _agent_read_the_cited_file(reasoning_agent, index, file_path):
         false_positive_count = sum(1 for v in verdicts.values() if v.is_false_positive)

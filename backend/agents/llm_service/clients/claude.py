@@ -53,6 +53,7 @@ from ..interface import (
     LLMTemporaryError,
     LLMTruncatedError,
     record_complete_json_raw,
+    reset_complete_json_observer_state,
 )
 from ..telemetry import record_llm_call
 from ..util import extract_json_from_response
@@ -693,6 +694,7 @@ class ClaudeLLMClient(LLMClient):
         """
         _require_text("objective", objective)
         _require_text("prompt", prompt)
+        reset_complete_json_observer_state()
         think = llm_config.resolve_think_for_model(self.model, think, response_format="json")
         team = current_attribution().team or _caller_team()
         with bind_request_id(new_request_id()), llm_attribution(objective=objective, team=team):

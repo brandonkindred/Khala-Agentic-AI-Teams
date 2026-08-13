@@ -27,7 +27,7 @@ from llm_service import (
     LLMTruncatedError,
     get_strands_model,
 )
-from llm_service.interface import take_complete_json_turns
+from llm_service.interface import reset_complete_json_observer_state, take_complete_json_turns
 from llm_service.structured import complete_json_response_text, complete_validated
 
 logger = logging.getLogger(__name__)
@@ -468,6 +468,7 @@ def run_agent_via_reasoning(
         max_tokens = _pinned_max_tokens(model)
         if max_tokens is not None:
             format_kwargs["max_tokens"] = max_tokens
+        reset_complete_json_observer_state()
         try:
             data = backing_client.complete_json(format_prompt, **format_kwargs)
         except LLMJsonParseError as exc:
@@ -475,6 +476,16 @@ def run_agent_via_reasoning(
             raise
         except LLMTruncatedError as exc:
             _observe_formatting_turns(on_formatting, format_prompt, exc.partial_content or "")
+            raise
+        except Exception:
+            leftover = take_complete_json_turns()
+            for turn_prompt, turn_response in leftover:
+                _invoke_observer(
+                    "run_agent_via_reasoning: on_formatting",
+                    on_formatting,
+                    turn_prompt,
+                    turn_response,
+                )
             raise
         raw_text = json.dumps(data)
         _observe_formatting_turns(

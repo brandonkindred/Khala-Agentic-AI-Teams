@@ -47,6 +47,7 @@ from ..interface import (
     LLMTruncatedError,
     record_complete_json_raw,
     record_complete_json_turn,
+    reset_complete_json_observer_state,
 )
 from ..limit_classification import classify_ollama_limit_kind
 from ..telemetry import record_llm_call
@@ -1756,6 +1757,7 @@ class OllamaLLMClient(LLMClient):
         think: "bool | str | None" = None,
         **kwargs: Any,
     ) -> Dict[str, Any]:
+        reset_complete_json_observer_state()
         think = self._resolve_think(think, response_format="json")
         max_retries, backoff_base, backoff_max = _parse_retry_config()
         rl_max_retries, rl_initial, rl_cap = self._rate_limit_retry_config()
