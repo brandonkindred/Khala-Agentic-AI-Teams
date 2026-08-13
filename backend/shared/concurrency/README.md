@@ -170,3 +170,57 @@ write of the latest state, not N sequential writes.
   possibly being abandoned mid-write by a writer slower than `join_timeout`
   (e.g. an HTTP client with its own longer timeout/retry budget);
   `join_timeout` only bounds the final thread join once draining is done.
+
+## `KeyedLockManager`
+
+A per-key mutual-exclusion registry: concurrent callers that name the same
+key are serialized against each other, while callers touching disjoint keys
+proceed fully concurrently — the "lock only what actually conflicts" pattern,
+as opposed to a single global lock that would serialize everything.
+
+Motivating use case: the SE code-v2 gated execution loop
+(`software_engineering_team/shared/phases/execution.py`) accumulates every
+microtask's output into a shared `all_files: Dict[str, str]` dict and writes
+it to a shared `repo_path` git worktree. Today that loop runs microtasks
+strictly one at a time, so this is safe by construction. Once cross-microtask
+concurrency is wired in (a follow-up change — see `_schedule_microtask_batches`,
+which already groups microtasks into dependency-respecting batches/waves, the
+natural unit of "things safe to consider running together"), two microtasks in
+the same wave could touch overlapping files, and the write-then-`all_files.update()`
+sequence (`_execute_coding_phase`) plus the snapshot/restore sequence
+(`rollback.py`'s `_record_prior_values`/`_rollback_microtask_files`) would need
+to run as one atomic unit per file to avoid a torn write or a split-brain state
+where the worktree and `all_files` disagree. **This module is standalone**:
+it's exported from this package like every other primitive here (so it's
+actually usable by a caller), but `execution.py`/`rollback.py` are
+intentionally untouched — wiring it into that write sequence is exactly the
+sibling issue it exists to unblock, not something this change does itself.
+
+```python
+from shared.concurrency import KeyedLockManager
+
+file_locks: KeyedLockManager[str] = KeyedLockManager()  # one instance per task run
+
+# Illustrative future call shape — not wired into execution.py yet:
+with file_locks.lock(microtask_files.keys()):
+    write_repo_text_files(repo_path, microtask_files)
+    all_files.update(microtask_files)
+```
+
+- `lock(keys)` — a context manager that acquires every key in `keys` (any
+  hashable) for the duration of the `with` block, deduplicating repeated keys
+  first. An empty batch is a no-op.
+- Disjoint key sets never block each other; overlapping keys are fully
+  serialized — whichever caller acquires second observes every side effect
+  the first caller made under the lock (no interleaving, no dropped update).
+- Batch acquisition is deadlock-safe **regardless of the order keys are
+  passed in**: every key is assigned a global order the first time this
+  manager ever sees it, and `lock()` always acquires a batch sorted by that
+  order — so two callers locking `["a", "b"]` and `["b", "a"]` concurrently
+  can never deadlock on each other.
+- Not reentrant: a thread calling `lock()` for a key it already holds from an
+  outer, not-yet-exited `lock()` call raises `RuntimeError` immediately
+  instead of deadlocking silently.
+- A key's lock is never removed once created — this manager is meant to be
+  constructed once and reused for an entire run (the same lifetime as the
+  `all_files` dict it is intended to guard), not created per call.

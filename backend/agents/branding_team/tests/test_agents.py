@@ -5,13 +5,6 @@ data-driven ``AgentPromptSpec``/``render_agent_prompt`` pattern
 (``branding_team.prompt_spec``) against the original hand-written
 prose, so an accidental wording change in a spec constant is caught here
 rather than silently drifting.
-
-Most migrated prompts render byte-identically to their pre-migration text.
-A few (marked below) are intentionally, documentedly different: the
-pre-migration prose either had no per-field descriptions to port (only bare
-field names) or used a blank-line separator the spec renderer doesn't
-support, so the migrated wording adds minimal descriptive text or drops the
-blank line to fit the shared template — content and meaning are preserved.
 """
 
 from __future__ import annotations
@@ -19,17 +12,26 @@ from __future__ import annotations
 from branding_team.agents import (
     make_archetype_analyst,
     make_audience_segmenter,
+    make_color_system_builder,
+    make_converge_decider,
+    make_creative_director,
+    make_design_system_codifier,
     make_differentiation_mapper,
     make_discovery_auditor,
     make_iconography_director,
+    make_logo_specifier,
     make_message_mapper,
+    make_moodboard_conceptualist,
     make_persona_builder,
+    make_photography_video_director,
     make_positioning_synthesizer,
     make_purpose_vision_writer,
     make_storyteller,
     make_tagline_writer,
+    make_typography_builder,
     make_values_articulator,
     make_voice_principles_drafter,
+    make_voice_tone_builder,
 )
 
 _EXPECTED_PURPOSE_VISION_PROMPT = (
@@ -46,62 +48,39 @@ _EXPECTED_ICONOGRAPHY_PROMPT = (
     "2. illustration_style — describe the illustration approach (flat, isometric, etc.)"
 )
 
-
-def test_purpose_vision_writer_prompt_matches_original_wording() -> None:
-    assert make_purpose_vision_writer().system_prompt == _EXPECTED_PURPOSE_VISION_PROMPT
-
-
-def test_iconography_director_prompt_matches_original_wording() -> None:
-    assert make_iconography_director().system_prompt == _EXPECTED_ICONOGRAPHY_PROMPT
-
-
-# --- Phase 1 -----------------------------------------------------------
-
-# Intentionally different: the original was a single prose paragraph naming
-# fields with no per-field descriptions ("Include: current_brand_perception,
-# market_position, ..."); the migrated version adds a one-line description
-# per field to fit the template.
 _EXPECTED_DISCOVERY_AUDITOR_PROMPT = (
     "You are a Brand Discovery Analyst. Given a branding mission, produce a comprehensive "
-    "brand discovery audit covering:\n"
-    "1. current_brand_perception — how the market and customers currently see the brand\n"
+    "brand discovery audit.\n"
+    "1. current_brand_perception — how the brand is currently perceived by its audience and market\n"
     "2. market_position — where the brand sits relative to competitors today\n"
-    "3. strengths — internal advantages the brand can build on\n"
-    "4. weaknesses — internal gaps or vulnerabilities\n"
-    "5. opportunities — external trends or openings the brand can pursue\n"
-    "6. threats — external risks or competitive pressures\n"
-    "7. stakeholder_insights — perspectives and concerns gathered from stakeholders\n"
+    "3. strengths — the brand's key strengths\n"
+    "4. weaknesses — the brand's key weaknesses\n"
+    "5. opportunities — opportunities the brand can pursue\n"
+    "6. threats — threats the brand faces\n"
+    "7. stakeholder_insights — insights gathered from stakeholders\n"
     "Be specific and grounded in the company description and target audience provided."
 )
 
 _EXPECTED_VALUES_ARTICULATOR_PROMPT = (
     "You are a Values Articulator. Given a branding mission with optional seed values, "
-    "produce a list of 3-5 core values. For each value provide:\n"
-    "1. value — the value name\n"
-    "2. behavioral_definition — what this value means in practice\n"
-    "3. observable_behaviors — 2-3 concrete behaviors that demonstrate this value"
+    "produce a list of 3-5 core values.\n"
+    "1. core_values — for each value provide: value (the value name), behavioral_definition "
+    "(what this value means in practice), and observable_behaviors (2-3 concrete behaviors "
+    "that demonstrate this value)"
 )
 
-# Intentionally different: the original listed field names in prose with
-# only cardinality hints ("name, description, pain_points (2-3), ..."); the
-# migrated version adds a one-line description per field to fit the template.
 _EXPECTED_AUDIENCE_SEGMENTER_PROMPT = (
-    "You are an Audience Segmenter. Given a branding mission, identify 1-3 target audience "
-    "segments. For each segment provide:\n"
-    "1. name — the segment name\n"
-    "2. description — a short description of this segment\n"
-    "3. pain_points — 2-3 pain points this segment experiences\n"
-    "4. goals — 2-3 goals this segment is pursuing\n"
-    "5. decision_drivers — 2-3 factors that drive this segment's decisions\n"
+    "You are an Audience Segmenter. Given a branding mission, identify 1-3 target audience segments.\n"
+    "1. target_audience_segments — for each segment provide: name, description, pain_points "
+    "(2-3), goals (2-3), and decision_drivers (2-3)\n"
     "Ground your analysis in the company description and stated target audience."
 )
 
 _EXPECTED_DIFFERENTIATION_MAPPER_PROMPT = (
     "You are a Differentiation Mapper. Given a branding mission with optional differentiators, "
-    "produce 2-4 differentiation pillars. For each pillar provide:\n"
-    "1. pillar — the differentiator name\n"
-    "2. proof_points — 2-3 evidence items\n"
-    "3. competitive_context — how competitors fall short here"
+    "produce 2-4 differentiation pillars.\n"
+    "1. differentiation_pillars — for each pillar provide: pillar (the differentiator name), "
+    "proof_points (2-3 evidence items), and competitive_context (how competitors fall short here)"
 )
 
 _EXPECTED_POSITIONING_SYNTHESIZER_PROMPT = (
@@ -114,29 +93,6 @@ _EXPECTED_POSITIONING_SYNTHESIZER_PROMPT = (
     "2. brand_promise — a one-sentence commitment to the customer"
 )
 
-
-def test_discovery_auditor_prompt_matches_converged_wording() -> None:
-    assert make_discovery_auditor().system_prompt == _EXPECTED_DISCOVERY_AUDITOR_PROMPT
-
-
-def test_values_articulator_prompt_matches_original_wording() -> None:
-    assert make_values_articulator().system_prompt == _EXPECTED_VALUES_ARTICULATOR_PROMPT
-
-
-def test_audience_segmenter_prompt_matches_converged_wording() -> None:
-    assert make_audience_segmenter().system_prompt == _EXPECTED_AUDIENCE_SEGMENTER_PROMPT
-
-
-def test_differentiation_mapper_prompt_matches_original_wording() -> None:
-    assert make_differentiation_mapper().system_prompt == _EXPECTED_DIFFERENTIATION_MAPPER_PROMPT
-
-
-def test_positioning_synthesizer_prompt_matches_original_wording() -> None:
-    assert make_positioning_synthesizer().system_prompt == _EXPECTED_POSITIONING_SYNTHESIZER_PROMPT
-
-
-# --- Phase 2 -----------------------------------------------------------
-
 _EXPECTED_STORYTELLER_PROMPT = (
     "You are a Brand Storyteller. Using the strategic core output and branding mission, "
     "craft:\n"
@@ -147,12 +103,11 @@ _EXPECTED_STORYTELLER_PROMPT = (
 
 _EXPECTED_ARCHETYPE_ANALYST_PROMPT = (
     "You are a Brand Archetype Analyst. Review the brand story from Inputs from previous "
-    "nodes and the strategic core, then select 1-2 brand archetypes "
-    "(e.g. The Sage, The Creator, The Explorer). Carry forward brand_story, hero_narrative, "
-    "and boilerplate_variants unchanged, and add for each archetype:\n"
-    "1. archetype — name\n"
-    "2. rationale — why this fits\n"
-    "3. personality_traits — 3-5 traits"
+    "nodes and the strategic core, then select 1-2 brand archetypes (e.g. The Sage, The "
+    "Creator, The Explorer). Carry forward brand_story, hero_narrative, and "
+    "boilerplate_variants unchanged, and add:\n"
+    "1. brand_archetypes — for each archetype: archetype (name), rationale (why this fits), "
+    "and personality_traits (3-5 traits)"
 )
 
 _EXPECTED_TAGLINE_WRITER_PROMPT = (
@@ -160,37 +115,25 @@ _EXPECTED_TAGLINE_WRITER_PROMPT = (
     "and the strategic core, carry forward every prior narrative field unchanged and add:\n"
     "1. tagline — a memorable brand tagline (max 8 words)\n"
     "2. tagline_rationale — why this tagline works\n"
-    "3. elevator_pitches — three variants:\n"
-    "   - tier: '5-second', pitch: ...\n"
-    "   - tier: '30-second', pitch: ...\n"
-    "   - tier: '2-minute', pitch: ..."
+    "3. elevator_pitches — three variants: tier '5-second' pitch, tier '30-second' pitch, "
+    "and tier '2-minute' pitch"
 )
 
 _EXPECTED_MESSAGE_MAPPER_PROMPT = (
     "You are a Message Mapper. Using all prior narrative fields from Inputs from previous "
     "nodes, carry them forward unchanged and add:\n"
-    "1. messaging_framework — 3-4 messaging pillars, each with:\n"
-    "   - pillar, key_message, proof_points\n"
-    "2. audience_message_maps — one per audience segment, each with:\n"
-    "   - audience_segment, primary_message, supporting_messages, tone_adjustments"
+    "1. messaging_framework — 3-4 messaging pillars, each with: pillar, key_message, and proof_points\n"
+    "2. audience_message_maps — one per audience segment, each with: audience_segment, "
+    "primary_message, supporting_messages, and tone_adjustments"
 )
 
-# Intentionally different: the original was a single prose sentence that
-# never names the top-level "persona_profiles" field explicitly; the
-# migrated version names the field and lists its per-persona attributes as
-# indented sub-items to fit the template.
 _EXPECTED_PERSONA_BUILDER_PROMPT = (
     "You are a Persona Builder. Using audience segments and all prior narrative fields "
     "from Inputs from previous nodes, carry those fields forward unchanged and create:\n"
-    "1. persona_profiles — 2-3 persona profiles, each with:\n"
-    "   - name, role, demographics, psychographics, goals, frustrations, media_habits, "
-    "jobs_to_be_done"
+    "1. persona_profiles — 2-3 persona profiles, each with: name, role, demographics, "
+    "psychographics, goals, frustrations, media_habits, jobs_to_be_done"
 )
 
-# Intentionally different: the original separated its closing sentence with
-# a blank line, which the shared renderer doesn't support (matching the
-# no-blank-line convention already used by every other migrated prompt,
-# including the closing line in _EXPECTED_PURPOSE_VISION_PROMPT above).
 _EXPECTED_VOICE_PRINCIPLES_DRAFTER_PROMPT = (
     "You are a Voice Principles Drafter. Using all prior narrative fields from Inputs from "
     "previous nodes and the mission's desired_voice, carry the prior fields forward "
@@ -198,9 +141,121 @@ _EXPECTED_VOICE_PRINCIPLES_DRAFTER_PROMPT = (
     "1. voice_principles — 3-4 principles (e.g. 'Use a confident, human voice')\n"
     "2. style_dos — 3-4 writing best practices\n"
     "3. style_donts — 3-4 things to avoid\n"
-    "4. editorial_quality_bar — 3-4 quality standards every piece must meet\n"
+    "4. editorial_quality_bar — 3-4 quality standards every piece must meet\n\n"
     "This is the final step in narrative development."
 )
+
+_EXPECTED_PHOTOGRAPHY_VIDEO_DIRECTOR_PROMPT = (
+    "You are a Photography & Video Director. Based on the winning moodboard, define:\n"
+    "1. photography_direction — shooting style, lighting, composition, subjects\n"
+    "2. video_direction — pacing, tone, visual style for video content\n"
+    "3. motion_principles — 3-4 principles for animation/motion design"
+)
+
+_EXPECTED_VOICE_TONE_BUILDER_PROMPT = (
+    "You are a Voice & Tone Builder. Using the brand narrative's writing guidelines and "
+    "the moodboard direction, define:\n"
+    "1. voice_tone_spectrum — for each context (marketing, support, legal, social, "
+    "internal), specify the tone and 2-3 examples\n"
+    "2. language_dos — 4-5 approved language patterns\n"
+    "3. language_donts — 4-5 language anti-patterns"
+)
+
+_EXPECTED_DESIGN_SYSTEM_CODIFIER_PROMPT = (
+    "You are a Design System Codifier. Based on the full visual identity work, produce:\n"
+    "1. design_principles — 3-4 guiding principles (e.g. 'Clarity over decoration')\n"
+    "2. foundation_tokens — 4-6 token categories (color, type, spacing, motion, etc.)\n"
+    "3. component_standards — 3-5 component rules (buttons, cards, navigation, etc.)"
+)
+
+
+def _expected_moodboard_conceptualist_prompt(variant: str) -> str:
+    return (
+        f"You are a MoodBoard Conceptualist specialising in {variant.lower()} visual "
+        f"directions. Given a brand's strategic core and narrative, create a moodboard "
+        f"concept with:\n"
+        f"1. title — a name for this direction\n"
+        f"2. visual_direction — overall aesthetic description\n"
+        f"3. color_story — 3-4 color names/descriptions\n"
+        f"4. typography_direction — font style recommendations\n"
+        f"5. image_style — 3-4 image style descriptions"
+    )
+
+
+_EXPECTED_MOODBOARD_EDITORIAL_PROMPT = _expected_moodboard_conceptualist_prompt("Editorial")
+_EXPECTED_MOODBOARD_MINIMALIST_PROMPT = _expected_moodboard_conceptualist_prompt("Minimalist")
+_EXPECTED_MOODBOARD_BOLD_PROMPT = _expected_moodboard_conceptualist_prompt("Bold")
+
+_EXPECTED_CREATIVE_DIRECTOR_PROMPT = (
+    "You are a Creative Director reviewing visual identity exploration. Using the three "
+    "moodboard concepts from Inputs from previous nodes, collect them into:\n"
+    "1. mood_board_candidates — preserve each concept (title, visual_direction, color_story, "
+    "typography_direction, image_style)\n"
+    "Do not pick a winner — converge_decider selects the winning direction."
+)
+
+_EXPECTED_CONVERGE_DECIDER_PROMPT = (
+    "You are a Creative Convergence Decider. You receive moodboard candidates from the "
+    "diverge phase plus the brand's strategic core and values. Score each candidate on:\n"
+    "- Audience resonance\n"
+    "- Distinctiveness vs competitors\n"
+    "- Cross-channel consistency\n"
+    "- Execution feasibility\n\n"
+    "Produce:\n"
+    "1. winning_candidate_title — the selected candidate title\n"
+    "2. scoring_criteria — the criteria used to score candidates\n"
+    "3. scores_by_candidate — dict of title→score\n"
+    "4. rationale — why this candidate won\n"
+    "5. workshop_prompts — 3 questions for stakeholders\n"
+    "6. decision_criteria — decision criteria used"
+)
+
+_EXPECTED_LOGO_SPECIFIER_PROMPT = (
+    "You are a Logo Specifier. Based on the winning moodboard direction, define a logo "
+    "suite. For each variant (primary, monochrome, icon-only, reversed), specify:\n"
+    "1. logo_suite — variant, usage_context, minimum_size, clear_space"
+)
+
+_EXPECTED_COLOR_SYSTEM_BUILDER_PROMPT = (
+    "You are a Color System Builder. Based on the winning moodboard direction, define "
+    "5-7 colors. Include primary, secondary, accent, surface, and critical colors.\n"
+    "1. color_palette — for each: name, hex_value, usage (where to use it), and "
+    "psychological_rationale (why this color works for the brand)"
+)
+
+_EXPECTED_TYPOGRAPHY_BUILDER_PROMPT = (
+    "You are a Typography Builder. Based on the winning moodboard direction, define a "
+    "typography system with 3-4 type roles (display, body, caption, code). For each:\n"
+    "1. typography_system — role, font_family, weight_range, usage_notes"
+)
+
+
+def test_purpose_vision_writer_prompt_matches_original_wording() -> None:
+    assert make_purpose_vision_writer().system_prompt == _EXPECTED_PURPOSE_VISION_PROMPT
+
+
+def test_iconography_director_prompt_matches_original_wording() -> None:
+    assert make_iconography_director().system_prompt == _EXPECTED_ICONOGRAPHY_PROMPT
+
+
+def test_discovery_auditor_prompt_matches_original_wording() -> None:
+    assert make_discovery_auditor().system_prompt == _EXPECTED_DISCOVERY_AUDITOR_PROMPT
+
+
+def test_values_articulator_prompt_matches_original_wording() -> None:
+    assert make_values_articulator().system_prompt == _EXPECTED_VALUES_ARTICULATOR_PROMPT
+
+
+def test_audience_segmenter_prompt_matches_original_wording() -> None:
+    assert make_audience_segmenter().system_prompt == _EXPECTED_AUDIENCE_SEGMENTER_PROMPT
+
+
+def test_differentiation_mapper_prompt_matches_original_wording() -> None:
+    assert make_differentiation_mapper().system_prompt == _EXPECTED_DIFFERENTIATION_MAPPER_PROMPT
+
+
+def test_positioning_synthesizer_prompt_matches_original_wording() -> None:
+    assert make_positioning_synthesizer().system_prompt == _EXPECTED_POSITIONING_SYNTHESIZER_PROMPT
 
 
 def test_storyteller_prompt_matches_original_wording() -> None:
@@ -219,11 +274,64 @@ def test_message_mapper_prompt_matches_original_wording() -> None:
     assert make_message_mapper().system_prompt == _EXPECTED_MESSAGE_MAPPER_PROMPT
 
 
-def test_persona_builder_prompt_matches_converged_wording() -> None:
+def test_persona_builder_prompt_matches_original_wording() -> None:
     assert make_persona_builder().system_prompt == _EXPECTED_PERSONA_BUILDER_PROMPT
 
 
-def test_voice_principles_drafter_prompt_matches_converged_wording() -> None:
+def test_voice_principles_drafter_prompt_matches_original_wording() -> None:
     assert (
         make_voice_principles_drafter().system_prompt == _EXPECTED_VOICE_PRINCIPLES_DRAFTER_PROMPT
     )
+
+
+def test_photography_video_director_prompt_matches_original_wording() -> None:
+    assert (
+        make_photography_video_director().system_prompt
+        == _EXPECTED_PHOTOGRAPHY_VIDEO_DIRECTOR_PROMPT
+    )
+
+
+def test_voice_tone_builder_prompt_matches_original_wording() -> None:
+    assert make_voice_tone_builder().system_prompt == _EXPECTED_VOICE_TONE_BUILDER_PROMPT
+
+
+def test_design_system_codifier_prompt_matches_original_wording() -> None:
+    assert make_design_system_codifier().system_prompt == _EXPECTED_DESIGN_SYSTEM_CODIFIER_PROMPT
+
+
+def test_moodboard_conceptualist_editorial_prompt_matches_spec() -> None:
+    assert (
+        make_moodboard_conceptualist("Editorial").system_prompt
+        == _EXPECTED_MOODBOARD_EDITORIAL_PROMPT
+    )
+
+
+def test_moodboard_conceptualist_minimalist_prompt_matches_spec() -> None:
+    assert (
+        make_moodboard_conceptualist("Minimalist").system_prompt
+        == _EXPECTED_MOODBOARD_MINIMALIST_PROMPT
+    )
+
+
+def test_moodboard_conceptualist_bold_prompt_matches_spec() -> None:
+    assert make_moodboard_conceptualist("Bold").system_prompt == _EXPECTED_MOODBOARD_BOLD_PROMPT
+
+
+def test_creative_director_prompt_matches_spec() -> None:
+    assert make_creative_director().system_prompt == _EXPECTED_CREATIVE_DIRECTOR_PROMPT
+
+
+def test_converge_decider_prompt_matches_spec() -> None:
+    assert make_converge_decider().system_prompt == _EXPECTED_CONVERGE_DECIDER_PROMPT
+
+
+def test_logo_specifier_prompt_matches_spec() -> None:
+    assert make_logo_specifier().system_prompt == _EXPECTED_LOGO_SPECIFIER_PROMPT
+
+
+def test_color_system_builder_prompt_matches_spec() -> None:
+    assert make_color_system_builder().system_prompt == _EXPECTED_COLOR_SYSTEM_BUILDER_PROMPT
+
+
+def test_typography_builder_prompt_matches_spec() -> None:
+    assert make_typography_builder().system_prompt == _EXPECTED_TYPOGRAPHY_BUILDER_PROMPT

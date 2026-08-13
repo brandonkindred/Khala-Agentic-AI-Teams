@@ -8,11 +8,11 @@ duplicating them. Not imported by production code.
 
 from __future__ import annotations
 
-from agent_registry.models import AgentManifest, CognitionSpec, IOSchema, SourceInfo
+from agent_platform.registry.models import AgentManifest, CognitionSpec, IOSchema, SourceInfo
 
 
 class FakeRegistry:
-    """In-memory stand-in for ``agent_registry.AgentRegistry``.
+    """In-memory stand-in for ``agent_platform.registry.AgentRegistry``.
 
     Satisfies the :class:`agent_team_studio.agent_studio.service.RegistryLike` protocol. ``seed``
     pre-loads agents that already exist (clone/refine sources); ``register``
