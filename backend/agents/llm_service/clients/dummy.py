@@ -18,7 +18,7 @@ import hashlib
 import json
 import re
 import sys
-from collections.abc import AsyncGenerator, AsyncIterable, Callable
+from collections.abc import AsyncGenerator, AsyncIterable
 from typing import TYPE_CHECKING, Any, Dict, Optional
 
 from ..interface import LLMClient
@@ -582,11 +582,186 @@ def _phase3_design_system_codifier_stub() -> Dict[str, Any]:
     }
 
 
-# Post-converge Phase 3 specialists, matched after the three ordering-sensitive
-# agents below. Each entry is ((anchor_a, anchor_b), builder): both anchors must
-# appear in the lowercased system prompt for that builder to fire. Order among
-# these seven does not matter — their anchor pairs are mutually exclusive.
-_PHASE3_SPECIALIST_REGISTRY: tuple[tuple[tuple[str, str], Callable[[], Dict[str, Any]]], ...] = (
+# --- Phase 3 Specialist Registry ---
+
+def _build_logo_specifier() -> Dict[str, Any]:
+    return {
+        "logo_suite": [
+            {
+                "variant": "primary",
+                "usage_context": "Default lockup on light backgrounds (dummy).",
+                "minimum_size": "24px height",
+                "clear_space": "0.5x logo height",
+            },
+            {
+                "variant": "monochrome",
+                "usage_context": "Single-color print and embroidery (dummy).",
+                "minimum_size": "24px height",
+                "clear_space": "0.5x logo height",
+            },
+            {
+                "variant": "icon-only",
+                "usage_context": "App icons and favicons (dummy).",
+                "minimum_size": "16px",
+                "clear_space": "0.25x icon width",
+            },
+            {
+                "variant": "reversed",
+                "usage_context": "Dark backgrounds and photography overlays (dummy).",
+                "minimum_size": "24px height",
+                "clear_space": "0.5x logo height",
+            },
+        ]
+    }
+
+def _build_color_system() -> Dict[str, Any]:
+    return {
+        "color_palette": [
+            {
+                "name": "Ink",
+                "hex_value": "#111827",
+                "usage": "Primary text and logos",
+                "psychological_rationale": "Signals clarity and confidence (dummy).",
+            },
+            {
+                "name": "Paper",
+                "hex_value": "#F8FAFC",
+                "usage": "Surfaces and backgrounds",
+                "psychological_rationale": "Keeps interfaces calm (dummy).",
+            },
+            {
+                "name": "Signal",
+                "hex_value": "#0EA5E9",
+                "usage": "Accent CTAs",
+                "psychological_rationale": "Draws attention without alarm (dummy).",
+            },
+            {
+                "name": "Support",
+                "hex_value": "#64748B",
+                "usage": "Secondary text",
+                "psychological_rationale": "Hierarchy without noise (dummy).",
+            },
+            {
+                "name": "Critical",
+                "hex_value": "#DC2626",
+                "usage": "Errors and destructive actions",
+                "psychological_rationale": "Clear urgency cue (dummy).",
+            },
+        ]
+    }
+
+def _build_typography() -> Dict[str, Any]:
+    return {
+        "typography_system": [
+            {
+                "role": "display",
+                "font_family": "Inter Display",
+                "weight_range": "600-700",
+                "usage_notes": "Hero headlines only (dummy).",
+            },
+            {
+                "role": "body",
+                "font_family": "Inter",
+                "weight_range": "400-500",
+                "usage_notes": "Long-form and UI copy (dummy).",
+            },
+            {
+                "role": "caption",
+                "font_family": "Inter",
+                "weight_range": "400-500",
+                "usage_notes": "Meta labels and footnotes (dummy).",
+            },
+        ]
+    }
+
+def _build_iconography() -> Dict[str, Any]:
+    return {
+        "iconography_style": (
+            "2px stroke, 2px corner radius, limited fill — geometric and calm (dummy)."
+        ),
+        "illustration_style": (
+            "Flat editorial scenes with restrained gradients and human scale (dummy)."
+        ),
+    }
+
+def _build_photography() -> Dict[str, Any]:
+    return {
+        "photography_direction": (
+            "Natural light, documentary framing, real product in use (dummy)."
+        ),
+        "video_direction": "Steady pacing, soft cuts, voice-forward demos (dummy).",
+        "motion_principles": [
+            "Ease-out entrances",
+            "Prefer opacity over bounce",
+            "Keep durations under 240ms for UI",
+        ],
+    }
+
+def _build_voice_tone() -> Dict[str, Any]:
+    return {
+        "voice_tone_spectrum": [
+            {
+                "context": "marketing",
+                "tone": "Confident and concrete",
+                "examples": ["Ship brand with the product", "Clarity over slogans"],
+            },
+            {
+                "context": "support",
+                "tone": "Calm and helpful",
+                "examples": ["Here is the next step", "We can fix that together"],
+            },
+            {
+                "context": "legal",
+                "tone": "Precise and plain",
+                "examples": ["This agreement covers", "You may opt out"],
+            },
+            {
+                "context": "social",
+                "tone": "Human and brief",
+                "examples": ["Shipped this week", "Ask us anything"],
+            },
+            {
+                "context": "internal",
+                "tone": "Direct and collaborative",
+                "examples": ["Decision needed by Friday", "Proposal attached"],
+            },
+        ],
+        "language_dos": [
+            "Lead with the customer outcome (dummy).",
+            "Use active voice (dummy).",
+            "Name the proof point (dummy).",
+            "Keep sentences scannable (dummy).",
+        ],
+        "language_donts": [
+            "Avoid empty superlatives (dummy).",
+            "Don't bury the offer (dummy).",
+            "Don't invent category jargon (dummy).",
+            "Don't mix slang with legal claims (dummy).",
+        ],
+    }
+
+def _build_design_system() -> Dict[str, Any]:
+    return {
+        "design_principles": [
+            "Clarity over decoration (dummy).",
+            "Consistency enables speed (dummy).",
+            "Every state must be intentional (dummy).",
+        ],
+        "foundation_tokens": [
+            "color",
+            "type",
+            "spacing",
+            "motion",
+            "elevation",
+        ],
+        "component_standards": [
+            "Buttons: one primary action per view (dummy).",
+            "Cards: 16px padding, single accent (dummy).",
+            "Navigation: persistent labels, no icon-only primary nav (dummy).",
+        ],
+    }
+
+_PHASE3_SPECIALISTS_REGISTRY = [
     (("logo specifier", "clear_space"), _phase3_logo_specifier_stub),
     (("psychological_rationale", "color system builder"), _phase3_color_system_builder_stub),
     (("typography builder", "weight_range"), _phase3_typography_builder_stub),
@@ -594,7 +769,7 @@ _PHASE3_SPECIALIST_REGISTRY: tuple[tuple[tuple[str, str], Callable[[], Dict[str,
     (("photography_direction", "motion_principles"), _phase3_photography_video_director_stub),
     (("voice_tone_spectrum", "language_donts"), _phase3_voice_tone_builder_stub),
     (("foundation_tokens", "component_standards"), _phase3_design_system_codifier_stub),
-)
+]
 
 
 def _branding_phase3_structured_stub(system_lowered: str) -> Optional[Dict[str, Any]]:
@@ -607,37 +782,39 @@ def _branding_phase3_structured_stub(system_lowered: str) -> Optional[Dict[str, 
         ``structured_output`` schema, or ``None`` when no Phase 3 agent matches.
         Dispatches to one of ten helpers covering: CreativeDirector,
         MoodBoardConceptualist, ConvergeDecider, and the seven post-converge
-        specialists in ``_PHASE3_SPECIALIST_REGISTRY`` (logo_specifier,
-        color_system_builder, typography_builder, iconography_director,
-        photography_video_director, voice_tone_builder, design_system_codifier).
-        Specialist anchors match on lowercased prompt *substrings*, not factory
-        names: logo_specifier matches "logo specifier" (space), color_system_builder
-        matches "color system builder", and typography_builder matches "typography
-        builder". The remaining four specialists (iconography_director,
-        photography_video_director, voice_tone_builder, design_system_codifier)
-        have no name-substring anchor at all — they match on output-field names only.
+        specialists (logo_specifier, color_system_builder, typography_builder,
+        iconography_director, photography_video_director, voice_tone_builder,
+        design_system_codifier). Specialist branches match on lowercased prompt
+        *substrings*, not factory names: logo_specifier matches "logo specifier"
+        (space), color_system_builder matches "color system builder", and
+        typography_builder matches "typography builder". The remaining four
+        specialists (iconography_director, photography_video_director,
+        voice_tone_builder, design_system_codifier) also match on output-field name
+        substrings present in the system prompt.
 
     Ordering constraints (first three only — do not conflate them):
-        1. CreativeDirector — ``mood_board_candidates`` + ``converge_decider``
-           → ``MoodBoardCandidatesOutput`` (must precede MoodBoardConceptualist
-           because its prompt also names the moodboard field list).
-        2. MoodBoardConceptualist — ``moodboard conceptualist`` + ``visual_direction``
-           → ``MoodBoardConceptOutput``.
-        3. ConvergeDecider — ``winning_candidate_title`` + ``scores_by_candidate``
-           → ``CreativeRefinementDecisionOutput`` (separate from CreativeDirector).
-        The seven specialists in ``_PHASE3_SPECIALIST_REGISTRY`` are matched
-        afterward, in registry order, by agent-specific prompt anchors; their
-        anchor pairs are mutually exclusive so registry order is not significant.
+        1. CreativeDirector
+        2. MoodBoardConceptualist
+        3. ConvergeDecider
+        Specialists are matched afterward by agent-specific prompt anchors via a registry.
     """
+    # 1. CreativeDirector
     if "mood_board_candidates" in system_lowered and "converge_decider" in system_lowered:
         return _phase3_creative_director_stub()
+    
+    # 2. MoodBoardConceptualist
     if "moodboard conceptualist" in system_lowered and "visual_direction" in system_lowered:
         return _phase3_moodboard_conceptualist_stub()
+    
+    # 3. ConvergeDecider
     if "winning_candidate_title" in system_lowered and "scores_by_candidate" in system_lowered:
         return _phase3_converge_decider_stub()
-    for (anchor_a, anchor_b), builder in _PHASE3_SPECIALIST_REGISTRY:
-        if anchor_a in system_lowered and anchor_b in system_lowered:
-            return builder()
+
+    # 4. Phase 3 Specialists via Registry
+    for anchors, builder_fn in _PHASE3_SPECIALISTS_REGISTRY:
+        if all(anchor in system_lowered for anchor in anchors):
+            return builder_fn()
+
     return None
 
 
@@ -802,8 +979,14 @@ def _branding_phase4_structured_output_stub(
         return _phase4_architecture_stub()
     if model_name == "BrandInActionOutput":
         return _phase4_brand_in_action_stub()
-    return None
+    
 
+    # 4. Phase 3 Specialists via Registry
+    for anchors, builder_fn in _PHASE3_SPECIALISTS_REGISTRY:
+        if all(anchor in system_lowered for anchor in anchors):
+            return builder_fn()
+
+    return None
 
 def _branding_phase4_text_routed_stub(system_lowered: str) -> Optional[Dict[str, Any]]:
     """Text-anchor fallback for Phase 4 branding structured-output stubs.
