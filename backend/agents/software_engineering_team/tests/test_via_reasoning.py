@@ -178,6 +178,26 @@ def test_validated_via_reasoning_empty_prose_skips_format(prose: str) -> None:
     assert client.format_calls == []
 
 
+def test_validated_via_reasoning_empty_prose_still_notifies_on_attempt() -> None:
+    """A blank reasoning complete() is still an LLM call; the observer must
+    see it before LLMSemanticExhaustionError is raised so the transcript
+    records the failed attempt that coordinator recovery may retry."""
+    client = _RecordingClient(prose="")
+    seen: list[tuple[str, str]] = []
+    with pytest.raises(LLMSemanticExhaustionError, match="no usable assistant content"):
+        complete_validated_via_reasoning_local(
+            client,
+            schema=_Out,
+            reasoning_prompt="Review this code",
+            reasoning_system_prompt="Prose only.",
+            formatting_instructions="JSON shape here",
+            objective="review code chunk",
+            on_attempt=lambda prompt, response: seen.append((prompt, response)),
+        )
+    assert seen == [("Review this code", "")]
+    assert client.format_calls == []
+
+
 def test_validated_via_reasoning_rejects_empty_objective() -> None:
     client = _RecordingClient()
     with pytest.raises(ValueError, match="objective must be non-empty"):
@@ -405,6 +425,39 @@ def test_run_agent_via_reasoning_empty_prose_skips_format(
             parse=lambda raw: _Out.model_validate_json(raw),
         )
     assert format_calls == []
+
+
+def test_run_agent_via_reasoning_empty_prose_still_notifies_on_reasoning_agent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """on_reasoning_agent must run before emptiness is rejected so the caller
+    can record the blank reasoning conversation in the transcript."""
+    from llm_service import LLMClientModel
+    from llm_service.clients.dummy import DummyLLMClient
+    from software_engineering_team.code_review_agent import via_reasoning as vr_mod
+
+    seen: list[Any] = []
+
+    class _RecordingAgent:
+        def __init__(self, **kwargs: Any) -> None:
+            self.messages = [{"role": "user", "content": [{"text": "Review this"}]}]
+
+        def __call__(self, prompt: str) -> str:
+            return ""
+
+    monkeypatch.setattr(vr_mod, "Agent", _RecordingAgent)
+    model = LLMClientModel(DummyLLMClient(), agent_key="code_review")
+
+    with pytest.raises(LLMSemanticExhaustionError, match="no usable assistant content"):
+        run_agent_via_reasoning(
+            model=model,
+            reasoning_prompt="Review this",
+            reasoning_system_prompt="Prose reviewer",
+            formatting_instructions='Return {"approved": bool, "summary": str}',
+            parse=lambda raw: _Out.model_validate_json(raw),
+            on_reasoning_agent=lambda agent: seen.append(agent.messages),
+        )
+    assert len(seen) == 1
 
 
 def test_run_agent_via_reasoning_omits_max_tokens_when_model_has_no_pin(

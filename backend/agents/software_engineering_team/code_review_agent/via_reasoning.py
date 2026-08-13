@@ -276,8 +276,9 @@ def complete_validated_via_reasoning_local(
         immediately and step 2 is never invoked. Empty or whitespace-only
         reasoning output raises ``LLMSemanticExhaustionError`` before
         formatting so coordinator recovery still runs. ``on_attempt``, when
-        given, is invoked once for the reasoning ``complete`` call and then
-        forwarded to :func:`complete_validated` so each formatting attempt
+        given, is invoked once for the reasoning ``complete`` call (including
+        an empty or whitespace-only reply, before that reply is rejected) and
+        then forwarded to :func:`complete_validated` so each formatting attempt
         (initial plus corrective retries) is observed too; observer exceptions
         are swallowed and never fail the review.
     """
@@ -286,21 +287,20 @@ def complete_validated_via_reasoning_local(
     _require_non_empty("formatting_instructions", formatting_instructions)
     _reject_think_kwarg("complete_validated_via_reasoning_local", kwargs)
 
-    prose = _require_reasoning_prose(
-        client.complete(
-            reasoning_prompt,
-            objective=f"{objective} (reasoning)",
-            system_prompt=reasoning_system_prompt,
-            temperature=reasoning_temperature,
-            think=_resolve_reasoning_think(reasoning_think),
-        )
+    raw_prose = client.complete(
+        reasoning_prompt,
+        objective=f"{objective} (reasoning)",
+        system_prompt=reasoning_system_prompt,
+        temperature=reasoning_temperature,
+        think=_resolve_reasoning_think(reasoning_think),
     )
     _invoke_observer(
         "complete_validated_via_reasoning_local: on_attempt",
         on_attempt,
         reasoning_prompt,
-        prose,
+        raw_prose,
     )
+    prose = _require_reasoning_prose(raw_prose)
     format_prompt = (
         f"{_DEFAULT_FORMAT_INSTRUCTIONS}\n\n{formatting_instructions}\n\n"
         f"{wrap_with_analysis_delimiters(prose)}"
@@ -361,9 +361,12 @@ def run_agent_via_reasoning(
         Returns ``parse``'s result. Tools are attached only to call 1.
         Both passes honor ``model``'s reserved ``max_tokens`` when one is set.
         Empty reasoning output raises ``LLMSemanticExhaustionError`` before
-        formatting. ``on_formatting`` is invoked after the formatting LLM call
-        returns or raises ``LLMJsonParseError`` (so a malformed reply is still
-        observable) and before ``parse``; observer exceptions are swallowed.
+        formatting. ``on_reasoning_agent``, when given, is invoked after the
+        reasoning ``Agent`` run and before emptiness is rejected, so a blank
+        reasoning call is still observable. ``on_formatting`` is invoked after
+        the formatting LLM call returns or raises ``LLMJsonParseError`` (so a
+        malformed reply is still observable) and before ``parse``; observer
+        exceptions are swallowed.
     """
     _require_non_empty("reasoning_prompt", reasoning_prompt)
     _require_non_empty("reasoning_system_prompt", reasoning_system_prompt)
@@ -383,9 +386,10 @@ def run_agent_via_reasoning(
     if conversation_manager is not None:
         reasoning_agent_kwargs["conversation_manager"] = conversation_manager
     reasoning_agent = Agent(**reasoning_agent_kwargs)
-    prose = _require_reasoning_prose(str(reasoning_agent(reasoning_prompt)))
+    raw_prose = str(reasoning_agent(reasoning_prompt))
     if on_reasoning_agent is not None:
         on_reasoning_agent(reasoning_agent)
+    prose = _require_reasoning_prose(raw_prose)
 
     format_prompt = (
         f"{_DEFAULT_FORMAT_INSTRUCTIONS}\n\n{formatting_instructions}\n\n"

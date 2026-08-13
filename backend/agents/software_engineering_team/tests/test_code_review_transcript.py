@@ -374,3 +374,22 @@ def test_model_label_reads_config_dict() -> None:
         config = {"model_name": "claude-y"}
 
     assert transcript.model_label(_Model()) == "claude-y"
+
+
+def test_unflushed_entries_returns_requeued_batch(monkeypatch) -> None:
+    """After a failed drain the batch is still buffered; unflushed_entries
+    exposes it so a one-shot transcript GET is not empty while the heartbeat
+    retries."""
+    monkeypatch.setattr(
+        "software_engineering_team.review_history_store.append_review_transcript_entries",
+        lambda *a, **k: False,
+    )
+    with llm_attribution(job_id="job-1"):
+        transcript.record_transcript_entry("chunk_review", "a.py", "p", "r")
+    assert transcript.drain() == 0
+    extra = transcript.unflushed_entries("job-1")
+    assert len(extra) == 1
+    assert extra[0]["target"] == "a.py"
+    assert transcript.unflushed_entries("other-job") == []
+    assert transcript.merge_unflushed("job-1", []) == extra
+    assert transcript.merge_unflushed("job-1", [{"stage": "durable"}])[0]["stage"] == "durable"

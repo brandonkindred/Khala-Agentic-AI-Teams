@@ -2275,6 +2275,34 @@ class TestReviewTranscript:
         assert resp.status_code == 200
         assert resp.json() == {"job_id": "j1", "entries": []}
 
+    def test_includes_unflushed_buffer_entries(self, review_app, monkeypatch) -> None:
+        """A known review whose durable row is still empty but whose final
+        drain requeued into the in-memory buffer must still return those
+        entries — the UI fetches once and would otherwise stay empty until
+        the heartbeat succeeds."""
+        from llm_service import llm_attribution
+        from software_engineering_team.code_review_agent import transcript
+
+        api_main = review_app["api"]
+        monkeypatch.setattr(
+            api_main,
+            "get_review",
+            lambda job_id: {"job_id": job_id, "owner": "o", "repo": "r"},
+        )
+        monkeypatch.setattr(api_main, "get_review_transcript", lambda job_id: None)
+        monkeypatch.setattr(transcript, "is_postgres_enabled", lambda: True)
+        transcript._reset_for_test()
+        with llm_attribution(job_id="j1"):
+            transcript.record_transcript_entry("chunk_review", "a.py", "p", "r")
+        try:
+            resp = review_app["client"].get("/reviews/j1/transcript")
+            assert resp.status_code == 200
+            data = resp.json()
+            assert len(data["entries"]) == 1
+            assert data["entries"][0]["target"] == "a.py"
+        finally:
+            transcript._reset_for_test()
+
     def test_409_on_owner_repo_mismatch(self, review_app, monkeypatch) -> None:
         api_main = review_app["api"]
         monkeypatch.setattr(

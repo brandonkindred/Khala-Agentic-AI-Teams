@@ -339,6 +339,52 @@ def drain() -> int:
         return 0
 
 
+def unflushed_entries(job_id: str) -> list[dict[str, Any]]:
+    """Return buffered, not-yet-durable transcript entries for ``job_id``.
+
+    The terminal transcript GET is a one-shot read. If the run's final
+    ``drain()`` requeued because Postgres blipped, those entries still sit in
+    this process's buffer while the heartbeat retries. Serving them here means
+    the dialog is not empty during that window, without delaying the review's
+    terminal status on persistence.
+
+    Preconditions:
+        ``job_id`` is a review job id (empty is allowed and returns []).
+
+    Postconditions:
+        Returns a new list of entry dicts currently buffered for ``job_id``,
+        in buffer order. Waits for an in-flight drain so the snapshot-cleared
+        window is not observed. Never raises.
+    """
+    if not job_id:
+        return []
+    try:
+        with _drain_exec_lock:
+            with _buffer_lock:
+                return [entry for jid, entry in _buffer if jid == job_id]
+    except Exception:  # noqa: BLE001 - a GET must not fail because the buffer is busy
+        logger.warning("code review transcript: unflushed_entries failed", exc_info=True)
+        return []
+
+
+def merge_unflushed(job_id: str, durable: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Append this job's buffered entries onto a durable transcript list.
+
+    Preconditions:
+        ``durable`` is the list returned by ``get_review_transcript`` (or []).
+
+    Postconditions:
+        Returns ``durable`` unchanged when the buffer has nothing for
+        ``job_id``. Otherwise returns a new list of durable + buffered
+        entries sorted by ``started_at`` (same order as the durable GET).
+        Never raises.
+    """
+    extra = unflushed_entries(job_id)
+    if not extra:
+        return durable
+    return sorted(list(durable) + extra, key=lambda e: e.get("started_at") or "")
+
+
 def register_transcript_flusher() -> None:
     """Start the background drain heartbeat (idempotent).
 
@@ -421,6 +467,8 @@ __all__ = [
     "model_label",
     "record_transcript_entry",
     "drain",
+    "unflushed_entries",
+    "merge_unflushed",
     "register_transcript_flusher",
     "unregister",
     "shutdown",

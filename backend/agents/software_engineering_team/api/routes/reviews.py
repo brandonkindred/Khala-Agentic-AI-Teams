@@ -19,6 +19,7 @@ from software_engineering_team.api.coding_team_models import (
     TranscriptResponse,
 )
 from software_engineering_team.api.routes._common import resolve_github_token
+from software_engineering_team.code_review_agent import transcript
 from software_engineering_team.github_source import (
     GitHubAPIError,
 )
@@ -135,7 +136,10 @@ def fetch_review_transcript(
           identical resubmission can hit it — made no LLM call at all) still
           returns 200 with an empty ``entries`` list rather than 404, so the
           UI's "View Transcript" action (shown for any terminal review) never
-          errors on a review that legitimately has nothing to show.
+          errors on a review that legitimately has nothing to show. Entries
+          still sitting in this process's in-memory buffer (a final ``drain()``
+          that requeued after a Postgres blip) are included, so the one-shot
+          dialog is not empty while the heartbeat retries.
     """
     review = _main.get_review(job_id)
     if review is None:
@@ -146,7 +150,7 @@ def fetch_review_transcript(
                 status_code=409,
                 detail="The requested repository does not match the reviewed repository.",
             )
-    entries = _main.get_review_transcript(job_id) or []
+    entries = transcript.merge_unflushed(job_id, _main.get_review_transcript(job_id) or [])
     return TranscriptResponse(
         job_id=job_id, entries=[TranscriptEntry.model_validate(e) for e in entries]
     )
