@@ -1,11 +1,11 @@
 """Dual-path dispatch for the Agent Studio authoring CRUD operations.
 
 The synchronous route handlers call these helpers. When Temporal is configured
-(``is_temporal_enabled()``) *and* a live in-process Agent Studio worker is polling
-``agent-studio-queue``, each helper starts the matching workflow and blocks for
+(``is_temporal_enabled()``) *and* an in-process Agent Studio worker has finished
+connecting (polling ``agent-studio-queue``), each helper starts the matching workflow and blocks for
 its result on the worker's event loop (via ``shared.temporal.execute_workflow_sync``),
 then rebuilds the Pydantic response the route returns. When Temporal is not
-configured, or the Studio worker is disabled/absent, each helper instead calls the corresponding
+configured, or the Studio worker is disabled, still connecting, or absent, each helper instead calls the corresponding
 :class:`~agent_platform.studio.service.AgentStudioService` method directly,
 in-process, via the same process-wide singleton
 (:func:`agent_platform.studio.runtime.get_studio_service`) the Temporal
@@ -104,19 +104,21 @@ def _translate_workflow_failure(exc: WorkflowFailureError) -> None:
 def _temporal_enabled() -> bool:
     """True when authoring CRUD should dispatch to Temporal.
 
-    Requires both a configured Temporal cluster and a live in-process
-    ``agent_studio`` worker. When the worker is disabled or absent, CRUD uses
-    direct in-process ``AgentStudioService`` instead — other teams may still
-    use Temporal in the same process.
+    Requires both a configured Temporal cluster and an in-process
+    ``agent_studio`` worker that has finished connecting (ready, not merely
+    a live thread). When the worker is disabled, still connecting, stuck, or
+    absent, CRUD uses direct in-process ``AgentStudioService`` instead —
+    other teams may still use Temporal in the same process.
 
     Postconditions:
-        - Returns True iff Temporal is configured and ``is_team_worker_alive``
-          reports a live ``agent_studio`` worker. Never raises.
+        - Returns True iff Temporal is configured and
+          ``is_team_worker_ready("agent_studio")`` is True. Never raises.
+          Never blocks on connect.
     """
     from shared.temporal.client import is_temporal_enabled
-    from shared.temporal.worker import is_team_worker_alive
+    from shared.temporal.worker import is_team_worker_ready
 
-    return is_temporal_enabled() and is_team_worker_alive("agent_studio")
+    return is_temporal_enabled() and is_team_worker_ready("agent_studio")
 
 
 def _direct_service() -> "AgentStudioService":
