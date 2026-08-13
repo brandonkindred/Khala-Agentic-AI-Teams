@@ -399,6 +399,122 @@ def test_dbc_self_review_build_verifier_failure_reverts_only_touched_files(tmp_p
     assert mt.output_files == microtask_files
 
 
+def test_dbc_self_review_build_verifier_failure_reverts_verifier_repairs(tmp_path):
+    # Production ``_run_build_verification`` may write LLM repairs to files
+    # this phase did not touch (``_try_build_fix_one_at_a_time``) before it
+    # knows whether verification will pass. On failure those edits must not
+    # remain on disk after the phase reports that it reverted.
+    (tmp_path / "a.py").write_text("orig a\n")
+    (tmp_path / "other.py").write_text("orig other\n")
+
+    def _review(*, code, **kwargs: Any) -> SimpleNamespace:
+        return SimpleNamespace(files={"a.py": "dbc a\n"})
+
+    def _verify_with_repairs(repo_path, label, tid):
+        (Path(repo_path) / "other.py").write_text("llm repair\n")
+        (Path(repo_path) / "new_fix.py").write_text("new repair\n")
+        return False, "build still broken"
+
+    microtask_files = {"a.py": "orig a\n", "other.py": "orig other\n"}
+    all_files = dict(microtask_files)
+
+    mt, microtask_files, all_files, _ = _call(
+        tmp_path=tmp_path,
+        gate_config=_gate_config(_review),
+        microtask_files=microtask_files,
+        all_files=all_files,
+        deps=ReviewDependencies(build_verifier=_verify_with_repairs),
+    )
+
+    assert (tmp_path / "a.py").read_text() == "orig a\n"
+    assert (tmp_path / "other.py").read_text() == "orig other\n"
+    assert not (tmp_path / "new_fix.py").exists()
+    assert microtask_files == {"a.py": "orig a\n", "other.py": "orig other\n"}
+    assert all_files == microtask_files
+
+
+def test_dbc_self_review_pre_verify_snapshot_oserror_skips_verify(tmp_path, monkeypatch):
+    # Without a post-write snapshot there is no baseline to restore verifier
+    # mutations against, so the mutating verifier must not run.
+    def _review(*, code, **kwargs: Any) -> SimpleNamespace:
+        return SimpleNamespace(files={"a.py": "dbc a\n"})
+
+    called: list[bool] = []
+
+    def _verify(repo, label, tid):
+        called.append(True)
+        return False, "should not run"
+
+    def _raise_snapshot(root: Path) -> Dict[Path, bytes]:
+        raise OSError("permission denied")
+
+    monkeypatch.setattr(dbc_phase, "_snapshot_worktree", _raise_snapshot)
+
+    mt, microtask_files, all_files, _ = _call(
+        tmp_path=tmp_path,
+        gate_config=_gate_config(_review),
+        microtask_files={"a.py": "orig a\n"},
+        deps=ReviewDependencies(build_verifier=_verify),
+    )
+
+    assert called == []
+    assert microtask_files["a.py"] == "dbc a\n"
+    assert (tmp_path / "a.py").read_text() == "dbc a\n"
+
+
+def test_dbc_self_review_revert_enumerate_oserror_still_restores_snapshot(tmp_path, monkeypatch):
+    (tmp_path / "a.py").write_text("orig a\n")
+    (tmp_path / "other.py").write_text("orig other\n")
+
+    def _review(*, code, **kwargs: Any) -> SimpleNamespace:
+        return SimpleNamespace(files={"a.py": "dbc a\n"})
+
+    def _verify(repo, label, tid):
+        (Path(repo) / "other.py").write_text("llm repair\n")
+        return False, "broke"
+
+    original_iter = dbc_phase._iter_worktree_files
+    calls = {"n": 0}
+
+    def _iter(root: Path):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return original_iter(root)
+        raise OSError("walk failed")
+
+    monkeypatch.setattr(dbc_phase, "_iter_worktree_files", _iter)
+
+    mt, microtask_files, all_files, _ = _call(
+        tmp_path=tmp_path,
+        gate_config=_gate_config(_review),
+        microtask_files={"a.py": "orig a\n", "other.py": "orig other\n"},
+        deps=ReviewDependencies(build_verifier=_verify),
+    )
+
+    assert (tmp_path / "a.py").read_text() == "orig a\n"
+    assert (tmp_path / "other.py").read_text() == "orig other\n"
+
+
+def test_dbc_self_review_worktree_snapshot_skips_symlinks(tmp_path):
+    (tmp_path / "a.py").write_text("orig a\n")
+    (tmp_path / "real.txt").write_text("real\n")
+    (tmp_path / "link.txt").symlink_to(tmp_path / "real.txt")
+
+    def _review(*, code, **kwargs: Any) -> SimpleNamespace:
+        return SimpleNamespace(files={"a.py": "dbc a\n"})
+
+    mt, microtask_files, all_files, _ = _call(
+        tmp_path=tmp_path,
+        gate_config=_gate_config(_review),
+        microtask_files={"a.py": "orig a\n"},
+        deps=ReviewDependencies(build_verifier=lambda repo, label, tid: (True, "ok")),
+    )
+
+    assert microtask_files["a.py"] == "dbc a\n"
+    assert (tmp_path / "a.py").read_text() == "dbc a\n"
+    assert (tmp_path / "link.txt").is_symlink()
+
+
 def test_dbc_self_review_build_verifier_raises_reverts(tmp_path):
     (tmp_path / "a.py").write_text("orig a\n")
 

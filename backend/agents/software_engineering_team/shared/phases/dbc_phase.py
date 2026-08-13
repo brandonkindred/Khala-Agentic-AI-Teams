@@ -20,9 +20,10 @@ sibling work. This module is self-contained and directly tested.
 from __future__ import annotations
 
 import logging
+import os
 import re
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Dict, Optional
+from typing import TYPE_CHECKING, Any, Callable, Dict, Iterator, Optional
 
 from shared.dev_models.models import SystemArchitecture, Task
 from software_engineering_team.shared.repo_writer import (
@@ -54,6 +55,13 @@ logger = logging.getLogger(__name__)
 # distinguish this case after the fact, so a matching file is excluded from
 # review entirely up front, before concatenation.
 _HEADER_LIKE_LINE = re.compile(r"^###[ \t]+\S[^\n]*[ \t]+###[ \t]*$", re.MULTILINE)
+
+# Pruned when snapshotting the worktree so a later build-verifier revert can
+# restore every file the verifier mutated without walking dependency / VCS /
+# artifact trees. Matches ``build_fix._BUILD_FIX_EXCLUDE_DIRS`` plus venvs.
+_WORKTREE_SNAPSHOT_EXCLUDE_DIRS = frozenset(
+    {".git", "node_modules", "dist", "build", "__pycache__", ".angular", "venv", ".venv"}
+)
 
 
 def run_dbc_comments_review(
@@ -173,6 +181,66 @@ def _revert_disk(prior_disk: Dict[Path, Optional[bytes]]) -> None:
             logger.warning("Failed to revert %s to its prior state (ignored): %s", full_path, exc)
 
 
+def _iter_worktree_files(root: Path) -> Iterator[Path]:
+    """Yield resolved regular-file paths under ``root``, pruning excluded dirs.
+
+    Preconditions:
+        ``root`` is an existing directory.
+
+    Postconditions:
+        Directory symlinks are not followed (``os.walk`` default). Symlinked
+        files are skipped. An ``OSError`` mid-walk or per-entry is raised to
+        the caller so a "never fails" phase can skip rather than proceed with
+        a partial snapshot.
+    """
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames if d not in _WORKTREE_SNAPSHOT_EXCLUDE_DIRS]
+        for name in filenames:
+            path = Path(dirpath, name)
+            if path.is_symlink() or not path.is_file():
+                continue
+            yield path.resolve()
+
+
+def _snapshot_worktree(root: Path) -> Dict[Path, bytes]:
+    """Read every non-excluded regular file under ``root``.
+
+    Postconditions:
+        Keys are resolved paths; values are the file bytes at snapshot time.
+        Raises ``OSError`` if a walk or read fails.
+    """
+    return {path: path.read_bytes() for path in _iter_worktree_files(root)}
+
+
+def _revert_verifier_side_effects(
+    *,
+    root: Path,
+    prior_disk: Dict[Path, Optional[bytes]],
+    pre_verify_disk: Dict[Path, bytes],
+) -> None:
+    """Restore pre-DbC DbC files and undo any other verifier worktree writes.
+
+    Postconditions:
+        ``prior_disk`` paths are restored to their pre-DbC bytes (or deleted
+        if they did not exist). Every other path present in
+        ``pre_verify_disk`` is restored to its post-DbC / pre-verifier bytes.
+        Files that exist now under ``root`` but were in neither map
+        (verifier-created) are deleted. Restore failures are swallowed by
+        ``_revert_disk``.
+    """
+    revert_map: Dict[Path, Optional[bytes]] = dict(pre_verify_disk)
+    revert_map.update(prior_disk)
+    try:
+        current = list(_iter_worktree_files(root))
+    except OSError as exc:
+        logger.warning("Could not enumerate worktree while reverting verifier edits: %s", exc)
+        current = []
+    for path in current:
+        if path not in revert_map:
+            revert_map[path] = None
+    _revert_disk(revert_map)
+
+
 def _run_dbc_self_review(
     *,
     gate_config: Any,
@@ -216,16 +284,20 @@ def _run_dbc_self_review(
         from a header-shaped comment line inside a reviewed file being
         misread as a chunk boundary) is discarded rather than written. If
         ``deps.build_verifier`` is set and reports failure
-        for the post-insertion tree, ONLY the file(s) this phase's DbC result
+        for the post-insertion tree, the file(s) this phase's DbC result
         touched are reverted -- on disk (prior content restored, or the file
         deleted if it was newly created) and in ``microtask_files``/
         ``all_files``/``mt.output_files`` (prior value restored, or the key
-        popped if it did not exist before); every other file is left
-        untouched. A ``gate_config.run_dbc_self_review`` exception, an unsafe
-        write path, an ordinary filesystem failure while snapshotting or
-        writing (e.g. a full disk or revoked permissions), or a build-verifier
-        exception are all logged and skipped/reverted rather than propagated
-        -- this phase never raises or
+        popped if it did not exist before). Any additional worktree writes
+        the verifier itself made (e.g. production ``_run_build_verification``
+        repairing files via ``_try_build_fix_one_at_a_time`` before it knows
+        whether verification will pass) are also restored or deleted so they
+        cannot leak into a later commit; files the verifier did not touch
+        remain unchanged. A ``gate_config.run_dbc_self_review`` exception, an
+        unsafe write path, an ordinary filesystem failure while snapshotting
+        or writing (e.g. a full disk or revoked permissions), or a
+        build-verifier exception are all logged and skipped/reverted rather
+        than propagated -- this phase never raises or
         fails the microtask.
     """
     if progress_callback:
@@ -281,8 +353,9 @@ def _run_dbc_self_review(
     # Snapshot prior state for exactly the touched keys, before any write.
     # Deliberately not rollback.py's whole-microtask _MicrotaskRollback
     # machinery (its revert wholesale-clears mt.output_files) -- a
-    # build-verifier failure here must revert only the DbC-touched file(s),
-    # leaving the rest of the microtask's output untouched.
+    # build-verifier failure here must revert only the DbC-touched keys in
+    # the in-memory maps. Disk restore also undoes extra files the verifier
+    # itself wrote (repair-loop side effects).
     prior_microtask: Dict[str, Optional[str]] = {}
     prior_all: Dict[str, Optional[str]] = {}
     prior_output: Dict[str, Optional[str]] = {}
@@ -338,27 +411,45 @@ def _run_dbc_self_review(
     mt.output_files = microtask_files
 
     if deps.build_verifier is not None:
+        pre_verify_disk: Optional[Dict[Path, bytes]]
         try:
-            ok, msg = deps.build_verifier(repo_path, build_verify_label, task_id)
-        except Exception as exc:
-            logger.warning("[%s] Microtask %s: DbC build verifier raised: %s", task_id, mt.id, exc)
-            ok, msg = False, str(exc)
-
-        if not ok:
+            pre_verify_disk = _snapshot_worktree(root)
+        except OSError as exc:
             logger.warning(
-                "[%s] Microtask %s: build failed after DbC comments (%s), reverting %d file(s)",
+                "[%s] Microtask %s: could not snapshot worktree before DbC build "
+                "verify, skipping verify: %s",
                 task_id,
                 mt.id,
-                msg,
-                len(dbc_files),
+                exc,
             )
-            for rel_path in dbc_files:
-                _restore_dict_entry(microtask_files, rel_path, prior_microtask[rel_path])
-                _restore_dict_entry(all_files, rel_path, prior_all[rel_path])
-                _restore_dict_entry(output_files, rel_path, prior_output[rel_path])
-            mt.output_files = output_files
-            _revert_disk(prior_disk)
-            return
+            pre_verify_disk = None
+
+        if pre_verify_disk is not None:
+            try:
+                ok, msg = deps.build_verifier(repo_path, build_verify_label, task_id)
+            except Exception as exc:
+                logger.warning(
+                    "[%s] Microtask %s: DbC build verifier raised: %s", task_id, mt.id, exc
+                )
+                ok, msg = False, str(exc)
+
+            if not ok:
+                logger.warning(
+                    "[%s] Microtask %s: build failed after DbC comments (%s), reverting %d file(s)",
+                    task_id,
+                    mt.id,
+                    msg,
+                    len(dbc_files),
+                )
+                for rel_path in dbc_files:
+                    _restore_dict_entry(microtask_files, rel_path, prior_microtask[rel_path])
+                    _restore_dict_entry(all_files, rel_path, prior_all[rel_path])
+                    _restore_dict_entry(output_files, rel_path, prior_output[rel_path])
+                mt.output_files = output_files
+                _revert_verifier_side_effects(
+                    root=root, prior_disk=prior_disk, pre_verify_disk=pre_verify_disk
+                )
+                return
 
     logger.info(
         "[%s] Microtask %s: DbC comments self-review complete (%d file(s) updated)",
