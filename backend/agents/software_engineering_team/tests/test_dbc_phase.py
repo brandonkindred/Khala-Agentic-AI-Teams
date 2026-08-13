@@ -395,10 +395,10 @@ def test_dbc_self_review_build_verifier_success_syncs_repairs_into_maps(tmp_path
     assert (tmp_path / "new_fix.py").read_text() == "new repair\n"
 
 
-def test_dbc_self_review_reverts_venv_repairs_on_failure(tmp_path):
-    # ``build_fix._BUILD_FIX_EXCLUDE_DIRS`` does not prune venvs, so the
-    # production fixer can overwrite files under venv/. The snapshot must
-    # include those paths or a failed verify cannot restore them.
+def test_dbc_self_review_does_not_sync_venv_or_pytest_cache(tmp_path):
+    # pytest's default cache provider writes ``.pytest_cache/`` on a passing
+    # run, and an in-tree venv can be huge; neither belongs in the in-memory
+    # maps even if the verifier (or pytest) created/changed those files.
     (tmp_path / "a.py").write_text("orig a\n")
     venv_file = tmp_path / "venv" / "lib" / "site.py"
     venv_file.parent.mkdir(parents=True)
@@ -409,7 +409,10 @@ def test_dbc_self_review_reverts_venv_repairs_on_failure(tmp_path):
 
     def _verify(repo_path, label, tid):
         (Path(repo_path) / "venv" / "lib" / "site.py").write_text("repaired venv\n")
-        return False, "broke"
+        cache = Path(repo_path) / ".pytest_cache" / "README.md"
+        cache.parent.mkdir(parents=True)
+        cache.write_text("don't commit this\n")
+        return True, "ok"
 
     mt, microtask_files, all_files, _ = _call(
         tmp_path=tmp_path,
@@ -418,8 +421,10 @@ def test_dbc_self_review_reverts_venv_repairs_on_failure(tmp_path):
         deps=ReviewDependencies(build_verifier=_verify),
     )
 
-    assert (tmp_path / "a.py").read_text() == "orig a\n"
-    assert venv_file.read_text() == "orig venv\n"
+    assert microtask_files == {"a.py": "dbc a\n"}
+    assert all_files == microtask_files
+    assert "venv/lib/site.py" not in microtask_files
+    assert ".pytest_cache/README.md" not in microtask_files
 
 
 def test_dbc_self_review_walk_error_skips_mutating_verifier(tmp_path, monkeypatch):
@@ -708,6 +713,32 @@ def test_dbc_self_review_write_oserror_reverts_partial_write(tmp_path, monkeypat
     assert not (tmp_path / "new.py").exists()
     assert microtask_files == {"a.py": "orig a\n", "new.py": "not yet on disk\n"}
     assert all_files == microtask_files
+
+
+def test_dbc_self_review_write_unicode_encode_error_reverts(tmp_path, monkeypatch):
+    # Path.write_text(..., encoding="utf-8") raises UnicodeEncodeError for an
+    # unpaired surrogate; that is not an OSError, so it must be caught on the
+    # same revert path or the never-fail phase would abort.
+    (tmp_path / "a.py").write_text("orig a\n")
+
+    def _review(*, code, **kwargs: Any) -> SimpleNamespace:
+        return SimpleNamespace(files={"a.py": "dbc a\n"})
+
+    def _fake_write(repo_path: Path, files: Dict[str, str]) -> None:
+        (Path(repo_path) / "a.py").write_text(files["a.py"])
+        raise UnicodeEncodeError("utf-8", "\ud800", 0, 1, "surrogates not allowed")
+
+    monkeypatch.setattr(dbc_phase, "write_repo_text_files", _fake_write)
+    microtask_files = {"a.py": "orig a\n"}
+
+    mt, microtask_files, all_files, _ = _call(
+        tmp_path=tmp_path,
+        gate_config=_gate_config(_review),
+        microtask_files=microtask_files,
+    )
+
+    assert (tmp_path / "a.py").read_text() == "orig a\n"
+    assert microtask_files == {"a.py": "orig a\n"}
 
 
 def test_revert_disk_swallows_oserror(tmp_path, monkeypatch):

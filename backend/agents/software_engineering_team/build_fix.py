@@ -24,10 +24,12 @@ from __future__ import annotations
 import logging
 import sys
 from pathlib import Path
+from typing import Optional
 
 from strands import Agent
 
 from llm_service import get_strands_model
+from shared.git.git_utils import UnsafeRepoPathError, resolve_safe_repo_path
 from shared.repo_context.repo_utils import find_repo_files
 
 logger = logging.getLogger(__name__)
@@ -56,6 +58,28 @@ _BUILD_FIX_MAX_CODE_CHARS = 30_000
 _BUILD_FIX_EXCLUDE_DIRS = frozenset(
     {"node_modules", ".git", "dist", "build", "__pycache__", ".angular"}
 )
+
+
+def _safe_repair_write_path(project_dir: Path, rel_path: str) -> Optional[Path]:
+    """Resolve an LLM repair path under ``project_dir``, or ``None`` if unsafe.
+
+    Preconditions:
+        ``project_dir`` is the project root the fixer is allowed to write.
+
+    Postconditions:
+        Returns a path contained in ``project_dir`` whose parts do not include
+        a virtualenv directory. ``None`` when ``rel_path`` is empty, escapes
+        ``project_dir`` (``..`` or a leading ``/`` that would leave the tree
+        via ``Path.__truediv__``), or targets ``venv`` / ``.venv``.
+    """
+    root = Path(project_dir).resolve()
+    try:
+        out = resolve_safe_repo_path(root, rel_path)
+    except UnsafeRepoPathError:
+        return None
+    if any(part in {"venv", ".venv"} for part in out.relative_to(root).parts):
+        return None
+    return out
 
 
 def _run_build_verification(
@@ -540,7 +564,10 @@ def _try_build_fix_one_at_a_time(
         if not fixed_files:
             continue
         for rel_path, content in fixed_files.items():
-            out_path = project_dir / rel_path
+            out_path = _safe_repair_write_path(project_dir, rel_path)
+            if out_path is None:
+                logger.warning("Build fix: refusing to write unsafe path %s", rel_path)
+                continue
             try:
                 out_path.parent.mkdir(parents=True, exist_ok=True)
                 out_path.write_text(content, encoding="utf-8")

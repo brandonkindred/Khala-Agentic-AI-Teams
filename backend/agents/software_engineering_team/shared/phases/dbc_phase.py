@@ -56,13 +56,24 @@ logger = logging.getLogger(__name__)
 # review entirely up front, before concatenation.
 _HEADER_LIKE_LINE = re.compile(r"^###[ \t]+\S[^\n]*[ \t]+###[ \t]*$", re.MULTILINE)
 
-# Pruned when snapshotting the worktree so a later build-verifier revert can
-# restore every file the verifier mutated without walking dependency / VCS /
-# artifact trees. Must match ``build_fix._BUILD_FIX_EXCLUDE_DIRS`` exactly:
-# the production fixer can write any path it does not prune, including
-# files under ``venv/`` / ``.venv/``.
+# Pruned when snapshotting the worktree so a later build-verifier revert /
+# success-sync does not walk dependency, VCS, artifact, venv, or pytest-cache
+# trees. Virtualenvs are pruned here (and the production fixer refuses to
+# write into them) so a per-microtask snapshot cannot load hundreds of MB of
+# site-packages. ``.pytest_cache`` is pruned so a passing pytest run cannot
+# be classified as an LLM repair.
 _WORKTREE_SNAPSHOT_EXCLUDE_DIRS = frozenset(
-    {"node_modules", ".git", "dist", "build", "__pycache__", ".angular"}
+    {
+        "node_modules",
+        ".git",
+        "dist",
+        "build",
+        "__pycache__",
+        ".angular",
+        "venv",
+        ".venv",
+        ".pytest_cache",
+    }
 )
 
 
@@ -370,7 +381,7 @@ def _run_dbc_self_review(
         ``microtask_files``/``all_files``/``mt.output_files`` so a later
         Documentation pass cannot overwrite disk from stale map contents. A
         ``gate_config.run_dbc_self_review`` exception, an
-        unsafe write path, an ordinary filesystem failure while snapshotting
+        unsafe write path, an ordinary filesystem or encoding failure while snapshotting
         or writing (e.g. a full disk or revoked permissions), or a
         build-verifier exception are all logged and skipped/reverted rather
         than propagated -- this phase never raises or
@@ -466,7 +477,7 @@ def _run_dbc_self_review(
             exc,
         )
         return  # Nothing was written (write_repo_text_files is all-or-nothing).
-    except OSError as exc:
+    except (OSError, UnicodeEncodeError) as exc:
         logger.warning(
             "[%s] Microtask %s: DbC comments write failed (%s), reverting any partial write",
             task_id,

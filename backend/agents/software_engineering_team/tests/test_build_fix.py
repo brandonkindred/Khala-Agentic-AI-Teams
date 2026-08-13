@@ -53,9 +53,9 @@ def test_frontend_code_v2_alias_normalizes_agent_type(
 
     assert success is True
     assert error_output == ""
-    assert any(
-        "no frontend project found" in record.message for record in caplog.records
-    ), "frontend branch was not actually entered"
+    assert any("no frontend project found" in record.message for record in caplog.records), (
+        "frontend branch was not actually entered"
+    )
 
 
 def test_backend_code_v2_passes_on_valid_python(tmp_path: Path) -> None:
@@ -65,3 +65,27 @@ def test_backend_code_v2_passes_on_valid_python(tmp_path: Path) -> None:
 
     assert success is True
     assert error_output == ""
+
+
+def test_safe_repair_write_path_rejects_traversal(tmp_path: Path) -> None:
+    from software_engineering_team.build_fix import _safe_repair_write_path
+
+    root = tmp_path.resolve()
+    assert _safe_repair_write_path(root, "../escape.py") is None
+    assert _safe_repair_write_path(root, "") is None
+
+
+def test_safe_repair_write_path_rejects_venv(tmp_path: Path) -> None:
+    from software_engineering_team.build_fix import _safe_repair_write_path
+
+    root = tmp_path.resolve()
+    assert _safe_repair_write_path(root, "venv/lib/site.py") is None
+    assert _safe_repair_write_path(root, ".venv/lib/site.py") is None
+
+
+def test_safe_repair_write_path_accepts_in_repo_source(tmp_path: Path) -> None:
+    from software_engineering_team.build_fix import _safe_repair_write_path
+
+    root = tmp_path.resolve()
+    out = _safe_repair_write_path(root, "app/main.py")
+    assert out == root / "app" / "main.py"
