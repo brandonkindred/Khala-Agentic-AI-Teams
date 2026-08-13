@@ -227,6 +227,8 @@ jobs:
             agent_provisioning:
               - 'backend/agents/agent_team_studio/agent_provisioning_team/**'
               - 'backend/agents/agent_registry/**'
+            agent_platform:
+              - 'backend/agents/agent_platform/**'
             # Agent Studio authoring + drafts persistence (in-memory unit suite;
             # live-Postgres store tests skip without POSTGRES_HOST).
             agent_studio:
@@ -323,6 +325,7 @@ jobs:
               - '!backend/agents/investment_team/**'
               - '!backend/agents/social_media_marketing_team/**'
               - '!backend/agents/agent_team_studio/agent_provisioning_team/**'
+              - '!backend/agents/agent_platform/**'
               - '!backend/agents/agent_registry/**'
               - '!backend/agents/sales_team/**'
               - '!backend/agents/agent_cognition/**'
@@ -366,6 +369,7 @@ jobs:
           F_INVESTMENT: ${{ steps.filter.outputs.investment }}
           F_SOCIAL_MARKETING: ${{ steps.filter.outputs.social_marketing }}
           F_AGENT_PROVISIONING: ${{ steps.filter.outputs.agent_provisioning }}
+          F_AGENT_PLATFORM: ${{ steps.filter.outputs.agent_platform }}
           F_AGENT_STUDIO: ${{ steps.filter.outputs.agent_studio }}
           F_ASSISTANT_KERNEL: ${{ steps.filter.outputs.assistant_kernel }}
           F_SALES: ${{ steps.filter.outputs.sales }}
@@ -412,6 +416,11 @@ jobs:
                   "tests": "agent_team_studio/agent_provisioning_team/tests/",
                   "source": "agent_team_studio.agent_provisioning_team",
                   "extra_requirements": "agent_team_studio/agent_provisioning_team/requirements.txt",
+              },
+              "agent_platform": {
+                  "name": "Agent Platform",
+                  "tests": "agent_platform/sandbox/tests/",
+                  "source": "agent_platform",
               },
               "agent_studio": {
                   "name": "Agent Studio",
