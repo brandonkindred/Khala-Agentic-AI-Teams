@@ -14,7 +14,7 @@ See [AGENTIC_TEAM_ARCHITECTURE.md](AGENTIC_TEAM_ARCHITECTURE.md) for the require
 ## Roster identity: thin refs, Manifest SoT
 
 Each team has a **roster** of thin refs (`AgenticTeamAgent`: `agent_name`, `source`,
-`manifest_id`). The registered `AgentManifest` (see `agent_registry.models.AgentManifest`)
+`manifest_id`). The registered `AgentManifest` (see `agent_platform.registry.models.AgentManifest`)
 is the sole writable source of truth for an agent's persona — a roster row only
 references it. `agent_name` is a team-local slot key (may differ from `manifest.name`);
 it is not a persona override.

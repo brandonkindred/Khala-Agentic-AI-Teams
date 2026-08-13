@@ -15,7 +15,7 @@ from __future__ import annotations
 import pytest
 from fastapi.testclient import TestClient
 
-from agent_registry.models import AgentManifest
+from agent_platform.registry.models import AgentManifest
 from agent_team_studio.agent_studio.models import AgentDefinition
 from agent_team_studio.agent_studio.service import AgentStudioService
 from agent_team_studio.agent_studio.testing import seed_manifest
@@ -93,7 +93,7 @@ def studio_service(registry: _FakeRegistry) -> AgentStudioService:
 @pytest.fixture
 def client(monkeypatch: pytest.MonkeyPatch, registry: _FakeRegistry) -> TestClient:
     install_fake_postgres(monkeypatch)
-    monkeypatch.setattr("agent_registry.get_registry", lambda: registry)
+    monkeypatch.setattr("agent_platform.registry.get_registry", lambda: registry)
     from agent_team_studio.agentic_team_provisioning.api.main import app
 
     return TestClient(app)

@@ -1,18 +1,27 @@
-"""Execute-and-wait dispatch for the Agent Studio Temporal workflows.
+"""Dual-path dispatch for the Agent Studio authoring CRUD operations.
 
-The synchronous route handlers call these helpers, which start the matching workflow
-and block for its result on the worker's event loop (via
-``shared.temporal.execute_workflow_sync``), then rebuild the Pydantic response the
-route returns. This is the single, forward Temporal dispatch path — there is no
-non-Temporal fallback.
+The synchronous route handlers call these helpers. When Temporal is configured
+(``is_temporal_enabled()``), each helper starts the matching workflow and blocks for
+its result on the worker's event loop (via ``shared.temporal.execute_workflow_sync``),
+then rebuilds the Pydantic response the route returns. When Temporal is not
+configured, each helper instead calls the corresponding
+:class:`~agent_team_studio.agent_studio.service.AgentStudioService` method directly,
+in-process, via the same process-wide singleton
+(:func:`agent_team_studio.agent_studio.runtime.get_studio_service`) the Temporal
+activities delegate to — so both paths share one conversation store and identical
+business logic. The branch is decided per call, so routes stay unaware of which mode
+ran.
 
-Error contract: an activity re-shapes the service's ``ValueError``/``LookupError`` as
-a typed ``ApplicationError`` (see :mod:`agent_team_studio.agent_studio.temporal.workflows`); Temporal
-surfaces that as a ``WorkflowFailureError`` whose cause chain carries the marker.
+Error contract: on the Temporal path, an activity re-shapes the service's
+``ValueError``/``LookupError`` as a typed ``ApplicationError`` (see
+:mod:`agent_team_studio.agent_studio.temporal.workflows`); Temporal surfaces that as a
+``WorkflowFailureError`` whose cause chain carries the marker.
 :func:`_translate_workflow_failure` walks that chain and re-raises the *native*
 ``ValueError``/``LookupError`` so the route's untouched ``ValueError`` → 400 /
 ``LookupError`` → 404 mapping still applies. A failure with no such marker is
-re-raised as-is (→ 500).
+re-raised as-is (→ 500). On the direct path there is no round-trip to reshape through:
+the service already raises those native exceptions directly, so they propagate
+unchanged and the same route mapping applies without any translation step.
 """
 
 from __future__ import annotations
@@ -21,12 +30,15 @@ import concurrent.futures
 import logging
 import uuid
 from collections.abc import Callable
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from agent_team_studio.agent_studio.service import AgentStudioService
 
 from temporalio.client import WorkflowFailureError
 from temporalio.exceptions import WorkflowAlreadyStartedError
 
-from agent_registry.models import AgentManifest
+from agent_platform.registry.models import AgentManifest
 from agent_team_studio.agent_studio.models import AgentDefinition, ConversationStateResponse
 from agent_team_studio.agent_studio.temporal import (
     TASK_QUEUE,
@@ -88,6 +100,33 @@ def _translate_workflow_failure(exc: WorkflowFailureError) -> None:
         node = node.__cause__ or node.__context__
 
 
+def _temporal_enabled() -> bool:
+    """True when authoring CRUD should dispatch to Temporal.
+
+    Postconditions:
+        - Returns ``is_temporal_enabled()`` — never raises.
+    """
+    from shared.temporal.client import is_temporal_enabled
+
+    return is_temporal_enabled()
+
+
+def _direct_service() -> "AgentStudioService":
+    """Return the process-wide service singleton for the direct dispatch path.
+
+    Imported lazily (matching the activities' own lazy import of the same getter) so
+    tests can monkeypatch ``agent_team_studio.agent_studio.runtime.get_studio_service``
+    and have both the Temporal activities and this direct path pick up the same
+    stand-in, rather than binding a stale reference at this module's import time.
+
+    Postconditions:
+        - Returns the process-wide ``AgentStudioService`` singleton.
+    """
+    from agent_team_studio.agent_studio.runtime import get_studio_service
+
+    return get_studio_service()
+
+
 def _execute(workflow_run: Callable[..., Any], *args: Any, workflow_id: str) -> Any:
     """Run a workflow to completion, translating a failed run's domain error.
 
@@ -132,12 +171,17 @@ def _execute(workflow_run: Callable[..., Any], *args: Any, workflow_id: str) -> 
 def start_conversation(
     mode: str, source_agent_id: str | None, initial_message: str | None
 ) -> ConversationStateResponse:
-    """Dispatch ``StartConversationWorkflow`` and return the conversation state.
+    """Start an authoring conversation, via Temporal when enabled else in-process.
 
     Postconditions:
         - Returns the initial ``ConversationStateResponse``; raises the service's
-          native ``ValueError``/``LookupError`` on a bad request / unknown source.
+          native ``ValueError``/``LookupError`` on a bad request / unknown source, in
+          both dispatch modes. The direct path calls
+          ``AgentStudioService.start_conversation`` and lets its exceptions propagate
+          unchanged — there is no Temporal round-trip to reshape them through.
     """
+    if not _temporal_enabled():
+        return _direct_service().start_conversation(mode, source_agent_id, initial_message)
     out = _execute(
         StartConversationWorkflow.run,
         mode,
@@ -149,12 +193,15 @@ def start_conversation(
 
 
 def send_message(conversation_id: str, message: str) -> ConversationStateResponse:
-    """Dispatch ``SendMessageWorkflow`` and return the updated conversation state.
+    """Send a message, via Temporal when enabled else in-process.
 
     Postconditions:
         - Returns the updated ``ConversationStateResponse``; raises native
-          ``ValueError``/``LookupError`` on invalid input / unknown conversation.
+          ``ValueError``/``LookupError`` on invalid input / unknown conversation, in
+          both dispatch modes.
     """
+    if not _temporal_enabled():
+        return _direct_service().send_message(conversation_id, message)
     out = _execute(
         SendMessageWorkflow.run,
         conversation_id,
@@ -165,12 +212,15 @@ def send_message(conversation_id: str, message: str) -> ConversationStateRespons
 
 
 def clone_from_registry(agent_id: str) -> AgentDefinition:
-    """Dispatch ``CloneFromRegistryWorkflow`` and return the refine-mode draft.
+    """Clone a registered agent into a refine-mode draft, via Temporal when enabled
+    else in-process.
 
     Postconditions:
         - Returns the cloned ``AgentDefinition``; raises native ``LookupError`` when
-          ``agent_id`` names no registered agent.
+          ``agent_id`` names no registered agent, in both dispatch modes.
     """
+    if not _temporal_enabled():
+        return _direct_service().clone_from_registry(agent_id)
     out = _execute(
         CloneFromRegistryWorkflow.run,
         agent_id,
@@ -180,15 +230,17 @@ def clone_from_registry(agent_id: str) -> AgentDefinition:
 
 
 def save_agent(definition: AgentDefinition) -> tuple[AgentManifest, bool]:
-    """Dispatch ``SaveAgentWorkflow`` and return ``(manifest, created)``.
+    """Save + register a definition, via Temporal when enabled else in-process.
 
     Mirrors ``AgentStudioService.save_agent``'s return shape so the route stays
-    structurally identical.
+    structurally identical regardless of dispatch mode.
 
     Postconditions:
         - Returns ``(AgentManifest, created)``; raises native ``ValueError`` when the
-          definition is not ready to save.
+          definition is not ready to save, in both dispatch modes.
     """
+    if not _temporal_enabled():
+        return _direct_service().save_agent(definition)
     out = _execute(
         SaveAgentWorkflow.run,
         definition.model_dump(),

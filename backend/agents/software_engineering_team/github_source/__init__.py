@@ -34,6 +34,7 @@ from .issue_grooming_runner import IssueGroomingRunner
 from .issue_grooming_scoring import (
     ScoreBreakdown,
     complexity_label,
+    from_unified_score,
     merge_complexity_label,
     nearest_fibonacci,
     score_issue,
@@ -54,10 +55,11 @@ from .issue_proposals import (
     proposal_from_findings,
 )
 
-# Aliased: issue_scorer.score_issue (the LLM/heuristic mode-facade from the
-# separate, deferred LLM-assisted-scoring epic) would otherwise collide with
-# issue_grooming_scoring.score_issue (the heuristic Phase A scorer actually
-# wired into IssueGroomingRunner, already re-exported above) at this
+# Aliased: issue_scorer.score_issue (the LLM/heuristic mode-facade actually
+# wired into IssueGroomingRunner, via from_unified_score's adaptation back to
+# the legacy shape) would otherwise collide with issue_grooming_scoring.score_issue
+# (the standalone legacy heuristic scorer, no longer Phase A's live path but
+# still exported as a tested pure function, already re-exported above) at this
 # package's top level.
 from .issue_scorer import DEFAULT_SCORING_MODE, SCORING_MODES, resolve_scoring_mode
 from .issue_scorer import score_issue as score_issue_by_mode
@@ -120,6 +122,7 @@ __all__ = [
     "find_matching_open_issue",
     "format_comment_body",
     "format_issue_comment",
+    "from_unified_score",
     "group_similar_findings",
     "inline_comment_to_timeline_body",
     "is_ready",
