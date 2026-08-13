@@ -854,6 +854,47 @@ def test_force_dummy_llm_overrides_runtime_provider_config(
     assert isinstance(get_client(), DummyLLMClient)
 
 
+def _skip_unless_effective_provider_is_live() -> None:
+    """Skip when UI runtime config makes the effective provider dummy.
+
+    ``LLM_PROVIDER`` is only the collection-time opt-in (see the ``skipif`` on
+    the live spot-check). ``resolve_provider`` prefers runtime config, so a
+    non-dummy env with a dummy UI setting would otherwise run these cases
+    against ``DummyLLMClient`` and count as live coverage.
+
+    Preconditions:
+        None — reads the current llm_service resolution.
+    Postconditions:
+        Returns only when ``resolve_provider()`` is not ``dummy`` and
+        ``get_client()`` is not a ``DummyLLMClient``. Otherwise pytest.skip.
+    """
+    from llm_service import DummyLLMClient
+    from llm_service import config as llm_config
+    from llm_service.factory import get_client
+
+    if llm_config.resolve_provider() == "dummy":
+        pytest.skip("effective provider is dummy; UI runtime config outranks LLM_PROVIDER")
+    assert not isinstance(get_client(), DummyLLMClient)
+
+
+def test_live_llm_spot_check_skips_when_runtime_resolves_to_dummy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Non-dummy ``LLM_PROVIDER`` is not live coverage when runtime is dummy.
+
+    Preconditions:
+        ``monkeypatch`` can replace ``llm_service.config._runtime``.
+    Postconditions:
+        ``_skip_unless_effective_provider_is_live`` skips.
+    """
+    from llm_service import config as llm_config
+
+    monkeypatch.setenv("LLM_PROVIDER", "claude")
+    monkeypatch.setattr(llm_config, "_runtime", lambda _key: "dummy")
+    with pytest.raises(pytest.skip.Exception, match="effective provider is dummy"):
+        _skip_unless_effective_provider_is_live()
+
+
 @pytest.mark.real_llm
 @pytest.mark.skipif(
     os.environ.get("LLM_PROVIDER", "dummy") == "dummy",
@@ -872,10 +913,14 @@ def test_one_migrated_agent_per_phase_against_live_llm(
     Preconditions:
         ``LLM_PROVIDER`` is set to a non-dummy value before test collection
         (``conftest`` uses ``setdefault``, so an explicit provider is preserved).
-        ``factory`` builds an agent with ``structured_output=output_model``.
+        ``resolve_provider()`` is also non-dummy — runtime UI config outranks
+        the env var. ``factory`` builds an agent with
+        ``structured_output=output_model``.
     Postconditions:
         ``result.structured_output`` is an instance of ``output_model``.
+        The backing client is not ``DummyLLMClient``.
     """
+    _skip_unless_effective_provider_is_live()
     agent = factory()
     result = agent(serialize_mission(make_mission()))
     assert isinstance(result.structured_output, output_model)

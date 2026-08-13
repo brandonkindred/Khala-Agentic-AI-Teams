@@ -23,7 +23,7 @@ def pytest_configure(config: pytest.Config) -> None:
     )
     config.addinivalue_line(
         "markers",
-        "real_llm: invoke a live LLM provider; skipped unless LLM_PROVIDER is set to a non-dummy value",
+        "real_llm: invoke a live LLM provider; skipped unless LLM_PROVIDER and resolve_provider() are non-dummy",
     )
 
 
