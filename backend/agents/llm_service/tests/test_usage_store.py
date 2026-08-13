@@ -85,6 +85,9 @@ def test_window_hours_accepts_numeric_hours() -> None:
     assert us.window_hours("1.0") == 1.0
     assert us.window_hours("24") == 24.0
     assert us.window_hours("0") == 0.0
+    assert us.window_is_unbounded("all") is True
+    assert us.window_is_unbounded("0") is False
+    assert us.window_is_unbounded("0.0") is False
     with pytest.raises(ValueError, match="unknown window"):
         us.window_hours("-1")
     with pytest.raises(ValueError, match="unknown window"):
@@ -275,6 +278,24 @@ def test_fetch_summary_24h_and_all(fake_db) -> None:
     all_summary = us.fetch_summary(window="all")
     assert all_summary["window_hours"] == 0.0
     assert "ts >=" not in fake_db.executed[0][0]
+
+    fake_db.executed.clear()
+    fake_db._fetchall = [
+        {
+            "bucket": "total",
+            "model": None,
+            "agent_key": None,
+            "calls": 0,
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0,
+            "error_count": 0,
+        }
+    ]
+    zero_summary = us.fetch_summary(window="0")
+    assert zero_summary["window"] == "0"
+    assert zero_summary["window_hours"] == 0.0
+    assert "ts >=" in fake_db.executed[0][0]
 
 
 def test_fetch_summary_query_failure_returns_empty(fake_db) -> None:

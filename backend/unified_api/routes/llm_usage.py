@@ -26,6 +26,7 @@ from llm_service.usage_store import (  # noqa: E402
     fetch_recent,
     fetch_summary,
     window_hours,
+    window_is_unbounded,
 )
 from shared.postgres import is_postgres_enabled, resolve_storage_status  # noqa: E402
 
@@ -74,10 +75,10 @@ def usage_summary(
     if is_postgres_enabled():
         data = fetch_summary(window=window, team=team)
     else:
-        hours = window_hours(window)
+        hours = None if window_is_unbounded(window) else window_hours(window)
         data = get_usage_summary(team=team, window_hours=hours)
         data["window"] = window
-        data["window_hours"] = hours
+        data["window_hours"] = 0.0 if hours is None else hours
     return _attach_storage(data)
 
 
@@ -99,8 +100,7 @@ def recent_calls(
         if rows is None:
             raise HTTPException(status_code=503, detail="llm usage recent query failed")
         return rows
-    hours = window_hours(window)
-    cutoff = None if hours <= 0 else time.time() - hours * 3600
+    cutoff = None if window_is_unbounded(window) else time.time() - window_hours(window) * 3600
     records = get_recent_calls(team=team, limit=1000)
     if cutoff is not None:
         records = [r for r in records if r.get("timestamp", 0) >= cutoff]

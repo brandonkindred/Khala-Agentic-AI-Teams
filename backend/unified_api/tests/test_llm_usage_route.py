@@ -71,6 +71,28 @@ def test_usage_summary_accepts_numeric_hour_window() -> None:
     assert data["window_hours"] == 1.0
 
 
+def test_numeric_zero_window_is_not_all_time() -> None:
+    """Legacy window=0 is a zero-width cutoff; only the all preset is unbounded."""
+    from llm_service.telemetry import clear_call_log, record_llm_call
+
+    clear_call_log()
+    rec = record_llm_call(team="blogging", agent_key="writer", model="m", total_tokens=9)
+    rec.timestamp = 1.0
+    with patch("unified_api.routes.llm_usage.resolve_storage_status", return_value="unconfigured"):
+        zero = client.get("/api/llm-usage/", params={"window": "0"})
+        all_time = client.get("/api/llm-usage/", params={"window": "all"})
+        recent_zero = client.get("/api/llm-usage/recent", params={"window": "0"})
+        recent_all = client.get("/api/llm-usage/recent", params={"window": "all"})
+    assert zero.status_code == 200
+    assert zero.json()["total_calls"] == 0
+    assert all_time.status_code == 200
+    assert all_time.json()["total_calls"] >= 1
+    assert recent_zero.status_code == 200
+    assert recent_zero.json() == []
+    assert recent_all.status_code == 200
+    assert any(r.get("total_tokens") == 9 for r in recent_all.json())
+
+
 def test_recent_query_failure_returns_503() -> None:
     """A failed recent query must not look like a genuine empty history."""
     with (

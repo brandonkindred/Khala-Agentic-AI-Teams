@@ -465,15 +465,17 @@ class UsageSummary:
 def get_usage_summary(
     *,
     team: Optional[str] = None,
-    window_hours: float = 24.0,
+    window_hours: Optional[float] = 24.0,
 ) -> Dict[str, Any]:
     """Aggregate token usage over the given time window.
 
     Returns a summary dict with totals and per-agent/per-model breakdowns.
-    ``window_hours <= 0`` means all-time (no timestamp cutoff).
+    ``window_hours is None`` means all-time (no timestamp cutoff).
+    ``window_hours == 0`` is a zero-width window (cutoff is now), matching
+    the pre-change route when clients sent numeric ``window=0``.
     """
     with _log_lock:
-        if window_hours <= 0:
+        if window_hours is None:
             records = list(_call_log)
         else:
             cutoff = time.time() - (window_hours * 3600)
@@ -481,7 +483,10 @@ def get_usage_summary(
     if team:
         records = [r for r in records if r.team == team]
 
-    summary = UsageSummary(team=team or "all", window_hours=window_hours)
+    summary = UsageSummary(
+        team=team or "all",
+        window_hours=0.0 if window_hours is None else window_hours,
+    )
     total_latency = 0
     for r in records:
         summary.total_calls += 1

@@ -171,7 +171,7 @@ def test_no_postgres_schema_skips_db_wiring(monkeypatch) -> None:
     app = create_team_app(service_name="svc", team_key="tk", title="T")
     with TestClient(app):
         pass
-    assert called == []  # postgres_schema=None ⇒ no register / no close
+    assert called == ["close"]  # no schema register; pool still closed (flusher may have opened it)
 
 
 def test_postgres_schema_registers_on_startup_and_closes_on_shutdown(monkeypatch) -> None:
@@ -323,14 +323,17 @@ def test_usage_flusher_registers_before_startup_and_shuts_down_before_pool_close
 
 def test_usage_flusher_registers_without_postgres_schema(monkeypatch) -> None:
     """Usage persistence is independent of the team's own schema."""
+    import shared.postgres
+
     order: list[str] = []
     monkeypatch.setattr(factory, "_register_usage_flusher", lambda _t: order.append("usage_register"))
     monkeypatch.setattr(factory, "_shutdown_usage_flusher", lambda _t: order.append("usage_shutdown"))
+    monkeypatch.setattr(shared.postgres, "close_pool", lambda: order.append("close"))
 
     app = create_team_app(service_name="svc", team_key="tk", title="T")
     with TestClient(app):
         assert order == ["usage_register"]
-    assert order == ["usage_register", "usage_shutdown"]
+    assert order == ["usage_register", "usage_shutdown", "close"]
 
 
 def test_register_usage_flusher_helper_swallows_failure(monkeypatch, caplog) -> None:

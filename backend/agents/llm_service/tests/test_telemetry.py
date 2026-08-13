@@ -231,9 +231,18 @@ def test_usage_summary_by_model_includes_token_splits() -> None:
     assert summary["by_model"]["m1"]["tokens"] == summary["by_model"]["m1"]["total_tokens"]
 
 
-def test_usage_summary_window_hours_zero_is_all_time() -> None:
+def test_usage_summary_window_hours_zero_is_zero_width() -> None:
+    """Numeric 0 is cutoff=now, not all-time (that is window_hours=None)."""
     telemetry.clear_call_log()
     rec = telemetry.record_llm_call(team="t", agent_key="a", model="m", total_tokens=1)
     rec.timestamp = 1.0  # far in the past
-    summary = telemetry.get_usage_summary(window_hours=0)
+    assert telemetry.get_usage_summary(window_hours=0)["total_calls"] == 0
+
+
+def test_usage_summary_window_hours_none_is_all_time() -> None:
+    telemetry.clear_call_log()
+    rec = telemetry.record_llm_call(team="t", agent_key="a", model="m", total_tokens=1)
+    rec.timestamp = 1.0  # far in the past
+    summary = telemetry.get_usage_summary(window_hours=None)
     assert summary["total_calls"] >= 1
+    assert summary["window_hours"] == 0.0

@@ -88,12 +88,14 @@ _ensure_lock = threading.Lock()
 
 
 def window_hours(window: str) -> float:
-    """Map a window id to hours (0.0 means unbounded / all-time).
+    """Map a window id to hours.
 
     Preconditions: ``window`` is a non-empty str.
     Postconditions: returns hours for a known preset (``24h`` / ``7d`` /
-        ``30d`` / ``all``) or a finite numeric-hours string (``1.0``, ``24``);
-        ``<= 0`` means all-time. Raises ``ValueError`` whose message contains
+        ``30d`` / ``all``) or a finite numeric-hours string (``1.0``, ``24``,
+        ``0``). The ``all`` preset maps to ``0.0`` as a display value; numeric
+        ``0`` / ``0.0`` is a zero-width window (cutoff is now), matching the
+        pre-change route. Raises ``ValueError`` whose message contains
         ``unknown window`` otherwise (unknown token, negative, NaN, inf, or
         a numeric window whose cutoff is not a representable datetime).
     """
@@ -111,6 +113,16 @@ def window_hours(window: str) -> float:
         except (OverflowError, ValueError, OSError):
             raise ValueError(f"unknown window: {window!r}")
     return hours
+
+
+def window_is_unbounded(window: str) -> bool:
+    """True only for the ``all`` preset, not numeric ``0`` / ``0.0``.
+
+    Preconditions: ``window`` is a non-empty str already accepted by
+        :func:`window_hours`.
+    Postconditions: returns ``True`` iff ``window == "all"``.
+    """
+    return window == "all"
 
 
 # Popped by GET /api/llm-usage before the body is returned. Set when a usage
@@ -153,19 +165,19 @@ def _failed_summary(*, window: str, team: str | None) -> dict:
 def _cutoff_datetime(hours: float) -> datetime:
     """UTC instant ``hours`` before now.
 
-    Preconditions: ``hours`` is finite and ``> 0``.
-    Postconditions: returns ``now - timedelta(hours=hours)``. Raises
-        ``OverflowError``, ``ValueError``, or ``OSError`` when that instant
-        is not representable as a datetime (e.g. ``hours=1e308``).
+    Preconditions: ``hours`` is finite and ``>= 0``.
+    Postconditions: returns ``now - timedelta(hours=hours)``. ``hours == 0``
+        is now (a zero-width window). Raises ``OverflowError``,
+        ``ValueError``, or ``OSError`` when that instant is not representable
+        as a datetime (e.g. ``hours=1e308``).
     """
     return datetime.now(tz=timezone.utc) - timedelta(hours=hours)
 
 
 def _cutoff(window: str) -> datetime | None:
-    hours = window_hours(window)
-    if hours <= 0:
+    if window_is_unbounded(window):
         return None
-    return _cutoff_datetime(hours)
+    return _cutoff_datetime(window_hours(window))
 
 
 def _ensure_table() -> None:
@@ -442,5 +454,6 @@ __all__ = [
     "fetch_summary",
     "record_to_row",
     "window_hours",
+    "window_is_unbounded",
     "write_rows",
 ]

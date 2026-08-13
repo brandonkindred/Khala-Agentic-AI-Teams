@@ -7,10 +7,12 @@ then :func:`shared.observability.instrument_fastapi_app`. :func:`create_team_app
 collapses that boilerplate into one call while leaving room for team-specific
 startup/shutdown work via optional hooks.
 
-Degrades cleanly: ``postgres_schema=None`` skips all Postgres wiring, and the
-``shared.postgres`` import is lazy so a team without it is never forced to depend
-on it. Schema registration and pool teardown are defensive (logged, never raised
-into app startup), matching the per-team lifespans this replaces.
+Degrades cleanly: ``postgres_schema=None`` skips schema registration. Pool
+teardown still runs because the LLM usage flusher may have opened the default
+shared pool. The ``shared.postgres`` import is lazy so a team without it is
+never forced to depend on it at import time. Schema registration and pool
+teardown are defensive (logged, never raised into app startup), matching the
+per-team lifespans this replaces.
 """
 
 from __future__ import annotations
@@ -127,9 +129,12 @@ def create_team_app(
           ``extra_postgres_schemas`` on startup and closes the Postgres pool on
           wrapping the optional hooks. The same lifespan registers the process-local
           LLM usage flusher after schema registration and shuts it down after
-          ``on_shutdown`` and before ``close_pool``. A single schema's registration
-          failure is logged and does not stop the remaining schemas from registering.
-          ``fastapi_kwargs`` pass through to the ``FastAPI`` constructor.
+          ``on_shutdown`` and before ``close_pool``. Pool close always runs after
+          that drain, even when ``postgres_schema`` is ``None``, because the
+          flusher may have opened the default shared pool. A single schema's
+          registration failure is logged and does not stop the remaining schemas
+          from registering. ``fastapi_kwargs`` pass through to the ``FastAPI``
+          constructor.
         - The returned app exposes its ``postgres_schema`` (the given
           ``TeamSchema`` or ``None``, unchanged for backward compatibility) via
           ``app.state.postgres_schema``, and the full combined set (primary
@@ -138,8 +143,9 @@ def create_team_app(
           team-service wrapper) can register every schema's DDL before starting
           background workers that write to it.
     Invariants:
-        - Postgres wiring fires iff the combined schema set (``postgres_schema``
-          plus ``extra_postgres_schemas``) is non-empty.
+        - Schema registration fires iff the combined schema set (``postgres_schema``
+          plus ``extra_postgres_schemas``) is non-empty. Pool close always runs
+          after the usage flusher drains.
     """
     # Validate the required identifiers explicitly (not via assert, so the check
     # holds under ``python -O``): empty values otherwise surface as obscure
@@ -202,14 +208,15 @@ def create_team_app(
             except Exception:
                 logger.exception("%s on_shutdown hook failed", team_key)
             # Drain before close_pool so the final INSERT can still use the pool.
+            # Always close the pool: the usage flusher may have opened it even
+            # when this app registered no postgres_schema.
             _shutdown_usage_flusher(team_key)
-            if _all_schemas:
-                try:
-                    from shared.postgres import close_pool
+            try:
+                from shared.postgres import close_pool
 
-                    close_pool()
-                except Exception:
-                    logger.warning("%s shared.postgres close_pool failed", team_key, exc_info=True)
+                close_pool()
+            except Exception:
+                logger.warning("%s shared.postgres close_pool failed", team_key, exc_info=True)
 
     app = FastAPI(title=title, version=version, lifespan=_lifespan, **fastapi_kwargs)
     # Expose the team's primary schema (or None) — unchanged, for backward
