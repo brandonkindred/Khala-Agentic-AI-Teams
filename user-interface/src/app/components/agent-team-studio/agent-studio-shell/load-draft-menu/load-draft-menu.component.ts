@@ -52,9 +52,10 @@ export class LoadDraftMenuComponent {
   /** Draft ids whose DELETE is in flight; disables that row's trigger while present. */
   readonly deletingIds = signal<ReadonlySet<string>>(new Set());
   private nextOffset = 0;
-  /** Bumped on every `onOpened()`; lets a fetch from a since-reopened menu
-   *  recognize its response is stale and discard it instead of appending
-   *  duplicate rows / double-advancing the offset. */
+  /** Bumped on every `onOpened()` and after a successful delete so an
+   *  in-flight pagination fetch (whose offset was computed against the
+   *  pre-delete list) is discarded instead of appending a skipped/duplicated
+   *  boundary row. */
   private openToken = 0;
 
   /**
@@ -115,10 +116,11 @@ export class LoadDraftMenuComponent {
    *
    * Preconditions: `draft.draft_id` is a non-empty id from a rendered row.
    * Postconditions: on confirm+success, that id is absent from `drafts()`,
-   *   `nextOffset` equals `drafts().length` so a later Show-older fetch does
-   *   not skip a shifted row, and `draftDeleted` emitted once. On cancel or
-   *   failure, `drafts()` unchanged and `draftDeleted` not emitted. A DELETE
-   *   already in flight for this id is a no-op; other ids remain independently
+   *   `nextOffset` equals `drafts().length`, any in-flight Show-older fetch is
+   *   discarded (and the next page is refetched at the new offset when one
+   *   was pending), and `draftDeleted` emitted once. On cancel or failure,
+   *   `drafts()` unchanged and `draftDeleted` not emitted. A DELETE already
+   *   in flight for this id is a no-op; other ids remain independently
    *   deletable.
    */
   confirmDelete(draft: AgentStudioDraftSummary): void {
@@ -139,12 +141,17 @@ export class LoadDraftMenuComponent {
         this.facade.deleteDraft(draft.draft_id).subscribe({
           next: () => {
             this.drafts.update((rows) => rows.filter((row) => row.draft_id !== draft.draft_id));
-            this.nextOffset = this.drafts().length;
             this.deletingIds.update((ids) => {
               const next = new Set(ids);
               next.delete(draft.draft_id);
               return next;
             });
+            this.nextOffset = this.drafts().length;
+            const refetch = this.loading();
+            this.openToken += 1;
+            if (refetch) {
+              this.fetchPage(this.openToken);
+            }
             this.draftDeleted.emit(draft.draft_id);
           },
           error: (err) => {
