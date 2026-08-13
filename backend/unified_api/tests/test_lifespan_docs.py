@@ -48,6 +48,8 @@ def test_lifespan_catalog_documents_worker_and_route_registration() -> None:
         "UNIFIED_API_AGENT_STUDIO_TEMPORAL_WORKER",
         "agent_platform.studio.router",
         "team_service",
+        "_retry_in_process_schema_registration",
+        "_in_process_schema_failures",
     ):
         assert token in text, f"catalog missing {token!r}"
 

@@ -83,7 +83,7 @@ unset. See [`shared.postgres/README.md`](../backend/shared/postgres/README.md).
 | `agent_platform.studio.postgres.SCHEMA` | `TEAM_CONFIGS["agent_studio"].enabled` |
 | `user_profile.postgres.SCHEMA` | `TEAM_CONFIGS["user_profile"].enabled` |
 | `agent_cognition.postgres.SCHEMA` | none |
-| `product_delivery.postgres.SCHEMA` | `TEAM_CONFIGS["product_delivery"].enabled` (uses `ensure_team_schema` so partial DDL marks the team unhealthy) |
+| `product_delivery.postgres.SCHEMA` | `TEAM_CONFIGS["product_delivery"].enabled` (uses `ensure_team_schema` so partial DDL marks the team unhealthy; **only this team** is added to `_in_process_schema_failures` and retried by step 3) |
 
 ### 1. Team-assistant mount specs
 
@@ -100,8 +100,11 @@ of the team's proxy catch-all.
 
 ### 3. Upstream health checker
 
-`asyncio.create_task(_health_check_loop())`. Probes container-team `/health` and
-retries in-process schema registration that failed at step 0.
+`asyncio.create_task(_health_check_loop())`. Probes container-team `/health`.
+Schema retry is Product Delivery only: `_retry_in_process_schema_registration`
+re-runs `ensure_team_schema` for keys in `_in_process_schema_failures`, and
+step 0 only adds `product_delivery` to that set. Other step-0 schemas are
+log-and-continue with no background retry.
 
 ### 4. Platform sandbox reaper and Temporal worker
 
