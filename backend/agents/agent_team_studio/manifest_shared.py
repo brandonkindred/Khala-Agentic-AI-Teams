@@ -1,10 +1,10 @@
 """Compatibility re-export of generated-agent constants plus marker-tag filtering.
 
 Canonical entrypoint/schema/anatomy/cognition values live in
-:mod:`shared.manifests`. This module re-exports them so existing Studio and
-agentic call sites keep importing from here until those callers migrate.
-``strip_marker_tags`` stays here: it is a local tag-filter helper, not a
-construction constant.
+:mod:`shared.manifests`. This module re-exports them so the agentic
+provisioning call sites keep importing from here until those callers
+migrate. ``strip_marker_tags`` stays here: it is a local tag-filter
+helper, not a construction constant.
 """
 
 from __future__ import annotations
