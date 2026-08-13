@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import ast
 import os
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Callable
 
@@ -63,7 +64,7 @@ from branding_team.agents import (
     make_voice_tone_builder,
     make_website_guide,
 )
-from branding_team.graphs.shared import serialize_mission
+from branding_team.graphs.shared import _branding_model, serialize_mission
 from branding_team.models import (
     BrandDiscoveryAuditOutput,
     BrandStoryOutput,
@@ -700,21 +701,56 @@ _PHASE_SPOT_CHECK_IDS: tuple[str, ...] = tuple(
 )
 
 
+@pytest.fixture
+def force_dummy_llm(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """Pin this test to DummyLLMClient even when the caller exported a live provider.
+
+    ``conftest`` uses ``setdefault``, so an explicit ``LLM_PROVIDER`` survives
+    collection. Combined with ``_branding_model``'s lru cache, that would let
+    this unmarked spot-check hit a live provider (and then the ``real_llm``
+    parametrization would hit it again). Force dummy and drop cached models
+    so ``pytest -m 'not real_llm'`` stays offline.
+
+    Preconditions:
+        ``monkeypatch`` is pytest's env-patch fixture.
+    Postconditions:
+        For the duration of the test, ``LLM_PROVIDER`` is ``dummy`` and the
+        branding-model / LLM-client caches have been cleared. Caches are
+        cleared again on teardown so a later ``real_llm`` test can resolve
+        the caller's provider.
+    """
+    from llm_service import factory as llm_factory
+    from llm_service.strands_provider import _clear_strands_model_cache_for_testing
+
+    monkeypatch.setenv("LLM_PROVIDER", "dummy")
+    llm_factory.clear_client_cache()
+    _clear_strands_model_cache_for_testing()
+    _branding_model.cache_clear()
+    yield
+    _branding_model.cache_clear()
+    _clear_strands_model_cache_for_testing()
+    llm_factory.clear_client_cache()
+
+
 @pytest.mark.parametrize(
     ("_case_id", "factory", "output_model"),
     _PHASE_SPOT_CHECKS,
     ids=_PHASE_SPOT_CHECK_IDS,
 )
 def test_one_migrated_agent_per_phase_yields_schema_valid_output(
-    _case_id: str, factory: Callable[[], Agent], output_model: type
+    _case_id: str,
+    factory: Callable[[], Agent],
+    output_model: type,
+    force_dummy_llm: None,
 ) -> None:
     """Production event-loop path: one factory per phase returns its schema.
 
-    Runs under ``LLM_PROVIDER=dummy`` in CI. A live provider is exercised by
-    ``test_one_migrated_agent_per_phase_against_live_llm`` when configured.
+    Always uses the dummy provider (see ``force_dummy_llm``). A live provider
+    is exercised only by ``test_one_migrated_agent_per_phase_against_live_llm``.
 
     Preconditions:
         ``factory`` builds an agent with ``structured_output=output_model``.
+        ``force_dummy_llm`` has pinned ``LLM_PROVIDER=dummy`` and cleared caches.
     Postconditions:
         ``result.structured_output`` is an instance of ``output_model``.
     """
