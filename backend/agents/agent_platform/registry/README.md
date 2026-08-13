@@ -163,7 +163,7 @@ python3 -m pytest agents/agent_platform/registry/tests/ unified_api/tests/test_a
 ## Roadmap
 
 1. **Phase 1 — Catalog** *(shipped)*: registry + API + browsable UI.
-2. **Phase 2 — Runner + Sandboxes** *(shipped)*: `POST /api/agents/{id}/invoke`, per-agent ephemeral Docker sandboxes (`agent_provisioning_team.sandbox`, unified `khala-agent-sandbox` image), invoke shim (`shared.agent_invoke`), auto-generated golden samples. See [`agent_provisioning_team/sandbox/README.md`](../../agent_team_studio/agent_provisioning_team/sandbox/README.md) and [`shared.agent_invoke/README.md`](../../../shared/agent_invoke/README.md).
+2. **Phase 2 — Runner + Sandboxes** *(shipped)*: `POST /api/agents/{id}/invoke`, per-agent ephemeral Docker sandboxes (`agent_platform.sandbox`, unified `khala-agent-sandbox` image), invoke shim (`shared.agent_invoke`), auto-generated golden samples. See [`sandbox/README.md`](../sandbox/README.md) and [`shared.agent_invoke/README.md`](../../../shared/agent_invoke/README.md).
 3. **Phase 3 — Runs**: Postgres-backed run history, user-saved ad-hoc inputs, run diffing, JSON-schema-driven form UI.
 4. **Phase 4 — Breadth**: manifest coverage for all 24 teams, pre-warming, batch invocation.
 
