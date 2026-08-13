@@ -1,9 +1,7 @@
-"""Unit tests for the Agent Studio direct (non-Temporal) authoring dispatch path.
+"""Unit tests for the Agent Studio in-process authoring dispatch path.
 
-Mirrors ``test_temporal_activity.py`` on the ``dispatch.*`` helpers: Temporal is forced
-off, the process-wide ``AgentStudioService`` is a Mock, and ``execute_workflow_sync``
-must never run. The direct path returns service objects unchanged and re-raises native
-``ValueError`` / ``LookupError`` (never ``ApplicationError``).
+Temporal is never on the CRUD path: ``execute_workflow_sync`` must not run, and
+native ``ValueError`` / ``LookupError`` propagate unchanged.
 """
 
 from __future__ import annotations
@@ -20,19 +18,15 @@ from agent_platform.studio.service import AgentStudioService
 
 
 @pytest.fixture(autouse=True)
-def _force_direct_path(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Force the in-process branch regardless of ``TEMPORAL_ADDRESS``."""
-    monkeypatch.setattr(dispatch, "_temporal_enabled", lambda: False)
-
-
-@pytest.fixture(autouse=True)
 def _forbid_temporal_execute(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Direct path must never start a workflow."""
+    """CRUD must never start a workflow."""
 
     def _boom(*_a, **_k):
         raise AssertionError("direct path must not call execute_workflow_sync")
 
-    monkeypatch.setattr(dispatch, "execute_workflow_sync", _boom)
+    monkeypatch.setattr("shared.temporal.execute_workflow_sync", _boom, raising=False)
+    if hasattr(dispatch, "execute_workflow_sync"):
+        monkeypatch.setattr(dispatch, "execute_workflow_sync", _boom)
 
 
 @pytest.fixture()

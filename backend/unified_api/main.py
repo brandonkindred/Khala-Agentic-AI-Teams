@@ -579,24 +579,23 @@ def _start_agent_studio_temporal_worker() -> None:
     """Start the in-process Agent Studio Temporal worker.
 
     Agent Studio is an in-process team (mounted on this app, not a separate
-    ``team_service`` container), so its worker runs here and its activity threads
-    share this process's :class:`AgentStudioService` singleton. Gated on
-    ``UNIFIED_API_AGENT_STUDIO_TEMPORAL_WORKER`` and on the team being enabled.
-    Authoring CRUD (start conversation / send message / clone / save) no longer
-    requires this worker: ``agent_platform.studio.temporal.dispatch``
-    falls back to calling :class:`AgentStudioService` directly, in-process, when
-    Temporal isn't configured — so a missing ``TEMPORAL_ADDRESS`` here is a
-    (fully-functional) mode switch, not a degraded state. The worker is a daemon
-    thread (no shutdown handle needed); log-and-continue on failure, matching
-    the other lifespan startup steps.
+    ``team_service`` container). Gated on ``UNIFIED_API_AGENT_STUDIO_TEMPORAL_WORKER``
+    and on the team being enabled. Authoring CRUD (start conversation / send
+    message / clone / save) does not use Temporal: dispatch always calls
+    :class:`AgentStudioService` in-process, and the worker starter no-ops when
+    there are no authoring workflows to register. A false return here is a
+    fully-functional mode, not a degraded state. Log-and-continue on failure,
+    matching the other lifespan startup steps.
 
+    Preconditions:
+        - ``TEAM_CONFIGS`` includes ``agent_studio``.
     Postconditions:
         - Logs at INFO and returns without starting a worker when
           ``UNIFIED_API_AGENT_STUDIO_TEMPORAL_WORKER`` is false.
-        - Logs at INFO when a worker actually started, or when ``start_team_worker``
-          returns ``False`` (``TEMPORAL_ADDRESS`` unset → no worker) — Agent Studio
-          serves authoring requests via direct in-process dispatch instead. Startup is
-          not aborted either way (that would take down every other team for one
+        - Logs at INFO when a worker actually started, or when the starter
+          returns ``False`` (nothing to register, or Temporal unset) — Agent
+          Studio serves authoring requests in-process either way. Startup is
+          not aborted (that would take down every other team for one
           in-process team's config).
     """
     if not UNIFIED_API_AGENT_STUDIO_TEMPORAL_WORKER:
@@ -614,10 +613,7 @@ def _start_agent_studio_temporal_worker() -> None:
     if started:
         logger.info("Started Agent Studio Temporal worker")
     else:
-        logger.info(
-            "Agent Studio Temporal worker NOT started (TEMPORAL_ADDRESS unset); "
-            "authoring requests will dispatch directly in-process instead."
-        )
+        logger.info("Agent Studio Temporal worker NOT started; authoring requests dispatch in-process.")
 
 
 @asynccontextmanager

@@ -363,10 +363,11 @@ traffic) — team proxy routes and health checks are unaffected.
 
 ### UNIFIED_API_AGENT_STUDIO_TEMPORAL_WORKER
 Agent Studio Temporal worker toggle (default: true). When true, the
-unified-api `lifespan` starts the in-process Agent Studio Temporal worker
-thread. Set to `false`/`0`/`no` to skip booting this worker; authoring CRUD
-(conversations / clone / save) then uses in-process `AgentStudioService`
-instead of `agent-studio-queue`. Other teams' Temporal workers are unaffected.
+unified-api `lifespan` calls the Agent Studio worker starter; that starter
+no-ops when there are no authoring workflows to register. Authoring CRUD
+(conversations / clone / save) always uses in-process `AgentStudioService`
+and does not require `agent-studio-queue`. Set to `false`/`0`/`no` to skip
+the starter call entirely. Other teams' Temporal workers are unaffected.
 
 ### ENABLE_LOG_API
 Exposes HTTP log endpoint.

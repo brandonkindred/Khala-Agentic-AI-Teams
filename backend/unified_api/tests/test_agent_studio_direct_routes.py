@@ -1,8 +1,7 @@
-"""Thin HTTP tests for Agent Studio authoring CRUD on the direct dispatch path.
+"""Thin HTTP smoke tests for Agent Studio authoring CRUD.
 
-Forces ``dispatch._temporal_enabled`` off so routes call ``AgentStudioService``
-in-process. ``execute_workflow_sync`` is patched to raise if invoked. Does not
-duplicate service-level cases already covered by the Temporal route suite.
+Routes call ``AgentStudioService`` in-process. Does not duplicate the fuller
+cases in ``test_agent_studio_routes.py``.
 """
 
 from __future__ import annotations
@@ -13,7 +12,6 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-import agent_platform.studio.temporal.dispatch as dispatch_mod
 from agent_platform.studio import router
 from agent_platform.studio.assistant import AgentDesignerAgent
 from agent_platform.studio.service import AgentStudioService
@@ -42,10 +40,6 @@ def _service(reply: str, registry: FakeRegistry) -> AgentStudioService:
     )
 
 
-def _boom_execute(*_a, **_k):
-    raise AssertionError("direct path must not call execute_workflow_sync")
-
-
 @pytest.fixture()
 def registry() -> FakeRegistry:
     """A fake registry pre-seeded with a clonable ``blogging.planner`` source."""
@@ -59,9 +53,7 @@ def make_client(monkeypatch: pytest.MonkeyPatch):
     """Factory: TestClient whose dispatch uses the in-process service path."""
 
     def _factory(service: object, *, raise_server_exceptions: bool = True) -> TestClient:
-        monkeypatch.setattr(dispatch_mod, "_temporal_enabled", lambda: False)
         monkeypatch.setattr("agent_platform.studio.runtime.get_studio_service", lambda: service)
-        monkeypatch.setattr(dispatch_mod, "execute_workflow_sync", _boom_execute)
         app = FastAPI()
         app.include_router(router)
         return TestClient(app, raise_server_exceptions=raise_server_exceptions)
