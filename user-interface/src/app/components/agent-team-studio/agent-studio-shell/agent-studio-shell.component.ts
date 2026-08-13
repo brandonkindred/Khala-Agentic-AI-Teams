@@ -253,6 +253,7 @@ export class AgentStudioShellComponent {
     this.state.setProcessId(asNullableString(payload['processId']));
     this.state.setPersonaId(asNullableString(payload['personaId']));
     this.state.setDraftAgentId(asNullableString(payload['draftAgentId']));
+    this.state.setPersonaLiveRunId(null);
     this.resolveFurthestStage(token);
   }
 

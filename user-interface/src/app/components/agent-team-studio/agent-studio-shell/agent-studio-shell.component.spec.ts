@@ -199,6 +199,13 @@ describe('AgentStudioShellComponent', () => {
       expect(component.state.registryAgentId()).toBeNull();
     });
 
+    it('clears a persisted persona live-run id on hydrate', () => {
+      component.state.setPersonaLiveRunId('run-stale');
+      agentStudioApi.getDraft.mockReturnValue(of(draft({ registryAgentId: 'reg-1' })));
+      component.loadDraft('d-1');
+      expect(component.state.personaLiveRunId()).toBeNull();
+    });
+
     it('loadingDraft reflects the in-flight request and guards re-entrancy', () => {
       const pending = new Subject<AgentStudioDraft>();
       agentStudioApi.getDraft.mockReturnValue(pending.asObservable());

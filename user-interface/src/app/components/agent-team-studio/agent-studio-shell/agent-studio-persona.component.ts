@@ -391,6 +391,12 @@ export class AgentStudioPersonaComponent implements OnInit {
     }
     this.loadTeam(teamId);
     this.loadPersonas();
+    // Resume a run that survived this component being destroyed (nested audit
+    // child or a Stage 3/2 back-loop). The id lives on the session store.
+    const liveRunId = this.state.personaLiveRunId();
+    if (liveRunId) {
+      this.startPolling(liveRunId);
+    }
   }
 
   /** Switch the Stage-4 sub-mode between 'manual' (chat/pipeline) and 'persona'. */
@@ -624,6 +630,7 @@ export class AgentStudioPersonaComponent implements OnInit {
   private startPolling(runId: string): void {
     this.stopPolling();
     this.activeRunId = runId;
+    this.state.setPersonaLiveRunId(runId);
     this.run.set(null);
     // Clear the prior run's pipeline state so a new launch doesn't briefly show
     // the last run's step progress before the first pipeline read lands.

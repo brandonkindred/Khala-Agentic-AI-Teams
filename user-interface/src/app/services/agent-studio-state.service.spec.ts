@@ -157,6 +157,26 @@ describe('AgentStudioStateService', () => {
     expect(service.hasConsumedHandoff('t-1::a')).toBe(false);
   });
 
+  it('starts with no persona live-run id', () => {
+    expect(service.personaLiveRunId()).toBeNull();
+  });
+
+  it('setPersonaLiveRunId persists the id until reset or a team change', () => {
+    service.setTeamId('team-1');
+    service.setPersonaLiveRunId('run-1');
+    expect(service.personaLiveRunId()).toBe('run-1');
+    service.setTeamId('team-1');
+    expect(service.personaLiveRunId()).toBe('run-1');
+    service.setTeamId('team-2');
+    expect(service.personaLiveRunId()).toBeNull();
+  });
+
+  it('reset clears the persona live-run id', () => {
+    service.setPersonaLiveRunId('run-1');
+    service.reset();
+    expect(service.personaLiveRunId()).toBeNull();
+  });
+
   describe('Stage-1 build sub-stepper', () => {
     it('starts at sub-stage 0 (Start)', () => {
       expect(service.activeBuildSubStage()).toBe(0);

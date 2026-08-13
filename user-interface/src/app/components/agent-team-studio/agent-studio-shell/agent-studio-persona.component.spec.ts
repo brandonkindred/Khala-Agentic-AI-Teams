@@ -1371,4 +1371,40 @@ describe('AgentStudioPersonaComponent', () => {
     component.openFullAudit();
     expect(nav).not.toHaveBeenCalled();
   });
+
+  it('resumes an in-progress run after the component is recreated', () => {
+    build();
+    facade.getPersonaRunStatus.mockReturnValue(of(statusWithJob({ status: 'polling_build' })));
+    fixture.detectChanges();
+    component.launch();
+    fixture.detectChanges();
+    expect(state.personaLiveRunId()).toBe('run-1');
+    expect(component.runInProgress()).toBe(true);
+
+    fixture.destroy();
+    fixture = TestBed.createComponent(AgentStudioPersonaComponent);
+    component = fixture.componentInstance;
+    fixture.detectChanges();
+
+    expect(component.run()?.run_id).toBe('run-1');
+    expect(component.runInProgress()).toBe(true);
+    expect(fixture.nativeElement.querySelector('.persona__stop')).toBeTruthy();
+  });
+
+  it('restores a completed run after the component is recreated', () => {
+    build();
+    fixture.detectChanges();
+    component.launch();
+    fixture.detectChanges();
+    expect(component.runTerminal()).toBe(true);
+
+    fixture.destroy();
+    fixture = TestBed.createComponent(AgentStudioPersonaComponent);
+    component = fixture.componentInstance;
+    fixture.detectChanges();
+
+    expect(component.run()?.run_id).toBe('run-1');
+    expect(component.runTerminal()).toBe(true);
+    expect(fixture.nativeElement.textContent).toContain('View full audit');
+  });
 });
