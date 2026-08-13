@@ -22,6 +22,7 @@ export const environment = {
   investmentApiUrl: `${apiBase}/api/investment`,
   integrationsApiUrl: `${apiBase}/api/integrations`,
   llmConfigApiUrl: `${apiBase}/api/llm-config`,
+  llmUsageApiUrl: `${apiBase}/api/llm-usage`,
   salesApiUrl: `${apiBase}/api/sales`,
   agenticTeamProvisioningApiUrl: `${apiBase}/api/agentic-team-provisioning`,
   startupAdvisorApiUrl: `${apiBase}/api/startup-advisor`,
