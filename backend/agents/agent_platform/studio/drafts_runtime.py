@@ -1,7 +1,7 @@
 """Process-wide Agent Studio drafts store singleton.
 
 Store selection (Postgres when configured, else in-memory) is bound once at
-import time — the same contract as ``agent_studio.runtime`` for conversations.
+import time — the same contract as ``agent_platform.studio.runtime`` for conversations.
 """
 
 from __future__ import annotations

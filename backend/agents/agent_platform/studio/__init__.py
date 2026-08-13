@@ -39,6 +39,14 @@ _LAZY_ROUTES_EXPORTS = {"router"}
 
 
 def __getattr__(name: str) -> Any:
+    """Resolve a public façade export lazily (PEP 562).
+
+    Preconditions:
+        * ``name`` is a ``str``.
+    Postconditions:
+        * Returns the named façade export, or raises ``AttributeError`` if
+          ``name`` is not a public façade export.
+    """
     if name in _LAZY_RUNTIME_EXPORTS:
         from . import runtime  # noqa: PLC0415 - intentional lazy import
 
