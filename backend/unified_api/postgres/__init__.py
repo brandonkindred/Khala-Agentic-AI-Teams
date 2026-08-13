@@ -3,25 +3,26 @@
 Declares the ``encrypted_integration_credentials`` table that
 ``postgres_encrypted_credentials.py`` and ``google_browser_login_credentials.py``
 both read/write, plus the ``llm_provider_configs`` table that holds the ordered
-multi-provider LLM fallback list. Registered from the unified_api's FastAPI lifespan.
+multi-provider LLM fallback list, plus ``llm_call_records`` for platform-wide
+token-usage persistence. Registered from the unified_api's FastAPI lifespan.
 """
 
 from __future__ import annotations
 
 from llm_service.provider_store import PROVIDER_TABLE_STATEMENTS
 from llm_service.provider_store import TABLE_NAME as PROVIDER_TABLE_NAME
+from llm_service.usage_store import TABLE_NAME as USAGE_TABLE_NAME
+from llm_service.usage_store import USAGE_TABLE_STATEMENTS
 from shared.postgres import TeamSchema
 from shared.postgres.secrets import SECRETS_TABLE_DDL
 
 SCHEMA = TeamSchema(
     team="unified_api",
-    database=None,  # default POSTGRES_DB
-    # Each CREATE TABLE lives once in its owning module (shared.postgres.secrets and
-    # llm_service.provider_store), both of which also self-heal the table lazily, so
-    # the registered schema and the lazy ensure can't drift.
-    statements=[SECRETS_TABLE_DDL, *PROVIDER_TABLE_STATEMENTS],
+    database=None,
+    statements=[SECRETS_TABLE_DDL, *PROVIDER_TABLE_STATEMENTS, *USAGE_TABLE_STATEMENTS],
     table_names=[
         "encrypted_integration_credentials",
         PROVIDER_TABLE_NAME,
+        USAGE_TABLE_NAME,
     ],
 )
