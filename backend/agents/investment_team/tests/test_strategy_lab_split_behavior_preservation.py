@@ -366,8 +366,13 @@ def _neutralize_synthesis_gates(
     ``MAX_CODE_REFINEMENT_ROUNDS`` is pinned to 2 so two-round recovery
     scenarios still reach round 1 when the process env has the valid
     floor value ``STRATEGY_LAB_MAX_CODE_REFINEMENT_ROUNDS=1``.
+    ``_refinement_stall_rounds`` is pinned to 2 as well: the valid floor
+    ``STRATEGY_LAB_REFINEMENT_STALL_ROUNDS=1`` makes ``is_stalled(1)``
+    true after the first failing round, which would skip the refinement
+    agent and abort before round 1.
     """
     monkeypatch.setattr(orchestrator_module, "MAX_CODE_REFINEMENT_ROUNDS", 2)
+    monkeypatch.setattr(orchestrator_module, "_refinement_stall_rounds", lambda: 2)
     monkeypatch.setattr(orch.spec_readiness_gate, "validate", lambda *a, **kw: [])
     monkeypatch.setattr(orch.code_safety_checker, "check", lambda *a, **kw: [])
     monkeypatch.setattr(orch.code_conformance_gate, "check", lambda *a, **kw: [])
