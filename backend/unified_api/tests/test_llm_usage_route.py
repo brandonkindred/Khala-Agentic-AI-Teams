@@ -53,6 +53,48 @@ def test_usage_summary_rejects_unknown_window() -> None:
     assert resp.status_code == 422
 
 
+def test_usage_summary_accepts_numeric_hour_window() -> None:
+    """Existing clients send window=1.0 (hours), not a preset id."""
+    with patch("unified_api.routes.llm_usage.resolve_storage_status", return_value="unconfigured"):
+        resp = client.get("/api/llm-usage/", params={"window": "1.0"})
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["window"] == "1.0"
+    assert data["window_hours"] == 1.0
+
+
+def test_recent_query_failure_returns_503() -> None:
+    """A failed recent query must not look like a genuine empty history."""
+    with (
+        patch("unified_api.routes.llm_usage.is_postgres_enabled", return_value=True),
+        patch("unified_api.routes.llm_usage.fetch_recent", return_value=None),
+    ):
+        resp = client.get("/api/llm-usage/recent")
+    assert resp.status_code == 503
+
+
+def test_recent_postgres_path_returns_rows() -> None:
+    rows = [
+        {
+            "timestamp": 1.0,
+            "team": "blogging",
+            "agent_key": "writer",
+            "model": "m",
+            "prompt_tokens": 1,
+            "completion_tokens": 1,
+            "total_tokens": 2,
+            "status": "success",
+        }
+    ]
+    with (
+        patch("unified_api.routes.llm_usage.is_postgres_enabled", return_value=True),
+        patch("unified_api.routes.llm_usage.fetch_recent", return_value=rows),
+    ):
+        resp = client.get("/api/llm-usage/recent")
+    assert resp.status_code == 200
+    assert resp.json() == rows
+
+
 def test_recent_calls_returns_list() -> None:
     with patch("unified_api.routes.llm_usage.resolve_storage_status", return_value="unconfigured"):
         resp = client.get("/api/llm-usage/recent")

@@ -80,6 +80,17 @@ def test_window_hours_presets() -> None:
         us.window_hours("1h")
 
 
+def test_window_hours_accepts_numeric_hours() -> None:
+    """Pre-change GET /api/llm-usage took window as hours (e.g. 1.0)."""
+    assert us.window_hours("1.0") == 1.0
+    assert us.window_hours("24") == 24.0
+    assert us.window_hours("0") == 0.0
+    with pytest.raises(ValueError, match="unknown window"):
+        us.window_hours("-1")
+    with pytest.raises(ValueError, match="unknown window"):
+        us.window_hours("inf")
+
+
 def test_write_rows_noop_when_postgres_off(monkeypatch) -> None:
     monkeypatch.setattr(us, "is_postgres_enabled", lambda: False)
 
@@ -405,6 +416,13 @@ def test_fetch_summary_postgres_off(monkeypatch) -> None:
     assert us.QUERY_FAILED_KEY not in summary
 
 
+def test_fetch_summary_numeric_window_postgres_off(monkeypatch) -> None:
+    monkeypatch.setattr(us, "is_postgres_enabled", lambda: False)
+    summary = us.fetch_summary(window="1.0")
+    assert summary["window"] == "1.0"
+    assert summary["window_hours"] == 1.0
+
+
 def test_fetch_summary_cur_none(monkeypatch) -> None:
     monkeypatch.setattr(us, "is_postgres_enabled", lambda: True)
     monkeypatch.setattr(us, "_table_ensured", True)
@@ -434,7 +452,7 @@ def test_fetch_recent_cur_none(monkeypatch) -> None:
         yield None
 
     monkeypatch.setattr(us, "pg_cursor", _none_cursor)
-    assert us.fetch_recent(window="24h") == []
+    assert us.fetch_recent(window="24h") is None
 
 
 def test_fetch_recent_naive_and_non_datetime_ts(fake_db) -> None:
@@ -480,6 +498,6 @@ def test_fetch_recent_naive_and_non_datetime_ts(fake_db) -> None:
     assert rows[2]["status"] == ""
 
 
-def test_fetch_recent_exception_returns_empty(fake_db) -> None:
+def test_fetch_recent_exception_returns_none(fake_db) -> None:
     fake_db._raise = True
-    assert us.fetch_recent(window="24h", team="blogging") == []
+    assert us.fetch_recent(window="24h", team="blogging") is None

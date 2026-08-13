@@ -164,6 +164,15 @@ describe('LlmUsageDashboardComponent', () => {
     expect(component.recent).toEqual([]);
   });
 
+  it('treats a recent-endpoint failure as a load error', () => {
+    apiSpy.getRecent.mockReturnValue(throwError(() => ({ error: { detail: 'recent down' } })));
+    component.load();
+    fixture.detectChanges();
+    expect(component.loadError).toBe('recent down');
+    expect(component.recent).toEqual([]);
+    expect(component.summary.total_calls).toBe(0);
+  });
+
   it('does not keep the previous window totals when a refetch fails', () => {
     apiSpy.getSummary.mockReturnValue(throwError(() => ({ error: { detail: '7d failed' } })));
     apiSpy.getRecent.mockReturnValue(throwError(() => ({ error: { detail: '7d failed' } })));

@@ -13,6 +13,7 @@ Invariants:
 from __future__ import annotations
 
 import logging
+import math
 import threading
 import time
 from datetime import datetime, timedelta, timezone
@@ -59,15 +60,23 @@ _ensure_lock = threading.Lock()
 
 
 def window_hours(window: str) -> float:
-    """Map a preset window id to hours (0.0 means unbounded / all-time).
+    """Map a window id to hours (0.0 means unbounded / all-time).
 
     Preconditions: ``window`` is a non-empty str.
-    Postconditions: returns the hours for a known preset; raises ``ValueError``
-        whose message contains ``unknown window`` otherwise.
+    Postconditions: returns hours for a known preset (``24h`` / ``7d`` /
+        ``30d`` / ``all``) or a finite numeric-hours string (``1.0``, ``24``);
+        ``<= 0`` means all-time. Raises ``ValueError`` whose message contains
+        ``unknown window`` otherwise (unknown token, negative, NaN, inf).
     """
-    if window not in WINDOWS:
+    if window in WINDOWS:
+        return WINDOWS[window]
+    try:
+        hours = float(window)
+    except (TypeError, ValueError):
         raise ValueError(f"unknown window: {window!r}")
-    return WINDOWS[window]
+    if not math.isfinite(hours) or hours < 0:
+        raise ValueError(f"unknown window: {window!r}")
+    return hours
 
 
 # Popped by GET /api/llm-usage before the body is returned. Set when a usage
@@ -78,7 +87,7 @@ QUERY_FAILED_KEY = "_query_failed"
 
 def empty_summary(*, window: str, team: str | None) -> dict:
     """Zeroed summary dict matching the GET /api/llm-usage response body (minus storage fields)."""
-    hours = WINDOWS.get(window, 0.0)
+    hours = window_hours(window)
     return {
         "team": team or "all",
         "window": window,
@@ -97,7 +106,8 @@ def empty_summary(*, window: str, team: str | None) -> dict:
 def _failed_summary(*, window: str, team: str | None) -> dict:
     """Empty summary marked so the HTTP layer reports storage as unreachable.
 
-    Preconditions: ``window`` is a key of :data:`WINDOWS`.
+    Preconditions: ``window`` is a key of :data:`WINDOWS` or a finite
+        numeric-hours string accepted by :func:`window_hours`.
     Postconditions: returns :func:`empty_summary` with :data:`QUERY_FAILED_KEY`
         set to ``True``.
     """
@@ -196,7 +206,8 @@ def _where(window: str, team: str | None) -> tuple[str, list]:
 def fetch_summary(*, window: str, team: str | None = None) -> dict:
     """Aggregate token usage for ``window`` (and optional ``team``). Never raises.
 
-    Preconditions: ``window`` is a key of :data:`WINDOWS`.
+    Preconditions: ``window`` is a key of :data:`WINDOWS` or a finite
+        numeric-hours string accepted by :func:`window_hours`.
     Postconditions: returns a summary dict (zeros / empty maps on Postgres-off
         or query failure). Query failure and a ``None`` cursor also set
         :data:`QUERY_FAILED_KEY` so the HTTP layer can report storage as
@@ -269,13 +280,16 @@ def fetch_summary(*, window: str, team: str | None = None) -> dict:
         return _failed_summary(window=window, team=team)
 
 
-def fetch_recent(*, window: str, team: str | None = None, limit: int = 100) -> list[dict]:
+def fetch_recent(*, window: str, team: str | None = None, limit: int = 100) -> list[dict] | None:
     """Newest-first call rows for ``window``. Never raises.
 
-    Preconditions: ``window`` is a key of :data:`WINDOWS`; ``limit`` >= 1.
+    Preconditions: ``window`` is a key of :data:`WINDOWS` or a finite
+        numeric-hours string accepted by :func:`window_hours`; ``limit`` >= 1.
     Postconditions: list of dicts with ``timestamp`` (unix float), ``team``,
         ``agent_key``, ``model``, ``prompt_tokens``, ``completion_tokens``,
-        ``total_tokens``, ``status``. Empty list when Postgres is off or on error.
+        ``total_tokens``, ``status``. Empty list when Postgres is off or the
+        window has no rows. Returns ``None`` when the query fails or the cursor
+        is ``None`` so the HTTP layer can distinguish failure from zero calls.
     """
     if not is_postgres_enabled():
         return []
@@ -285,7 +299,7 @@ def fetch_recent(*, window: str, team: str | None = None, limit: int = 100) -> l
     try:
         with pg_cursor(dict_rows=True) as cur:
             if cur is None:
-                return []
+                return None
             cur.execute(
                 "SELECT ts, team, agent_key, model, prompt_tokens, completion_tokens, "
                 f"total_tokens, status FROM llm_call_records{where_sql} "
@@ -317,7 +331,7 @@ def fetch_recent(*, window: str, team: str | None = None, limit: int = 100) -> l
         return out
     except Exception:
         logger.debug("failed to fetch recent llm calls", exc_info=True)
-        return []
+        return None
 
 
 __all__ = [

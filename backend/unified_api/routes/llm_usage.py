@@ -12,9 +12,9 @@ from __future__ import annotations
 import sys
 import time
 from pathlib import Path
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, HTTPException, Query
 
 _agents_dir = Path(__file__).resolve().parent.parent.parent / "agents"
 if str(_agents_dir) not in sys.path:
@@ -31,7 +31,19 @@ from shared.postgres import is_postgres_enabled, resolve_storage_status  # noqa:
 
 router = APIRouter(prefix="/api/llm-usage", tags=["llm-usage"])
 
-WindowPreset = Literal["24h", "7d", "30d", "all"]
+
+def _require_window(window: str) -> str:
+    """Accept a preset or numeric-hours window; HTTP 422 otherwise.
+
+    Preconditions: ``window`` is a non-empty str (the raw query value).
+    Postconditions: returns ``window`` unchanged when :func:`window_hours`
+        accepts it; raises ``HTTPException`` 422 otherwise.
+    """
+    try:
+        window_hours(window)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return window
 
 
 def _attach_storage(data: dict[str, Any]) -> dict[str, Any]:
@@ -55,9 +67,10 @@ def _attach_storage(data: dict[str, Any]) -> dict[str, Any]:
 @router.get("/")
 def usage_summary(
     team: Annotated[str | None, Query(description="Filter by team name")] = None,
-    window: Annotated[WindowPreset, Query(description="Time window preset")] = "24h",
+    window: Annotated[str, Query(description="Preset (24h, 7d, 30d, all) or hours (e.g. 1.0)")] = "24h",
 ) -> dict[str, Any]:
-    """Aggregated LLM token usage over a preset window."""
+    """Aggregated LLM token usage over a preset or numeric-hours window."""
+    _require_window(window)
     if is_postgres_enabled():
         data = fetch_summary(window=window, team=team)
     else:
@@ -71,12 +84,16 @@ def usage_summary(
 @router.get("/recent")
 def recent_calls(
     team: Annotated[str | None, Query(description="Filter by team name")] = None,
-    window: Annotated[WindowPreset, Query(description="Time window preset")] = "24h",
+    window: Annotated[str, Query(description="Preset (24h, 7d, 30d, all) or hours (e.g. 1.0)")] = "24h",
     limit: Annotated[int, Query(ge=1, le=1000, description="Max records to return")] = 100,
 ) -> list:
     """Recent individual LLM call records, newest first."""
+    _require_window(window)
     if is_postgres_enabled():
-        return fetch_recent(window=window, team=team, limit=limit)
+        rows = fetch_recent(window=window, team=team, limit=limit)
+        if rows is None:
+            raise HTTPException(status_code=503, detail="llm usage recent query failed")
+        return rows
     hours = window_hours(window)
     cutoff = None if hours <= 0 else time.time() - hours * 3600
     records = get_recent_calls(team=team, limit=1000)
