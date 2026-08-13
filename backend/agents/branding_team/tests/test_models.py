@@ -1,17 +1,20 @@
-"""Validation tests for the Phase 1, Phase 2, and Phase 4 structured-output wrapper models.
+"""Validation tests for the Phase 1, Phase 2, Phase 3, and Phase 4 structured-output models.
 
 These agent-facing models (``BrandDiscoveryAuditOutput``, ``PurposeVisionOutput``,
 ``CoreValuesOutput``, ``AudienceSegmentsOutput``, ``DifferentiationPillarsOutput``,
 ``PositioningOutput``, plus Phase 2's ``BrandStoryOutput``,
 ``BrandArchetypesOutput``, ``TaglineOutput``, ``MessagingFrameworkOutput``
 (and its nested ``MessagingPillarOutput``/``AudienceMessageMapOutput``),
-``PersonaProfilesOutput``, ``WritingGuidelinesOutput``, plus Phase 4's
-``ChannelGuidelineOutput``, ``BrandArchitectureOutput``, and
-``BrandExperiencePrinciplesOutput``) must reject empty/omitted content so
-Strands' structured-output tool retries the LLM
+``PersonaProfilesOutput``, ``WritingGuidelinesOutput``, plus Phase 3's nested
+twins (``LogoUsageRuleOutput``, ``ColorEntryOutput``, ``TypographySpecOutput``,
+``VoiceToneEntryOutput``), plus Phase 4's ``ChannelGuidelineOutput``,
+``BrandArchitectureOutput``, and ``BrandExperiencePrinciplesOutput``) must
+reject empty/omitted content so Strands' structured-output tool retries the LLM
 instead of silently accepting a blank or under-cardinality response (see
 ``structured_output_tool.py``: a ``ValidationError`` becomes a tool error
-the model is asked to fix).
+the model is asked to fix). Dual-mode tests also pin the soft merge-target
+twins and the ``isinstance(strict, soft)`` subclass contract produced by
+``_derive_strict_variant``.
 """
 
 from __future__ import annotations
@@ -34,6 +37,8 @@ from branding_team.models import (
     BrandExperiencePrinciplesOutput,
     BrandStoryOutput,
     ChannelGuidelineOutput,
+    ColorEntry,
+    ColorEntryOutput,
     CoreValue,
     CoreValueOutput,
     CoreValuesOutput,
@@ -42,6 +47,8 @@ from branding_team.models import (
     DifferentiationPillarsOutput,
     ElevatorPitch,
     ElevatorPitchOutput,
+    LogoUsageRule,
+    LogoUsageRuleOutput,
     MessagingFrameworkOutput,
     MessagingPillar,
     MessagingPillarOutput,
@@ -51,6 +58,10 @@ from branding_team.models import (
     PositioningOutput,
     PurposeVisionOutput,
     TaglineOutput,
+    TypographySpec,
+    TypographySpecOutput,
+    VoiceToneEntry,
+    VoiceToneEntryOutput,
     WritingGuidelinesBody,
     WritingGuidelinesOutput,
 )
@@ -808,3 +819,198 @@ def test_brand_experience_principles_output_rejects_blank_list_items() -> None:
         BrandExperiencePrinciplesOutput(
             **{**_EXPERIENCE_PRINCIPLES_KWARGS, "sensory_elements": ["", ""]}
         )
+
+
+def test_logo_usage_rule_permits_blank_and_omitted_content() -> None:
+    """``LogoUsageRule`` is the soft merge-target twin: all fields default
+    to empty, matching ``VisualIdentityOutput.logo_suite``'s partial-fragment
+    merge contract."""
+    minimal = LogoUsageRule()
+    assert minimal.variant == ""
+    assert minimal.usage_context == ""
+    assert minimal.minimum_size == ""
+    assert minimal.clear_space == ""
+
+    explicit_blank = LogoUsageRule(variant="", usage_context="", minimum_size="", clear_space="")
+    assert explicit_blank.variant == ""
+
+
+def test_logo_usage_rule_output_rejects_blank_content() -> None:
+    """A blank variant, usage context, minimum size, or clear space must fail."""
+    valid_kwargs = dict(
+        variant="primary",
+        usage_context="Full-color lockup on light backgrounds",
+        minimum_size="24px",
+        clear_space="0.5x cap-height",
+    )
+
+    with pytest.raises(ValidationError):
+        LogoUsageRuleOutput(**{**valid_kwargs, "variant": ""})
+    with pytest.raises(ValidationError):
+        LogoUsageRuleOutput(**{**valid_kwargs, "usage_context": ""})
+    with pytest.raises(ValidationError):
+        LogoUsageRuleOutput(**{**valid_kwargs, "minimum_size": ""})
+    with pytest.raises(ValidationError):
+        LogoUsageRuleOutput(**{**valid_kwargs, "clear_space": ""})
+
+    output = LogoUsageRuleOutput(**valid_kwargs)
+    assert output.variant == "primary"
+
+
+def test_logo_usage_rule_output_is_usable_as_a_logo_usage_rule() -> None:
+    """The derived strict twin stays a normal, directly constructible
+    ``pydantic.BaseModel`` subclass wherever ``LogoUsageRule`` is."""
+    output = LogoUsageRuleOutput(
+        variant="primary",
+        usage_context="Full-color lockup on light backgrounds",
+        minimum_size="24px",
+        clear_space="0.5x cap-height",
+    )
+    assert isinstance(output, LogoUsageRule)
+
+
+def test_color_entry_permits_blank_and_omitted_content() -> None:
+    """``ColorEntry`` is the soft merge-target twin: only ``name`` is
+    required; ``hex_value``/``usage``/``psychological_rationale`` accept
+    blank/omitted content, matching ``VisualIdentityOutput.color_palette``'s
+    partial-fragment merge contract."""
+    minimal = ColorEntry(name="Midnight")
+    assert minimal.hex_value == ""
+    assert minimal.usage == ""
+    assert minimal.psychological_rationale == ""
+
+    explicit_blank = ColorEntry(name="Midnight", hex_value="", usage="", psychological_rationale="")
+    assert explicit_blank.hex_value == ""
+
+
+def test_color_entry_output_rejects_blank_content() -> None:
+    """A blank name, hex value, usage, or rationale must fail validation."""
+    valid_kwargs = dict(
+        name="Midnight",
+        hex_value="#1a1a2e",
+        usage="Primary background",
+        psychological_rationale="Conveys depth and authority",
+    )
+
+    with pytest.raises(ValidationError):
+        ColorEntryOutput(**{**valid_kwargs, "name": ""})
+    with pytest.raises(ValidationError):
+        ColorEntryOutput(**{**valid_kwargs, "hex_value": ""})
+    with pytest.raises(ValidationError):
+        ColorEntryOutput(**{**valid_kwargs, "usage": ""})
+    with pytest.raises(ValidationError):
+        ColorEntryOutput(**{**valid_kwargs, "psychological_rationale": ""})
+
+    output = ColorEntryOutput(**valid_kwargs)
+    assert output.name == "Midnight"
+
+
+def test_color_entry_output_is_usable_as_a_color_entry() -> None:
+    """The derived strict twin stays a normal, directly constructible
+    ``pydantic.BaseModel`` subclass wherever ``ColorEntry`` is."""
+    output = ColorEntryOutput(
+        name="Midnight",
+        hex_value="#1a1a2e",
+        usage="Primary background",
+        psychological_rationale="Conveys depth and authority",
+    )
+    assert isinstance(output, ColorEntry)
+
+
+def test_typography_spec_permits_blank_and_omitted_content() -> None:
+    """``TypographySpec`` is the soft merge-target twin: all fields default
+    to empty, matching ``VisualIdentityOutput.typography_system``'s
+    partial-fragment merge contract."""
+    minimal = TypographySpec()
+    assert minimal.role == ""
+    assert minimal.font_family == ""
+    assert minimal.weight_range == ""
+    assert minimal.usage_notes == ""
+
+    explicit_blank = TypographySpec(role="", font_family="", weight_range="", usage_notes="")
+    assert explicit_blank.role == ""
+
+
+def test_typography_spec_output_rejects_blank_content() -> None:
+    """A blank role, font family, weight range, or usage notes must fail."""
+    valid_kwargs = dict(
+        role="display",
+        font_family="Inter",
+        weight_range="600-800",
+        usage_notes="Headlines and hero type only",
+    )
+
+    with pytest.raises(ValidationError):
+        TypographySpecOutput(**{**valid_kwargs, "role": ""})
+    with pytest.raises(ValidationError):
+        TypographySpecOutput(**{**valid_kwargs, "font_family": ""})
+    with pytest.raises(ValidationError):
+        TypographySpecOutput(**{**valid_kwargs, "weight_range": ""})
+    with pytest.raises(ValidationError):
+        TypographySpecOutput(**{**valid_kwargs, "usage_notes": ""})
+
+    output = TypographySpecOutput(**valid_kwargs)
+    assert output.role == "display"
+
+
+def test_typography_spec_output_is_usable_as_a_typography_spec() -> None:
+    """The derived strict twin stays a normal, directly constructible
+    ``pydantic.BaseModel`` subclass wherever ``TypographySpec`` is."""
+    output = TypographySpecOutput(
+        role="display",
+        font_family="Inter",
+        weight_range="600-800",
+        usage_notes="Headlines and hero type only",
+    )
+    assert isinstance(output, TypographySpec)
+
+
+def test_voice_tone_entry_permits_blank_and_omitted_content() -> None:
+    """``VoiceToneEntry`` is the soft merge-target twin: all fields default
+    empty, matching ``VisualIdentityOutput.voice_tone_spectrum``'s
+    partial-fragment merge contract."""
+    minimal = VoiceToneEntry()
+    assert minimal.context == ""
+    assert minimal.tone == ""
+    assert minimal.examples == []
+
+    explicit_blank = VoiceToneEntry(context="", tone="", examples=[])
+    assert explicit_blank.examples == []
+
+    blank_item = VoiceToneEntry(examples=[""])
+    assert blank_item.examples == [""]
+
+
+def test_voice_tone_entry_output_rejects_blank_content() -> None:
+    """A blank context, tone, or empty examples list must fail; a list of
+    blank strings is still valid because ``examples`` is ``List[str]`` with
+    container ``min_length=1``, not ``List[NonEmptyStr]``."""
+    valid_kwargs = dict(
+        context="marketing",
+        tone="confident and warm",
+        examples=["Let's ship the brand, not the buzzwords."],
+    )
+
+    with pytest.raises(ValidationError):
+        VoiceToneEntryOutput(**{**valid_kwargs, "context": ""})
+    with pytest.raises(ValidationError):
+        VoiceToneEntryOutput(**{**valid_kwargs, "tone": ""})
+    with pytest.raises(ValidationError):
+        VoiceToneEntryOutput(**{**valid_kwargs, "examples": []})
+
+    output = VoiceToneEntryOutput(**valid_kwargs)
+    assert output.context == "marketing"
+
+    blank_item = VoiceToneEntryOutput(context="marketing", tone="confident and warm", examples=[""])
+    assert blank_item.examples == [""]
+
+
+def test_voice_tone_entry_output_is_usable_as_a_voice_tone_entry() -> None:
+    """The derived strict twin stays a normal, directly constructible
+    ``pydantic.BaseModel`` subclass wherever ``VoiceToneEntry`` is."""
+    output = VoiceToneEntryOutput(
+        context="marketing",
+        tone="confident and warm",
+        examples=["Let's ship the brand, not the buzzwords."],
+    )
+    assert isinstance(output, VoiceToneEntry)

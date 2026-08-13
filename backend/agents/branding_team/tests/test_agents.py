@@ -12,17 +12,26 @@ from __future__ import annotations
 from branding_team.agents import (
     make_archetype_analyst,
     make_audience_segmenter,
+    make_color_system_builder,
+    make_converge_decider,
+    make_creative_director,
+    make_design_system_codifier,
     make_differentiation_mapper,
     make_discovery_auditor,
     make_iconography_director,
+    make_logo_specifier,
     make_message_mapper,
+    make_moodboard_conceptualist,
     make_persona_builder,
+    make_photography_video_director,
     make_positioning_synthesizer,
     make_purpose_vision_writer,
     make_storyteller,
     make_tagline_writer,
+    make_typography_builder,
     make_values_articulator,
     make_voice_principles_drafter,
+    make_voice_tone_builder,
 )
 
 _EXPECTED_PURPOSE_VISION_PROMPT = (
@@ -136,6 +145,90 @@ _EXPECTED_VOICE_PRINCIPLES_DRAFTER_PROMPT = (
     "This is the final step in narrative development."
 )
 
+_EXPECTED_PHOTOGRAPHY_VIDEO_DIRECTOR_PROMPT = (
+    "You are a Photography & Video Director. Based on the winning moodboard, define:\n"
+    "1. photography_direction — shooting style, lighting, composition, subjects\n"
+    "2. video_direction — pacing, tone, visual style for video content\n"
+    "3. motion_principles — 3-4 principles for animation/motion design"
+)
+
+_EXPECTED_VOICE_TONE_BUILDER_PROMPT = (
+    "You are a Voice & Tone Builder. Using the brand narrative's writing guidelines and "
+    "the moodboard direction, define:\n"
+    "1. voice_tone_spectrum — for each context (marketing, support, legal, social, "
+    "internal), specify the tone and 2-3 examples\n"
+    "2. language_dos — 4-5 approved language patterns\n"
+    "3. language_donts — 4-5 language anti-patterns"
+)
+
+_EXPECTED_DESIGN_SYSTEM_CODIFIER_PROMPT = (
+    "You are a Design System Codifier. Based on the full visual identity work, produce:\n"
+    "1. design_principles — 3-4 guiding principles (e.g. 'Clarity over decoration')\n"
+    "2. foundation_tokens — 4-6 token categories (color, type, spacing, motion, etc.)\n"
+    "3. component_standards — 3-5 component rules (buttons, cards, navigation, etc.)"
+)
+
+
+def _expected_moodboard_conceptualist_prompt(variant: str) -> str:
+    return (
+        f"You are a MoodBoard Conceptualist specialising in {variant.lower()} visual "
+        f"directions. Given a brand's strategic core and narrative, create a moodboard "
+        f"concept with:\n"
+        f"1. title — a name for this direction\n"
+        f"2. visual_direction — overall aesthetic description\n"
+        f"3. color_story — 3-4 color names/descriptions\n"
+        f"4. typography_direction — font style recommendations\n"
+        f"5. image_style — 3-4 image style descriptions"
+    )
+
+
+_EXPECTED_MOODBOARD_EDITORIAL_PROMPT = _expected_moodboard_conceptualist_prompt("Editorial")
+_EXPECTED_MOODBOARD_MINIMALIST_PROMPT = _expected_moodboard_conceptualist_prompt("Minimalist")
+_EXPECTED_MOODBOARD_BOLD_PROMPT = _expected_moodboard_conceptualist_prompt("Bold")
+
+_EXPECTED_CREATIVE_DIRECTOR_PROMPT = (
+    "You are a Creative Director reviewing visual identity exploration. Using the three "
+    "moodboard concepts from Inputs from previous nodes, collect them into:\n"
+    "1. mood_board_candidates — preserve each concept (title, visual_direction, color_story, "
+    "typography_direction, image_style)\n"
+    "Do not pick a winner — converge_decider selects the winning direction."
+)
+
+_EXPECTED_CONVERGE_DECIDER_PROMPT = (
+    "You are a Creative Convergence Decider. You receive moodboard candidates from the "
+    "diverge phase plus the brand's strategic core and values. Score each candidate on:\n"
+    "- Audience resonance\n"
+    "- Distinctiveness vs competitors\n"
+    "- Cross-channel consistency\n"
+    "- Execution feasibility\n\n"
+    "Produce:\n"
+    "1. winning_candidate_title — the selected candidate title\n"
+    "2. scoring_criteria — the criteria used to score candidates\n"
+    "3. scores_by_candidate — dict of title→score\n"
+    "4. rationale — why this candidate won\n"
+    "5. workshop_prompts — 3 questions for stakeholders\n"
+    "6. decision_criteria — decision criteria used"
+)
+
+_EXPECTED_LOGO_SPECIFIER_PROMPT = (
+    "You are a Logo Specifier. Based on the winning moodboard direction, define a logo "
+    "suite. For each variant (primary, monochrome, icon-only, reversed), specify:\n"
+    "1. logo_suite — variant, usage_context, minimum_size, clear_space"
+)
+
+_EXPECTED_COLOR_SYSTEM_BUILDER_PROMPT = (
+    "You are a Color System Builder. Based on the winning moodboard direction, define "
+    "5-7 colors. Include primary, secondary, accent, surface, and critical colors.\n"
+    "1. color_palette — for each: name, hex_value, usage (where to use it), and "
+    "psychological_rationale (why this color works for the brand)"
+)
+
+_EXPECTED_TYPOGRAPHY_BUILDER_PROMPT = (
+    "You are a Typography Builder. Based on the winning moodboard direction, define a "
+    "typography system with 3-4 type roles (display, body, caption, code). For each:\n"
+    "1. typography_system — role, font_family, weight_range, usage_notes"
+)
+
 
 def test_purpose_vision_writer_prompt_matches_original_wording() -> None:
     assert make_purpose_vision_writer().system_prompt == _EXPECTED_PURPOSE_VISION_PROMPT
@@ -189,3 +282,56 @@ def test_voice_principles_drafter_prompt_matches_original_wording() -> None:
     assert (
         make_voice_principles_drafter().system_prompt == _EXPECTED_VOICE_PRINCIPLES_DRAFTER_PROMPT
     )
+
+
+def test_photography_video_director_prompt_matches_original_wording() -> None:
+    assert (
+        make_photography_video_director().system_prompt
+        == _EXPECTED_PHOTOGRAPHY_VIDEO_DIRECTOR_PROMPT
+    )
+
+
+def test_voice_tone_builder_prompt_matches_original_wording() -> None:
+    assert make_voice_tone_builder().system_prompt == _EXPECTED_VOICE_TONE_BUILDER_PROMPT
+
+
+def test_design_system_codifier_prompt_matches_original_wording() -> None:
+    assert make_design_system_codifier().system_prompt == _EXPECTED_DESIGN_SYSTEM_CODIFIER_PROMPT
+
+
+def test_moodboard_conceptualist_editorial_prompt_matches_spec() -> None:
+    assert (
+        make_moodboard_conceptualist("Editorial").system_prompt
+        == _EXPECTED_MOODBOARD_EDITORIAL_PROMPT
+    )
+
+
+def test_moodboard_conceptualist_minimalist_prompt_matches_spec() -> None:
+    assert (
+        make_moodboard_conceptualist("Minimalist").system_prompt
+        == _EXPECTED_MOODBOARD_MINIMALIST_PROMPT
+    )
+
+
+def test_moodboard_conceptualist_bold_prompt_matches_spec() -> None:
+    assert make_moodboard_conceptualist("Bold").system_prompt == _EXPECTED_MOODBOARD_BOLD_PROMPT
+
+
+def test_creative_director_prompt_matches_spec() -> None:
+    assert make_creative_director().system_prompt == _EXPECTED_CREATIVE_DIRECTOR_PROMPT
+
+
+def test_converge_decider_prompt_matches_spec() -> None:
+    assert make_converge_decider().system_prompt == _EXPECTED_CONVERGE_DECIDER_PROMPT
+
+
+def test_logo_specifier_prompt_matches_spec() -> None:
+    assert make_logo_specifier().system_prompt == _EXPECTED_LOGO_SPECIFIER_PROMPT
+
+
+def test_color_system_builder_prompt_matches_spec() -> None:
+    assert make_color_system_builder().system_prompt == _EXPECTED_COLOR_SYSTEM_BUILDER_PROMPT
+
+
+def test_typography_builder_prompt_matches_spec() -> None:
+    assert make_typography_builder().system_prompt == _EXPECTED_TYPOGRAPHY_BUILDER_PROMPT

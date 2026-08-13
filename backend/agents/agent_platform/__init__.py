@@ -1,21 +1,34 @@
-"""In-process agent platform: registry, console, sandbox, and Studio authoring.
+"""Agent platform — in-process backend for discover, author, run, and sandbox.
 
-This package is the cohesive backend for discover / author / run / sandbox
-agents. Members:
+Intended members of this package:
 
-* ``agent_platform.registry`` — manifest catalog (not present yet; still
-  ``agent_registry``)
-* ``agent_platform.console`` — runs / saved-inputs / diff (not present yet;
-  still ``agent_console``)
-* ``agent_platform.sandbox`` — ephemeral sandbox runner (not present yet;
-  still under ``agent_team_studio.agent_provisioning_team.sandbox``)
-* ``agent_platform.studio`` — conversational single-agent authoring, including
-  the ``/api/agent-studio`` HTTP router
+- ``registry`` — manifest catalog (Agent Console ``/api/agents``); present
+- ``console`` — runs / saved-inputs / diff data layer
+- ``sandbox`` — ephemeral per-agent runner; present
+- ``studio`` — conversational single-agent authoring, including the
+  ``/api/agent-studio`` HTTP router; present
 
-Docker/env provisioning (``agent_team_studio.agent_provisioning_team`` minus
-sandbox) is not a member. Domain apps (``agentic_team_provisioning``,
-``user_agent_founder``) consume the platform; they are not members.
+Docker/environment provisioning infrastructure is not a member of this package.
+Domain apps (agentic compose, persona runner) consume this package; they are
+not members of it.
 
-This module re-exports nothing. Import the subsystem packages directly
-(``from agent_platform.studio import router``).
+Subpackages are imported with fully-qualified dotted paths
+(``agent_platform.registry``, ``agent_platform.sandbox``,
+``agent_platform.studio``, …). This module re-exports nothing.
+
+Boundary:
+    * In: manifest catalog (``agent_platform.registry``), sandbox lifecycle
+      (acquire / warm / teardown / reaper) plus its Temporal wiring
+      (``agent_platform.sandbox``), and Studio authoring
+      (``agent_platform.studio``).
+    * Out: Docker/env provisioning infra under
+      ``agent_team_studio.agent_provisioning_team`` (tool agents, phases,
+      orchestrator, provisioning Temporal). Domain apps that merely consume
+      the platform (agentic compose, persona runner) stay consumers.
+
+Preconditions:
+    * ``backend/agents`` is on ``PYTHONPATH``.
+Postconditions:
+    * Importing ``agent_platform`` has no side effects (no worker boot, no
+      I/O). Subpackages are loaded only when callers import them.
 """

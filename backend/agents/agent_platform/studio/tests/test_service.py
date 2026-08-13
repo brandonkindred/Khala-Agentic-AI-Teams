@@ -8,12 +8,12 @@ from __future__ import annotations
 
 import pytest
 
+from agent_platform.registry.models import AgentManifest
 from agent_platform.studio.assistant import AgentDesignerAgent
 from agent_platform.studio.models import AgentDefinition
 from agent_platform.studio.service import AgentStudioService
 from agent_platform.studio.store import AgentStudioConversationStore
 from agent_platform.studio.testing import FakeRegistry, seed_manifest
-from agent_registry.models import AgentManifest
 
 _DRAFT_REPLY = """\
 Drafted it.

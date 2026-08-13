@@ -11,19 +11,16 @@ Invariants:
     - **Additive-only, fail-safe.** Never removes or mutates findings the
       caller already has; any setup/LLM/validation failure yields
       ``([], [])``.
-    - **Bounded cost per batch, with reactive recovery.** Agent construction,
-      context budgeting, proactive file-group chunking, and reactive
-      overflow bisect/shrink recovery are all owned by the shared
+    - **One call with reactive bisect recovery.** Agent construction and
+      overflow recovery (file-list bisect only; no character truncation) are
+      owned by the shared
       :func:`~code_review_agent.submission_pass_runner.run_submission_pass`
       runner; this module supplies only its system prompt, tool set, and
-      prompt/parse callbacks. A submission that fits under the budget still
-      makes exactly one think-then-format pair.
+      prompt/parse callbacks. Architecture text, the path manifest, and
+      changed-file bodies are inlined in full — there is no character packing.
     - **``CODE_REVIEW`` profile only.** Same restriction as each standalone
       pass.
-    - **Context-aware budgeting.** Changed-file inlining (and, when needed,
-      architecture text / the path manifest) is sized for the combined
-      system prompt and dual finding-array response — not the map-call code
-      allowance alone. Disabled halves are omitted from the prompt.
+    - **Half-aware prompts.** Disabled halves are omitted from the prompt.
 """
 
 from __future__ import annotations
@@ -51,7 +48,7 @@ from .prompts import (
     build_merged_architecture_side_effect_reasoning_system_prompt,
 )
 from .repo_reader import RepoReader
-from .submission_pass_runner import FileBatch, SubmissionPassBudgets, run_submission_pass
+from .submission_pass_runner import FileBatch, run_submission_pass
 
 logger = logging.getLogger(__name__)
 
@@ -93,12 +90,10 @@ def find_architecture_and_side_effect_issues(
           ``CodebaseIndex.full_content_complete``). Architecture is forced off
           when there is no architecture payload and no ``repo_reader`` /
           ``existing_codebase`` evidence.
-        - When the changed-file set's estimated inline size exceeds one batch's
-          budget, the shared runner splits it into multiple bounded batches
-          (and reactively bisects/shrinks any batch that still overflows);
-          findings from every batch are concatenated into the same two
-          returned lists. A submission under the budget still makes exactly
-          one think-then-format pair.
+        - Starts with one think-then-format call over the full changed-file
+          set. On an overflow-shaped failure the shared runner bisects the
+          file list (never truncating content); findings from every recovered
+          batch are concatenated into the same two returned lists.
     """
     if index is None:
         index = CodebaseIndex.from_input(input_data, repo_reader=repo_reader)
@@ -158,8 +153,8 @@ def _run_pass(
     Postconditions:
         - Same contract as the public entry, minus the env/profile early
           returns the caller already handled.
-        - Delegates budgeting, proactive chunking, the think-then-format
-          ``Agent`` pair, and reactive overflow bisect/shrink recovery to
+        - Delegates the think-then-format ``Agent`` pair and reactive overflow
+          bisect recovery to
           :func:`~code_review_agent.submission_pass_runner.run_submission_pass`,
           which never raises; a batch's findings are folded into the two
           returned lists in batch order. An empty runner result (context too
@@ -181,13 +176,10 @@ def _run_pass(
     tools = _build_merged_pass_tools(index, side_on=side_on)
     pre_numbered = side_pass._effective_pre_numbered(input_data, index)
 
-    def _build_prompt_for_batch(batch: FileBatch, budgets: SubmissionPassBudgets) -> str:
+    def _build_prompt_for_batch(batch: FileBatch) -> str:
         return _build_prompt(
             index,
             arch_body,
-            budgets.max_inline_code_chars,
-            max_architecture_chars=budgets.max_extra_body_chars,
-            max_manifest_chars=budgets.max_manifest_chars,
             arch_on=arch_on,
             side_on=side_on,
             content_items=batch.items,
@@ -226,9 +218,6 @@ def _run_pass(
             )
         return architecture_findings, side_effect_findings
 
-    # `find_architecture_and_side_effect_issues` already returns early unless at
-    # least one of arch_on/side_on is True, so this XOR is always 1 or 2 — never
-    # the 0 that would make `run_submission_pass` raise ValueError.
     results = run_submission_pass(
         llm,
         changed_files=list(index.files.items()),
@@ -237,8 +226,6 @@ def _run_pass(
         build_prompt=_build_prompt_for_batch,
         tools=tools,
         parse=_parse_batch_reply,
-        extra_reserved_chars=len(arch_body),
-        finding_array_count=1 if arch_on ^ side_on else 2,
         pass_label="MergedArchitectureSideEffectPass",
     )
 
@@ -412,10 +399,7 @@ def _issues_from_half(
 def _build_prompt(
     index: CodebaseIndex,
     architecture_body: str,
-    max_inline_chars: int,
     *,
-    max_architecture_chars: int,
-    max_manifest_chars: int,
     arch_on: bool,
     side_on: bool,
     content_items: Optional[List[Tuple[str, str]]] = None,
@@ -428,38 +412,28 @@ def _build_prompt(
     Preconditions:
         - ``architecture_body`` is the flattened document text (empty when the
           architecture half is off or no document was provided).
-        - Budget ints are ``>= 0`` from :func:`compute_code_review_merged_pass_budgets`.
         - At least one of ``arch_on`` / ``side_on`` is True.
         - ``content_items``, when given, is this call's batch of the changed
           files (a subset of ``index.files.items()``) whose full content is
-          inlined below the manifest; ``None`` inlines every changed file
-          (the pre-batching / single-batch behavior).
+          inlined below the manifest; ``None`` inlines every changed file.
         - ``batch_index``/``total_batches`` are both ``None`` (no batch label
           rendered) or both set to this batch's 1-based position and the
           total batch count.
-        - ``is_partial`` is True only for a reactive-recovery bisect/shrink
-          child batch (:attr:`~code_review_agent.submission_pass_runner.FileBatch.is_partial`),
+        - ``is_partial`` is True only for a reactive-recovery bisect child
+          batch (:attr:`~code_review_agent.submission_pass_runner.FileBatch.is_partial`),
           whose ``content_items`` is not a complete representation of
           everything ``batch_index``/``total_batches`` normally cover.
 
     Postconditions:
         - Omits the architecture section when ``arch_on`` is False.
-        - The changed-file path manifest always lists every changed file in
-          the submission (from ``index.files``, not ``content_items``),
-          truncated to ``max_manifest_chars`` with a tool-reachable overflow
-          note when needed — batching only bounds inlined content, not
-          whole-submission awareness of what changed.
-        - Inlines ``content_items`` (or every changed file when ``None``) up
-          to ``max_inline_chars``, deducting per-file heading/fence wrappers
-          from that allowance. When ``is_partial`` is True, the content
-          section header renders a reduced-view recovery banner instead of a
-          "batch N of M" claim (``total_batches`` is inherited unchanged from
-          the parent batch and would otherwise misrepresent this reduced
-          content as a complete proactive batch); this check takes precedence
-          over the ``total_batches`` check below. Otherwise, when
-          ``total_batches`` is set (> 1), the content section header names
-          this batch's position and points to the manifest/tools for files
-          not shown in this call.
+        - When architecture is on and a document is present, inlines it in full.
+        - The changed-file path manifest lists every changed file in the
+          submission (from ``index.files``, not ``content_items``) with no
+          truncation.
+        - Inlines every file in ``content_items`` (or every changed file when
+          ``None``) in full. When ``is_partial`` is True, the content section
+          header renders a reduced-view recovery banner; otherwise, when
+          ``total_batches`` is set (> 1), it names this batch's position.
         - Ends with a prose-only closer (no JSON schema) per enabled half;
           disabled halves are told to stay empty in the tool-guidance line above.
     """
@@ -467,17 +441,11 @@ def _build_prompt(
 
     if arch_on:
         if architecture_body:
-            body = architecture_body[:max_architecture_chars]
-            doc_fence = code_fence_for(body)
+            doc_fence = code_fence_for(architecture_body)
             parts.append("**Architecture document:**")
             parts.append(doc_fence)
-            parts.append(body)
+            parts.append(architecture_body)
             parts.append(doc_fence)
-            if len(body) < len(architecture_body):
-                parts.append(
-                    f"(Only the first {len(body)} characters of the architecture document "
-                    "are shown above — the remainder was omitted to fit the model context.)"
-                )
         else:
             parts.append("**Architecture document:**")
             parts.append(
@@ -490,7 +458,7 @@ def _build_prompt(
 
     changed_files = list(index.files.items())
     paths = [path for path, _ in changed_files]
-    parts.extend(_render_manifest(paths, max_manifest_chars))
+    parts.extend(_render_manifest(paths))
     parts.append("")
 
     batch_files = content_items if content_items is not None else changed_files
@@ -512,25 +480,12 @@ def _build_prompt(
         )
     else:
         parts.append("**Full content of the changed files:**")
-    remaining = max_inline_chars
-    omitted = 0
-    for i, (path, content) in enumerate(batch_files):
-        if remaining <= 0:
-            omitted = len(batch_files) - i
-            break
-        block_lines, _truncated = _fit_changed_file_block(path, content, remaining)
-        if block_lines is None:
-            omitted = len(batch_files) - i
-            break
-        block = "\n".join(block_lines)
-        parts.extend(block_lines)
-        remaining -= len(block) + 1  # +1 for the join newline before the next block
-    if omitted:
-        parts.append(
-            f"... and {omitted} more changed file(s) not shown above; call "
-            "list_changed_files(offset=0)/read_file(path) to see them "
-            "(page with offset/limit when the list is long)."
-        )
+    for path, content in batch_files:
+        fence = code_fence_for(content)
+        parts.append(f"### {path} ###")
+        parts.append(fence)
+        parts.append(content)
+        parts.append(fence)
     parts.append("")
 
     if arch_on and side_on:
@@ -578,114 +533,9 @@ def _build_prompt(
     return "\n".join(parts)
 
 
-def _overflow_manifest_note(omitted: int) -> str:
-    """Tool-reachable note for changed paths omitted from the inline manifest."""
-    return (
-        f"... and {omitted} more changed path(s) not listed; "
-        "call list_changed_files(offset=0) then read_file(path) to reach them "
-        "(page with offset/limit when the list is long)."
-    )
+def _render_manifest(paths: List[str]) -> List[str]:
+    """Render the full changed-file path list (no character truncation).
 
-
-def _render_manifest(paths: List[str], max_manifest_chars: int) -> List[str]:
-    """Render the changed-file path list, truncated to ``max_manifest_chars``.
-
-    Postconditions:
-        - Always includes the section header.
-        - When the full remaining list fits in the budget, renders every remaining
-          path (no overflow note) — never reserves note room that would hide
-          paths that already fit.
-        - When the full list exceeds the budget, includes as many paths as fit
-          and a tool-reachable overflow note for the rest.
+    Postconditions: always includes the section header followed by every path.
     """
-    header = f"**Changed files in this submission ({len(paths)}):**"
-    lines: List[str] = [header]
-    used = len(header) + 1
-    shown = 0
-    for i, path in enumerate(paths):
-        # Prefer emitting the full remainder when it fits without an overflow note.
-        rest_cost = sum(len(p) + 1 for p in paths[i:])
-        if used + rest_cost <= max_manifest_chars:
-            lines.extend(paths[i:])
-            return lines
-
-        line_cost = len(path) + 1
-        omitted_after = len(paths) - (shown + 1)
-        room_for_note = len(_overflow_manifest_note(omitted_after)) + 1 if omitted_after > 0 else 0
-        if used + line_cost + room_for_note > max_manifest_chars and shown > 0:
-            lines.append(_overflow_manifest_note(len(paths) - shown))
-            break
-        if used + line_cost > max_manifest_chars and shown == 0:
-            # Budget too tight for even one path: header + overflow only.
-            lines.append(_overflow_manifest_note(len(paths)))
-            break
-        lines.append(path)
-        used += line_cost
-        shown += 1
-    return lines
-
-
-def _fit_changed_file_block(
-    path: str,
-    content: str,
-    remaining: int,
-) -> Tuple[Optional[List[str]], bool]:
-    """Build one changed-file prompt block that fits in ``remaining`` characters.
-
-    Preconditions:
-        - ``remaining`` is ``>= 0``.
-        - ``path`` / ``content`` are the submission path and body to inline.
-
-    Postconditions:
-        - Returns ``(None, True)`` when even a heading/fence shell cannot fit
-          (caller should omit this and every later file).
-        - Otherwise returns ``(block_lines, truncated)`` where ``block_lines``
-          join to a string of length ``<= remaining``. When the body is a
-          prefix of ``content``, ``truncated`` is ``True`` and a read_file note
-          is included. Never raises.
-    """
-    heading = f"### {path} ###"
-    fence_reserve = 8
-    base_overhead = len(heading) + 1 + 2 * (fence_reserve + 1)
-    note_template = (
-        "(Only the first {n} characters of `{path}` are shown above; call "
-        "read_file to see the rest.)"
-    )
-    # Worst-case note length uses ``remaining`` as the digit width upper bound.
-    note_reserve = len(note_template.format(n=remaining, path=path)) + 1
-    if base_overhead >= remaining:
-        return None, True
-
-    if base_overhead + len(content) <= remaining:
-        body = content
-        include_note = False
-    else:
-        overhead = base_overhead + note_reserve
-        if remaining <= overhead:
-            return None, True
-        body = content[: remaining - overhead]
-        include_note = True
-
-    def _lines_for(body_text: str, with_note: bool) -> List[str]:
-        fence = code_fence_for(body_text)
-        out = [heading, fence, body_text, fence]
-        if with_note:
-            out.append(note_template.format(n=len(body_text), path=path))
-        return out
-
-    block_lines = _lines_for(body, include_note)
-    block = "\n".join(block_lines)
-    # Actual fences can exceed the fixed reserve (long backtick runs). Shrink
-    # the body — including full-file blocks — rather than dropping this file
-    # and every later one.
-    while len(block) > remaining and body:
-        excess = len(block) - remaining
-        if len(body) <= excess:
-            return None, True
-        body = body[: len(body) - excess]
-        include_note = True
-        block_lines = _lines_for(body, True)
-        block = "\n".join(block_lines)
-    if len(block) > remaining:
-        return None, True
-    return block_lines, include_note or len(body) < len(content)
+    return [f"**Changed files in this submission ({len(paths)}):**", *paths]

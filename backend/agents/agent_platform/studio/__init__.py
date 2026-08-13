@@ -9,7 +9,7 @@ This package implements the §5 Stage-1 backend the Agent Studio UX depends on
 * **clone-from-registry** — projecting an existing registry manifest into an
   editable draft (the source manifest is never mutated);
 * **save + register** — turning a finished definition into a live, invokable
-  ``agent_registry`` manifest, reusing the generated-agent runtime so a saved
+  ``agent_platform.registry`` manifest, reusing the generated-agent runtime so a saved
   Studio agent is invokable exactly like a generated team agent.
 
 Conversation state is held in-process (:mod:`agent_platform.studio.store`); durable

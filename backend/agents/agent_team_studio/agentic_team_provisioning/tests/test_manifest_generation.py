@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from agent_registry.models import AgentManifest, CognitionSpec
+from agent_platform.registry.models import AgentManifest, CognitionSpec
 from agent_team_studio.agentic_team_provisioning.manifest_generation import (
     build_agent_manifest,
     default_cognition_block,
@@ -143,11 +143,11 @@ def test_free_text_tools_are_not_mapped_into_cognition():
 
 
 def test_register_team_manifests_installs_into_registry(monkeypatch: pytest.MonkeyPatch):
-    import agent_registry
-    from agent_registry.loader import AgentRegistry
+    from agent_platform import registry
+    from agent_platform.registry.loader import AgentRegistry
 
     reg = AgentRegistry([], {})
-    monkeypatch.setattr(agent_registry, "get_registry", lambda: reg)
+    monkeypatch.setattr(registry, "get_registry", lambda: reg)
 
     team_id = "team-1"
     agents = [_thin(team_id, "A"), _thin(team_id, "B")]
@@ -167,11 +167,11 @@ def test_register_team_manifests_installs_into_registry(monkeypatch: pytest.Monk
 
 
 def test_register_team_manifests_uses_existing_registry_summary(monkeypatch: pytest.MonkeyPatch):
-    import agent_registry
-    from agent_registry.loader import AgentRegistry
+    from agent_platform import registry
+    from agent_platform.registry.loader import AgentRegistry
 
     reg = AgentRegistry([], {})
-    monkeypatch.setattr(agent_registry, "get_registry", lambda: reg)
+    monkeypatch.setattr(registry, "get_registry", lambda: reg)
 
     team_id = "team-1"
     prior = build_agent_manifest(team_id, "A", summary="kept summary")
@@ -184,11 +184,11 @@ def test_register_team_manifests_uses_existing_registry_summary(monkeypatch: pyt
 
 def test_register_team_manifests_preserves_existing_skill_tags(monkeypatch: pytest.MonkeyPatch):
     """Omitting skill_tags (startup path) must not wipe previously stamped skill tags."""
-    import agent_registry
-    from agent_registry.loader import AgentRegistry
+    from agent_platform import registry
+    from agent_platform.registry.loader import AgentRegistry
 
     reg = AgentRegistry([], {})
-    monkeypatch.setattr(agent_registry, "get_registry", lambda: reg)
+    monkeypatch.setattr(registry, "get_registry", lambda: reg)
 
     team_id = "team-1"
     prior = build_agent_manifest(
@@ -206,11 +206,11 @@ def test_register_team_manifests_preserves_existing_skill_tags(monkeypatch: pyte
 
 def test_register_team_manifests_explicit_skill_tags_replace(monkeypatch: pytest.MonkeyPatch):
     """When skill_tags is provided for an agent, those values replace prior skill tags."""
-    import agent_registry
-    from agent_registry.loader import AgentRegistry
+    from agent_platform import registry
+    from agent_platform.registry.loader import AgentRegistry
 
     reg = AgentRegistry([], {})
-    monkeypatch.setattr(agent_registry, "get_registry", lambda: reg)
+    monkeypatch.setattr(registry, "get_registry", lambda: reg)
 
     team_id = "team-1"
     prior = build_agent_manifest(team_id, "A", summary="s", skill_tags=["old-skill"])
@@ -225,11 +225,11 @@ def test_register_team_manifests_explicit_skill_tags_replace(monkeypatch: pytest
 
 
 def test_register_team_manifests_replaces_stale_roster(monkeypatch: pytest.MonkeyPatch):
-    import agent_registry
-    from agent_registry.loader import AgentRegistry
+    from agent_platform import registry
+    from agent_platform.registry.loader import AgentRegistry
 
     reg = AgentRegistry([], {})
-    monkeypatch.setattr(agent_registry, "get_registry", lambda: reg)
+    monkeypatch.setattr(registry, "get_registry", lambda: reg)
 
     team_id = "team-1"
     first = register_team_manifests(
@@ -253,12 +253,12 @@ def test_register_team_manifests_replaces_stale_roster(monkeypatch: pytest.Monke
 def test_register_team_manifests_scopes_removal_to_team_and_generated(
     monkeypatch: pytest.MonkeyPatch,
 ):
-    import agent_registry
-    from agent_registry.loader import AgentRegistry
-    from agent_registry.models import AgentManifest, SourceInfo
+    from agent_platform import registry
+    from agent_platform.registry.loader import AgentRegistry
+    from agent_platform.registry.models import AgentManifest, SourceInfo
 
     reg = AgentRegistry([], {})
-    monkeypatch.setattr(agent_registry, "get_registry", lambda: reg)
+    monkeypatch.setattr(registry, "get_registry", lambda: reg)
 
     # A hand-authored manifest for another team is never touched by team-1's replace.
     other = AgentManifest(
@@ -287,11 +287,11 @@ def test_team_prefix_is_injective_for_shared_slug():
 
 
 def test_register_team_manifests_isolates_teams_with_shared_slug(monkeypatch: pytest.MonkeyPatch):
-    import agent_registry
-    from agent_registry.loader import AgentRegistry
+    from agent_platform import registry
+    from agent_platform.registry.loader import AgentRegistry
 
     reg = AgentRegistry([], {})
-    monkeypatch.setattr(agent_registry, "get_registry", lambda: reg)
+    monkeypatch.setattr(registry, "get_registry", lambda: reg)
 
     team_a = "team-aaaaaaaaaa-1"
     team_b = "team-aaaaaaaaaa-2"
@@ -304,12 +304,12 @@ def test_register_team_manifests_isolates_teams_with_shared_slug(monkeypatch: py
 def test_register_team_manifests_propagates_registry_failure(
     monkeypatch: pytest.MonkeyPatch,
 ):
-    import agent_registry
+    from agent_platform import registry
 
     def _boom():
         raise RuntimeError("registry unavailable")
 
-    monkeypatch.setattr(agent_registry, "get_registry", _boom)
+    monkeypatch.setattr(registry, "get_registry", _boom)
 
     # Registry failures propagate so chat-save can roll back the roster write.
     with pytest.raises(RuntimeError, match="registry unavailable"):
@@ -320,11 +320,11 @@ def test_register_team_manifests_propagates_atomic_replace_failure(
     monkeypatch: pytest.MonkeyPatch,
 ):
     """A failed atomic replace leaves the prior roster manifests untouched."""
-    import agent_registry
-    from agent_registry.loader import AgentRegistry
+    from agent_platform import registry
+    from agent_platform.registry.loader import AgentRegistry
 
     reg = AgentRegistry([], {})
-    monkeypatch.setattr(agent_registry, "get_registry", lambda: reg)
+    monkeypatch.setattr(registry, "get_registry", lambda: reg)
 
     team_id = "team-1"
     first = register_team_manifests(

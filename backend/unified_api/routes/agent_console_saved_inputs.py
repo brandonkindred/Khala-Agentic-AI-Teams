@@ -20,7 +20,7 @@ from agent_console import (
 )
 from agent_console.models import SavedInputCreate, SavedInputUpdate
 from agent_console.store import SavedInputNameConflict
-from agent_registry import get_registry
+from agent_platform.registry import get_registry
 
 logger = logging.getLogger(__name__)
 

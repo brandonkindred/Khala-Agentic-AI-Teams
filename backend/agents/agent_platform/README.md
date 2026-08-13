@@ -1,30 +1,27 @@
-# agent_platform
+# Agent platform
 
-In-process platform core for discover / author / run / sandbox agents.
+In-process backend for discovering, authoring, running, and sandboxing specialist
+agents. Lives at `backend/agents/agent_platform/` so it sits on the same
+`PYTHONPATH` root (`backend/agents`) as every other agent package.
 
 ## Members
 
-| Subpackage | Status in this tree |
-|---|---|
-| `studio` | Present — authoring modules + `/api/agent-studio` router |
-| `registry` | Not yet — still `agent_registry` |
-| `console` | Not yet — still `agent_console` |
-| `sandbox` | Not yet — still `agent_team_studio.agent_provisioning_team.sandbox` |
+| Subpackage | Role | Public import |
+|---|---|---|
+| [`registry/`](registry/README.md) | Manifest catalog serving `/api/agents` | `from agent_platform.registry import …` |
+| `console/` | Runs / saved-inputs / diff data layer | not yet relocated |
+| [`sandbox/`](sandbox/README.md) | Per-agent ephemeral sandbox lifecycle and sandbox-only Temporal wiring | `from agent_platform.sandbox import acquire` |
+| [`studio/`](studio/README.md) | Conversational single-agent authoring + `/api/agent-studio` router | `from agent_platform.studio import router` |
+
+This package's `__init__.py` is a thin boundary docstring only — it re-exports
+nothing. Callers import from the subpackage façades.
 
 ## Not in this package
 
-- Docker/env provisioning under `agent_team_studio.agent_provisioning_team/`
-- `agentic_team_provisioning` and `user_agent_founder` (consumers)
+- Docker/environment provisioning infra (`agent_team_studio/agent_provisioning_team/`)
+- Domain apps that consume the platform (`agentic_team_provisioning/`, `user_agent_founder/`)
+- Unified-API HTTP route modules for registry/console/sandbox (`unified_api/routes/sandboxes.py` stays
+  a bare `include_router` mount). Studio's router lives in `agent_platform.studio`.
 
-## Public imports
-
-```python
-from agent_platform.studio import router, get_studio_service
-from agent_platform.studio import build_studio_agent_manifest, clone_from_manifest
-from agent_platform.studio.temporal.worker import start_agent_studio_temporal_worker_thread
-from agent_platform.studio.postgres import SCHEMA
-```
-
-The unified API mounts `router` at `/api/agent-studio` when
-`TEAM_CONFIGS["agent_studio"]` is enabled. Worker boot stays in the unified-API
-lifespan.
+Layout and import map: `system_design/adr/ADR-013-agent-platform-package-layout.md`.
+Migration order and non-goals: `system_design/adr/ADR-014-agent-platform-non-goals-and-migration-order.md`.

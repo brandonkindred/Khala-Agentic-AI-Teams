@@ -3,7 +3,7 @@
 The sync worker, scheduler, and reflection engine each need a slice of an agent's
 declarative ``cognition`` config (``knowledge_graph`` ingest/grounding flags and
 ``memory.retention_days_events``). This module centralizes reading it from the
-:mod:`agent_registry`, with safe defaults when the registry or manifest is
+:mod:`agent_platform.registry`, with safe defaults when the registry or manifest is
 unavailable (e.g. an ad-hoc agent that has memory but no on-disk manifest).
 
 Defaults come straight from the manifest model classes (``CognitionKnowledgeGraphSpec``
@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 @lru_cache(maxsize=1)
 def _kg_default() -> Any:
     """The default ``CognitionKnowledgeGraphSpec`` (default-on), cached."""
-    from agent_registry.models import CognitionKnowledgeGraphSpec  # noqa: PLC0415
+    from agent_platform.registry.models import CognitionKnowledgeGraphSpec  # noqa: PLC0415
 
     return CognitionKnowledgeGraphSpec()
 
@@ -33,7 +33,7 @@ def _kg_default() -> Any:
 @lru_cache(maxsize=1)
 def _retention_default() -> int:
     """The default raw-event retention from ``CognitionMemorySpec``, cached."""
-    from agent_registry.models import CognitionMemorySpec  # noqa: PLC0415
+    from agent_platform.registry.models import CognitionMemorySpec  # noqa: PLC0415
 
     return CognitionMemorySpec().retention_days_events
 
@@ -46,7 +46,7 @@ def _manifest_cognition(agent_id: str) -> Any:
     apply their own defaults. Never raises.
     """
     try:
-        from agent_registry import get_registry  # noqa: PLC0415
+        from agent_platform.registry import get_registry  # noqa: PLC0415
 
         manifest = get_registry().get(agent_id)
         if manifest is not None:

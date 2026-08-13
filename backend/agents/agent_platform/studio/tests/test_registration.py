@@ -4,6 +4,13 @@ from __future__ import annotations
 
 import pytest
 
+from agent_platform.registry.models import (
+    AgentManifest,
+    AgentStateSpec,
+    CognitionSpec,
+    IOSchema,
+    SourceInfo,
+)
 from agent_platform.studio.agent_states import STATE_ORDER
 from agent_platform.studio.models import AgentDefinition, AgentState
 from agent_platform.studio.registration import (
@@ -12,7 +19,6 @@ from agent_platform.studio.registration import (
     clone_from_manifest,
     studio_agent_id,
 )
-from agent_registry.models import AgentManifest, AgentStateSpec, CognitionSpec, IOSchema, SourceInfo
 from agent_team_studio.manifest_shared import default_cognition_block
 
 

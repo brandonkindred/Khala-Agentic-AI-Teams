@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pydantic import BaseModel, Field
 
-from agent_registry.models import AgentManifest
+from agent_platform.registry.models import AgentManifest
 from agent_team_studio.agentic_team_provisioning.manifest_generation import (
     build_agent_manifest,
     manifest_agent_id,
@@ -68,7 +68,7 @@ def resolve_persona(manifest_id: str) -> RosterPersonaView:
     Postconditions: returns ``persona_from_manifest`` for the registry entry.
     Raises: ``LookupError`` if the Manifest is not in the registry.
     """
-    from agent_registry import get_registry
+    from agent_platform.registry import get_registry
 
     if not manifest_id or not str(manifest_id).strip():
         raise LookupError("manifest_id must be non-empty")
@@ -260,7 +260,7 @@ def migrate_roster_row(
         # Generated rows may still carry denormalized fat skills alongside a stamped
         # id — fold them into the Manifest before stripping the roster JSON.
         if source == SOURCE_GENERATED and _raw_has_fat_keys(raw):
-            from agent_registry import get_registry
+            from agent_platform.registry import get_registry
 
             _ensure_generated_manifest_from_fat(
                 team_id, agent_name, mid, raw, get_registry(), conn=conn
@@ -271,7 +271,7 @@ def migrate_roster_row(
         )
 
     mid = manifest_agent_id(team_id, agent_name)
-    from agent_registry import get_registry
+    from agent_platform.registry import get_registry
 
     _ensure_generated_manifest_from_fat(
         team_id, agent_name, mid, raw, get_registry(), conn=conn

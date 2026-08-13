@@ -38,6 +38,7 @@ if TYPE_CHECKING:
 from temporalio.client import WorkflowFailureError
 from temporalio.exceptions import WorkflowAlreadyStartedError
 
+from agent_platform.registry.models import AgentManifest
 from agent_platform.studio.models import AgentDefinition, ConversationStateResponse
 from agent_platform.studio.temporal import (
     TASK_QUEUE,
@@ -50,7 +51,6 @@ from agent_platform.studio.temporal import (
     SendMessageWorkflow,
     StartConversationWorkflow,
 )
-from agent_registry.models import AgentManifest
 from shared.temporal import execute_workflow_sync
 
 logger = logging.getLogger(__name__)
