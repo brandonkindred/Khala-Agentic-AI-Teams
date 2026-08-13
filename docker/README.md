@@ -129,7 +129,7 @@ On **macOS** with Docker Desktop, container memory is capped by the VM's memory 
 The **khala** (Unified API) image is mostly a reverse proxy: of the teams
 configured in `TEAM_CONFIGS` (`backend/unified_api/config.py`), all but a
 handful (`in_process=True` — `user_profile`, `product_delivery`,
-`agent_studio`, plus platform modules `agent_console`, `agent_platform.registry`,
+`agent_studio`, plus platform modules `agent_platform.console`, `agent_platform.registry`,
 `agent_cognition`, `team_assistant`) are proxied over HTTP via
 `unified_api/team_proxy.py` to their own per-team container and never
 imported by this process. `backend/Dockerfile` reflects that: it installs
