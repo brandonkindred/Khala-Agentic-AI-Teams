@@ -424,7 +424,10 @@ jobs:
               },
               "agent_platform": {
                   "name": "Agent Platform",
-                  "tests": "agent_platform/sandbox/tests/ agent_platform/registry/tests/",
+                  # Sandbox + registry unit suites plus a /api/agents dual-path
+                  # smoke test (cwd is backend/agents; space-separated paths
+                  # word-split in `pytest ${{ matrix.tests }}`).
+                  "tests": "agent_platform/sandbox/tests/ agent_platform/registry/tests/ ../unified_api/tests/test_agents_dual_path_residue.py",
                   "source": "agent_platform.sandbox",
               },
               "agent_studio": {

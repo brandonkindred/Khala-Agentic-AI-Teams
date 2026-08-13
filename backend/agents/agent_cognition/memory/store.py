@@ -1,6 +1,6 @@
 """Postgres data-access layer for episodic memory events and rollups.
 
-Follows the ``agent_console`` store idiom:
+Follows the ``agent_platform.console`` store idiom:
   * stateless module-level functions (the pool lives in ``shared.postgres``)
   * one public function per operation, decorated with ``@timed_query``
   * synchronous psycopg v3; ``with get_conn()`` commits on clean exit and
