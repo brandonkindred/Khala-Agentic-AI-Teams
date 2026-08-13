@@ -69,6 +69,14 @@ def test_shared_skeleton_pieces_are_slices_of_legacy_prompt() -> None:
     assert _SHARED_OUTPUT_SECTION in CODE_REVIEW_PROMPT
 
 
+def test_shared_output_section_treats_line_gutter_as_metadata_not_indent() -> None:
+    """Numbered prefixes must not be judged as source whitespace (9→10 hang)."""
+    assert "`123| <code>`" in _SHARED_OUTPUT_SECTION
+    assert "`N| `" in _SHARED_OUTPUT_SECTION
+    assert "hanging indent" in _SHARED_OUTPUT_SECTION
+    assert "gutter is metadata" in _SHARED_OUTPUT_SECTION
+
+
 def test_requirement_citation_guardrail_in_spec_flavored_sections_only() -> None:
     """Guardrail sits under the Ticket/Spec Fit item, not Style."""
     code_review = build_review_system_prompt(ReviewProfile.CODE_REVIEW)
