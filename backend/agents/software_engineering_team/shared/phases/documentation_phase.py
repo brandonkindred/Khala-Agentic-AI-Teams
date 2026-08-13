@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Dict, Optional
 
 from llm_service import LLMClient
+from shared.concurrency import KeyedLockManager
 from shared.dev_models.models import Task
 from software_engineering_team.shared.repo_writer import (
     UnsafeRepoPathError,
@@ -58,6 +59,7 @@ def _run_documentation_phase(
     current_idx: int,
     total: int,
     detail_cb: Callable[[str, int, str], None],
+    file_locks: KeyedLockManager[str],
 ) -> None:
     """Run a microtask's documentation self-review phase (Phase 5, never fails).
 
@@ -66,6 +68,8 @@ def _run_documentation_phase(
 
     Preconditions:
         ``microtask_files`` reflects the last review-gate-accepted write.
+        ``file_locks`` is the per-run manager that serializes overlapping
+        documentation writes against concurrent wave siblings.
     Postconditions:
         ``mt.status`` becomes ``COMPLETED`` and ``mt.id`` is added to
         ``completed_ids``. ``microtask_files``, ``all_files``, and
@@ -135,10 +139,11 @@ def _run_documentation_phase(
     # path is best-effort: log and skip it — the microtask still completes.
     if self_review_result.documentation:
         try:
-            write_repo_text_files(repo_path, self_review_result.documentation)
-            microtask_files.update(self_review_result.documentation)
-            mt.output_files = microtask_files
-            all_files.update(self_review_result.documentation)
+            with file_locks.lock(self_review_result.documentation.keys()):
+                write_repo_text_files(repo_path, self_review_result.documentation)
+                microtask_files.update(self_review_result.documentation)
+                mt.output_files = microtask_files
+                all_files.update(self_review_result.documentation)
         except UnsafeRepoPathError as exc:
             logger.warning(
                 "[%s] Microtask %s: unsafe documentation path rejected, skipping: %s",

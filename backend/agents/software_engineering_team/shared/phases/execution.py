@@ -5,6 +5,7 @@ gated per-microtask review loop (``run_gated_execution_impl``).
 from __future__ import annotations
 
 import logging
+import threading
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
@@ -12,18 +13,18 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from llm_service import LLMClient
 from llm_service.strands_model import LlmRunner
+from shared.concurrency import KeyedLockManager, parallel_map
 from shared.dev_models.models import ReviewContext, SystemArchitecture, Task
 from software_engineering_team.shared.agent_review import AgentReviewCache
 from software_engineering_team.shared.code_completeness import reject_invalid_python
 from software_engineering_team.shared.phases.documentation_phase import _run_documentation_phase
 from software_engineering_team.shared.phases.review_cycle import (
     GateOutcome,
+    _locked_write_and_merge,
     _run_review_cycles,
-    write_microtask_output_or_fail,
 )
 from software_engineering_team.shared.phases.rollback import (
     _MicrotaskRollback,
-    _record_prior_values,
 )
 from software_engineering_team.shared.stack_profile import PhaseModels, StackProfile
 
@@ -192,7 +193,7 @@ def run_execution_impl(
     models: PhaseModels,
     run_general_microtask: Callable[..., Dict[str, str]],
 ) -> Any:
-    """Execute microtasks in the planner's stated order, best-effort on dependencies.
+    """Execute microtasks in dependency-respecting waves, concurrently within a wave.
 
     If ``only_microtask_ids`` is set, only those microtasks are run (e.g. fix
     microtasks from ``plan_fixes_for_unresolved_issues``). ``tool_runners`` maps
@@ -205,7 +206,10 @@ def run_execution_impl(
         boundary for its LLM ``Agent``).
     Postconditions:
         Returns an ``ExecutionResult``; a failed microtask is marked FAILED and
-        execution continues with the rest. An unmet ``depends_on`` is logged and
+        execution continues with the rest. Microtasks are grouped into
+        dependency-respecting waves via :func:`_schedule_microtask_batches`;
+        independent members of a wave run concurrently via ``parallel_map``.
+        An unmet ``depends_on`` is logged and
         the microtask still runs ("running anyway") rather than being skipped or
         failed outright: ``depends_on`` is an LLM-planned ordering hint, not a
         verified DAG, so failing closed on it would silently drop a legitimately
@@ -225,63 +229,45 @@ def run_execution_impl(
         microtasks = [mt for mt in microtasks if mt.id in id_set]
     completed_ids: set[str] = set()
     total = len(microtasks)
+    file_locks: KeyedLockManager[str] = KeyedLockManager()
+    progress_lock = threading.Lock()
+    progress_callback = _serialize_progress(progress_callback, progress_lock)
 
-    for idx, mt in enumerate(microtasks):
-        deps_met = all(d in completed_ids for d in mt.depends_on)
-        if not deps_met:
-            logger.warning(
-                "[%s] Microtask %s has unmet deps %s — running anyway",
-                task.id,
-                mt.id,
-                mt.depends_on,
-            )
+    batches = _schedule_microtask_batches(microtasks)
+    idx = 0
+    for batch in batches:
+        indexed = []
+        for mt in batch:
+            idx += 1
+            indexed.append((mt, idx))
 
-        mt.status = microtask_status_enum.IN_PROGRESS
-        logger.info(
-            "[%s] Execution: microtask %d/%d — %s (%s)",
-            task.id,
-            idx + 1,
-            total,
-            mt.id,
-            mt.tool_agent.value if mt.tool_agent else "none",
-        )
-
-        if progress_callback:
-            progress_callback(
-                idx + 1,
-                len(completed_ids),
-                total,
-                mt.title or mt.id,
-                "coding",
-                "Generating code...",
-            )
-
-        try:
-            generate_microtask_files(
+        def _run_one(pair: Tuple[Any, int]) -> None:
+            mt, current_idx = pair
+            _run_one_ungated_microtask(
                 llm=llm,
                 mt=mt,
                 task=task,
+                current_idx=current_idx,
                 planning_result=planning_result,
                 repo_path=repo_path,
-                existing_code=existing_code,
                 architecture=architecture,
+                existing_code=existing_code,
                 runners=runners,
                 models=models,
                 run_general_microtask=run_general_microtask,
+                all_files=all_files,
+                completed_ids=completed_ids,
+                file_locks=file_locks,
+                progress_callback=progress_callback,
+                total=total,
+                microtask_status_enum=microtask_status_enum,
             )
 
-            all_files.update(mt.output_files)
-            mt.status = microtask_status_enum.COMPLETED
-            completed_ids.add(mt.id)
-        except Exception as exc:
-            logger.error("[%s] Microtask %s failed: %s", task.id, mt.id, exc)
-            mt.status = microtask_status_enum.FAILED
-            mt.notes = str(exc)
-
-        if progress_callback:
-            progress_callback(
-                idx + 1, len(completed_ids), total, mt.title or mt.id, "completed", ""
-            )
+        if len(indexed) == 1 or _batch_has_intra_dependencies(batch):
+            for pair in indexed:
+                _run_one(pair)
+        else:
+            parallel_map(indexed, _run_one, max_workers=len(indexed), skip_none=False)
 
     summary = f"Executed {len(completed_ids)}/{total} microtasks; {len(all_files)} files produced."
     return execution_result_cls(files=all_files, microtasks=microtasks, summary=summary)
@@ -384,6 +370,7 @@ def _execute_coding_phase(
     current_idx: int,
     completed_ids: set,
     total: int,
+    file_locks: KeyedLockManager[str],
 ) -> Optional[Tuple[Dict[str, str], _MicrotaskRollback]]:
     """Run a microtask's coding phase: generate its files, then guard-write them.
 
@@ -424,16 +411,16 @@ def _execute_coding_phase(
         # to restore on failure — the prior ``all_files`` value per raw key and the
         # prior on-disk content per resolved path — so a rollback reverts both the
         # result and the worktree to the pre-microtask state. Recorded ahead of the
-        # write and of ``all_files.update``.
+        # write and of ``all_files.update``, under the per-path write lock.
         microtask_rollback = _MicrotaskRollback()
-        _record_prior_values(microtask_rollback, repo_path, all_files, microtask_files)
         # Route the initial write through the same guarded helper the review
         # cycles use, so an unsafe path in the first emission is a handled
         # REVIEW_FAILED (rolled back + recorded in review_failed_ids so
         # dependents SKIP) rather than a bare FAILED that skips that bookkeeping.
-        if not write_microtask_output_or_fail(
-            repo_path,
-            microtask_files,
+        if not _locked_write_and_merge(
+            file_locks=file_locks,
+            repo_path=repo_path,
+            files=microtask_files,
             mt=mt,
             task_id=task_id,
             review_failed_ids=review_failed_ids,
@@ -442,7 +429,6 @@ def _execute_coding_phase(
             review_failed_status=microtask_status.REVIEW_FAILED,
         ):
             return None
-        all_files.update(microtask_files)
         return microtask_files, microtask_rollback
 
     except Exception as exc:
@@ -529,6 +515,322 @@ def _schedule_microtask_batches(microtasks: List[Any]) -> List[List[Any]]:
     return batches
 
 
+def _batch_has_intra_dependencies(batch: List[Any]) -> bool:
+    """Return True when any microtask in ``batch`` depends on another in ``batch``.
+
+    Preconditions:
+        Every ``mt`` has ``.id`` and ``.depends_on``.
+    Postconditions:
+        True iff at least one ``depends_on`` id is the ``.id`` of another member
+        of this same batch — the cycle-flush case from
+        :func:`_schedule_microtask_batches`. Independent waves return False.
+    """
+    ids = {mt.id for mt in batch}
+    return any(any(dep in ids for dep in mt.depends_on) for mt in batch)
+
+
+def _clone_review_deps(deps: ReviewDependencies) -> ReviewDependencies:
+    """Shallow-copy ``deps`` so a worker can reset ``tool_agent_cache`` privately.
+
+    Preconditions:
+        ``deps`` is a :class:`ReviewDependencies` instance.
+    Postconditions:
+        Returns a new instance sharing the same agents/verifiers/tool map, with
+        ``tool_agent_cache`` left ``None`` (the review-cycle helper constructs a
+        fresh per-microtask cache on entry).
+    """
+    return ReviewDependencies(
+        build_verifier=deps.build_verifier,
+        qa_agent=deps.qa_agent,
+        security_agent=deps.security_agent,
+        code_review_agent=deps.code_review_agent,
+        linting_tool_agent=deps.linting_tool_agent,
+        tool_agents=deps.tool_agents,
+        tool_agent_cache=None,
+    )
+
+
+def _serialize_progress(
+    progress_callback: Optional[Callable[[int, int, int, str, str, str], None]],
+    lock: threading.Lock,
+) -> Optional[Callable[[int, int, int, str, str, str], None]]:
+    """Wrap ``progress_callback`` so concurrent workers cannot interleave ticks.
+
+    Preconditions:
+        ``lock`` is dedicated to this callback (not reused for file writes).
+    Postconditions:
+        Returns ``None`` when ``progress_callback`` is ``None``; otherwise a
+        wrapper that holds ``lock`` for the duration of each call.
+    """
+    if progress_callback is None:
+        return None
+
+    def _wrapped(
+        current_index: int,
+        completed: int,
+        total: int,
+        title: str,
+        microtask_phase: str,
+        phase_detail: str,
+    ) -> None:
+        with lock:
+            progress_callback(current_index, completed, total, title, microtask_phase, phase_detail)
+
+    return _wrapped
+
+
+def _run_one_gated_microtask(
+    *,
+    gate_config: GatedExecutionConfig,
+    llm: LLMClient,
+    task: Task,
+    task_id: str,
+    mt: Any,
+    current_idx: int,
+    planning_result: Any,
+    repo_path: Path,
+    architecture: Optional[SystemArchitecture],
+    existing_code: str,
+    runners: Dict[Any, Any],
+    models: PhaseModels,
+    review_context: Optional[ReviewContext],
+    config: Any,
+    deps: ReviewDependencies,
+    all_files: Dict[str, str],
+    review_failed_ids: set,
+    completed_ids: set,
+    microtask_status: Any,
+    review_result_cls: Any,
+    review_failed_error_cls: Any,
+    tool_agent_kind: Any,
+    max_total_cycles: int,
+    code_review_retry_cap: int,
+    total: int,
+    file_locks: KeyedLockManager[str],
+    progress_callback: Optional[Callable[[int, int, int, str, str, str], None]],
+) -> None:
+    """Run one microtask's full gated pipeline (coding, review cycles, docs).
+
+    Preconditions:
+        ``mt`` belongs to the current wave; ``deps`` is a worker-private
+        :class:`ReviewDependencies` (not shared with a sibling worker);
+        ``file_locks`` is the per-run manager.
+    Postconditions:
+        ``mt`` ends COMPLETED, SKIPPED, FAILED, or REVIEW_FAILED. A
+        ``review_failed_error_cls`` is raised when review fails and
+        ``config.on_failure == "stop"`` (or a security failure with
+        ``security_failure_always_stops``). Shared ``all_files`` /
+        ``completed_ids`` / ``review_failed_ids`` are updated in place.
+    """
+    deps_met = all(d in completed_ids for d in mt.depends_on)
+    if not deps_met:
+        unmet = [d for d in mt.depends_on if d not in completed_ids]
+        if any(d in review_failed_ids for d in unmet):
+            logger.warning(
+                "[%s] Microtask %s depends on review-failed microtasks %s — skipping",
+                task_id,
+                mt.id,
+                unmet,
+            )
+            mt.status = microtask_status.SKIPPED
+            mt.notes = f"Skipped: depends on review-failed microtasks {unmet}"
+            return
+        logger.warning(
+            "[%s] Microtask %s has unmet deps %s — running anyway", task_id, mt.id, unmet
+        )
+
+    mt.status = microtask_status.IN_PROGRESS
+    logger.info(
+        "[%s] Execution: microtask %d/%d — %s (%s)",
+        task_id,
+        current_idx,
+        total,
+        mt.id,
+        mt.tool_agent.value,
+    )
+
+    def _detail_cb(detail: str, _idx: int, _phase: str) -> None:
+        """Forward phase detail to the (already serialized) progress callback."""
+        if progress_callback:
+            progress_callback(_idx, len(completed_ids), total, mt.title or mt.id, _phase, detail)
+
+    if progress_callback:
+        progress_callback(
+            current_idx,
+            len(completed_ids),
+            total,
+            mt.title or mt.id,
+            "coding",
+            "Generating code...",
+        )
+
+    coding_result = _execute_coding_phase(
+        llm=llm,
+        mt=mt,
+        task=task,
+        task_id=task_id,
+        planning_result=planning_result,
+        repo_path=repo_path,
+        existing_code=existing_code,
+        architecture=architecture,
+        runners=runners,
+        models=models,
+        run_general_microtask=gate_config.run_general_microtask,
+        all_files=all_files,
+        review_failed_ids=review_failed_ids,
+        microtask_status=microtask_status,
+        progress_callback=progress_callback,
+        current_idx=current_idx,
+        completed_ids=completed_ids,
+        total=total,
+        file_locks=file_locks,
+    )
+    if coding_result is None:
+        return
+    microtask_files, microtask_rollback = coding_result
+
+    phase_failed, microtask_files, total_cycles = _run_review_cycles(
+        gate_config=gate_config,
+        llm=llm,
+        task=task,
+        task_id=task_id,
+        mt=mt,
+        microtask_files=microtask_files,
+        repo_path=repo_path,
+        deps=deps,
+        review_context=review_context,
+        config=config,
+        planning_result=planning_result,
+        all_files=all_files,
+        review_failed_ids=review_failed_ids,
+        microtask_rollback=microtask_rollback,
+        microtask_status=microtask_status,
+        review_result_cls=review_result_cls,
+        review_failed_error_cls=review_failed_error_cls,
+        max_total_cycles=max_total_cycles,
+        code_review_retry_cap=code_review_retry_cap,
+        progress_callback=progress_callback,
+        current_idx=current_idx,
+        completed_ids=completed_ids,
+        total=total,
+        detail_cb=_detail_cb,
+        file_locks=file_locks,
+    )
+
+    if not phase_failed:
+        _run_documentation_phase(
+            gate_config=gate_config,
+            llm=llm,
+            task=task,
+            task_id=task_id,
+            mt=mt,
+            microtask_files=microtask_files,
+            repo_path=repo_path,
+            deps=deps,
+            tool_agent_kind=tool_agent_kind,
+            all_files=all_files,
+            microtask_status=microtask_status,
+            completed_ids=completed_ids,
+            total_cycles=total_cycles,
+            progress_callback=progress_callback,
+            current_idx=current_idx,
+            total=total,
+            detail_cb=_detail_cb,
+            file_locks=file_locks,
+        )
+
+    if progress_callback:
+        progress_callback(
+            current_idx, len(completed_ids), total, mt.title or mt.id, "completed", ""
+        )
+
+
+def _run_one_ungated_microtask(
+    *,
+    llm: LLMClient,
+    mt: Any,
+    task: Task,
+    current_idx: int,
+    planning_result: Any,
+    repo_path: Path,
+    architecture: Optional[SystemArchitecture],
+    existing_code: str,
+    runners: Dict[Any, Any],
+    models: PhaseModels,
+    run_general_microtask: Callable[..., Dict[str, str]],
+    all_files: Dict[str, str],
+    completed_ids: set,
+    file_locks: KeyedLockManager[str],
+    progress_callback: Optional[Callable[[int, int, int, str, str, str], None]],
+    total: int,
+    microtask_status_enum: Any,
+) -> None:
+    """Run one microtask of the non-gated execution loop.
+
+    Preconditions:
+        ``mt`` belongs to the current wave.
+    Postconditions:
+        On success ``mt`` is COMPLETED, ``all_files`` gains its output, and
+        ``completed_ids`` gains ``mt.id``. On exception ``mt`` is FAILED and
+        execution of other wave members is unaffected.
+    """
+    deps_met = all(d in completed_ids for d in mt.depends_on)
+    if not deps_met:
+        logger.warning(
+            "[%s] Microtask %s has unmet deps %s — running anyway",
+            task.id,
+            mt.id,
+            mt.depends_on,
+        )
+
+    mt.status = microtask_status_enum.IN_PROGRESS
+    logger.info(
+        "[%s] Execution: microtask %d/%d — %s (%s)",
+        task.id,
+        current_idx,
+        total,
+        mt.id,
+        mt.tool_agent.value if mt.tool_agent else "none",
+    )
+
+    if progress_callback:
+        progress_callback(
+            current_idx,
+            len(completed_ids),
+            total,
+            mt.title or mt.id,
+            "coding",
+            "Generating code...",
+        )
+
+    try:
+        generate_microtask_files(
+            llm=llm,
+            mt=mt,
+            task=task,
+            planning_result=planning_result,
+            repo_path=repo_path,
+            existing_code=existing_code,
+            architecture=architecture,
+            runners=runners,
+            models=models,
+            run_general_microtask=run_general_microtask,
+        )
+        with file_locks.lock(mt.output_files.keys()):
+            all_files.update(mt.output_files)
+        mt.status = microtask_status_enum.COMPLETED
+        completed_ids.add(mt.id)
+    except Exception as exc:
+        logger.error("[%s] Microtask %s failed: %s", task.id, mt.id, exc)
+        mt.status = microtask_status_enum.FAILED
+        mt.notes = str(exc)
+
+    if progress_callback:
+        progress_callback(
+            current_idx, len(completed_ids), total, mt.title or mt.id, "completed", ""
+        )
+
+
 def run_gated_execution_impl(
     *,
     gate_config: GatedExecutionConfig,
@@ -578,10 +880,9 @@ def run_gated_execution_impl(
         ``ToolAgentInput``, ``ToolAgentKind``, ``ReviewResult``,
         ``MicrotaskReviewFailedError`` and ``MicrotaskReviewConfig``.
         ``review_deps`` is an optional :class:`ReviewDependencies` instance
-        (a fresh one is constructed when omitted); it is passed through to
-        ``_run_review_cycles`` for every microtask, which resets its
-        ``tool_agent_cache`` field to a new :class:`AgentReviewCache` at the
-        start of each microtask's own cycle loop -- a team's gate callables
+        (a fresh one is constructed when omitted). Each concurrent worker
+        receives a shallow clone so ``_run_review_cycles`` can reset
+        ``tool_agent_cache`` without racing a sibling; a team's gate callables
         that read ``deps.tool_agent_cache`` see one scoped to the microtask
         currently in progress, never a stale one from an earlier microtask.
         ``gate_config.run_code_review_gate`` accepts a ``review_context`` keyword
@@ -597,9 +898,15 @@ def run_gated_execution_impl(
         ``_run_llm_review``'s docstring in either team's ``phases/review.py``).
     Postconditions:
         Returns an ``ExecutionResult``; each microtask ends COMPLETED, SKIPPED,
-        FAILED or REVIEW_FAILED. When a microtask's review fails and
-        ``on_failure == "stop"`` (or a security failure with
-        ``security_failure_always_stops``), raises ``MicrotaskReviewFailedError``.
+        FAILED or REVIEW_FAILED. Independent members of a scheduled wave run
+        concurrently via ``parallel_map`` (the full coding + review + docs
+        pipeline). A wave whose members depend on each other (the scheduler's
+        cycle-flush batch) still runs sequentially so SKIP-on-review-failed
+        can observe an in-batch predecessor. When a microtask's review fails
+        and ``on_failure == "stop"`` (or a security failure with
+        ``security_failure_always_stops``), raises ``MicrotaskReviewFailedError``
+        and the next wave is not started; independent siblings already running
+        in the failing wave finish in the background.
     """
     models = gate_config.models
     microtask_status = models.MicrotaskStatus
@@ -634,8 +941,12 @@ def run_gated_execution_impl(
     # Wave-based (topological-batch) scheduling only reorders iteration; it does
     # not change which microtasks run or how many, and ``microtasks`` itself (used
     # for the final ``ExecutionResult.microtasks``) is left in its original,
-    # planner-emitted order.
-    execution_order = [mt for batch in _schedule_microtask_batches(microtasks) for mt in batch]
+    # planner-emitted order. Independent members of a wave run concurrently;
+    # a batch with intra-batch edges (cycle flush) stays sequential.
+    batches = _schedule_microtask_batches(microtasks)
+    file_locks: KeyedLockManager[str] = KeyedLockManager()
+    progress_lock = threading.Lock()
+    progress_callback = _serialize_progress(progress_callback, progress_lock)
 
     task_id = task.id
     logger.info("%s", gate_config.startup_log_message(task_id, total, config))
@@ -643,136 +954,50 @@ def run_gated_execution_impl(
     max_total_cycles = gate_config.max_total_cycles(config)
     code_review_retry_cap = gate_config.code_review_retry_cap(config)
 
-    _current_mt = [None]
+    idx = 0
+    for batch in batches:
+        indexed: List[Tuple[Any, int]] = []
+        for mt in batch:
+            idx += 1
+            indexed.append((mt, idx))
 
-    def _detail_cb(detail: str, _idx: int, _phase: str) -> None:
-        """Forward phase detail to progress callback."""
-        if progress_callback:
-            mt = _current_mt[0]
-            progress_callback(_idx, len(completed_ids), total, mt.title or mt.id, _phase, detail)
-
-    for idx, mt in enumerate(execution_order):
-        deps_met = all(d in completed_ids for d in mt.depends_on)
-        if not deps_met:
-            unmet = [d for d in mt.depends_on if d not in completed_ids]
-            if any(d in review_failed_ids for d in unmet):
-                logger.warning(
-                    "[%s] Microtask %s depends on review-failed microtasks %s — skipping",
-                    task_id,
-                    mt.id,
-                    unmet,
-                )
-                mt.status = microtask_status.SKIPPED
-                mt.notes = f"Skipped: depends on review-failed microtasks {unmet}"
-                continue
-            # Unmet but not review-failed (not yet run, or run out of order): soft
-            # dependency hint, not a verified DAG -- run anyway rather than fail
-            # closed on a planner ordering quirk (see run_execution_impl's docstring
-            # for the fuller rationale, shared by both loops).
-            logger.warning(
-                "[%s] Microtask %s has unmet deps %s — running anyway", task_id, mt.id, unmet
-            )
-
-        mt.status = microtask_status.IN_PROGRESS
-        _current_mt[0] = mt
-        logger.info(
-            "[%s] Execution: microtask %d/%d — %s (%s)",
-            task_id,
-            idx + 1,
-            total,
-            mt.id,
-            mt.tool_agent.value,
-        )
-
-        current_idx = idx + 1
-
-        if progress_callback:
-            progress_callback(
-                current_idx,
-                len(completed_ids),
-                total,
-                mt.title or mt.id,
-                "coding",
-                "Generating code...",
-            )
-
-        coding_result = _execute_coding_phase(
-            llm=llm,
-            mt=mt,
-            task=task,
-            task_id=task_id,
-            planning_result=planning_result,
-            repo_path=repo_path,
-            existing_code=existing_code,
-            architecture=architecture,
-            runners=runners,
-            models=models,
-            run_general_microtask=gate_config.run_general_microtask,
-            all_files=all_files,
-            review_failed_ids=review_failed_ids,
-            microtask_status=microtask_status,
-            progress_callback=progress_callback,
-            current_idx=current_idx,
-            completed_ids=completed_ids,
-            total=total,
-        )
-        if coding_result is None:
-            continue
-        microtask_files, microtask_rollback = coding_result
-
-        phase_failed, microtask_files, total_cycles = _run_review_cycles(
-            gate_config=gate_config,
-            llm=llm,
-            task=task,
-            task_id=task_id,
-            mt=mt,
-            microtask_files=microtask_files,
-            repo_path=repo_path,
-            deps=deps,
-            review_context=review_context,
-            config=config,
-            planning_result=planning_result,
-            all_files=all_files,
-            review_failed_ids=review_failed_ids,
-            microtask_rollback=microtask_rollback,
-            microtask_status=microtask_status,
-            review_result_cls=review_result_cls,
-            review_failed_error_cls=review_failed_error_cls,
-            max_total_cycles=max_total_cycles,
-            code_review_retry_cap=code_review_retry_cap,
-            progress_callback=progress_callback,
-            current_idx=current_idx,
-            completed_ids=completed_ids,
-            total=total,
-            detail_cb=_detail_cb,
-        )
-
-        # ── Phase 5: Documentation (Self-Review, Never Fails) ─────────────────
-        if not phase_failed:
-            _run_documentation_phase(
+        def _run_one(pair: Tuple[Any, int]) -> None:
+            mt, current_idx = pair
+            _run_one_gated_microtask(
                 gate_config=gate_config,
                 llm=llm,
                 task=task,
                 task_id=task_id,
                 mt=mt,
-                microtask_files=microtask_files,
-                repo_path=repo_path,
-                deps=deps,
-                tool_agent_kind=tool_agent_kind,
-                all_files=all_files,
-                microtask_status=microtask_status,
-                completed_ids=completed_ids,
-                total_cycles=total_cycles,
-                progress_callback=progress_callback,
                 current_idx=current_idx,
+                planning_result=planning_result,
+                repo_path=repo_path,
+                architecture=architecture,
+                existing_code=existing_code,
+                runners=runners,
+                models=models,
+                review_context=review_context,
+                config=config,
+                deps=_clone_review_deps(deps),
+                all_files=all_files,
+                review_failed_ids=review_failed_ids,
+                completed_ids=completed_ids,
+                microtask_status=microtask_status,
+                review_result_cls=review_result_cls,
+                review_failed_error_cls=review_failed_error_cls,
+                tool_agent_kind=tool_agent_kind,
+                max_total_cycles=max_total_cycles,
+                code_review_retry_cap=code_review_retry_cap,
                 total=total,
-                detail_cb=_detail_cb,
+                file_locks=file_locks,
+                progress_callback=progress_callback,
             )
 
-        if progress_callback:
-            progress_callback(
-                current_idx, len(completed_ids), total, mt.title or mt.id, "completed", ""
-            )
+        if len(indexed) == 1 or _batch_has_intra_dependencies(batch):
+            for pair in indexed:
+                _run_one(pair)
+        else:
+            parallel_map(indexed, _run_one, max_workers=len(indexed), skip_none=False)
 
     completed_count = len(completed_ids)
     failed_count = len(review_failed_ids)
