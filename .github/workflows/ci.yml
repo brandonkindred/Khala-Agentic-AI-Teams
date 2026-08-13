@@ -528,6 +528,18 @@ jobs:
               changed = per_team
 
           entries = [v for k, v in large_teams.items() if changed.get(k)]
+          # Console is a sibling platform member with its own 90% gate. It
+          # shares the agent_platform path filter (lives under
+          # agent_platform/console/) rather than a separate paths-filter key.
+          # Store/prune suites skip without POSTGRES_HOST, so they are omitted
+          # from the unit cov config (same pattern as agent_studio).
+          if changed.get("agent_platform"):
+              entries.append({
+                  "name": "Agent Platform Console",
+                  "tests": "agent_platform/console/tests/",
+                  "source": "agent_platform.console",
+                  "cov_config": "agent_platform/console/pyproject.toml",
+              })
           any_misc = any(changed.get(k) for k in misc_teams)
           if any_misc:
               entries.append(misc_entry)

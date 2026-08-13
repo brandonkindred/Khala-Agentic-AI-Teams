@@ -5,10 +5,11 @@ Both the Studio (``agent_platform.studio``) and agentic
 :class:`~agent_platform.registry.models.AgentManifest` instances with the same
 overall shape: pick an inline-vs-ref I/O schema, assemble the manifest fields,
 then round-trip through :func:`~agent_platform.registry.manifest_projection.revalidate`.
-This module is the future single source for that shape — the *helper
-functions*, not the team-specific constants (entrypoint refs, default
-cognition block) each surface stamps on, which stay owned by their current
-callers until a follow-up centralizes them here.
+This module is the single source for that shape — the *helper functions*.
+Generated-agent entrypoint/schema/anatomy refs and the default cognition
+block live in :mod:`shared.manifests.constants`; helpers here stay
+value-driven so callers pass those constants in rather than this module
+hardcoding them.
 
 Nothing here performs I/O — these are pure constants-free, side-effect-free
 functions only.
@@ -70,7 +71,7 @@ def build_manifest(
     manifest, then round-trip it through :func:`revalidate`. It intentionally
     takes ``source``/``cognition``/``inputs``/``outputs`` as plain values rather
     than deriving them from hardcoded entrypoint/schema-ref constants — those
-    constants are owned by each calling surface today.
+    constants live in :mod:`shared.manifests.constants`.
 
     Preconditions:
         * ``id``, ``team``, ``name``, ``summary`` are non-empty.

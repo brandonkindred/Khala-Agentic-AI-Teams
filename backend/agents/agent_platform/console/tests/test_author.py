@@ -8,7 +8,7 @@ import types
 
 import pytest
 
-from agent_console.author import ANONYMOUS, resolve_author
+from agent_platform.console.author import ANONYMOUS, resolve_author
 
 
 @pytest.fixture(autouse=True)

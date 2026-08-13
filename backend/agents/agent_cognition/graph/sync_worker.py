@@ -1,6 +1,6 @@
 """Background worker that drains agent memory into the knowledge graph.
 
-Mirrors ``agent_console.prune.run_pruner``: an ``asyncio`` loop started from the
+Mirrors ``agent_platform.console.prune.run_pruner``: an ``asyncio`` loop started from the
 unified API lifespan. Each pass visits every agent with episodic memory and
 ingests new events and rollup summaries (since that agent's watermark) into
 Graphiti as temporal episodes, partitioned by ``group_id = agent_id``. Graphiti
