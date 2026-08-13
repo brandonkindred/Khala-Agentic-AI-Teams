@@ -176,7 +176,7 @@ flowchart LR
 | Temporal workers | [`backend/shared/temporal/`](backend/shared/temporal/) | Pattern A: teams export `WORKFLOWS` / `ACTIVITIES` |
 | LLM client | [`backend/agents/llm_service/`](backend/agents/llm_service/) | Ordered Postgres provider list + failover |
 | Agent cache | `AGENT_CACHE` (Docker: `/data/agents`) | Per-team namespaced artifacts under `{team_name}/` |
-| Agent Console / Registry | UI `/agent-console`; [`agent_platform/registry`](backend/agents/agent_platform/registry/), [`agent_console`](backend/agents/agent_console/) | Discover, inspect, and run specialist agents |
+| Agent Console / Registry | UI `/agent-console`; [`agent_platform/registry`](backend/agents/agent_platform/registry/), [`agent_platform/console`](backend/agents/agent_platform/console/) | Discover, inspect, and run specialist agents |
 
 The Software Engineering deep dive (phases, task graphs, quality gates, Product Delivery loop) lives in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md). Repo orientation for agents and humans: [`CLAUDE.md`](CLAUDE.md).
 
@@ -305,7 +305,7 @@ Growing the collective is a first-class feature. Three ways in:
 - [`docs/ENV_VARS.md`](docs/ENV_VARS.md) — full environment-variable reference
 - [`backend/agents/llm_service/`](backend/agents/llm_service/README.md) — provider-list LLM client
 - [`backend/agents/agent_platform/registry/`](backend/agents/agent_platform/registry/README.md) — Agent Console catalog
-- [`backend/agents/agent_console/`](backend/agents/agent_console/README.md) — runs, saved inputs, diff
+- [`backend/agents/agent_platform/console/`](backend/agents/agent_platform/console/README.md) — runs, saved inputs, diff
 - [`backend/unified_api/`](backend/unified_api/README.md) — mounts, `TeamConfig`, proxy behavior
 - [`backend/agents/`](backend/agents/README.md) — agent monorepo overview
 - [`docker/README.md`](docker/README.md) — Compose stack
