@@ -3,15 +3,12 @@ import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { MatDialog } from '@angular/material/dialog';
 import { By } from '@angular/platform-browser';
 import { NoopAnimationsModule } from '@angular/platform-browser/animations';
-import { provideRouter, RouterOutlet } from '@angular/router';
+import { provideRouter, RouterOutlet, type Routes } from '@angular/router';
 import { RouterTestingHarness } from '@angular/router/testing';
 import { Subject, of, throwError } from 'rxjs';
 import { vi } from 'vitest';
 import type { AgentStudioDraft, AgentStudioDraftSummary } from '../../../models/agent-studio.model';
-import { AgentStudioApiService } from '../../../services/agent-studio-api.service';
-import { AgentRunnerApiService } from '../../../services/agent-runner-api.service';
 import { AgenticTeamApiService } from '../../../services/agentic-team-api.service';
-import { PersonaTestingApiService } from '../../../services/persona-testing-api.service';
 import { AgentStudioFacade } from '../../../services/agent-studio.facade';
 import type { ProcessDefinition } from '../../../models/agentic-team.model';
 import { AgentStudioShellComponent } from './agent-studio-shell.component';
@@ -34,37 +31,39 @@ class StubNestedParentComponent {}
 describe('AgentStudioShellComponent', () => {
   let component: AgentStudioShellComponent;
   let fixture: ComponentFixture<AgentStudioShellComponent>;
-  // Stage views live on the child host, not the shell. The shell still
-  // provides AgentStudioFacade, which injects the four HTTP clients — fake
-  // those here so no real HTTP client is required. AgentStudioApiService also
-  // backs `app-load-draft-menu` (real, unstubbed) and the shell's own
-  // `loadDraft` hydration (via the façade).
-  let agentStudioApi: {
-    cloneFromRegistry: ReturnType<typeof vi.fn>;
-    saveAgent: ReturnType<typeof vi.fn>;
+  // Stage views live on the child host, not the shell. The shell provides
+  // AgentStudioFacade at the component level, so TestBed root providers cannot
+  // replace it — override the shell's own provider. Load-draft-menu stays real
+  // and consumes this same mock. The leftover getProcess lookup is still a
+  // direct AgenticTeamApiService call.
+  let facade: {
+    loadDraft: ReturnType<typeof vi.fn>;
     listDrafts: ReturnType<typeof vi.fn>;
-    getDraft: ReturnType<typeof vi.fn>;
+    selectAgent: ReturnType<typeof vi.fn>;
+    saveAgent: ReturnType<typeof vi.fn>;
   };
   let agenticTeamApi: { getProcess: ReturnType<typeof vi.fn> };
 
   beforeEach(async () => {
-    agentStudioApi = {
-      cloneFromRegistry: vi.fn().mockReturnValue(of({})),
-      saveAgent: vi.fn().mockReturnValue(of({})),
+    facade = {
+      loadDraft: vi.fn(),
       listDrafts: vi.fn().mockReturnValue(of([])),
-      getDraft: vi.fn(),
+      selectAgent: vi.fn().mockReturnValue(of({})),
+      saveAgent: vi.fn().mockReturnValue(of({})),
     };
     agenticTeamApi = { getProcess: vi.fn() };
     await TestBed.configureTestingModule({
       imports: [AgentStudioShellComponent, NoopAnimationsModule],
       providers: [
-        { provide: AgentStudioApiService, useValue: agentStudioApi },
         { provide: AgenticTeamApiService, useValue: agenticTeamApi },
-        { provide: AgentRunnerApiService, useValue: {} },
-        { provide: PersonaTestingApiService, useValue: {} },
         provideRouter([]),
       ],
-    }).compileComponents();
+    })
+      .overrideComponent(AgentStudioShellComponent, {
+        remove: { providers: [AgentStudioFacade] },
+        add: { providers: [{ provide: AgentStudioFacade, useValue: facade }] },
+      })
+      .compileComponents();
 
     fixture = TestBed.createComponent(AgentStudioShellComponent);
     component = fixture.componentInstance;
@@ -72,6 +71,21 @@ describe('AgentStudioShellComponent', () => {
   });
 
   afterEach(() => TestBed.resetTestingModule());
+
+  const compileNestedStudioShell = async (children: Routes): Promise<void> => {
+    await TestBed.configureTestingModule({
+      imports: [AgentStudioShellComponent, NoopAnimationsModule],
+      providers: [
+        { provide: AgenticTeamApiService, useValue: agenticTeamApi },
+        provideRouter([{ path: '', component: AgentStudioShellComponent, children }]),
+      ],
+    })
+      .overrideComponent(AgentStudioShellComponent, {
+        remove: { providers: [AgentStudioFacade] },
+        add: { providers: [{ provide: AgentStudioFacade, useValue: facade }] },
+      })
+      .compileComponents();
+  };
 
   it('should create with all four stages and start on Build', () => {
     expect(component).toBeTruthy();
@@ -116,14 +130,14 @@ describe('AgentStudioShellComponent', () => {
     });
 
     it('binds currentDraftId/currentDraftName from the response, not from payload', () => {
-      agentStudioApi.getDraft.mockReturnValue(of(draft({})));
+      facade.loadDraft.mockReturnValue(of(draft({})));
       component.loadDraft('d-1');
       expect(component.state.currentDraftId()).toBe('d-1');
       expect(component.state.currentDraftName()).toBe('My draft');
     });
 
     it('hydrates the handoff signals from payload, defensively coercing non-strings to null', () => {
-      agentStudioApi.getDraft.mockReturnValue(
+      facade.loadDraft.mockReturnValue(
         of(draft({ registryAgentId: 'reg-1', teamId: 42, personaId: null })),
       );
       component.loadDraft('d-1');
@@ -135,7 +149,7 @@ describe('AgentStudioShellComponent', () => {
     });
 
     it('Stage 4: teamId + processId set and the process is complete', () => {
-      agentStudioApi.getDraft.mockReturnValue(of(draft({ teamId: 'team-1', processId: 'proc-1' })));
+      facade.loadDraft.mockReturnValue(of(draft({ teamId: 'team-1', processId: 'proc-1' })));
       agenticTeamApi.getProcess.mockReturnValue(of(process('complete')));
       component.loadDraft('d-1');
       expect(agenticTeamApi.getProcess).toHaveBeenCalledWith('proc-1');
@@ -144,14 +158,14 @@ describe('AgentStudioShellComponent', () => {
     });
 
     it('Stage 3: teamId + processId set but the process is not complete', () => {
-      agentStudioApi.getDraft.mockReturnValue(of(draft({ teamId: 'team-1', processId: 'proc-1' })));
+      facade.loadDraft.mockReturnValue(of(draft({ teamId: 'team-1', processId: 'proc-1' })));
       agenticTeamApi.getProcess.mockReturnValue(of(process('draft')));
       component.loadDraft('d-1');
       expect(component.state.activeStage()).toBe(2);
     });
 
     it('Stage 3: falls back when the process lookup fails (e.g. deleted since save)', () => {
-      agentStudioApi.getDraft.mockReturnValue(of(draft({ teamId: 'team-1', processId: 'proc-1' })));
+      facade.loadDraft.mockReturnValue(of(draft({ teamId: 'team-1', processId: 'proc-1' })));
       agenticTeamApi.getProcess.mockReturnValue(throwError(() => new Error('404')));
       component.loadDraft('d-1');
       expect(component.state.activeStage()).toBe(2);
@@ -160,28 +174,28 @@ describe('AgentStudioShellComponent', () => {
     });
 
     it('Stage 3: only teamId set — no process lookup performed', () => {
-      agentStudioApi.getDraft.mockReturnValue(of(draft({ teamId: 'team-1' })));
+      facade.loadDraft.mockReturnValue(of(draft({ teamId: 'team-1' })));
       component.loadDraft('d-1');
       expect(agenticTeamApi.getProcess).not.toHaveBeenCalled();
       expect(component.state.activeStage()).toBe(2);
     });
 
     it('Stage 2: only registryAgentId set', () => {
-      agentStudioApi.getDraft.mockReturnValue(of(draft({ registryAgentId: 'reg-1' })));
+      facade.loadDraft.mockReturnValue(of(draft({ registryAgentId: 'reg-1' })));
       component.loadDraft('d-1');
       expect(component.state.activeStage()).toBe(1);
     });
 
     it('Stage 1: nothing set, including moving backward from a later active stage', () => {
       component.state.navigateToStage(3);
-      agentStudioApi.getDraft.mockReturnValue(of(draft({})));
+      facade.loadDraft.mockReturnValue(of(draft({})));
       component.loadDraft('d-1');
       expect(component.state.activeStage()).toBe(0);
     });
 
     it('never re-validates rosterFullyStaffed', () => {
       component.state.setRosterFullyStaffed(true);
-      agentStudioApi.getDraft.mockReturnValue(of(draft({ teamId: 'team-1', processId: 'proc-1' })));
+      facade.loadDraft.mockReturnValue(of(draft({ teamId: 'team-1', processId: 'proc-1' })));
       agenticTeamApi.getProcess.mockReturnValue(of(process('complete')));
       component.loadDraft('d-1');
       expect(component.state.rosterFullyStaffed()).toBe(true);
@@ -191,8 +205,8 @@ describe('AgentStudioShellComponent', () => {
       expect(component.state.rosterFullyStaffed()).toBe(false);
     });
 
-    it('a getDraft failure clears loadingDraft and leaves state unchanged', () => {
-      agentStudioApi.getDraft.mockReturnValue(throwError(() => new Error('404')));
+    it('a loadDraft failure clears loadingDraft and leaves state unchanged', () => {
+      facade.loadDraft.mockReturnValue(throwError(() => new Error('404')));
       component.loadDraft('d-1');
       expect(component.loadingDraft()).toBe(false);
       expect(component.state.currentDraftId()).toBeNull();
@@ -201,31 +215,31 @@ describe('AgentStudioShellComponent', () => {
 
     it('clears a persisted persona live-run id on hydrate', () => {
       component.state.setPersonaLiveRunId('run-stale');
-      agentStudioApi.getDraft.mockReturnValue(of(draft({ registryAgentId: 'reg-1' })));
+      facade.loadDraft.mockReturnValue(of(draft({ registryAgentId: 'reg-1' })));
       component.loadDraft('d-1');
       expect(component.state.personaLiveRunId()).toBeNull();
     });
 
     it('loadingDraft reflects the in-flight request and guards re-entrancy', () => {
       const pending = new Subject<AgentStudioDraft>();
-      agentStudioApi.getDraft.mockReturnValue(pending.asObservable());
+      facade.loadDraft.mockReturnValue(pending.asObservable());
       component.loadDraft('d-1');
       expect(component.loadingDraft()).toBe(true);
 
       component.loadDraft('d-2');
-      expect(agentStudioApi.getDraft).toHaveBeenCalledTimes(1);
+      expect(facade.loadDraft).toHaveBeenCalledTimes(1);
 
       pending.next(draft({}));
       pending.complete();
       expect(component.loadingDraft()).toBe(false);
     });
 
-    it('loadingDraft stays true through the nested process-status check, not just the getDraft call', () => {
-      agentStudioApi.getDraft.mockReturnValue(of(draft({ teamId: 'team-1', processId: 'proc-1' })));
+    it('loadingDraft stays true through the nested process-status check, not just the loadDraft call', () => {
+      facade.loadDraft.mockReturnValue(of(draft({ teamId: 'team-1', processId: 'proc-1' })));
       const pendingProcess = new Subject<ProcessDefinition>();
       agenticTeamApi.getProcess.mockReturnValue(pendingProcess.asObservable());
       component.loadDraft('d-1');
-      // getDraft already resolved (synchronous `of`), but the process check is
+      // loadDraft already resolved (synchronous `of`), but the process check is
       // still pending — loadingDraft must not have gone false in between.
       expect(component.loadingDraft()).toBe(true);
       pendingProcess.next(process('complete'));
@@ -235,7 +249,7 @@ describe('AgentStudioShellComponent', () => {
 
     it('clears a stale composeProcessStatus when the process lookup fails', () => {
       component.state.setComposeProcessStatus('complete');
-      agentStudioApi.getDraft.mockReturnValue(of(draft({ teamId: 'team-1', processId: 'proc-1' })));
+      facade.loadDraft.mockReturnValue(of(draft({ teamId: 'team-1', processId: 'proc-1' })));
       agenticTeamApi.getProcess.mockReturnValue(throwError(() => new Error('404')));
       component.loadDraft('d-1');
       expect(component.state.composeProcessStatus()).toBeNull();
@@ -245,18 +259,18 @@ describe('AgentStudioShellComponent', () => {
       component.state.advanceBuildSubStage();
       component.state.advanceBuildSubStage();
       expect(component.state.activeBuildSubStage()).toBe(2);
-      agentStudioApi.getDraft.mockReturnValue(of(draft({})));
+      facade.loadDraft.mockReturnValue(of(draft({})));
       component.loadDraft('d-1');
       expect(component.state.activeBuildSubStage()).toBe(0);
       expect(component.state.maxReachedBuildSubStage()).toBe(0);
     });
 
-    it('a superseded loadDraft call discards its late getDraft response instead of corrupting the newer load', () => {
+    it('a superseded loadDraft call discards its late loadDraft response instead of corrupting the newer load', () => {
       const firstDraft = new Subject<AgentStudioDraft>();
-      agentStudioApi.getDraft.mockReturnValueOnce(firstDraft.asObservable());
+      facade.loadDraft.mockReturnValueOnce(firstDraft.asObservable());
       component.loadDraft('d-1'); // in flight, not yet resolved
 
-      agentStudioApi.getDraft.mockReturnValueOnce(of(draft({ registryAgentId: 'reg-2' })));
+      facade.loadDraft.mockReturnValueOnce(of(draft({ registryAgentId: 'reg-2' })));
       // Simulate the busy-guard having been bypassed (e.g. a direct call) —
       // force loadingDraft back to false so the second call isn't blocked,
       // to isolate the token guard's own protection from the busy guard's.
@@ -271,14 +285,14 @@ describe('AgentStudioShellComponent', () => {
     });
 
     it('a superseded loadDraft call discards its late getProcess response', () => {
-      agentStudioApi.getDraft.mockReturnValueOnce(
+      facade.loadDraft.mockReturnValueOnce(
         of(draft({ teamId: 'team-1', processId: 'proc-1' })),
       );
       const firstProcess = new Subject<ProcessDefinition>();
       agenticTeamApi.getProcess.mockReturnValueOnce(firstProcess.asObservable());
-      component.loadDraft('d-1'); // getDraft resolves, getProcess left pending
+      component.loadDraft('d-1'); // loadDraft resolves, getProcess left pending
 
-      agentStudioApi.getDraft.mockReturnValueOnce(of(draft({ registryAgentId: 'reg-2' })));
+      facade.loadDraft.mockReturnValueOnce(of(draft({ registryAgentId: 'reg-2' })));
       component.loadingDraft.set(false); // bypass the busy-guard, isolate the token guard
       component.loadDraft('d-2'); // resolves synchronously to Stage 2
 
@@ -290,7 +304,7 @@ describe('AgentStudioShellComponent', () => {
     });
 
     it('the Load-draft menu is wired to loadDraft and reflects loadingDraft as busy', () => {
-      agentStudioApi.getDraft.mockReturnValue(of(draft({})));
+      facade.loadDraft.mockReturnValue(of(draft({})));
       const menu = fixture.debugElement.query(By.directive(LoadDraftMenuComponent));
       expect(menu).toBeTruthy();
       menu.triggerEventHandler('draftSelected', 'd-1');
@@ -509,29 +523,14 @@ describe('AgentStudioShellComponent', () => {
 
   it('hides the continue footer on the persona-run child and keeps handoff state', async () => {
     TestBed.resetTestingModule();
-    await TestBed.configureTestingModule({
-      imports: [AgentStudioShellComponent, NoopAnimationsModule],
-      providers: [
-        { provide: AgentStudioApiService, useValue: agentStudioApi },
-        { provide: AgenticTeamApiService, useValue: agenticTeamApi },
-        { provide: AgentRunnerApiService, useValue: {} },
-        { provide: PersonaTestingApiService, useValue: {} },
-        provideRouter([
-          {
-            path: '',
-            component: AgentStudioShellComponent,
-            children: [
-              { path: '', component: StubStageHostComponent },
-              {
-                path: 'persona-run/:runId',
-                component: StubAuditHostComponent,
-                data: { hideStudioFooter: true },
-              },
-            ],
-          },
-        ]),
-      ],
-    }).compileComponents();
+    await compileNestedStudioShell([
+      { path: '', component: StubStageHostComponent },
+      {
+        path: 'persona-run/:runId',
+        component: StubAuditHostComponent,
+        data: { hideStudioFooter: true },
+      },
+    ]);
 
     const harness = await RouterTestingHarness.create();
     const shell = await harness.navigateByUrl('/', AgentStudioShellComponent);
@@ -553,35 +552,20 @@ describe('AgentStudioShellComponent', () => {
 
   it('hides the continue footer when hideStudioFooter is on a nested child', async () => {
     TestBed.resetTestingModule();
-    await TestBed.configureTestingModule({
-      imports: [AgentStudioShellComponent, NoopAnimationsModule],
-      providers: [
-        { provide: AgentStudioApiService, useValue: agentStudioApi },
-        { provide: AgenticTeamApiService, useValue: agenticTeamApi },
-        { provide: AgentRunnerApiService, useValue: {} },
-        { provide: PersonaTestingApiService, useValue: {} },
-        provideRouter([
+    await compileNestedStudioShell([
+      { path: '', component: StubStageHostComponent },
+      {
+        path: 'persona-run/:runId',
+        component: StubNestedParentComponent,
+        children: [
           {
             path: '',
-            component: AgentStudioShellComponent,
-            children: [
-              { path: '', component: StubStageHostComponent },
-              {
-                path: 'persona-run/:runId',
-                component: StubNestedParentComponent,
-                children: [
-                  {
-                    path: '',
-                    component: StubAuditHostComponent,
-                    data: { hideStudioFooter: true },
-                  },
-                ],
-              },
-            ],
+            component: StubAuditHostComponent,
+            data: { hideStudioFooter: true },
           },
-        ]),
-      ],
-    }).compileComponents();
+        ],
+      },
+    ]);
 
     const harness = await RouterTestingHarness.create();
     await harness.navigateByUrl('/', AgentStudioShellComponent);
@@ -596,31 +580,16 @@ describe('AgentStudioShellComponent', () => {
 
   it('returns to the stage host when a draft is loaded from the persona-run child', async () => {
     TestBed.resetTestingModule();
-    await TestBed.configureTestingModule({
-      imports: [AgentStudioShellComponent, NoopAnimationsModule],
-      providers: [
-        { provide: AgentStudioApiService, useValue: agentStudioApi },
-        { provide: AgenticTeamApiService, useValue: agenticTeamApi },
-        { provide: AgentRunnerApiService, useValue: {} },
-        { provide: PersonaTestingApiService, useValue: {} },
-        provideRouter([
-          {
-            path: '',
-            component: AgentStudioShellComponent,
-            children: [
-              { path: '', component: StubStageHostComponent },
-              {
-                path: 'persona-run/:runId',
-                component: StubAuditHostComponent,
-                data: { hideStudioFooter: true },
-              },
-            ],
-          },
-        ]),
-      ],
-    }).compileComponents();
+    await compileNestedStudioShell([
+      { path: '', component: StubStageHostComponent },
+      {
+        path: 'persona-run/:runId',
+        component: StubAuditHostComponent,
+        data: { hideStudioFooter: true },
+      },
+    ]);
 
-    agentStudioApi.getDraft.mockReturnValue(
+    facade.loadDraft.mockReturnValue(
       of({
         draft_id: 'd-1',
         name: 'My draft',
@@ -648,31 +617,16 @@ describe('AgentStudioShellComponent', () => {
 
   it('stays on the persona-run child when loadDraft fails', async () => {
     TestBed.resetTestingModule();
-    await TestBed.configureTestingModule({
-      imports: [AgentStudioShellComponent, NoopAnimationsModule],
-      providers: [
-        { provide: AgentStudioApiService, useValue: agentStudioApi },
-        { provide: AgenticTeamApiService, useValue: agenticTeamApi },
-        { provide: AgentRunnerApiService, useValue: {} },
-        { provide: PersonaTestingApiService, useValue: {} },
-        provideRouter([
-          {
-            path: '',
-            component: AgentStudioShellComponent,
-            children: [
-              { path: '', component: StubStageHostComponent },
-              {
-                path: 'persona-run/:runId',
-                component: StubAuditHostComponent,
-                data: { hideStudioFooter: true },
-              },
-            ],
-          },
-        ]),
-      ],
-    }).compileComponents();
+    await compileNestedStudioShell([
+      { path: '', component: StubStageHostComponent },
+      {
+        path: 'persona-run/:runId',
+        component: StubAuditHostComponent,
+        data: { hideStudioFooter: true },
+      },
+    ]);
 
-    agentStudioApi.getDraft.mockReturnValue(throwError(() => new Error('404')));
+    facade.loadDraft.mockReturnValue(throwError(() => new Error('404')));
 
     const harness = await RouterTestingHarness.create();
     const shell = await harness.navigateByUrl('/persona-run/run-1', AgentStudioShellComponent);
