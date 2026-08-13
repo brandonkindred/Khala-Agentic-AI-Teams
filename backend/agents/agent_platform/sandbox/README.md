@@ -1,4 +1,4 @@
-# agent_provisioning_team.sandbox
+# agent_platform.sandbox
 
 Per-agent ephemeral sandbox lifecycle used by the Agent Console **Runner**.
 
@@ -71,13 +71,13 @@ durable Temporal workflows/activities instead of direct in-process calls
 (`SandboxAcquireWorkflow` / `SandboxTeardownWorkflow`, and the idle reaper as a
 single self-scheduling `SandboxReaperWorkflow`). Read-only ops (`status`,
 `list_active`, `metrics`, `note_activity`) stay direct on the API loop. Dispatch
-lives in `agent_provisioning_team.temporal.sandbox_dispatch`; the workflows and
-activities are exported from `temporal/__init__.py` as `SANDBOX_WORKFLOWS` /
+lives in `agent_platform.sandbox.temporal.dispatch`; the workflows and
+activities are exported from `agent_platform.sandbox.temporal` as `SANDBOX_WORKFLOWS` /
 `SANDBOX_ACTIVITIES` — deliberately **not** part of the team's main
 `WORKFLOWS`/`ACTIVITIES` lists. They run on their own `SANDBOX_TASK_QUEUE`
-(`temporal/constants.py`), served only by a worker started explicitly from
-`unified_api/main.py`'s own lifespan
-(`start_agent_provisioning_sandbox_temporal_worker_thread`) — never by the
+(`agent_platform.sandbox.temporal.constants`), served only by a worker started
+explicitly from `unified_api/main.py`'s own lifespan
+(`start_agent_platform_sandbox_temporal_worker_thread`) — never by the
 main provisioning worker that team_service boots on `TASK_QUEUE`. Sharing a
 task queue between the two would let Temporal dispatch a sandbox activity into
 that other process,
@@ -114,9 +114,7 @@ provisioner. Fields live on `agent_platform.registry.models.SandboxSpec`:
 | `env` | Extra env vars to forward into the agent container (beyond the default Postgres/Temporal/LLM set). |
 | `extra_pip` | Additional pip packages to install at image build time. |
 
-Note: there is no `access_tier` field. Permission tiers were removed in
-#456 — every sandbox is provisioned with full access on every backing
-service (its own Postgres, its own Temporal, etc.).
+Note: there is no `access_tier` field. Permission tiers were removed — every sandbox is provisioned with full access on every backing service.
 
 ## Environment variables
 
@@ -161,8 +159,7 @@ never join it.
 
 ```bash
 cd backend
-python3 -m pytest agents/agent_provisioning_team/tests/test_sandbox_stack_provisioner.py \
-                  agents/agent_provisioning_team/tests/test_sandbox_lifecycle.py
+python3 -m pytest agents/agent_platform/sandbox/tests/
 ```
 
 Tests patch `provisioner._exec` and `run_container`/`stop_container` so

@@ -10,6 +10,7 @@ _root = Path(__file__).resolve().parent.parent
 if str(_root) not in sys.path:
     sys.path.insert(0, str(_root))
 
+from agents.prompts import OBSERVABILITY_PROMPT  # noqa: E402
 from strands import Agent, tool  # noqa: E402
 from tools import (  # noqa: E402
     aws_pricing_tool,
@@ -17,8 +18,6 @@ from tools import (  # noqa: E402
     file_read_tool,
     web_search_tool,
 )
-
-_PROMPT_PATH = _root / "prompts" / "observability.md"
 
 
 @tool
@@ -44,10 +43,9 @@ def observability_architect(
     Returns:
         Observability stack recommendation, alert runbook stubs, SLO targets.
     """
-    prompt = _PROMPT_PATH.read_text(encoding="utf-8")
     agent = Agent(
         model=_get_haiku_model(),
-        system_prompt=prompt,
+        system_prompt=OBSERVABILITY_PROMPT,
         tools=[file_read_tool, aws_pricing_tool, web_search_tool, document_writer_tool],
         callback_handler=None,
     )

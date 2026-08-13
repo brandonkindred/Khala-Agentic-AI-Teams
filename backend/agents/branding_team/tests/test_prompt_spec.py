@@ -19,6 +19,15 @@ def test_prompt_field_spec_rejects_blank_description() -> None:
         PromptFieldSpec("a_field", "")
 
 
+def test_prompt_field_spec_rejects_blank_sub_item() -> None:
+    with pytest.raises(AssertionError, match="sub_items entries must be non-blank strings"):
+        PromptFieldSpec("a_field", "a description", sub_items=("valid", "   "))
+
+
+def test_prompt_field_spec_defaults_to_no_sub_items() -> None:
+    assert PromptFieldSpec("a_field", "a description").sub_items == ()
+
+
 def test_agent_prompt_spec_rejects_blank_opening() -> None:
     with pytest.raises(AssertionError, match="opening must be a non-blank string"):
         AgentPromptSpec(opening="  ", fields=(PromptFieldSpec("f", "d"),))
@@ -75,3 +84,33 @@ def test_render_agent_prompt_omits_closing_line_when_absent() -> None:
 def test_render_agent_prompt_rejects_non_spec_argument() -> None:
     with pytest.raises(AssertionError, match="spec must be an AgentPromptSpec"):
         render_agent_prompt("not a spec")  # type: ignore[arg-type]
+
+
+def test_render_agent_prompt_indents_sub_items_under_their_field() -> None:
+    spec = AgentPromptSpec(
+        opening="You are a Test Agent. Do this:",
+        fields=(
+            PromptFieldSpec(
+                "first_field", "the first thing", sub_items=("detail one", "detail two")
+            ),
+            PromptFieldSpec("second_field", "the second thing"),
+        ),
+    )
+    assert render_agent_prompt(spec) == (
+        "You are a Test Agent. Do this:\n"
+        "1. first_field — the first thing\n"
+        "   - detail one\n"
+        "   - detail two\n"
+        "2. second_field — the second thing"
+    )
+
+
+def test_render_agent_prompt_omits_sub_items_when_absent() -> None:
+    spec = AgentPromptSpec(
+        opening="You are a Test Agent. Do this:",
+        fields=(PromptFieldSpec("only_field", "the only thing"),),
+    )
+    assert (
+        render_agent_prompt(spec)
+        == "You are a Test Agent. Do this:\n1. only_field — the only thing"
+    )
