@@ -231,6 +231,8 @@ jobs:
               - 'backend/agents/agent_platform/registry/**'
               - 'backend/agents/agent_platform/__init__.py'
               - 'backend/agents/agent_platform/README.md'
+            agent_platform:
+              - 'backend/agents/agent_platform/**'
             # Agent Studio authoring + drafts persistence (in-memory unit suite;
             # live-Postgres store tests skip without POSTGRES_HOST).
             agent_studio:
@@ -372,6 +374,7 @@ jobs:
           F_INVESTMENT: ${{ steps.filter.outputs.investment }}
           F_SOCIAL_MARKETING: ${{ steps.filter.outputs.social_marketing }}
           F_AGENT_PROVISIONING: ${{ steps.filter.outputs.agent_provisioning }}
+          F_AGENT_PLATFORM: ${{ steps.filter.outputs.agent_platform }}
           F_AGENT_STUDIO: ${{ steps.filter.outputs.agent_studio }}
           F_ASSISTANT_KERNEL: ${{ steps.filter.outputs.assistant_kernel }}
           F_SALES: ${{ steps.filter.outputs.sales }}
@@ -418,6 +421,11 @@ jobs:
                   "tests": "agent_team_studio/agent_provisioning_team/tests/",
                   "source": "agent_team_studio.agent_provisioning_team",
                   "extra_requirements": "agent_team_studio/agent_provisioning_team/requirements.txt",
+              },
+              "agent_platform": {
+                  "name": "Agent Platform",
+                  "tests": "agent_platform/sandbox/tests/ agent_platform/registry/tests/",
+                  "source": "agent_platform.sandbox",
               },
               "agent_studio": {
                   "name": "Agent Studio",
