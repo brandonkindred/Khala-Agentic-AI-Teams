@@ -13,10 +13,9 @@ and tested independently of the coding/documentation phases that surround it.
 from __future__ import annotations
 
 import logging
-from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Dict, Iterable, Iterator, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple
 
 from llm_service import LLMClient
 from shared.concurrency import KeyedLockManager, parallel_map
@@ -42,23 +41,6 @@ if TYPE_CHECKING:
     )
 
 logger = logging.getLogger(__name__)
-
-
-class _HeldFileLockManager(KeyedLockManager[str]):
-    """No-op :class:`KeyedLockManager` used when the caller already holds the pipeline locks.
-
-    :class:`KeyedLockManager` is not reentrant. Inner snapshot/write/rollback/doc
-    helpers must not re-acquire keys the outer per-microtask ``with file_locks.lock``
-    already holds for the full overlapping pipeline.
-    """
-
-    @contextmanager
-    def lock(self, keys: Iterable[str]) -> Iterator[None]:
-        del keys
-        yield
-
-
-_HELD_FILE_LOCKS: KeyedLockManager[str] = _HeldFileLockManager()
 
 
 def _dedup_issues(issues: List[Any], seen: set[tuple[str, str]]) -> List[Any]:
@@ -540,9 +522,8 @@ def _run_review_cycles(
         ``microtask_rollback`` was created and pre-populated by Phase 1
         (:func:`_commit_coding_write`) for ``microtask_files``'s initial write.
         ``detail_cb(detail, idx, phase)`` forwards to ``progress_callback``.
-        ``file_locks`` is the per-run manager, or ``_HELD_FILE_LOCKS`` when the
-        caller already holds the physical-path locks for this microtask's
-        overlapping pipeline (KeyedLockManager is not reentrant).
+        ``file_locks`` is the per-run manager used to serialize overlapping
+        snapshot/write/merge/rollback under the caller's worktree lock.
     Postconditions:
         Returns ``(phase_failed, microtask_files, total_cycles)``: ``phase_failed``
         is True iff the microtask's review was rejected (retry exhaustion, the

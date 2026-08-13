@@ -2013,6 +2013,102 @@ def test_overlapping_independent_review_failure_preserves_sibling_content(tmp_pa
     assert (tmp_path / "shared.py").read_text(encoding="utf-8") == "owned-by-a\n"
 
 
+def test_review_introduced_path_stays_consistent_across_siblings(tmp_path):
+    """A file added by batch-fix (not in the initial generation set) stays consistent.
+
+    Two initially disjoint microtasks each fail code review once and the fix
+    writes the same new path; ``all_files`` must match disk afterward.
+    """
+
+    failed: set[str] = set()
+
+    def cr_fail_once(**kwargs: Any) -> GateOutcome:
+        mid = kwargs["microtask"].id
+        if mid not in failed:
+            failed.add(mid)
+            return GateOutcome(passed=False, issues=[_issue()], summary="fix me")
+        return GateOutcome(passed=True)
+
+    def batch_fix_adds_readme(**kwargs: Any) -> SimpleNamespace:
+        files = dict(kwargs["current_files"])
+        files["README.md"] = f"fix-{kwargs['microtask'].id}\n"
+        return SimpleNamespace(files=files)
+
+    mt1, mt2 = _microtask("mt-1"), _microtask("mt-2")
+    result = _run(
+        _make_gate_config(
+            coder=_recording_coder([]),
+            code_review_gate=cr_fail_once,
+            batch_fix=batch_fix_adds_readme,
+        ),
+        [mt1, mt2],
+        tmp_path,
+        review_config=_config(cr=1),
+    )
+
+    disk = (tmp_path / "README.md").read_text(encoding="utf-8")
+    assert result.files["README.md"] == disk
+    assert disk in {"fix-mt-1\n", "fix-mt-2\n"}
+    assert mt1.status == MS.COMPLETED
+    assert mt2.status == MS.COMPLETED
+
+
+def test_docs_introduced_path_stays_consistent_across_siblings(tmp_path):
+    """Documentation can add paths the initial generation set did not lock."""
+
+    def doc_review(**kwargs: Any) -> SimpleNamespace:
+        code_files = kwargs["code_files"]
+        owner = next(iter(code_files)).split("/")[-1].replace(".py", "")
+        return SimpleNamespace(
+            documentation={"README.md": f"docs-{owner}\n"},
+            iterations=1,
+            final_quality_score=0.95,
+        )
+
+    mt1, mt2 = _microtask("mt-1"), _microtask("mt-2")
+    result = _run(
+        _make_gate_config(coder=_recording_coder([]), doc_review=doc_review),
+        [mt1, mt2],
+        tmp_path,
+        review_config=_config(),
+    )
+
+    disk = (tmp_path / "README.md").read_text(encoding="utf-8")
+    assert result.files["README.md"] == disk
+    assert disk in {"docs-mt-1\n", "docs-mt-2\n"}
+    assert mt1.status == MS.COMPLETED
+    assert mt2.status == MS.COMPLETED
+
+
+def test_review_gates_do_not_overlap_across_wave_workers(tmp_path):
+    """Repo-wide review tools must not run concurrently for independent wave members."""
+    current = 0
+    max_current = 0
+    counter_lock = threading.Lock()
+
+    def cr_gate(**kwargs: Any) -> GateOutcome:
+        nonlocal current, max_current
+        with counter_lock:
+            current += 1
+            max_current = max(max_current, current)
+        time.sleep(0.05)
+        with counter_lock:
+            current -= 1
+        return GateOutcome(passed=True)
+
+    mt1, mt2 = _microtask("mt-1"), _microtask("mt-2")
+    _run(
+        _make_gate_config(coder=_recording_coder([]), code_review_gate=cr_gate),
+        [mt1, mt2],
+        tmp_path,
+        review_config=_config(),
+    )
+
+    assert max_current == 1
+    assert mt1.status == MS.COMPLETED
+    assert mt2.status == MS.COMPLETED
+
+
 def test_overlapping_writes_keep_all_files_and_disk_in_sync(tmp_path):
     """Two independent microtasks writing the same path leave all_files matching disk."""
 

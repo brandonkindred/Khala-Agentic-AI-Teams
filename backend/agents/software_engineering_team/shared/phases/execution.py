@@ -19,7 +19,6 @@ from software_engineering_team.shared.agent_review import AgentReviewCache
 from software_engineering_team.shared.code_completeness import reject_invalid_python
 from software_engineering_team.shared.phases.documentation_phase import _run_documentation_phase
 from software_engineering_team.shared.phases.review_cycle import (
-    _HELD_FILE_LOCKS,
     GateOutcome,
     _locked_write_and_merge,
     _run_review_cycles,
@@ -379,8 +378,8 @@ def _generate_coding_phase(
 ) -> Optional[Dict[str, str]]:
     """Generate a microtask's files without writing them (Phase 1, generate half).
 
-    Runs outside the per-path pipeline lock so overlapping siblings can generate
-    concurrently; the caller then holds those locks from the first write through
+    Runs outside the worktree lock so overlapping siblings can generate
+    concurrently; the caller then holds that lock from the first write through
     review, docs, and rollback.
 
     Preconditions:
@@ -431,8 +430,8 @@ def _commit_coding_write(
 
     Preconditions:
         ``microtask_files`` was produced by :func:`_generate_coding_phase`;
-        ``file_locks`` is either the per-run manager or ``_HELD_FILE_LOCKS``
-        when the caller already holds the pipeline lock for these paths.
+        ``file_locks`` is the per-run manager. The caller holds
+        ``worktree_lock`` for this write, so the per-path locks are uncontended.
     Postconditions:
         On success, returns ``(microtask_files, rollback)`` with a fresh
         :class:`_MicrotaskRollback` snapshotting the pre-write state, and
@@ -622,6 +621,7 @@ def _run_one_gated_microtask(
     code_review_retry_cap: int,
     total: int,
     file_locks: KeyedLockManager[str],
+    worktree_lock: threading.Lock,
     progress_callback: Optional[Callable[[int, int, int, str, str, str], None]],
 ) -> None:
     """Run one microtask's full gated pipeline (coding, review cycles, docs).
@@ -629,7 +629,9 @@ def _run_one_gated_microtask(
     Preconditions:
         ``mt`` belongs to the current wave; ``deps`` is a worker-private
         :class:`ReviewDependencies` (not shared with a sibling worker);
-        ``file_locks`` is the per-run manager.
+        ``file_locks`` is the per-run manager; ``worktree_lock`` is the
+        per-run exclusive lock for worktree mutation and repo-wide review
+        tools.
     Postconditions:
         ``mt`` ends COMPLETED, SKIPPED, FAILED, or REVIEW_FAILED. A
         ``review_failed_error_cls`` is raised when review fails and
@@ -637,8 +639,9 @@ def _run_one_gated_microtask(
         ``security_failure_always_stops``). Shared ``all_files`` /
         ``completed_ids`` / ``review_failed_ids`` are updated in place.
         Generation runs unlocked; the first write through review, docs, and
-        rollback holds the physical-path locks so overlapping siblings cannot
-        interleave snapshot/write/rollback.
+        rollback holds ``worktree_lock`` so siblings cannot interleave
+        snapshot/write/rollback, introduce colliding new paths, or run
+        repo-wide build/lint against an in-progress sibling worktree.
     """
     deps_met = all(d in completed_ids for d in mt.depends_on)
     if not deps_met:
@@ -703,13 +706,14 @@ def _run_one_gated_microtask(
     if microtask_files is None:
         return
 
-    # Hold physical-path locks from the first write through review + docs +
-    # rollback so an overlapping sibling cannot snapshot/write while this
-    # microtask still has an in-flight rollback. Inner helpers receive
-    # ``_HELD_FILE_LOCKS`` because KeyedLockManager is not reentrant.
-    with file_locks.lock(_file_lock_keys(repo_path, microtask_files.keys())):
+    # Generation is unlocked (no worktree writes). Write through review, docs,
+    # and rollback hold ``worktree_lock``: review tools (build/lint) observe
+    # the whole repo, and review/docs can introduce paths that were not in
+    # the initial generation set, so per-file locks on those initial keys
+    # are not enough.
+    with worktree_lock:
         coding_result = _commit_coding_write(
-            file_locks=_HELD_FILE_LOCKS,
+            file_locks=file_locks,
             repo_path=repo_path,
             microtask_files=microtask_files,
             mt=mt,
@@ -747,7 +751,7 @@ def _run_one_gated_microtask(
             completed_ids=completed_ids,
             total=total,
             detail_cb=_detail_cb,
-            file_locks=_HELD_FILE_LOCKS,
+            file_locks=file_locks,
         )
 
         if not phase_failed:
@@ -769,7 +773,7 @@ def _run_one_gated_microtask(
                 current_idx=current_idx,
                 total=total,
                 detail_cb=_detail_cb,
-                file_locks=_HELD_FILE_LOCKS,
+                file_locks=file_locks,
             )
 
     if progress_callback:
@@ -932,15 +936,19 @@ def run_gated_execution_impl(
     Postconditions:
         Returns an ``ExecutionResult``; each microtask ends COMPLETED, SKIPPED,
         FAILED or REVIEW_FAILED. Independent members of a scheduled wave run
-        concurrently via ``parallel_map`` (the full coding + review + docs
-        pipeline). A wave whose members depend on each other (the scheduler's
-        cycle-flush batch) still runs sequentially so SKIP-on-review-failed
-        can observe an in-batch predecessor. When a microtask's review fails
-        and ``on_failure == "stop"`` (or a security failure with
-        ``security_failure_always_stops``), raises ``MicrotaskReviewFailedError``
-        and the next wave is not started; ``wait_for_stragglers=True`` so
-        independent siblings already running in the failing wave finish their
-        worktree writes before the exception propagates.
+        concurrently via ``parallel_map``. Generation of independent wave
+        members runs concurrently; write through review, docs, and rollback
+        hold a per-run worktree lock because review tools observe the whole
+        repo and review/docs can introduce paths not present in the initial
+        generation set. A wave whose members depend on each other (the
+        scheduler's cycle-flush batch) still runs sequentially so
+        SKIP-on-review-failed can observe an in-batch predecessor. When a
+        microtask's review fails and ``on_failure == "stop"`` (or a security
+        failure with ``security_failure_always_stops``), raises
+        ``MicrotaskReviewFailedError`` and the next wave is not started;
+        ``wait_for_stragglers=True`` so independent siblings already running
+        in the failing wave finish their worktree writes before the exception
+        propagates.
     """
     models = gate_config.models
     microtask_status = models.MicrotaskStatus
@@ -979,6 +987,7 @@ def run_gated_execution_impl(
     # a batch with intra-batch edges (cycle flush) stays sequential.
     batches = _schedule_microtask_batches(microtasks)
     file_locks: KeyedLockManager[str] = KeyedLockManager()
+    worktree_lock = threading.Lock()
     progress_lock = threading.Lock()
     progress_callback = _serialize_progress(progress_callback, progress_lock)
 
@@ -1024,6 +1033,7 @@ def run_gated_execution_impl(
                 code_review_retry_cap=code_review_retry_cap,
                 total=total,
                 file_locks=file_locks,
+                worktree_lock=worktree_lock,
                 progress_callback=progress_callback,
             )
 

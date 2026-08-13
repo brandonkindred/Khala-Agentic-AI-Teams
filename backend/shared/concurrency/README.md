@@ -184,12 +184,13 @@ microtask's output into a shared `all_files: Dict[str, str]` dict and writes
 it to a shared `repo_path` git worktree. Independent microtasks in the same
 scheduled wave run concurrently via `parallel_map` with `wait_for_stragglers=True`
 so a stop-on-review-failure does not return while a sibling is still writing
-the worktree. Generation runs unlocked; overlapping paths then hold one
-`KeyedLockManager` (constructed once per run) from the first write through
-review, docs, and rollback. Lock keys are physical (`realpath`) paths, so
-`shared.py` and `./shared.py` serialize against each other. Inner
-snapshot/write/rollback helpers receive a no-op manager because
-`KeyedLockManager` is not reentrant. Disjoint paths proceed in parallel.
+the worktree. Generation runs unlocked; write through review, docs, and
+rollback then hold a per-run worktree lock because review tools (build/lint)
+observe the whole repo and review/docs can introduce paths that were not in
+the initial generation set. Per-path `KeyedLockManager` locks still
+serialize overlapping snapshot/write/merge under that exclusive section;
+keys are physical (`realpath`) paths, so `shared.py` and `./shared.py`
+serialize against each other.
 
 ```python
 from shared.concurrency import KeyedLockManager
