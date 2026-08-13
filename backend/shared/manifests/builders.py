@@ -1,6 +1,6 @@
 """Shared build/clone/project helpers for constructing ``AgentManifest`` instances.
 
-Both the Studio (``agent_team_studio.agent_studio``) and agentic
+Both the Studio (``agent_platform.studio``) and agentic
 (``agent_team_studio.agentic_team_provisioning``) authoring surfaces build
 :class:`~agent_registry.models.AgentManifest` instances with the same
 overall shape: pick an inline-vs-ref I/O schema, assemble the manifest fields,
