@@ -1,6 +1,6 @@
 """Route-level tests for the agent-keyed /api/agents/sandboxes/* endpoints.
 
-Backed by the ``agent_team_studio.agent_provisioning_team.sandbox`` lifecycle. Tests mock the
+Backed by the ``agent_platform.sandbox`` lifecycle. Tests mock the
 docker CLI so no daemon is touched.
 """
 
@@ -22,10 +22,10 @@ if str(_agents) not in sys.path:
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from agent_team_studio.agent_provisioning_team.sandbox import SandboxStatus, UnknownAgentError
-from agent_team_studio.agent_provisioning_team.sandbox import lifecycle as lifecycle_mod
-from agent_team_studio.agent_provisioning_team.sandbox import provisioner as provisioner_mod
-from agent_team_studio.agent_provisioning_team.sandbox.lifecycle import Lifecycle
+from agent_platform.sandbox import SandboxStatus, UnknownAgentError
+from agent_platform.sandbox import lifecycle as lifecycle_mod
+from agent_platform.sandbox import provisioner as provisioner_mod
+from agent_platform.sandbox.lifecycle import Lifecycle
 
 
 async def _fake_resolve_team(agent_id: str) -> str:
@@ -158,11 +158,11 @@ def test_warm_and_teardown_dispatch_through_temporal_when_enabled(client: TestCl
     fallback every other test in this file exercises — sandbox_temporal_enabled()
     is False in the ambient test environment (no TEMPORAL_ADDRESS), so without
     this test the route's `if sandbox_temporal_enabled():` branch in
-    sandbox_dispatch.acquire_sandbox/teardown_sandbox would have no route-level
+    dispatch.acquire_sandbox/teardown_sandbox would have no route-level
     coverage at all (the branch itself is unit-tested in test_sandbox_temporal.py,
     but never through the actual FastAPI route)."""
-    from agent_team_studio.agent_provisioning_team.sandbox.state import SandboxHandle
-    from agent_team_studio.agent_provisioning_team.temporal import sandbox_dispatch as sd
+    from agent_platform.sandbox.state import SandboxHandle
+    from agent_platform.sandbox.temporal import dispatch as sd
 
     handle = SandboxHandle(
         agent_id="blogging.planner",
