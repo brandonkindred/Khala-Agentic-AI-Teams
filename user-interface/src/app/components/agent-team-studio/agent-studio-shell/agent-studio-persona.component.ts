@@ -14,8 +14,7 @@ import { MatIconModule } from '@angular/material/icon';
 import { MatProgressBarModule } from '@angular/material/progress-bar';
 import { MatTooltipModule } from '@angular/material/tooltip';
 import { EMPTY, Subscription, catchError, interval, switchMap, timeout } from 'rxjs';
-import { AgenticTeamApiService } from '../../../services/agentic-team-api.service';
-import { PersonaTestingApiService } from '../../../services/persona-testing-api.service';
+import { AgentStudioFacade } from '../../../services/agent-studio.facade';
 import { AgentStudioStateService } from '../../../services/agent-studio-state.service';
 import type {
   AgenticTeam,
@@ -98,15 +97,19 @@ type StudioPersonaMode = 'manual' | 'persona';
  * Validates the team assembled in Stage 3 two ways:
  *   - **Manual:** reuses `app-agentic-team-test-panel` (chat + pipeline) as-is.
  *   - **Persona-driven:** picks a testing persona + a target process and launches
- *     an autonomous run via `POST /start` with
+ *     an autonomous run via `AgentStudioFacade.startPersonaRun` with
  *     `target_team_key = "agentic_team:<teamId>"`, then renders a live run view
  *     (elapsed counter, "persona is thinking…", decision transcript).
+ * Primary HTTP goes through `AgentStudioFacade`; the embedded test panel and
+ * persona editor dialog keep their own API clients (same documented exception
+ * as Stage 2's Console runner).
  *
  * Back-loops (spec §2.1): "iterate roster" → Stage 3, "fix an agent" → Stage 2
  * (disabled when no registry agent is in focus). A team that isn't testable yet
  * (no `complete` process) shows the §Stage-3 safety net rather than an empty
- * dropdown. Reads the handoff `teamId`/`processId`; never navigates backward via
- * the stepper itself.
+ * dropdown. Reads the handoff `teamId`/`processId`/`personaId`; process
+ * selection writes through the shared store (no local competing signal). Never
+ * navigates backward via the stepper itself.
  */
 @Component({
   selector: 'app-agent-studio-persona',
@@ -125,8 +128,7 @@ type StudioPersonaMode = 'manual' | 'persona';
 })
 export class AgentStudioPersonaComponent implements OnInit {
   private readonly state = inject(AgentStudioStateService);
-  private readonly agenticApi = inject(AgenticTeamApiService);
-  private readonly personaApi = inject(PersonaTestingApiService);
+  private readonly facade = inject(AgentStudioFacade);
   private readonly dialog = inject(MatDialog);
   private readonly destroyRef = inject(DestroyRef);
 
@@ -141,7 +143,7 @@ export class AgentStudioPersonaComponent implements OnInit {
   readonly personasError = signal<string | null>(null);
   /** True while a create-persona POST is in flight (drives a progress indicator). */
   readonly creatingPersona = signal(false);
-  readonly selectedProcessId = signal<string | null>(null);
+  readonly selectedProcessId = computed(() => this.state.processId());
   readonly launching = signal(false);
   /** True while a stop-run (cancel) request is in flight; drives "Stopping…". */
   readonly cancelling = signal(false);
@@ -385,10 +387,6 @@ export class AgentStudioPersonaComponent implements OnInit {
     if (!teamId) {
       return; // empty state: no team composed yet (handled in template)
     }
-    // Pre-seed the target process from the Stage-3 handoff *before* loading the
-    // team, so loadTeam's "default to the single complete process" only fires
-    // when the handoff carried none (it must not clobber a seeded selection).
-    this.selectedProcessId.set(this.state.processId());
     this.loadTeam(teamId);
     this.loadPersonas();
   }
@@ -435,16 +433,24 @@ export class AgentStudioPersonaComponent implements OnInit {
     this.state.setPersonaId(id);
   }
 
-  /** Select the target process for the run (must be a `complete` process). */
+  /**
+   * Select the target process for the run (must be a `complete` process).
+   * Process selection is owned by the shared studio state (so it survives a
+   * back-loop to Stage 2/3 and is what drafts persist), hence the write goes
+   * through the state service rather than a local signal.
+   *
+   * Preconditions: `id` is a process id on the loaded team.
+   * Postconditions: `state.processId()` equals `id`.
+   */
   selectProcess(id: string): void {
-    this.selectedProcessId.set(id);
+    this.state.setProcessId(id);
   }
 
   // ── Data loads ────────────────────────────────────────────────────────────
 
   private loadTeam(teamId: string): void {
     this.teamError.set(null);
-    this.agenticApi
+    this.facade
       .getTeam(teamId)
       .pipe(takeUntilDestroyed(this.destroyRef))
       .subscribe({
@@ -466,11 +472,11 @@ export class AgentStudioPersonaComponent implements OnInit {
           // <select> only lists complete ones (so it'd show the placeholder) and
           // the backend would 422 it, but the signal would still enable Run.
           if (current && !complete.some((p) => p.process_id === current)) {
-            this.selectedProcessId.set(null);
+            this.state.setProcessId(null);
           }
           // Default to the only complete process when nothing valid is selected.
           if (!this.selectedProcessId() && complete.length === 1) {
-            this.selectedProcessId.set(complete[0].process_id);
+            this.state.setProcessId(complete[0].process_id);
           }
         },
         error: () => {
@@ -485,8 +491,8 @@ export class AgentStudioPersonaComponent implements OnInit {
     // each error region is independently responsible and safely reloadable.
     this.personasError.set(null);
     this.personasLoading.set(true);
-    this.personaApi
-      .getPersonas()
+    this.facade
+      .listPersonas()
       .pipe(takeUntilDestroyed(this.destroyRef))
       .subscribe({
         next: (resp) => {
@@ -534,8 +540,8 @@ export class AgentStudioPersonaComponent implements OnInit {
     }
     this.launching.set(true);
     this.error.set(null);
-    this.personaApi
-      .startTest({
+    this.facade
+      .startPersonaRun({
         persona_id: personaId,
         target_team_key: `agentic_team:${teamId}`,
         process_id: processId,
@@ -586,8 +592,8 @@ export class AgentStudioPersonaComponent implements OnInit {
     const runId = r.run_id;
     this.cancelling.set(true);
     this.error.set(null);
-    this.personaApi
-      .cancelJob(runId)
+    this.facade
+      .cancelPersonaRun(runId)
       .pipe(timeout(LAUNCH_TIMEOUT_MS), takeUntilDestroyed(this.destroyRef))
       .subscribe({
         error: () => {
@@ -624,7 +630,7 @@ export class AgentStudioPersonaComponent implements OnInit {
         // banner and lets the next tick retry, matching the immediate-fetch
         // comment's promise.
         switchMap(() =>
-          this.personaApi.getRunStatus(runId).pipe(
+          this.facade.getPersonaRunStatus(runId).pipe(
             catchError(() => {
               this.error.set(LOST_CONTACT);
               return EMPTY;
@@ -635,8 +641,8 @@ export class AgentStudioPersonaComponent implements OnInit {
       )
       .subscribe((detail) => this.handleStatus(detail));
     // Fetch once immediately so the panel isn't blank for a full poll interval.
-    this.personaApi
-      .getRunStatus(runId)
+    this.facade
+      .getPersonaRunStatus(runId)
       .pipe(takeUntilDestroyed(this.destroyRef))
       .subscribe({
         next: (detail) => this.handleStatus(detail),
@@ -690,8 +696,8 @@ export class AgentStudioPersonaComponent implements OnInit {
    * so a slow read from a prior run can't clobber the current one.
    */
   private fetchPipelineRun(teamId: string, pipelineRunId: string): void {
-    this.agenticApi
-      .getPipelineRun(teamId, pipelineRunId)
+    this.facade
+      .getTeamPipelineRun(teamId, pipelineRunId)
       .pipe(
         catchError(() => EMPTY),
         takeUntilDestroyed(this.destroyRef),
@@ -760,7 +766,7 @@ export class AgentStudioPersonaComponent implements OnInit {
         // "New persona" trigger — without this the dialog is already closed and a
         // user with no feedback might retry and double-submit.
         this.creatingPersona.set(true);
-        this.personaApi
+        this.facade
           .createPersona(result)
           .pipe(takeUntilDestroyed(this.destroyRef))
           .subscribe({
@@ -773,7 +779,7 @@ export class AgentStudioPersonaComponent implements OnInit {
                 return;
               }
               this.personas.update((list) => [...list, created]);
-              this.state.setPersonaId(created.id);
+              // The façade writes `personaId` on success; do not re-write it here.
             },
             error: () => {
               this.creatingPersona.set(false);
