@@ -6,7 +6,7 @@ single specialist agent loaded by the sandbox runtime to the Agent Console
 
 The shim does **not** run inside production team services; it lives only
 inside the sandbox container started by
-`backend/agents/agent_team_studio/agent_provisioning_team/sandbox/`. The sandbox's
+`backend/agents/agent_platform/sandbox/`. The sandbox's
 `agent_sandbox_runtime/entrypoint.py` mounts it and adds a per-container
 middleware that restricts dispatch to the one agent id bound via
 `SANDBOX_AGENT_ID`.

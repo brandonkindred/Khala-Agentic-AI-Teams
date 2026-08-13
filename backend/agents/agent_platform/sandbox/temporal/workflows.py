@@ -1,9 +1,9 @@
-"""Temporal workflows for the Agent Provisioning sandbox lifecycle.
+"""Temporal workflows for the platform sandbox lifecycle.
 
 Three workflows wrap the agent-keyed sandbox pool:
 
 * ``SandboxAcquireWorkflow`` — durably warm one agent's sandbox (execute-and-wait
-  from the ``/warm`` route and the Agent Console runner).
+  from the ``/warm`` route and the invoke proxy).
 * ``SandboxTeardownWorkflow`` — durably stop + evict one agent's sandbox.
 * ``SandboxReaperWorkflow`` — a single self-scheduling durable loop that replaces
   the old ``asyncio.create_task(run_idle_reaper())`` background task. It sleeps,
@@ -24,8 +24,8 @@ from temporalio import workflow
 from temporalio.common import RetryPolicy
 
 with workflow.unsafe.imports_passed_through():
-    from agent_team_studio.agent_provisioning_team.temporal import sandbox_activities as _sb
-    from agent_team_studio.agent_provisioning_team.temporal.constants import (
+    from agent_platform.sandbox.temporal import activities as _sb
+    from agent_platform.sandbox.temporal.constants import (
         SANDBOX_ACQUIRE_TIMEOUT_S,
         SANDBOX_REAP_TIMEOUT_S,
         SANDBOX_REAPER_INTERVAL_S,

@@ -1,8 +1,8 @@
-"""Agent-keyed sandbox lifecycle for ``agent_provisioning_team`` (issue #264).
+"""Agent-keyed sandbox lifecycle for ``agent_platform.sandbox``.
 
-Runs the unified ``khala-agent-sandbox`` image from Phase 1 (#263) as one
-ephemeral, hardened container per specialist agent under test. The unified
-API and Agent Console switch to this module in Phase 3 (#265).
+Runs the unified ``khala-agent-sandbox`` image as one ephemeral, hardened
+container per specialist agent under test. Unified-API sandbox routes and
+the invoke proxy import this package.
 """
 
 from .lifecycle import (

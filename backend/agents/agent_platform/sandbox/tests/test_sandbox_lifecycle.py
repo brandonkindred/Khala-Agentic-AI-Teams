@@ -18,13 +18,13 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from agent_team_studio.agent_provisioning_team.sandbox import (
+from agent_platform.sandbox import (
     Lifecycle,
     SandboxStatus,
     UnknownAgentError,
 )
-from agent_team_studio.agent_provisioning_team.sandbox import provisioner as provisioner_mod
-from agent_team_studio.agent_provisioning_team.sandbox.state import SandboxHandle, SandboxState, now
+from agent_platform.sandbox import provisioner as provisioner_mod
+from agent_platform.sandbox.state import SandboxHandle, SandboxState, now
 
 
 def _lifecycle(tmp_path: Path) -> Lifecycle:
@@ -33,7 +33,7 @@ def _lifecycle(tmp_path: Path) -> Lifecycle:
 
 def _patched_registry(team: str = "blogging"):
     return patch(
-        "agent_team_studio.agent_provisioning_team.sandbox.lifecycle._resolve_team",
+        "agent_platform.sandbox.lifecycle._resolve_team",
         return_value=team,
     )
 
@@ -48,7 +48,7 @@ def _patched_docker(*, container_id: str = "abc123", host_port: int = 55123, run
     with ExitStack() as stack:
         stack.enter_context(
             patch(
-                "agent_team_studio.agent_provisioning_team.sandbox.lifecycle._check_docker_available",
+                "agent_platform.sandbox.lifecycle._check_docker_available",
                 return_value=None,
             )
         )
@@ -134,7 +134,7 @@ async def test_acquire_is_idempotent_when_already_warm(tmp_path: Path) -> None:
 async def test_acquire_reuses_warm_handle_when_docker_check_would_fail(tmp_path: Path) -> None:
     """A WARM sandbox should be reused even if the Docker daemon is temporarily
     unavailable (e.g. live-restore). The preflight must not gate the fast path."""
-    from agent_team_studio.agent_provisioning_team.sandbox.lifecycle import DockerUnavailableError
+    from agent_platform.sandbox.lifecycle import DockerUnavailableError
 
     lc = _lifecycle(tmp_path)
     with _patched_registry(), _patched_docker(running=True):
@@ -143,7 +143,7 @@ async def test_acquire_reuses_warm_handle_when_docker_check_would_fail(tmp_path:
     with (
         _patched_registry(),
         patch(
-            "agent_team_studio.agent_provisioning_team.sandbox.lifecycle._check_docker_available",
+            "agent_platform.sandbox.lifecycle._check_docker_available",
             side_effect=DockerUnavailableError("daemon gone"),
         ),
         patch.object(provisioner_mod, "is_running", new=AsyncMock(return_value=True)),
@@ -268,11 +268,11 @@ async def test_unknown_agent_raises_without_docker_call(tmp_path: Path) -> None:
     lc = _lifecycle(tmp_path)
     with (
         patch(
-            "agent_team_studio.agent_provisioning_team.sandbox.lifecycle._resolve_team",
+            "agent_platform.sandbox.lifecycle._resolve_team",
             side_effect=UnknownAgentError("No agent manifest for 'ghost.agent'"),
         ),
         patch(
-            "agent_team_studio.agent_provisioning_team.sandbox.lifecycle._check_docker_available",
+            "agent_platform.sandbox.lifecycle._check_docker_available",
             return_value=None,
         ),
         patch.object(provisioner_mod, "run_container", new=AsyncMock()) as run_mock,
@@ -284,13 +284,13 @@ async def test_unknown_agent_raises_without_docker_call(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_acquire_raises_docker_unavailable_when_no_docker(tmp_path: Path) -> None:
-    from agent_team_studio.agent_provisioning_team.sandbox.lifecycle import DockerUnavailableError
+    from agent_platform.sandbox.lifecycle import DockerUnavailableError
 
     lc = _lifecycle(tmp_path)
     with (
         _patched_registry(),
         patch(
-            "agent_team_studio.agent_provisioning_team.sandbox.lifecycle._check_docker_available",
+            "agent_platform.sandbox.lifecycle._check_docker_available",
             side_effect=DockerUnavailableError("Docker daemon not found"),
         ),
         patch.object(provisioner_mod, "run_container", new=AsyncMock()) as run_mock,
@@ -342,7 +342,7 @@ async def test_acquire_returns_warm_handle_when_is_running_check_fails(tmp_path:
 def test_check_docker_available_honors_persisted_context(tmp_path: Path) -> None:
     """_check_docker_available should pass when ~/.docker/config.json has a
     non-default currentContext, even without DOCKER_HOST or the default socket."""
-    from agent_team_studio.agent_provisioning_team.sandbox.lifecycle import _check_docker_available
+    from agent_platform.sandbox.lifecycle import _check_docker_available
 
     docker_dir = tmp_path / ".docker"
     docker_dir.mkdir()
@@ -359,7 +359,7 @@ def test_check_docker_available_honors_persisted_context(tmp_path: Path) -> None
 
 def test_check_docker_available_ignores_default_context(tmp_path: Path) -> None:
     """A persisted context of 'default' should NOT skip the socket check."""
-    from agent_team_studio.agent_provisioning_team.sandbox.lifecycle import (
+    from agent_platform.sandbox.lifecycle import (
         DockerUnavailableError,
         _check_docker_available,
     )
@@ -381,7 +381,7 @@ def test_check_docker_available_ignores_default_context(tmp_path: Path) -> None:
 def test_check_docker_available_honors_docker_config_env(tmp_path: Path) -> None:
     """DOCKER_CONFIG pointing to a custom dir with a non-default context
     should skip the socket check."""
-    from agent_team_studio.agent_provisioning_team.sandbox.lifecycle import _check_docker_available
+    from agent_platform.sandbox.lifecycle import _check_docker_available
 
     custom_dir = tmp_path / "custom-docker"
     custom_dir.mkdir()
@@ -402,7 +402,7 @@ def test_check_docker_available_honors_docker_config_env(tmp_path: Path) -> None
 def test_check_docker_available_ignores_docker_context_default_env(tmp_path: Path) -> None:
     """DOCKER_CONTEXT=default points to the local socket, so the socket check
     must still fire — setting it should not bypass the fast-fail."""
-    from agent_team_studio.agent_provisioning_team.sandbox.lifecycle import (
+    from agent_platform.sandbox.lifecycle import (
         DockerUnavailableError,
         _check_docker_available,
     )
@@ -411,7 +411,7 @@ def test_check_docker_available_ignores_docker_context_default_env(tmp_path: Pat
         patch("shutil.which", return_value="/usr/bin/docker"),
         patch.dict("os.environ", {"DOCKER_HOST": "", "DOCKER_CONTEXT": "default"}, clear=False),
         patch(
-            "agent_team_studio.agent_provisioning_team.sandbox.lifecycle._has_non_default_docker_context",
+            "agent_platform.sandbox.lifecycle._has_non_default_docker_context",
             return_value=False,
         ),
         patch("pathlib.Path.exists", return_value=False),
@@ -422,7 +422,7 @@ def test_check_docker_available_ignores_docker_context_default_env(tmp_path: Pat
 
 def test_check_docker_available_passes_with_non_default_docker_context_env() -> None:
     """DOCKER_CONTEXT set to a non-default value should skip the socket check."""
-    from agent_team_studio.agent_provisioning_team.sandbox.lifecycle import _check_docker_available
+    from agent_platform.sandbox.lifecycle import _check_docker_available
 
     with (
         patch("shutil.which", return_value="/usr/bin/docker"),
@@ -448,7 +448,7 @@ async def test_run_idle_reaper_is_cancellable(tmp_path: Path) -> None:
     lc = _lifecycle(tmp_path)
     with (
         patch(
-            "agent_team_studio.agent_provisioning_team.sandbox.lifecycle.asyncio.sleep",
+            "agent_platform.sandbox.lifecycle.asyncio.sleep",
             new=AsyncMock(),
         ),
         patch.object(Lifecycle, "reap_once", new=AsyncMock(return_value=[])),
@@ -523,7 +523,7 @@ def test_percentile_uses_nearest_rank() -> None:
     """Regression for PR #304 Codex feedback: the helper must use ceil, not
     round, so p95 on 11 samples lands on index 10 (the textbook nearest-rank
     rank) rather than underestimating at index 9."""
-    from agent_team_studio.agent_provisioning_team.sandbox.lifecycle import _percentile
+    from agent_platform.sandbox.lifecycle import _percentile
 
     samples = list(range(1, 12))  # 1..11, pre-sorted
     # p95 of 11 samples: ceil(0.95 * 11) = 11 → index 10 → value 11.
@@ -632,7 +632,7 @@ async def test_run_idle_reaper_records_interval(tmp_path: Path) -> None:
         # Patching asyncio.sleep globally would also mock any `await sleep(0)`
         # in the test itself — hence we drive cancellation from reap_once below.
         patch(
-            "agent_team_studio.agent_provisioning_team.sandbox.lifecycle.asyncio.sleep",
+            "agent_platform.sandbox.lifecycle.asyncio.sleep",
             new=AsyncMock(),
         ),
         patch.object(Lifecycle, "reap_once", new=_cancel),
@@ -650,8 +650,8 @@ async def test_module_helpers_delegate_to_singleton(tmp_path: Path, monkeypatch)
     """`sandbox.acquire/teardown/…` must operate on the same Lifecycle instance
     so that status swings are observable across calls — the unified API routes
     rely on this to reconcile invoke + list + teardown."""
-    from agent_team_studio.agent_provisioning_team import sandbox as sb
-    from agent_team_studio.agent_provisioning_team.sandbox import lifecycle as lifecycle_mod
+    from agent_platform import sandbox as sb
+    from agent_platform.sandbox import lifecycle as lifecycle_mod
 
     lc = _lifecycle(tmp_path)
     lifecycle_mod.get_lifecycle.cache_clear()
@@ -680,7 +680,7 @@ async def test_module_helpers_delegate_to_singleton(tmp_path: Path, monkeypatch)
 
 @pytest.mark.asyncio
 async def test_wait_healthy_exceeds_deadline(tmp_path: Path, monkeypatch) -> None:
-    from agent_team_studio.agent_provisioning_team.sandbox import lifecycle as lc_mod
+    from agent_platform.sandbox import lifecycle as lc_mod
 
     lc = lc_mod.Lifecycle(state_file=tmp_path / "s.json")
 
@@ -699,7 +699,7 @@ async def test_wait_healthy_exceeds_deadline(tmp_path: Path, monkeypatch) -> Non
 
 @pytest.mark.asyncio
 async def test_wait_healthy_success(tmp_path: Path, monkeypatch) -> None:
-    from agent_team_studio.agent_provisioning_team.sandbox import lifecycle as lc_mod
+    from agent_platform.sandbox import lifecycle as lc_mod
 
     lc = lc_mod.Lifecycle(state_file=tmp_path / "s.json")
 
@@ -714,7 +714,7 @@ async def test_wait_healthy_success(tmp_path: Path, monkeypatch) -> None:
 
 @pytest.mark.asyncio
 async def test_run_idle_reaper_swallows_non_cancel_exception(tmp_path: Path) -> None:
-    from agent_team_studio.agent_provisioning_team.sandbox import lifecycle as lc_mod
+    from agent_platform.sandbox import lifecycle as lc_mod
 
     lc = lc_mod.Lifecycle(state_file=tmp_path / "s.json")
 
@@ -736,8 +736,8 @@ async def test_run_idle_reaper_swallows_non_cancel_exception(tmp_path: Path) -> 
 
 @pytest.mark.asyncio
 async def test_reap_once_skips_non_warm(tmp_path: Path) -> None:
-    from agent_team_studio.agent_provisioning_team.sandbox import lifecycle as lc_mod
-    from agent_team_studio.agent_provisioning_team.sandbox.state import (
+    from agent_platform.sandbox import lifecycle as lc_mod
+    from agent_platform.sandbox.state import (
         SandboxState,
         SandboxStatus,
         now,
@@ -762,7 +762,7 @@ async def test_reap_once_skips_non_warm(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_resolve_team_success() -> None:
-    from agent_team_studio.agent_provisioning_team.sandbox.lifecycle import _resolve_team
+    from agent_platform.sandbox.lifecycle import _resolve_team
 
     fake_manifest = MagicMock()
     fake_manifest.team = "myteam"
@@ -778,7 +778,7 @@ async def test_resolve_team_success() -> None:
 
 @pytest.mark.asyncio
 async def test_resolve_team_unknown() -> None:
-    from agent_team_studio.agent_provisioning_team.sandbox.lifecycle import (
+    from agent_platform.sandbox.lifecycle import (
         UnknownAgentError,
         _resolve_team,
     )
@@ -812,7 +812,7 @@ async def test_resolve_team_calls_get_registry_off_the_event_loop_thread() -> No
         captured["thread"] = threading.current_thread()
         return fake_registry
 
-    from agent_team_studio.agent_provisioning_team.sandbox.lifecycle import _resolve_team
+    from agent_platform.sandbox.lifecycle import _resolve_team
 
     with patch("agent_platform.registry.get_registry", side_effect=_recording_get_registry):
         assert await _resolve_team("agent.x") == "myteam"
@@ -824,8 +824,8 @@ async def test_resolve_team_calls_get_registry_off_the_event_loop_thread() -> No
 async def test_module_helper_status(tmp_path: Path, monkeypatch) -> None:
     from unittest.mock import AsyncMock as _AsyncMock
 
-    from agent_team_studio.agent_provisioning_team import sandbox as sb
-    from agent_team_studio.agent_provisioning_team.sandbox import lifecycle as lc_mod
+    from agent_platform import sandbox as sb
+    from agent_platform.sandbox import lifecycle as lc_mod
 
     lc = lc_mod.Lifecycle(state_file=tmp_path / "s.json")
     lc_mod.get_lifecycle.cache_clear()
@@ -838,8 +838,8 @@ async def test_module_helper_status(tmp_path: Path, monkeypatch) -> None:
 
 @pytest.mark.asyncio
 async def test_module_helper_metrics(tmp_path: Path, monkeypatch) -> None:
-    from agent_team_studio.agent_provisioning_team import sandbox as sb
-    from agent_team_studio.agent_provisioning_team.sandbox import lifecycle as lc_mod
+    from agent_platform import sandbox as sb
+    from agent_platform.sandbox import lifecycle as lc_mod
 
     lc = lc_mod.Lifecycle(state_file=tmp_path / "s.json")
     lc_mod.get_lifecycle.cache_clear()
@@ -852,8 +852,8 @@ async def test_module_helper_metrics(tmp_path: Path, monkeypatch) -> None:
 async def test_module_helper_run_idle_reaper(tmp_path: Path, monkeypatch) -> None:
     from unittest.mock import AsyncMock as _AsyncMock
 
-    from agent_team_studio.agent_provisioning_team import sandbox as sb
-    from agent_team_studio.agent_provisioning_team.sandbox import lifecycle as lc_mod
+    from agent_platform import sandbox as sb
+    from agent_platform.sandbox import lifecycle as lc_mod
 
     lc = lc_mod.Lifecycle(state_file=tmp_path / "s.json")
     lc_mod.get_lifecycle.cache_clear()
@@ -874,7 +874,7 @@ async def test_module_helper_run_idle_reaper(tmp_path: Path, monkeypatch) -> Non
 
 @pytest.mark.asyncio
 async def test_lifecycle_note_activity_missing_no_op(tmp_path: Path) -> None:
-    from agent_team_studio.agent_provisioning_team.sandbox.lifecycle import Lifecycle
+    from agent_platform.sandbox.lifecycle import Lifecycle
 
     lc = Lifecycle(state_file=tmp_path / "s.json")
     # No state for "ghost" — call must be a no-op rather than raise.
@@ -883,7 +883,7 @@ async def test_lifecycle_note_activity_missing_no_op(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_lifecycle_teardown_missing_no_op(tmp_path: Path) -> None:
-    from agent_team_studio.agent_provisioning_team.sandbox.lifecycle import Lifecycle
+    from agent_platform.sandbox.lifecycle import Lifecycle
 
     lc = Lifecycle(state_file=tmp_path / "s.json")
     await lc.teardown("ghost")
@@ -892,7 +892,7 @@ async def test_lifecycle_teardown_missing_no_op(tmp_path: Path) -> None:
 @pytest.mark.asyncio
 async def test_lifecycle_persist_swallows_oserror(tmp_path: Path, monkeypatch) -> None:
     """If `state.save` raises, the public method completes without re-raising."""
-    from agent_team_studio.agent_provisioning_team.sandbox import lifecycle as lc_mod
+    from agent_platform.sandbox import lifecycle as lc_mod
 
     lc = lc_mod.Lifecycle(state_file=tmp_path / "s.json")
 
@@ -908,7 +908,7 @@ async def test_lifecycle_persist_swallows_non_oserror(tmp_path: Path, monkeypatc
     """The docstring promises `_persist()` never raises; a non-OSError failure
     inside `state.save` (e.g. a serialization error) must be swallowed the
     same way an OSError is, not propagate as an unhandled task exception."""
-    from agent_team_studio.agent_provisioning_team.sandbox import lifecycle as lc_mod
+    from agent_platform.sandbox import lifecycle as lc_mod
 
     lc = lc_mod.Lifecycle(state_file=tmp_path / "s.json")
 

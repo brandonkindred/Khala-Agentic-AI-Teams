@@ -16,8 +16,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from agent_team_studio.agent_provisioning_team.sandbox import provisioner as provisioner_mod
-from agent_team_studio.agent_provisioning_team.sandbox.provisioner import container_name_for
+from agent_platform.sandbox import provisioner as provisioner_mod
+from agent_platform.sandbox.provisioner import container_name_for
 
 
 @pytest.fixture
@@ -273,7 +273,7 @@ def _make_proc_stub():
 
 @pytest.mark.asyncio
 async def test_provisioner_exec_kills_on_timeout(monkeypatch) -> None:
-    from agent_team_studio.agent_provisioning_team.sandbox import provisioner as pm
+    from agent_platform.sandbox import provisioner as pm
 
     # Real proc-stub that hangs in communicate until cancelled.
     proc_stub = MagicMock()
@@ -303,7 +303,7 @@ async def test_provisioner_exec_kills_on_timeout(monkeypatch) -> None:
 
 
 def test_materialise_project_dir_copies_grafana(tmp_path: Path, monkeypatch) -> None:
-    from agent_team_studio.agent_provisioning_team.sandbox import provisioner as pm
+    from agent_platform.sandbox import provisioner as pm
 
     # sandbox_stack_assets_dir() returns the template's parent directory,
     # so colocate the support files with the template.
@@ -334,7 +334,7 @@ def test_materialise_project_dir_copies_grafana(tmp_path: Path, monkeypatch) -> 
 
 @pytest.mark.asyncio
 async def test_exec_handles_timeout(monkeypatch) -> None:
-    from agent_team_studio.agent_provisioning_team.sandbox import provisioner as pm
+    from agent_platform.sandbox import provisioner as pm
 
     async def fake_create_subprocess_exec(*args, **kwargs):
         # Simulate a stuck subprocess by returning a proc whose communicate
@@ -365,7 +365,7 @@ async def test_exec_handles_timeout(monkeypatch) -> None:
 async def test_is_running_true(monkeypatch) -> None:
     from unittest.mock import AsyncMock as _AsyncMock
 
-    from agent_team_studio.agent_provisioning_team.sandbox import provisioner as pm
+    from agent_platform.sandbox import provisioner as pm
 
     monkeypatch.setattr(pm, "_exec", _AsyncMock(return_value=(0, "true\n", "")))
     assert await pm.is_running("c1") is True
@@ -375,7 +375,7 @@ async def test_is_running_true(monkeypatch) -> None:
 async def test_is_running_false(monkeypatch) -> None:
     from unittest.mock import AsyncMock as _AsyncMock
 
-    from agent_team_studio.agent_provisioning_team.sandbox import provisioner as pm
+    from agent_platform.sandbox import provisioner as pm
 
     monkeypatch.setattr(pm, "_exec", _AsyncMock(return_value=(0, "false\n", "")))
     assert await pm.is_running("c1") is False
@@ -385,7 +385,7 @@ async def test_is_running_false(monkeypatch) -> None:
 async def test_is_running_returns_false_on_error(monkeypatch) -> None:
     from unittest.mock import AsyncMock as _AsyncMock
 
-    from agent_team_studio.agent_provisioning_team.sandbox import provisioner as pm
+    from agent_platform.sandbox import provisioner as pm
 
     monkeypatch.setattr(pm, "_exec", _AsyncMock(return_value=(1, "", "no such container")))
     assert await pm.is_running("c1") is False
@@ -395,7 +395,7 @@ async def test_is_running_returns_false_on_error(monkeypatch) -> None:
 async def test_inspect_host_port_raises_on_invalid_output(monkeypatch) -> None:
     from unittest.mock import AsyncMock as _AsyncMock
 
-    from agent_team_studio.agent_provisioning_team.sandbox import provisioner as pm
+    from agent_platform.sandbox import provisioner as pm
 
     monkeypatch.setattr(pm, "_exec", _AsyncMock(return_value=(0, "not-a-port\n", "")))
     with pytest.raises(pm.DockerError):
@@ -406,7 +406,7 @@ async def test_inspect_host_port_raises_on_invalid_output(monkeypatch) -> None:
 async def test_inspect_host_port_raises_on_nonzero(monkeypatch) -> None:
     from unittest.mock import AsyncMock as _AsyncMock
 
-    from agent_team_studio.agent_provisioning_team.sandbox import provisioner as pm
+    from agent_platform.sandbox import provisioner as pm
 
     monkeypatch.setattr(pm, "_exec", _AsyncMock(return_value=(1, "", "boom")))
     with pytest.raises(pm.DockerError):
@@ -417,7 +417,7 @@ async def test_inspect_host_port_raises_on_nonzero(monkeypatch) -> None:
 async def test_inspect_host_port_success(monkeypatch) -> None:
     from unittest.mock import AsyncMock as _AsyncMock
 
-    from agent_team_studio.agent_provisioning_team.sandbox import provisioner as pm
+    from agent_platform.sandbox import provisioner as pm
 
     monkeypatch.setattr(pm, "_exec", _AsyncMock(return_value=(0, "55123\n", "")))
     port = await pm.inspect_host_port("c1")
@@ -427,7 +427,7 @@ async def test_inspect_host_port_success(monkeypatch) -> None:
 @pytest.mark.asyncio
 async def test_run_container_cleans_up_on_inspect_failure(tmp_path: Path, monkeypatch) -> None:
     """If `docker inspect` fails after compose up, project dir is cleaned up."""
-    from agent_team_studio.agent_provisioning_team.sandbox import provisioner as pm
+    from agent_platform.sandbox import provisioner as pm
 
     monkeypatch.setenv("AGENT_CACHE", str(tmp_path))
 
@@ -462,7 +462,7 @@ async def test_run_container_cleans_up_on_inspect_failure(tmp_path: Path, monkey
 
 @pytest.mark.asyncio
 async def test_run_container_cleans_up_on_docker_error_in_exec(tmp_path: Path, monkeypatch) -> None:
-    from agent_team_studio.agent_provisioning_team.sandbox import provisioner as pm
+    from agent_platform.sandbox import provisioner as pm
 
     monkeypatch.setenv("AGENT_CACHE", str(tmp_path))
 
@@ -488,7 +488,7 @@ async def test_run_container_cleans_up_on_docker_error_in_exec(tmp_path: Path, m
 @pytest.mark.asyncio
 async def test_stop_container_raises_for_unexpected_failure(monkeypatch) -> None:
 
-    from agent_team_studio.agent_provisioning_team.sandbox import provisioner as pm
+    from agent_platform.sandbox import provisioner as pm
 
     async def fake_exec(cmd, *, timeout_s=30):
         if cmd[:3] == ["docker", "inspect", "--format"]:
@@ -504,14 +504,14 @@ async def test_stop_container_raises_for_unexpected_failure(monkeypatch) -> None
 
 
 def test_ensure_network_is_noop_shim() -> None:
-    from agent_team_studio.agent_provisioning_team.sandbox import provisioner as pm
+    from agent_platform.sandbox import provisioner as pm
 
     asyncio.run(pm.ensure_network())
 
 
 def test_cleanup_secrets_file_swallows_oserror(tmp_path: Path, monkeypatch) -> None:
     """rmtree failures are logged but not raised."""
-    from agent_team_studio.agent_provisioning_team.sandbox import provisioner as pm
+    from agent_platform.sandbox import provisioner as pm
 
     monkeypatch.setenv("AGENT_CACHE", str(tmp_path))
     project_dir = pm.sandbox_project_dir("khala-sbx-x")
