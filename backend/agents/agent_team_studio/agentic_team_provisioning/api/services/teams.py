@@ -15,7 +15,7 @@ from typing import Callable, Optional
 from fastapi import HTTPException, Response
 from pydantic import ValidationError
 
-from agent_registry.models import AgentManifest
+from agent_platform.registry.models import AgentManifest
 from agent_team_studio.agentic_team_provisioning.manifest_generation import (
     is_generated_manifest,
 )
@@ -152,7 +152,7 @@ def list_team_agents(team_id: str):
 
 
 def list_team_agent_manifests(team_id: str):
-    """Resolvable agent_registry manifests for the team's roster.
+    """Resolvable agent_platform.registry manifests for the team's roster.
 
     Returns the Manifest currently registered for each roster ref's
     ``manifest_id`` (registry-source originals and generated wrappers alike).
@@ -165,10 +165,10 @@ def list_team_agent_manifests(team_id: str):
         the team is unknown.
     """
     # ``get_registry`` is imported inline (not at module top) so the test suite's
-    # ``monkeypatch.setattr("agent_registry.get_registry", …)`` is resolved at call
-    # time — a top-level ``from agent_registry import get_registry`` would bind the
+    # ``monkeypatch.setattr("agent_platform.registry.get_registry", …)`` is resolved at call
+    # time — a top-level ``from agent_platform.registry import get_registry`` would bind the
     # name before the patch and bypass the fake registry.
-    from agent_registry import get_registry
+    from agent_platform.registry import get_registry
     from agent_team_studio.agentic_team_provisioning.api import main as _main
 
     team = _main._store.get_team(team_id)
@@ -254,9 +254,9 @@ def _unregister_generated_manifest(team_id: str, agent: AgenticTeamAgent) -> Non
     """
     try:
         # ``get_registry`` stays inline so tests' ``monkeypatch`` of
-        # ``agent_registry.get_registry`` resolves at call time (see
+        # ``agent_platform.registry.get_registry`` resolves at call time (see
         # ``list_team_agent_manifests``).
-        from agent_registry import get_registry
+        from agent_platform.registry import get_registry
 
         get_registry().unregister(agent.manifest_id)
     except Exception:
@@ -306,7 +306,7 @@ def add_agent_from_registry(team_id: str, req: AddAgentFromRegistryRequest):
         registry is unavailable), so an outage surfaces as a clear service-unavailable
         response rather than an opaque 500.
     """
-    from agent_registry import get_registry
+    from agent_platform.registry import get_registry
     from agent_team_studio.agentic_team_provisioning.api import main as _main
 
     team = _main._store.get_team(team_id)

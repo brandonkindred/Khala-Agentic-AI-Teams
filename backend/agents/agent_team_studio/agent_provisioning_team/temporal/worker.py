@@ -8,12 +8,6 @@ boot the generic team_service entrypoint invokes via
 (and ``shared.temporal.teams_registry.start_all_team_workers``) does.
 This module also retains ``create_agent_provisioning_worker`` for tests and
 diagnostics that want to build a ``Worker`` instance directly.
-
-``start_agent_provisioning_sandbox_temporal_worker_thread`` is a second,
-independent worker for sandbox lifecycle workflows/activities only — called
-explicitly from ``unified_api/main.py``'s own lifespan. See its docstring and
-``SANDBOX_TASK_QUEUE`` in ``temporal/constants.py`` for why sandbox work is
-pinned to its own queue/worker rather than sharing this team's general one.
 """
 
 from __future__ import annotations
@@ -52,8 +46,8 @@ def start_agent_provisioning_temporal_worker_thread() -> bool:
           ``WORKFLOWS``/``ACTIVITIES`` (provisioning/deprovision) — safe to run
           in any process, including the standalone team-service container,
           since none of it depends on process-local state. Sandbox
-          workflows/activities are intentionally excluded; see
-          :func:`start_agent_provisioning_sandbox_temporal_worker_thread`.
+          workflows/activities are not registered here; they live in
+          ``agent_platform.sandbox.temporal``.
     """
     from agent_team_studio.agent_provisioning_team.temporal import ACTIVITIES, WORKFLOWS
     from shared.temporal import start_team_worker
@@ -65,43 +59,6 @@ def start_agent_provisioning_temporal_worker_thread() -> bool:
         WORKFLOWS,
         ACTIVITIES,
         task_queue=TASK_QUEUE,
-    )
-
-
-def start_agent_provisioning_sandbox_temporal_worker_thread() -> bool:
-    """Start the sandbox-only Temporal worker, on its own task queue.
-
-    Preconditions:
-        - Must be called only from the process that owns the sandbox
-          ``Lifecycle`` singleton these activities mutate — the unified API
-          process (``unified_api/main.py``'s own lifespan calls this
-          explicitly; it is never started by package import or by the
-          standalone agent-provisioning-service team container). Calling it
-          from any other process would reintroduce the state-divergence hazard
-          ``SANDBOX_TASK_QUEUE``'s docstring (in ``temporal/constants.py``)
-          describes.
-    Postconditions:
-        - Returns True if a worker thread is running (or already running) for
-          the ``"agent_provisioning_sandbox"`` team key on
-          ``SANDBOX_TASK_QUEUE``, False when Temporal is disabled. Uses a
-          distinct team key from :func:`start_agent_provisioning_temporal_worker_thread`
-          so the two worker threads are tracked independently and neither
-          call can no-op against the other's registration.
-    """
-    from agent_team_studio.agent_provisioning_team.temporal import (
-        SANDBOX_ACTIVITIES,
-        SANDBOX_WORKFLOWS,
-    )
-    from agent_team_studio.agent_provisioning_team.temporal.constants import SANDBOX_TASK_QUEUE
-    from shared.temporal import start_team_worker
-
-    if not is_temporal_enabled():
-        return False
-    return start_team_worker(
-        "agent_provisioning_sandbox",
-        SANDBOX_WORKFLOWS,
-        SANDBOX_ACTIVITIES,
-        task_queue=SANDBOX_TASK_QUEUE,
     )
 
 
