@@ -578,69 +578,6 @@ def test_brand_rules_codifier_prompt_matches_spec() -> None:
 # Epic 5e sweep — completeness, no leftover string builders, per-phase spot-check
 # ---------------------------------------------------------------------------
 
-# Every public ``make_*`` factory in ``branding_team.agents``. Parameterized
-# factories (moodboard conceptualist, channel guides) appear once; their
-# variants are locked by the individual snapshot tests above.
-_SNAPSHOTTED_MAKE_FACTORIES: frozenset[str] = frozenset(
-    {
-        "make_discovery_auditor",
-        "make_purpose_vision_writer",
-        "make_values_articulator",
-        "make_audience_segmenter",
-        "make_differentiation_mapper",
-        "make_positioning_synthesizer",
-        "make_storyteller",
-        "make_archetype_analyst",
-        "make_tagline_writer",
-        "make_message_mapper",
-        "make_persona_builder",
-        "make_voice_principles_drafter",
-        "make_creative_director",
-        "make_moodboard_conceptualist",
-        "make_converge_decider",
-        "make_logo_specifier",
-        "make_color_system_builder",
-        "make_typography_builder",
-        "make_iconography_director",
-        "make_photography_video_director",
-        "make_voice_tone_builder",
-        "make_design_system_codifier",
-        "make_brand_experience_principler",
-        "make_website_guide",
-        "make_social_guide",
-        "make_email_guide",
-        "make_events_guide",
-        "make_partnerships_guide",
-        "make_internal_guide",
-        "make_brand_architecture_builder",
-        "make_brand_in_action_illustrator",
-        "make_ownership_definer",
-        "make_approval_workflow_designer",
-        "make_asset_wiki_planner",
-        "make_training_planner",
-        "make_kpi_designer",
-        "make_evolution_framer",
-        "make_brand_rules_codifier",
-    }
-)
-
-
-def test_every_make_factory_has_a_prompt_snapshot() -> None:
-    """A new ``make_*`` factory fails here until it lands in the snapshot set.
-
-    Preconditions:
-        ``branding_team.agents`` is importable and defines public ``make_*``
-        callables.
-    Postconditions:
-        The discovered ``make_*`` names equal ``_SNAPSHOTTED_MAKE_FACTORIES``.
-    """
-    discovered = {
-        name
-        for name in dir(branding_agents)
-        if name.startswith("make_") and callable(getattr(branding_agents, name))
-    }
-    assert discovered == _SNAPSHOTTED_MAKE_FACTORIES
-
 
 def _call_func_name(node: ast.expr) -> str | None:
     """Return the function name of a Call's ``func``, or None if not a bare name.
@@ -655,6 +592,109 @@ def _call_func_name(node: ast.expr) -> str | None:
     if isinstance(node, ast.Attribute):
         return node.attr
     return None
+
+
+def _make_factory_from_system_prompt_expr(node: ast.expr) -> str | None:
+    """Return ``make_*`` if ``node`` is ``make_*(...).system_prompt``, else None.
+
+    Preconditions:
+        ``node`` is an AST expression.
+    Postconditions:
+        Returns the ``make_*`` function name, or ``None`` when ``node`` is not
+        a ``make_*`` call whose ``system_prompt`` attribute is read.
+    """
+    if not isinstance(node, ast.Attribute) or node.attr != "system_prompt":
+        return None
+    if not isinstance(node.value, ast.Call):
+        return None
+    name = _call_func_name(node.value.func)
+    if name is not None and name.startswith("make_"):
+        return name
+    return None
+
+
+def _is_expected_prompt_operand(node: ast.expr) -> bool:
+    """Return True when ``node`` is an ``_EXPECTED_*`` name or a non-empty string.
+
+    Preconditions:
+        ``node`` is an AST expression.
+    Postconditions:
+        True iff ``node`` is a snapshot expected-prompt operand.
+    """
+    if isinstance(node, ast.Constant) and isinstance(node.value, str) and node.value:
+        return True
+    return isinstance(node, ast.Name) and node.id.startswith("_EXPECTED")
+
+
+def _make_factories_with_prompt_snapshots(tree: ast.AST) -> set[str]:
+    """Return ``make_*`` names equality-compared to an expected prompt in a test.
+
+    A name-only registry is not a snapshot: adding ``make_foo`` to a set would
+    pass a completeness check without locking ``system_prompt``. This walks
+    ``test_*`` functions for ``make_*(...).system_prompt == _EXPECTED...``.
+
+    Preconditions:
+        ``tree`` is a parsed Python module AST.
+    Postconditions:
+        The set of ``make_*`` names that appear in a ``test_*`` function as
+        ``make_*(...).system_prompt == <expected prompt>``. Empty when none match.
+    """
+    names: set[str] = set()
+    for func in ast.walk(tree):
+        if not isinstance(func, ast.FunctionDef) or not func.name.startswith("test_"):
+            continue
+        for node in ast.walk(func):
+            if not isinstance(node, ast.Compare):
+                continue
+            if not any(isinstance(op, ast.Eq) for op in node.ops):
+                continue
+            operands = [node.left, *node.comparators]
+            factory_name: str | None = None
+            saw_expected = False
+            for expr in operands:
+                extracted = _make_factory_from_system_prompt_expr(expr)
+                if extracted is not None:
+                    factory_name = extracted
+                if _is_expected_prompt_operand(expr):
+                    saw_expected = True
+            if factory_name is not None and saw_expected:
+                names.add(factory_name)
+    return names
+
+
+def test_prompt_snapshot_guard_requires_system_prompt_equality() -> None:
+    """A factory name with no ``system_prompt == _EXPECTED_*`` assertion is not covered.
+
+    Preconditions:
+        The helpers parse a synthetic module AST.
+    Postconditions:
+        A bare ``make_*()`` call is ignored; an equality against ``_EXPECTED_*``
+        is counted.
+    """
+    uncovered = ast.parse("def test_x():\n    make_new_agent()\n")
+    assert _make_factories_with_prompt_snapshots(uncovered) == set()
+    covered = ast.parse("def test_x():\n    assert make_new_agent().system_prompt == _EXPECTED_X\n")
+    assert _make_factories_with_prompt_snapshots(covered) == {"make_new_agent"}
+
+
+def test_every_make_factory_has_a_prompt_snapshot() -> None:
+    """A new ``make_*`` factory fails here until a snapshot assertion exists.
+
+    Preconditions:
+        ``branding_team.agents`` is importable and defines public ``make_*``
+        callables. This module contains the snapshot tests.
+    Postconditions:
+        Every discovered ``make_*`` name appears in a ``test_*`` function as
+        ``make_*(...).system_prompt == _EXPECTED...`` (parameterized factories
+        count once; variants are locked by those individual tests).
+    """
+    discovered = {
+        name
+        for name in dir(branding_agents)
+        if name.startswith("make_") and callable(getattr(branding_agents, name))
+    }
+    tree = ast.parse(Path(__file__).read_text(encoding="utf-8"))
+    assert discovered == _make_factories_with_prompt_snapshots(tree)
 
 
 def test_agents_py_build_agent_calls_use_render_agent_prompt() -> None:
