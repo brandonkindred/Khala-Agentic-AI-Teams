@@ -2,9 +2,9 @@
 
 Both the Studio (``agent_platform.studio``) and agentic
 (``agent_team_studio.agentic_team_provisioning``) authoring surfaces build
-:class:`~agent_registry.models.AgentManifest` instances with the same
+:class:`~agent_platform.registry.models.AgentManifest` instances with the same
 overall shape: pick an inline-vs-ref I/O schema, assemble the manifest fields,
-then round-trip through :func:`~agent_registry.manifest_projection.revalidate`.
+then round-trip through :func:`~agent_platform.registry.manifest_projection.revalidate`.
 This module is the future single source for that shape — the *helper
 functions*, not the team-specific constants (entrypoint refs, default
 cognition block) each surface stamps on, which stay owned by their current
@@ -18,8 +18,8 @@ from __future__ import annotations
 
 from typing import Any
 
-from agent_registry.manifest_projection import revalidate
-from agent_registry.models import AgentManifest, AgentStateSpec, CognitionSpec, IOSchema, SourceInfo
+from agent_platform.registry.manifest_projection import revalidate
+from agent_platform.registry.models import AgentManifest, AgentStateSpec, CognitionSpec, IOSchema, SourceInfo
 
 
 def io_schema(
