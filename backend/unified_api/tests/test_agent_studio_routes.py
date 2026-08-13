@@ -15,8 +15,8 @@ path **in-process, without a Temporal cluster**, by:
     Temporal's exception wrapping, so the dispatch layer's ``ValueError`` → 400 /
     ``LookupError`` → 404 translation is genuinely exercised.
 
-The direct in-process dispatch branch has its own coverage elsewhere (it reuses this
-same ``AgentStudioService`` unchanged, reached without a workflow round-trip).
+The direct in-process dispatch branch is covered in ``test_agent_studio_direct_routes.py``
+(same ``AgentStudioService``, reached without a workflow round-trip).
 
 ``backend/conftest.py`` already puts ``agents/`` on ``sys.path``.
 """

@@ -7,7 +7,7 @@ from typing import Final, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from agent_registry.models import AgentManifest
+from agent_platform.registry.models import AgentManifest
 
 from ..assistant_kernel import ConversationMessage
 
@@ -141,7 +141,7 @@ class AgenticTeamAgent(BaseModel):
     A roster entry is identity only: which manifest fills this team-local slot,
     and how it got there. Persona (``role``, ``skills``, ``capabilities``,
     ``tools``, ``expertise``) is not a field on this model — it lives solely on
-    the registered ``AgentManifest`` (see ``agent_registry.models.AgentManifest``)
+    the registered ``AgentManifest`` (see ``agent_platform.registry.models.AgentManifest``)
     and is joined at read time via ``roster_resolve.resolve_persona`` into
     ``EnrichedRosterAgent``. See this package's README ("Roster identity: thin
     refs, Manifest SoT") for the resolution path and the from-registry field
@@ -283,7 +283,7 @@ class TeamDetailResponse(BaseModel):
 
 
 class GeneratedManifestsResponse(BaseModel):
-    """Generated ``agent_registry`` manifests for a team's roster.
+    """Generated ``agent_platform.registry`` manifests for a team's roster.
 
     Each manifest carries the batteries-included cognition block stamped by
     ``manifest_generation.build_agent_manifest``.

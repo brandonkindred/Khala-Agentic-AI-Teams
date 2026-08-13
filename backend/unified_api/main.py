@@ -669,12 +669,12 @@ async def lifespan(app: FastAPI):  # noqa: PLR0915 - linear startup orchestrator
         logger.exception("agent_console postgres schema registration failed")
 
     try:
-        from agent_registry.postgres import SCHEMA as AGENT_REGISTRY_SCHEMA
+        from agent_platform.registry.postgres import SCHEMA as AGENT_REGISTRY_SCHEMA
         from shared.postgres import register_team_schemas
 
         register_team_schemas(AGENT_REGISTRY_SCHEMA)
     except Exception:
-        logger.exception("agent_registry postgres schema registration failed")
+        logger.exception("agent_platform.registry postgres schema registration failed")
 
     # Gate on the team's `enabled` flag, same rationale as product_delivery
     # below: disabling agent_studio must also disable its startup side

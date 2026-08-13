@@ -6,7 +6,7 @@ import { MatIconModule } from '@angular/material/icon';
 import { AgentDefinition, BUILD_SUB_STAGES, SaveAgentRequest } from '../../../models/agent-studio.model';
 import { AgentCatalogComponent } from '../agent-console/agent-catalog/agent-catalog.component';
 import { AgentProvisioningPanelComponent } from '../agent-provisioning-panel/agent-provisioning-panel.component';
-import { AgentStudioApiService } from '../../../services/agent-studio-api.service';
+import { AgentStudioFacade } from '../../../services/agent-studio.facade';
 import { AgentStudioStateService } from '../../../services/agent-studio-state.service';
 import { AgentStudioStagePlaceholderComponent } from './agent-studio-stage-placeholder.component';
 
@@ -19,15 +19,15 @@ import { AgentStudioStagePlaceholderComponent } from './agent-studio-stage-place
  * **1.1 Start** reuses the Agent Console catalog as-is (`app-agent-catalog`)
  * for browse / filter / inspect-drawer. Selecting an agent there (the
  * drawer's run action) clones it into a Stage-1 draft via
- * `AgentStudioApiService.cloneFromRegistry` — the source registry agent is
+ * `AgentStudioFacade.selectAgent` — the source registry agent is
  * never mutated; an explicit "Continue to Define →" then advances the
  * sub-stepper. **1.2 Define** and **1.3 Configure** are scaffolded with the
  * shared stage placeholder (the build assistant and the full anatomy review
  * are a later increment); each carries its own forward chrome, and Configure
  * additionally carries the sub-stepper's one backward affordance
  * (`◂ back to Define`) and the real **"Save agent"** action, which calls
- * `AgentStudioApiService.saveAgent` and writes the resulting id to
- * `registryAgentId` (spec §3, Stage 1) — this is what unlocks the
+ * `AgentStudioFacade.saveAgent` (the façade writes the resulting id to
+ * `registryAgentId` — spec §3, Stage 1) — this is what unlocks the
  * main-stepper's gated "Test this agent →" (Stage 1 → Stage 2).
  *
  * Provisioning is folded into this stage (spec §3, Stage 1): a "Provision an
@@ -63,7 +63,7 @@ import { AgentStudioStagePlaceholderComponent } from './agent-studio-stage-place
 })
 export class AgentStudioBuildAgentComponent {
   readonly state = inject(AgentStudioStateService);
-  private readonly api = inject(AgentStudioApiService);
+  private readonly facade = inject(AgentStudioFacade);
   private readonly destroyRef = inject(DestroyRef);
 
   /** The forward-only 1.1/1.2/1.3 sub-stage list rendered by the sub-stepper. */
@@ -106,11 +106,11 @@ export class AgentStudioBuildAgentComponent {
 
   /**
    * Clone the catalog's selected agent into a Stage-1 draft via
-   * `AgentStudioApiService` (spec §3, Stage 1.1: "Duplicate & refine" — the
-   * source registry agent is never mutated). This is the "select" step only —
+   * `AgentStudioFacade.selectAgent` (spec §3, Stage 1.1: "Duplicate & refine" —
+   * the source registry agent is never mutated). This is the "select" step only —
    * advancing to Stage 2 is the shell's gated "Test this agent →" affordance,
-   * unlocked once the draft is saved (§3, Stage 1.3). On success, a fresh
-   * client-generated id is written to `draftAgentId` — the handoff's
+   * unlocked once the draft is saved (§3, Stage 1.3). On success the façade
+   * stamps a fresh client-generated id onto `draftAgentId` — the handoff's
    * build-in-progress bookkeeping slot (spec §2.4) — since no server-issued
    * draft id exists until the drafts-persistence story lands.
    */
@@ -118,15 +118,14 @@ export class AgentStudioBuildAgentComponent {
     if (this.cloning()) return;
     this.cloning.set(true);
     this.cloneError.set(null);
-    this.api
-      .cloneFromRegistry(agentId)
+    this.facade
+      .selectAgent(agentId)
       .pipe(takeUntilDestroyed(this.destroyRef))
       .subscribe({
         next: (definition) => {
           this.cloning.set(false);
           this.draftDefinition.set(definition);
           this.selectedSourceAgentId.set(agentId);
-          this.state.setDraftAgentId(crypto.randomUUID());
         },
         error: (err) => {
           this.cloning.set(false);
@@ -136,11 +135,11 @@ export class AgentStudioBuildAgentComponent {
   }
 
   /**
-   * Save + register the current draft via `AgentStudioApiService`. On success,
-   * the returned `agent_id` becomes the journey's `registryAgentId` — the id
-   * the shell's "Test this agent →" gate and the rest of the journey read
-   * (spec §2.4: "On Save the draft agent is registered and its registry id is
-   * written to registryAgentId").
+   * Save + register the current draft via `AgentStudioFacade.saveAgent`. On
+   * success, the façade writes the returned `agent_id` to the journey's
+   * `registryAgentId` — the id the shell's "Test this agent →" gate and the
+   * rest of the journey read (spec §2.4: "On Save the draft agent is registered
+   * and its registry id is written to registryAgentId").
    *
    * Preconditions: none enforced — a missing draft or an in-flight save is a
    *   normal no-op (the Configure action row only renders once a draft exists).
@@ -165,13 +164,12 @@ export class AgentStudioBuildAgentComponent {
       output_schema: definition.output_schema,
       states: definition.states,
     };
-    this.api
+    this.facade
       .saveAgent(req)
       .pipe(takeUntilDestroyed(this.destroyRef))
       .subscribe({
-        next: (response) => {
+        next: () => {
           this.saving.set(false);
-          this.state.setRegistryAgentId(response.agent_id);
         },
         error: (err) => {
           this.saving.set(false);

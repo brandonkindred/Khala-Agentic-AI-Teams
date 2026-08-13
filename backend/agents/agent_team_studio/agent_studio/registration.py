@@ -1,7 +1,7 @@
 """Clone-from-registry and save+register for authored Studio agents.
 
 Saving reuses the **generated-agent runtime**: a saved Studio agent is registered
-into the process-wide ``agent_registry`` with the same entrypoint and invoke
+into the process-wide ``agent_platform.registry`` with the same entrypoint and invoke
 schemas that ``agentic_team_provisioning`` stamps onto generated team agents, so
 it resolves via ``GET /api/agents/{id}`` and runs via ``POST /api/agents/{id}/invoke``
 without a YAML file.
@@ -17,13 +17,13 @@ Registration scope tracks ``AgentRegistry.register()``'s own write-through: when
 dynamic Postgres store is active (``POSTGRES_HOST`` configured, not inside a
 per-invoke sandbox), a saved Studio agent is persisted there too, so every other
 worker and the per-invoke sandbox resolve it — not just this process. Local-only
-(in-process) otherwise. See :func:`agent_registry.get_registry`.
+(in-process) otherwise. See :func:`agent_platform.registry.get_registry`.
 """
 
 from __future__ import annotations
 
-from agent_registry.manifest_projection import hash_suffix, revalidate, slug
-from agent_registry.models import AgentManifest, AgentStateSpec, IOSchema, SourceInfo
+from agent_platform.registry.manifest_projection import hash_suffix, revalidate, slug
+from agent_platform.registry.models import AgentManifest, AgentStateSpec, IOSchema, SourceInfo
 
 from ..manifest_shared import (
     AGENT_ANATOMY_REF,
@@ -115,7 +115,7 @@ def _manifest_states(definition: AgentDefinition) -> list[AgentStateSpec]:
 
 
 def build_studio_agent_manifest(definition: AgentDefinition) -> AgentManifest:
-    """Build a validated, invokable ``agent_registry`` manifest for a definition.
+    """Build a validated, invokable ``agent_platform.registry`` manifest for a definition.
 
     Preconditions:
         * ``definition.name`` is non-empty.

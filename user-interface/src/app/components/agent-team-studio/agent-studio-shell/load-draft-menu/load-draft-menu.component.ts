@@ -5,7 +5,7 @@ import { MatIconModule } from '@angular/material/icon';
 import { MatMenuModule } from '@angular/material/menu';
 import { MatProgressSpinnerModule } from '@angular/material/progress-spinner';
 import { extractErrorDetail } from '../../../../core/error-handler.interceptor';
-import { AgentStudioApiService } from '../../../../services/agent-studio-api.service';
+import { AgentStudioFacade } from '../../../../services/agent-studio.facade';
 import type { AgentStudioDraftSummary } from '../../../../models/agent-studio.model';
 
 /** Number of draft summaries fetched per page (spec §3.5: "show older" via offset). */
@@ -15,7 +15,7 @@ const PAGE_SIZE = 10;
  * Load-draft dropdown (spec §3.5). Lists saved-draft summaries, paginated via
  * a trailing "Show older" control, and emits `draftSelected` when a row is
  * picked — hydration itself is the shell's responsibility (it needs
- * `AgentStudioStateService` and a second API call this menu has no reason to
+ * `AgentStudioStateService` and a second façade call this menu has no reason to
  * know about).
  */
 @Component({
@@ -27,7 +27,7 @@ const PAGE_SIZE = 10;
   styleUrl: './load-draft-menu.component.scss',
 })
 export class LoadDraftMenuComponent {
-  private readonly api = inject(AgentStudioApiService);
+  private readonly facade = inject(AgentStudioFacade);
 
   /** Disables the trigger while the shell is mid-hydration from a prior selection. */
   @Input() busy = false;
@@ -90,7 +90,7 @@ export class LoadDraftMenuComponent {
   private fetchPage(token: number): void {
     this.loading.set(true);
     this.error.set(null);
-    this.api.listDrafts(PAGE_SIZE, this.nextOffset).subscribe({
+    this.facade.listDrafts(PAGE_SIZE, this.nextOffset).subscribe({
       next: (rows) => {
         if (token !== this.openToken) return;
         this.drafts.update((existing) => [...existing, ...rows]);
