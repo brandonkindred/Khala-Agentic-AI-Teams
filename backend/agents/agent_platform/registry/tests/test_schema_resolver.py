@@ -4,12 +4,12 @@ from __future__ import annotations
 
 import pytest
 
-from agent_registry.schema_resolver import SchemaResolutionError, resolve_schema
+from agent_platform.registry.schema_resolver import SchemaResolutionError, resolve_schema
 
 
 def test_resolve_pydantic_model_returns_json_schema() -> None:
     # Use a well-known model from the registry's own package.
-    schema = resolve_schema("agent_registry.models:AgentSummary")
+    schema = resolve_schema("agent_platform.registry.models:AgentSummary")
     assert schema["type"] == "object"
     assert "id" in schema["properties"]
     assert "team" in schema["properties"]
@@ -22,7 +22,7 @@ def test_resolve_missing_module_raises() -> None:
 
 def test_resolve_missing_symbol_raises() -> None:
     with pytest.raises(SchemaResolutionError):
-        resolve_schema("agent_registry.models:NoSuchSymbol")
+        resolve_schema("agent_platform.registry.models:NoSuchSymbol")
 
 
 def test_malformed_ref_raises() -> None:

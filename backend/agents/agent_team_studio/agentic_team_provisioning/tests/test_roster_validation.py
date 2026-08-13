@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from agent_registry.models import AgentManifest, CognitionSpec, SourceInfo
+from agent_platform.registry.models import AgentManifest, CognitionSpec, SourceInfo
 from agent_team_studio.agentic_team_provisioning.manifest_generation import manifest_agent_id
 from agent_team_studio.agentic_team_provisioning.models import (
     AgenticTeam,
@@ -38,7 +38,7 @@ class _FakeRegistry:
 @pytest.fixture
 def registry(monkeypatch: pytest.MonkeyPatch) -> _FakeRegistry:
     reg = _FakeRegistry()
-    monkeypatch.setattr("agent_registry.get_registry", lambda: reg)
+    monkeypatch.setattr("agent_platform.registry.get_registry", lambda: reg)
     return reg
 
 

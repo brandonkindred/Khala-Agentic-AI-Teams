@@ -19,15 +19,15 @@ import { MatFormFieldModule } from '@angular/material/form-field';
 import { MatIconModule } from '@angular/material/icon';
 import { MatSelectModule } from '@angular/material/select';
 import { MatTooltipModule } from '@angular/material/tooltip';
-import { AgentCatalogApiService } from '../../../../services/agent-catalog-api.service';
-import { CognitionApiService } from '../../../../services/cognition-api.service';
+import { AgentCatalogApiService } from '../../../services/agent-catalog-api.service';
+import { CognitionApiService } from '../../../services/cognition-api.service';
 import {
   ConfirmDialogComponent,
   ConfirmDialogData,
-} from '../../../../shared/confirm-dialog/confirm-dialog.component';
-import { LoadingSpinnerComponent } from '../../../../shared/loading-spinner/loading-spinner.component';
-import { EmptyStateComponent } from '../../../../shared/empty-state/empty-state.component';
-import { ErrorMessageComponent } from '../../../../shared/error-message/error-message.component';
+} from '../../../shared/confirm-dialog/confirm-dialog.component';
+import { LoadingSpinnerComponent } from '../../../shared/loading-spinner/loading-spinner.component';
+import { EmptyStateComponent } from '../../../shared/empty-state/empty-state.component';
+import { ErrorMessageComponent } from '../../../shared/error-message/error-message.component';
 import {
   EVIDENCE_OUTDATED,
   eventKindLabel,
@@ -38,8 +38,8 @@ import {
   rulePriorityLabel,
   ruleModeTooltip,
   ruleSourceLabel,
-} from '../../../../models/cognition-labels';
-import type { AgentSummary } from '../../../../models/agent-catalog.model';
+} from '../../../models/cognition-labels';
+import type { AgentSummary } from '../../../models/agent-catalog.model';
 import type {
   MemoryEvent,
   ProposalStatus,
@@ -47,7 +47,7 @@ import type {
   RuleMode,
   RuleProposal,
   RuleStatus,
-} from '../../../../models/cognition.model';
+} from '../../../models/cognition.model';
 
 type ProposalFilter = ProposalStatus | 'all';
 type RuleFilter = RuleStatus | 'all';

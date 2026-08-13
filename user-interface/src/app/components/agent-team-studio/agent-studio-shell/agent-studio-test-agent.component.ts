@@ -10,9 +10,14 @@ import { AgentStudioStateService } from '../../../services/agent-studio-state.se
  * Runs the agent chosen in Stage 1 inside its sandbox by reusing the Agent
  * Console runner as-is (`app-agent-runner`), pre-seeded from the handoff
  * `registryAgentId`. The runner owns all sandbox / invoke / saved-input /
- * run-history / diff behaviour; this stage only seeds it and frames the agent.
- * The forward "Add to team →" affordance lives in the shell footer (the shell
- * owns the guided forward step), so this stage adds no second forward button.
+ * run-history / diff behaviour (including `AgentRunnerApiService`); this
+ * stage only seeds it and frames the agent. Stage 2's happy path therefore
+ * has no Studio HTTP-client injection of its own — invoke/sandbox stay on
+ * the reused Console runner rather than being re-wired through
+ * `AgentStudioFacade` (those façade methods exist for Studio-owned callers;
+ * this stage is not one). The forward "Add to team →" affordance lives in
+ * the shell footer (the shell owns the guided forward step), so this stage
+ * adds no second forward button.
  *
  * When no agent is selected yet (the stage was reached without a Stage-1
  * selection), it renders an empty state rather than an unseeded runner — so the

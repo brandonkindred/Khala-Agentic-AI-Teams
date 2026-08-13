@@ -1,6 +1,6 @@
 """Postgres-backed persistence for dynamically registered agent manifests.
 
-The base :class:`~agent_registry.loader.AgentRegistry` loads hand-authored
+The base :class:`~agent_platform.registry.loader.AgentRegistry` loads hand-authored
 manifests from disk YAML into an in-memory dict. That is per-process, so a
 manifest registered at runtime (Agent Studio save, ``agentic_team_provisioning``
 generated agents) is invisible to the other uvicorn workers and to the per-invoke
@@ -19,7 +19,7 @@ Trust / scope boundary:
 
 All functions raise on Postgres failure; ``AgentRegistry`` wraps every call so a
 Postgres outage degrades to local in-memory resolution rather than breaking the
-registry. DDL lives in ``agent_registry.postgres``; it is registered from the
+registry. DDL lives in ``agent_platform.registry.postgres``; it is registered from the
 unified API lifespan **and** ensured lazily on the first write here (see
 :func:`_ensure_schema`), so a write from a process that never applied the DDL
 (e.g. the standalone ``agentic_team_provisioning`` service) still lands in the
@@ -51,7 +51,9 @@ _TABLE = "agent_registry_dynamic_manifests"
 # change to its value (e.g. adding a schema-qualified prefix) that isn't a
 # safe identifier fails loudly here instead of silently becoming an
 # injection vector at every f-string call site below.
-assert re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", _TABLE), f"_TABLE is not a bare identifier: {_TABLE!r}"
+assert re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", _TABLE), (
+    f"_TABLE is not a bare identifier: {_TABLE!r}"
+)
 
 # Small TTL micro-cache for the full-list read (``all()``), which backs the
 # catalog list/search/teams endpoints. Point ``get()`` lookups (the invoke /
