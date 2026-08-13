@@ -769,15 +769,27 @@ export class AgentStudioPersonaComponent implements OnInit {
    * Postconditions: `personaLiveRunEndedAtMs` is set; `elapsedSec` is
    *   `endedAt - startedAt` in seconds (0 if startedAt is missing). Prefers
    *   `detail.updated_at` so a run that finished while Stage 4 was unmounted
-   *   does not include time spent on the audit child.
+   *   does not include time spent on the audit child. If that timestamp is
+   *   later than a previously stored end, this is a new attempt that finished
+   *   while unmounted (Testing Personas resume/restart on the same `run_id`);
+   *   the prior attempt's start is dropped so elapsed is not stretched across
+   *   the idle gap. That attempt's start was never observed, so `elapsedSec`
+   *   is 0.
    */
   private freezeElapsedAtTerminal(detail: PersonaTestRunDetail): void {
-    const startedAt = this.state.personaLiveRunStartedAtMs();
+    let startedAt = this.state.personaLiveRunStartedAtMs();
     if (startedAt == null) {
       return;
     }
-    const endedAt =
-      parseTimestampMs(detail.updated_at) ?? this.state.personaLiveRunEndedAtMs() ?? Date.now();
+    const storedEnd = this.state.personaLiveRunEndedAtMs();
+    const endedAt = parseTimestampMs(detail.updated_at) ?? storedEnd ?? Date.now();
+    // A later terminal timestamp than the one already frozen means a subsequent
+    // attempt completed while Stage 4 was unmounted. The persisted start belongs
+    // to the prior attempt; using it would include the idle gap between them.
+    if (storedEnd != null && endedAt > storedEnd) {
+      startedAt = endedAt;
+      this.state.setPersonaLiveRunStartedAtMs(endedAt);
+    }
     this.state.setPersonaLiveRunEndedAtMs(endedAt);
     this.elapsedSec.set(Math.max(0, Math.floor((endedAt - startedAt) / 1000)));
   }

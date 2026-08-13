@@ -1440,6 +1440,36 @@ describe('AgentStudioPersonaComponent', () => {
     }
   });
 
+  it('does not include the idle gap when a restarted run finishes while unmounted', () => {
+    vi.useFakeTimers();
+    try {
+      const firstFinishedAt = new Date(Date.now()).toISOString();
+      build();
+      facade.getPersonaRunStatus.mockReturnValue(
+        of(statusWithJob({ status: 'completed', updated_at: firstFinishedAt })),
+      );
+      fixture.detectChanges();
+      component.launch();
+      expect(component.runTerminal()).toBe(true);
+      expect(state.personaLiveRunEndedAtMs()).not.toBeNull();
+
+      fixture.destroy();
+      vi.advanceTimersByTime(60_000);
+      const secondFinishedAt = new Date(Date.now()).toISOString();
+      facade.getPersonaRunStatus.mockReturnValue(
+        of(statusWithJob({ status: 'completed', updated_at: secondFinishedAt })),
+      );
+      fixture = TestBed.createComponent(AgentStudioPersonaComponent);
+      component = fixture.componentInstance;
+      fixture.detectChanges();
+
+      expect(component.runTerminal()).toBe(true);
+      expect(component.elapsedSec()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('reseeds elapsed when a persisted terminal run is running again', () => {
     vi.useFakeTimers();
     try {
