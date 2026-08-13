@@ -160,5 +160,23 @@ describe('LlmUsageDashboardComponent', () => {
     component.load();
     fixture.detectChanges();
     expect(component.loadError).toBe('usage down');
+    expect(component.summary.total_calls).toBe(0);
+    expect(component.recent).toEqual([]);
+  });
+
+  it('does not keep the previous window totals when a refetch fails', () => {
+    apiSpy.getSummary.mockReturnValue(throwError(() => ({ error: { detail: '7d failed' } })));
+    apiSpy.getRecent.mockReturnValue(throwError(() => ({ error: { detail: '7d failed' } })));
+    component.setWindow('7d');
+    fixture.detectChanges();
+    expect(component.window).toBe('7d');
+    expect(component.summary.window).toBe('7d');
+    expect(component.summary.total_calls).toBe(0);
+    expect(component.summary.total_tokens).toBe(0);
+    expect(component.recent).toEqual([]);
+    expect(component.loadError).toBe('7d failed');
+    const el: HTMLElement = fixture.nativeElement;
+    expect(el.querySelector('[data-testid="by-model-table"]')).toBeNull();
+    expect(el.textContent).not.toMatch(/No LLM calls/i);
   });
 });

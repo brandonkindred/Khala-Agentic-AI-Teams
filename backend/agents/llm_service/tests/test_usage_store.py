@@ -12,9 +12,7 @@ from llm_service import usage_store as us
 
 
 class FakeCursor:
-    def __init__(
-        self, fetchone_rows=None, fetchall_rows=None, raise_on_execute=False
-    ) -> None:
+    def __init__(self, fetchone_rows=None, fetchall_rows=None, raise_on_execute=False) -> None:
         self.executed: list[tuple] = []
         self._fetchone = list(fetchone_rows or [])
         self._fetchall = fetchall_rows if fetchall_rows is not None else []
@@ -175,6 +173,7 @@ def test_fetch_summary_query_failure_returns_empty(fake_db) -> None:
     assert summary["total_calls"] == 0
     assert summary["by_model"] == {}
     assert summary["team"] == "blogging"
+    assert summary[us.QUERY_FAILED_KEY] is True
 
 
 def test_fetch_recent_newest_first_and_limit(fake_db) -> None:
@@ -316,6 +315,7 @@ def test_fetch_summary_postgres_off(monkeypatch) -> None:
     assert summary["total_calls"] == 0
     assert summary["team"] == "blogging"
     assert summary["by_model"] == {}
+    assert us.QUERY_FAILED_KEY not in summary
 
 
 def test_fetch_summary_cur_none(monkeypatch) -> None:
@@ -330,6 +330,7 @@ def test_fetch_summary_cur_none(monkeypatch) -> None:
     summary = us.fetch_summary(window="7d")
     assert summary["total_calls"] == 0
     assert summary["window"] == "7d"
+    assert summary[us.QUERY_FAILED_KEY] is True
 
 
 def test_fetch_recent_postgres_off(monkeypatch) -> None:

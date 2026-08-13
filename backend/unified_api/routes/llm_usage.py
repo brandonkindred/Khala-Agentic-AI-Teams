@@ -21,7 +21,12 @@ if str(_agents_dir) not in sys.path:
     sys.path.insert(0, str(_agents_dir))
 
 from llm_service.telemetry import get_recent_calls, get_usage_summary  # noqa: E402
-from llm_service.usage_store import fetch_recent, fetch_summary, window_hours  # noqa: E402
+from llm_service.usage_store import (  # noqa: E402
+    QUERY_FAILED_KEY,
+    fetch_recent,
+    fetch_summary,
+    window_hours,
+)
 from shared.postgres import is_postgres_enabled, resolve_storage_status  # noqa: E402
 
 router = APIRouter(prefix="/api/llm-usage", tags=["llm-usage"])
@@ -30,7 +35,18 @@ WindowPreset = Literal["24h", "7d", "30d", "all"]
 
 
 def _attach_storage(data: dict[str, Any]) -> dict[str, Any]:
+    """Stamp storage_status onto a summary body.
+
+    Preconditions: ``data`` is a mutable summary dict from ``fetch_summary`` or
+        ``get_usage_summary``.
+    Postconditions: ``storage_status`` / ``storage_available`` are set. A usage
+        query failure (``QUERY_FAILED_KEY``) with an otherwise-available probe
+        is reported as ``unreachable``. The internal marker is removed.
+    """
+    query_failed = bool(data.pop(QUERY_FAILED_KEY, False))
     status = resolve_storage_status()
+    if query_failed and status == "available":
+        status = "unreachable"
     data["storage_status"] = status
     data["storage_available"] = status == "available"
     return data

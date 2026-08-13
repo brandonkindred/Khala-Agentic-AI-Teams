@@ -37,11 +37,18 @@ const EMPTY_TOTALS: Pick<
   avg_latency_ms: 0,
 };
 
-function emptySummary(): LlmUsageSummary {
+const WINDOW_HOURS: Record<LlmUsageWindow, number> = {
+  '24h': 24,
+  '7d': 168,
+  '30d': 720,
+  all: 0,
+};
+
+function emptySummary(window: LlmUsageWindow = '24h'): LlmUsageSummary {
   return {
     team: 'all',
-    window: '24h',
-    window_hours: 24,
+    window,
+    window_hours: WINDOW_HOURS[window],
     ...EMPTY_TOTALS,
     storage_available: true,
     storage_status: 'available',
@@ -117,6 +124,13 @@ export class LlmUsageDashboardComponent implements OnInit {
             catchError((err) => {
               this.loadError = extractErrorDetail(err, 'Failed to load LLM usage.');
               this.loading = false;
+              const previous = this.summary;
+              this.summary = {
+                ...emptySummary(this.window),
+                storage_available: previous.storage_available,
+                storage_status: previous.storage_status,
+              };
+              this.recent = [];
               return EMPTY;
             }),
           ),
@@ -138,7 +152,10 @@ export class LlmUsageDashboardComponent implements OnInit {
    *
    * Preconditions: none.
    * Postconditions: on success, sets `summary`, `recent`, `storageStatus` and
-   * clears `loadError`; on failure, sets `loadError` via `extractErrorDetail`.
+   * clears `loadError`; on failure, sets `loadError` via `extractErrorDetail`,
+   * zeros `summary`/`recent` for the selected window (so a failed refetch
+   * cannot keep the previous window's totals), and leaves `storage_*` from the
+   * last successful response.
    * A newer `load()` cancels any in-flight pair via `switchMap`.
    */
   load(): void {

@@ -70,6 +70,12 @@ def window_hours(window: str) -> float:
     return WINDOWS[window]
 
 
+# Popped by GET /api/llm-usage before the body is returned. Set when a usage
+# query fails even though ``SELECT 1`` might still succeed, so the route can
+# report ``storage_status=unreachable`` instead of empty-but-available.
+QUERY_FAILED_KEY = "_query_failed"
+
+
 def empty_summary(*, window: str, team: str | None) -> dict:
     """Zeroed summary dict matching the GET /api/llm-usage response body (minus storage fields)."""
     hours = WINDOWS.get(window, 0.0)
@@ -86,6 +92,18 @@ def empty_summary(*, window: str, team: str | None) -> dict:
         "by_agent": {},
         "by_model": {},
     }
+
+
+def _failed_summary(*, window: str, team: str | None) -> dict:
+    """Empty summary marked so the HTTP layer reports storage as unreachable.
+
+    Preconditions: ``window`` is a key of :data:`WINDOWS`.
+    Postconditions: returns :func:`empty_summary` with :data:`QUERY_FAILED_KEY`
+        set to ``True``.
+    """
+    data = empty_summary(window=window, team=team)
+    data[QUERY_FAILED_KEY] = True
+    return data
 
 
 def _cutoff(window: str) -> datetime | None:
@@ -180,7 +198,9 @@ def fetch_summary(*, window: str, team: str | None = None) -> dict:
 
     Preconditions: ``window`` is a key of :data:`WINDOWS`.
     Postconditions: returns a summary dict (zeros / empty maps on Postgres-off
-        or query failure). ``avg_latency_ms`` is always ``0.0`` (latency is not
+        or query failure). Query failure and a ``None`` cursor also set
+        :data:`QUERY_FAILED_KEY` so the HTTP layer can report storage as
+        unreachable. ``avg_latency_ms`` is always ``0.0`` (latency is not
         persisted). ``by_model`` values have ``calls``, ``prompt_tokens``,
         ``completion_tokens``, ``total_tokens``.
     """
@@ -192,7 +212,7 @@ def fetch_summary(*, window: str, team: str | None = None) -> dict:
     try:
         with pg_cursor(dict_rows=True) as cur:
             if cur is None:
-                return empty
+                return _failed_summary(window=window, team=team)
             cur.execute(
                 "SELECT COUNT(*) AS total_calls, "
                 "COALESCE(SUM(prompt_tokens), 0) AS total_prompt_tokens, "
@@ -251,7 +271,7 @@ def fetch_summary(*, window: str, team: str | None = None) -> dict:
         }
     except Exception:
         logger.debug("failed to fetch llm usage summary", exc_info=True)
-        return empty
+        return _failed_summary(window=window, team=team)
 
 
 def fetch_recent(*, window: str, team: str | None = None, limit: int = 100) -> list[dict]:
@@ -307,6 +327,7 @@ def fetch_recent(*, window: str, team: str | None = None, limit: int = 100) -> l
 
 __all__ = [
     "TABLE_NAME",
+    "QUERY_FAILED_KEY",
     "USAGE_TABLE_STATEMENTS",
     "WINDOWS",
     "empty_summary",

@@ -16,6 +16,7 @@ if str(_agents) not in sys.path:
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from llm_service.usage_store import QUERY_FAILED_KEY
 from unified_api.routes.llm_usage import router as llm_usage_router
 
 app = FastAPI()
@@ -93,6 +94,36 @@ def test_postgres_path_does_not_read_ring_buffer() -> None:
     assert data["storage_available"] is True
     assert "pg-model" in data["by_model"]
     assert "ring" not in data["by_model"]
+
+
+def test_usage_query_failure_reports_storage_unreachable() -> None:
+    """SELECT 1 succeeding must not hide a failed llm_call_records query."""
+    failed = {
+        "team": "all",
+        "window": "24h",
+        "window_hours": 24.0,
+        "total_calls": 0,
+        "total_prompt_tokens": 0,
+        "total_completion_tokens": 0,
+        "total_tokens": 0,
+        "avg_latency_ms": 0.0,
+        "error_count": 0,
+        "by_agent": {},
+        "by_model": {},
+        QUERY_FAILED_KEY: True,
+    }
+    with (
+        patch("unified_api.routes.llm_usage.is_postgres_enabled", return_value=True),
+        patch("unified_api.routes.llm_usage.resolve_storage_status", return_value="available"),
+        patch("unified_api.routes.llm_usage.fetch_summary", return_value=failed),
+    ):
+        resp = client.get("/api/llm-usage/")
+    data = resp.json()
+    assert resp.status_code == 200
+    assert data["storage_status"] == "unreachable"
+    assert data["storage_available"] is False
+    assert data["total_calls"] == 0
+    assert QUERY_FAILED_KEY not in data
 
 
 def test_proxy_health_reports_circuit_breaker_states() -> None:

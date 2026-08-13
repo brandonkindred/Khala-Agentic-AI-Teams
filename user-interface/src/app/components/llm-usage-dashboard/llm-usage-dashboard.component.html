@@ -66,7 +66,7 @@
     </mat-card>
   </div>
 
-  @if (displaySummary.total_calls === 0 && modelRows().length === 0 && (!storageAvailable || recent.length === 0)) {
+  @if (!loadError && displaySummary.total_calls === 0 && modelRows().length === 0 && (!storageAvailable || recent.length === 0)) {
     <p class="empty-note">No LLM calls in this window.</p>
   }
 
