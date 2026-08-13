@@ -189,7 +189,9 @@ def _revert_disk(prior_disk: Dict[Path, Optional[bytes]]) -> None:
 
     Postconditions:
         Each path with ``prior_bytes is None`` is deleted (it did not exist
-        before); each other path is restored to ``prior_bytes``. An ordinary
+        before); each other path is restored to ``prior_bytes``. A current
+        symlink or other non-regular path at that location is unlinked first
+        so ``write_bytes`` cannot follow a verifier-planted link. An ordinary
         filesystem failure (e.g. the disk that caused the original write to
         fail is still unwritable) is logged and skipped per-path rather than
         raised -- this is already the fallback path of a "never fails"
@@ -200,6 +202,8 @@ def _revert_disk(prior_disk: Dict[Path, Optional[bytes]]) -> None:
             if prior_bytes is None:
                 full_path.unlink(missing_ok=True)
             else:
+                if full_path.is_symlink() or (full_path.exists() and not full_path.is_file()):
+                    full_path.unlink(missing_ok=True)
                 full_path.parent.mkdir(parents=True, exist_ok=True)
                 full_path.write_bytes(prior_bytes)
         except OSError as exc:
@@ -224,16 +228,26 @@ def _iter_worktree_files(
         ``root`` is an existing directory.
 
     Postconditions:
-        Directory symlinks are not followed (``os.walk`` default). File
-        symlinks are skipped unless ``include_symlinks`` is true, in which
-        case they are yielded unfollowed (not ``resolve()``'d). When
-        ``strict`` is true, an ``OSError`` mid-walk is raised to the caller
-        so a snapshot cannot proceed from a partial scan. When ``strict`` is
-        false, walk errors are skipped (best-effort enumeration for revert).
+        Directory symlinks are not followed (``os.walk`` default). File and
+        directory symlinks are skipped unless ``include_symlinks`` is true,
+        in which case they are yielded unfollowed (not ``resolve()``'d) and
+        directory links are not descended into. When ``strict`` is true, an
+        ``OSError`` mid-walk is raised to the caller so a snapshot cannot
+        proceed from a partial scan. When ``strict`` is false, walk errors
+        are skipped (best-effort enumeration for revert).
     """
     onerror = _raise_walk_error if strict else None
     for dirpath, dirnames, filenames in os.walk(root, onerror=onerror):
-        dirnames[:] = [d for d in dirnames if d not in _WORKTREE_SNAPSHOT_EXCLUDE_DIRS]
+        kept: list[str] = []
+        for d in dirnames:
+            child = Path(dirpath, d)
+            if child.is_symlink():
+                if include_symlinks:
+                    yield child
+                continue
+            if d not in _WORKTREE_SNAPSHOT_EXCLUDE_DIRS:
+                kept.append(d)
+        dirnames[:] = kept
         for name in filenames:
             path = Path(dirpath, name)
             if path.is_symlink() or not path.is_file():
@@ -255,9 +269,9 @@ def _snapshot_worktree(root: Path) -> _WorktreeSnapshot:
 
     Postconditions:
         ``files`` maps resolved regular-file paths to their bytes. ``symlinks``
-        is the set of file-symlink paths (unfollowed) so revert can leave
-        pre-existing links in place while deleting verifier-created ones.
-        Raises ``OSError`` if a walk or read fails.
+        is the set of file- and directory-symlink paths (unfollowed) so revert
+        can leave pre-existing links in place while deleting verifier-created
+        ones. Raises ``OSError`` if a walk or read fails.
     """
     files: Dict[Path, bytes] = {}
     links: Set[Path] = set()
@@ -282,10 +296,11 @@ def _revert_verifier_side_effects(
         ``prior_disk`` paths are restored to their pre-DbC bytes (or deleted
         if they did not exist). Every other path present in
         ``pre_verify_disk`` is restored to its post-DbC / pre-verifier bytes.
-        Regular files and file-symlinks that exist now under ``root`` but
-        were in neither map nor ``pre_verify_symlinks`` (verifier-created)
-        are deleted. Pre-existing symlinks are left unfollowed and unrestored.
-        Restore failures are swallowed by ``_revert_disk``.
+        Regular files and file/directory-symlinks that exist now under
+        ``root`` but were in neither map nor ``pre_verify_symlinks``
+        (verifier-created) are deleted. Pre-existing symlinks are left
+        unfollowed and unrestored. Restore failures are swallowed by
+        ``_revert_disk``.
     """
     revert_map: Dict[Path, Optional[bytes]] = dict(pre_verify_disk)
     revert_map.update(prior_disk)

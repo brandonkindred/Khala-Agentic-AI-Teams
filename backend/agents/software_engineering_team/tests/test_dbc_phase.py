@@ -641,6 +641,8 @@ def test_dbc_self_review_worktree_snapshot_skips_symlinks(tmp_path):
     (tmp_path / "a.py").write_text("orig a\n")
     (tmp_path / "real.txt").write_text("real\n")
     (tmp_path / "link.txt").symlink_to(tmp_path / "real.txt")
+    (tmp_path / "real_dir").mkdir()
+    (tmp_path / "dir_link").symlink_to(tmp_path / "real_dir")
 
     def _review(*, code, **kwargs: Any) -> SimpleNamespace:
         return SimpleNamespace(files={"a.py": "dbc a\n"})
@@ -655,6 +657,7 @@ def test_dbc_self_review_worktree_snapshot_skips_symlinks(tmp_path):
     assert microtask_files["a.py"] == "dbc a\n"
     assert (tmp_path / "a.py").read_text() == "dbc a\n"
     assert (tmp_path / "link.txt").is_symlink()
+    assert (tmp_path / "dir_link").is_symlink()
 
 
 def test_dbc_self_review_revert_deletes_verifier_created_symlink(tmp_path):
@@ -679,6 +682,60 @@ def test_dbc_self_review_revert_deletes_verifier_created_symlink(tmp_path):
     assert (tmp_path / "a.py").read_text() == "orig a\n"
     assert (tmp_path / "existing_link.txt").is_symlink()
     assert not (tmp_path / "new_link.txt").exists()
+
+
+def test_dbc_self_review_revert_unlinks_file_replaced_by_symlink(tmp_path):
+    (tmp_path / "a.py").write_text("orig a\n")
+    outside = tmp_path.parent.resolve() / f"dbc-symlink-target-{tmp_path.name}.txt"
+    outside.write_text("outside orig\n")
+
+    def _review(*, code, **kwargs: Any) -> SimpleNamespace:
+        return SimpleNamespace(files={"a.py": "dbc a\n"})
+
+    def _verify(repo, label, tid):
+        replaced = Path(repo) / "a.py"
+        replaced.unlink()
+        replaced.symlink_to(outside)
+        return False, "broke"
+
+    try:
+        _call(
+            tmp_path=tmp_path,
+            gate_config=_gate_config(_review),
+            microtask_files={"a.py": "orig a\n"},
+            deps=ReviewDependencies(build_verifier=_verify),
+        )
+        assert not (tmp_path / "a.py").is_symlink()
+        assert (tmp_path / "a.py").read_text() == "orig a\n"
+        assert outside.read_text() == "outside orig\n"
+    finally:
+        outside.unlink(missing_ok=True)
+
+
+def test_dbc_self_review_revert_deletes_verifier_created_dir_symlink(tmp_path):
+    (tmp_path / "a.py").write_text("orig a\n")
+    (tmp_path / "real_dir").mkdir()
+    (tmp_path / "real_dir" / "x.txt").write_text("x\n")
+    (tmp_path / "existing_dir_link").symlink_to(tmp_path / "real_dir")
+
+    def _review(*, code, **kwargs: Any) -> SimpleNamespace:
+        return SimpleNamespace(files={"a.py": "dbc a\n"})
+
+    def _verify(repo, label, tid):
+        (Path(repo) / "new_dir_link").symlink_to(Path(repo) / "real_dir")
+        return False, "broke"
+
+    _call(
+        tmp_path=tmp_path,
+        gate_config=_gate_config(_review),
+        microtask_files={"a.py": "orig a\n"},
+        deps=ReviewDependencies(build_verifier=_verify),
+    )
+
+    assert (tmp_path / "a.py").read_text() == "orig a\n"
+    assert (tmp_path / "existing_dir_link").is_symlink()
+    assert not (tmp_path / "new_dir_link").exists()
+    assert (tmp_path / "real_dir" / "x.txt").read_text() == "x\n"
 
 
 def test_dbc_self_review_build_verifier_raises_reverts(tmp_path):
