@@ -2,7 +2,7 @@
 
 Observers must not block the LLM call path (see ``llm_service/telemetry.py``).
 This module keeps the observer on the call path but makes it do **zero DB I/O**:
-it builds the 8-column row tuple (pure Python, via
+it builds the 9-column row tuple (pure Python, via
 :func:`usage_store.record_to_row`) and appends it to a bounded in-memory deque.
 
 A :class:`BackgroundHeartbeat` daemon thread drains the deque on an interval and

@@ -105,11 +105,12 @@ def test_write_rows_noop_when_postgres_off(monkeypatch) -> None:
 def test_write_rows_inserts_tuple(fake_db) -> None:
     rec = _Rec()
     row = us.record_to_row(rec)
-    assert len(row) == 8
+    assert len(row) == 9
     assert row[1] == "blogging"
     assert row[4] == 10
     assert row[5] == 5
     assert row[6] == 15
+    assert row[7] == 0
     n = us.write_rows([row])
     assert n == 1
     sql, params = fake_db.executed[0]
@@ -134,6 +135,7 @@ def test_fetch_summary_uses_one_snapshot_query(fake_db) -> None:
             "completion_tokens": 10,
             "total_tokens": 40,
             "error_count": 1,
+            "avg_latency_ms": 12.5,
         },
         {
             "bucket": "model",
@@ -144,6 +146,7 @@ def test_fetch_summary_uses_one_snapshot_query(fake_db) -> None:
             "completion_tokens": 10,
             "total_tokens": 40,
             "error_count": 1,
+            "avg_latency_ms": 12.5,
         },
         {
             "bucket": "agent",
@@ -162,7 +165,9 @@ def test_fetch_summary_uses_one_snapshot_query(fake_db) -> None:
     assert "GROUPING SETS" in sql
     assert summary["total_calls"] == 2
     assert summary["by_model"]["claude-opus-4-8"]["calls"] == 2
+    assert summary["by_model"]["claude-opus-4-8"]["tokens"] == 40
     assert summary["by_agent"]["writer"]["calls"] == 2
+    assert summary["avg_latency_ms"] == 12.5
     assert summary["by_agent"]["writer"]["tokens"] == 40
 
 
@@ -274,7 +279,7 @@ def test_fetch_summary_query_failure_returns_empty(fake_db) -> None:
     assert summary[us.QUERY_FAILED_KEY] is True
 
 
-def test_fetch_recent_newest_first_and_limit(fake_db) -> None:
+def test_fetch_recent_oldest_to_newest_and_limit(fake_db) -> None:
     ts_new = datetime(2026, 8, 12, 13, 0, tzinfo=timezone.utc)
     ts_old = datetime(2026, 8, 12, 11, 0, tzinfo=timezone.utc)
     fake_db._fetchall = [
@@ -286,6 +291,7 @@ def test_fetch_recent_newest_first_and_limit(fake_db) -> None:
             "prompt_tokens": 1,
             "completion_tokens": 2,
             "total_tokens": 3,
+            "latency_ms": 10,
             "status": "success",
         },
         {
@@ -296,14 +302,16 @@ def test_fetch_recent_newest_first_and_limit(fake_db) -> None:
             "prompt_tokens": 4,
             "completion_tokens": 5,
             "total_tokens": 9,
+            "latency_ms": 20,
             "status": "error",
         },
     ]
     rows = us.fetch_recent(window="24h", limit=2)
     assert len(rows) == 2
-    assert rows[0]["model"] == "m1"
-    assert rows[0]["timestamp"] == ts_new.timestamp()
-    assert rows[1]["model"] == "m2"
+    assert rows[0]["model"] == "m2"
+    assert rows[0]["timestamp"] == ts_old.timestamp()
+    assert rows[1]["model"] == "m1"
+    assert rows[1]["latency_ms"] == 10
     sql, params = fake_db.executed[0]
     assert "ORDER BY ts DESC" in sql
     assert params[-1] == 2
@@ -355,9 +363,10 @@ def test_ensure_table_executes_ddl(monkeypatch) -> None:
     monkeypatch.setattr(us, "_table_ensured", False)
     us._ensure_table()
     assert us._table_ensured is True
-    assert len(cursor.executed) == 2
+    assert len(cursor.executed) == 3
     assert "CREATE TABLE IF NOT EXISTS llm_call_records" in cursor.executed[0][0]
     assert "CREATE INDEX IF NOT EXISTS idx_llm_call_records_ts" in cursor.executed[1][0]
+    assert "ADD COLUMN IF NOT EXISTS latency_ms" in cursor.executed[2][0]
 
 
 def test_ensure_table_exception_leaves_flag_false(monkeypatch) -> None:
@@ -491,11 +500,12 @@ def test_fetch_recent_naive_and_non_datetime_ts(fake_db) -> None:
     ]
     rows = us.fetch_recent(window="all", limit=10)
     assert len(rows) == 3
-    assert rows[0]["timestamp"] == naive.replace(tzinfo=timezone.utc).timestamp()
+    # SQL returns newest-first; fetch_recent reverses to oldest-to-newest.
+    assert rows[0]["timestamp"] == 0.0
+    assert rows[0]["team"] == ""
+    assert rows[0]["status"] == ""
     assert rows[1]["timestamp"] == 1_724_000_000.5
-    assert rows[2]["timestamp"] == 0.0
-    assert rows[2]["team"] == ""
-    assert rows[2]["status"] == ""
+    assert rows[2]["timestamp"] == naive.replace(tzinfo=timezone.utc).timestamp()
 
 
 def test_fetch_recent_exception_returns_none(fake_db) -> None:

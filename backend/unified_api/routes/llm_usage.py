@@ -87,7 +87,7 @@ def recent_calls(
     window: Annotated[str, Query(description="Preset (24h, 7d, 30d, all) or hours (e.g. 1.0)")] = "24h",
     limit: Annotated[int, Query(ge=1, le=1000, description="Max records to return")] = 100,
 ) -> list:
-    """Recent individual LLM call records, newest first."""
+    """Recent individual LLM call records, oldest-to-newest (most recent last)."""
     _require_window(window)
     if is_postgres_enabled():
         rows = fetch_recent(window=window, team=team, limit=limit)
@@ -99,8 +99,7 @@ def recent_calls(
     records = get_recent_calls(team=team, limit=1000)
     if cutoff is not None:
         records = [r for r in records if r.get("timestamp", 0) >= cutoff]
-    records.reverse()  # get_recent_calls is oldest→newest; API is newest first
-    return records[:limit]
+    return records[-limit:]
 
 
 @router.get("/health")

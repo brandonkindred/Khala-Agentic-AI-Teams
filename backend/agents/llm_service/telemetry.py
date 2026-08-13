@@ -502,12 +502,19 @@ def get_usage_summary(
         model_key = r.model or ""
         model = summary.by_model.setdefault(
             model_key,
-            {"calls": 0, "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+            {
+                "calls": 0,
+                "prompt_tokens": 0,
+                "completion_tokens": 0,
+                "total_tokens": 0,
+                "tokens": 0,
+            },
         )
         model["calls"] += 1
         model["prompt_tokens"] += r.prompt_tokens
         model["completion_tokens"] += r.completion_tokens
         model["total_tokens"] += r.total_tokens
+        model["tokens"] += r.total_tokens
 
     if summary.total_calls > 0:
         summary.avg_latency_ms = total_latency / summary.total_calls

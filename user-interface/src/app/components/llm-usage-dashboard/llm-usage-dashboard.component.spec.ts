@@ -126,6 +126,16 @@ describe('LlmUsageDashboardComponent', () => {
     expect(el.textContent).toContain('(unknown)');
   });
 
+  it('shows recent calls newest-first even when the API is oldest-to-newest', () => {
+    const older = callRow({ timestamp: 1_700_000_000, model: 'old-model' });
+    const newer = callRow({ timestamp: 1_800_000_000, model: 'new-model' });
+    apiSpy.getRecent.mockReturnValue(of([older, newer]));
+    component.load();
+    fixture.detectChanges();
+    expect(component.recent.map((r) => r.model)).toEqual(['old-model', 'new-model']);
+    expect(component.displayRecent.map((r) => r.model)).toEqual(['new-model', 'old-model']);
+  });
+
   it('shows the per-model table when a single model has data', () => {
     const el: HTMLElement = fixture.nativeElement;
     expect(el.querySelector('[data-testid="by-model-table"]')).not.toBeNull();

@@ -99,6 +99,17 @@ export class LlmUsageDashboardComponent implements OnInit {
   }
 
   /**
+   * Recent-call rows for the table, newest first.
+   *
+   * Preconditions: none.
+   * Postconditions: returns `recent` reversed; the API list stays
+   * oldest-to-newest (most recent last).
+   */
+  get displayRecent(): LlmUsageCall[] {
+    return this.recent.slice().reverse();
+  }
+
+  /**
    * Summary shown in cards/tables. When storage is unavailable, totals are
    * zeroed so the page never presents the in-memory buffer as durable history.
    *

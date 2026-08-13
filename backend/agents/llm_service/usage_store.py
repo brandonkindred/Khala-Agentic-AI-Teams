@@ -35,12 +35,16 @@ USAGE_TABLE_DDL = (
     "prompt_tokens INTEGER NOT NULL DEFAULT 0, "
     "completion_tokens INTEGER NOT NULL DEFAULT 0, "
     "total_tokens INTEGER NOT NULL DEFAULT 0, "
+    "latency_ms INTEGER NOT NULL DEFAULT 0, "
     "status TEXT NOT NULL DEFAULT '')"
 )
 USAGE_TABLE_INDEX_DDL = (
     "CREATE INDEX IF NOT EXISTS idx_llm_call_records_ts ON llm_call_records (ts)"
 )
-USAGE_TABLE_STATEMENTS = (USAGE_TABLE_DDL, USAGE_TABLE_INDEX_DDL)
+USAGE_TABLE_LATENCY_DDL = (
+    "ALTER TABLE llm_call_records ADD COLUMN IF NOT EXISTS latency_ms INTEGER NOT NULL DEFAULT 0"
+)
+USAGE_TABLE_STATEMENTS = (USAGE_TABLE_DDL, USAGE_TABLE_INDEX_DDL, USAGE_TABLE_LATENCY_DDL)
 
 WINDOWS: dict[str, float] = {
     "24h": 24.0,
@@ -51,8 +55,8 @@ WINDOWS: dict[str, float] = {
 
 _INSERT_SQL = (
     "INSERT INTO llm_call_records (ts, team, agent_key, model, "
-    "prompt_tokens, completion_tokens, total_tokens, status) VALUES "
-    "(%s, %s, %s, %s, %s, %s, %s, %s)"
+    "prompt_tokens, completion_tokens, total_tokens, latency_ms, status) VALUES "
+    "(%s, %s, %s, %s, %s, %s, %s, %s, %s)"
 )
 
 _table_ensured = False
@@ -137,19 +141,21 @@ def _ensure_table() -> None:
                     return
                 cur.execute(USAGE_TABLE_DDL)
                 cur.execute(USAGE_TABLE_INDEX_DDL)
+                cur.execute(USAGE_TABLE_LATENCY_DDL)
             _table_ensured = True
         except Exception:
             logger.warning("llm_call_records table ensure failed", exc_info=True)
 
 
 def record_to_row(record: Any) -> tuple:
-    """Build the 8-element INSERT tuple from an LLMCallRecord-shaped object.
+    """Build the 9-element INSERT tuple from an LLMCallRecord-shaped object.
 
     Preconditions: ``record`` exposes ``timestamp``, ``team``, ``agent_key``,
         ``model``, ``prompt_tokens``, ``completion_tokens``, ``total_tokens``,
-        ``status`` (missing numerics → 0, missing strings → "").
+        ``latency_ms``, ``status`` (missing numerics → 0, missing strings → "").
     Postconditions: returns ``(ts, team, agent_key, model, prompt_tokens,
-        completion_tokens, total_tokens, status)`` with timezone-aware UTC ``ts``.
+        completion_tokens, total_tokens, latency_ms, status)`` with
+        timezone-aware UTC ``ts``.
     """
     raw_ts = getattr(record, "timestamp", None)
     epoch = raw_ts if isinstance(raw_ts, (int, float)) and raw_ts > 0 else time.time()
@@ -162,6 +168,7 @@ def record_to_row(record: Any) -> tuple:
         int(getattr(record, "prompt_tokens", 0) or 0),
         int(getattr(record, "completion_tokens", 0) or 0),
         int(getattr(record, "total_tokens", 0) or 0),
+        int(getattr(record, "latency_ms", 0) or 0),
         getattr(record, "status", "") or "",
     )
 
@@ -169,7 +176,7 @@ def record_to_row(record: Any) -> tuple:
 def write_rows(rows: Sequence[tuple]) -> int:
     """Batch-insert pre-built row tuples. Never raises.
 
-    Preconditions: each element is an 8-tuple from :func:`record_to_row`.
+    Preconditions: each element is a 9-tuple from :func:`record_to_row`.
     Postconditions: returns the number of rows written; 0 when Postgres is off,
         ``rows`` is empty, or the write failed.
     """
@@ -211,9 +218,10 @@ def fetch_summary(*, window: str, team: str | None = None) -> dict:
     Postconditions: returns a summary dict (zeros / empty maps on Postgres-off
         or query failure). Query failure and a ``None`` cursor also set
         :data:`QUERY_FAILED_KEY` so the HTTP layer can report storage as
-        unreachable. ``avg_latency_ms`` is always ``0.0`` (latency is not
-        persisted). ``by_model`` values have ``calls``, ``prompt_tokens``,
-        ``completion_tokens``, ``total_tokens``. Totals, ``by_model``, and
+        unreachable. ``avg_latency_ms`` is the mean of persisted ``latency_ms``
+        (0.0 when there are no rows). ``by_model`` values have ``calls``,
+        ``prompt_tokens``, ``completion_tokens``, ``total_tokens``, and
+        ``tokens`` (alias of ``total_tokens``). Totals, ``by_model``, and
         ``by_agent`` come from one ``GROUPING SETS`` statement so they share
         a single snapshot (Postgres ``READ COMMITTED`` would otherwise let
         the background flusher commit between successive SELECT statements).
@@ -237,6 +245,7 @@ def fetch_summary(*, window: str, team: str | None = None) -> dict:
                 "COALESCE(SUM(prompt_tokens), 0) AS prompt_tokens, "
                 "COALESCE(SUM(completion_tokens), 0) AS completion_tokens, "
                 "COALESCE(SUM(total_tokens), 0) AS total_tokens, "
+                "COALESCE(AVG(latency_ms), 0) AS avg_latency_ms, "
                 "COUNT(*) FILTER (WHERE status <> 'success') AS error_count "
                 f"FROM llm_call_records{where_sql} "
                 "GROUP BY GROUPING SETS ((), (model), (agent_key))",
@@ -250,6 +259,7 @@ def fetch_summary(*, window: str, team: str | None = None) -> dict:
                 "prompt_tokens": int(r["prompt_tokens"] or 0),
                 "completion_tokens": int(r["completion_tokens"] or 0),
                 "total_tokens": int(r["total_tokens"] or 0),
+                "tokens": int(r["total_tokens"] or 0),
             }
             for r in rows
             if r.get("bucket") == "model"
@@ -270,7 +280,7 @@ def fetch_summary(*, window: str, team: str | None = None) -> dict:
             "total_prompt_tokens": int(totals.get("prompt_tokens") or 0),
             "total_completion_tokens": int(totals.get("completion_tokens") or 0),
             "total_tokens": int(totals.get("total_tokens") or 0),
-            "avg_latency_ms": 0.0,
+            "avg_latency_ms": round(float(totals.get("avg_latency_ms") or 0), 1),
             "error_count": int(totals.get("error_count") or 0),
             "by_agent": by_agent,
             "by_model": by_model,
@@ -287,7 +297,9 @@ def fetch_recent(*, window: str, team: str | None = None, limit: int = 100) -> l
         numeric-hours string accepted by :func:`window_hours`; ``limit`` >= 1.
     Postconditions: list of dicts with ``timestamp`` (unix float), ``team``,
         ``agent_key``, ``model``, ``prompt_tokens``, ``completion_tokens``,
-        ``total_tokens``, ``status``. Empty list when Postgres is off or the
+        ``total_tokens``, ``latency_ms``, ``status``, oldest-to-newest (the
+        newest ``limit`` rows, most recent last — matching pre-change
+        ``get_recent_calls``). Empty list when Postgres is off or the
         window has no rows. Returns ``None`` when the query fails or the cursor
         is ``None`` so the HTTP layer can distinguish failure from zero calls.
     """
@@ -302,7 +314,7 @@ def fetch_recent(*, window: str, team: str | None = None, limit: int = 100) -> l
                 return None
             cur.execute(
                 "SELECT ts, team, agent_key, model, prompt_tokens, completion_tokens, "
-                f"total_tokens, status FROM llm_call_records{where_sql} "
+                f"total_tokens, latency_ms, status FROM llm_call_records{where_sql} "
                 "ORDER BY ts DESC LIMIT %s",
                 params,
             )
@@ -325,9 +337,11 @@ def fetch_recent(*, window: str, team: str | None = None, limit: int = 100) -> l
                     "prompt_tokens": int(r.get("prompt_tokens") or 0),
                     "completion_tokens": int(r.get("completion_tokens") or 0),
                     "total_tokens": int(r.get("total_tokens") or 0),
+                    "latency_ms": int(r.get("latency_ms") or 0),
                     "status": r.get("status") or "",
                 }
             )
+        out.reverse()
         return out
     except Exception:
         logger.debug("failed to fetch recent llm calls", exc_info=True)

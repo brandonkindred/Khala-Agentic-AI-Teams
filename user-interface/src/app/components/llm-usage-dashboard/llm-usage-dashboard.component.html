@@ -123,7 +123,7 @@
             </tr>
           </thead>
           <tbody>
-            @for (row of recent; track $index) {
+            @for (row of displayRecent; track $index) {
               <tr>
                 <td>{{ formatTime(row.timestamp) }}</td>
                 <td>{{ row.model || '(unknown)' }}</td>

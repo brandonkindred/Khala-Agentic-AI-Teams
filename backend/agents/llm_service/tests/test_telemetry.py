@@ -225,9 +225,10 @@ def test_usage_summary_by_model_includes_token_splits() -> None:
         "prompt_tokens": 10,
         "completion_tokens": 5,
         "total_tokens": 15,
+        "tokens": 15,
     }
     assert summary["by_model"]["m2"]["calls"] == 1
-    assert "tokens" not in summary["by_model"]["m1"]
+    assert summary["by_model"]["m1"]["tokens"] == summary["by_model"]["m1"]["total_tokens"]
 
 
 def test_usage_summary_window_hours_zero_is_all_time() -> None:
