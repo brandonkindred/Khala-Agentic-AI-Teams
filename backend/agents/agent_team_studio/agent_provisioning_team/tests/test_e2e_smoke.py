@@ -35,7 +35,7 @@ from typing import Any
 import httpx
 import pytest
 
-from agent_team_studio.agent_provisioning_team.sandbox.state import resolve_cache_path
+from agent_platform.sandbox.state import resolve_cache_path
 
 E2E_ENABLED = os.environ.get("KHALA_E2E") == "1"
 

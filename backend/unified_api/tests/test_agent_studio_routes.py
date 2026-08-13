@@ -5,12 +5,12 @@
 exercising the full router → dispatch → workflow → activity → service → response
 path **in-process, without a Temporal cluster**, by:
 
-  * forcing ``agent_team_studio.agent_studio.temporal.dispatch._temporal_enabled`` to
+  * forcing ``agent_platform.studio.temporal.dispatch._temporal_enabled`` to
     ``True`` regardless of whether ``TEMPORAL_ADDRESS`` happens to be set in the
     environment running the suite,
-  * patching ``agent_team_studio.agent_studio.runtime.get_studio_service`` so the activities delegate to
+  * patching ``agent_platform.studio.runtime.get_studio_service`` so the activities delegate to
     a scripted assistant + fake registry (no live LLM / Postgres), and
-  * patching ``agent_team_studio.agent_studio.temporal.dispatch.execute_workflow_sync`` with an inline
+  * patching ``agent_platform.studio.temporal.dispatch.execute_workflow_sync`` with an inline
     stand-in that runs the workflow's single activity directly and reproduces
     Temporal's exception wrapping, so the dispatch layer's ``ValueError`` → 400 /
     ``LookupError`` → 404 translation is genuinely exercised.
@@ -32,11 +32,12 @@ from fastapi.testclient import TestClient
 from temporalio.client import WorkflowFailureError
 from temporalio.exceptions import ApplicationError
 
-import agent_team_studio.agent_studio.temporal.dispatch as dispatch_mod
-from agent_team_studio.agent_studio.assistant import AgentDesignerAgent
-from agent_team_studio.agent_studio.service import AgentStudioService
-from agent_team_studio.agent_studio.store import AgentStudioConversationStore
-from agent_team_studio.agent_studio.temporal.workflows import (
+import agent_platform.studio.temporal.dispatch as dispatch_mod
+from agent_platform.studio import router
+from agent_platform.studio.assistant import AgentDesignerAgent
+from agent_platform.studio.service import AgentStudioService
+from agent_platform.studio.store import AgentStudioConversationStore
+from agent_platform.studio.temporal.workflows import (
     CloneFromRegistryWorkflow,
     SaveAgentWorkflow,
     SendMessageWorkflow,
@@ -46,8 +47,7 @@ from agent_team_studio.agent_studio.temporal.workflows import (
     send_message_activity,
     start_conversation_activity,
 )
-from agent_team_studio.agent_studio.testing import FakeRegistry, seed_manifest
-from unified_api.routes.agent_studio import router
+from agent_platform.studio.testing import FakeRegistry, seed_manifest
 
 _DRAFT_REPLY = """\
 Drafted it.
@@ -116,7 +116,7 @@ def make_client(monkeypatch: pytest.MonkeyPatch):
 
     def _factory(service: object, *, raise_server_exceptions: bool = True) -> TestClient:
         monkeypatch.setattr(dispatch_mod, "_temporal_enabled", lambda: True)
-        monkeypatch.setattr("agent_team_studio.agent_studio.runtime.get_studio_service", lambda: service)
+        monkeypatch.setattr("agent_platform.studio.runtime.get_studio_service", lambda: service)
         monkeypatch.setattr(dispatch_mod, "execute_workflow_sync", _inline_execute)
         app = FastAPI()
         app.include_router(router)

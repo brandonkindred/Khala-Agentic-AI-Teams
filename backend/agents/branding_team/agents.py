@@ -594,9 +594,7 @@ _LOGO_SPECIFIER_PROMPT = AgentPromptSpec(
         "You are a Logo Specifier. Based on the winning moodboard direction, define a logo "
         "suite. For each variant (primary, monochrome, icon-only, reversed), specify:"
     ),
-    fields=(
-        PromptFieldSpec("logo_suite", "variant, usage_context, minimum_size, clear_space"),
-    ),
+    fields=(PromptFieldSpec("logo_suite", "variant, usage_context, minimum_size, clear_space"),),
 )
 
 
@@ -653,9 +651,7 @@ _TYPOGRAPHY_BUILDER_PROMPT = AgentPromptSpec(
         "You are a Typography Builder. Based on the winning moodboard direction, define a "
         "typography system with 3-4 type roles (display, body, caption, code). For each:"
     ),
-    fields=(
-        PromptFieldSpec("typography_system", "role, font_family, weight_range, usage_notes"),
-    ),
+    fields=(PromptFieldSpec("typography_system", "role, font_family, weight_range, usage_notes"),),
 )
 
 
@@ -707,9 +703,7 @@ def make_iconography_director() -> Agent:
 _PHOTOGRAPHY_VIDEO_DIRECTOR_PROMPT = AgentPromptSpec(
     opening="You are a Photography & Video Director. Based on the winning moodboard, define:",
     fields=(
-        PromptFieldSpec(
-            "photography_direction", "shooting style, lighting, composition, subjects"
-        ),
+        PromptFieldSpec("photography_direction", "shooting style, lighting, composition, subjects"),
         PromptFieldSpec("video_direction", "pacing, tone, visual style for video content"),
         PromptFieldSpec("motion_principles", "3-4 principles for animation/motion design"),
     ),

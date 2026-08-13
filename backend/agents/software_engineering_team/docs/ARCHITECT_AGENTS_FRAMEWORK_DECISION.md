@@ -35,7 +35,7 @@ to share a directory:
 The Enterprise Orchestrator is a single `strands.Agent` built with the
 **Agents-as-Tools** pattern: each specialist is exposed to the orchestrator
 as an LLM-callable tool, and the orchestrator's own system prompt
-(`prompts/orchestrator.md`) — not Python control flow — tells the LLM what
+(`agents/prompts.py`'s `ORCHESTRATOR_PROMPT`) — not Python control flow — tells the LLM what
 order to call them in and when to run them in parallel. The LLM decides,
 at runtime, which tools to invoke. It also constructs its model from a
 bare Bedrock model-ID string
@@ -88,7 +88,7 @@ justified exception. Do not migrate it to `BaseTeamLead`.**
   engineer decides control flow in Python and the LLM only fills in
   content within each phase. The Enterprise Orchestrator's control flow is
   the opposite: the LLM decides which specialist tool to call and when,
-  guided by prose in `prompts/orchestrator.md`. Porting this to
+  guided by prose in `agents/prompts.py`'s `ORCHESTRATOR_PROMPT`. Porting this to
   `BaseTeamLead` isn't swapping a base class — it's replacing the
   orchestrator's actual delegation mechanism with a different one.
 - **`BaseTeamLead` is one of several already-coexisting shapes, not a
@@ -118,7 +118,7 @@ justified exception. Do not migrate it to `BaseTeamLead`.**
   require rewriting nine `strands.Agent`-as-tool specialists into
   imperative calls; authoring new Pydantic request/result models matching
   `BaseTeamLead`'s handoff contract; re-expressing
-  `prompts/orchestrator.md`'s natural-language sequencing as an explicit
+  `agents/prompts.py`'s `ORCHESTRATOR_PROMPT` natural-language sequencing as an explicit
   Python phase/gate order (including its sequential/parallel groupings);
   re-routing model resolution from bare Bedrock model IDs onto
   `llm_service`; and resolving the session-persistence gap above — real
@@ -181,7 +181,7 @@ work, since none exists today; (b) design an equivalent for
 session/conversation continuity under `BaseTeamLead`'s stateless-per-call
 model, or make an explicit decision to drop it; (c) convert the nine
 specialist agents from `strands.Agent`-as-tool functions into directly
-callable Python objects; (d) replace `prompts/orchestrator.md`'s
+callable Python objects; (d) replace `agents/prompts.py`'s `ORCHESTRATOR_PROMPT`
 LLM-driven sequencing with an explicit, hand-authored phase/gate order,
 including its sequential-vs-parallel groupings; (e) move model resolution
 off bare Bedrock model-ID strings onto `llm_service`; (f) decide whether

@@ -239,6 +239,14 @@ describe('AgentStudioFacade', () => {
     expect(state.markHandoffConsumed).not.toHaveBeenCalled();
   });
 
+  it('marks the handoff key consumed and skips the API when the agent is already on the roster', () => {
+    let result: unknown;
+    facade.addAgentToTeam('t1', 'blog/writer', true).subscribe((value) => (result = value));
+    expect(result).toBeNull();
+    expect(state.markHandoffConsumed).toHaveBeenCalledWith('t1::blog/writer');
+    expect(agenticTeamApi.addAgentFromRegistry).not.toHaveBeenCalled();
+  });
+
   // ---------------------------------------------------------------------
   // Stage 4 — Test Team w/ Personas
   // ---------------------------------------------------------------------

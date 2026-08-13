@@ -25,10 +25,13 @@ from .code_boundaries import node_end_line, node_start_line
 _HEURISTIC_SKIP = ("}", ")", "]", "*/", "/*", "//", "#", "*", "...")
 
 # The ``render_annotated_hunks`` path (coding-team PR review) prefixes each hunk
-# line with its original file line number: ``4242: const x = 1;``. This pattern
-# detects and strips those prefixes so the boundary helpers below receive plain
-# code and a physical (1-based) line index.
-_LINE_NUMBER_PREFIX_RE = re.compile(r"^(\d+): ")
+# line with its original file line number: ``4242| const x = 1;`` (legacy
+# fixtures still use ``4242: const x = 1;``). A pipe gutter is the live format
+# so the prefix cannot be mistaken for Python ``def``/dict syntax. Leading
+# spaces before the digits are width-padding (``  9| ``), never source indent.
+# Indented dict keys (``    1: value``) do not match: they use ``: `` and sit
+# at a 4-space indent, whereas a padded ``| `` gutter never uses ``: ``.
+_LINE_NUMBER_PREFIX_RE = re.compile(r"^(?:(\d+): |[ ]*(\d+)\| )")
 
 # Bare inter-hunk gap marker emitted by ``render_annotated_hunks`` between
 # non-contiguous hunks. Joining across it would attach a later hunk's indented
@@ -63,10 +66,10 @@ class EnclosingConstruct:
 def strip_numbered_prefixes(
     content: str, line_number: int
 ) -> Tuple[str, int, Optional[Callable[[int], int]]]:
-    """Strip ``N: `` line-number prefixes from pre-numbered hunk content.
+    """Strip ``N| `` / legacy ``N: `` line-number prefixes from pre-numbered hunk content.
 
     The coding-team PR-review path calls ``render_annotated_hunks`` which
-    prepends each line with its new-file line number: ``4242: const x = 1;``.
+    prepends each line with its new-file line number: ``4242| const x = 1;``.
     This content reaches the verifier's ``CodebaseIndex`` verbatim, so the
     boundary-lookup functions below must strip those prefixes before scanning.
 
@@ -75,13 +78,13 @@ def strip_numbered_prefixes(
         - ``line_number`` is a positive int (not a bool).
 
     Postconditions:
-        - If the first non-blank line does NOT match ``r'^\\d+: '``, the
-          content is not pre-numbered; returns ``(content, line_number, None)``
-          unchanged — no remap is needed.
+        - If the first non-blank line does NOT match ``r'^(\\d+): '`` or
+          ``r'^[ ]*(\\d+)\\| '``, the content is not pre-numbered; returns
+          ``(content, line_number, None)`` unchanged — no remap is needed.
         - Otherwise returns ``(stripped_content, physical_index, line_mapper)``
           where:
-          - ``stripped_content`` is the content with all ``N: `` prefixes
-            removed. Bare ``...`` hunk-gap markers from
+          - ``stripped_content`` is the content with all ``N| `` / legacy
+            ``N: `` prefixes removed. Bare ``...`` hunk-gap markers from
             ``render_annotated_hunks`` are kept as-is so
             :func:`enclosing_construct` can resolve each hunk independently
             without joining them into one AST (joining would attach a later
@@ -118,7 +121,7 @@ def strip_numbered_prefixes(
     for i, line in enumerate(lines, start=1):
         m = _LINE_NUMBER_PREFIX_RE.match(line)
         if m:
-            orig = int(m.group(1))
+            orig = int(m.group(1) or m.group(2))
             phys_to_orig[i] = orig
             stripped.append(line[m.end() :])
             if orig == line_number and not exact_match:
@@ -286,9 +289,7 @@ def _iter_constructs_ast(content: str) -> List[EnclosingConstruct]:
         start_line = node_start_line(node)
         end_line = node_end_line(node)
         kind = "class" if isinstance(node, ast.ClassDef) else "function"
-        nodes.append(
-            (start_line, end_line, node.name, kind, _property_accessor_suffix(node))
-        )
+        nodes.append((start_line, end_line, node.name, kind, _property_accessor_suffix(node)))
 
     peers = [(s, e, n, k) for s, e, n, k, _ in nodes]
     results: List[EnclosingConstruct] = []
@@ -297,9 +298,7 @@ def _iter_constructs_ast(content: str) -> List[EnclosingConstruct]:
             name, kind, start_line, end_line, peers, accessor_suffix=accessor_suffix
         )
         results.append(
-            EnclosingConstruct(
-                start_line=start_line, end_line=end_line, name=qualified, kind=kind
-            )
+            EnclosingConstruct(start_line=start_line, end_line=end_line, name=qualified, kind=kind)
         )
     return results
 

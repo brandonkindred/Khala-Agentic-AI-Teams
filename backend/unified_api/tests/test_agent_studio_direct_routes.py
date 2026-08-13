@@ -13,12 +13,12 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-import agent_team_studio.agent_studio.temporal.dispatch as dispatch_mod
-from agent_team_studio.agent_studio.assistant import AgentDesignerAgent
-from agent_team_studio.agent_studio.service import AgentStudioService
-from agent_team_studio.agent_studio.store import AgentStudioConversationStore
-from agent_team_studio.agent_studio.testing import FakeRegistry, seed_manifest
-from unified_api.routes.agent_studio import router
+import agent_platform.studio.temporal.dispatch as dispatch_mod
+from agent_platform.studio import router
+from agent_platform.studio.assistant import AgentDesignerAgent
+from agent_platform.studio.service import AgentStudioService
+from agent_platform.studio.store import AgentStudioConversationStore
+from agent_platform.studio.testing import FakeRegistry, seed_manifest
 
 _DRAFT_REPLY = """\
 Drafted it.
@@ -60,7 +60,7 @@ def make_client(monkeypatch: pytest.MonkeyPatch):
 
     def _factory(service: object, *, raise_server_exceptions: bool = True) -> TestClient:
         monkeypatch.setattr(dispatch_mod, "_temporal_enabled", lambda: False)
-        monkeypatch.setattr("agent_team_studio.agent_studio.runtime.get_studio_service", lambda: service)
+        monkeypatch.setattr("agent_platform.studio.runtime.get_studio_service", lambda: service)
         monkeypatch.setattr(dispatch_mod, "execute_workflow_sync", _boom_execute)
         app = FastAPI()
         app.include_router(router)
