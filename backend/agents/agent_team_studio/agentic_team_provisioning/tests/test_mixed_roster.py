@@ -15,7 +15,7 @@ from __future__ import annotations
 import pytest
 from fastapi.testclient import TestClient
 
-from agent_registry.models import AgentManifest, CognitionSpec, SourceInfo
+from agent_platform.registry.models import AgentManifest, CognitionSpec, SourceInfo
 from agent_team_studio.agentic_team_provisioning.assistant.store import AgenticTeamStore
 from agent_team_studio.agentic_team_provisioning.manifest_generation import (
     build_agent_manifest,
@@ -103,7 +103,7 @@ def registry() -> _FakeRegistry:
 @pytest.fixture
 def client(monkeypatch: pytest.MonkeyPatch, registry: _FakeRegistry) -> TestClient:
     install_fake_postgres(monkeypatch)
-    monkeypatch.setattr("agent_registry.get_registry", lambda: registry)
+    monkeypatch.setattr("agent_platform.registry.get_registry", lambda: registry)
     from agent_team_studio.agentic_team_provisioning.api.main import app
 
     return TestClient(app)
@@ -208,7 +208,7 @@ def test_get_team_agents_enriches_mixed_roster(client: TestClient) -> None:
 
     # Generated side: its own manifest is registered and the thin ref added directly,
     # mirroring how the LLM-save path stamps and registers a generated agent's manifest.
-    from agent_registry import get_registry
+    from agent_platform.registry import get_registry
 
     writer_manifest = build_agent_manifest(
         team_id, "Writer", summary="Writes copy", skill_tags=["seo"]
@@ -241,7 +241,7 @@ def test_validate_roster_mixed_sources_fully_staffed(monkeypatch: pytest.MonkeyP
         team_id, "Writer", summary="Writes copy", skill_tags=["seo"]
     )
     reg.register(generated_manifest)
-    monkeypatch.setattr("agent_registry.get_registry", lambda: reg)
+    monkeypatch.setattr("agent_platform.registry.get_registry", lambda: reg)
 
     registry_agent = AgenticTeamAgent(
         agent_name="blogging.planner", source="registry", manifest_id="blogging.planner"

@@ -11,7 +11,7 @@ from __future__ import annotations
 import pytest
 from fastapi.testclient import TestClient
 
-from agent_registry.models import AgentManifest, CognitionSpec, SourceInfo
+from agent_platform.registry.models import AgentManifest, CognitionSpec, SourceInfo
 from agent_team_studio.agentic_team_provisioning.assistant.store import AgenticTeamStore
 from agent_team_studio.agentic_team_provisioning.models import (
     AgenticTeamAgent,
@@ -95,9 +95,9 @@ def registry() -> _FakeRegistry:
 @pytest.fixture
 def client(monkeypatch: pytest.MonkeyPatch, registry: _FakeRegistry) -> TestClient:
     install_fake_postgres(monkeypatch)
-    # The route resolves the registry via ``from agent_registry import get_registry``;
+    # The route resolves the registry via ``from agent_platform.registry import get_registry``;
     # patch the package attribute so the call picks up the shared fake.
-    monkeypatch.setattr("agent_registry.get_registry", lambda: registry)
+    monkeypatch.setattr("agent_platform.registry.get_registry", lambda: registry)
     from agent_team_studio.agentic_team_provisioning.api.main import app
 
     return TestClient(app)
@@ -986,7 +986,7 @@ def test_merge_generated_agents_unknown_team_is_noop(monkeypatch: pytest.MonkeyP
 def test_manifests_endpoint_returns_original_for_registry_agent(client: TestClient) -> None:
     """A registry-source roster agent advertises its *original* resolvable manifest id,
     while a generated agent advertises its registered stamped wrapper (orphans omitted)."""
-    from agent_registry import get_registry
+    from agent_platform.registry import get_registry
     from agent_team_studio.agentic_team_provisioning.manifest_generation import (
         build_agent_manifest,
     )

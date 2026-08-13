@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import pytest
 
-from agent_registry.models import AgentManifest
+from agent_platform.registry.models import AgentManifest
 from agent_team_studio.agent_studio.assistant import AgentDesignerAgent
 from agent_team_studio.agent_studio.models import AgentDefinition
 from agent_team_studio.agent_studio.service import AgentStudioService

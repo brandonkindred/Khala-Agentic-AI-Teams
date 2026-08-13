@@ -10,11 +10,14 @@ from code_review_agent.merged_architecture_side_effect_pass import (
 )
 from code_review_agent.models import CodeReviewInput
 from code_review_agent.profiles import ReviewProfile
+from tests.submission_pass_two_call_client import SubmissionPassTwoCallClient
 
 from llm_service.clients.dummy import DummyLLMClient
 from shared.dev_models.models import SystemArchitecture
 
-_MERGED_PASS_ANCHOR = '"architecture_findings"/"side_effect_findings"'
+pytest_plugins = ["tests.submission_pass_two_call_client"]
+
+_MERGED_PASS_ANCHOR = "Merged submission pass:"
 
 # Default off-diff excerpt so architecture/redundancy half has evidence when
 # tests do not attach a repo_reader or formal architecture document.
@@ -41,9 +44,9 @@ def test_returns_empty_when_both_env_flags_disabled(monkeypatch: pytest.MonkeyPa
     monkeypatch.setenv("CODE_REVIEW_ARCHITECTURE_CONSISTENCY_PASS", "false")
     monkeypatch.setenv("CODE_REVIEW_SIDE_EFFECT_IMPACT_PASS", "false")
 
-    class _FailIfAsked(DummyLLMClient):
+    class _FailIfAsked(SubmissionPassTwoCallClient):
         def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
-            assert _MERGED_PASS_ANCHOR not in prompt, "merged pass should not run"
+            assert _MERGED_PASS_ANCHOR not in self.latest_reasoning_prompt(), "merged pass should not run"
             return {"approved": True, "issues": [], "summary": "ok", "spec_compliance_notes": ""}
 
     arch, side = find_architecture_and_side_effect_issues(_FailIfAsked(), _input())
@@ -52,9 +55,9 @@ def test_returns_empty_when_both_env_flags_disabled(monkeypatch: pytest.MonkeyPa
 
 
 def test_returns_empty_for_non_code_review_profile() -> None:
-    class _FailIfAsked(DummyLLMClient):
+    class _FailIfAsked(SubmissionPassTwoCallClient):
         def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
-            assert _MERGED_PASS_ANCHOR not in prompt, "merged pass should not run"
+            assert _MERGED_PASS_ANCHOR not in self.latest_reasoning_prompt(), "merged pass should not run"
             return {"approved": True, "issues": [], "summary": "ok", "spec_compliance_notes": ""}
 
     arch, side = find_architecture_and_side_effect_issues(
@@ -73,9 +76,9 @@ def test_returns_empty_when_no_readable_files() -> None:
 
 
 def test_splits_merged_response_into_two_finding_lists() -> None:
-    class _FindingsClient(DummyLLMClient):
+    class _FindingsClient(SubmissionPassTwoCallClient):
         def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
-            if _MERGED_PASS_ANCHOR in prompt:
+            if _MERGED_PASS_ANCHOR in self.latest_reasoning_prompt():
                 return {
                     "architecture_findings": [
                         {
@@ -117,9 +120,9 @@ def test_architecture_finding_pre_existing_tag_survives_the_merged_pass() -> Non
     PR-review whole-file path can never route it to a human-review proposal
     instead of a blocking PR comment."""
 
-    class _FindingsClient(DummyLLMClient):
+    class _FindingsClient(SubmissionPassTwoCallClient):
         def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
-            if _MERGED_PASS_ANCHOR in prompt:
+            if _MERGED_PASS_ANCHOR in self.latest_reasoning_prompt():
                 return {
                     "architecture_findings": [
                         {
@@ -142,7 +145,7 @@ def test_architecture_finding_pre_existing_tag_survives_the_merged_pass() -> Non
 
 
 def test_fails_safe_on_llm_error() -> None:
-    class _Raiser(DummyLLMClient):
+    class _Raiser(SubmissionPassTwoCallClient):
         def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
             raise RuntimeError("boom")
 
@@ -155,9 +158,9 @@ def test_missing_half_key_does_not_discard_the_other_half() -> None:
     """A missing/malformed sibling key must not wipe valid findings from the
     other half — halves are validated independently."""
 
-    class _Partial(DummyLLMClient):
+    class _Partial(SubmissionPassTwoCallClient):
         def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
-            if _MERGED_PASS_ANCHOR in prompt:
+            if _MERGED_PASS_ANCHOR in self.latest_reasoning_prompt():
                 return {
                     "architecture_findings": [
                         {
@@ -184,9 +187,9 @@ def test_half_parse_failure_does_not_discard_the_other_half(
     """A raising validate/parse on one half must not wipe valid findings from the other."""
     import code_review_agent.side_effect_impact_pass as side_pass
 
-    class _Partial(DummyLLMClient):
+    class _Partial(SubmissionPassTwoCallClient):
         def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
-            if _MERGED_PASS_ANCHOR in prompt:
+            if _MERGED_PASS_ANCHOR in self.latest_reasoning_prompt():
                 return {
                     "architecture_findings": [
                         {
@@ -221,9 +224,9 @@ def test_half_parse_failure_does_not_discard_the_other_half(
 
 
 def test_fails_safe_on_non_object_reply() -> None:
-    class _Gibberish(DummyLLMClient):
+    class _Gibberish(SubmissionPassTwoCallClient):
         def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
-            if _MERGED_PASS_ANCHOR in prompt:
+            if _MERGED_PASS_ANCHOR in self.latest_reasoning_prompt():
                 return "not even a dict-shaped reply"  # type: ignore[return-value]
             return {"approved": True, "issues": [], "summary": "ok", "spec_compliance_notes": ""}
 
@@ -235,10 +238,10 @@ def test_fails_safe_on_non_object_reply() -> None:
 def test_runs_without_architecture_document() -> None:
     prompts: list = []
 
-    class _EmptyFindings(DummyLLMClient):
+    class _EmptyFindings(SubmissionPassTwoCallClient):
         def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
-            if _MERGED_PASS_ANCHOR in prompt:
-                prompts.append(prompt)
+            if _MERGED_PASS_ANCHOR in self.latest_reasoning_prompt():
+                prompts.append(self.latest_reasoning_prompt())
                 return {"architecture_findings": [], "side_effect_findings": []}
             return {"approved": True, "issues": [], "summary": "ok", "spec_compliance_notes": ""}
 
@@ -260,7 +263,7 @@ def test_skips_architecture_half_without_repository_evidence(
     import code_review_agent.merged_architecture_side_effect_pass as pass_mod
 
     built: Dict[str, Any] = {}
-    real_build = pass_mod.build_merged_architecture_side_effect_prompt
+    real_build = pass_mod.build_merged_architecture_side_effect_reasoning_system_prompt
 
     def _spy(*, arch_on: bool, side_on: bool) -> str:
         built["arch_on"] = arch_on
@@ -268,11 +271,13 @@ def test_skips_architecture_half_without_repository_evidence(
         built["prompt"] = real_build(arch_on=arch_on, side_on=side_on)
         return built["prompt"]
 
-    monkeypatch.setattr(pass_mod, "build_merged_architecture_side_effect_prompt", _spy)
+    monkeypatch.setattr(
+        pass_mod, "build_merged_architecture_side_effect_reasoning_system_prompt", _spy
+    )
 
-    class _Client(DummyLLMClient):
+    class _Client(SubmissionPassTwoCallClient):
         def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
-            if _MERGED_PASS_ANCHOR in prompt:
+            if _MERGED_PASS_ANCHOR in self.latest_reasoning_prompt():
                 return {
                     "architecture_findings": [
                         {
@@ -313,7 +318,7 @@ def test_discards_disabled_half_when_only_one_flag_on(monkeypatch: pytest.Monkey
     import code_review_agent.merged_architecture_side_effect_pass as pass_mod
 
     built: Dict[str, Any] = {}
-    real_build = pass_mod.build_merged_architecture_side_effect_prompt
+    real_build = pass_mod.build_merged_architecture_side_effect_reasoning_system_prompt
 
     def _spy(*, arch_on: bool, side_on: bool) -> str:
         built["arch_on"] = arch_on
@@ -321,11 +326,13 @@ def test_discards_disabled_half_when_only_one_flag_on(monkeypatch: pytest.Monkey
         built["prompt"] = real_build(arch_on=arch_on, side_on=side_on)
         return built["prompt"]
 
-    monkeypatch.setattr(pass_mod, "build_merged_architecture_side_effect_prompt", _spy)
+    monkeypatch.setattr(
+        pass_mod, "build_merged_architecture_side_effect_reasoning_system_prompt", _spy
+    )
 
-    class _FindingsClient(DummyLLMClient):
+    class _FindingsClient(SubmissionPassTwoCallClient):
         def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
-            if _MERGED_PASS_ANCHOR in prompt:
+            if _MERGED_PASS_ANCHOR in self.latest_reasoning_prompt():
                 return {
                     "architecture_findings": [
                         {
@@ -368,10 +375,10 @@ def test_skips_side_effect_half_when_pre_numbered() -> None:
     side-effect findings (same guard as the standalone side-effect pass)."""
     prompts: list = []
 
-    class _FindingsClient(DummyLLMClient):
+    class _FindingsClient(SubmissionPassTwoCallClient):
         def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
-            if _MERGED_PASS_ANCHOR in prompt:
-                prompts.append(prompt)
+            if _MERGED_PASS_ANCHOR in self.latest_reasoning_prompt():
+                prompts.append(self.latest_reasoning_prompt())
                 return {
                     "architecture_findings": [
                         {
@@ -417,10 +424,10 @@ def test_side_effect_half_runs_when_pre_numbered_with_full_content_supplied() ->
     silently discarded as unverifiable hunk-fallback mode."""
     prompts: list = []
 
-    class _FindingsClient(DummyLLMClient):
+    class _FindingsClient(SubmissionPassTwoCallClient):
         def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
-            if _MERGED_PASS_ANCHOR in prompt:
-                prompts.append(prompt)
+            if _MERGED_PASS_ANCHOR in self.latest_reasoning_prompt():
+                prompts.append(self.latest_reasoning_prompt())
                 return {
                     "architecture_findings": [],
                     "side_effect_findings": [
@@ -459,10 +466,10 @@ def test_side_effect_half_stays_off_when_full_content_covers_only_some_paths() -
     half (unaffected by ``pre_numbered``) may still run."""
     prompts: list = []
 
-    class _FindingsClient(DummyLLMClient):
+    class _FindingsClient(SubmissionPassTwoCallClient):
         def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
-            if _MERGED_PASS_ANCHOR in prompt:
-                prompts.append(prompt)
+            if _MERGED_PASS_ANCHOR in self.latest_reasoning_prompt():
+                prompts.append(self.latest_reasoning_prompt())
                 return {
                     "architecture_findings": [],
                     "side_effect_findings": [
@@ -495,81 +502,33 @@ def test_side_effect_half_stays_off_when_full_content_covers_only_some_paths() -
     assert side == []
 
 
-def test_large_architecture_document_shrinks_code_inline_budget(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Unlike the standalone architecture pass, the merged call must reserve
-    the architecture body in its budget so a huge document shrinks changed-file
-    inlining (and caps the document on tiny contexts) instead of overflowing."""
-    import code_review_agent.merged_architecture_side_effect_pass as pass_mod
+def test_large_architecture_document_is_inlined_in_full() -> None:
+    """A huge architecture document is inlined in full in the user prompt."""
+    prompts: list = []
 
-    captured: Dict[str, Any] = {}
-    original_build = pass_mod._build_prompt
-
-    def _spy(index, architecture_body, max_inline_chars, **kwargs):
-        captured["max_inline_chars"] = max_inline_chars
-        captured["max_architecture_chars"] = kwargs["max_architecture_chars"]
-        captured["architecture_body_len"] = len(architecture_body)
-        return original_build(index, architecture_body, max_inline_chars, **kwargs)
-
-    monkeypatch.setattr(pass_mod, "_build_prompt", _spy)
-
-    # Small context so a 100K architecture body cannot share the map-call code
-    # allowance without overflowing.
-    class _SmallCtx(DummyLLMClient):
-        def get_max_context_tokens(self) -> int:
-            return 16_384
-
+    class _Client(SubmissionPassTwoCallClient):
         def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
-            if _MERGED_PASS_ANCHOR in prompt:
+            if _MERGED_PASS_ANCHOR in self.latest_reasoning_prompt():
+                prompts.append(self.latest_reasoning_prompt())
                 return {"architecture_findings": [], "side_effect_findings": []}
             return {"approved": True, "issues": [], "summary": "ok", "spec_compliance_notes": ""}
 
-    from software_engineering_team.shared.context_sizing import compute_code_review_map_chunk_chars
-
-    map_budget = compute_code_review_map_chunk_chars(_SmallCtx())
     arch_doc = SystemArchitecture(overview="", architecture_document="X" * 100_000)
-    find_architecture_and_side_effect_issues(_SmallCtx(), _input(architecture=arch_doc))
+    find_architecture_and_side_effect_issues(_Client(), _input(architecture=arch_doc))
 
-    assert captured["architecture_body_len"] == 100_000
-    assert captured["max_architecture_chars"] < 100_000
-    assert captured["max_inline_chars"] < map_budget
-    assert captured["max_inline_chars"] == 0
-
-
-def test_skips_call_when_context_cannot_fit_fixed_prompt(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """An undersized context that cannot hold the system prompt + response
-    reserve must skip the LLM call rather than inventing inline capacity."""
-    calls = {"n": 0}
-
-    class _TinyCtx(DummyLLMClient):
-        def get_max_context_tokens(self) -> int:
-            return 2_048
-
-        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
-            calls["n"] += 1
-            raise AssertionError("merged pass should not call the LLM")
-
-    arch, side = find_architecture_and_side_effect_issues(_TinyCtx(), _input())
-    assert arch == []
-    assert side == []
-    assert calls["n"] == 0
+    assert prompts
+    assert "X" * 100_000 in prompts[0]
+    assert "the remainder was omitted" not in prompts[0]
 
 
-def test_truncates_large_changed_file_manifest(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_inlines_full_changed_file_manifest() -> None:
+    """All changed paths are listed when prompt packing is unbounded."""
     prompts: list = []
 
-    class _Client(DummyLLMClient):
-        def get_max_context_tokens(self) -> int:
-            # Fits fixed prompt + tool transcript + a usable (shrunk) response,
-            # but leaves essentially no content room so the path list truncates.
-            return 18_000
-
+    class _Client(SubmissionPassTwoCallClient):
         def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
-            if _MERGED_PASS_ANCHOR in prompt:
-                prompts.append(prompt)
+            if _MERGED_PASS_ANCHOR in self.latest_reasoning_prompt():
+                prompts.append(self.latest_reasoning_prompt())
                 return {"architecture_findings": [], "side_effect_findings": []}
             return {"approved": True, "issues": [], "summary": "ok", "spec_compliance_notes": ""}
 
@@ -577,72 +536,24 @@ def test_truncates_large_changed_file_manifest(monkeypatch: pytest.MonkeyPatch) 
     find_architecture_and_side_effect_issues(_Client(), _input(files=files))
     assert prompts
     manifest_section = prompts[0].split("**Full content of the changed files:**", 1)[0]
-    assert "more changed path(s) not listed" in manifest_section
-    assert "list_changed_files" in manifest_section
-    assert manifest_section.count("pkg/module_") < 400
+    assert "more changed path(s) not listed" not in manifest_section
+    assert manifest_section.count("pkg/module_") == 400
 
 
-def test_raises_tight_output_cap_for_dual_finding_arrays(
+def test_runner_does_not_pin_max_tokens(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """When LLM_MAX_OUTPUT_TOKENS is set near a single-pass sizing (e.g. 4096), the
-    production LLMClientModel path must raise the merged call to the dual-array
-    floor so both finding lists can fit in one completion."""
+    """Submission passes must not clone the model with a token output budget."""
     import code_review_agent.submission_pass_runner as runner_mod
 
     from llm_service import LLMClientModel
-    from software_engineering_team.shared.context_sizing import (
-        CODE_REVIEW_MERGED_PASS_RESPONSE_TOKENS,
-    )
 
     monkeypatch.setenv("LLM_MAX_OUTPUT_TOKENS", "4096")
     clones: list = []
 
     class _Empty(DummyLLMClient):
-        def get_max_context_tokens(self) -> int:
-            # Dummy default is 16K; with tool-transcript headroom that shrinks
-            # the dual-array reserve. Use a window that still holds the full floor.
-            return 40_000
-
         def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
-            if _MERGED_PASS_ANCHOR in prompt:
-                return {"architecture_findings": [], "side_effect_findings": []}
-            return {"approved": True, "issues": [], "summary": "ok", "spec_compliance_notes": ""}
-
-    class _RecordingModel(LLMClientModel):
-        def clone(self, **overrides: Any) -> LLMClientModel:  # type: ignore[override]
-            clones.append(overrides)
-            return super().clone(**overrides)
-
-    backing = _Empty()
-    base = _RecordingModel(backing, agent_key="code_review")
-    monkeypatch.setattr(runner_mod, "resolve_code_review_model", lambda _llm: base)
-
-    find_architecture_and_side_effect_issues(backing, _input())
-    assert clones == [{"max_tokens": CODE_REVIEW_MERGED_PASS_RESPONSE_TOKENS}]
-
-
-def test_model_pin_takes_precedence_over_env_max_tokens(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A pinned max_tokens of 4096 must be raised even when LLM_MAX_OUTPUT_TOKENS is
-    already generous — the pin is what the adapter actually sends."""
-    import code_review_agent.submission_pass_runner as runner_mod
-
-    from llm_service import LLMClientModel
-    from software_engineering_team.shared.context_sizing import (
-        CODE_REVIEW_MERGED_PASS_RESPONSE_TOKENS,
-    )
-
-    monkeypatch.setenv("LLM_MAX_OUTPUT_TOKENS", "16384")
-    clones: list = []
-
-    class _Empty(DummyLLMClient):
-        def get_max_context_tokens(self) -> int:
-            return 40_000
-
-        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
-            if _MERGED_PASS_ANCHOR in prompt:
+            if _MERGED_PASS_ANCHOR in self.latest_reasoning_prompt():
                 return {"architecture_findings": [], "side_effect_findings": []}
             return {"approved": True, "issues": [], "summary": "ok", "spec_compliance_notes": ""}
 
@@ -656,147 +567,35 @@ def test_model_pin_takes_precedence_over_env_max_tokens(
     monkeypatch.setattr(runner_mod, "resolve_code_review_model", lambda _llm: base)
 
     find_architecture_and_side_effect_issues(backing, _input())
-    assert clones == [{"max_tokens": CODE_REVIEW_MERGED_PASS_RESPONSE_TOKENS}]
+    assert not any("max_tokens" in c for c in clones)
 
 
-def test_clamps_oversized_cap_to_shrunk_response_reserve(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """When the response reserve shrinks for a small context, an oversized
-    LLM_MAX_OUTPUT_TOKENS must be clamped down to that reserve."""
-    import code_review_agent.submission_pass_runner as runner_mod
-
-    from llm_service import LLMClientModel
-    from software_engineering_team.shared.context_sizing import (
-        _CODE_REVIEW_MERGED_PASS_MIN_RESPONSE_TOKENS,
-        CODE_REVIEW_MERGED_PASS_RESPONSE_TOKENS,
-    )
-
-    monkeypatch.setenv("LLM_MAX_OUTPUT_TOKENS", "16384")
-    clones: list = []
-
-    class _SmallCtx(DummyLLMClient):
-        def get_max_context_tokens(self) -> int:
-            # Large enough to run (fixed prompt + transcript + min response),
-            # small enough that the dual-array floor cannot fit in full.
-            return 18_000
-
-        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
-            if _MERGED_PASS_ANCHOR in prompt:
-                return {"architecture_findings": [], "side_effect_findings": []}
-            return {"approved": True, "issues": [], "summary": "ok", "spec_compliance_notes": ""}
-
-    class _RecordingModel(LLMClientModel):
-        def clone(self, **overrides: Any) -> LLMClientModel:  # type: ignore[override]
-            clones.append(overrides)
-            return super().clone(**overrides)
-
-    backing = _SmallCtx()
-    base = _RecordingModel(backing, agent_key="code_review")
-    monkeypatch.setattr(runner_mod, "resolve_code_review_model", lambda _llm: base)
-
-    find_architecture_and_side_effect_issues(backing, _input())
-    assert len(clones) == 1
-    assert clones[0]["max_tokens"] < CODE_REVIEW_MERGED_PASS_RESPONSE_TOKENS
-    assert clones[0]["max_tokens"] >= _CODE_REVIEW_MERGED_PASS_MIN_RESPONSE_TOKENS
-
-
-def test_clamps_oversized_cap_to_full_dual_array_reserve(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Even when the dual-array floor is selected, an oversized LLM_MAX_OUTPUT_TOKENS
-    must still be clamped to that reserved response budget."""
-    import code_review_agent.submission_pass_runner as runner_mod
-
-    from llm_service import LLMClientModel
-    from software_engineering_team.shared.context_sizing import (
-        CODE_REVIEW_MERGED_PASS_RESPONSE_TOKENS,
-    )
-
-    monkeypatch.setenv("LLM_MAX_OUTPUT_TOKENS", "16384")
-    clones: list = []
-
-    class _Empty(DummyLLMClient):
-        def get_max_context_tokens(self) -> int:
-            return 40_000
-
-        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
-            if _MERGED_PASS_ANCHOR in prompt:
-                return {"architecture_findings": [], "side_effect_findings": []}
-            return {"approved": True, "issues": [], "summary": "ok", "spec_compliance_notes": ""}
-
-    class _RecordingModel(LLMClientModel):
-        def clone(self, **overrides: Any) -> LLMClientModel:  # type: ignore[override]
-            clones.append(overrides)
-            return super().clone(**overrides)
-
-    backing = _Empty()
-    base = _RecordingModel(backing, agent_key="code_review")
-    monkeypatch.setattr(runner_mod, "resolve_code_review_model", lambda _llm: base)
-
-    find_architecture_and_side_effect_issues(backing, _input())
-    assert clones == [{"max_tokens": CODE_REVIEW_MERGED_PASS_RESPONSE_TOKENS}]
-
-
-def test_truncation_note_is_reserved_so_large_file_still_inlines() -> None:
-    """A file larger than the inline budget must keep a prefix plus note, not
-    drop the whole file (and later files) because the note overflowed."""
+def test_build_prompt_inlines_large_changed_files_in_full() -> None:
+    """Large and small changed files are both inlined without truncation."""
     import code_review_agent.merged_architecture_side_effect_pass as pass_mod
     from code_review_agent.false_positive_filter import CodebaseIndex
 
+    big_content = "X" * 5_000
+    small_content = "def ok():\n    return 1\n"
     index = CodebaseIndex.from_input(
-        _input(files={"big.py": "X" * 5_000, "small.py": "def ok():\n    return 1\n"})
+        _input(files={"big.py": big_content, "small.py": small_content})
     )
-    prompt = pass_mod._build_prompt(
-        index,
-        "",
-        400,
-        max_architecture_chars=0,
-        max_manifest_chars=2_000,
-        arch_on=False,
-        side_on=True,
-    )
-    assert "### big.py ###" in prompt
-    assert "Only the first" in prompt
-    assert "### small.py ###" in prompt or "list_changed_files" in prompt
+    prompt = pass_mod._build_prompt(index, "", arch_on=False, side_on=True)
+    assert big_content in prompt
+    assert small_content in prompt
+    assert "Only the first" not in prompt
+    assert "more changed file(s) not shown" not in prompt
 
 
-def test_render_manifest_emits_full_list_when_budget_matches_full_size() -> None:
-    """When max_manifest_chars equals _manifest_chars, every path must render —
-    do not reserve overflow-note room that would hide paths that already fit."""
+def test_render_manifest_lists_every_path() -> None:
+    """``_render_manifest`` lists every changed path with no character cap."""
     import code_review_agent.merged_architecture_side_effect_pass as pass_mod
-    from code_review_agent.submission_pass_runner import _manifest_chars
 
     paths = ["a", "b", "c"]
-    budget = _manifest_chars(paths)
-    rendered = pass_mod._render_manifest(paths, budget)
+    rendered = pass_mod._render_manifest(paths)
     text = "\n".join(rendered)
     assert "a" in text and "b" in text and "c" in text
     assert "more changed path(s) not listed" not in text
-    # ``_manifest_chars`` counts a trailing newline after the last path; join does not.
-    assert len(text) <= budget
-
-
-def test_fit_changed_file_block_shrinks_when_fence_exceeds_reserve() -> None:
-    """A full-file block whose actual fence exceeds the 8-char reserve must
-    shrink the body instead of dropping the file entirely."""
-    import code_review_agent.merged_architecture_side_effect_pass as pass_mod
-
-    # Eight+ backticks force code_fence_for to emit a longer fence than the reserve.
-    content = "x = '''" + ("`" * 12) + "'''\n" + ("y = 1\n" * 40)
-    heading = "### fencey.py ###"
-    fence_reserve = 8
-    base_overhead = len(heading) + 1 + 2 * (fence_reserve + 1)
-    # Budget that appears to fit under the reserve but not under the real fence.
-    remaining = base_overhead + len(content)
-    block_lines, truncated = pass_mod._fit_changed_file_block("fencey.py", content, remaining)
-    assert block_lines is not None
-    block = "\n".join(block_lines)
-    assert len(block) <= remaining
-    assert "### fencey.py ###" in block
-    # Either the full content fit with the real fence, or we shrunk with a note.
-    if truncated:
-        assert "Only the first" in block
 
 
 def test_list_changed_files_tool_returns_submission_paths_only() -> None:
@@ -906,16 +705,14 @@ def test_format_changed_files_page_bounds_by_char_budget() -> None:
     assert "of 50" in page
 
 
-def test_no_extra_batching_for_small_multi_file_submission_under_budget() -> None:
-    """Several small files that together still fit the per-call budget must
-    make exactly one LLM call, not one per file — no behavior change for
-    submissions under the budget."""
+def test_no_extra_batching_for_small_multi_file_submission() -> None:
+    """Several small files make exactly one LLM call when no overflow occurs."""
     prompts: list = []
 
-    class _Client(DummyLLMClient):
+    class _Client(SubmissionPassTwoCallClient):
         def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
-            if _MERGED_PASS_ANCHOR in prompt:
-                prompts.append(prompt)
+            if _MERGED_PASS_ANCHOR in self.latest_reasoning_prompt():
+                prompts.append(self.latest_reasoning_prompt())
                 return {"architecture_findings": [], "side_effect_findings": []}
             return {"approved": True, "issues": [], "summary": "ok", "spec_compliance_notes": ""}
 
@@ -926,167 +723,28 @@ def test_no_extra_batching_for_small_multi_file_submission_under_budget() -> Non
     }
     find_architecture_and_side_effect_issues(_Client(), _input(files=files))
     assert len(prompts) == 1
+    for path in files:
+        assert f"### {path} ###" in prompts[0]
 
 
-def test_splits_into_multiple_batches_for_oversized_submission(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """When the changed-file set's total estimated size exceeds one call's
-    inline-code budget, the merged pass issues one independent LLM call per
-    batch and concatenates each batch's findings into the same two lists."""
-    import code_review_agent.submission_pass_runner as runner_mod
-
-    from software_engineering_team.shared.context_sizing import MergedPassBudgets
-
-    monkeypatch.setattr(
-        runner_mod,
-        "compute_code_review_merged_pass_budgets",
-        lambda *a, **k: MergedPassBudgets(
-            max_architecture_chars=0,
-            max_inline_code_chars=200,
-            max_manifest_chars=2_000,
-            reserved_response_tokens=4096,
-        ),
-    )
-
-    prompts: list = []
-
-    class _Client(DummyLLMClient):
-        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
-            if _MERGED_PASS_ANCHOR in prompt:
-                prompts.append(prompt)
-                for path in ("a.py", "b.py", "c.py"):
-                    if f"### {path} ###" in prompt:
-                        return {
-                            "architecture_findings": [
-                                {
-                                    "severity": "medium",
-                                    "category": "architecture",
-                                    "file_path": path,
-                                    "description": f"finding for {path}",
-                                    "suggestion": "n/a",
-                                }
-                            ],
-                            "side_effect_findings": [],
-                        }
-                return {"architecture_findings": [], "side_effect_findings": []}
-            return {"approved": True, "issues": [], "summary": "ok", "spec_compliance_notes": ""}
-
-    files = {
-        "a.py": "x = 1\n" * 10,
-        "b.py": "y = 2\n" * 10,
-        "c.py": "z = 3\n" * 10,
-    }
-    arch, side = find_architecture_and_side_effect_issues(_Client(), _input(files=files))
-
-    assert len(prompts) == 3
-    assert {f.description for f in arch} == {
-        "finding for a.py",
-        "finding for b.py",
-        "finding for c.py",
-    }
-    assert side == []
-    # Every batch's manifest still lists all three changed files (whole-
-    # submission awareness), even though its content section shows only one.
-    for prompt in prompts:
-        manifest_section = prompt.split("**Full content of the changed files", 1)[0]
-        assert "a.py" in manifest_section
-        assert "b.py" in manifest_section
-        assert "c.py" in manifest_section
-    assert any("batch 1 of 3" in p for p in prompts)
-    assert any("batch 3 of 3" in p for p in prompts)
-
-
-def test_one_batch_failure_does_not_discard_other_batches(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A malformed reply for one batch must not wipe out findings already
-    collected from other, successful batches."""
-    import code_review_agent.submission_pass_runner as runner_mod
-
-    from software_engineering_team.shared.context_sizing import MergedPassBudgets
-
-    monkeypatch.setattr(
-        runner_mod,
-        "compute_code_review_merged_pass_budgets",
-        lambda *a, **k: MergedPassBudgets(
-            max_architecture_chars=0,
-            max_inline_code_chars=200,
-            max_manifest_chars=2_000,
-            reserved_response_tokens=4096,
-        ),
-    )
-
-    class _Client(DummyLLMClient):
-        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
-            if _MERGED_PASS_ANCHOR in prompt:
-                if "### a.py ###" in prompt:
-                    return "not even a dict-shaped reply"  # type: ignore[return-value]
-                if "### b.py ###" in prompt:
-                    return {
-                        "architecture_findings": [
-                            {
-                                "severity": "medium",
-                                "category": "architecture",
-                                "file_path": "b.py",
-                                "description": "finding for b.py",
-                                "suggestion": "n/a",
-                            }
-                        ],
-                        "side_effect_findings": [],
-                    }
-                return {"architecture_findings": [], "side_effect_findings": []}
-            return {"approved": True, "issues": [], "summary": "ok", "spec_compliance_notes": ""}
-
-    files = {
-        "a.py": "x = 1\n" * 10,
-        "b.py": "y = 2\n" * 10,
-        "c.py": "z = 3\n" * 10,
-    }
-    arch, side = find_architecture_and_side_effect_issues(_Client(), _input(files=files))
-    assert [f.description for f in arch] == ["finding for b.py"]
-    assert side == []
-
-
-def test_reactive_recovery_bisects_overflowing_batch_through_public_entry_point(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The pass must now benefit from the shared runner's reactive bisect
-    recovery: a combined batch call that overflows mid-turn should be retried
-    as two single-file calls, rather than simply skipped (the pre-runner
-    behavior — this pass had no reactive recovery of its own)."""
-    import code_review_agent.submission_pass_runner as runner_mod
+def test_reactive_recovery_bisects_overflowing_batch_through_public_entry_point() -> None:
+    """The merged pass benefits from the shared runner's reactive bisect recovery."""
     from strands.types.exceptions import ContextWindowOverflowException
-
-    from software_engineering_team.shared.context_sizing import MergedPassBudgets
-
-    # A generous inline budget so both tiny files actually inline into the
-    # first (combined) call instead of being omitted for lack of room — the
-    # default DummyLLMClient context leaves ~0 content room once the dual-
-    # array response reserve is set aside (see test_no_extra_batching_for_
-    # small_multi_file_submission_under_budget, which never inspects prompt
-    # content for exactly this reason).
-    monkeypatch.setattr(
-        runner_mod,
-        "compute_code_review_merged_pass_budgets",
-        lambda *a, **k: MergedPassBudgets(
-            max_architecture_chars=0,
-            max_inline_code_chars=100_000,
-            max_manifest_chars=2_000,
-            reserved_response_tokens=4096,
-        ),
-    )
 
     call_count = {"n": 0}
 
-    class _Client(DummyLLMClient):
-        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+    class _Client(SubmissionPassTwoCallClient):
+        def complete(self, prompt: str, **kwargs: Any) -> str:
             if _MERGED_PASS_ANCHOR in prompt:
                 call_count["n"] += 1
                 if "### a.py ###" in prompt and "### b.py ###" in prompt:
                     raise ContextWindowOverflowException("combined batch too large")
+            return super().complete(prompt, **kwargs)
+
+        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+            if _MERGED_PASS_ANCHOR in self.latest_reasoning_prompt():
                 for path in ("a.py", "b.py"):
-                    if f"### {path} ###" in prompt:
+                    if f"### {path} ###" in self.latest_reasoning_prompt():
                         return {
                             "architecture_findings": [
                                 {
@@ -1107,6 +765,4 @@ def test_reactive_recovery_bisects_overflowing_batch_through_public_entry_point(
 
     assert {f.description for f in arch} == {"finding for a.py", "finding for b.py"}
     assert side == []
-    # More than one call proves the overflowing combined attempt was actually
-    # retried (bisected), not that the test happened to pass on the first try.
     assert call_count["n"] > 1

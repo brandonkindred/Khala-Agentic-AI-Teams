@@ -174,7 +174,7 @@ def test_secrets_loader_noop_when_file_missing(monkeypatch: pytest.MonkeyPatch, 
 
 
 def _injectable_manifest(agent_id: str):
-    from agent_registry.models import AgentManifest, SourceInfo
+    from agent_platform.registry.models import AgentManifest, SourceInfo
 
     return AgentManifest(
         id=agent_id,
@@ -190,7 +190,7 @@ def test_injected_manifest_lets_unknown_agent_boot(monkeypatch: pytest.MonkeyPat
     boots when its manifest is injected via ``SANDBOX_AGENT_MANIFEST_FILE``."""
     import json
 
-    from agent_registry import get_registry
+    from agent_platform.registry import get_registry
     from agent_sandbox_runtime.entrypoint import _build_app
 
     agent_id = "agent_team_studio.agent_studio.injected-xyz"

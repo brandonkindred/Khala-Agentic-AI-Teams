@@ -1,41 +1,64 @@
 """Tests for Code Review Chunk Reviewer.
 
-``ChunkReviewAgent`` calls the injected ``LLMClient``'s ``complete_json``
-directly (via ``llm_service.complete_validated``, validated against
-``ChunkReviewLLMResponse``) — no strands ``Agent``/``Model`` is built for
-this call path. Uses ``DummyLLMClient`` subclasses instead of ``MagicMock``
-so the injected client behaves like a real ``LLMClient``.
+``ChunkReviewAgent`` uses a two-call via-reasoning path: ``complete`` for prose
+review (with thinking), then ``complete_json`` for schema-validated formatting
+(with thinking off). Uses ``DummyLLMClient`` subclasses instead of
+``MagicMock`` so the injected client behaves like a real ``LLMClient``.
 """
 
 from __future__ import annotations
 
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Union
 
 import pytest
 from code_review_agent.chunk_reviewer import ChunkReviewAgent
 from code_review_agent.models import ChunkReviewInput, ChunkReviewOutput
+from code_review_agent.profiles import build_review_reasoning_system_prompt
 
 from llm_service import LLMJsonParseError, LLMSchemaValidationError
 from llm_service.clients.dummy import DummyLLMClient
 
 
-class _StubClient(DummyLLMClient):
-    """DummyLLMClient subclass returning a canned ChunkReviewLLMResponse-shaped dict."""
+class _TwoCallStub(DummyLLMClient):
+    """DummyLLMClient returning canned prose then a ChunkReviewLLMResponse-shaped dict."""
 
-    def __init__(self, canned: Dict[str, Any]) -> None:
+    def __init__(self, canned: Dict[str, Any], prose: str = "prose review") -> None:
         super().__init__()
         self._canned = canned
+        self._prose = prose
+        self.complete_calls: list[dict[str, Any]] = []
+        self.complete_json_calls: list[dict[str, Any]] = []
+
+    def complete(
+        self,
+        prompt: str,
+        *,
+        objective: str,
+        think: Optional[Union[bool, str]] = None,
+        system_prompt: Optional[str] = None,
+        **kwargs: Any,
+    ) -> str:
+        self.complete_calls.append(
+            {
+                "prompt": prompt,
+                "objective": objective,
+                "think": think,
+                "system_prompt": system_prompt,
+            }
+        )
+        return self._prose
 
     def complete_json(
         self,
         prompt: str,
         *,
-        temperature: float = 0.0,
-        system_prompt: Optional[str] = None,
-        tools: Optional[list] = None,
-        think: bool = False,
+        objective: str,
+        think: Optional[Union[bool, str]] = None,
         **kwargs: Any,
     ) -> Dict[str, Any]:
+        self.complete_json_calls.append(
+            {"prompt": prompt, "objective": objective, "think": think}
+        )
         return self._canned
 
 
@@ -55,11 +78,11 @@ def _chunk_input(**overrides: Any) -> ChunkReviewInput:
 
 
 class _NonJsonClient(DummyLLMClient):
-    """DummyLLMClient whose ``complete_json`` cannot produce parseable JSON, so
-    it raises ``LLMJsonParseError`` itself -- matching the real ``LLMClient``
-    contract (``complete_json`` returns ``Dict[str, Any]``, never a bare
-    string; a real client that cannot parse its own reply raises rather than
-    returning unparsed text, e.g. ``OllamaLLMClient._extract_json``)."""
+    """DummyLLMClient whose reasoning pass succeeds but formatting cannot produce
+    parseable JSON — matching the real ``LLMClient`` contract."""
+
+    def complete(self, prompt: str, **kwargs: Any) -> str:
+        return "prose review"
 
     def complete_json(self, prompt: str, **kwargs: Any) -> Any:
         raise LLMJsonParseError(
@@ -85,10 +108,10 @@ def test_chunk_review_raises_llm_json_parse_error_on_non_json_model_output() -> 
 
 
 class _NonObjectJsonClient(DummyLLMClient):
-    """DummyLLMClient whose ``complete_json`` returns well-formed but
-    non-object JSON (a bare list) -- ``ChunkReviewLLMResponse.model_validate``
-    rejects a non-mapping value, so this must surface as
-    ``LLMSchemaValidationError``, not an unclassified ``AttributeError``."""
+    """DummyLLMClient whose formatting pass returns well-formed but non-object JSON."""
+
+    def complete(self, prompt: str, **kwargs: Any) -> str:
+        return "prose review"
 
     def complete_json(self, prompt: str, **kwargs: Any) -> Any:
         return ["not", "an", "object"]
@@ -122,7 +145,7 @@ def test_chunk_review_agent_carries_file_path_from_issue() -> None:
     """When the LLM sets a file_path on an issue, it flows through to the
     output unchanged."""
     agent = ChunkReviewAgent(
-        llm=_StubClient(
+        llm=_TwoCallStub(
             {
                 "approved": False,
                 "issues": [
@@ -151,14 +174,19 @@ def test_chunk_review_agent_carries_file_path_from_issue() -> None:
 
 
 class _RecorderClient(DummyLLMClient):
-    """Delegates to Dummy but records every prompt."""
+    """Delegates to Dummy but records reasoning (``complete``) prompts."""
 
     def __init__(self) -> None:
         super().__init__()
         self.prompts: list = []
+        self.format_prompts: list = []
+
+    def complete(self, prompt: str, **kwargs: Any) -> str:
+        self.prompts.append(prompt)
+        return super().complete(prompt, **kwargs)
 
     def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
-        self.prompts.append(prompt)
+        self.format_prompts.append(prompt)
         return super().complete_json(prompt, **kwargs)
 
 
@@ -251,7 +279,7 @@ def test_new_output_fields_are_parsed_through() -> None:
     """``spec_compliance_notes`` from the model reply is passed through onto the
     ``ChunkReviewOutput``."""
     agent = ChunkReviewAgent(
-        llm=_StubClient(
+        llm=_TwoCallStub(
             {
                 "approved": True,
                 "issues": [],
@@ -272,7 +300,7 @@ def test_missing_new_output_fields_raise_schema_validation_error() -> None:
     regardless of prompt, so the retry fails identically and
     ``LLMSchemaValidationError`` is raised -- replacing the old hand-rolled
     parser's silent ``.get(..., "")`` default."""
-    agent = ChunkReviewAgent(llm=_StubClient({"approved": True, "issues": [], "summary": "ok"}))
+    agent = ChunkReviewAgent(llm=_TwoCallStub({"approved": True, "issues": [], "summary": "ok"}))
     with pytest.raises(LLMSchemaValidationError):
         agent.run(_chunk_input())
 
@@ -283,7 +311,7 @@ def test_reject_without_actionable_issue_raises_schema_validation_error() -> Non
     justify the rejection, so the reply is malformed and fails schema
     validation rather than being silently accepted."""
     agent = ChunkReviewAgent(
-        llm=_StubClient(
+        llm=_TwoCallStub(
             {"approved": False, "issues": [], "summary": "No issues.", "spec_compliance_notes": ""}
         )
     )
@@ -296,7 +324,7 @@ def test_reject_with_only_low_severity_issue_raises_schema_validation_error() ->
     critical/high threshold -- an info/low finding alone does not justify a
     rejection per the review prompt's own contract."""
     agent = ChunkReviewAgent(
-        llm=_StubClient(
+        llm=_TwoCallStub(
             {
                 "approved": False,
                 "issues": [
@@ -323,7 +351,7 @@ def test_chunk_review_agent_passes_blank_file_path_through_unchanged() -> None:
     defaults an omitted ``file_path`` to ``""`` and always emits the key on
     ``model_dump()``, so it is present-but-blank rather than absent."""
     agent = ChunkReviewAgent(
-        llm=_StubClient(
+        llm=_TwoCallStub(
             {
                 "approved": False,
                 "issues": [
@@ -371,43 +399,64 @@ def test_undeclared_language_falls_back_to_typescript_for_non_python_path() -> N
     assert "**Language:** typescript" in client.prompts[0]
 
 
-def test_final_output_contract_note_follows_the_code_block() -> None:
-    """The output-contract nudge (emit only the JSON, no reasoning) is appended as
-    the last thing the model reads — after the code block — so a thinking model is
-    steered toward a final answer instead of reasoning-only output."""
-    from code_review_agent.chunk_reviewer import FINAL_OUTPUT_CONTRACT_NOTE
-
+def test_reasoning_prompt_omits_final_output_contract_note() -> None:
+    """The via-reasoning path sends prose on call 1; the JSON contract note must
+    not appear in the reasoning user prompt (formatting owns JSON on call 2)."""
     client = _RecorderClient()
     ChunkReviewAgent(llm=client).run(_chunk_input())
     prompt = client.prompts[0]
-    assert FINAL_OUTPUT_CONTRACT_NOTE.strip() in prompt
-    # It comes after the code-to-review section (last thing the model sees).
-    assert prompt.index("Code to review") < prompt.index("Respond with ONLY")
+    assert "Respond with ONLY the single JSON object" not in prompt
+
+
+def test_chunk_review_uses_two_call_via_reasoning_path() -> None:
+    """``run()`` issues ``complete`` then ``complete_json`` with the expected think
+    flags and split system prompts."""
+    canned = {
+        "approved": True,
+        "issues": [],
+        "summary": "ok",
+        "spec_compliance_notes": "",
+    }
+    client = _TwoCallStub(canned)
+    ChunkReviewAgent(llm=client).run(_chunk_input())
+    assert len(client.complete_calls) == 1
+    assert len(client.complete_json_calls) == 1
+    reasoning_system = client.complete_calls[0]["system_prompt"] or ""
+    assert "Return a single JSON object" not in reasoning_system
+    assert "Respond with ONLY the single JSON object" not in client.complete_calls[0]["prompt"]
+    assert client.complete_calls[0]["think"] is True
+    assert client.complete_json_calls[0]["think"] is False
+    assert build_review_reasoning_system_prompt("code_review") in reasoning_system
 
 
 class _ThinkRecorderClient(DummyLLMClient):
-    """Delegates to Dummy but records the ``think`` kwarg of every call."""
+    """Records ``think`` on both the reasoning and formatting calls."""
 
     def __init__(self) -> None:
         super().__init__()
-        self.think_values: list = []
+        self.reasoning_think_values: list = []
+        self.format_think_values: list = []
+
+    def complete(self, prompt: str, **kwargs: Any) -> str:
+        self.reasoning_think_values.append(kwargs.get("think"))
+        return super().complete(prompt, **kwargs)
 
     def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
-        self.think_values.append(kwargs.get("think"))
+        self.format_think_values.append(kwargs.get("think"))
         return super().complete_json(prompt, **kwargs)
 
 
 def test_run_forwards_think_override() -> None:
-    """``ChunkReviewAgent.run(think=...)`` threads the override directly to the
-    injected client's ``complete_json`` call (via ``complete_validated``); the
-    default is ``None`` (the client's own platform-default thinking level, per
-    ``LLMClient.complete_json``'s contract)."""
+    """``think=False`` disables thinking on the reasoning pass; the default maps
+    to ``True``. The formatting pass always uses ``think=False``."""
     client = _ThinkRecorderClient()
     agent = ChunkReviewAgent(llm=client)
     agent.run(_chunk_input(), think=False)
-    assert client.think_values[-1] is False
+    assert client.reasoning_think_values[-1] is False
+    assert client.format_think_values[-1] is False
     agent.run(_chunk_input())
-    assert client.think_values[-1] is None
+    assert client.reasoning_think_values[-1] is True
+    assert client.format_think_values[-1] is False
 
 
 def test_shared_context_is_passed_through_in_full() -> None:
@@ -423,7 +472,8 @@ def test_shared_context_is_passed_through_in_full() -> None:
     oversized_spec = ("S" * max_spec) + "TAIL_BEYOND_BUDGET"
     agent = ChunkReviewAgent(llm=client)
     agent.run(_chunk_input(spec_excerpt=oversized_spec))
-    assert len(client.prompts) == 1  # exactly one LLM call: the review itself
+    assert len(client.prompts) == 1  # one reasoning call for this chunk
+    assert len(client.format_prompts) == 1
     assert "TAIL_BEYOND_BUDGET" in client.prompts[0]
     assert "S" * 100 in client.prompts[0]
 
@@ -441,6 +491,7 @@ def test_architecture_overview_is_passed_through_in_full() -> None:
     agent = ChunkReviewAgent(llm=client)
     agent.run(_chunk_input(architecture_overview=oversized_arch))
     assert len(client.prompts) == 1
+    assert len(client.format_prompts) == 1
     assert "TAIL_BEYOND_BUDGET" in client.prompts[0]
     assert "A" * 100 in client.prompts[0]
 
@@ -459,6 +510,7 @@ def test_existing_codebase_excerpt_is_passed_through_in_full() -> None:
     agent = ChunkReviewAgent(llm=client)
     agent.run(_chunk_input(existing_codebase_excerpt=oversized_existing))
     assert len(client.prompts) == 1
+    assert len(client.format_prompts) == 1
     assert "TAIL_BEYOND_BUDGET" in client.prompts[0]
     assert "E" * 100 in client.prompts[0]
 
