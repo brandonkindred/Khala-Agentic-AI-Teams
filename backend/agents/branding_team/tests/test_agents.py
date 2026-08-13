@@ -5,10 +5,24 @@ data-driven ``AgentPromptSpec``/``render_agent_prompt`` pattern
 (``branding_team.prompt_spec``) against the original hand-written
 prose, so an accidental wording change in a spec constant is caught here
 rather than silently drifting.
+
+The completeness and AST guards at the bottom of this module are the epic's
+final sweep: a new ``make_*`` factory fails until it has a snapshot row, and
+any ``build_agent(..., system_prompt=...)`` that is not
+``render_agent_prompt(...)`` fails until the hand-written path is removed.
 """
 
 from __future__ import annotations
 
+import ast
+import os
+from pathlib import Path
+from typing import Callable
+
+import pytest
+from strands import Agent
+
+from branding_team import agents as branding_agents
 from branding_team.agents import (
     make_approval_workflow_designer,
     make_archetype_analyst,
@@ -49,6 +63,15 @@ from branding_team.agents import (
     make_voice_tone_builder,
     make_website_guide,
 )
+from branding_team.graphs.shared import serialize_mission
+from branding_team.models import (
+    BrandDiscoveryAuditOutput,
+    BrandStoryOutput,
+    ChannelGuidelineOutput,
+    IconographyOutput,
+    OwnershipOutput,
+)
+from branding_team.tests.conftest import make_mission
 
 _EXPECTED_PURPOSE_VISION_PROMPT = (
     "You are a Purpose & Vision Writer. Given a branding mission, write three things:\n"
@@ -548,3 +571,180 @@ def test_training_planner_prompt_matches_spec() -> None:
 
 def test_brand_rules_codifier_prompt_matches_spec() -> None:
     assert make_brand_rules_codifier().system_prompt == _EXPECTED_BRAND_RULES_CODIFIER_PROMPT
+
+
+# ---------------------------------------------------------------------------
+# Epic 5e sweep — completeness, no leftover string builders, per-phase spot-check
+# ---------------------------------------------------------------------------
+
+# Every public ``make_*`` factory in ``branding_team.agents``. Parameterized
+# factories (moodboard conceptualist, channel guides) appear once; their
+# variants are locked by the individual snapshot tests above.
+_SNAPSHOTTED_MAKE_FACTORIES: frozenset[str] = frozenset(
+    {
+        "make_discovery_auditor",
+        "make_purpose_vision_writer",
+        "make_values_articulator",
+        "make_audience_segmenter",
+        "make_differentiation_mapper",
+        "make_positioning_synthesizer",
+        "make_storyteller",
+        "make_archetype_analyst",
+        "make_tagline_writer",
+        "make_message_mapper",
+        "make_persona_builder",
+        "make_voice_principles_drafter",
+        "make_creative_director",
+        "make_moodboard_conceptualist",
+        "make_converge_decider",
+        "make_logo_specifier",
+        "make_color_system_builder",
+        "make_typography_builder",
+        "make_iconography_director",
+        "make_photography_video_director",
+        "make_voice_tone_builder",
+        "make_design_system_codifier",
+        "make_brand_experience_principler",
+        "make_website_guide",
+        "make_social_guide",
+        "make_email_guide",
+        "make_events_guide",
+        "make_partnerships_guide",
+        "make_internal_guide",
+        "make_brand_architecture_builder",
+        "make_brand_in_action_illustrator",
+        "make_ownership_definer",
+        "make_approval_workflow_designer",
+        "make_asset_wiki_planner",
+        "make_training_planner",
+        "make_kpi_designer",
+        "make_evolution_framer",
+        "make_brand_rules_codifier",
+    }
+)
+
+
+def test_every_make_factory_has_a_prompt_snapshot() -> None:
+    """A new ``make_*`` factory fails here until it lands in the snapshot set.
+
+    Preconditions:
+        ``branding_team.agents`` is importable and defines public ``make_*``
+        callables.
+    Postconditions:
+        The discovered ``make_*`` names equal ``_SNAPSHOTTED_MAKE_FACTORIES``.
+    """
+    discovered = {
+        name
+        for name in dir(branding_agents)
+        if name.startswith("make_") and callable(getattr(branding_agents, name))
+    }
+    assert discovered == _SNAPSHOTTED_MAKE_FACTORIES
+
+
+def _call_func_name(node: ast.expr) -> str | None:
+    """Return the function name of a Call's ``func``, or None if not a bare name.
+
+    Preconditions:
+        ``node`` is an AST expression (the ``func`` of an ``ast.Call``).
+    Postconditions:
+        Returns ``id`` for ``ast.Name``, ``attr`` for ``ast.Attribute``, else None.
+    """
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        return node.attr
+    return None
+
+
+def test_agents_py_build_agent_calls_use_render_agent_prompt() -> None:
+    """No ``build_agent`` in ``agents.py`` may take a hand-written prompt literal.
+
+    Preconditions:
+        ``branding_team.agents.__file__`` points at a readable Python source file.
+    Postconditions:
+        Every ``build_agent(...)`` call in that file passes
+        ``system_prompt=render_agent_prompt(...)``. At least one such call exists.
+    """
+    source_path = Path(branding_agents.__file__).resolve()
+    tree = ast.parse(source_path.read_text(encoding="utf-8"))
+    build_agent_calls = 0
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        if _call_func_name(node.func) != "build_agent":
+            continue
+        build_agent_calls += 1
+        keywords = {kw.arg: kw.value for kw in node.keywords if kw.arg is not None}
+        system_prompt = keywords.get("system_prompt")
+        assert system_prompt is not None, "build_agent is missing system_prompt="
+        assert isinstance(system_prompt, ast.Call), (
+            "build_agent(system_prompt=...) must be render_agent_prompt(...), "
+            f"got {ast.unparse(system_prompt)}"
+        )
+        assert _call_func_name(system_prompt.func) == "render_agent_prompt", (
+            "build_agent(system_prompt=...) must call render_agent_prompt, "
+            f"got {ast.unparse(system_prompt)}"
+        )
+    assert build_agent_calls > 0
+
+
+_PHASE_SPOT_CHECKS: tuple[tuple[str, Callable[[], Agent], type], ...] = (
+    ("phase1_discovery_auditor", make_discovery_auditor, BrandDiscoveryAuditOutput),
+    ("phase2_storyteller", make_storyteller, BrandStoryOutput),
+    ("phase3_iconography_director", make_iconography_director, IconographyOutput),
+    ("phase4_website_guide", make_website_guide, ChannelGuidelineOutput),
+    ("phase5_ownership_definer", make_ownership_definer, OwnershipOutput),
+)
+_PHASE_SPOT_CHECK_IDS: tuple[str, ...] = tuple(
+    case_id for case_id, _factory, _model in _PHASE_SPOT_CHECKS
+)
+
+
+@pytest.mark.parametrize(
+    ("_case_id", "factory", "output_model"),
+    _PHASE_SPOT_CHECKS,
+    ids=_PHASE_SPOT_CHECK_IDS,
+)
+def test_one_migrated_agent_per_phase_yields_schema_valid_output(
+    _case_id: str, factory: Callable[[], Agent], output_model: type
+) -> None:
+    """Production event-loop path: one factory per phase returns its schema.
+
+    Runs under ``LLM_PROVIDER=dummy`` in CI. A live provider is exercised by
+    ``test_one_migrated_agent_per_phase_against_live_llm`` when configured.
+
+    Preconditions:
+        ``factory`` builds an agent with ``structured_output=output_model``.
+    Postconditions:
+        ``result.structured_output`` is an instance of ``output_model``.
+    """
+    agent = factory()
+    result = agent(serialize_mission(make_mission()))
+    assert isinstance(result.structured_output, output_model)
+
+
+@pytest.mark.real_llm
+@pytest.mark.skipif(
+    os.environ.get("LLM_PROVIDER", "dummy") == "dummy",
+    reason="real LLM provider not configured; dummy event-loop spot-checks cover CI",
+)
+@pytest.mark.parametrize(
+    ("_case_id", "factory", "output_model"),
+    _PHASE_SPOT_CHECKS,
+    ids=_PHASE_SPOT_CHECK_IDS,
+)
+def test_one_migrated_agent_per_phase_against_live_llm(
+    _case_id: str, factory: Callable[[], Agent], output_model: type
+) -> None:
+    """Same per-phase spot-check against a real provider when one is configured.
+
+    Preconditions:
+        ``LLM_PROVIDER`` is set to a non-dummy value before test collection
+        (``conftest`` uses ``setdefault``, so an explicit provider is preserved).
+        ``factory`` builds an agent with ``structured_output=output_model``.
+    Postconditions:
+        ``result.structured_output`` is an instance of ``output_model``.
+    """
+    agent = factory()
+    result = agent(serialize_mission(make_mission()))
+    assert isinstance(result.structured_output, output_model)
