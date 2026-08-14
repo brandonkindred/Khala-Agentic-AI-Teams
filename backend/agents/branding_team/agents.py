@@ -1,7 +1,10 @@
 """Agent factory functions for the branding team Strands SDK pipeline.
 
 Each function returns a configured ``strands.Agent`` instance for use as a
-node in a ``GraphBuilder`` graph.  Agents are grouped by phase.
+node in a ``GraphBuilder`` graph.  Agents are grouped by phase. Every
+``make_*`` factory renders its system prompt from an ``AgentPromptSpec``
+via ``render_agent_prompt`` — there are no hand-written prompt-builder
+paths in this module.
 
 ``BrandComplianceAgent`` is the only non-Strands class; it runs
 outside the graph as a post-processing utility.
