@@ -421,7 +421,11 @@ def _try_build_fix_one_at_a_time(
                         logger.warning(
                             "Build fix: failed to install requirements.txt before test run: %s", e
                         )
-                test_result = run_pytest(project_dir, python_exe=sys.executable)
+                try:
+                    test_result = run_pytest(project_dir, python_exe=sys.executable)
+                except Exception as e:
+                    logger.warning("Build fix: pytest failed to run: %s", e)
+                    return False, str(e)
                 if not test_result.success:
                     for f in test_result.parsed_failures("pytest"):
                         issues.append(
@@ -595,7 +599,11 @@ def _try_build_fix_one_at_a_time(
             if result.success:
                 tests_dir = project_dir / "tests"
                 if tests_dir.exists() and any(tests_dir.rglob("test_*.py")):
-                    result = run_pytest(project_dir, python_exe=sys.executable)
+                    try:
+                        result = run_pytest(project_dir, python_exe=sys.executable)
+                    except Exception as e:
+                        logger.warning("Build fix: pytest failed to run: %s", e)
+                        return False, str(e)
         if result.success:
             logger.info(
                 "Build fix (tool agent): task %s build passed after fixing one issue at a time",
@@ -648,8 +656,12 @@ def _try_build_fix_one_at_a_time(
                         }
                     )
             else:
-                test_result = run_pytest(project_dir, python_exe=sys.executable)
-                result = test_result
+                try:
+                    test_result = run_pytest(project_dir, python_exe=sys.executable)
+                    result = test_result
+                except Exception as e:
+                    logger.warning("Build fix: pytest failed to run: %s", e)
+                    return False, str(e)
                 if not result.success:
                     issues = [
                         {
