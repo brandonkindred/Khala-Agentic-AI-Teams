@@ -183,6 +183,29 @@ def _restore_dict_entry(d: Dict[str, str], key: str, prior: Optional[str]) -> No
         d[key] = prior
 
 
+def _contained_write_path(root: Path, rel_path: str) -> Optional[Path]:
+    """Return ``rel_path`` under ``root`` only when the real path stays in-repo.
+
+    Preconditions:
+        ``root`` is the resolved worktree root.
+
+    Postconditions:
+        Returns the lexical path from ``resolve_safe_repo_path`` when that path's
+        ``Path.resolve()`` target is still under ``root``. ``None`` when the
+        path is empty, lexically escapes, or traverses a symlink out of the
+        worktree.
+    """
+    try:
+        out = resolve_safe_repo_path(root, rel_path)
+    except UnsafeRepoPathError:
+        return None
+    try:
+        out.resolve().relative_to(root)
+    except ValueError:
+        return None
+    return out
+
+
 def _clear_path(full_path: Path) -> None:
     """Remove ``full_path`` whether it is a file, symlink, or directory.
 
@@ -560,11 +583,24 @@ def _run_dbc_self_review(
             len(raw_dbc_files) - len(dbc_files),
             sorted(set(raw_dbc_files) - set(dbc_files)),
         )
+    root = Path(repo_path).resolve()
+    escaped_paths = [path for path in dbc_files if _contained_write_path(root, path) is None]
+    if escaped_paths:
+        logger.warning(
+            "[%s] Microtask %s: discarding %d DbC path(s) that escape the worktree "
+            "via symlink or traversal: %s",
+            task_id,
+            mt.id,
+            len(escaped_paths),
+            sorted(escaped_paths),
+        )
+        dbc_files = {
+            path: content for path, content in dbc_files.items() if path not in set(escaped_paths)
+        }
     if not dbc_files:
         logger.info("[%s] Microtask %s: DbC self-review made no changes", task_id, mt.id)
         return
 
-    root = Path(repo_path).resolve()
     output_files = mt.output_files if isinstance(getattr(mt, "output_files", None), dict) else {}
 
     # Snapshot prior state for exactly the touched keys, before any write.

@@ -269,9 +269,8 @@ def test_dbc_self_review_writes_and_merges_files(tmp_path):
 def test_dbc_self_review_unsafe_path_skipped_atomically(tmp_path):
     # The unsafe key must itself already be a key of microtask_files --
     # otherwise the "discard paths not in the reviewed set" filter would
-    # remove it before write_repo_text_files' own guard is ever reached.
-    # This simulates an unsafe key already present upstream, which
-    # write_repo_text_files' guard exists to catch regardless of origin.
+    # remove it first. Traversal keys are dropped before the write; remaining
+    # in-repo files still apply.
     def _review(*, code, **kwargs: Any) -> SimpleNamespace:
         return SimpleNamespace(files={"a.py": "safe", "../escape.py": "evil"})
 
@@ -285,9 +284,86 @@ def test_dbc_self_review_unsafe_path_skipped_atomically(tmp_path):
         all_files=all_files,
     )
 
+    assert (tmp_path / "a.py").read_text() == "safe"
+    assert microtask_files == {"a.py": "safe", "../escape.py": "orig-evil"}
+    assert all_files == {"a.py": "safe", "../escape.py": "orig-evil"}
+
+
+def test_dbc_self_review_rejects_symlink_escape_write(tmp_path):
+    """A reviewed path through a repo symlink must not write outside the worktree."""
+    outside = tmp_path.parent.resolve() / f"dbc-write-escape-{tmp_path.name}"
+    outside.mkdir()
+    (outside / "a.py").write_text("outside orig\n")
+    (tmp_path / "src").symlink_to(outside)
+    (tmp_path / "keep.py").write_text("keep orig\n")
+
+    def _review(*, code, **kwargs: Any) -> SimpleNamespace:
+        return SimpleNamespace(files={"src/a.py": "leaked\n", "keep.py": "keep new\n"})
+
+    microtask_files = {"src/a.py": "map orig\n", "keep.py": "keep orig\n"}
+    all_files = dict(microtask_files)
+    try:
+        mt, microtask_files, all_files, _ = _call(
+            tmp_path=tmp_path,
+            gate_config=_gate_config(_review),
+            microtask_files=microtask_files,
+            all_files=all_files,
+        )
+        assert (outside / "a.py").read_text() == "outside orig\n"
+        assert (tmp_path / "keep.py").read_text() == "keep new\n"
+        assert microtask_files["src/a.py"] == "map orig\n"
+        assert microtask_files["keep.py"] == "keep new\n"
+        assert all_files["src/a.py"] == "map orig\n"
+        assert mt.output_files["keep.py"] == "keep new\n"
+        assert mt.output_files["src/a.py"] == "map orig\n"
+    finally:
+        (tmp_path / "src").unlink(missing_ok=True)
+        (outside / "a.py").unlink(missing_ok=True)
+        outside.rmdir()
+
+
+def test_dbc_self_review_symlink_escape_only_is_noop(tmp_path):
+    """When every reviewed path escapes through a symlink, skip the write entirely."""
+    outside = tmp_path.parent.resolve() / f"dbc-write-escape-only-{tmp_path.name}"
+    outside.mkdir()
+    (outside / "a.py").write_text("outside orig\n")
+    (tmp_path / "src").symlink_to(outside)
+
+    def _review(*, code, **kwargs: Any) -> SimpleNamespace:
+        return SimpleNamespace(files={"src/a.py": "leaked\n"})
+
+    microtask_files = {"src/a.py": "map orig\n"}
+    try:
+        _, microtask_files, _, _ = _call(
+            tmp_path=tmp_path,
+            gate_config=_gate_config(_review),
+            microtask_files=microtask_files,
+        )
+        assert (outside / "a.py").read_text() == "outside orig\n"
+        assert microtask_files == {"src/a.py": "map orig\n"}
+    finally:
+        (tmp_path / "src").unlink(missing_ok=True)
+        (outside / "a.py").unlink(missing_ok=True)
+        outside.rmdir()
+
+
+def test_dbc_self_review_write_rejects_batch_if_containment_filter_misses(tmp_path, monkeypatch):
+    """write_repo_text_files remains all-or-nothing if an unsafe key slips the filter."""
+
+    monkeypatch.setattr(dbc_phase, "_contained_write_path", lambda root, rel_path: root / "a.py")
+
+    def _review(*, code, **kwargs: Any) -> SimpleNamespace:
+        return SimpleNamespace(files={"a.py": "safe", "../escape.py": "evil"})
+
+    microtask_files = {"a.py": "orig", "../escape.py": "orig-evil"}
+    _, microtask_files, _, _ = _call(
+        tmp_path=tmp_path,
+        gate_config=_gate_config(_review),
+        microtask_files=microtask_files,
+    )
+
     assert not (tmp_path / "a.py").exists()
     assert microtask_files == {"a.py": "orig", "../escape.py": "orig-evil"}
-    assert all_files == {"a.py": "orig", "../escape.py": "orig-evil"}
 
 
 def test_dbc_self_review_gate_config_exception_is_swallowed(tmp_path):
