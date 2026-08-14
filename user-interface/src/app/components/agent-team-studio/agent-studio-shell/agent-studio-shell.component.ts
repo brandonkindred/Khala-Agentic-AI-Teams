@@ -83,6 +83,16 @@ export class AgentStudioShellComponent {
     { initialValue: this.childHidesFooter() },
   );
 
+  /**
+   * Read `data.hideStudioFooter` from the deepest activated child.
+   *
+   * Preconditions: none — safe when there is no child (shell constructed
+   *   without navigating).
+   * Postconditions: `true` iff that child's snapshot has
+   *   `hideStudioFooter === true`. Walks `firstChild` because the audit
+   *   route is nested under this shell; `snapshot` may be missing while
+   *   the outlet is still activating.
+   */
   private childHidesFooter(): boolean {
     let child = this.route.firstChild;
     while (child?.firstChild) {
