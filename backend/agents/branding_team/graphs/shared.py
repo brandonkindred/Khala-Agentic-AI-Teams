@@ -26,15 +26,17 @@ if TYPE_CHECKING:
 # Every pipeline agent passes an explicit ``agent_key`` instead of resolving
 # ``build_agent``'s implicit "branding" default. The scheme is:
 #
-# - ``branding.<phase value>`` (via ``phase_agent_key``) for each phase's
+# - ``branding_<phase value>`` (via ``phase_agent_key``) for each phase's
 #   specialist agents — reusing ``BrandPhase``'s own enum values so the tier
-#   and the phase it routes can never drift apart. This groups each phase's
-#   mix of open-ended strategic/creative work (e.g. Phase 1's
+#   and the phase it routes can never drift apart. Underscores keep the key
+#   a valid shell/Compose identifier so ``LLM_MODEL_<agent_key>`` can be
+#   exported (``LLM_MODEL_branding_strategic_core``). This groups each
+#   phase's mix of open-ended strategic/creative work (e.g. Phase 1's
 #   positioning_synthesizer, Phase 2's Storyteller) alongside its more
 #   bounded extraction/list-generation specialists (e.g. Phase 5's
 #   asset_wiki_planner) under one dial, so ops can tune per-phase cost/
-#   quality via ``LLM_MODEL_branding.<phase>`` without a code change.
-# - ``branding.compositor`` (``COMPOSITOR_AGENT_KEY``, via ``build_compositor``)
+#   quality via ``LLM_MODEL_branding_<phase>`` without a code change.
+# - ``branding_compositor`` (``COMPOSITOR_AGENT_KEY``, via ``build_compositor``)
 #   for the three phase-terminal join agents — ``visual_compositor``,
 #   ``channel_compositor``, ``governance_compositor`` — that assemble a
 #   phase's full set of upstream fragments into that phase's structured
@@ -46,7 +48,7 @@ if TYPE_CHECKING:
 # ``BrandComplianceAgent`` (outside the graph) is deliberately excluded: it
 # is a keyword-matching ``@dataclass`` with no LLM call, so no agent_key
 # applies to it.
-COMPOSITOR_AGENT_KEY = "branding.compositor"
+COMPOSITOR_AGENT_KEY = "branding_compositor"
 
 
 def phase_agent_key(phase: BrandPhase) -> str:
@@ -55,10 +57,12 @@ def phase_agent_key(phase: BrandPhase) -> str:
     Preconditions:
         ``phase`` is a ``BrandPhase`` member.
     Postconditions:
-        Returns ``f"branding.{phase.value}"`` (e.g.
-        ``"branding.strategic_core"`` for ``BrandPhase.STRATEGIC_CORE``).
+        Returns ``f"branding_{phase.value}"`` (e.g.
+        ``"branding_strategic_core"`` for ``BrandPhase.STRATEGIC_CORE``).
+        The result is a valid Python/shell identifier so
+        ``LLM_MODEL_<agent_key>`` can be set in env files and Compose.
     """
-    return f"branding.{phase.value}"
+    return f"branding_{phase.value}"
 
 
 # ---------------------------------------------------------------------------
@@ -77,7 +81,7 @@ OutputMode = Literal["json", "text"]
 # state and must stay distinct per graph build.
 #
 # ``maxsize`` bounds the cache: the key space is the agent_key tiers below
-# (five phase tiers + "branding.compositor" + the "branding" default +
+# (five phase tiers + "branding_compositor" + the "branding" default +
 # "branding_assistant") crossed with the two output modes — comfortably
 # under 16 today, with headroom for a future tier without a cache eviction
 # cliff.
@@ -133,7 +137,7 @@ def build_agent(
         ``LLM_MODEL_<agent_key>`` override (if any) resolves the backing
         model. Defaults to ``"branding"`` for callers that don't need
         per-tier routing; every pipeline call site instead passes one of the
-        ``branding.<phase>`` / ``branding.compositor`` tiers documented on
+        ``branding_<phase>`` / ``branding_compositor`` tiers documented on
         :func:`phase_agent_key` and ``COMPOSITOR_AGENT_KEY`` below (see also
         the "LLM routing (agent_key tiers)" section of ``README.md``).
     """
@@ -155,7 +159,7 @@ def build_agent(
 
 
 def build_compositor(*, name: str, system_prompt: str, description: str = "") -> Agent:
-    """Create a phase-terminal join agent on the shared ``branding.compositor`` tier.
+    """Create a phase-terminal join agent on the shared ``branding_compositor`` tier.
 
     Thin wrapper over :func:`build_agent` that pins ``agent_key=COMPOSITOR_AGENT_KEY``
     so every phase's compositor (``visual_compositor``, ``channel_compositor``,

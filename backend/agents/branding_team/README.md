@@ -151,20 +151,20 @@ Every pipeline agent (all `make_*` factories in `agents.py`, plus the three phas
 
 Specialist factories pass `agent_key=` to `build_agent()` directly (a phase-scoped constant, e.g. `_PHASE1_AGENT_KEY = phase_agent_key(BrandPhase.STRATEGIC_CORE)` in `agents.py`). The three compositors instead call `build_compositor()` (`graphs/shared.py`) — a thin `build_agent()` wrapper that pins `agent_key=COMPOSITOR_AGENT_KEY` internally, with no `agent_key` parameter exposed to override it — so all three phase files share one call site for that routing decision instead of each inlining `build_agent(..., agent_key=COMPOSITOR_AGENT_KEY)`.
 
-**Naming scheme:** `branding.<tier>`, where `<tier>` is one of:
+**Naming scheme:** `branding_<tier>` (underscores so `LLM_MODEL_<agent_key>` is a valid shell identifier), where `<tier>` is one of:
 
 | `agent_key` | Covers | Why this grouping |
 |---|---|---|
-| `branding.strategic_core` | All 6 Phase 1 factories | `phase_agent_key(BrandPhase.STRATEGIC_CORE)` — Phase 1 mixes discovery/audience extraction with the brand-defining `positioning_synthesizer` synthesis step; one dial lets ops tune the whole "define what the brand is" phase together. |
-| `branding.narrative_messaging` | All 6 Phase 2 factories | `phase_agent_key(BrandPhase.NARRATIVE_MESSAGING)` — open-ended creative writing (story, tagline, voice) that benefits from a stronger model. |
-| `branding.visual_identity` | All 10 Phase 3 factories except `visual_compositor` (`CreativeDirector`, `MoodBoardConceptualist_*`, `converge_decider`, and the 7 post-converge specialists) | `phase_agent_key(BrandPhase.VISUAL_IDENTITY)`. |
-| `branding.channel_activation` | All 9 Phase 4 factories except `channel_compositor` (including all 6 channel guides built via the shared `_make_channel_guide` helper) | `phase_agent_key(BrandPhase.CHANNEL_ACTIVATION)` — mostly bounded, template-driven channel-guideline generation; a natural candidate for a lighter model. |
-| `branding.governance` | All 7 Phase 5 factories except `governance_compositor` | `phase_agent_key(BrandPhase.GOVERNANCE)` — largely structured list/policy generation (KPIs, wiki backlog, training plans); another candidate for a lighter model. |
-| `branding.compositor` | The three phase-terminal join agents: `visual_compositor`, `channel_compositor`, `governance_compositor` (`COMPOSITOR_AGENT_KEY`) | A distinct cross-phase role from any single phase's specialists — each reads every upstream fragment from its phase and assembles them into that phase's structured `*Output`, so it gets its own dial rather than inheriting its phase's tier. |
+| `branding_strategic_core` | All 6 Phase 1 factories | `phase_agent_key(BrandPhase.STRATEGIC_CORE)` — Phase 1 mixes discovery/audience extraction with the brand-defining `positioning_synthesizer` synthesis step; one dial lets ops tune the whole "define what the brand is" phase together. |
+| `branding_narrative_messaging` | All 6 Phase 2 factories | `phase_agent_key(BrandPhase.NARRATIVE_MESSAGING)` — open-ended creative writing (story, tagline, voice) that benefits from a stronger model. |
+| `branding_visual_identity` | All 10 Phase 3 factories except `visual_compositor` (`CreativeDirector`, `MoodBoardConceptualist_*`, `converge_decider`, and the 7 post-converge specialists) | `phase_agent_key(BrandPhase.VISUAL_IDENTITY)`. |
+| `branding_channel_activation` | All 9 Phase 4 factories except `channel_compositor` (including all 6 channel guides built via the shared `_make_channel_guide` helper) | `phase_agent_key(BrandPhase.CHANNEL_ACTIVATION)` — mostly bounded, template-driven channel-guideline generation; a natural candidate for a lighter model. |
+| `branding_governance` | All 7 Phase 5 factories except `governance_compositor` | `phase_agent_key(BrandPhase.GOVERNANCE)` — largely structured list/policy generation (KPIs, wiki backlog, training plans); another candidate for a lighter model. |
+| `branding_compositor` | The three phase-terminal join agents: `visual_compositor`, `channel_compositor`, `governance_compositor` (`COMPOSITOR_AGENT_KEY`) | A distinct cross-phase role from any single phase's specialists — each reads every upstream fragment from its phase and assembles them into that phase's structured `*Output`, so it gets its own dial rather than inheriting its phase's tier. |
 
 `BrandComplianceAgent` (outside the graph — see [Agent roles and outputs](#agent-roles-and-outputs)) is deliberately excluded from this scheme: it's a keyword-matching `@dataclass` with no LLM call, so no `agent_key` applies to it. The `"branding_assistant"` key used by the separate conversational assistant (`assistant/agent.py`) is also out of scope here — it predates this scheme and routes the assistant, not a pipeline agent.
 
-Assigning which physical model/provider backs each tier (e.g. a lighter model for `branding.channel_activation` and `branding.governance`, a stronger one for `branding.strategic_core` and `branding.narrative_messaging`) is an operational decision made post-deploy via `LLM_MODEL_<agent_key>` env vars — see [`docs/ENV_VARS.md`](../../../docs/ENV_VARS.md) — not part of this naming scheme itself.
+Assigning which physical model/provider backs each tier (e.g. a lighter model for `branding_channel_activation` and `branding_governance`, a stronger one for `branding_strategic_core` and `branding_narrative_messaging`) is an operational decision made post-deploy via `LLM_MODEL_<agent_key>` env vars (e.g. `export LLM_MODEL_branding_strategic_core=...`) — see [`docs/ENV_VARS.md`](../../../docs/ENV_VARS.md) — not part of this naming scheme itself.
 
 ## API and session flow
 

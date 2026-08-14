@@ -290,8 +290,8 @@ def _resolved_agent_key(agent: Agent) -> str:
 
 def test_build_agent_forwards_agent_key_to_model_config() -> None:
     """``build_agent``'s ``agent_key`` reaches ``get_strands_model`` (not just accepted)."""
-    agent = build_agent(name="a5", system_prompt="do v", agent_key="branding.strategic_core")
-    assert _resolved_agent_key(agent) == "branding.strategic_core"
+    agent = build_agent(name="a5", system_prompt="do v", agent_key="branding_strategic_core")
+    assert _resolved_agent_key(agent) == "branding_strategic_core"
 
 
 def test_build_agent_default_agent_key_is_branding() -> None:
@@ -320,11 +320,19 @@ def test_build_compositor_forwards_description() -> None:
 
 
 def test_phase_agent_key_derives_from_phase_value() -> None:
-    assert phase_agent_key(BrandPhase.STRATEGIC_CORE) == "branding.strategic_core"
-    assert phase_agent_key(BrandPhase.NARRATIVE_MESSAGING) == "branding.narrative_messaging"
-    assert phase_agent_key(BrandPhase.VISUAL_IDENTITY) == "branding.visual_identity"
-    assert phase_agent_key(BrandPhase.CHANNEL_ACTIVATION) == "branding.channel_activation"
-    assert phase_agent_key(BrandPhase.GOVERNANCE) == "branding.governance"
+    assert phase_agent_key(BrandPhase.STRATEGIC_CORE) == "branding_strategic_core"
+    assert phase_agent_key(BrandPhase.NARRATIVE_MESSAGING) == "branding_narrative_messaging"
+    assert phase_agent_key(BrandPhase.VISUAL_IDENTITY) == "branding_visual_identity"
+    assert phase_agent_key(BrandPhase.CHANNEL_ACTIVATION) == "branding_channel_activation"
+    assert phase_agent_key(BrandPhase.GOVERNANCE) == "branding_governance"
+
+
+def test_phase_and_compositor_agent_keys_are_shell_safe() -> None:
+    """Keys must be valid identifiers so ``LLM_MODEL_<agent_key>`` can be exported."""
+    keys = [phase_agent_key(phase) for phase in PHASE_ORDER] + [COMPOSITOR_AGENT_KEY]
+    for key in keys:
+        assert key.isidentifier(), key
+        assert "." not in key
 
 
 def test_phase1_factories_use_strategic_core_agent_key() -> None:
