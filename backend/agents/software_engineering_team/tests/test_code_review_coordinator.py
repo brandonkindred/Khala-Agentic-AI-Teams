@@ -2333,6 +2333,30 @@ def test_compact_for_review_rejects_negative_max_chars() -> None:
         _compact_for_review("text", -1, DummyLLMClient(), "spec")
 
 
+def test_compact_for_review_uses_provider_start_timestamps(monkeypatch) -> None:
+    """Continuation callbacks share one outer complete(); each transcript
+    entry must keep that turn's provider-recorded start, not the callback time."""
+    from llm_service.clients.dummy import DummyLLMClient
+    from llm_service.interface import record_complete_json_turn, reset_complete_json_observer_state
+
+    reset_complete_json_observer_state()
+    captured: list = []
+    monkeypatch.setattr(
+        "code_review_agent.coordinator.record_transcript_entry",
+        lambda *args, **kwargs: captured.append((args, kwargs)),
+    )
+
+    class _ContinuationClient(DummyLLMClient):
+        def complete(self, prompt: str, **kwargs: Any) -> str:
+            record_complete_json_turn("first prompt", "PARTIAL", started_monotonic=10.0)
+            record_complete_json_turn("continuation messages", " REST", started_monotonic=20.0)
+            return "PARTIAL REST"
+
+    _compact_for_review("x" * 200, 50, _ContinuationClient(), "spec")
+    assert [kwargs["started_monotonic"] for _, kwargs in captured] == [10.0, 20.0]
+    assert [args[3] for args, _ in captured] == ["PARTIAL", " REST"]
+
+
 def test_not_reviewed_range_label_edge_cases() -> None:
     """The observability label handles a missing path and a missing line range."""
     from code_review_agent.coordinator import _not_reviewed_range_label

@@ -100,6 +100,7 @@ import time
 from typing import Callable, List, NamedTuple, Optional, Tuple
 
 from llm_service import LLMClient, compact_text
+from llm_service.interface import observer_turn_started_monotonic
 from shared.cache import get_shared_cache
 from shared.env import env_flag_enabled
 from shared.env_config import env_bool
@@ -634,13 +635,17 @@ def _compact_for_review(
     def _on_attempt(prompt: str, response: str) -> None:
         nonlocal last
         now = time.monotonic()
+        started = observer_turn_started_monotonic()
+        if started is None:
+            started = last
         record_transcript_entry(
             "compaction",
             content_description,
             prompt,
             response,
             model=model_label(llm),
-            duration_ms=(now - last) * 1000,
+            duration_ms=(now - started) * 1000,
+            started_monotonic=started,
         )
         last = now
 

@@ -2436,6 +2436,22 @@ class OllamaLLMClient(LLMClient):
         except LLMSemanticExhaustionError:
             self._record_telemetry(status="error", error_type="semantic_exhaustion")
             raise
+        except LLMTruncatedError as e:
+            # chat() has no continuation merge; still record the truncated
+            # first reply so Strands worker-turn replay can surface it.
+            prompt_text = json.dumps(list(messages), default=str)
+            self._record_telemetry(
+                status="truncated",
+                error_type="truncated",
+                prompt_text=prompt_text,
+                response_text=e.partial_content,
+            )
+            record_complete_json_turn(
+                prompt_text,
+                e.partial_content or "",
+                started_monotonic=request_started,
+            )
+            raise
         stripped = (content or "").strip()
         if stripped.startswith("{") and "__tool_calls__" in stripped:
             try:

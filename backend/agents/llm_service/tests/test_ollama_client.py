@@ -20,6 +20,7 @@ from llm_service.interface import (
     LLMRateLimitError,
     LLMSemanticExhaustionError,
     LLMTemporaryError,
+    LLMTruncatedError,
     record_complete_json_turn,
     reset_complete_json_observer_state,
     take_complete_json_raw,
@@ -1136,6 +1137,38 @@ def test_ollama_chat_round_returns_tool_calls_when_tools_present(
     assert result["__tool_calls__"][0]["function"]["name"] == "do_thing"
 
 
+def test_chat_truncated_records_partial_before_raise(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """finish_reason=length on chat() must record the partial reply before
+    re-raising so Strands worker-turn replay can surface it."""
+    reset_complete_json_observer_state()
+    monkeypatch.setenv("LLM_PROVIDER", "ollama")
+    truncated_sse = [
+        'data: {"choices":[{"delta":{"content":"PARTIAL CHAT"},"finish_reason":null}]}',
+        'data: {"choices":[{"delta":{},"finish_reason":"length"}]}',
+        "data: [DONE]",
+    ]
+    cms = [_stream_cm(200, sse_lines=truncated_sse)]
+    with patch("httpx.Client") as mock_client_cls:
+        mock_client, _captured = _capturing_multi_client(cms)
+        mock_client_cls.return_value = mock_client
+        client = OllamaLLMClient(model="test", base_url="http://localhost:9999", timeout=5)
+        with pytest.raises(LLMTruncatedError):
+            client.chat(
+                [{"role": "user", "content": "review this"}],
+                objective="test",
+                response_format="text",
+                temperature=0.0,
+            )
+    turns = take_complete_json_turns()
+    assert len(turns) == 1
+    prompt, response, started = turns[0]
+    assert json.loads(prompt) == [{"role": "user", "content": "review this"}]
+    assert response == "PARTIAL CHAT"
+    assert isinstance(started, float)
+
+
 def test_ollama_chat_json_self_corrects_prose_when_tools_present(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1170,9 +1203,7 @@ def test_ollama_chat_json_self_corrects_prose_when_tools_present(
             },
         }
     ]
-    mock_client = _multi_attempt_client(
-        [_stream_cm(200, prose_sse), _stream_cm(200, json_sse)]
-    )
+    mock_client = _multi_attempt_client([_stream_cm(200, prose_sse), _stream_cm(200, json_sse)])
     captured: list[dict] = []
     original_stream = mock_client.__enter__.return_value.stream
 
@@ -1227,9 +1258,7 @@ def test_ollama_chat_json_self_correct_exhausted_still_raises(
         "data: [DONE]",
     ]
     tools = [{"type": "function", "function": {"name": "list_files", "parameters": {}}}]
-    mock_client = _multi_attempt_client(
-        [_stream_cm(200, prose_sse), _stream_cm(200, prose_sse)]
-    )
+    mock_client = _multi_attempt_client([_stream_cm(200, prose_sse), _stream_cm(200, prose_sse)])
     with patch("httpx.Client") as mock_client_cls:
         mock_client_cls.return_value = mock_client
         client = OllamaLLMClient(model="test", base_url="http://localhost:9999", timeout=5)
@@ -1763,7 +1792,10 @@ def test_semantic_exhaustion_diagnostic_accumulates_across_ladder(
         "data: [DONE]",
     ]
     # Rung 1 (high) has JSON in reasoning; rung 2 (thinking-off) is truly empty.
-    cms = [_stream_cm(200, sse_lines=with_json), _stream_cm(200, sse_lines=list(_REASONING_ONLY_SSE))]
+    cms = [
+        _stream_cm(200, sse_lines=with_json),
+        _stream_cm(200, sse_lines=list(_REASONING_ONLY_SSE)),
+    ]
     with (
         patch("httpx.Client") as mock_client_cls,
         caplog.at_level(logging.ERROR, logger="llm_service.clients.ollama"),
@@ -1776,7 +1808,9 @@ def test_semantic_exhaustion_diagnostic_accumulates_across_ladder(
         with pytest.raises(LLMSemanticExhaustionError):
             client.complete_json("q", objective="test", temperature=0, think="high")
     assert [c["reasoning_effort"] for c in captured] == ["high", "none"]
-    receipt = next(r.getMessage() for r in caplog.records if "semantic_exhaustion" in r.getMessage())
+    receipt = next(
+        r.getMessage() for r in caplog.records if "semantic_exhaustion" in r.getMessage()
+    )
     # Accumulated from rung 1, not taken from the empty final rung.
     assert "reasoning_has_json=True" in receipt
 
@@ -2051,7 +2085,11 @@ def test_list_ollama_models_parses_and_sorts_names(monkeypatch: pytest.MonkeyPat
     }
     mock_cls, mock_client = _patch_tags_get(_make_tags_response(200, payload))
     with patch("httpx.Client", mock_cls):
-        assert list_ollama_models() == ["deepseek-v4-flash:cloud", "deepseek-v4-flash:cloud", "qwen3-coder:480b-cloud"]
+        assert list_ollama_models() == [
+            "deepseek-v4-flash:cloud",
+            "deepseek-v4-flash:cloud",
+            "qwen3-coder:480b-cloud",
+        ]
     # The request targets {base_url}/api/tags.
     called_url = mock_client.__enter__.return_value.get.call_args[0][0]
     assert called_url == "http://localhost:11434/api/tags"
