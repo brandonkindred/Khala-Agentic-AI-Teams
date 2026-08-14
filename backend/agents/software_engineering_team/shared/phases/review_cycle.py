@@ -18,11 +18,12 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple
 
 from llm_service import LLMClient
-from shared.concurrency import parallel_map
+from shared.concurrency import KeyedLockManager, parallel_map
 from shared.dev_models.models import ReviewContext, Task
 from software_engineering_team.shared.agent_review import AgentReviewCache
 from software_engineering_team.shared.gate_outcomes import record_gate_outcome
 from software_engineering_team.shared.phases.rollback import (
+    _file_lock_keys,
     _MicrotaskRollback,
     _record_prior_values,
     _rollback_microtask_files,
@@ -107,6 +108,74 @@ def write_microtask_output_or_fail(
         review_failed_ids.add(mt.id)
         _rollback_microtask_files(rollback, all_files, mt)
         return False
+
+
+def _locked_write_and_merge(
+    *,
+    file_locks: KeyedLockManager[str],
+    repo_path: Path,
+    files: Dict[str, str],
+    mt: Any,
+    task_id: str,
+    review_failed_ids: set,
+    all_files: Dict[str, str],
+    rollback: _MicrotaskRollback,
+    review_failed_status: Any,
+) -> bool:
+    """Snapshot, write, and merge ``files`` as one locked critical section.
+
+    Holds the per-path write lock across the rollback snapshot, the worktree
+    write, and the ``all_files`` / ``mt.output_files`` merge so concurrent
+    microtasks that touch overlapping paths cannot tear those two views apart.
+    Lock keys are physical (``realpath``) paths, so ``shared.py`` and
+    ``./shared.py`` serialize against each other.
+
+    Preconditions:
+        ``file_locks`` is the per-run :class:`KeyedLockManager`; ``rollback`` is
+        this microtask's rollback manifest (earliest snapshot still wins).
+    Postconditions:
+        On success the worktree and ``all_files`` both contain ``files``,
+        ``mt.output_files`` equals ``files``, and True is returned. On an
+        unsafe-path rejection, rollback has already run under the same lock
+        and False is returned.
+    """
+    with file_locks.lock(_file_lock_keys(repo_path, files.keys())):
+        _record_prior_values(rollback, repo_path, all_files, files)
+        if not write_microtask_output_or_fail(
+            repo_path,
+            files,
+            mt=mt,
+            task_id=task_id,
+            review_failed_ids=review_failed_ids,
+            all_files=all_files,
+            rollback=rollback,
+            review_failed_status=review_failed_status,
+        ):
+            return False
+        mt.output_files = files
+        all_files.update(files)
+        return True
+
+
+def _locked_rollback(
+    file_locks: KeyedLockManager[str],
+    rollback: _MicrotaskRollback,
+    all_files: Dict[str, str],
+    mt: Any,
+) -> None:
+    """Run :func:`_rollback_microtask_files` while holding this microtask's file keys.
+
+    Preconditions:
+        ``rollback.disk_prior`` lists the physical paths this microtask wrote
+        (preferred lock keys); ``rollback.all_files_prior`` is the fallback
+        when nothing was snapshotted on disk.
+    Postconditions:
+        ``all_files`` and the worktree match the pre-microtask snapshot. An
+        empty key set is a no-op lock (the rollback still runs).
+    """
+    lock_keys = [str(path) for path in rollback.disk_prior] or list(rollback.all_files_prior)
+    with file_locks.lock(lock_keys):
+        _rollback_microtask_files(rollback, all_files, mt)
 
 
 @dataclass
@@ -224,6 +293,7 @@ def _apply_code_review_retry_exhausted(
     all_files: Dict[str, str],
     rollback: _MicrotaskRollback,
     review_failed_status: Any,
+    file_locks: KeyedLockManager[str],
 ) -> bool:
     """Mark retry-exhaustion REVIEW_FAILED unless write-path already failed.
 
@@ -256,7 +326,7 @@ def _apply_code_review_retry_exhausted(
         code_review_retry_cap,
         cr_outcome.summary,
     )
-    _rollback_microtask_files(rollback, all_files, mt)
+    _locked_rollback(file_locks, rollback, all_files, mt)
     return True
 
 
@@ -272,6 +342,7 @@ def _apply_grounding_circuit_breaker_trip(
     all_files: Dict[str, str],
     rollback: _MicrotaskRollback,
     review_failed_status: Any,
+    file_locks: KeyedLockManager[str],
 ) -> bool:
     """Trip the grounding-failure circuit breaker for a hallucination-driven CR loop.
 
@@ -318,7 +389,7 @@ def _apply_grounding_circuit_breaker_trip(
         mt.id,
         grounding_failure_streak,
     )
-    _rollback_microtask_files(rollback, all_files, mt)
+    _locked_rollback(file_locks, rollback, all_files, mt)
     return True
 
 
@@ -340,6 +411,7 @@ def _apply_cr_section_exit(
     on_failure: str,
     review_failed_error_cls: Any,
     review_result_cls: Any,
+    file_locks: KeyedLockManager[str],
 ) -> Tuple[bool, int]:
     """Resolve one outer cycle's code-review section exit: breaker vs retry exhaustion.
 
@@ -380,6 +452,7 @@ def _apply_cr_section_exit(
             all_files=all_files,
             rollback=rollback,
             review_failed_status=review_failed_status,
+            file_locks=file_locks,
         )
     elif not cr_outcome.passed:
         phase_failed = _apply_code_review_retry_exhausted(
@@ -392,6 +465,7 @@ def _apply_cr_section_exit(
             all_files=all_files,
             rollback=rollback,
             review_failed_status=review_failed_status,
+            file_locks=file_locks,
         )
 
     if phase_failed and on_failure == "stop":
@@ -428,6 +502,7 @@ def _run_review_cycles(
     completed_ids: set,
     total: int,
     detail_cb: Callable[[str, int, str], None],
+    file_locks: KeyedLockManager[str],
 ) -> Tuple[bool, Dict[str, str], int]:
     """Run the code review / QA / security gate cycles (Phases 2-4).
 
@@ -445,8 +520,10 @@ def _run_review_cycles(
 
     Preconditions:
         ``microtask_rollback`` was created and pre-populated by Phase 1
-        (:func:`_execute_coding_phase`) for ``microtask_files``'s initial write.
+        (:func:`_commit_coding_write`) for ``microtask_files``'s initial write.
         ``detail_cb(detail, idx, phase)`` forwards to ``progress_callback``.
+        ``file_locks`` is the per-run manager used to serialize overlapping
+        snapshot/write/merge/rollback under the caller's worktree lock.
     Postconditions:
         Returns ``(phase_failed, microtask_files, total_cycles)``: ``phase_failed``
         is True iff the microtask's review was rejected (retry exhaustion, the
@@ -593,12 +670,10 @@ def _run_review_cycles(
             )
 
             microtask_files = ps_result.files
-            # Snapshot prior values for any keys the fix introduced, before the
-            # write, so a later rollback restores them (or removes newly-created ones).
-            _record_prior_values(microtask_rollback, repo_path, all_files, microtask_files)
-            if not write_microtask_output_or_fail(
-                repo_path,
-                microtask_files,
+            if not _locked_write_and_merge(
+                file_locks=file_locks,
+                repo_path=repo_path,
+                files=microtask_files,
                 mt=mt,
                 task_id=task_id,
                 review_failed_ids=review_failed_ids,
@@ -608,8 +683,6 @@ def _run_review_cycles(
             ):
                 phase_failed = True
                 break
-            mt.output_files = microtask_files
-            all_files.update(microtask_files)
 
             if progress_callback:
                 progress_callback(
@@ -660,6 +733,7 @@ def _run_review_cycles(
             on_failure=config.on_failure,
             review_failed_error_cls=review_failed_error_cls,
             review_result_cls=review_result_cls,
+            file_locks=file_locks,
         )
         if phase_failed:
             break
@@ -792,12 +866,10 @@ def _run_review_cycles(
                 )
 
                 microtask_files = ps_result.files
-                # Snapshot prior values for any keys the fix introduced, before the
-                # write, so a later rollback restores them (or removes newly-created ones).
-                _record_prior_values(microtask_rollback, repo_path, all_files, microtask_files)
-                if not write_microtask_output_or_fail(
-                    repo_path,
-                    microtask_files,
+                if not _locked_write_and_merge(
+                    file_locks=file_locks,
+                    repo_path=repo_path,
+                    files=microtask_files,
                     mt=mt,
                     task_id=task_id,
                     review_failed_ids=review_failed_ids,
@@ -807,8 +879,6 @@ def _run_review_cycles(
                 ):
                     phase_failed = True
                     break
-                mt.output_files = microtask_files
-                all_files.update(microtask_files)
 
                 # Restart from code review
                 continue
@@ -874,12 +944,10 @@ def _run_review_cycles(
                 )
 
                 microtask_files = ps_result.files
-                # Snapshot prior values for any keys the fix introduced, before the
-                # write, so a later rollback restores them (or removes newly-created ones).
-                _record_prior_values(microtask_rollback, repo_path, all_files, microtask_files)
-                if not write_microtask_output_or_fail(
-                    repo_path,
-                    microtask_files,
+                if not _locked_write_and_merge(
+                    file_locks=file_locks,
+                    repo_path=repo_path,
+                    files=microtask_files,
                     mt=mt,
                     task_id=task_id,
                     review_failed_ids=review_failed_ids,
@@ -889,8 +957,6 @@ def _run_review_cycles(
                 ):
                     phase_failed = True
                     break
-                mt.output_files = microtask_files
-                all_files.update(microtask_files)
 
                 # Restart from code review
                 continue
@@ -956,12 +1022,10 @@ def _run_review_cycles(
                 )
 
                 microtask_files = ps_result.files
-                # Snapshot prior values for any keys the fix introduced, before the
-                # write, so a later rollback restores them (or removes newly-created ones).
-                _record_prior_values(microtask_rollback, repo_path, all_files, microtask_files)
-                if not write_microtask_output_or_fail(
-                    repo_path,
-                    microtask_files,
+                if not _locked_write_and_merge(
+                    file_locks=file_locks,
+                    repo_path=repo_path,
+                    files=microtask_files,
                     mt=mt,
                     task_id=task_id,
                     review_failed_ids=review_failed_ids,
@@ -971,8 +1035,6 @@ def _run_review_cycles(
                 ):
                     phase_failed = True
                     break
-                mt.output_files = microtask_files
-                all_files.update(microtask_files)
 
                 # Restart from code review
                 continue
@@ -1001,7 +1063,7 @@ def _run_review_cycles(
             )
             # Rollback: undo this microtask's contributions to all_files and the
             # worktree, restoring any file an earlier microtask or the repo had.
-            _rollback_microtask_files(microtask_rollback, all_files, mt)
+            _locked_rollback(file_locks, microtask_rollback, all_files, mt)
             # Security failures always stop regardless of on_failure setting
             _force_stop = config.on_failure == "stop" or (
                 getattr(config, "security_failure_always_stops", True) and not sec_outcome.passed

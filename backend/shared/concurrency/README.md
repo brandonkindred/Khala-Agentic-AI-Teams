@@ -181,28 +181,25 @@ as opposed to a single global lock that would serialize everything.
 Motivating use case: the SE code-v2 gated execution loop
 (`software_engineering_team/shared/phases/execution.py`) accumulates every
 microtask's output into a shared `all_files: Dict[str, str]` dict and writes
-it to a shared `repo_path` git worktree. Today that loop runs microtasks
-strictly one at a time, so this is safe by construction. Once cross-microtask
-concurrency is wired in (a follow-up change — see `_schedule_microtask_batches`,
-which already groups microtasks into dependency-respecting batches/waves, the
-natural unit of "things safe to consider running together"), two microtasks in
-the same wave could touch overlapping files, and the write-then-`all_files.update()`
-sequence (`_execute_coding_phase`) plus the snapshot/restore sequence
-(`rollback.py`'s `_record_prior_values`/`_rollback_microtask_files`) would need
-to run as one atomic unit per file to avoid a torn write or a split-brain state
-where the worktree and `all_files` disagree. **This module is standalone**:
-it's exported from this package like every other primitive here (so it's
-actually usable by a caller), but `execution.py`/`rollback.py` are
-intentionally untouched — wiring it into that write sequence is exactly the
-sibling issue it exists to unblock, not something this change does itself.
+it to a shared `repo_path` git worktree. Independent microtasks in the same
+scheduled wave run concurrently via `parallel_map` with `wait_for_stragglers=True`
+so a stop-on-review-failure does not return while a sibling is still writing
+the worktree. The pool is capped by `SE_EXECUTION_WAVE_CONCURRENCY` (default 4),
+not wave size. Generation runs unlocked; write through review, docs, and
+rollback then hold a per-run worktree lock because review tools (build/lint)
+observe the whole repo and review/docs can introduce paths that were not in
+the initial generation set. Per-path `KeyedLockManager` locks still
+serialize overlapping snapshot/write/merge under that exclusive section;
+keys are physical (`realpath`) paths, so `shared.py` and `./shared.py`
+serialize against each other.
 
 ```python
 from shared.concurrency import KeyedLockManager
 
 file_locks: KeyedLockManager[str] = KeyedLockManager()  # one instance per task run
 
-# Illustrative future call shape — not wired into execution.py yet:
-with file_locks.lock(microtask_files.keys()):
+# Keys are physical (realpath) paths so aliases of one file serialize together.
+with file_locks.lock(physical_lock_keys):
     write_repo_text_files(repo_path, microtask_files)
     all_files.update(microtask_files)
 ```

@@ -15,7 +15,7 @@ import logging
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Iterable, List, Optional
 
 from software_engineering_team.shared.repo_writer import UnsafeRepoPathError, resolve_safe_repo_path
 
@@ -65,6 +65,38 @@ def _resolve_physical_path_in_repo(root: Path, full_path: Path) -> Optional[Path
     if real == root or root not in real.parents:
         return None
     return real
+
+
+def _file_lock_keys(repo_path: Path, rel_paths: Iterable[str]) -> List[str]:
+    """Map microtask-relative paths to physical lock keys (``realpath`` strings).
+
+    ``shared.py`` and ``./shared.py`` (and symlink aliases) collapse to one key
+    so concurrent writers serialize on the file they actually touch, not the
+    spelling they used. An unsafe or out-of-repo path falls back to the raw
+    key so it still serializes against other writers using the same spelling.
+
+    Preconditions:
+        ``repo_path`` is the worktree root.
+    Postconditions:
+        Returns deduplicated keys in first-seen order. An empty ``rel_paths``
+        yields an empty list (a no-op for :meth:`KeyedLockManager.lock`).
+    """
+    root = Path(repo_path).resolve()
+    keys: List[str] = []
+    seen: set[str] = set()
+    for rel_path in rel_paths:
+        key = rel_path
+        try:
+            full_path = resolve_safe_repo_path(root, rel_path)
+            real_path = _resolve_physical_path_in_repo(root, full_path)
+            if real_path is not None:
+                key = str(real_path)
+        except UnsafeRepoPathError:
+            pass
+        if key not in seen:
+            seen.add(key)
+            keys.append(key)
+    return keys
 
 
 def _snapshot_disk_state(real_path: Path) -> _DiskEntry:
