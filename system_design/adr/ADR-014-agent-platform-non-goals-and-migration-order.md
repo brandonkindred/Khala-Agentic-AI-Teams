@@ -1,7 +1,7 @@
 # ADR-014 — Agent platform non-goals and migration order
 
-- **Status**: Accepted — design-note only, no code moves. Unblocks the sibling move stories
-  under the parent epic.
+- **Status**: Implemented — non-goals and move order held; platform code lives under
+  `agent_platform/`, provisioning and domain apps under `agent_team_studio/`.
 - **Date**: 2026-08-12
 - **Owner**: Agent Studio / Agent Platform
 - **Related**:
