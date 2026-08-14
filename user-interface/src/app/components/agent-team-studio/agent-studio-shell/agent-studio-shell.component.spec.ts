@@ -336,6 +336,19 @@ describe('AgentStudioShellComponent', () => {
       expect(component.state.registryAgentId()).toBe('reg-1');
       expect(component.state.isDirty()).toBe(false);
     });
+
+    it('aborts hydration when the handoff changes while getDraft is in flight', () => {
+      const pending = new Subject<AgentStudioDraft>();
+      facade.loadDraft.mockReturnValue(pending.asObservable());
+      component.loadDraft('d-1');
+      component.state.setRegistryAgentId('local-2');
+      pending.next(draft({ registryAgentId: 'reg-1' }));
+      pending.complete();
+      expect(component.state.registryAgentId()).toBe('local-2');
+      expect(component.state.currentDraftId()).toBeNull();
+      expect(component.state.isDirty()).toBe(true);
+      expect(component.loadingDraft()).toBe(false);
+    });
   });
 
   describe('Load draft conflict', () => {
@@ -477,6 +490,21 @@ describe('AgentStudioShellComponent', () => {
       expect(component.state.registryAgentId()).toBe('local-2');
       expect(component.state.isDirty()).toBe(true);
     });
+
+    it('Save first when unbound does not hydrate if a load rebound the session during the save dialog', () => {
+      component.state.setRegistryAgentId('local-1');
+      const saveClosed = new Subject<AgentStudioDraftSummary>();
+      openSpy
+        .mockReturnValueOnce({ afterClosed: () => of('save') } as unknown as ReturnType<MatDialog['open']>)
+        .mockReturnValueOnce({ afterClosed: () => saveClosed.asObservable() } as unknown as ReturnType<MatDialog['open']>);
+      component.loadDraft('d-1');
+      component.state.setCurrentDraft('other-1', 'Loaded');
+      component.state.markClean();
+      saveClosed.next({ draft_id: 'new-1', name: 'Saved', updated_at: '2026-01-01T00:00:00Z' });
+      saveClosed.complete();
+      expect(facade.loadDraft).not.toHaveBeenCalled();
+      expect(component.state.currentDraftId()).toBe('other-1');
+    });
   });
 
   describe('Save draft popover', () => {
@@ -575,6 +603,25 @@ describe('AgentStudioShellComponent', () => {
       expect(component.state.currentDraftId()).toBe('d-1');
       expect(component.state.registryAgentId()).toBe('reg-2');
       expect(component.state.isDirty()).toBe(true);
+    });
+
+    it('ignores a save result after the session has bound a different draft', () => {
+      component.state.setCurrentDraft('d-a', 'A');
+      const closed = new Subject<AgentStudioDraftSummary>();
+      openSpy.mockReturnValue({ afterClosed: () => closed.asObservable() } as unknown as ReturnType<MatDialog['open']>);
+      component.openSaveDraftDialog();
+      component.state.setCurrentDraft('d-b', 'B');
+      closed.next(draftSummary());
+      closed.complete();
+      expect(component.state.currentDraftId()).toBe('d-b');
+      expect(component.state.currentDraftName()).toBe('B');
+    });
+
+    it('disables the Save button while a load is in flight', () => {
+      component.loadingDraft.set(true);
+      fixture.detectChanges();
+      const button: HTMLButtonElement = fixture.nativeElement.querySelector('.studio__draft-btn');
+      expect(button.disabled).toBe(true);
     });
 
     it('returns afterClosed so callers can chain on success', () => {

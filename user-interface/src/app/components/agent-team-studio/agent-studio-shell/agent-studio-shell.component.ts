@@ -4,7 +4,7 @@ import { MatDialog, MatDialogModule } from '@angular/material/dialog';
 import { MatIconModule } from '@angular/material/icon';
 import { MatTooltipModule } from '@angular/material/tooltip';
 import { Observable } from 'rxjs';
-import type { AgentStudioDraft } from '../../../models/agent-studio.model';
+import type { AgentStudioDraft, AgentStudioHandoffState } from '../../../models/agent-studio.model';
 import { STUDIO_STAGES } from '../../../models/agent-studio.model';
 import { AgentStudioFacade } from '../../../services/agent-studio.facade';
 import { AgentStudioStateService } from '../../../services/agent-studio-state.service';
@@ -40,6 +40,16 @@ const STAGE_PERSONAS = 3;
  *  trust a field's type without checking it first. */
 function asNullableString(value: unknown): string | null {
   return typeof value === 'string' ? value : null;
+}
+
+function sameHandoff(a: AgentStudioHandoffState, b: AgentStudioHandoffState): boolean {
+  return (
+    a.registryAgentId === b.registryAgentId &&
+    a.teamId === b.teamId &&
+    a.processId === b.processId &&
+    a.personaId === b.personaId &&
+    a.draftAgentId === b.draftAgentId
+  );
 }
 
 /**
@@ -166,15 +176,18 @@ export class AgentStudioShellComponent {
    * Preconditions: none — always safe to call.
    * Postconditions: on a successful save, `state.currentDraftId()` /
    *   `currentDraftName()` reflect the saved draft and `markSaved` records
-   *   the payload submitted at open (not response-time handoff). `isDirty()`
-   *   is then false iff the current handoff still matches that payload. On
-   *   cancel or failure, state is unchanged. The returned observable is the
-   *   dialog's `afterClosed()`.
+   *   the payload submitted at open (not response-time handoff) iff the
+   *   session is still bound to the dialog's `draftId`; a load that rebound
+   *   the session while the dialog was open leaves binding and snapshot
+   *   unchanged. `isDirty()` is then false iff the current handoff still
+   *   matches that payload. On cancel or failure, state is unchanged. The
+   *   returned observable is the dialog's `afterClosed()`.
    */
   openSaveDraftDialog(): Observable<SaveDraftDialogResult | undefined> {
     const submitted = { ...this.state.handoff() };
+    const capturedDraftId = this.state.currentDraftId();
     const data: SaveDraftDialogData = {
-      draftId: this.state.currentDraftId(),
+      draftId: capturedDraftId,
       initialName: this.state.currentDraftName(),
       payload: submitted,
     };
@@ -197,6 +210,7 @@ export class AgentStudioShellComponent {
     const closed$ = ref.afterClosed();
     closed$.subscribe((result) => {
       if (!result) return;
+      if (this.state.currentDraftId() !== capturedDraftId) return;
       this.state.setCurrentDraft(result.draft_id, result.name);
       this.state.markSaved(submitted);
     });
@@ -300,8 +314,9 @@ export class AgentStudioShellComponent {
    *   the handoff still matches that snapshot. Concurrent edits stay dirty
    *   and are not overwritten. On PUT error, does not hydrate and
    *   `loadingDraft()` returns to false. When unbound, opens the Save-draft
-   *   dialog; hydrates only if the handoff still matches the submitted
-   *   payload; empty/cancel aborts with no hydrate.
+   *   dialog; hydrates only if the session is still bound to the saved
+   *   draft and the handoff still matches the submitted payload;
+   *   empty/cancel/rebind aborts with no hydrate.
    */
   private saveFirstThenHydrate(draftId: string): void {
     const boundId = this.state.currentDraftId();
@@ -328,6 +343,7 @@ export class AgentStudioShellComponent {
     }
     this.openSaveDraftDialog().subscribe((result) => {
       if (!result) return;
+      if (this.state.currentDraftId() !== result.draft_id) return;
       if (this.state.isDirty()) return;
       this.fetchAndHydrate(draftId);
     });
@@ -345,14 +361,21 @@ export class AgentStudioShellComponent {
    *   nested process-status check. On failure, `loadingDraft()` returns to
    *   `false` and `state` is unchanged. A call superseded by a later
    *   `loadDraft` (its token no longer matches `loadDraftToken`) discards
-   *   its response instead of applying it.
+   *   its response instead of applying it. If the handoff IDs change while
+   *   the GET is in flight, hydration is aborted so concurrent stage work
+   *   is not overwritten.
    */
   private fetchAndHydrate(draftId: string): void {
     this.loadingDraft.set(true);
     const token = ++this.loadDraftToken;
+    const captured = { ...this.state.handoff() };
     this.facade.loadDraft(draftId).subscribe({
       next: (draft) => {
         if (token !== this.loadDraftToken) return;
+        if (!sameHandoff(this.state.handoff(), captured)) {
+          this.loadingDraft.set(false);
+          return;
+        }
         this.hydrateFromDraft(draft, token);
       },
       error: () => {

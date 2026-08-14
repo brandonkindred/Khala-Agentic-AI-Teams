@@ -24,7 +24,15 @@
           </button>
         </span>
       }
-      <button mat-stroked-button type="button" class="studio__draft-btn" (click)="openSaveDraftDialog()">Save draft</button>
+      <button
+        mat-stroked-button
+        type="button"
+        class="studio__draft-btn"
+        [disabled]="loadingDraft()"
+        (click)="openSaveDraftDialog()"
+      >
+        Save draft
+      </button>
       <app-load-draft-menu
         [busy]="loadingDraft()"
         (draftSelected)="loadDraft($event)"
