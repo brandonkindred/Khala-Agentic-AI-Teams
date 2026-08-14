@@ -1092,6 +1092,19 @@ file/module a finding claims is missing ("add X" / "X does not exist") already
 exists, and drop that false positive. The reader is read-only, bounded, and
 fail-safe (a read failure only ever keeps a finding).
 
+### CODE_REVIEW_SCOPE_FILTER
+Default-on toggle for the scope-verification pass that runs after the reviewer
+returns findings and before PR comments are posted. A tool-using verifier
+sees the PR's added/modified line map and classifies each genuine finding as
+in-scope (including required omissions), out-of-scope / pre-existing, or
+unsure. Findings that are not confidently in-scope are tagged `pre_existing`
+so they become pending issue proposals instead of PR comments. Posting is
+fail-closed (unsure does not comment). An ungrounded out-of-scope verdict is
+ignored so it cannot hide a real in-scope finding. Coverage/safety findings
+never enter this pass. The unscripted dummy LLM harness is a no-op so tests
+that do not stub the verifier keep their existing posting behavior. Set to
+`false`/`0`/`no` to disable (any other value, or unset, leaves it enabled).
+
 ### CODE_REVIEW_ARCHITECTURE_CONSISTENCY_PASS
 Default-on toggle for the architecture-consistency / cross-codebase-redundancy
 pass. This toggle enables the architecture half of the in-process coordinator's

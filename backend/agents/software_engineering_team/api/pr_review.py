@@ -1123,6 +1123,54 @@ def _fetch_pr_metadata(
     return pr, files, reviewer_login
 
 
+def _files_for_scope(mode: ReviewModeDecision) -> Dict[str, str]:
+    """Collect reviewer-visible file bodies for the scope verifier index.
+
+    Postconditions: union of ``head_files``, ``hunk_files``, and non-empty
+        change-surface blocks. Never raises.
+    """
+    files: Dict[str, str] = {}
+    files.update(mode.head_files or {})
+    files.update(mode.hunk_files or {})
+    surface = mode.change_surface
+    if surface is not None and not surface.is_empty:
+        files.update(dict(surface.blocks))
+    return files
+
+
+def _tag_review_issues_for_scope(output: Any, mode: ReviewModeDecision) -> None:
+    """Tag out-of-scope findings before partition so they are not posted.
+
+    Preconditions: ``output`` is a successful reviewer result with ``issues``.
+    Postconditions: ``output.issues`` is replaced with scope-tagged copies when
+        the verifier runs; on Dummy LLM / verifier failure the list is left
+        unchanged. Never raises.
+    """
+    issues = getattr(output, "issues", None) or []
+    if not issues:
+        return
+    try:
+        from llm_service import get_client
+        from software_engineering_team.code_review_agent.scope_filter import (
+            apply_scope_verification,
+        )
+
+        tagged = apply_scope_verification(
+            get_client(),
+            issues=issues,
+            changed_by_path=mode.changed_by_path,
+            files=_files_for_scope(mode),
+            repo_reader=mode.repo_reader,
+        )
+        output.issues = tagged
+    except Exception as exc:  # noqa: BLE001 — tagging must never fail the review
+        logger.warning(
+            "PR review: scope verification skipped (%s: %s)",
+            type(exc).__name__,
+            scrub_token_from_text(str(exc)),
+        )
+
+
 class ReviewModeDecision(NamedTuple):
     """Whole-file vs. hunk review-mode decision, plus every input ``_run_reviewer`` needs."""
 
@@ -1830,6 +1878,8 @@ def _run_pr_review_body(
             )
             if output is None:
                 return
+
+            _tag_review_issues_for_scope(output, mode)
 
             partition = _partition_review_issues(
                 output,

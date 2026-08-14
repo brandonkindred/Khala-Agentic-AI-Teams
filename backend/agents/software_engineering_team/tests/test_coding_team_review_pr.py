@@ -3174,6 +3174,110 @@ class TestFixedRunPrReview:
         assert job["status"] == "completed"
         assert job["review_summary"]["pending_issue_proposals"] == []
 
+    def test_scope_verifier_unsure_does_not_post_comment(self, review_app, monkeypatch) -> None:
+        """An unsure scope verdict fail-closes posting: no PR comment, proposal instead."""
+        from software_engineering_team.code_review_agent.models import CodeReviewIssue
+        from software_engineering_team.code_review_agent.scope_filter import (
+            ScopeVerdict,
+            apply_scope_verdicts,
+        )
+
+        def _force_unsure(llm, *, issues, changed_by_path, files, repo_reader=None, input_data=None):
+            converted = [
+                CodeReviewIssue(
+                    severity=getattr(i, "severity", "high"),
+                    category=getattr(i, "category", "logic"),
+                    file_path=getattr(i, "file_path", ""),
+                    line=getattr(i, "line", None),
+                    description=getattr(i, "description", ""),
+                    suggestion=getattr(i, "suggestion", ""),
+                    pre_existing=bool(getattr(i, "pre_existing", False)),
+                )
+                for i in issues
+            ]
+            return apply_scope_verdicts(
+                converted,
+                changed_by_path=changed_by_path,
+                verdicts={0: ScopeVerdict(scope="unsure", confidence="low")},
+                grounded=True,
+            )
+
+        monkeypatch.setattr(
+            "software_engineering_team.code_review_agent.scope_filter.apply_scope_verification",
+            _force_unsure,
+        )
+        review_app["github"]["client"] = _FakeReviewClient()
+        review_app["github"]["agent_output"] = _FakeOutput(
+            issues=[
+                _FakeReviewIssue(
+                    "high",
+                    line=99,
+                    file_path="a.py",
+                    description="maybe out of scope",
+                )
+            ]
+        )
+        resp = review_app["client"].post("/review-pr", json=_review_body())
+        assert resp.status_code == 200
+        gh = review_app["github"]["client"]
+        assert gh.comments == []
+        assert gh.review_comments == []
+        job = review_app["jobs"].get_job(resp.json()["job_id"])
+        assert job["review_summary"]["pending_issue_proposals"]
+        assert (
+            job["review_summary"]["pending_issue_proposals"][0]["description"] == "maybe out of scope"
+        )
+
+    def test_scope_verifier_omission_still_posts(self, review_app, monkeypatch) -> None:
+        """A confident omission stays a PR finding even when the path is off-diff."""
+        from software_engineering_team.code_review_agent.models import CodeReviewIssue
+        from software_engineering_team.code_review_agent.scope_filter import (
+            ScopeVerdict,
+            apply_scope_verdicts,
+        )
+
+        def _force_omission(llm, *, issues, changed_by_path, files, repo_reader=None, input_data=None):
+            converted = [
+                CodeReviewIssue(
+                    severity=getattr(i, "severity", "high"),
+                    category=getattr(i, "category", "logic"),
+                    file_path=getattr(i, "file_path", ""),
+                    line=getattr(i, "line", None),
+                    description=getattr(i, "description", ""),
+                    suggestion=getattr(i, "suggestion", ""),
+                    pre_existing=bool(getattr(i, "pre_existing", False)),
+                )
+                for i in issues
+            ]
+            return apply_scope_verdicts(
+                converted,
+                changed_by_path=changed_by_path,
+                verdicts={0: ScopeVerdict(scope="omission", confidence="high")},
+                grounded=True,
+            )
+
+        monkeypatch.setattr(
+            "software_engineering_team.code_review_agent.scope_filter.apply_scope_verification",
+            _force_omission,
+        )
+        review_app["github"]["client"] = _FakeReviewClient()
+        review_app["github"]["agent_output"] = _FakeOutput(
+            issues=[
+                _FakeReviewIssue(
+                    "high",
+                    line=1,
+                    file_path="missing.py",
+                    description="should have added missing.py",
+                )
+            ]
+        )
+        resp = review_app["client"].post("/review-pr", json=_review_body())
+        assert resp.status_code == 200
+        gh = review_app["github"]["client"]
+        assert any("should have added missing.py" in c[1] for c in gh.comments)
+        job = review_app["jobs"].get_job(resp.json()["job_id"])
+        assert job["review_summary"]["pending_issue_proposals"] == []
+
 
 # ---------------------------------------------------------------------------
 # Whole-file review path (_fetch_head_files + files-mode dispatch)
