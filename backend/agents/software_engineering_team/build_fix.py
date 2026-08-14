@@ -429,6 +429,10 @@ def _execute_llm_repair_attempt(
     return True
 
 
+class _BuildFixCommandError(Exception):
+    """A build/test helper raised; the repair loop must abort with this message."""
+
+
 def _run_post_fix_build_verification(project_dir: Path, agent_type: str) -> Any:
     """Re-run the agent-type build/test gate after applying a repair.
 
@@ -438,7 +442,10 @@ def _run_post_fix_build_verification(project_dir: Path, agent_type: str) -> Any:
     Postconditions:
         Frontend always returns the ``ng build`` result. Backend returns the
         syntax-check result, or the pytest result when syntax passed and a
-        ``tests/`` tree with ``test_*.py`` files exists.
+        ``tests/`` tree with ``test_*.py`` files exists. If ``run_pytest``
+        itself raises, logs ``Build fix: pytest failed to run`` and raises
+        ``_BuildFixCommandError`` so the orchestrator can return
+        ``(False, message)`` without aborting the process.
     """
     from shared.command_runner.angular_repair import run_ng_build_with_nvm_fallback
     from shared.command_runner.executor import run_pytest, run_python_syntax_check
@@ -449,7 +456,11 @@ def _run_post_fix_build_verification(project_dir: Path, agent_type: str) -> Any:
     if result.success:
         tests_dir = project_dir / "tests"
         if tests_dir.exists() and any(tests_dir.rglob("test_*.py")):
-            result = run_pytest(project_dir, python_exe=sys.executable)
+            try:
+                result = run_pytest(project_dir, python_exe=sys.executable)
+            except Exception as e:
+                logger.warning("Build fix: pytest failed to run: %s", e)
+                raise _BuildFixCommandError(str(e)) from e
     return result
 
 
@@ -567,7 +578,11 @@ def _try_build_fix_one_at_a_time(
                         logger.warning(
                             "Build fix: failed to install requirements.txt before test run: %s", e
                         )
-                test_result = run_pytest(project_dir, python_exe=sys.executable)
+                try:
+                    test_result = run_pytest(project_dir, python_exe=sys.executable)
+                except Exception as e:
+                    logger.warning("Build fix: pytest failed to run: %s", e)
+                    return False, str(e)
                 if not test_result.success:
                     for f in test_result.parsed_failures("pytest"):
                         issues.append(
@@ -653,7 +668,10 @@ def _try_build_fix_one_at_a_time(
         )
         if not applied:
             continue
-        result = _run_post_fix_build_verification(project_dir, agent_type)
+        try:
+            result = _run_post_fix_build_verification(project_dir, agent_type)
+        except _BuildFixCommandError as e:
+            return False, str(e)
         if result.success:
             logger.info(
                 "Build fix (tool agent): task %s build passed after fixing one issue at a time",
@@ -706,8 +724,12 @@ def _try_build_fix_one_at_a_time(
                         }
                     )
             else:
-                test_result = run_pytest(project_dir, python_exe=sys.executable)
-                result = test_result
+                try:
+                    test_result = run_pytest(project_dir, python_exe=sys.executable)
+                    result = test_result
+                except Exception as e:
+                    logger.warning("Build fix: pytest failed to run: %s", e)
+                    return False, str(e)
                 if not result.success:
                     issues = [
                         {
