@@ -22,7 +22,9 @@ in-process registry APIs used by teams that generate agents.
 
 Agent Studio's save/register path is one such writer: it projects its editable
 `AgentDefinition` view-model into an `AgentManifest` before calling
-`AgentRegistry.register`. See
+`AgentRegistry.register`. Construction of generated and Studio manifests goes
+through [`shared.manifests`](../../../../shared/manifests/README.md), not
+ad-hoc `AgentManifest(...)`. See
 [`studio/README.md`](../studio/README.md#identity-agentdefinition-view-model-vs-agentmanifest-sot)
 for the full `AgentDefinition` ↔ `AgentManifest` field mapping.
 
