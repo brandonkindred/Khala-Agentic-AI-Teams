@@ -63,7 +63,7 @@ from strands.agent.conversation_manager import SlidingWindowConversationManager
 from strands.models.model import Model as _StrandsModel
 
 from llm_service import LLMClient
-from llm_service.interface import observer_turn_started_monotonic, take_complete_json_turns
+from llm_service.interface import take_complete_json_turns
 from shared.concurrency import parallel_map
 from shared.env import env_flag_enabled
 from software_engineering_team.shared.context_sizing import parse_env_int
@@ -85,7 +85,13 @@ from .prompts import (
     FALSE_POSITIVE_VERIFY_REASONING_SYSTEM_PROMPT,
 )
 from .repo_reader import DEFAULT_MAX_LISTED_FILES, DiskRepoReader, RepoReader
-from .transcript import model_label, record_reasoning_transcript_turns, record_transcript_entry
+from .transcript import (
+    model_label,
+    record_formatting_transcript_turns,
+    record_reasoning_transcript_turns,
+    record_transcript_entry,
+    resolve_format_turn_started,
+)
 from .via_reasoning import formatting_system_prompt_with_untrusted_guard, run_agent_via_reasoning
 
 logger = logging.getLogger(__name__)
@@ -2014,11 +2020,11 @@ def _verify_group(
         format_turn_started_at = time.monotonic()
 
     def _capture_formatting(prompt_text: str, response: str) -> None:
-        turn_started = observer_turn_started_monotonic()
-        if turn_started is None:
-            turn_started = (
-                format_turn_started_at if format_turn_started_at is not None else time.monotonic()
-            )
+        turn_started = resolve_format_turn_started(
+            [started for _, _, started in format_turns],
+            format_turn_started_at,
+            time.monotonic(),
+        )
         format_turns.append((prompt_text, response, turn_started))
 
     try:
@@ -2053,17 +2059,15 @@ def _verify_group(
             model=model_label(model),
             recorder=record_transcript_entry,
         )
-        if format_turns:
-            for format_prompt, format_response, turn_started in format_turns:
-                record_transcript_entry(
-                    "false_positive_filter",
-                    file_path,
-                    format_prompt,
-                    format_response,
-                    system_prompt=formatting_system_prompt_with_untrusted_guard(None),
-                    model=model_label(model),
-                    duration_ms=(now - turn_started) * 1000,
-                )
+        record_formatting_transcript_turns(
+            "false_positive_filter",
+            file_path,
+            turns=format_turns,
+            last_ended=now,
+            system_prompt=formatting_system_prompt_with_untrusted_guard(None),
+            model=model_label(model),
+            recorder=record_transcript_entry,
+        )
     verdicts = _parse_verdicts(data, len(issues))
     if reasoning_agent is None or not _agent_read_the_cited_file(reasoning_agent, index, file_path):
         false_positive_count = sum(1 for v in verdicts.values() if v.is_false_positive)

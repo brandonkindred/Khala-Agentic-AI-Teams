@@ -86,6 +86,14 @@ def test_record_builds_entry_fields(monkeypatch) -> None:
     assert entry["entry_id"]
 
 
+def test_sequential_turn_durations_end_at_next_start() -> None:
+    assert transcript.sequential_turn_durations_ms([1.0, 1.5, 2.0], 2.25) == [
+        500.0,
+        500.0,
+        250.0,
+    ]
+
+
 def test_record_prepends_system_prompt_when_supplied(monkeypatch) -> None:
     """The recorded prompt includes the system prompt when the caller supplies
     one -- otherwise the transcript would omit the instruction layer that

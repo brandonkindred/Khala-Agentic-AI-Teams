@@ -242,11 +242,9 @@ def test_call_agent_records_each_formatting_continuation_turn(
 def test_call_agent_records_formatting_turn_start_times(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """duration_ms must be measured from on_formatting_start (before the LLM
-    call) to finally, not from the completion callback. A lone formatting
-    call that stamps time only after complete_json returns would get ~0 ms
-    and a started_at that sorts after concurrent work that actually started
-    later."""
+    """duration_ms for each formatting turn ends at the next turn's start;
+    only the last turn uses the ``finally`` timestamp. Sharing one end time
+    would make the first continuation include every later model call."""
     from llm_service import llm_attribution
 
     class _Agent:
@@ -294,8 +292,8 @@ def test_call_agent_records_formatting_turn_start_times(
             batch_target="batch 1/1",
         )
 
-    assert captured[1][1]["duration_ms"] == 25000.0
-    assert captured[2][1]["duration_ms"] == 25000.0
+    assert captured[1][1]["duration_ms"] == 20000.0
+    assert captured[2][1]["duration_ms"] == 5000.0
 
 
 def test_two_call_client_stub_invokes_on_reasoning_agent(monkeypatch) -> None:

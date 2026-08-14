@@ -54,6 +54,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Optional
 
 from llm_service import current_attribution
+from llm_service.interface import observer_turn_started_monotonic
 from shared.concurrency.heartbeat import BackgroundHeartbeat
 from shared.postgres import is_postgres_enabled
 from software_engineering_team.shared.env_config import env_float, env_int
@@ -244,6 +245,83 @@ def record_reasoning_transcript_turns(
         model=model,
         duration_ms=(reasoning_done_at - started) * 1000,
     )
+
+
+def sequential_turn_durations_ms(started_times: list[float], last_ended: float) -> list[float]:
+    """Wall-clock duration of each turn, ending at the next start.
+
+    Preconditions:
+        ``started_times`` is monotonic start times in call order. ``last_ended``
+        is when the last turn finished.
+    Postconditions:
+        Returns one non-negative duration in milliseconds per start. Turn
+        ``i`` ends at ``started_times[i + 1]`` except the last, which ends at
+        ``last_ended``.
+    """
+    durations: list[float] = []
+    for index, started in enumerate(started_times):
+        ended = started_times[index + 1] if index + 1 < len(started_times) else last_ended
+        durations.append(max(0.0, (ended - started) * 1000))
+    return durations
+
+
+def resolve_format_turn_started(
+    existing_starts: list[float],
+    format_pass_started: float | None,
+    now: float,
+) -> float:
+    """Start time for one formatting observer callback.
+
+    Preconditions:
+        ``existing_starts`` are prior formatting turns in this pass. ``now``
+        is ``time.monotonic()`` at the callback.
+    Postconditions:
+        Prefers the provider-stamped observer start. Otherwise the first
+        turn uses ``format_pass_started`` (request start) and later turns
+        use ``now`` so chained durations do not share one stamp.
+    """
+    observer = observer_turn_started_monotonic()
+    if observer is not None:
+        return observer
+    if not existing_starts and format_pass_started is not None:
+        return format_pass_started
+    return now
+
+
+def record_formatting_transcript_turns(
+    stage: str,
+    target: str,
+    *,
+    turns: list[tuple[str, str, float]],
+    last_ended: float,
+    system_prompt: str,
+    model: str,
+    recorder: Callable[..., None] | None = None,
+) -> None:
+    """Buffer one transcript entry per formatting LLM turn.
+
+    Preconditions:
+        ``turns`` is ``(prompt, response, started)`` in callback order.
+        ``last_ended`` is monotonic time after the last formatting call.
+    Postconditions:
+        Each turn's ``duration_ms`` ends at the next turn's start, except
+        the last which ends at ``last_ended``. No-op when ``turns`` is empty.
+        Never raises.
+    """
+    if not turns:
+        return
+    write = recorder if recorder is not None else record_transcript_entry
+    durations = sequential_turn_durations_ms([started for _, _, started in turns], last_ended)
+    for (prompt, response, _started), duration_ms in zip(turns, durations, strict=True):
+        write(
+            stage,
+            target,
+            prompt,
+            response,
+            system_prompt=system_prompt,
+            model=model,
+            duration_ms=duration_ms,
+        )
 
 
 def record_transcript_entry(
@@ -635,7 +713,10 @@ __all__ = [
     "model_label",
     "record_transcript_entry",
     "record_reasoning_transcript_turns",
+    "record_formatting_transcript_turns",
     "reasoning_turns_from_agent_messages",
+    "resolve_format_turn_started",
+    "sequential_turn_durations_ms",
     "drain",
     "unflushed_entries",
     "merge_unflushed",

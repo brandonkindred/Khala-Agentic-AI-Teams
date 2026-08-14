@@ -31,7 +31,6 @@ from typing import List, Optional
 from pydantic import BaseModel, Field
 
 from llm_service import LLMClient
-from llm_service.interface import observer_turn_started_monotonic
 
 from .model_resolution import resolve_code_review_model
 from .models import CodeReviewInput, CodeReviewIssue
@@ -41,7 +40,12 @@ from .prompts import (
     SPEC_COMPLIANCE_PASS_FORMATTING_INSTRUCTIONS,
     SPEC_COMPLIANCE_PASS_REASONING_SYSTEM_PROMPT,
 )
-from .transcript import model_label, record_transcript_entry
+from .transcript import (
+    model_label,
+    record_formatting_transcript_turns,
+    record_transcript_entry,
+    resolve_format_turn_started,
+)
 from .via_reasoning import formatting_system_prompt_with_untrusted_guard, run_agent_via_reasoning
 
 logger = logging.getLogger(__name__)
@@ -201,11 +205,11 @@ def _run_via_reasoning_with_transcript(
         format_turn_started_at = time.monotonic()
 
     def _capture_formatting(prompt: str, response: str) -> None:
-        turn_started = observer_turn_started_monotonic()
-        if turn_started is None:
-            turn_started = (
-                format_turn_started_at if format_turn_started_at is not None else time.monotonic()
-            )
+        turn_started = resolve_format_turn_started(
+            [started for _, _, started in format_turns],
+            format_turn_started_at,
+            time.monotonic(),
+        )
         format_turns.append((prompt, response, turn_started))
 
     try:
@@ -238,17 +242,15 @@ def _run_via_reasoning_with_transcript(
                 model=model_label(model),
                 duration_ms=(reasoning_done_at - started) * 1000,
             )
-        if format_turns:
-            for format_prompt, format_response, turn_started in format_turns:
-                record_transcript_entry(
-                    stage,
-                    "",
-                    format_prompt,
-                    format_response,
-                    system_prompt=formatting_system_prompt_with_untrusted_guard(None),
-                    model=model_label(model),
-                    duration_ms=(now - turn_started) * 1000,
-                )
+        record_formatting_transcript_turns(
+            stage,
+            "",
+            turns=format_turns,
+            last_ended=now,
+            system_prompt=formatting_system_prompt_with_untrusted_guard(None),
+            model=model_label(model),
+            recorder=record_transcript_entry,
+        )
 
 
 def synthesize_review_findings(
