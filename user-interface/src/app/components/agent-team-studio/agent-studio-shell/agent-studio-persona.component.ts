@@ -767,14 +767,13 @@ export class AgentStudioPersonaComponent implements OnInit {
    *
    * Preconditions: `detail` is the active run and is terminal.
    * Postconditions: `personaLiveRunEndedAtMs` is set; `elapsedSec` is
-   *   `endedAt - startedAt` in seconds (0 if startedAt is missing). Prefers
-   *   `detail.updated_at` so a run that finished while Stage 4 was unmounted
-   *   does not include time spent on the audit child. If that timestamp is
-   *   later than a previously stored end, this is a new attempt that finished
-   *   while unmounted (Testing Personas resume/restart on the same `run_id`);
-   *   the prior attempt's start is dropped so elapsed is not stretched across
-   *   the idle gap. That attempt's start was never observed, so `elapsedSec`
-   *   is 0.
+   *   `endedAt - startedAt` in seconds (0 if startedAt is missing). When both
+   *   `created_at` and `updated_at` parse, both endpoints are taken from the
+   *   payload so elapsed is not a browser-clock start minus a server-clock end.
+   *   If `updated_at` is later than a previously stored end, this is a new
+   *   attempt that finished while unmounted; that attempt's start was never
+   *   observed, so `elapsedSec` is 0. If the payload timestamps are missing,
+   *   falls back to the client-observed end (`storedEnd` or `Date.now()`).
    */
   private freezeElapsedAtTerminal(detail: PersonaTestRunDetail): void {
     let startedAt = this.state.personaLiveRunStartedAtMs();
@@ -782,13 +781,23 @@ export class AgentStudioPersonaComponent implements OnInit {
       return;
     }
     const storedEnd = this.state.personaLiveRunEndedAtMs();
-    const endedAt = parseTimestampMs(detail.updated_at) ?? storedEnd ?? Date.now();
+    const payloadStart = parseTimestampMs(detail.created_at);
+    const payloadEnd = parseTimestampMs(detail.updated_at);
+    let endedAt: number;
+    if (payloadStart != null && payloadEnd != null) {
+      startedAt = payloadStart;
+      endedAt = payloadEnd;
+    } else {
+      endedAt = payloadEnd ?? storedEnd ?? Date.now();
+    }
     // A later terminal timestamp than the one already frozen means a subsequent
     // attempt completed while Stage 4 was unmounted. The persisted start belongs
     // to the prior attempt; using it would include the idle gap between them.
     if (storedEnd != null && endedAt > storedEnd) {
       startedAt = endedAt;
       this.state.setPersonaLiveRunStartedAtMs(endedAt);
+    } else if (payloadStart != null && payloadEnd != null) {
+      this.state.setPersonaLiveRunStartedAtMs(payloadStart);
     }
     this.state.setPersonaLiveRunEndedAtMs(endedAt);
     this.elapsedSec.set(Math.max(0, Math.floor((endedAt - startedAt) / 1000)));

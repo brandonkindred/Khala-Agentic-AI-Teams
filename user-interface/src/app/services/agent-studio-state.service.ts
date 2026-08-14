@@ -253,6 +253,16 @@ export class AgentStudioStateService {
   setRegistryAgentId(id: string | null): void {
     this.registryAgentId.set(id);
   }
+
+  /**
+   * Bind this session to a composed team.
+   *
+   * Preconditions: none.
+   * Postconditions: `teamId() === id`. If `id` differs from the previous
+   *   value, persona live-run signals are cleared (`personaLiveRunId()`,
+   *   `personaLiveRunStartedAtMs()`, `personaLiveRunEndedAtMs()` are `null`)
+   *   so Stage 4 cannot resume a run that belonged to another team.
+   */
   setTeamId(id: string | null): void {
     if (id !== this.teamId()) {
       this.setPersonaLiveRunId(null);

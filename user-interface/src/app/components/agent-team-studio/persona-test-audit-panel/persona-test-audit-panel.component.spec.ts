@@ -3,6 +3,7 @@ import { of, throwError } from 'rxjs';
 import { ActivatedRoute, provideRouter } from '@angular/router';
 import { vi } from 'vitest';
 import { PersonaTestingApiService } from '../../../services/persona-testing-api.service';
+import type { RunArtifacts } from '../../../models';
 import { PersonaTestAuditPanelComponent } from './persona-test-audit-panel.component';
 
 describe('PersonaTestAuditPanelComponent', () => {
@@ -124,7 +125,7 @@ describe('PersonaTestAuditPanelComponent', () => {
 
   it('handles missing artifact fields', () => {
     buildFixture();
-    component.artifacts = { se_job_status: {} } as never;
+    component.artifacts = { se_job_status: {} } as RunArtifacts;
     expect(component.seJobProgress).toBeNull();
     expect(component.seJobTaskStates).toBeNull();
     expect(component.getTaskStatus('t1')).toBe('');

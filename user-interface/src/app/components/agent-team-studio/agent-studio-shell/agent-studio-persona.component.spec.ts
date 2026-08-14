@@ -1416,7 +1416,10 @@ describe('AgentStudioPersonaComponent', () => {
     vi.useFakeTimers();
     try {
       build();
-      facade.getPersonaRunStatus.mockReturnValue(of(statusWithJob({ status: 'polling_build' })));
+      const launchedAt = new Date(Date.now()).toISOString();
+      facade.getPersonaRunStatus.mockReturnValue(
+        of(statusWithJob({ status: 'polling_build', created_at: launchedAt })),
+      );
       fixture.detectChanges();
       component.launch();
       vi.advanceTimersByTime(5_000);
@@ -1426,7 +1429,13 @@ describe('AgentStudioPersonaComponent', () => {
       fixture.destroy();
       vi.advanceTimersByTime(60_000);
       facade.getPersonaRunStatus.mockReturnValue(
-        of(statusWithJob({ status: 'completed', updated_at: finishedAt })),
+        of(
+          statusWithJob({
+            status: 'completed',
+            created_at: launchedAt,
+            updated_at: finishedAt,
+          }),
+        ),
       );
 
       fixture = TestBed.createComponent(AgentStudioPersonaComponent);
@@ -1443,10 +1452,17 @@ describe('AgentStudioPersonaComponent', () => {
   it('does not include the idle gap when a restarted run finishes while unmounted', () => {
     vi.useFakeTimers();
     try {
+      const launchedAt = new Date(Date.now()).toISOString();
       const firstFinishedAt = new Date(Date.now()).toISOString();
       build();
       facade.getPersonaRunStatus.mockReturnValue(
-        of(statusWithJob({ status: 'completed', updated_at: firstFinishedAt })),
+        of(
+          statusWithJob({
+            status: 'completed',
+            created_at: launchedAt,
+            updated_at: firstFinishedAt,
+          }),
+        ),
       );
       fixture.detectChanges();
       component.launch();
@@ -1457,7 +1473,13 @@ describe('AgentStudioPersonaComponent', () => {
       vi.advanceTimersByTime(60_000);
       const secondFinishedAt = new Date(Date.now()).toISOString();
       facade.getPersonaRunStatus.mockReturnValue(
-        of(statusWithJob({ status: 'completed', updated_at: secondFinishedAt })),
+        of(
+          statusWithJob({
+            status: 'completed',
+            created_at: launchedAt,
+            updated_at: secondFinishedAt,
+          }),
+        ),
       );
       fixture = TestBed.createComponent(AgentStudioPersonaComponent);
       component = fixture.componentInstance;

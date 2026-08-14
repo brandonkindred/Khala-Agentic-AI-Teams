@@ -5,7 +5,7 @@ import { MatDialog, MatDialogModule } from '@angular/material/dialog';
 import { MatIconModule } from '@angular/material/icon';
 import { MatTooltipModule } from '@angular/material/tooltip';
 import { ActivatedRoute, NavigationEnd, Router, RouterOutlet } from '@angular/router';
-import { filter, map, startWith } from 'rxjs';
+import { filter, map } from 'rxjs';
 import type { AgentStudioDraft } from '../../../models/agent-studio.model';
 import { STUDIO_STAGES } from '../../../models/agent-studio.model';
 import { AgentStudioFacade } from '../../../services/agent-studio.facade';
@@ -76,9 +76,11 @@ export class AgentStudioShellComponent {
     this.router.events.pipe(
       filter((e): e is NavigationEnd => e instanceof NavigationEnd),
       map(() => this.childHidesFooter()),
-      startWith(this.childHidesFooter()),
     ),
-    { initialValue: false },
+    // Router.events does not replay the NavigationEnd that created this
+    // component, so seed from the already-activated child snapshot. A hardcoded
+    // `false` would flash the footer on a direct load of the audit child.
+    { initialValue: this.childHidesFooter() },
   );
 
   private childHidesFooter(): boolean {

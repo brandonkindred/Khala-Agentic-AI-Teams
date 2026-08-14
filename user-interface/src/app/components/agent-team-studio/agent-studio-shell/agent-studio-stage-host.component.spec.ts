@@ -95,27 +95,27 @@ describe('AgentStudioStageHostComponent', () => {
 
   afterEach(() => TestBed.resetTestingModule());
 
-  it('renders the real Build Agent stage (not the placeholder) on Stage 1', () => {
+  it('renders the real Build Agent stage (not the placeholder) when activeStage is 0', () => {
     expect(state.activeStage()).toBe(0);
     expect(fixture.nativeElement.querySelector('app-agent-studio-build-agent')).toBeTruthy();
     expect(fixture.nativeElement.querySelector('app-agent-studio-stage-placeholder')).toBeNull();
   });
 
-  it('renders the real Test Agent stage (not the placeholder) on Stage 2', () => {
+  it('renders the real Test Agent stage (not the placeholder) when activeStage is 1', () => {
     state.navigateToStage(1);
     fixture.detectChanges();
     expect(fixture.nativeElement.querySelector('app-agent-studio-test-agent')).toBeTruthy();
     expect(fixture.nativeElement.querySelector('app-agent-studio-stage-placeholder')).toBeNull();
   });
 
-  it('renders the real Compose Team stage (not the placeholder) on Stage 3', () => {
+  it('renders the real Compose Team stage (not the placeholder) when activeStage is 2', () => {
     state.navigateToStage(2);
     fixture.detectChanges();
     expect(fixture.nativeElement.querySelector('app-agent-studio-compose-team')).toBeTruthy();
     expect(fixture.nativeElement.querySelector('app-agent-studio-stage-placeholder')).toBeNull();
   });
 
-  it('renders the Personas stage on Stage 4', () => {
+  it('renders the Personas stage when activeStage is 3', () => {
     state.navigateToStage(3);
     fixture.detectChanges();
     expect(fixture.nativeElement.querySelector('app-agent-studio-persona')).toBeTruthy();
