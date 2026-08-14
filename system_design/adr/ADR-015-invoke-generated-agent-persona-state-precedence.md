@@ -111,7 +111,7 @@ written back to the manifest):
 | `skills` | non-plumbing `manifest.tags` | Must strip every plumbing marker, not only generated-team ones: `generated`, `agentic_team_provisioning`, and `studio`. Today's `skill_tags_from_manifest` strips only the first two; the implementation must expand that shared projection (or pass the unioned strip set) so a Studio-saved agent does not inject `studio` into `Skills:`. |
 | `capabilities` | `[]` | The manifest has no capabilities concept today; the manifest "default" is simply empty unless the request supplies it. |
 | `expertise` | `[manifest.team]` when non-empty, else `[]` | Existing mapping, unchanged. |
-| `system_prompt` *(new field on `GeneratedAgentInvokeInput`, added by the implementation story)* | `manifest.states[key == state].system_prompt` | Two cases — see **Prompt composition** below. An explicit request `system_prompt` is **full replacement**. A *manifest-sourced* state prompt is **composed with** the resolved persona fields, not a replacement of them. |
+| `system_prompt` *(new field on `GeneratedAgentInvokeInput`, added by the implementation story)* | `next((s.system_prompt for s in manifest.states if s.key == state), "")` — `states` is a list of `AgentStateSpec`, not a dict keyed by state | Two cases — see **Prompt composition** below. An explicit request `system_prompt` is **full replacement**. A *manifest-sourced* state prompt is **composed with** the resolved persona fields, not a replacement of them. |
 | `state` *(new field, default `"executing"`)* | Selects which `AgentStateSpec` backs the manifest-sourced state prompt | Meaningful only when the manifest carries a matching, non-blank state; otherwise falls through per the backward-compatibility rule below. |
 | `tools` | **Out of scope of this binding** — runtime tool list stays `[]` on this entrypoint | The request `tools` field stays inert. This contract also does **not** start passing `manifest.cognition.tools` into `resolve_tools` / `call_agent_with_cognition`. See "Explicitly out of scope" below. |
 
@@ -351,7 +351,8 @@ A future implementation must satisfy exactly this surface:
   — per the table and presence test above.
 - `system_prompt` follows Prompt composition: request-sourced is full replacement
   of the base prompt; manifest-sourced is `build_system_prompt(...)` plus the
-  matching `manifest.states[key == state].system_prompt`.
+  matching `AgentStateSpec.system_prompt` whose `key` equals the resolved `state`
+  (`next((s.system_prompt for s in manifest.states if s.key == state), "")`).
 - `skills` defaults strip plumbing tags `{generated, agentic_team_provisioning,
   studio}` so Studio's registration stamp never appears in the Skills line.
 - Runtime tools on this entrypoint stay `[]`. The request `tools` field stays

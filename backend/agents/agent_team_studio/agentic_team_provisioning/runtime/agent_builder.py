@@ -289,9 +289,10 @@ async def invoke_generated_agent(body: Any) -> dict[str, Any]:
     precedence contract in ``system_design/adr/ADR-015-invoke-generated-agent-persona-state-precedence.md``.
 
     Preconditions:
-        * ``body`` is a mapping; ``agent_name`` and ``message`` are recommended
-          (both default so a malformed body never raises a ``TypeError`` at the
-          dispatch boundary).
+        * ``body`` may be any value. Non-dicts (including ``None``) coerce to
+          ``{}`` before ``GeneratedAgentInvokeInput`` validation so a malformed
+          payload never raises a ``TypeError`` at the dispatch boundary.
+          ``agent_name`` and ``message`` are recommended and default when omitted.
     Postconditions:
         * Reconstructs the roster agent, runs it through the cognition-aware
           wrapper (advisory rules + memory digest from the open side channel steer
