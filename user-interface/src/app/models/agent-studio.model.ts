@@ -105,7 +105,7 @@ export interface AgentDefinition {
 
 /**
  * Wire shapes for the Stage-1 `/api/agent-studio` API — conversations, clone,
- * save, and drafts. Mirrors `backend/agents/agent_team_studio/agent_studio/models.py`
+ * save, and drafts. Mirrors `backend/agents/agent_platform/studio/models.py`
  * field-for-field (snake_case), consumed by `AgentStudioApiService`.
  */
 export interface ConversationMessage {

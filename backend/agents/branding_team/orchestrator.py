@@ -898,10 +898,11 @@ def _merge_structured_output(
 ) -> Optional[BaseModel]:
     """Validate an agent's typed ``structured_output`` against a phase's output model.
 
-    ``structured`` is often a strict subset of ``model_class`` — e.g. the
+    ``structured`` is often a specialist fragment of ``model_class`` — e.g. the
     positioning synthesizer only emits ``positioning_statement``/``brand_promise``
     out of the full ``StrategicCoreOutput`` schema — which validates fine since
-    every field on the phase output models has a default.
+    every field on the phase output models has a default. Dump-then-validate is
+    required for those subset payloads; it is not leftover twin-model conversion.
 
     Preconditions:
         ``structured`` is a ``pydantic.BaseModel`` instance; ``model_class`` is

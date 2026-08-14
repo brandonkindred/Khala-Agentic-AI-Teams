@@ -231,10 +231,12 @@ jobs:
               - 'backend/agents/agent_platform/registry/**'
               - 'backend/agents/agent_platform/__init__.py'
               - 'backend/agents/agent_platform/README.md'
+            agent_platform:
+              - 'backend/agents/agent_platform/**'
             # Agent Studio authoring + drafts persistence (in-memory unit suite;
             # live-Postgres store tests skip without POSTGRES_HOST).
             agent_studio:
-              - 'backend/agents/agent_team_studio/agent_studio/**'
+              - 'backend/agents/agent_platform/studio/**'
             # Shared design-assistant conversation kernel (message envelope,
             # fenced-JSON helpers, turn-lock protocol) used by agent_studio and
             # agentic_team_provisioning's chat assistants.
@@ -332,7 +334,7 @@ jobs:
               - '!backend/agents/agent_platform/**'
               - '!backend/agents/sales_team/**'
               - '!backend/agents/agent_cognition/**'
-              - '!backend/agents/agent_team_studio/agent_studio/**'
+              - '!backend/agents/agent_platform/studio/**'
               - '!backend/agents/agent_team_studio/assistant_kernel/**'
               - '!backend/agents/agent_team_studio/user_agent_founder/**'
               - '!backend/agents/agent_team_studio/agentic_team_provisioning/**'
@@ -372,6 +374,7 @@ jobs:
           F_INVESTMENT: ${{ steps.filter.outputs.investment }}
           F_SOCIAL_MARKETING: ${{ steps.filter.outputs.social_marketing }}
           F_AGENT_PROVISIONING: ${{ steps.filter.outputs.agent_provisioning }}
+          F_AGENT_PLATFORM: ${{ steps.filter.outputs.agent_platform }}
           F_AGENT_STUDIO: ${{ steps.filter.outputs.agent_studio }}
           F_ASSISTANT_KERNEL: ${{ steps.filter.outputs.assistant_kernel }}
           F_SALES: ${{ steps.filter.outputs.sales }}
@@ -419,13 +422,25 @@ jobs:
                   "source": "agent_team_studio.agent_provisioning_team",
                   "extra_requirements": "agent_team_studio/agent_provisioning_team/requirements.txt",
               },
+              "agent_platform": {
+                  "name": "Agent Platform",
+                  # In-package sandbox/registry suites plus unified-API sandbox
+                  # lifecycle, invoke HTTP, and dual-path residue tests (cwd is
+                  # backend/agents; space-separated paths word-split in
+                  # `pytest ${{ matrix.tests }}`).
+                  "tests": "agent_platform/sandbox/tests/ agent_platform/registry/tests/ ../unified_api/tests/test_sandboxes_route.py ../unified_api/tests/test_sandbox_reaper_startup.py ../unified_api/tests/test_agents_route.py ../unified_api/tests/test_agents_route_lazy_temporal_import.py ../unified_api/tests/test_agents_dual_path_residue.py",
+                  "source": "agent_platform.sandbox",
+              },
               "agent_studio": {
                   "name": "Agent Studio",
-                  "tests": "agent_team_studio/agent_studio/tests/",
-                  "source": "agent_team_studio.agent_studio",
+                  # In-package unit suite plus unified-API HTTP handler tests
+                  # (cwd is backend/agents; space-separated paths word-split
+                  # in `pytest ${{ matrix.tests }}`).
+                  "tests": "agent_platform/studio/tests/ ../unified_api/tests/test_agent_studio_routes.py ../unified_api/tests/test_agent_studio_direct_routes.py ../unified_api/tests/test_agent_studio_drafts_routes.py ../unified_api/tests/test_agent_studio_worker_startup.py ../unified_api/tests/test_agent_studio_user_profile_import_gating.py",
+                  "source": "agent_platform.studio",
                   # Omit live-Postgres store modules from the unit cov gate
                   # (those suites skip without POSTGRES_HOST).
-                  "cov_config": "agent_team_studio/agent_studio/pyproject.toml",
+                  "cov_config": "agent_platform/studio/pyproject.toml",
               },
               # unified_api lives at backend/unified_api/ (a sibling of backend/agents/,
               # this job's working directory), so its test/source paths are given
@@ -517,6 +532,18 @@ jobs:
               changed = per_team
 
           entries = [v for k, v in large_teams.items() if changed.get(k)]
+          # Console is a sibling platform member with its own 90% gate. It
+          # shares the agent_platform path filter (lives under
+          # agent_platform/console/) rather than a separate paths-filter key.
+          # Store/prune suites skip without POSTGRES_HOST, so they are omitted
+          # from the unit cov config (same pattern as agent_studio).
+          if changed.get("agent_platform"):
+              entries.append({
+                  "name": "Agent Platform Console",
+                  "tests": "agent_platform/console/tests/",
+                  "source": "agent_platform.console",
+                  "cov_config": "agent_platform/console/pyproject.toml",
+              })
           any_misc = any(changed.get(k) for k in misc_teams)
           if any_misc:
               entries.append(misc_entry)

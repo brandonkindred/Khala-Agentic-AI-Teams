@@ -6,7 +6,7 @@ Two layers:
   constraints exist in the DDL text (the acceptance criteria for Step 1).
 * **Idempotency tests** are skipped unless ``POSTGRES_HOST`` is set; they
   prove the schema applies and re-applies cleanly against live Postgres,
-  mirroring ``agent_console`` / ``product_delivery`` store tests.
+  mirroring ``agent_platform.console`` / ``product_delivery`` store tests.
 """
 
 from __future__ import annotations

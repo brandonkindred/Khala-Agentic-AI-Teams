@@ -594,9 +594,7 @@ _LOGO_SPECIFIER_PROMPT = AgentPromptSpec(
         "You are a Logo Specifier. Based on the winning moodboard direction, define a logo "
         "suite. For each variant (primary, monochrome, icon-only, reversed), specify:"
     ),
-    fields=(
-        PromptFieldSpec("logo_suite", "variant, usage_context, minimum_size, clear_space"),
-    ),
+    fields=(PromptFieldSpec("logo_suite", "variant, usage_context, minimum_size, clear_space"),),
 )
 
 
@@ -653,9 +651,7 @@ _TYPOGRAPHY_BUILDER_PROMPT = AgentPromptSpec(
         "You are a Typography Builder. Based on the winning moodboard direction, define a "
         "typography system with 3-4 type roles (display, body, caption, code). For each:"
     ),
-    fields=(
-        PromptFieldSpec("typography_system", "role, font_family, weight_range, usage_notes"),
-    ),
+    fields=(PromptFieldSpec("typography_system", "role, font_family, weight_range, usage_notes"),),
 )
 
 
@@ -707,9 +703,7 @@ def make_iconography_director() -> Agent:
 _PHOTOGRAPHY_VIDEO_DIRECTOR_PROMPT = AgentPromptSpec(
     opening="You are a Photography & Video Director. Based on the winning moodboard, define:",
     fields=(
-        PromptFieldSpec(
-            "photography_direction", "shooting style, lighting, composition, subjects"
-        ),
+        PromptFieldSpec("photography_direction", "shooting style, lighting, composition, subjects"),
         PromptFieldSpec("video_direction", "pacing, tone, visual style for video content"),
         PromptFieldSpec("motion_principles", "3-4 principles for animation/motion design"),
     ),
@@ -803,6 +797,25 @@ def make_design_system_codifier() -> Agent:
 # ===================================================================
 
 
+_BRAND_EXPERIENCE_PRINCIPLER_PROMPT = AgentPromptSpec(
+    opening="You are a Brand Experience Architect. Define:",
+    fields=(
+        PromptFieldSpec(
+            "brand_experience_principles",
+            "3-5 principles that govern every brand touchpoint",
+        ),
+        PromptFieldSpec(
+            "signature_moments",
+            "3-5 key moments in the customer journey that should feel distinctly on-brand",
+        ),
+        PromptFieldSpec(
+            "sensory_elements",
+            "2-4 sensory cues (sound, texture, scent, etc.) if applicable",
+        ),
+    ),
+)
+
+
 def make_brand_experience_principler() -> Agent:
     """Build the Phase 4 Brand Experience Principler agent.
 
@@ -814,14 +827,41 @@ def make_brand_experience_principler() -> Agent:
     return build_agent(
         name="brand_experience_principler",
         description="Defines brand experience principles, signature moments, and sensory elements.",
-        system_prompt=(
-            "You are a Brand Experience Architect. Define:\n"
-            "1. brand_experience_principles — 3-5 principles that govern every brand touchpoint\n"
-            "2. signature_moments — 3-5 key moments in the customer journey that should feel "
-            "distinctly on-brand\n"
-            "3. sensory_elements — 2-4 sensory cues (sound, texture, scent, etc.) if applicable"
-        ),
+        system_prompt=render_agent_prompt(_BRAND_EXPERIENCE_PRINCIPLER_PROMPT),
         structured_output=BrandExperiencePrinciplesOutput,
+    )
+
+
+def _channel_guide_prompt(channel: str, description: str) -> AgentPromptSpec:
+    """Build the channel-guide prompt spec for one activation channel.
+
+    Preconditions:
+        ``channel`` and ``description`` are non-empty strings.
+    Postconditions:
+        Returns an ``AgentPromptSpec`` whose opening interpolates
+        ``channel.title()`` / ``channel``, whose fields name the six
+        ``ChannelGuidelineOutput`` attributes (``channel``'s description
+        is the quoted identifier), and whose closing is
+        ``f"Context: {description}"``.
+    """
+    assert isinstance(channel, str) and channel.strip(), "channel must be a non-empty string"
+    assert isinstance(description, str) and description.strip(), (
+        "description must be a non-empty string"
+    )
+    return AgentPromptSpec(
+        opening=(
+            f"You are a {channel.title()} Channel Specialist. Define guidelines for the "
+            f"{channel} channel:"
+        ),
+        fields=(
+            PromptFieldSpec("channel", f"'{channel}'"),
+            PromptFieldSpec("strategy", "overall approach for this channel"),
+            PromptFieldSpec("dos", "3-4 best practices"),
+            PromptFieldSpec("donts", "3-4 things to avoid"),
+            PromptFieldSpec("content_types", "3-5 recommended content formats"),
+            PromptFieldSpec("frequency_guidance", "recommended cadence"),
+        ),
+        closing=f"Context: {description}",
     )
 
 
@@ -853,17 +893,7 @@ def _make_channel_guide(
     return build_agent(
         name=f"{channel}_guide",
         description=f"Defines brand guidelines for the {channel} channel.",
-        system_prompt=(
-            f"You are a {channel.title()} Channel Specialist. Define guidelines for the "
-            f"{channel} channel:\n"
-            f"- channel: '{channel}'\n"
-            f"- strategy: overall approach for this channel\n"
-            f"- dos: 3-4 best practices\n"
-            f"- donts: 3-4 things to avoid\n"
-            f"- content_types: 3-5 recommended content formats\n"
-            f"- frequency_guidance: recommended cadence\n"
-            f"Context: {description}"
-        ),
+        system_prompt=render_agent_prompt(_channel_guide_prompt(channel, description)),
         structured_output=structured_output,
     )
 
@@ -940,6 +970,20 @@ def make_internal_guide() -> Agent:
     )
 
 
+_BRAND_ARCHITECTURE_BUILDER_PROMPT = AgentPromptSpec(
+    opening="You are a Brand Architecture Specialist. Define:",
+    fields=(
+        PromptFieldSpec(
+            "brand_architecture",
+            "rules for parent brand, sub-brands, product lines. Each with: entity, "
+            "relationship, naming_convention, visual_treatment",
+        ),
+        PromptFieldSpec("naming_conventions", "3-5 naming rules"),
+        PromptFieldSpec("terminology_glossary", "5-10 key terms with definitions (dict)"),
+    ),
+)
+
+
 def make_brand_architecture_builder() -> Agent:
     """Build the Phase 4 Brand Architecture Specialist agent.
 
@@ -951,15 +995,25 @@ def make_brand_architecture_builder() -> Agent:
     return build_agent(
         name="brand_architecture_builder",
         description="Defines brand architecture rules, naming conventions, and terminology.",
-        system_prompt=(
-            "You are a Brand Architecture Specialist. Define:\n"
-            "1. brand_architecture — rules for parent brand, sub-brands, product lines. Each "
-            "with: entity, relationship, naming_convention, visual_treatment\n"
-            "2. naming_conventions — 3-5 naming rules\n"
-            "3. terminology_glossary — 5-10 key terms with definitions (dict)\n"
-        ),
+        system_prompt=render_agent_prompt(_BRAND_ARCHITECTURE_BUILDER_PROMPT),
         structured_output=BrandArchitectureOutput,
     )
+
+
+_BRAND_IN_ACTION_ILLUSTRATOR_PROMPT = AgentPromptSpec(
+    opening=(
+        "You are a Brand-in-Action Illustrator. Create 3-5 applied examples showing correct "
+        "vs incorrect brand usage:"
+    ),
+    fields=(
+        PromptFieldSpec(
+            "brand_in_action",
+            "each example has: context (where this applies, e.g. 'sales deck header'), "
+            "correct_example (the on-brand version), incorrect_example (the off-brand "
+            "version), rationale (why the correct version is better)",
+        ),
+    ),
+)
 
 
 def make_brand_in_action_illustrator() -> Agent:
@@ -972,14 +1026,7 @@ def make_brand_in_action_illustrator() -> Agent:
     return build_agent(
         name="brand_in_action_illustrator",
         description="Creates brand-in-action do/don't examples.",
-        system_prompt=(
-            "You are a Brand-in-Action Illustrator. Create 3-5 applied examples showing correct "
-            "vs incorrect brand usage. Each example has:\n"
-            "- context: where this applies (e.g. 'sales deck header')\n"
-            "- correct_example: the on-brand version\n"
-            "- incorrect_example: the off-brand version\n"
-            "- rationale: why the correct version is better\n"
-        ),
+        system_prompt=render_agent_prompt(_BRAND_IN_ACTION_ILLUSTRATOR_PROMPT),
         structured_output=BrandInActionOutput,
     )
 
@@ -987,6 +1034,19 @@ def make_brand_in_action_illustrator() -> Agent:
 # ===================================================================
 # Phase 5 — Governance & Evolution  (Graph: fan-out / fan-in)
 # ===================================================================
+
+
+_OWNERSHIP_DEFINER_PROMPT = AgentPromptSpec(
+    opening="You are a Brand Ownership Definer. Define:",
+    fields=(
+        PromptFieldSpec("ownership_model", "who owns the brand (paragraph)"),
+        PromptFieldSpec(
+            "decision_authority",
+            "a dict mapping decision types to responsible roles "
+            "(e.g. 'logo_changes': 'Brand Director', 'campaign_messaging': 'Marketing Lead')",
+        ),
+    ),
+)
 
 
 def make_ownership_definer() -> Agent:
@@ -1000,14 +1060,24 @@ def make_ownership_definer() -> Agent:
     return build_agent(
         name="ownership_definer",
         description="Defines brand ownership model and decision authority matrix.",
-        system_prompt=(
-            "You are a Brand Ownership Definer. Define:\n"
-            "1. ownership_model — who owns the brand (paragraph)\n"
-            "2. decision_authority — a dict mapping decision types to responsible roles "
-            "(e.g. 'logo_changes': 'Brand Director', 'campaign_messaging': 'Marketing Lead')"
-        ),
+        system_prompt=render_agent_prompt(_OWNERSHIP_DEFINER_PROMPT),
         structured_output=OwnershipOutput,
     )
+
+
+_APPROVAL_WORKFLOW_DESIGNER_PROMPT = AgentPromptSpec(
+    opening="You are an Approval Workflow Designer. Define:",
+    fields=(
+        PromptFieldSpec(
+            "approval_workflows",
+            "3-5 workflows, each with: asset_type, approvers (list), sla, escalation_path",
+        ),
+        PromptFieldSpec(
+            "agency_briefing_protocols",
+            "3-5 protocols for briefing external agencies",
+        ),
+    ),
+)
 
 
 def make_approval_workflow_designer() -> Agent:
@@ -1021,14 +1091,23 @@ def make_approval_workflow_designer() -> Agent:
     return build_agent(
         name="approval_workflow_designer",
         description="Designs approval workflows and agency briefing protocols.",
-        system_prompt=(
-            "You are an Approval Workflow Designer. Define:\n"
-            "1. approval_workflows — 3-5 workflows, each with: asset_type, approvers (list), "
-            "sla, escalation_path\n"
-            "2. agency_briefing_protocols — 3-5 protocols for briefing external agencies"
-        ),
+        system_prompt=render_agent_prompt(_APPROVAL_WORKFLOW_DESIGNER_PROMPT),
         structured_output=ApprovalWorkflowsOutput,
     )
+
+
+_ASSET_WIKI_PLANNER_PROMPT = AgentPromptSpec(
+    opening="You are an Asset & Wiki Planner. Define:",
+    fields=(
+        PromptFieldSpec("asset_management_guidance", "3-5 guidelines for managing brand assets"),
+        PromptFieldSpec(
+            "wiki_backlog",
+            "4-6 wiki entries, each with: title, summary, owners (list), "
+            "update_cadence. Cover: Brand North Star, Voice Playbook, Design System, Brand "
+            "Review Intake, Channel Playbook, Governance Charter.",
+        ),
+    ),
+)
 
 
 def make_asset_wiki_planner() -> Agent:
@@ -1041,15 +1120,21 @@ def make_asset_wiki_planner() -> Agent:
     return build_agent(
         name="asset_wiki_planner",
         description="Plans asset management and brand wiki backlog.",
-        system_prompt=(
-            "You are an Asset & Wiki Planner. Define:\n"
-            "1. asset_management_guidance — 3-5 guidelines for managing brand assets\n"
-            "2. wiki_backlog — 4-6 wiki entries, each with: title, summary, owners (list), "
-            "update_cadence. Cover: Brand North Star, Voice Playbook, Design System, Brand "
-            "Review Intake, Channel Playbook, Governance Charter."
-        ),
+        system_prompt=render_agent_prompt(_ASSET_WIKI_PLANNER_PROMPT),
         structured_output=AssetWikiOutput,
     )
+
+
+_TRAINING_PLANNER_PROMPT = AgentPromptSpec(
+    opening="You are a Training Planner. Define:",
+    fields=(
+        PromptFieldSpec(
+            "training_onboarding_plan",
+            "4-6 training initiatives for onboarding new team members and maintaining "
+            "brand literacy.",
+        ),
+    ),
+)
 
 
 def make_training_planner() -> Agent:
@@ -1062,12 +1147,25 @@ def make_training_planner() -> Agent:
     return build_agent(
         name="training_planner",
         description="Plans brand training and onboarding programmes.",
-        system_prompt=(
-            "You are a Training Planner. Define training_onboarding_plan — 4-6 training "
-            "initiatives for onboarding new team members and maintaining brand literacy."
-        ),
+        system_prompt=render_agent_prompt(_TRAINING_PLANNER_PROMPT),
         structured_output=TrainingOnboardingOutput,
     )
+
+
+_KPI_DESIGNER_PROMPT = AgentPromptSpec(
+    opening="You are a Brand KPI Designer. Define:",
+    fields=(
+        PromptFieldSpec(
+            "brand_health_kpis",
+            "4-6 KPIs, each with: metric, measurement_method, target, review_frequency",
+        ),
+        PromptFieldSpec("tracking_methodology", "paragraph describing the measurement approach"),
+        PromptFieldSpec(
+            "review_trigger_points",
+            "3-5 events that should trigger a brand health review",
+        ),
+    ),
+)
 
 
 def make_kpi_designer() -> Agent:
@@ -1081,15 +1179,24 @@ def make_kpi_designer() -> Agent:
     return build_agent(
         name="kpi_designer",
         description="Designs brand health KPIs with tracking methodology.",
-        system_prompt=(
-            "You are a Brand KPI Designer. Define:\n"
-            "1. brand_health_kpis — 4-6 KPIs, each with: metric, measurement_method, target, "
-            "review_frequency\n"
-            "2. tracking_methodology — paragraph describing the measurement approach\n"
-            "3. review_trigger_points — 3-5 events that should trigger a brand health review"
-        ),
+        system_prompt=render_agent_prompt(_KPI_DESIGNER_PROMPT),
         structured_output=BrandHealthKPIsOutput,
     )
+
+
+_EVOLUTION_FRAMER_PROMPT = AgentPromptSpec(
+    opening="You are a Brand Evolution Framer. Define:",
+    fields=(
+        PromptFieldSpec(
+            "evolution_framework",
+            "paragraph describing how the brand evolves over time",
+        ),
+        PromptFieldSpec(
+            "version_control_cadence",
+            "how often the brand system is formally reviewed and versioned",
+        ),
+    ),
+)
 
 
 def make_evolution_framer() -> Agent:
@@ -1103,14 +1210,28 @@ def make_evolution_framer() -> Agent:
     return build_agent(
         name="evolution_framer",
         description="Defines the brand evolution framework and version control cadence.",
-        system_prompt=(
-            "You are a Brand Evolution Framer. Define:\n"
-            "1. evolution_framework — paragraph describing how the brand evolves over time\n"
-            "2. version_control_cadence — how often the brand system is formally reviewed "
-            "and versioned"
-        ),
+        system_prompt=render_agent_prompt(_EVOLUTION_FRAMER_PROMPT),
         structured_output=EvolutionFrameworkOutput,
     )
+
+
+_BRAND_RULES_CODIFIER_PROMPT = AgentPromptSpec(
+    opening=(
+        "You are a Brand Rules Codifier. Using the full brand context (positioning, promise, "
+        "values, narrative, visual identity), produce:"
+    ),
+    fields=(
+        PromptFieldSpec(
+            "brand_guidelines",
+            "a list of 5-8 governance rules that everyone in the organisation must follow. "
+            "Each rule is a single clear sentence.",
+        ),
+    ),
+    closing=(
+        "Cover: identity usage, messaging hierarchy, approval gates, asset management, and "
+        "evolution."
+    ),
+)
 
 
 def make_brand_rules_codifier() -> Agent:
@@ -1123,13 +1244,7 @@ def make_brand_rules_codifier() -> Agent:
     return build_agent(
         name="brand_rules_codifier",
         description="Codifies top-level brand governance rules.",
-        system_prompt=(
-            "You are a Brand Rules Codifier. Using the full brand context (positioning, promise, "
-            "values, narrative, visual identity), produce brand_guidelines — a list of 5-8 "
-            "governance rules that everyone in the organisation must follow. Each rule is a "
-            "single clear sentence. Cover: identity usage, messaging hierarchy, approval gates, "
-            "asset management, and evolution."
-        ),
+        system_prompt=render_agent_prompt(_BRAND_RULES_CODIFIER_PROMPT),
         structured_output=BrandGuidelinesOutput,
     )
 

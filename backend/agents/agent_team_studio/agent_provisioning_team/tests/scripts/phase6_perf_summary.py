@@ -24,7 +24,7 @@ from pathlib import Path
 
 
 def _default_log_path() -> Path:
-    # Mirrors agent_team_studio.agent_provisioning_team.sandbox.state.resolve_cache_path; kept
+    # Mirrors agent_platform.sandbox.state.resolve_cache_path; kept
     # inline so this script can run without bootstrapping the agents/ tree.
     return Path(
         os.environ.get("AGENT_CACHE", "/tmp/agents"), "agent_provisioning", "phase6_perf.jsonl"

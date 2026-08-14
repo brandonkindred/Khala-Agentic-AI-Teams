@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from agent_platform.registry.models import AgentManifest, CognitionSpec
+from agent_platform.registry.models import AgentManifest, CognitionSpec, SourceInfo
 from agent_team_studio.agentic_team_provisioning.manifest_generation import (
     build_agent_manifest,
     default_cognition_block,
@@ -12,6 +12,14 @@ from agent_team_studio.agentic_team_provisioning.manifest_generation import (
     register_team_manifests,
 )
 from agent_team_studio.agentic_team_provisioning.models import AgenticTeamAgent
+from shared.manifests import (
+    AGENT_ANATOMY_REF,
+    GENERATED_AGENT_ENTRYPOINT,
+    GENERATED_AGENT_INPUT_REF,
+    GENERATED_AGENT_OUTPUT_REF,
+    build_manifest,
+    io_schema,
+)
 
 
 def _thin(team_id: str, agent_name: str) -> AgenticTeamAgent:
@@ -35,7 +43,9 @@ def test_default_cognition_block_is_batteries_included():
 
 
 def test_build_agent_manifest_validates_and_stamps_cognition():
-    manifest = build_agent_manifest("team-uuid-123", "Triage Agent", summary="Classifies tickets by urgency")
+    manifest = build_agent_manifest(
+        "team-uuid-123", "Triage Agent", summary="Classifies tickets by urgency"
+    )
 
     assert isinstance(manifest, AgentManifest)
     assert manifest.team == "agentic_team_provisioning"
@@ -71,6 +81,39 @@ def test_build_agent_manifest_includes_skill_tags():
     assert "seo" in manifest.tags
     assert "copy" in manifest.tags
     assert manifest.tags.count("seo") == 1
+
+
+def test_build_agent_manifest_delegates_to_shared_builders():
+    import agent_team_studio.agentic_team_provisioning.manifest_generation as mg
+
+    assert not hasattr(mg, "revalidate")
+
+    via_agentic = build_agent_manifest(
+        "team-uuid-123", "Triage Agent", summary="Classifies tickets"
+    )
+    via_shared = build_manifest(
+        id=manifest_agent_id("team-uuid-123", "Triage Agent"),
+        team="agentic_team_provisioning",
+        name="Triage Agent",
+        summary="Classifies tickets",
+        tags=["generated", "agentic_team_provisioning"],
+        inputs=io_schema(
+            None,
+            schema_ref=GENERATED_AGENT_INPUT_REF,
+            ref_description="Roster metadata + user message; a shared entrypoint serves every "
+            "generated agent.",
+            inline_description="Authored input schema.",
+        ),
+        outputs=io_schema(
+            None,
+            schema_ref=GENERATED_AGENT_OUTPUT_REF,
+            ref_description="The agent's response text.",
+            inline_description="Authored output schema.",
+        ),
+        cognition=default_cognition_block(),
+        source=SourceInfo(entrypoint=GENERATED_AGENT_ENTRYPOINT, anatomy_ref=AGENT_ANATOMY_REF),
+    )
+    assert via_agentic == via_shared
 
 
 def test_build_agent_manifest_rejects_empty_team_id():
@@ -191,9 +234,7 @@ def test_register_team_manifests_preserves_existing_skill_tags(monkeypatch: pyte
     monkeypatch.setattr(registry, "get_registry", lambda: reg)
 
     team_id = "team-1"
-    prior = build_agent_manifest(
-        team_id, "A", summary="kept summary", skill_tags=["seo", "copy"]
-    )
+    prior = build_agent_manifest(team_id, "A", summary="kept summary", skill_tags=["seo", "copy"])
     reg.register(prior)
 
     result = register_team_manifests(team_id, [_thin(team_id, "A")])
