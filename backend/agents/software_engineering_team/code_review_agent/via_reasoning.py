@@ -33,17 +33,15 @@ from llm_service.interface import (
     reset_complete_json_observer_state,
     take_complete_json_turns,
 )
-from llm_service.structured import complete_json_response_text, complete_validated
+from llm_service.structured import (
+    _DEFAULT_VALIDATED_FORMAT_INSTRUCTIONS,
+    complete_json_response_text,
+    complete_validated,
+)
 
 logger = logging.getLogger(__name__)
 
 T = TypeVar("T", bound=BaseModel)
-
-_DEFAULT_FORMAT_INSTRUCTIONS = (
-    "Convert the following analysis into a single JSON object matching "
-    "the required schema. Return JSON only — no markdown fences, no "
-    "prose outside the object."
-)
 
 _FORMAT_ANALYSIS_UNTRUSTED_SYSTEM_SUFFIX = (
     "\n\n---\n"
@@ -393,7 +391,7 @@ def complete_validated_via_reasoning_local(
     )
     prose = _require_reasoning_prose(raw_prose)
     format_prompt = (
-        f"{_DEFAULT_FORMAT_INSTRUCTIONS}\n\n{formatting_instructions}\n\n"
+        f"{_DEFAULT_VALIDATED_FORMAT_INSTRUCTIONS}\n\n{formatting_instructions}\n\n"
         f"{wrap_with_analysis_delimiters(prose)}"
     )
     _invoke_start_observer(
@@ -501,7 +499,7 @@ def run_agent_via_reasoning(
     prose = _require_reasoning_prose(raw_prose)
 
     format_prompt = (
-        f"{_DEFAULT_FORMAT_INSTRUCTIONS}\n\n{formatting_instructions}\n\n"
+        f"{_DEFAULT_VALIDATED_FORMAT_INSTRUCTIONS}\n\n{formatting_instructions}\n\n"
         f"{wrap_with_analysis_delimiters(prose)}"
     )
     format_system = formatting_system_prompt_with_untrusted_guard(formatting_system_prompt)

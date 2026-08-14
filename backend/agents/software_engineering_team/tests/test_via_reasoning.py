@@ -13,6 +13,7 @@ from llm_service.interface import (
     LLMSemanticExhaustionError,
     LLMTruncatedError,
 )
+from llm_service.structured import _DEFAULT_VALIDATED_FORMAT_INSTRUCTIONS
 from software_engineering_team.code_review_agent.via_reasoning import (
     complete_validated_via_reasoning_local,
     formatting_system_prompt_with_untrusted_guard,
@@ -129,6 +130,7 @@ def test_validated_via_reasoning_sequences_reason_then_format() -> None:
     assert client.format_calls[0]["think"] is False
     assert "REVIEW PROSE" in client.format_calls[0]["prompt"]
     assert "Return {" in client.format_calls[0]["prompt"]
+    assert _DEFAULT_VALIDATED_FORMAT_INSTRUCTIONS in client.format_calls[0]["prompt"]
 
 
 def test_validated_via_reasoning_honors_reasoning_think_false() -> None:
