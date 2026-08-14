@@ -6,6 +6,7 @@ native ``ValueError`` / ``LookupError`` propagate unchanged.
 
 from __future__ import annotations
 
+import time
 from unittest.mock import Mock
 
 import pytest
@@ -163,3 +164,32 @@ def test_send_message_preserves_keyerror(service: Mock) -> None:
     assert type(ei.value) is KeyError
     assert isinstance(ei.value, LookupError)
     assert not isinstance(ei.value, ApplicationError)
+
+
+# ── dispatch timeout (replaces the former Temporal activity/execute caps) ────────
+
+
+def test_authoring_timeout_matches_former_activity_cap() -> None:
+    """In-process CRUD must keep the 180s cap the Temporal activity used."""
+    assert dispatch.AUTHORING_TIMEOUT_S == 180.0
+
+
+def test_send_message_timeout_raises_runtime_error(
+    monkeypatch: pytest.MonkeyPatch, service: Mock
+) -> None:
+    """A stalled LLM turn must not occupy the caller until the provider timeout."""
+    monkeypatch.setattr(dispatch, "AUTHORING_TIMEOUT_S", 0.05)
+    service.send_message.side_effect = lambda *_a, **_k: time.sleep(1.0)
+
+    with pytest.raises(RuntimeError, match="dispatch timeout"):
+        dispatch.send_message("c9", "make a planner")
+
+
+def test_start_conversation_timeout_raises_runtime_error(
+    monkeypatch: pytest.MonkeyPatch, service: Mock
+) -> None:
+    monkeypatch.setattr(dispatch, "AUTHORING_TIMEOUT_S", 0.05)
+    service.start_conversation.side_effect = lambda *_a, **_k: time.sleep(1.0)
+
+    with pytest.raises(RuntimeError, match="dispatch timeout"):
+        dispatch.start_conversation("new", None, "hi")
