@@ -108,6 +108,21 @@ def test_append_transcript_entries_swallows_db_errors(monkeypatch) -> None:
     assert store.append_review_transcript_entries("j", [{"stage": "chunk_review"}]) is False
 
 
+def test_unpersisted_transcript_entries_skips_known_ids() -> None:
+    from software_engineering_team.review_history_store import unpersisted_transcript_entries
+
+    existing = [{"entry_id": "a", "prompt": "old"}, {"prompt": "legacy"}]
+    incoming = [
+        {"entry_id": "a", "prompt": "retry"},
+        {"entry_id": "b", "prompt": "new"},
+        {"prompt": "no-id"},
+    ]
+    assert unpersisted_transcript_entries(existing, incoming) == [
+        {"entry_id": "b", "prompt": "new"},
+        {"prompt": "no-id"},
+    ]
+
+
 def test_get_review_transcript_none_when_postgres_disabled(monkeypatch) -> None:
     monkeypatch.setattr(store, "is_postgres_enabled", lambda: False)
     assert store.get_review_transcript("j") is None

@@ -160,6 +160,24 @@ def test_transcript_entries_batched_in_one_call_preserve_order() -> None:
     assert [e["target"] for e in entries] == ["a.py", "b.py", ""]
 
 
+def test_append_transcript_retry_same_entry_ids_does_not_duplicate() -> None:
+    record_review_start("j1", "o", "r", 7, "u", "alice")
+    batch = [
+        {
+            "entry_id": "e1",
+            "stage": "chunk_review",
+            "target": "a.py",
+            "prompt": "p1",
+            "response": "r1",
+        }
+    ]
+    assert append_review_transcript_entries("j1", batch) is True
+    assert append_review_transcript_entries("j1", batch) is True
+    entries = get_review_transcript("j1")
+    assert len(entries) == 1
+    assert entries[0]["entry_id"] == "e1"
+
+
 def test_append_transcript_entries_returns_true_on_success() -> None:
     record_review_start("j1", "o", "r", 7, "u", "alice")
     assert (

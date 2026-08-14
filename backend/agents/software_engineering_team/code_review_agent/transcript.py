@@ -45,8 +45,10 @@ shared, cross-team ring buffer.
 
 from __future__ import annotations
 
+import json
 import logging
 import threading
+import uuid
 from collections import deque
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Optional
@@ -124,6 +126,32 @@ def model_label(model: Any) -> str:
     return type(model).__name__
 
 
+def _should_prefix_system_prompt(prompt: str, system_prompt: str) -> bool:
+    """True when ``system_prompt`` should be prepended onto ``prompt``.
+
+    Preconditions:
+        ``prompt`` is the user/messages text for this turn. ``system_prompt``
+        may be empty.
+    Postconditions:
+        Returns False when ``system_prompt`` is blank, when ``prompt`` already
+        starts with a ``[system]`` section, or when ``prompt`` is a JSON list
+        of chat messages that already includes a ``role=system`` item.
+        Otherwise True.
+    """
+    if not system_prompt:
+        return False
+    stripped = prompt.lstrip()
+    if stripped.startswith("[system]"):
+        return False
+    try:
+        data = json.loads(prompt)
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return True
+    if isinstance(data, list):
+        return not any(isinstance(item, dict) and item.get("role") == "system" for item in data)
+    return True
+
+
 def record_transcript_entry(
     stage: str,
     target: str,
@@ -166,17 +194,27 @@ def record_transcript_entry(
           the oldest buffered entry is dropped so a stalled or disabled flush
           can never grow this process's memory without bound. The recorded
           ``prompt`` field is ``prompt`` prefixed with a ``[system]``/``[user]``
-          section split when ``system_prompt`` is non-blank, else ``prompt``
-          unchanged. Never raises: any failure in buffering is logged and
-          swallowed so transcript recording cannot break a review.
+          section split when ``system_prompt`` is non-blank *and* ``prompt``
+          does not already embed that system message (a serialized
+          ``messages`` JSON array from an Ollama continuation already includes
+          ``role: system``; prepending again would duplicate it). Else
+          ``prompt`` is stored unchanged. Each entry carries a unique
+          ``entry_id`` so a retried flush can be appended idempotently.
+          Never raises: any failure in buffering is logged and swallowed so
+          transcript recording cannot break a review.
     """
     try:
         job_id = current_attribution().job_id
         if not job_id or not is_postgres_enabled():
             return
-        full_prompt = f"[system]\n{system_prompt}\n\n[user]\n{prompt}" if system_prompt else prompt
+        full_prompt = (
+            f"[system]\n{system_prompt}\n\n[user]\n{prompt}"
+            if _should_prefix_system_prompt(prompt, system_prompt)
+            else prompt
+        )
         started_at = datetime.now(timezone.utc) - timedelta(milliseconds=max(duration_ms, 0.0))
         entry = {
+            "entry_id": str(uuid.uuid4()),
             "stage": stage,
             "target": target,
             "model": model,

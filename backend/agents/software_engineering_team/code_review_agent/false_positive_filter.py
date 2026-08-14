@@ -64,7 +64,7 @@ from strands.agent.conversation_manager import SlidingWindowConversationManager
 from strands.models.model import Model as _StrandsModel
 
 from llm_service import LLMClient
-from llm_service.interface import observer_turn_started_monotonic
+from llm_service.interface import observer_turn_started_monotonic, take_complete_json_turns
 from shared.concurrency import parallel_map
 from shared.env import env_flag_enabled
 from software_engineering_team.shared.context_sizing import parse_env_int
@@ -1955,6 +1955,41 @@ def _agent_read_the_cited_file(agent: Agent, index: CodebaseIndex, file_path: st
         return False
 
 
+def _reasoning_turns_from_agent_messages(
+    agent: Agent,
+    fallback_prompt: str,
+    started: float,
+) -> list[tuple[str, str, float]]:
+    """Split a Strands conversation into one transcript turn per assistant message.
+
+    Preconditions:
+        ``agent.messages`` is the completed reasoning conversation (may be
+        empty or malformed). ``started`` is monotonic time from before the
+        Agent run.
+    Postconditions:
+        Returns ``(prompt, response, started)`` triples in conversation order:
+        each assistant message is a response whose prompt is the JSON of prior
+        messages (or ``fallback_prompt`` when the prefix is empty). Returns
+        an empty list when there are no assistant messages.
+    """
+    try:
+        messages = list(getattr(agent, "messages", []) or [])
+    except Exception:  # noqa: BLE001 - transcript fallback must never break verification
+        return []
+    turns: list[tuple[str, str, float]] = []
+    for index, message in enumerate(messages):
+        if not isinstance(message, dict) or message.get("role") != "assistant":
+            continue
+        prefix = messages[:index]
+        try:
+            prompt = json.dumps(prefix, default=str) if prefix else fallback_prompt
+            response = json.dumps(message, default=str)
+        except Exception:  # noqa: BLE001
+            continue
+        turns.append((prompt, response, started))
+    return turns
+
+
 def _verify_group(
     model: _StrandsModel,
     index: CodebaseIndex,
@@ -1983,15 +2018,13 @@ def _verify_group(
           "keep", so an ungrounded drop never reaches the merge (see
           ``_agent_read_the_cited_file``).
         - On a successful call, buffers ``false_positive_filter`` transcript
-          entries (target ``file_path``, the full prompt) for later batched,
-          off-hot-path persistence to ``code_review_transcripts`` — see
-          ``transcript.record_transcript_entry``. The reasoning-pass response
-          is the full ``agent.messages`` conversation (JSON), not just the
-          final text: this call is tool-using (``read_file``), so one
-          invocation can span several model turns (a toolUse request, its
-          toolResult, then a follow-up model turn), and recording only the
-          final text would silently drop the intermediate turns from the
-          "thinking process" transcript. Each formatting-pass callback is a
+          entries (target ``file_path``) for later batched, off-hot-path
+          persistence to ``code_review_transcripts`` — see
+          ``transcript.record_transcript_entry``. The reasoning pass records
+          one entry per underlying model invocation (tool-use request and the
+          follow-up after ``read_file``), using inner HTTP turns when the
+          Strands adapter recorded them, otherwise one entry per assistant
+          message in ``agent.messages``. Each formatting-pass callback is a
           separate entry (format prompt + JSON reply, including continuation
           turns). A no-op when no ``job_id`` is bound on the current
           ``llm_attribution`` context (see ``CodeReviewAgent.run``); never
@@ -1999,15 +2032,21 @@ def _verify_group(
     """
     prompt = _build_group_prompt(index, file_path, issues, input_data)
     reasoning_agent: Agent | None = None
+    reasoning_turns: list[tuple[str, str, float]] = []
     format_turns: list[tuple[str, str, float]] = []
     started = time.monotonic()
     reasoning_done_at = started
     format_turn_started_at: float | None = None
 
     def _capture_reasoning_agent(agent: Agent) -> None:
-        nonlocal reasoning_agent, reasoning_done_at
+        nonlocal reasoning_agent, reasoning_done_at, reasoning_turns
         reasoning_agent = agent
         reasoning_done_at = time.monotonic()
+        recorded = take_complete_json_turns()
+        if recorded:
+            reasoning_turns = recorded
+        else:
+            reasoning_turns = _reasoning_turns_from_agent_messages(agent, prompt, started)
 
     def _on_formatting_start() -> None:
         nonlocal format_turn_started_at
@@ -2041,7 +2080,23 @@ def _verify_group(
         # pass, so a malformed reply is still visible in the transcript. A
         # reasoning-pass exception that never constructed the agent is a no-op.
         now = time.monotonic()
-        if reasoning_agent is not None:
+        if reasoning_turns:
+            for index, (turn_prompt, turn_response, turn_started) in enumerate(reasoning_turns):
+                ended = (
+                    reasoning_turns[index + 1][2]
+                    if index + 1 < len(reasoning_turns)
+                    else reasoning_done_at
+                )
+                record_transcript_entry(
+                    "false_positive_filter",
+                    file_path,
+                    turn_prompt,
+                    turn_response,
+                    system_prompt=FALSE_POSITIVE_VERIFY_REASONING_SYSTEM_PROMPT,
+                    model=model_label(model),
+                    duration_ms=max(0.0, (ended - turn_started) * 1000),
+                )
+        elif reasoning_agent is not None:
             try:
                 transcript_response = json.dumps(reasoning_agent.messages, default=str)
             except Exception:  # noqa: BLE001 - transcript recording must never break verification

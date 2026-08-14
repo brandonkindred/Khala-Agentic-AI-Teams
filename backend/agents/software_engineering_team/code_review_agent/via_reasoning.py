@@ -489,6 +489,7 @@ def run_agent_via_reasoning(
     if conversation_manager is not None:
         reasoning_agent_kwargs["conversation_manager"] = conversation_manager
     reasoning_agent = Agent(**reasoning_agent_kwargs)
+    reset_complete_json_observer_state()
     try:
         raw_prose = str(reasoning_agent(reasoning_prompt))
     except LLMError:
@@ -517,9 +518,7 @@ def run_agent_via_reasoning(
         if max_tokens is not None:
             format_kwargs["max_tokens"] = max_tokens
         reset_complete_json_observer_state()
-        _invoke_start_observer(
-            "run_agent_via_reasoning: on_formatting_start", on_formatting_start
-        )
+        _invoke_start_observer("run_agent_via_reasoning: on_formatting_start", on_formatting_start)
         try:
             data = backing_client.complete_json(format_prompt, **format_kwargs)
         except LLMJsonParseError as exc:
@@ -558,9 +557,7 @@ def run_agent_via_reasoning(
         system_prompt=format_system,
         tools=[],
     )
-    _invoke_start_observer(
-        "run_agent_via_reasoning: on_formatting_start", on_formatting_start
-    )
+    _invoke_start_observer("run_agent_via_reasoning: on_formatting_start", on_formatting_start)
     raw = str(formatting_agent(format_prompt)).strip()
     _invoke_observer(
         "run_agent_via_reasoning: on_formatting",

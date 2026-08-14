@@ -2313,11 +2313,9 @@ def test_verify_group_disables_strands_tool_result_truncation(monkeypatch) -> No
 
 
 def test_verify_group_records_full_tool_loop_in_transcript(monkeypatch) -> None:
-    """The durable transcript entry for a tool-using verification call must
-    capture every model turn (the toolUse request, its toolResult, and the
-    follow-up model turn), not just the final text answer -- otherwise the
-    transcript silently drops the intermediate turns for the one call site
-    that actually uses tools."""
+    """The durable transcript must record each reasoning model invocation
+    (toolUse request and the follow-up after read_file) as its own call, plus
+    the formatting pass -- not one collapsed conversation blob."""
     from llm_service import llm_attribution
 
     captured: List[Any] = []
@@ -2331,20 +2329,17 @@ def test_verify_group_records_full_tool_loop_in_transcript(monkeypatch) -> None:
     with llm_attribution(job_id="job-1"):
         filter_false_positives(stub, _input(), [keep])
 
-    assert len(captured) == 2
-    _stage, _target, _prompt, response = captured[0]
-    # A single-turn call would just be [user, assistant] (2 messages) or even
-    # a bare final-text string; the simulated read_file round-trip must widen
-    # this to at least [user, assistant(toolUse), user(toolResult), assistant(final)].
-    messages = json.loads(response)
-    assert isinstance(messages, list)
-    assert len(messages) >= 3
-    assert any(
-        isinstance(block, dict) and "toolUse" in block
-        for message in messages
-        for block in (message.get("content") or [])
-        if isinstance(block, dict)
-    )
+    reasoning_entries = [args for args in captured if args[0] == "false_positive_filter"]
+    assert len(reasoning_entries) >= 3
+    tool_use_seen = False
+    for args in reasoning_entries[:-1]:
+        _stage, _target, prompt, response = args
+        blob = f"{prompt}\n{response}"
+        if "toolUse" in blob or "read_file" in blob or "__tool_calls__" in blob:
+            tool_use_seen = True
+    assert tool_use_seen
+    format_prompt, format_response = reasoning_entries[-1][2], reasoning_entries[-1][3]
+    assert "verdicts" in format_prompt.lower() or "is_real_issue" in format_response
 
 
 def test_filter_drop_log_truncates_description(caplog) -> None:

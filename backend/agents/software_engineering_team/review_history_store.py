@@ -204,6 +204,30 @@ def update_review(
     _best_effort_write("update_review", _write)
 
 
+def unpersisted_transcript_entries(
+    existing: list[Any],
+    incoming: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Return ``incoming`` entries that are not already stored.
+
+    Preconditions:
+        ``existing`` is the current JSONB array (list of dicts). ``incoming``
+        is the batch the flusher wants to append.
+    Postconditions:
+        Returns the subset of ``incoming`` (same order) whose ``entry_id`` is
+        missing or not present on any existing dict. Entries without
+        ``entry_id`` are always included.
+    """
+    seen = {
+        item.get("entry_id") for item in existing if isinstance(item, dict) and item.get("entry_id")
+    }
+    return [
+        entry
+        for entry in incoming
+        if not (isinstance(entry, dict) and entry.get("entry_id") and entry["entry_id"] in seen)
+    ]
+
+
 @timed_query(store=_STORE, op="append_review_transcript_entries")
 def append_review_transcript_entries(job_id: str, entries: list[dict[str, Any]]) -> bool:
     """Append a batch of LLM-call entries to a review's durable transcript.
@@ -231,9 +255,12 @@ def append_review_transcript_entries(job_id: str, entries: list[dict[str, Any]])
           (starting from an empty array) on the first call for a given
           ``job_id``, and returns ``True``. Concurrent callers for the same
           ``job_id`` (the background flusher may drain from more than one
-          process) each append exactly their own batch — the ``||`` (JSONB
-          concatenation) read-modify-write happens server-side in one
-          statement, so no entry is lost to a last-writer-wins race.
+          process) each append exactly their own batch — the row is locked
+          for the read-modify-write so no entry is lost to a last-writer-wins
+          race. Entries that already appear in the stored array (matched by
+          ``entry_id``) are skipped, so a flush that committed but then
+          raised to the client can be retried without duplicating calls.
+          Incoming dicts without ``entry_id`` always append (legacy batches).
         - Returns ``False`` without writing anything when Postgres is
           unavailable, ``entries`` is empty, or the write itself fails (logged
           as a warning). Never raises.
@@ -245,11 +272,24 @@ def append_review_transcript_entries(job_id: str, entries: list[dict[str, Any]])
         with get_conn() as conn, conn.cursor() as cur:
             cur.execute(
                 """INSERT INTO code_review_transcripts (job_id, entries)
-                       VALUES (%s, %s)
-                   ON CONFLICT (job_id) DO UPDATE
-                       SET entries = code_review_transcripts.entries || EXCLUDED.entries""",
-                (job_id, Json(list(entries))),
+                       VALUES (%s, '[]'::jsonb)
+                   ON CONFLICT (job_id) DO NOTHING""",
+                (job_id,),
             )
+            cur.execute(
+                "SELECT entries FROM code_review_transcripts WHERE job_id = %s FOR UPDATE",
+                (job_id,),
+            )
+            row = cur.fetchone()
+            existing = list(row[0] or []) if row else []
+            to_add = unpersisted_transcript_entries(existing, list(entries))
+            if to_add:
+                cur.execute(
+                    """UPDATE code_review_transcripts
+                          SET entries = entries || %s
+                        WHERE job_id = %s""",
+                    (Json(to_add), job_id),
+                )
         return True
     except Exception:  # noqa: BLE001 - caller (the flusher) decides whether to requeue
         logger.warning("code_review_runs: append_review_transcript_entries failed", exc_info=True)

@@ -83,6 +83,7 @@ def test_record_builds_entry_fields(monkeypatch) -> None:
     assert entry["model"] == "m"
     assert entry["duration_ms"] == 42
     assert entry["started_at"]  # non-empty ISO timestamp
+    assert entry["entry_id"]
 
 
 def test_record_prepends_system_prompt_when_supplied(monkeypatch) -> None:
@@ -109,6 +110,38 @@ def test_record_prepends_system_prompt_when_supplied(monkeypatch) -> None:
     assert "be a reviewer" in entry["prompt"]
     assert "user-text" in entry["prompt"]
     assert entry["prompt"].index("be a reviewer") < entry["prompt"].index("user-text")
+
+
+def test_record_does_not_duplicate_system_prompt_already_in_messages_json(monkeypatch) -> None:
+    """Continuation observers serialize the full messages list, which already
+    includes the system role. Prefixing ``system_prompt`` again would show the
+    instruction twice in the transcript."""
+    import json
+
+    captured: list = []
+
+    def _write(job_id, entries):
+        captured.append((job_id, entries))
+        return True
+
+    monkeypatch.setattr(
+        "software_engineering_team.review_history_store.append_review_transcript_entries",
+        _write,
+    )
+    messages = json.dumps(
+        [
+            {"role": "system", "content": "be a reviewer"},
+            {"role": "user", "content": "continue"},
+        ]
+    )
+    with llm_attribution(job_id="job-1"):
+        transcript.record_transcript_entry(
+            "chunk_review", "a.py", messages, "resp", system_prompt="be a reviewer"
+        )
+    transcript.drain()
+    prompt = captured[0][1][0]["prompt"]
+    assert prompt == messages
+    assert prompt.count("be a reviewer") == 1
 
 
 def test_record_leaves_prompt_unchanged_without_system_prompt(monkeypatch) -> None:
