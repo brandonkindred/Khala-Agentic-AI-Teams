@@ -391,6 +391,8 @@ def merge_unflushed(
         entries sorted by ``started_at`` (same order as the durable GET).
         Never raises.
     """
+    extra: list[dict[str, Any]] = []
+    loaded: list[dict[str, Any]] = []
     try:
         with _drain_exec_lock:
             extra = _snapshot_unflushed(job_id) if job_id else []
@@ -400,9 +402,9 @@ def merge_unflushed(
         logger.warning("code review transcript: merge_unflushed failed", exc_info=True)
         try:
             loaded = durable() if callable(durable) else list(durable or [])
+            loaded = loaded or []
         except Exception:  # noqa: BLE001
             loaded = []
-        extra = []
     if not extra:
         return loaded
     return sorted(list(loaded) + extra, key=lambda e: e.get("started_at") or "")

@@ -627,6 +627,8 @@ def _compact_for_review(
         (no-op when no ``job_id`` is bound). Cache hits make no LLM call and
         record nothing.
     """
+    if max_chars < 0:
+        raise ValueError("max_chars must be a non-negative character budget")
     last = time.monotonic()
 
     def _on_attempt(prompt: str, response: str) -> None:

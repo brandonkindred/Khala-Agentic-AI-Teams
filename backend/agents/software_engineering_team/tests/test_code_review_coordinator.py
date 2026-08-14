@@ -24,6 +24,7 @@ from code_review_agent.coordinator import (
     MAX_CODE_REVIEW_ISSUES,
     MIN_SPLIT_SEGMENT_CHARS,
     _cap_issues,
+    _compact_for_review,
     _is_content_failure,
     _issues_from_chunk_output,
     _map_parallelism,
@@ -2322,6 +2323,14 @@ def test_resolve_code_review_model_think_off_uses_real_factory(monkeypatch) -> N
     assert model.get_config().get("think") is False
     # The default (think=None) path stays on the provider default.
     assert resolve_code_review_model(object()).get_config().get("think") is None
+
+
+def test_compact_for_review_rejects_negative_max_chars() -> None:
+    """The documented non-negative budget is enforced, not left to slice quirks."""
+    from llm_service.clients.dummy import DummyLLMClient
+
+    with pytest.raises(ValueError, match="non-negative"):
+        _compact_for_review("text", -1, DummyLLMClient(), "spec")
 
 
 def test_not_reviewed_range_label_edge_cases() -> None:

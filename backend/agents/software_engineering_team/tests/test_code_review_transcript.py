@@ -395,6 +395,25 @@ def test_unflushed_entries_returns_requeued_batch(monkeypatch) -> None:
     assert transcript.merge_unflushed("job-1", [{"stage": "durable"}])[0]["stage"] == "durable"
 
 
+def test_merge_unflushed_keeps_buffer_when_first_durable_load_fails() -> None:
+    """A blip while loading durable rows must not wipe the buffer snapshot
+    already taken under the drain lock — otherwise GET drops in-flight entries."""
+    calls = {"n": 0}
+
+    def _durable() -> list[dict]:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("blip")
+        return [{"stage": "durable", "started_at": "a"}]
+
+    with llm_attribution(job_id="job-1"):
+        transcript.record_transcript_entry("chunk_review", "a.py", "p", "r")
+    merged = transcript.merge_unflushed("job-1", _durable)
+    assert calls["n"] == 2
+    assert any(e.get("stage") == "durable" for e in merged)
+    assert any(e.get("target") == "a.py" for e in merged)
+
+
 def test_merge_unflushed_loads_durable_after_in_flight_drain(monkeypatch) -> None:
     """GET must not snapshot an empty buffer against a durable list that was
     read before an in-flight persist committed — the loader runs after waiting
