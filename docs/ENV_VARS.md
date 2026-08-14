@@ -354,6 +354,11 @@ and small payloads are nowhere near the warning threshold anyway).
 ### SECURITY_GATEWAY_ENABLED
 Security gateway toggle (default: true).
 
+Unified-API lifespan worker/route registration (which step boots which worker,
+which routers mount at import time vs inside `lifespan()`) is catalogued in
+[`UNIFIED_API_LIFESPAN.md`](UNIFIED_API_LIFESPAN.md). The toggles below are the
+gates for those steps.
+
 ### UNIFIED_API_SANDBOX_TEMPORAL_WORKER
 Platform sandbox reaper/worker toggle (default: true). When true, the
 unified-api `lifespan` starts the platform sandbox idle reaper — a
@@ -1683,6 +1688,14 @@ Bounds the concurrent per-issue `blocked_by` dependency fetches that enrich
 with the issues it depends on so the UI can flag blocked issues; the lookups fan out under a
 semaphore of this width (default `8`). A failed/absent lookup degrades to no dependencies for that
 issue and never fails the list.
+
+### SE_EXECUTION_WAVE_CONCURRENCY
+Maximum number of microtask workers the code-v2 execution loops
+(`run_execution_impl` / `run_gated_execution_impl`) dispatch concurrently within
+one independent wave (default `4`; garbage/empty → default; floored at `1`).
+`parallel_map` sizes the pool at `min(this, wave size)`, so a large planner
+wave cannot spawn one thread per microtask. Cycle-flush batches with intra-batch
+edges still run sequentially.
 
 ### CODING_TEAM_REVIEW_RETRIES
 Number of times the coding-team Tech Lead `run_code_review` LLM call is retried (with jittered

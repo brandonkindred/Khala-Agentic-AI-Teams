@@ -78,7 +78,8 @@ activities are exported from `agent_platform.sandbox.temporal` as `SANDBOX_WORKF
 (`agent_platform.sandbox.temporal.constants`), served only by a worker started
 explicitly from `unified_api/main.py`'s own lifespan
 (`start_agent_platform_sandbox_temporal_worker_thread`) — never by the
-main provisioning worker that team_service boots on `TASK_QUEUE`. Sharing a
+main provisioning worker that team_service boots on `TASK_QUEUE`. Full
+lifespan catalog: [`docs/UNIFIED_API_LIFESPAN.md`](../../../../docs/UNIFIED_API_LIFESPAN.md). Sharing a
 task queue between the two would let Temporal dispatch a sandbox activity into
 that other process,
 against a different, unsynchronized `Lifecycle` instance than the one this
