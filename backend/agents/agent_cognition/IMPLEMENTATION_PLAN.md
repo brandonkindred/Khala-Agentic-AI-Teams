@@ -206,7 +206,7 @@ flowchart TB
 
 ### Step 9 — Manifest `CognitionSpec`
 - **Goal:** Declarative per-agent cognition config.
-- **Files:** add optional `CognitionSpec` to `agent_registry/models.py` (memory retention,
+- **Files:** add optional `CognitionSpec` to `agent_platform/registry/models.py` (memory retention,
   tools, rule_packs, `requires_idempotency_key`); loader tolerates its absence (lazy, like
   `InvokeSpec`/`SandboxSpec`).
 - **Depends:** 1
@@ -254,7 +254,7 @@ flowchart TB
   `agent_cognition_runs` rows past an idempotency TTL**. It does **not** touch `in_progress`
   rows — expired-lease reclaim is handled lazily by `claim_run` (Step 8) so the `request_hash`
   survives for retry policing. Started/cancelled in the unified_api lifespan (mirror
-  `agent_console.prune.run_pruner`).
+  `agent_platform.console.prune.run_pruner`).
 - **Depends:** 3, 6
 - **✅ Acceptance:** tick rolls up due agents; clean cancel on shutdown; shares the idempotent
   function so it can't double-produce against the lazy path; **events past retention are

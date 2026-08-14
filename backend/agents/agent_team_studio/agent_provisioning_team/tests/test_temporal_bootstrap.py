@@ -61,9 +61,7 @@ def test_importing_temporal_package_does_not_call_start_team_worker():
         importlib.import_module("agent_team_studio.agent_provisioning_team.temporal")
         importlib.import_module("agent_team_studio.agent_provisioning_team.temporal.workflows")
         importlib.import_module("agent_team_studio.agent_provisioning_team.temporal.start_workflow")
-        importlib.import_module(
-            "agent_team_studio.agent_provisioning_team.temporal.sandbox_dispatch"
-        )
+        importlib.import_module("agent_platform.sandbox.temporal.dispatch")
         assert patched.call_count == 0, (
             f"Module-level start_team_worker bootstrap re-introduced "
             f"(call count = {patched.call_count}); importing from unified-api "

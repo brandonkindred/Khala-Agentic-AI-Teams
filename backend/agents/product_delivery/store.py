@@ -1,6 +1,6 @@
 """Postgres data-access layer for the Product Delivery team.
 
-Mirrors :mod:`agent_console.store` in shape:
+Mirrors :mod:`agent_platform.console.store` in shape:
 
 * stateless class — pool lives in ``shared.postgres``;
 * one public method per operation, decorated with ``@timed_query``;
