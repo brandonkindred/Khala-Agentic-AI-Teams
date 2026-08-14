@@ -1227,17 +1227,16 @@ def test_restore_documentation_with_none_onboarding() -> None:
 def test_llm_client_is_not_configured_by_default() -> None:
     from agent_team_studio.agent_provisioning_team.shared.llm_client import LLMClient
 
-    assert LLMClient().is_configured is False
+    assert LLMClient(model="").is_configured is False
 
 
-def test_llm_client_complete_raises_when_configured(monkeypatch) -> None:
+def test_llm_client_complete_falls_back_when_unconfigured() -> None:
+    import asyncio
+
     from agent_team_studio.agent_provisioning_team.shared.llm_client import LLMClient, LLMRequest
 
-    client = LLMClient()
-    # Trick is_configured into True via monkeypatch on the property's getter.
-    with patch.object(type(client), "is_configured", property(lambda self: True)):
-        with pytest.raises(NotImplementedError):
-            client.complete(LLMRequest(system="s", user="u"))
+    client = LLMClient(model="")
+    assert asyncio.run(client.complete(LLMRequest(system="s", user="u"))) == "[llm-fallback] u"
 
 
 def test_sanitize_prompt_var_default_max() -> None:
