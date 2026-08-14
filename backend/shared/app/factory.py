@@ -7,10 +7,12 @@ then :func:`shared.observability.instrument_fastapi_app`. :func:`create_team_app
 collapses that boilerplate into one call while leaving room for team-specific
 startup/shutdown work via optional hooks.
 
-Degrades cleanly: ``postgres_schema=None`` skips all Postgres wiring, and the
-``shared.postgres`` import is lazy so a team without it is never forced to depend
-on it. Schema registration and pool teardown are defensive (logged, never raised
-into app startup), matching the per-team lifespans this replaces.
+Degrades cleanly: ``postgres_schema=None`` skips schema registration. Pool
+teardown still runs because the LLM usage flusher may have opened the default
+shared pool. The ``shared.postgres`` import is lazy so a team without it is
+never forced to depend on it at import time. Schema registration and pool
+teardown are defensive (logged, never raised into app startup), matching the
+per-team lifespans this replaces.
 """
 
 from __future__ import annotations
@@ -47,6 +49,68 @@ async def _maybe_call(hook: Optional[LifecycleHook]) -> None:
         await result
 
 
+def _register_usage_flusher(team_key: str) -> None:
+    """Register the process-local LLM usage observer + drain heartbeat.
+
+    The observer registry lives in this process. Unified API registration cannot
+    see LLM calls made by a team-service worker, so every team app must register
+    here. Idempotent; no-op when Postgres is unset. Failures are logged and never
+    raised into app startup.
+
+    Preconditions:
+        - ``team_key`` is a non-empty string used only in log messages.
+    Postconditions:
+        - ``register_usage_flusher`` has been invoked, or a failure was logged
+          and startup continues.
+    """
+    try:
+        from llm_service.usage_flusher import register_usage_flusher
+
+        register_usage_flusher()
+    except Exception:
+        logger.warning("%s llm usage flusher registration failed", team_key, exc_info=True)
+
+
+def _shutdown_usage_flusher(team_key: str) -> None:
+    """Drain buffered LLM usage rows before the process-wide Postgres pool closes.
+
+    Preconditions:
+        - ``team_key`` is a non-empty string used only in log messages.
+    Postconditions:
+        - ``usage_flusher.shutdown`` has been invoked (unregister then drain), or
+          a failure was logged. Never raises.
+    """
+    try:
+        from llm_service.usage_flusher import shutdown as usage_flush_shutdown
+
+        usage_flush_shutdown()
+    except Exception:
+        logger.warning("%s llm usage flusher shutdown failed", team_key, exc_info=True)
+
+
+def _stop_in_process_temporal_workers(team_key: str) -> None:
+    """Stop in-process Temporal workers before usage-flusher / Postgres teardown.
+
+    Team-service containers start a Temporal worker from the generated wrapper.
+    Many teams (e.g. personal assistant) supply no ``on_shutdown`` hook, so this
+    factory teardown is the only place that can join that worker before the
+    usage observer unregisters and the shared pool closes.
+
+    Preconditions:
+        - ``team_key`` is a non-empty string used only in log messages.
+        - Safe to call when no workers are registered (no-op).
+    Postconditions:
+        - :func:`shared.temporal.worker.stop_all_team_workers` has been invoked.
+          Failures are logged and swallowed. Never raises.
+    """
+    try:
+        from shared.temporal.worker import stop_all_team_workers
+
+        stop_all_team_workers()
+    except Exception:
+        logger.warning("%s in-process Temporal worker shutdown failed", team_key, exc_info=True)
+
+
 def create_team_app(
     *,
     service_name: str,
@@ -74,10 +138,12 @@ def create_team_app(
         - ``fastapi_kwargs`` must not contain ``lifespan`` (set explicitly here);
           passing it raises ``ValueError``. ``title``/``version`` are named
           parameters, so duplicating them raises ``TypeError`` from Python itself.
-        - ``on_startup`` runs after schema registration; ``on_shutdown`` runs
-          before the pool is closed. Teardown (``on_shutdown`` + pool close) runs
-          even if ``on_startup`` **or** ``on_shutdown`` raises, so neither a
-          startup nor a shutdown failure ever leaks the pool.
+        - ``on_startup`` runs after schema registration and LLM-usage-flusher
+          registration; ``on_shutdown`` runs before in-process Temporal workers
+          are stopped, the usage flusher drains, and the pool is closed.
+          Teardown (``on_shutdown`` + worker stop + usage flush + pool close)
+          runs even if ``on_startup`` **or** ``on_shutdown`` raises, so neither
+          a startup nor a shutdown failure ever leaks the pool.
     Postconditions:
         - :func:`init_otel` has been called and the returned app is OTel-
           instrumented; ``excluded_urls`` (when given) is forwarded to the
@@ -85,10 +151,15 @@ def create_team_app(
           business route whose path contains ``metrics`` stays traced. Its
           lifespan registers every schema in ``postgres_schema`` plus
           ``extra_postgres_schemas`` on startup and closes the Postgres pool on
-          shutdown (both no-ops/guarded when Postgres is unconfigured), wrapping
-          the optional hooks. A single schema's registration failure is logged
-          and does not stop the remaining schemas from registering. ``fastapi_kwargs``
-          pass through to the ``FastAPI`` constructor.
+          wrapping the optional hooks. The same lifespan registers the process-local
+          LLM usage flusher after schema registration and, on shutdown, stops
+          in-process Temporal workers, then shuts the flusher down after
+          ``on_shutdown`` and before ``close_pool``. Pool close always runs after
+          that drain, even when ``postgres_schema`` is ``None``, because the
+          flusher may have opened the default shared pool. A single schema's
+          registration failure is logged and does not stop the remaining schemas
+          from registering. ``fastapi_kwargs`` pass through to the ``FastAPI``
+          constructor.
         - The returned app exposes its ``postgres_schema`` (the given
           ``TeamSchema`` or ``None``, unchanged for backward compatibility) via
           ``app.state.postgres_schema``, and the full combined set (primary
@@ -97,8 +168,9 @@ def create_team_app(
           team-service wrapper) can register every schema's DDL before starting
           background workers that write to it.
     Invariants:
-        - Postgres wiring fires iff the combined schema set (``postgres_schema``
-          plus ``extra_postgres_schemas``) is non-empty.
+        - Schema registration fires iff the combined schema set (``postgres_schema``
+          plus ``extra_postgres_schemas``) is non-empty. Pool close always runs
+          after the usage flusher drains.
     """
     # Validate the required identifiers explicitly (not via assert, so the check
     # holds under ``python -O``): empty values otherwise surface as obscure
@@ -118,16 +190,14 @@ def create_team_app(
     # message. (``title``/``version`` are named parameters, so Python already
     # raises ``TypeError`` on a duplicate — they can never reach ``fastapi_kwargs``.)
     if "lifespan" in fastapi_kwargs:
-        raise ValueError(
-            "lifespan must not be passed in fastapi_kwargs; it is set by create_team_app"
-        )
+        raise ValueError("lifespan must not be passed in fastapi_kwargs; it is set by create_team_app")
 
     init_otel(service_name=service_name, team_key=team_key)
 
     # Primary schema first, then any extras, in declaration order.
-    _all_schemas: "tuple[TeamSchema, ...]" = (
-        (postgres_schema,) if postgres_schema is not None else ()
-    ) + (tuple(extra_postgres_schemas) if extra_postgres_schemas else ())
+    _all_schemas: "tuple[TeamSchema, ...]" = ((postgres_schema,) if postgres_schema is not None else ()) + (
+        tuple(extra_postgres_schemas) if extra_postgres_schemas else ()
+    )
 
     @asynccontextmanager
     async def _lifespan(application: FastAPI):
@@ -146,25 +216,35 @@ def create_team_app(
                         logger.exception("%s postgres schema registration failed", team_key)
         # on_startup runs inside the try so that a raising hook still triggers
         # teardown — register_team_schemas may have opened the process-wide pool
-        # above, and a startup failure must not leak it.
+        # above, and a startup failure must not leak it. Usage flusher registers
+        # before on_startup so team hooks that start Temporal workers already
+        # have the process-local observer.
         try:
+            _register_usage_flusher(team_key)
             await _maybe_call(on_startup)
             yield
         finally:
-            # Guard on_shutdown so a raising hook cannot skip close_pool below —
-            # otherwise a shutdown-hook failure would leak the process-wide pool,
-            # breaking the "pool is always closed on shutdown" invariant.
+            # Guard on_shutdown so a raising hook cannot skip usage-flush or
+            # close_pool below — otherwise a shutdown-hook failure would leak
+            # the process-wide pool, breaking the "pool is always closed on
+            # shutdown" invariant.
             try:
                 await _maybe_call(on_shutdown)
             except Exception:
                 logger.exception("%s on_shutdown hook failed", team_key)
-            if _all_schemas:
-                try:
-                    from shared.postgres import close_pool
+            # Stop Temporal workers before the usage observer unregisters and
+            # the pool closes, so in-flight LLM activities can still persist.
+            _stop_in_process_temporal_workers(team_key)
+            # Drain before close_pool so the final INSERT can still use the pool.
+            # Always close the pool: the usage flusher may have opened it even
+            # when this app registered no postgres_schema.
+            _shutdown_usage_flusher(team_key)
+            try:
+                from shared.postgres import close_pool
 
-                    close_pool()
-                except Exception:
-                    logger.warning("%s shared.postgres close_pool failed", team_key, exc_info=True)
+                close_pool()
+            except Exception:
+                logger.warning("%s shared.postgres close_pool failed", team_key, exc_info=True)
 
     app = FastAPI(title=title, version=version, lifespan=_lifespan, **fastapi_kwargs)
     # Expose the team's primary schema (or None) — unchanged, for backward

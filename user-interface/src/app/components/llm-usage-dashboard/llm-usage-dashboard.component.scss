@@ -1,0 +1,98 @@
+.llm-usage {
+  max-width: 960px;
+  margin: 0 auto;
+  padding: 24px 16px;
+}
+
+.page-header {
+  margin-bottom: 16px;
+
+  h1 {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin: 0 0 4px;
+    font-size: 1.5rem;
+  }
+
+  .subtitle {
+    margin: 0;
+    color: var(--mat-sys-on-surface-variant, #5f6368);
+    font-size: 0.9rem;
+  }
+}
+
+.usage-controls {
+  margin: 12px 0 20px;
+}
+
+.loading {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 0 16px;
+}
+
+.metric-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 12px;
+  margin-bottom: 20px;
+}
+
+@media (max-width: 800px) {
+  .metric-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+
+@media (max-width: 480px) {
+  .metric-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+.metric-card {
+  .metric-card__label {
+    font-size: 0.8rem;
+    color: var(--mat-sys-on-surface-variant, #5f6368);
+    margin-bottom: 4px;
+  }
+
+  .metric-card__value {
+    font-size: 1.5rem;
+    font-weight: 600;
+  }
+}
+
+.empty-note {
+  color: var(--mat-sys-on-surface-variant, #5f6368);
+  font-size: 0.9rem;
+  margin: 8px 0 16px;
+}
+
+.table-card {
+  margin-bottom: 16px;
+}
+
+.usage-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.875rem;
+
+  th,
+  td {
+    text-align: left;
+    padding: 8px 10px;
+    border-bottom: 1px solid var(--mat-sys-outline-variant, rgba(0, 0, 0, 0.12));
+  }
+
+  th {
+    font-weight: 600;
+    color: var(--mat-sys-on-surface-variant, #5f6368);
+  }
+
+  td:nth-child(n + 2) {
+    font-variant-numeric: tabular-nums;
+  }
+}

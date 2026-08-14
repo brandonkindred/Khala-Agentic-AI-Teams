@@ -620,10 +620,35 @@ def _start_agent_studio_temporal_worker() -> None:
         )
 
 
+def _stop_in_process_temporal_workers() -> None:
+    """Stop in-process Temporal workers before usage-flusher / Postgres teardown.
+
+    Agent Studio and the platform sandbox poll from this process. Their
+    activities can invoke the LLM; they must finish (or be shut down) before
+    the usage observer unregisters and the shared pool closes.
+
+    Preconditions:
+        - Safe to call when no workers are registered (no-op).
+    Postconditions:
+        - :func:`shared.temporal.worker.stop_all_team_workers` has been invoked.
+          Failures are logged and swallowed. Never raises.
+    """
+    try:
+        from shared.temporal.worker import stop_all_team_workers
+
+        stop_all_team_workers()
+    except Exception:
+        logger.warning("in-process Temporal worker shutdown failed", exc_info=True)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):  # noqa: PLR0915 - linear startup orchestrator; each numbered step is one registration/boot  # pragma: no cover - startup requires live Postgres schema registration, Temporal worker boot, and sub-app mounting
     """Application lifespan: register Postgres schemas, register assistant
     mount specs, register proxy routes, then boot in-process workers.
+
+    Numbered step catalog (schemas, routes, workers): ``docs/UNIFIED_API_LIFESPAN.md``.
+    Import-time ``include_router`` mounts are listed there too — they are not
+    registered inside this function.
 
     Platform sandbox Temporal worker ownership: this lifespan is the sole
     boot site for ``start_agent_platform_sandbox_temporal_worker_thread``
@@ -640,6 +665,10 @@ async def lifespan(app: FastAPI):  # noqa: PLR0915 - linear startup orchestrator
     Postconditions:
         * Yields with proxy routes registered and in-process workers started
           (or skipped/logged) according to their gates.
+        * On shutdown, in-process Temporal workers are stopped and joined
+          before the usage flusher unregisters and the shared Postgres pool
+          closes, so LLM calls completing during teardown still reach
+          ``llm_call_records``.
     """
     global _registered_teams
     logger.info("Starting Unified API Server...")
@@ -662,6 +691,13 @@ async def lifespan(app: FastAPI):  # noqa: PLR0915 - linear startup orchestrator
         logger.exception("unified_api postgres schema registration failed")
 
     try:
+        from llm_service.usage_flusher import register_usage_flusher
+
+        register_usage_flusher()
+    except Exception:
+        logger.warning("llm usage flusher registration failed", exc_info=True)
+
+    try:
         from shared.postgres import register_team_schemas
         from team_assistant.postgres import SCHEMA as TEAM_ASSISTANT_SCHEMA
 
@@ -675,7 +711,7 @@ async def lifespan(app: FastAPI):  # noqa: PLR0915 - linear startup orchestrator
 
         register_team_schemas(AGENT_CONSOLE_SCHEMA)
     except Exception:
-        logger.exception("agent_console postgres schema registration failed")
+        logger.exception("agent_platform.console postgres schema registration failed")
 
     try:
         from agent_platform.registry.postgres import SCHEMA as AGENT_REGISTRY_SCHEMA
@@ -841,6 +877,15 @@ async def lifespan(app: FastAPI):  # noqa: PLR0915 - linear startup orchestrator
         await close_graphiti()
     except Exception:
         logger.warning("shared.neo4j close_graphiti failed", exc_info=True)
+
+    _stop_in_process_temporal_workers()
+
+    try:
+        from llm_service.usage_flusher import shutdown as usage_flush_shutdown
+
+        usage_flush_shutdown()
+    except Exception:
+        logger.warning("llm usage flusher shutdown failed", exc_info=True)
 
     # Close Postgres connection pools owned by shared.postgres.
     try:

@@ -13,6 +13,12 @@ registered agent back into an editable draft.
 - Save: `POST /agents`
 - Drafts (separate, opaque-payload CRUD; not `AgentDefinition`-typed): `/drafts`
 
+The router is included from `unified_api/main.py` at import time when
+`TEAM_CONFIGS["agent_studio"]` is enabled. The Studio Temporal worker
+(`agent-studio-queue`) boots from the unified-API lifespan, not Pattern A
+import-time start — catalog:
+[`docs/UNIFIED_API_LIFESPAN.md`](../../../../docs/UNIFIED_API_LIFESPAN.md).
+
 ## Identity: `AgentDefinition` view-model vs. `AgentManifest` SoT
 
 `agent_platform.registry.models.AgentManifest` is the only persisted, writable **catalog**
@@ -23,7 +29,9 @@ in-progress `definition_json` on an Agent Studio conversation row
 (`agent_studio_conversations`), never as a second catalog identity. Saving a
 conversation's definition, or cloning a registered agent into a new refine
 conversation, always crosses this boundary through exactly one pair of pure
-projection functions in `registration.py`:
+projection functions in `registration.py` (they delegate construction and
+field projection to `shared.manifests`; Studio-owned id, state-fold, and
+refine-draft rules stay in this package):
 
 - **`build_studio_agent_manifest(definition) -> AgentManifest`** — the save/register
   path (`service.py::save_agent`). Called on every `POST /agents`.

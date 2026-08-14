@@ -24,7 +24,7 @@ def _subprocess_pythonpath() -> str:
 
     Preconditions: ``_BACKEND_ROOT`` and ``_AGENTS_ROOT`` exist.
     Postconditions: returned string puts the ``agents`` and ``backend`` roots on
-        ``sys.path`` (so ``unified_api`` and ``agent_provisioning_team`` resolve).
+        ``sys.path`` (so ``unified_api`` and ``agent_platform`` resolve).
     """
     assert _BACKEND_ROOT.is_dir()
     assert _AGENTS_ROOT.is_dir()

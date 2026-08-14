@@ -43,6 +43,20 @@ TTL (seconds, default `30`) for the cross-container runtime config cache backing
 supply entry defaults (model/base URL). Each team container caches resolved defaults for this window.
 Garbage → default; negative floors to `0` (read-through every call). No effect when Postgres is unset.
 
+### LLM_USAGE_BUFFER_MAX
+Maximum number of LLM-usage rows held in memory before the oldest is dropped
+(default `1000`; floor `1`). Overflow drops the oldest row and logs a WARNING
+once per burst. Used by `llm_service.usage_flusher`. No-op when Postgres is unset.
+
+### LLM_USAGE_FLUSH_INTERVAL_S
+Seconds between background drains of the in-memory usage buffer to
+`llm_call_records` (default `2`; garbage → `2`, negatives clamped to `0` which
+floors the loop at `0.1s` so it never busy-loops). The observer does zero DB I/O
+on the LLM call path. A final drain runs at process shutdown (team-app
+lifespan, Unified API lifespan, or team-service ``atexit``) before the
+Postgres pool closes. The observer registry is process-local, so every
+LLM-calling process registers its own flusher.
+
 ### LLM_NUM_CTX_FALLBACK_TTL_S
 TTL (seconds, default `300`) for the Ollama client's provisional `num_ctx` fallback. When a model's
 context size is not in `KNOWN_MODEL_CONTEXT` / `LLM_CONTEXT_SIZE` and `/api/show` fails, the client
@@ -340,6 +354,11 @@ and small payloads are nowhere near the warning threshold anyway).
 ### SECURITY_GATEWAY_ENABLED
 Security gateway toggle (default: true).
 
+Unified-API lifespan worker/route registration (which step boots which worker,
+which routers mount at import time vs inside `lifespan()`) is catalogued in
+[`UNIFIED_API_LIFESPAN.md`](UNIFIED_API_LIFESPAN.md). The toggles below are the
+gates for those steps.
+
 ### UNIFIED_API_SANDBOX_TEMPORAL_WORKER
 Platform sandbox reaper/worker toggle (default: true). When true, the
 unified-api `lifespan` starts the platform sandbox idle reaper — a
@@ -364,9 +383,9 @@ traffic) — team proxy routes and health checks are unaffected.
 ### UNIFIED_API_AGENT_STUDIO_TEMPORAL_WORKER
 Agent Studio Temporal worker toggle (default: true). When true, the
 unified-api `lifespan` starts the in-process Agent Studio Temporal worker
-thread (Agent Studio is Temporal-only; the team's requests fail without it).
-Set to `false`/`0`/`no` to run unified-api without booting this worker
-thread, e.g. when Agent Studio is unused.
+thread. Set to `false`/`0`/`no` to skip booting this worker; authoring CRUD
+(conversations / clone / save) then uses in-process `AgentStudioService`
+instead of `agent-studio-queue`. Other teams' Temporal workers are unaffected.
 
 ### ENABLE_LOG_API
 Exposes HTTP log endpoint.

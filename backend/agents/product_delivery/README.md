@@ -80,7 +80,7 @@ Every row carries:
 - `id TEXT PRIMARY KEY` — UUID4 hex assigned by the store.
 - `author TEXT NOT NULL` — handle from
   `agent_platform.console.author.resolve_author()`. When real auth lands we can
-  migrate both `agent_console` and `product_delivery` rows to user ids
+  migrate both Agent Console (`agent_console_*`) and `product_delivery` rows to user ids
   in a single pass.
 - `created_at` / `updated_at TIMESTAMPTZ`.
 

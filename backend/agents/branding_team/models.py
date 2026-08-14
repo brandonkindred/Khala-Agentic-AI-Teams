@@ -6,6 +6,31 @@ Implements a 5-phase brand development framework:
   Phase 3 — Visual & Expressive Identity
   Phase 4 — Experience & Channel Activation
   Phase 5 — Governance & Evolution
+
+Collapsed nested-item pattern
+-----------------------------
+Nested item models (canonical pair: ``CoreValue`` / ``CoreValueOutput``) are a
+soft merge-target base plus a ``_derive_strict_variant``-generated strict
+subclass that redeclares only the fields that must be required/non-empty.
+Field lists are not duplicated. The soft base is the merge target for partial
+per-agent fragments, ``default_factory`` construction, and permissive
+fixtures. The strict subclass is the Strands ``structured_output=`` schema so
+a blank or incomplete LLM payload fails validation and retries instead of
+silently producing empty content.
+
+``model_validate(..., context={"strict": True})`` is not used: Strands
+constructs structured-output instances itself and does not thread a
+``context=`` kwarg through any call site this package controls. A derived
+subclass enforces constraints at the type level regardless of how it is
+instantiated. ``isinstance(CoreValueOutput(...), CoreValue)`` holds because
+the generated class is a real subclass of the soft base.
+
+This pattern does not apply to the Phase 2 cumulative-inheritance chain
+(``BrandStoryOutput`` → … → ``WritingGuidelinesOutput``) or to remaining
+hand-written sibling pairs that were never collapsed
+(``BrandDiscoveryAudit`` / ``BrandDiscoveryAuditOutput``,
+``ChannelGuideline`` / ``ChannelGuidelineOutput``, and the mood-board /
+design-system agent-output wrappers).
 """
 
 from __future__ import annotations
@@ -23,18 +48,10 @@ from shared.hitl.models import HumanReview as HumanReview  # noqa: F401 — re-e
 NonEmptyStr = Annotated[str, Field(min_length=1)]
 
 # ---------------------------------------------------------------------------
-# Strict/soft validation-context twin pattern
+# Strict/soft derived-subclass pattern (see module docstring)
 # ---------------------------------------------------------------------------
-# Several models in this file come in pairs: a "soft" model (permissive
-# defaults; used as a merge target for partial per-agent fragments, and by
-# permissive test fixtures) and a "strict" agent-output twin (every field
-# required/non-empty; used as a Strands ``structured_output=`` schema so a
-# blank/incomplete LLM response fails validation and triggers a retry
-# instead of silently producing empty content). Rather than hand-duplicate
-# every field declaration between the two, the strict twin is generated
-# from the soft base via ``_derive_strict_variant`` immediately below the
-# soft class it derives from. See ``CoreValue``/``CoreValueOutput`` for the
-# reference pair.
+# Nested item models use ``_derive_strict_variant`` immediately below the
+# soft class they derive from. See ``CoreValue``/``CoreValueOutput``.
 
 
 def _derive_strict_variant(
