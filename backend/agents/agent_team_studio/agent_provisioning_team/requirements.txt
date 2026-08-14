@@ -12,6 +12,10 @@ psycopg_pool>=3.3,<4.0
 redis>=7.4,<8.0
 strands-agents>=1.35,<2.0
 strands-agents-tools>=0.4,<1.0
+# Native strands.models.ollama provider used by shared.llm_client.
+ollama>=0.4.8,<1.0
+# Native strands.models.anthropic provider used for LLM_PROVIDER=claude.
+anthropic>=0.69,<1.0
 
 # OpenTelemetry: shared.observability.init_otel runs at every startup
 opentelemetry-api>=1.41,<2.0

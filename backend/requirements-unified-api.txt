@@ -49,6 +49,8 @@ APScheduler>=3.11,<4.0
 pytz>=2026.1
 strands-agents>=1.35,<2.0
 strands-agents-tools>=0.4,<1.0
+# Native strands.models.ollama provider used by the in-process Studio worker.
+ollama>=0.4.8,<1.0
 anthropic>=0.69,<1.0
 # Medium auto-login (unified_api/medium_browser_login.py); requires
 # `playwright install chromium` at image build time to be usable.
