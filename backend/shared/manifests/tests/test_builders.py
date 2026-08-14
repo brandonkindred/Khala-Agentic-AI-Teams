@@ -4,8 +4,18 @@ from __future__ import annotations
 
 import pytest
 
-from agent_registry.models import AgentManifest, AgentStateSpec, CognitionSpec, SourceInfo
-from shared.manifests import build_manifest, clone_manifest, io_schema, project_manifest
+from agent_platform.registry.models import AgentManifest, AgentStateSpec, CognitionSpec, SourceInfo
+from shared.manifests import (
+    AGENT_ANATOMY_REF,
+    GENERATED_AGENT_ENTRYPOINT,
+    GENERATED_AGENT_INPUT_REF,
+    GENERATED_AGENT_OUTPUT_REF,
+    build_manifest,
+    clone_manifest,
+    default_cognition_block,
+    io_schema,
+    project_manifest,
+)
 
 
 def _source() -> SourceInfo:
@@ -128,6 +138,83 @@ def test_build_manifest_result_is_json_safe_and_equal_to_a_direct_construction()
         source=_source(),
     )
     assert manifest == AgentManifest.model_validate(manifest.model_dump(mode="json"))
+
+
+def test_build_manifest_stamps_required_generated_fields() -> None:
+    manifest = build_manifest(
+        id="agentic_team_provisioning.example-agent",
+        team="agentic_team_provisioning",
+        name="Triage Agent",
+        summary="Classifies tickets",
+        source=SourceInfo(entrypoint=GENERATED_AGENT_ENTRYPOINT, anatomy_ref=AGENT_ANATOMY_REF),
+        cognition=default_cognition_block(),
+        inputs=io_schema(
+            None,
+            schema_ref=GENERATED_AGENT_INPUT_REF,
+            ref_description="in",
+            inline_description="i",
+        ),
+        outputs=io_schema(
+            None,
+            schema_ref=GENERATED_AGENT_OUTPUT_REF,
+            ref_description="out",
+            inline_description="i",
+        ),
+    )
+    assert manifest.team == "agentic_team_provisioning"
+    assert manifest.source.entrypoint == (
+        "agent_team_studio.agentic_team_provisioning.runtime.agent_builder:invoke_generated_agent"
+    )
+    assert manifest.source.anatomy_ref == ("backend/agents/agent_team_studio/agent_provisioning_team/AGENT_ANATOMY.md")
+    assert manifest.inputs is not None
+    assert manifest.inputs.schema_ref == (
+        "agent_team_studio.agentic_team_provisioning.models:GeneratedAgentInvokeInput"
+    )
+    assert manifest.outputs is not None
+    assert manifest.outputs.schema_ref == (
+        "agent_team_studio.agentic_team_provisioning.models:GeneratedAgentInvokeOutput"
+    )
+    assert manifest.cognition is not None
+    assert manifest.cognition.rule_packs == ["default_guardrails"]
+    assert manifest.cognition.memory.retention_days_events == 90
+    assert manifest.cognition.tools == []
+    assert manifest.cognition.requires_idempotency_key is False
+    assert manifest.cognition.knowledge_graph.enabled is True
+
+
+def test_build_manifest_stamps_required_studio_fields() -> None:
+    cognition = default_cognition_block().model_copy(update={"tools": ["web.search"]})
+    manifest = build_manifest(
+        id="agent_studio.planner",
+        team="agent_studio",
+        name="Planner",
+        summary="Plans things",
+        source=SourceInfo(entrypoint=GENERATED_AGENT_ENTRYPOINT, anatomy_ref=AGENT_ANATOMY_REF),
+        cognition=cognition,
+        inputs=io_schema(
+            None,
+            schema_ref=GENERATED_AGENT_INPUT_REF,
+            ref_description="in",
+            inline_description="i",
+        ),
+        outputs=io_schema(
+            None,
+            schema_ref=GENERATED_AGENT_OUTPUT_REF,
+            ref_description="out",
+            inline_description="i",
+        ),
+    )
+    assert manifest.team == "agent_studio"
+    assert manifest.source.entrypoint == (
+        "agent_team_studio.agentic_team_provisioning.runtime.agent_builder:invoke_generated_agent"
+    )
+    assert manifest.source.anatomy_ref == ("backend/agents/agent_team_studio/agent_provisioning_team/AGENT_ANATOMY.md")
+    assert manifest.cognition is not None
+    assert manifest.cognition.tools == ["web.search"]
+    assert manifest.cognition.rule_packs == ["default_guardrails"]
+    assert manifest.cognition.memory.retention_days_events == 90
+    assert manifest.cognition.requires_idempotency_key is False
+    assert manifest.cognition.knowledge_graph.enabled is True
 
 
 # -- clone_manifest --------------------------------------------------------------

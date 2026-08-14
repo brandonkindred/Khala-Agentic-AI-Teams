@@ -2,8 +2,7 @@ import { TestBed } from '@angular/core/testing';
 import { NoopAnimationsModule } from '@angular/platform-browser/animations';
 import { of } from 'rxjs';
 import { vi } from 'vitest';
-import { AgenticTeamApiService } from '../../../services/agentic-team-api.service';
-import { PersonaTestingApiService } from '../../../services/persona-testing-api.service';
+import { AgentStudioFacade } from '../../../services/agent-studio.facade';
 import { AgentStudioStateService } from '../../../services/agent-studio-state.service';
 import { AgentStudioPersonaComponent } from './agent-studio-persona.component';
 import { expectNoAxeViolations } from '../../../testing/a11y';
@@ -50,20 +49,18 @@ describe('AgentStudioPersonaComponent a11y', () => {
   };
 
   const setup = async () => {
-    const agenticApi = {
+    const facade = {
       getTeam: vi.fn().mockReturnValue(of({ team: TEAM })),
-      getPipelineRun: vi.fn().mockReturnValue(of(PIPELINE_RUN)),
-    };
-    const personaApi = {
-      getPersonas: vi.fn().mockReturnValue(
+      getTeamPipelineRun: vi.fn().mockReturnValue(of(PIPELINE_RUN)),
+      listPersonas: vi.fn().mockReturnValue(
         of({
           personas: [
             { id: 'startup-founder', name: 'Startup Founder', description: '', icon: 'rocket', is_builtin: true },
           ],
         }),
       ),
-      startTest: vi.fn().mockReturnValue(of({ job_id: 'run-1', status: 'running', message: '' })),
-      getRunStatus: vi.fn().mockReturnValue(
+      startPersonaRun: vi.fn().mockReturnValue(of({ job_id: 'run-1', status: 'running', message: '' })),
+      getPersonaRunStatus: vi.fn().mockReturnValue(
         of({
           run_id: 'run-1',
           status: 'polling_build',
@@ -79,14 +76,13 @@ describe('AgentStudioPersonaComponent a11y', () => {
           ],
         }),
       ),
-      cancelJob: vi.fn().mockReturnValue(of({})),
+      cancelPersonaRun: vi.fn().mockReturnValue(of({})),
     };
     await TestBed.configureTestingModule({
       imports: [AgentStudioPersonaComponent, NoopAnimationsModule],
       providers: [
         AgentStudioStateService,
-        { provide: AgenticTeamApiService, useValue: agenticApi },
-        { provide: PersonaTestingApiService, useValue: personaApi },
+        { provide: AgentStudioFacade, useValue: facade },
       ],
     }).compileComponents();
     TestBed.inject(AgentStudioStateService).setTeamId('t1');

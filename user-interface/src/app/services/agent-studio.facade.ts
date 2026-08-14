@@ -159,14 +159,28 @@ export class AgentStudioFacade {
    * auto-add per `(teamId, manifestId)` this session. The dedupe key is
    * marked consumed on attempt, not on success, so a failed add is not
    * retried automatically — the user can still add the agent manually.
-   * Returns `null` without calling the API if the key was already consumed.
+   * Returns `null` without calling the API if the key was already consumed,
+   * or if `alreadyOnRoster` is true (the agent is already staffed — still
+   * mark consumed so a later manual delete is never auto-undone).
+   *
+   * Preconditions: `teamId` and `manifestId` are non-empty strings.
+   * Postconditions: the `(teamId, manifestId)` key is consumed when this
+   *   session had not already consumed it; the API is called only when the
+   *   key was fresh and `alreadyOnRoster` is false.
    */
-  addAgentToTeam(teamId: string, manifestId: string): Observable<AgenticTeamAgent | null> {
+  addAgentToTeam(
+    teamId: string,
+    manifestId: string,
+    alreadyOnRoster = false,
+  ): Observable<AgenticTeamAgent | null> {
     const key = `${teamId}::${manifestId}`;
     if (this.state.hasConsumedHandoff(key)) {
       return of(null);
     }
     this.state.markHandoffConsumed(key);
+    if (alreadyOnRoster) {
+      return of(null);
+    }
     return this.agenticTeamApi.addAgentFromRegistry(teamId, manifestId);
   }
 

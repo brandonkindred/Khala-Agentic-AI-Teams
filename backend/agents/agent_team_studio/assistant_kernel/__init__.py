@@ -1,6 +1,6 @@
 """Shared conversation kernel for design-assistant chat flows.
 
-``AgentDesignerAgent`` (``agent_team_studio.agent_studio.assistant``) and
+``AgentDesignerAgent`` (``agent_platform.studio.assistant``) and
 ``ProcessDesignerAgent`` (``agent_team_studio.agentic_team_provisioning.assistant.agent``)
 independently reimplement the same three primitives for their LLM chat
 conversations: a message envelope DTO, fenced-JSON-in-prose extraction, and

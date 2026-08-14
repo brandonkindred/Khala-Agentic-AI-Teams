@@ -5,22 +5,13 @@ from __future__ import annotations
 from agent_team_studio.manifest_shared import (
     AGENT_ANATOMY_REF,
     DEFAULT_RULE_PACKS,
-    GENERATED_AGENT_ENTRYPOINT,
-    GENERATED_AGENT_INPUT_REF,
-    GENERATED_AGENT_OUTPUT_REF,
     default_cognition_block,
     strip_marker_tags,
 )
 
 
-def test_constants_are_non_empty_strings() -> None:
-    for value in (
-        GENERATED_AGENT_ENTRYPOINT,
-        GENERATED_AGENT_INPUT_REF,
-        GENERATED_AGENT_OUTPUT_REF,
-        AGENT_ANATOMY_REF,
-    ):
-        assert isinstance(value, str) and value.strip()
+def test_anatomy_ref_is_a_non_empty_string() -> None:
+    assert isinstance(AGENT_ANATOMY_REF, str) and AGENT_ANATOMY_REF.strip()
 
 
 def test_default_rule_packs_contains_guardrails() -> None:

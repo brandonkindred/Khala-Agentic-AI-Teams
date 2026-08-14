@@ -1,12 +1,12 @@
 """Parity/regression tests: both designer assistants against the shared kernel.
 
-``AgentDesignerAgent`` (``agent_team_studio.agent_studio.assistant``) and
+``AgentDesignerAgent`` (``agent_platform.studio.assistant``) and
 ``ProcessDesignerAgent`` (``agent_team_studio.agentic_team_provisioning.assistant.agent``)
 both call the kernel's ``parse_fenced_json``/``strip_fenced_blocks``
 (:mod:`agent_team_studio.assistant_kernel.fenced_json``) instead of hand-rolled
 parsers. The kernel primitives themselves are already unit-tested in isolation
 (``test_fenced_json.py``, ``test_turn_lock.py``); the local test modules for
-each assistant (``agent_studio/tests/test_assistant.py``,
+each assistant (``agent_platform/studio/tests/test_assistant.py``,
 ``agentic_team_provisioning/tests/test_assistant_agent.py``) cover each
 assistant's *own* merge/wiring logic. Neither proves the two assistants
 actually converge on identical kernel behavior side by side. This module is
@@ -37,9 +37,9 @@ from __future__ import annotations
 import pytest
 import strands
 
-from agent_team_studio.agent_studio.assistant import AgentDesignerAgent
-from agent_team_studio.agent_studio.models import AgentDefinition
-from agent_team_studio.agent_studio.store import AgentStudioConversationStore
+from agent_platform.studio.assistant import AgentDesignerAgent
+from agent_platform.studio.models import AgentDefinition
+from agent_platform.studio.store import AgentStudioConversationStore
 from agent_team_studio.agentic_team_provisioning.assistant import agent as process_agent_module
 from agent_team_studio.agentic_team_provisioning.assistant.agent import ProcessDesignerAgent
 from agent_team_studio.agentic_team_provisioning.assistant.store import AgenticTeamStore

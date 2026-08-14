@@ -6,6 +6,31 @@ Implements a 5-phase brand development framework:
   Phase 3 — Visual & Expressive Identity
   Phase 4 — Experience & Channel Activation
   Phase 5 — Governance & Evolution
+
+Collapsed nested-item pattern
+-----------------------------
+Nested item models (canonical pair: ``CoreValue`` / ``CoreValueOutput``) are a
+soft merge-target base plus a ``_derive_strict_variant``-generated strict
+subclass that redeclares only the fields that must be required/non-empty.
+Field lists are not duplicated. The soft base is the merge target for partial
+per-agent fragments, ``default_factory`` construction, and permissive
+fixtures. The strict subclass is the Strands ``structured_output=`` schema so
+a blank or incomplete LLM payload fails validation and retries instead of
+silently producing empty content.
+
+``model_validate(..., context={"strict": True})`` is not used: Strands
+constructs structured-output instances itself and does not thread a
+``context=`` kwarg through any call site this package controls. A derived
+subclass enforces constraints at the type level regardless of how it is
+instantiated. ``isinstance(CoreValueOutput(...), CoreValue)`` holds because
+the generated class is a real subclass of the soft base.
+
+This pattern does not apply to the Phase 2 cumulative-inheritance chain
+(``BrandStoryOutput`` → … → ``WritingGuidelinesOutput``) or to remaining
+hand-written sibling pairs that were never collapsed
+(``BrandDiscoveryAudit`` / ``BrandDiscoveryAuditOutput``,
+``ChannelGuideline`` / ``ChannelGuidelineOutput``, and the mood-board /
+design-system agent-output wrappers).
 """
 
 from __future__ import annotations
@@ -23,18 +48,10 @@ from shared.hitl.models import HumanReview as HumanReview  # noqa: F401 — re-e
 NonEmptyStr = Annotated[str, Field(min_length=1)]
 
 # ---------------------------------------------------------------------------
-# Strict/soft validation-context twin pattern
+# Strict/soft derived-subclass pattern (see module docstring)
 # ---------------------------------------------------------------------------
-# Several models in this file come in pairs: a "soft" model (permissive
-# defaults; used as a merge target for partial per-agent fragments, and by
-# permissive test fixtures) and a "strict" agent-output twin (every field
-# required/non-empty; used as a Strands ``structured_output=`` schema so a
-# blank/incomplete LLM response fails validation and triggers a retry
-# instead of silently producing empty content). Rather than hand-duplicate
-# every field declaration between the two, the strict twin is generated
-# from the soft base via ``_derive_strict_variant`` immediately below the
-# soft class it derives from. See ``CoreValue``/``CoreValueOutput`` for the
-# reference pair.
+# Nested item models use ``_derive_strict_variant`` immediately below the
+# soft class they derive from. See ``CoreValue``/``CoreValueOutput``.
 
 
 def _derive_strict_variant(
@@ -93,7 +110,7 @@ def _derive_strict_variant(
 
 
 # Common closing sentence for every strict-twin ``doc=`` below — factored out
-# so the 12 call sites don't each hand-duplicate the same boilerplate tail.
+# so the 17 call sites don't each hand-duplicate the same boilerplate tail.
 _STRICT_TWIN_DOC_SUFFIX = (
     "Generated via ``_derive_strict_variant`` — see that helper's docstring "
     "for the shared strict/soft twin pattern this file uses."
@@ -881,6 +898,23 @@ class BrandArchitectureRule(BaseModel):
     visual_treatment: str = ""
 
 
+BrandArchitectureRuleOutput = _derive_strict_variant(
+    "BrandArchitectureRuleOutput",
+    BrandArchitectureRule,
+    doc=(
+        "Agent-facing brand architecture rule; requires non-empty fields.\n\n"
+        "Field-for-field twin of ``BrandArchitectureRule`` with required content — "
+        "``BrandArchitectureRule`` itself must stay soft (all-default) since "
+        "it also backs ``ChannelActivationOutput.brand_architecture``'s merge target. "
+    )
+    + _STRICT_TWIN_DOC_SUFFIX,
+    entity=(str, Field(min_length=1)),
+    relationship=(str, Field(min_length=1)),
+    naming_convention=(str, Field(min_length=1)),
+    visual_treatment=(str, Field(min_length=1)),
+)
+
+
 class BrandInActionExample(BaseModel):
     """Applied mockup or do/don't example."""
 
@@ -890,18 +924,21 @@ class BrandInActionExample(BaseModel):
     rationale: str = ""
 
 
-class BrandInActionExampleOutput(BaseModel):
-    """Agent-facing brand-in-action example; requires non-empty fields.
-
-    Field-for-field twin of ``BrandInActionExample`` with required content,
-    matching the Phase 3 nested-output-model pattern (``LogoUsageRuleOutput``,
-    ``ColorEntryOutput``, ``TypographySpecOutput``, ``VoiceToneEntryOutput``).
-    """
-
-    context: str = Field(min_length=1)
-    correct_example: str = Field(min_length=1)
-    incorrect_example: str = Field(min_length=1)
-    rationale: str = Field(min_length=1)
+BrandInActionExampleOutput = _derive_strict_variant(
+    "BrandInActionExampleOutput",
+    BrandInActionExample,
+    doc=(
+        "Agent-facing brand-in-action example; requires non-empty fields.\n\n"
+        "Field-for-field twin of ``BrandInActionExample`` with required content — "
+        "``BrandInActionExample`` itself must stay soft (all-default) since "
+        "it also backs ``ChannelActivationOutput.brand_in_action``'s merge target. "
+    )
+    + _STRICT_TWIN_DOC_SUFFIX,
+    context=(str, Field(min_length=1)),
+    correct_example=(str, Field(min_length=1)),
+    incorrect_example=(str, Field(min_length=1)),
+    rationale=(str, Field(min_length=1)),
+)
 
 
 class ChannelActivationOutput(BaseModel):
@@ -927,23 +964,6 @@ class BrandExperiencePrinciplesOutput(BaseModel):
     brand_experience_principles: List[NonEmptyStr] = Field(min_length=3, max_length=5)
     signature_moments: List[NonEmptyStr] = Field(min_length=3, max_length=5)
     sensory_elements: List[NonEmptyStr] = Field(min_length=2, max_length=4)
-
-
-class BrandArchitectureRuleOutput(BaseModel):
-    """Agent-facing brand architecture rule; requires non-empty fields.
-
-    Field-for-field twin of ``BrandArchitectureRule`` with required content,
-    matching the Phase 3 nested-output-model pattern (``LogoUsageRuleOutput``,
-    ``ColorEntryOutput``, ``TypographySpecOutput``, ``VoiceToneEntryOutput``)
-    and this file's own ``BrandInActionExampleOutput``/``BrandInActionExample``
-    split — ``BrandArchitectureRule`` itself must stay soft (all-default) since
-    it also backs ``ChannelActivationOutput.brand_architecture``'s merge target.
-    """
-
-    entity: str = Field(min_length=1)
-    relationship: str = Field(min_length=1)
-    naming_convention: str = Field(min_length=1)
-    visual_treatment: str = Field(min_length=1)
 
 
 class BrandArchitectureOutput(BaseModel):
@@ -987,6 +1007,23 @@ class ApprovalWorkflow(BaseModel):
     escalation_path: str = ""
 
 
+ApprovalWorkflowOutput = _derive_strict_variant(
+    "ApprovalWorkflowOutput",
+    ApprovalWorkflow,
+    doc=(
+        "Agent-facing approval workflow; requires non-empty fields.\n\n"
+        "Field-for-field twin of ``ApprovalWorkflow`` with required content — "
+        "``ApprovalWorkflow`` itself must stay soft (all-default) since it also "
+        "backs ``GovernanceOutput.approval_workflows``'s merge target. "
+    )
+    + _STRICT_TWIN_DOC_SUFFIX,
+    asset_type=(str, Field(min_length=1)),
+    approvers=(List[NonEmptyStr], Field(min_length=1)),
+    sla=(str, Field(min_length=1)),
+    escalation_path=(str, Field(min_length=1)),
+)
+
+
 class BrandHealthKPI(BaseModel):
     """Brand health tracking metric."""
 
@@ -994,6 +1031,50 @@ class BrandHealthKPI(BaseModel):
     measurement_method: str = ""
     target: str = ""
     review_frequency: str = ""
+
+
+BrandHealthKPIOutput = _derive_strict_variant(
+    "BrandHealthKPIOutput",
+    BrandHealthKPI,
+    doc=(
+        "Agent-facing brand health KPI; requires non-empty fields.\n\n"
+        "Field-for-field twin of ``BrandHealthKPI`` with required content — "
+        "``BrandHealthKPI`` itself must stay soft (all-default) since it also "
+        "backs ``GovernanceOutput.brand_health_kpis``'s merge target. "
+    )
+    + _STRICT_TWIN_DOC_SUFFIX,
+    metric=(str, Field(min_length=1)),
+    measurement_method=(str, Field(min_length=1)),
+    target=(str, Field(min_length=1)),
+    review_frequency=(str, Field(min_length=1)),
+)
+
+
+class WikiEntry(BaseModel):
+    """A single entry in the brand's living wiki/knowledge base."""
+
+    title: str
+    summary: str
+    owners: List[str] = Field(default_factory=list)
+    update_cadence: str = "monthly"
+
+
+WikiEntryOutput = _derive_strict_variant(
+    "WikiEntryOutput",
+    WikiEntry,
+    doc=(
+        "Agent-facing wiki entry; requires non-empty fields.\n\n"
+        "Field-for-field twin of ``WikiEntry`` with required content — "
+        "``WikiEntry`` itself must stay soft (``title``/``summary`` unconstrained, "
+        "``owners``/``update_cadence`` defaulted) since it also backs "
+        "``GovernanceOutput.wiki_backlog``'s merge target. "
+    )
+    + _STRICT_TWIN_DOC_SUFFIX,
+    title=(str, Field(min_length=1)),
+    summary=(str, Field(min_length=1)),
+    owners=(List[NonEmptyStr], Field(min_length=1)),
+    update_cadence=(str, Field(min_length=1)),
+)
 
 
 class GovernanceOutput(BaseModel):
@@ -1013,51 +1094,7 @@ class GovernanceOutput(BaseModel):
     # Brand governance rules (from brand_rules_codifier)
     brand_guidelines: List[str] = Field(default_factory=list)
     # Knowledge-base backlog (from asset_wiki_planner)
-    wiki_backlog: List["WikiEntry"] = Field(default_factory=list)
-
-
-class ApprovalWorkflowOutput(BaseModel):
-    """Agent-facing approval workflow; requires non-empty fields.
-
-    Field-for-field twin of ``ApprovalWorkflow`` with required content,
-    matching the Phase 3/4 nested-output-model pattern — ``ApprovalWorkflow``
-    itself must stay soft (all-default) since it also backs
-    ``GovernanceOutput.approval_workflows``'s merge target.
-    """
-
-    asset_type: str = Field(min_length=1)
-    approvers: List[NonEmptyStr] = Field(min_length=1)
-    sla: str = Field(min_length=1)
-    escalation_path: str = Field(min_length=1)
-
-
-class WikiEntryOutput(BaseModel):
-    """Agent-facing wiki entry; requires non-empty fields.
-
-    Field-for-field twin of ``WikiEntry`` with required content —
-    ``WikiEntry`` itself must stay soft (``title``/``summary`` unconstrained,
-    ``owners``/``update_cadence`` defaulted) since it also backs
-    ``GovernanceOutput.wiki_backlog``'s merge target.
-    """
-
-    title: str = Field(min_length=1)
-    summary: str = Field(min_length=1)
-    owners: List[NonEmptyStr] = Field(min_length=1)
-    update_cadence: str = Field(min_length=1)
-
-
-class BrandHealthKPIOutput(BaseModel):
-    """Agent-facing brand health KPI; requires non-empty fields.
-
-    Field-for-field twin of ``BrandHealthKPI`` with required content —
-    ``BrandHealthKPI`` itself must stay soft (all-default) since it also
-    backs ``GovernanceOutput.brand_health_kpis``'s merge target.
-    """
-
-    metric: str = Field(min_length=1)
-    measurement_method: str = Field(min_length=1)
-    target: str = Field(min_length=1)
-    review_frequency: str = Field(min_length=1)
+    wiki_backlog: List[WikiEntry] = Field(default_factory=list)
 
 
 class OwnershipOutput(BaseModel):
@@ -1352,15 +1389,6 @@ class DesignSystemDefinitionOutput(BaseModel):
     design_principles: List[str] = Field(min_length=1)
     foundation_tokens: List[str] = Field(min_length=1)
     component_standards: List[str] = Field(min_length=1)
-
-
-class WikiEntry(BaseModel):
-    """A single entry in the brand's living wiki/knowledge base."""
-
-    title: str
-    summary: str
-    owners: List[str] = Field(default_factory=list)
-    update_cadence: str = "monthly"
 
 
 # ---------------------------------------------------------------------------

@@ -231,6 +231,15 @@ export const routes: Routes = [
         data: { breadcrumb: 'LLM Provider' },
       },
       {
+        path: 'llm-usage',
+        loadComponent: () =>
+          import('./components/llm-usage-dashboard/llm-usage-dashboard.component').then(
+            (m) => m.LlmUsageDashboardComponent,
+          ),
+        title: 'LLM Usage',
+        data: { breadcrumb: 'LLM Usage' },
+      },
+      {
         path: 'sales',
         loadComponent: () =>
           import('./components/sales-dashboard/sales-dashboard.component').then((m) => m.SalesDashboardComponent),

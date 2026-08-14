@@ -583,7 +583,7 @@ def _start_agent_studio_temporal_worker() -> None:
     share this process's :class:`AgentStudioService` singleton. Gated on
     ``UNIFIED_API_AGENT_STUDIO_TEMPORAL_WORKER`` and on the team being enabled.
     Authoring CRUD (start conversation / send message / clone / save) no longer
-    requires this worker: ``agent_team_studio.agent_studio.temporal.dispatch``
+    requires this worker: ``agent_platform.studio.temporal.dispatch``
     falls back to calling :class:`AgentStudioService` directly, in-process, when
     Temporal isn't configured — so a missing ``TEMPORAL_ADDRESS`` here is a
     (fully-functional) mode switch, not a degraded state. The worker is a daemon
@@ -605,7 +605,7 @@ def _start_agent_studio_temporal_worker() -> None:
     if not TEAM_CONFIGS["agent_studio"].enabled:
         return
     try:
-        from agent_team_studio.agent_studio.temporal.worker import start_agent_studio_temporal_worker_thread
+        from agent_platform.studio.temporal.worker import start_agent_studio_temporal_worker_thread
 
         started = start_agent_studio_temporal_worker_thread()
     except Exception:
@@ -620,10 +620,55 @@ def _start_agent_studio_temporal_worker() -> None:
         )
 
 
+def _stop_in_process_temporal_workers() -> None:
+    """Stop in-process Temporal workers before usage-flusher / Postgres teardown.
+
+    Agent Studio and the platform sandbox poll from this process. Their
+    activities can invoke the LLM; they must finish (or be shut down) before
+    the usage observer unregisters and the shared pool closes.
+
+    Preconditions:
+        - Safe to call when no workers are registered (no-op).
+    Postconditions:
+        - :func:`shared.temporal.worker.stop_all_team_workers` has been invoked.
+          Failures are logged and swallowed. Never raises.
+    """
+    try:
+        from shared.temporal.worker import stop_all_team_workers
+
+        stop_all_team_workers()
+    except Exception:
+        logger.warning("in-process Temporal worker shutdown failed", exc_info=True)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):  # noqa: PLR0915 - linear startup orchestrator; each numbered step is one registration/boot  # pragma: no cover - startup requires live Postgres schema registration, Temporal worker boot, and sub-app mounting
-    """Application lifespan: register own Postgres schemas, register assistant
-    mount specs (no sub-apps mounted yet), then register proxy routes.
+    """Application lifespan: register Postgres schemas, register assistant
+    mount specs, register proxy routes, then boot in-process workers.
+
+    Numbered step catalog (schemas, routes, workers): ``docs/UNIFIED_API_LIFESPAN.md``.
+    Import-time ``include_router`` mounts are listed there too — they are not
+    registered inside this function.
+
+    Platform sandbox Temporal worker ownership: this lifespan is the sole
+    boot site for ``start_agent_platform_sandbox_temporal_worker_thread``
+    (``agent_platform.sandbox.temporal.worker``). The worker polls
+    ``SANDBOX_TASK_QUEUE`` inside this process so sandbox activities share
+    the process-local ``Lifecycle`` singleton. It is never started by
+    package import, by ``team_service`` worker bootstrap, or by the
+    standalone agent-provisioning container's main worker. Gated on
+    ``UNIFIED_API_SANDBOX_TEMPORAL_WORKER`` (see ``_maybe_start_sandbox_reaper``).
+
+    Preconditions:
+        * None — each numbered step self-disables or log-and-continues when
+          its backing service is unset.
+    Postconditions:
+        * Yields with proxy routes registered and in-process workers started
+          (or skipped/logged) according to their gates.
+        * On shutdown, in-process Temporal workers are stopped and joined
+          before the usage flusher unregisters and the shared Postgres pool
+          closes, so LLM calls completing during teardown still reach
+          ``llm_call_records``.
     """
     global _registered_teams
     logger.info("Starting Unified API Server...")
@@ -646,6 +691,13 @@ async def lifespan(app: FastAPI):  # noqa: PLR0915 - linear startup orchestrator
         logger.exception("unified_api postgres schema registration failed")
 
     try:
+        from llm_service.usage_flusher import register_usage_flusher
+
+        register_usage_flusher()
+    except Exception:
+        logger.warning("llm usage flusher registration failed", exc_info=True)
+
+    try:
         from shared.postgres import register_team_schemas
         from team_assistant.postgres import SCHEMA as TEAM_ASSISTANT_SCHEMA
 
@@ -654,12 +706,12 @@ async def lifespan(app: FastAPI):  # noqa: PLR0915 - linear startup orchestrator
         logger.exception("team_assistant postgres schema registration failed")
 
     try:
-        from agent_console.postgres import SCHEMA as AGENT_CONSOLE_SCHEMA
+        from agent_platform.console.postgres import SCHEMA as AGENT_CONSOLE_SCHEMA
         from shared.postgres import register_team_schemas
 
         register_team_schemas(AGENT_CONSOLE_SCHEMA)
     except Exception:
-        logger.exception("agent_console postgres schema registration failed")
+        logger.exception("agent_platform.console postgres schema registration failed")
 
     try:
         from agent_platform.registry.postgres import SCHEMA as AGENT_REGISTRY_SCHEMA
@@ -675,7 +727,7 @@ async def lifespan(app: FastAPI):  # noqa: PLR0915 - linear startup orchestrator
     # to run unconditionally regardless of config.
     if TEAM_CONFIGS["agent_studio"].enabled:
         try:
-            from agent_team_studio.agent_studio.postgres import SCHEMA as AGENT_STUDIO_SCHEMA
+            from agent_platform.studio.postgres import SCHEMA as AGENT_STUDIO_SCHEMA
             from shared.postgres import register_team_schemas
 
             register_team_schemas(AGENT_STUDIO_SCHEMA)
@@ -762,13 +814,13 @@ async def lifespan(app: FastAPI):  # noqa: PLR0915 - linear startup orchestrator
     #    (see shared.temporal.runner._await_client), and a lost race here must
     #    not mean the reaper never starts for the life of the process. See
     #    _start_sandbox_reaper_task's docstring for why the sandbox worker must
-    #    be booted here rather than shared with this team's general worker.
+    #    be booted here rather than the agent-provisioning team_service worker.
     sandbox_reaper_task = await _maybe_start_sandbox_reaper()
 
     # 5. Start the Agent Console run pruner (Phase 3).
     run_pruner_task: asyncio.Task | None = None
     try:
-        from agent_console.prune import run_pruner
+        from agent_platform.console.prune import run_pruner
 
         run_pruner_task = asyncio.create_task(run_pruner())
         logger.info("Started Agent Console run pruner")
@@ -825,6 +877,15 @@ async def lifespan(app: FastAPI):  # noqa: PLR0915 - linear startup orchestrator
         await close_graphiti()
     except Exception:
         logger.warning("shared.neo4j close_graphiti failed", exc_info=True)
+
+    _stop_in_process_temporal_workers()
+
+    try:
+        from llm_service.usage_flusher import shutdown as usage_flush_shutdown
+
+        usage_flush_shutdown()
+    except Exception:
+        logger.warning("llm usage flusher shutdown failed", exc_info=True)
 
     # Close Postgres connection pools owned by shared.postgres.
     try:
@@ -968,7 +1029,7 @@ if TEAM_CONFIGS["product_delivery"].enabled:
 # unified API at startup.
 if TEAM_CONFIGS["agent_studio"].enabled:
     try:
-        from unified_api.routes.agent_studio import router as agent_studio_router
+        from agent_platform.studio import router as agent_studio_router
     except Exception:  # pragma: no cover - defensive import-failure guard
         logger.warning("Failed to import agent_studio routes; skipping mount", exc_info=True)
     else:
@@ -1112,7 +1173,7 @@ def _expected_tables_for(team_key: str) -> list[str]:
         from product_delivery.postgres import SCHEMA as PRODUCT_DELIVERY_SCHEMA
 
         return list(PRODUCT_DELIVERY_SCHEMA.table_names)
-    # Other in-process teams (agent_console, team_assistant, …) don't
+    # Other in-process teams (agent_platform.console, team_assistant, …) don't
     # currently surface table-presence checks in /health. Add cases
     # here as they adopt the pattern.
     return []
@@ -1216,7 +1277,7 @@ def _retry_in_process_schema_registration(team_key: str) -> bool:  # pragma: no 
                 total,
             )
             return True
-        # Other in-process teams (agent_console, team_assistant, etc.)
+        # Other in-process teams (agent_platform.console, team_assistant, etc.)
         # don't currently track their schema-failure flag through this
         # set, so there's nothing to retry. Add cases here as they
         # adopt the pattern.
@@ -1257,7 +1318,7 @@ async def health() -> UnifiedHealthResponse:
         intentionally_unavailable = False
         if config.in_process:
             # No upstream container, but the in-process router still
-            # depends on Postgres for product_delivery / agent_console.
+            # depends on Postgres for product_delivery / agent_platform.console.
             # Four states matter:
             #   * disabled → routes are unmounted; report "unavailable"
             #     (intentional — operator opt-out via TEAM_CONFIGS).

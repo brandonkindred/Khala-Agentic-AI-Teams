@@ -5,8 +5,9 @@ batteries-included Agent Cognition Core attached. The pure builder helpers in th
 module turn a roster :class:`~agent_team_studio.agentic_team_provisioning.models.AgenticTeamAgent`
 into a validated :class:`~agent_platform.registry.models.AgentManifest` whose ``cognition``
 block carries the core defaults (day-one ``default_guardrails`` seed pack, 90-day
-episodic memory, a default-on knowledge graph). Those builders perform no
-Postgres, LLM, or filesystem I/O.
+episodic memory, a default-on knowledge graph). Construction delegates to
+:mod:`shared.manifests`; this module owns roster ids, skill-tag wrapping, and
+registration. Those builders perform no Postgres, LLM, or filesystem I/O.
 
 :func:`register_team_manifests` is the stateful counterpart: it installs built
 manifests into the process-wide registry and, when a Postgres-backed dynamic store
@@ -17,17 +18,18 @@ from __future__ import annotations
 
 from typing import NamedTuple
 
-from agent_platform.registry.manifest_projection import hash_suffix, revalidate, slug
-from agent_platform.registry.models import AgentManifest, IOSchema, SourceInfo
+from agent_platform.registry.manifest_projection import hash_suffix, slug
+from agent_platform.registry.models import AgentManifest, SourceInfo
 from agent_team_studio.agentic_team_provisioning.models import SOURCE_GENERATED, AgenticTeamAgent
-
-from ..manifest_shared import (
+from shared.manifests import (
     AGENT_ANATOMY_REF,
     GENERATED_AGENT_ENTRYPOINT,
     GENERATED_AGENT_INPUT_REF,
     GENERATED_AGENT_OUTPUT_REF,
+    build_manifest,
     default_cognition_block,
-    strip_marker_tags,
+    io_schema,
+    project_manifest,
 )
 
 # The registry team key for this service (matches TEAM_CONFIGS in
@@ -110,7 +112,6 @@ def build_agent_manifest(
     if not agent_name:
         raise ValueError("build_agent_manifest: agent_name must be non-empty")
 
-    manifest_id = manifest_agent_id(team_id, agent_name)
     resolved_summary = (summary or "").strip() or f"Generated agent {agent_name}"
     tags: list[str] = ["generated", _TEAM_KEY]
     for tag in skill_tags or []:
@@ -118,26 +119,28 @@ def build_agent_manifest(
         if cleaned and cleaned not in tags:
             tags.append(cleaned)
 
-    manifest = AgentManifest(
-        id=manifest_id,
+    return build_manifest(
+        id=manifest_agent_id(team_id, agent_name),
         team=_TEAM_KEY,
         name=agent_name,
         summary=resolved_summary,
         tags=tags,
-        inputs=IOSchema(
+        inputs=io_schema(
+            None,
             schema_ref=GENERATED_AGENT_INPUT_REF,
-            description="Roster metadata + user message; a shared entrypoint serves every "
+            ref_description="Roster metadata + user message; a shared entrypoint serves every "
             "generated agent.",
+            inline_description="Authored input schema.",
         ),
-        outputs=IOSchema(
-            schema_ref=GENERATED_AGENT_OUTPUT_REF, description="The agent's response text."
+        outputs=io_schema(
+            None,
+            schema_ref=GENERATED_AGENT_OUTPUT_REF,
+            ref_description="The agent's response text.",
+            inline_description="Authored output schema.",
         ),
         cognition=default_cognition_block(),
         source=SourceInfo(entrypoint=GENERATED_AGENT_ENTRYPOINT, anatomy_ref=AGENT_ANATOMY_REF),
     )
-    # Round-trip through a JSON-safe dump so the returned object is guaranteed
-    # to be a fully validated manifest (and safe to serialize over the API).
-    return revalidate(manifest)
 
 
 def skill_tags_from_manifest(manifest: AgentManifest) -> list[str]:
@@ -147,7 +150,7 @@ def skill_tags_from_manifest(manifest: AgentManifest) -> list[str]:
     Postconditions: returns tags excluding the ``"generated"`` and team-key markers
         stamped by :func:`build_agent_manifest`, order preserved.
     """
-    return strip_marker_tags(manifest.tags or [], frozenset({"generated", _TEAM_KEY}))
+    return project_manifest(manifest, strip_tags=frozenset({"generated", _TEAM_KEY}))["tags"]
 
 
 def is_generated_manifest(manifest: AgentManifest) -> bool:

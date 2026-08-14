@@ -1,20 +1,23 @@
-"""Validation tests for the Phase 1, Phase 2, Phase 3, and Phase 4 structured-output models.
+"""Validation tests for the Phase 1–5 structured-output models.
 
-These agent-facing models (``BrandDiscoveryAuditOutput``, ``PurposeVisionOutput``,
-``CoreValuesOutput``, ``AudienceSegmentsOutput``, ``DifferentiationPillarsOutput``,
-``PositioningOutput``, plus Phase 2's ``BrandStoryOutput``,
-``BrandArchetypesOutput``, ``TaglineOutput``, ``MessagingFrameworkOutput``
-(and its nested ``MessagingPillarOutput``/``AudienceMessageMapOutput``),
-``PersonaProfilesOutput``, ``WritingGuidelinesOutput``, plus Phase 3's nested
-twins (``LogoUsageRuleOutput``, ``ColorEntryOutput``, ``TypographySpecOutput``,
-``VoiceToneEntryOutput``), plus Phase 4's ``ChannelGuidelineOutput``,
-``BrandArchitectureOutput``, and ``BrandExperiencePrinciplesOutput``) must
-reject empty/omitted content so Strands' structured-output tool retries the LLM
-instead of silently accepting a blank or under-cardinality response (see
-``structured_output_tool.py``: a ``ValidationError`` becomes a tool error
-the model is asked to fix). Dual-mode tests also pin the soft merge-target
-twins and the ``isinstance(strict, soft)`` subclass contract produced by
-``_derive_strict_variant``.
+Agent-facing ``*Output`` models must reject empty/omitted content so Strands'
+structured-output tool retries the LLM instead of silently accepting a blank
+or under-cardinality response (see ``structured_output_tool.py``: a
+``ValidationError`` becomes a tool error the model is asked to fix).
+
+Collapsed nested-item models (``CoreValue``, ``AudienceSegment``,
+``DifferentiationPillar``, ``BrandArchetype``, ``MessagingPillar``,
+``AudienceMessageMap``, ``ElevatorPitch``, ``PersonaProfile``,
+``LogoUsageRule``, ``ColorEntry``, ``TypographySpec``, ``VoiceToneEntry``,
+``BrandArchitectureRule``, ``BrandInActionExample``, ``ApprovalWorkflow``,
+``WikiEntry``, ``BrandHealthKPI`` and their ``*Output`` subclasses) are
+covered in dual-mode: the soft base still permits blank/omitted content
+(merge-target contract), the strict subclass still rejects blanks, and
+``isinstance(strict, soft)`` holds because ``_derive_strict_variant``
+generates a real subclass. Wrapper and compositor schemas
+(``BrandDiscoveryAuditOutput``, ``PurposeVisionOutput``, ``CoreValuesOutput``,
+Phase 2's cumulative chain, Phase 4/5 compositor models) keep their
+cardinality and blank-rejection tests.
 """
 
 from __future__ import annotations
@@ -23,6 +26,9 @@ import pytest
 from pydantic import ValidationError
 
 from branding_team.models import (
+    ApprovalWorkflow,
+    ApprovalWorkflowOutput,
+    ApprovalWorkflowsOutput,
     AudienceMessageMap,
     AudienceMessageMapOutput,
     AudienceSegment,
@@ -32,10 +38,16 @@ from branding_team.models import (
     BrandArchetypeOutput,
     BrandArchetypesOutput,
     BrandArchitectureOutput,
+    BrandArchitectureRule,
     BrandArchitectureRuleOutput,
     BrandDiscoveryAuditOutput,
     BrandExperiencePrinciplesOutput,
+    BrandHealthKPI,
+    BrandHealthKPIOutput,
+    BrandInActionExample,
+    BrandInActionExampleOutput,
     BrandStoryOutput,
+    ChannelActivationOutput,
     ChannelGuidelineOutput,
     ColorEntry,
     ColorEntryOutput,
@@ -47,6 +59,7 @@ from branding_team.models import (
     DifferentiationPillarsOutput,
     ElevatorPitch,
     ElevatorPitchOutput,
+    GovernanceOutput,
     LogoUsageRule,
     LogoUsageRuleOutput,
     MessagingFrameworkOutput,
@@ -62,6 +75,8 @@ from branding_team.models import (
     TypographySpecOutput,
     VoiceToneEntry,
     VoiceToneEntryOutput,
+    WikiEntry,
+    WikiEntryOutput,
     WritingGuidelinesBody,
     WritingGuidelinesOutput,
 )
@@ -1014,3 +1029,297 @@ def test_voice_tone_entry_output_is_usable_as_a_voice_tone_entry() -> None:
         examples=["Let's ship the brand, not the buzzwords."],
     )
     assert isinstance(output, VoiceToneEntry)
+
+
+def test_brand_architecture_rule_permits_blank_and_omitted_content() -> None:
+    """``BrandArchitectureRule`` is the soft merge-target twin: all fields
+    default empty, matching ``ChannelActivationOutput.brand_architecture``'s
+    partial-fragment merge contract."""
+    minimal = BrandArchitectureRule()
+    assert minimal.entity == ""
+    assert minimal.relationship == ""
+    assert minimal.naming_convention == ""
+    assert minimal.visual_treatment == ""
+
+    explicit_blank = BrandArchitectureRule(
+        entity="", relationship="", naming_convention="", visual_treatment=""
+    )
+    assert explicit_blank.entity == ""
+
+
+def test_brand_architecture_rule_output_rejects_blank_content() -> None:
+    """A blank entity, relationship, naming convention, or visual treatment must fail."""
+    valid_kwargs = dict(
+        entity="Parent brand",
+        relationship="Umbrella over sub-brands",
+        naming_convention="[Parent] [Product]",
+        visual_treatment="Shared wordmark, distinct accent color",
+    )
+
+    with pytest.raises(ValidationError):
+        BrandArchitectureRuleOutput(**{**valid_kwargs, "entity": ""})
+    with pytest.raises(ValidationError):
+        BrandArchitectureRuleOutput(**{**valid_kwargs, "relationship": ""})
+    with pytest.raises(ValidationError):
+        BrandArchitectureRuleOutput(**{**valid_kwargs, "naming_convention": ""})
+    with pytest.raises(ValidationError):
+        BrandArchitectureRuleOutput(**{**valid_kwargs, "visual_treatment": ""})
+
+    output = BrandArchitectureRuleOutput(**valid_kwargs)
+    assert output.entity == "Parent brand"
+
+
+def test_brand_architecture_rule_output_is_usable_as_a_brand_architecture_rule() -> None:
+    """The derived strict twin stays a normal, directly constructible
+    ``pydantic.BaseModel`` subclass wherever ``BrandArchitectureRule`` is."""
+    output = BrandArchitectureRuleOutput(
+        entity="Parent brand",
+        relationship="Umbrella over sub-brands",
+        naming_convention="[Parent] [Product]",
+        visual_treatment="Shared wordmark, distinct accent color",
+    )
+    assert isinstance(output, BrandArchitectureRule)
+
+
+def test_brand_in_action_example_permits_blank_and_omitted_content() -> None:
+    """``BrandInActionExample`` is the soft merge-target twin: all fields
+    default empty, matching ``ChannelActivationOutput.brand_in_action``'s
+    partial-fragment merge contract."""
+    minimal = BrandInActionExample()
+    assert minimal.context == ""
+    assert minimal.correct_example == ""
+    assert minimal.incorrect_example == ""
+    assert minimal.rationale == ""
+
+    explicit_blank = BrandInActionExample(
+        context="", correct_example="", incorrect_example="", rationale=""
+    )
+    assert explicit_blank.context == ""
+
+
+def test_brand_in_action_example_output_rejects_blank_content() -> None:
+    """A blank context, correct example, incorrect example, or rationale must fail."""
+    valid_kwargs = dict(
+        context="Homepage hero",
+        correct_example="Lead with the brand promise, then proof.",
+        incorrect_example="Lead with a generic stock photo and slogan.",
+        rationale="First impression must match positioning.",
+    )
+
+    with pytest.raises(ValidationError):
+        BrandInActionExampleOutput(**{**valid_kwargs, "context": ""})
+    with pytest.raises(ValidationError):
+        BrandInActionExampleOutput(**{**valid_kwargs, "correct_example": ""})
+    with pytest.raises(ValidationError):
+        BrandInActionExampleOutput(**{**valid_kwargs, "incorrect_example": ""})
+    with pytest.raises(ValidationError):
+        BrandInActionExampleOutput(**{**valid_kwargs, "rationale": ""})
+
+    output = BrandInActionExampleOutput(**valid_kwargs)
+    assert output.context == "Homepage hero"
+
+
+def test_brand_in_action_example_output_is_usable_as_a_brand_in_action_example() -> None:
+    """The derived strict twin stays a normal, directly constructible
+    ``pydantic.BaseModel`` subclass wherever ``BrandInActionExample`` is."""
+    output = BrandInActionExampleOutput(
+        context="Homepage hero",
+        correct_example="Lead with the brand promise, then proof.",
+        incorrect_example="Lead with a generic stock photo and slogan.",
+        rationale="First impression must match positioning.",
+    )
+    assert isinstance(output, BrandInActionExample)
+
+
+def test_approval_workflow_permits_blank_and_omitted_content() -> None:
+    """``ApprovalWorkflow`` is the soft merge-target twin: all fields default
+    empty, matching ``GovernanceOutput.approval_workflows``'s partial-fragment
+    merge contract."""
+    minimal = ApprovalWorkflow()
+    assert minimal.asset_type == ""
+    assert minimal.approvers == []
+    assert minimal.sla == ""
+    assert minimal.escalation_path == ""
+
+    explicit_blank = ApprovalWorkflow(asset_type="", approvers=[], sla="", escalation_path="")
+    assert explicit_blank.approvers == []
+
+    blank_item = ApprovalWorkflow(approvers=[""])
+    assert blank_item.approvers == [""]
+
+
+def test_approval_workflow_output_rejects_blank_content() -> None:
+    """A blank asset type, SLA, escalation path, empty approvers list, or
+    blank approver item must fail."""
+    valid_kwargs = dict(
+        asset_type="Campaign landing page",
+        approvers=["Brand Director"],
+        sla="2 business days",
+        escalation_path="Brand Director -> CMO",
+    )
+
+    with pytest.raises(ValidationError):
+        ApprovalWorkflowOutput(**{**valid_kwargs, "asset_type": ""})
+    with pytest.raises(ValidationError):
+        ApprovalWorkflowOutput(**{**valid_kwargs, "approvers": []})
+    with pytest.raises(ValidationError):
+        ApprovalWorkflowOutput(**{**valid_kwargs, "approvers": [""]})
+    with pytest.raises(ValidationError):
+        ApprovalWorkflowOutput(**{**valid_kwargs, "sla": ""})
+    with pytest.raises(ValidationError):
+        ApprovalWorkflowOutput(**{**valid_kwargs, "escalation_path": ""})
+
+    output = ApprovalWorkflowOutput(**valid_kwargs)
+    assert output.asset_type == "Campaign landing page"
+
+
+def test_approval_workflow_output_is_usable_as_an_approval_workflow() -> None:
+    """The derived strict twin stays a normal, directly constructible
+    ``pydantic.BaseModel`` subclass wherever ``ApprovalWorkflow`` is."""
+    output = ApprovalWorkflowOutput(
+        asset_type="Campaign landing page",
+        approvers=["Brand Director"],
+        sla="2 business days",
+        escalation_path="Brand Director -> CMO",
+    )
+    assert isinstance(output, ApprovalWorkflow)
+
+
+def test_wiki_entry_permits_blank_and_omitted_content() -> None:
+    """``WikiEntry`` is the soft merge-target twin: ``title``/``summary`` are
+    required but unconstrained, ``owners`` defaults empty, and
+    ``update_cadence`` defaults to ``monthly``, matching
+    ``GovernanceOutput.wiki_backlog``'s partial-fragment merge contract."""
+    minimal = WikiEntry(title="Brand North Star", summary="Source of truth for positioning.")
+    assert minimal.owners == []
+    assert minimal.update_cadence == "monthly"
+
+    explicit_blank = WikiEntry(title="", summary="", owners=[], update_cadence="")
+    assert explicit_blank.title == ""
+    assert explicit_blank.summary == ""
+    assert explicit_blank.update_cadence == ""
+
+    blank_item = WikiEntry(title="Brand North Star", summary="Source of truth.", owners=[""])
+    assert blank_item.owners == [""]
+
+
+def test_wiki_entry_output_rejects_blank_content() -> None:
+    """A blank title, summary, cadence, empty owners list, or blank owner must fail."""
+    valid_kwargs = dict(
+        title="Brand North Star",
+        summary="Source of truth for positioning.",
+        owners=["Brand Strategy"],
+        update_cadence="quarterly",
+    )
+
+    with pytest.raises(ValidationError):
+        WikiEntryOutput(**{**valid_kwargs, "title": ""})
+    with pytest.raises(ValidationError):
+        WikiEntryOutput(**{**valid_kwargs, "summary": ""})
+    with pytest.raises(ValidationError):
+        WikiEntryOutput(**{**valid_kwargs, "owners": []})
+    with pytest.raises(ValidationError):
+        WikiEntryOutput(**{**valid_kwargs, "owners": [""]})
+    with pytest.raises(ValidationError):
+        WikiEntryOutput(**{**valid_kwargs, "update_cadence": ""})
+
+    output = WikiEntryOutput(**valid_kwargs)
+    assert output.title == "Brand North Star"
+
+
+def test_wiki_entry_output_is_usable_as_a_wiki_entry() -> None:
+    """The derived strict twin stays a normal, directly constructible
+    ``pydantic.BaseModel`` subclass wherever ``WikiEntry`` is."""
+    output = WikiEntryOutput(
+        title="Brand North Star",
+        summary="Source of truth for positioning.",
+        owners=["Brand Strategy"],
+        update_cadence="quarterly",
+    )
+    assert isinstance(output, WikiEntry)
+
+
+def test_brand_health_kpi_permits_blank_and_omitted_content() -> None:
+    """``BrandHealthKPI`` is the soft merge-target twin: all fields default
+    empty, matching ``GovernanceOutput.brand_health_kpis``'s partial-fragment
+    merge contract."""
+    minimal = BrandHealthKPI()
+    assert minimal.metric == ""
+    assert minimal.measurement_method == ""
+    assert minimal.target == ""
+    assert minimal.review_frequency == ""
+
+    explicit_blank = BrandHealthKPI(
+        metric="", measurement_method="", target="", review_frequency=""
+    )
+    assert explicit_blank.metric == ""
+
+
+def test_brand_health_kpi_output_rejects_blank_content() -> None:
+    """A blank metric, measurement method, target, or review frequency must fail."""
+    valid_kwargs = dict(
+        metric="NPS",
+        measurement_method="Quarterly survey",
+        target=">50",
+        review_frequency="quarterly",
+    )
+
+    with pytest.raises(ValidationError):
+        BrandHealthKPIOutput(**{**valid_kwargs, "metric": ""})
+    with pytest.raises(ValidationError):
+        BrandHealthKPIOutput(**{**valid_kwargs, "measurement_method": ""})
+    with pytest.raises(ValidationError):
+        BrandHealthKPIOutput(**{**valid_kwargs, "target": ""})
+    with pytest.raises(ValidationError):
+        BrandHealthKPIOutput(**{**valid_kwargs, "review_frequency": ""})
+
+    output = BrandHealthKPIOutput(**valid_kwargs)
+    assert output.metric == "NPS"
+
+
+def test_brand_health_kpi_output_is_usable_as_a_brand_health_kpi() -> None:
+    """The derived strict twin stays a normal, directly constructible
+    ``pydantic.BaseModel`` subclass wherever ``BrandHealthKPI`` is."""
+    output = BrandHealthKPIOutput(
+        metric="NPS",
+        measurement_method="Quarterly survey",
+        target=">50",
+        review_frequency="quarterly",
+    )
+    assert isinstance(output, BrandHealthKPI)
+
+
+def test_channel_activation_accepts_strict_architecture_fragment_dump() -> None:
+    """``_merge_structured_output`` validates a specialist dump against the
+    soft phase model; a ``BrandArchitectureOutput`` dump must still merge
+    into ``ChannelActivationOutput`` after the nested twin collapse."""
+    merged = ChannelActivationOutput.model_validate(
+        BrandArchitectureOutput(**_ARCHITECTURE_KWARGS).model_dump()
+    )
+    assert len(merged.brand_architecture) == 1
+    assert merged.brand_architecture[0].entity == "Parent brand"
+    assert isinstance(merged.brand_architecture[0], BrandArchitectureRule)
+
+
+def test_governance_accepts_strict_workflow_fragment_dump() -> None:
+    """``_merge_structured_output`` validates a specialist dump against the
+    soft phase model; an ``ApprovalWorkflowsOutput`` dump must still merge
+    into ``GovernanceOutput`` after the nested twin collapse."""
+    workflow = ApprovalWorkflowOutput(
+        asset_type="Campaign landing page",
+        approvers=["Brand Director"],
+        sla="2 business days",
+        escalation_path="Brand Director -> CMO",
+    )
+    fragment = ApprovalWorkflowsOutput(
+        approval_workflows=[workflow, workflow, workflow],
+        agency_briefing_protocols=[
+            "Always include brand book",
+            "Share latest palette",
+            "Cite wiki owners",
+        ],
+    )
+    merged = GovernanceOutput.model_validate(fragment.model_dump())
+    assert len(merged.approval_workflows) == 3
+    assert merged.approval_workflows[0].asset_type == "Campaign landing page"
+    assert isinstance(merged.approval_workflows[0], ApprovalWorkflow)
