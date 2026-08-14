@@ -172,8 +172,8 @@ def _run(fn: Callable[..., T], *args: object) -> T:
         - ``fn`` is callable; ``args`` match ``fn``.
     Postconditions:
         - Returns ``fn``'s result, or re-raises ``fn``'s exception.
-        - Raises ``RuntimeError`` if ``fn`` does not finish within
-          ``AUTHORING_TIMEOUT_S``.
+        - Raises ``RuntimeError`` chained from ``concurrent.futures.TimeoutError``
+          if ``fn`` does not finish within ``AUTHORING_TIMEOUT_S``.
     """
     fut = _authoring_executor().submit(fn, *args)
     try:

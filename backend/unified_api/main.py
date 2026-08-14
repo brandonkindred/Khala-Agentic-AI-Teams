@@ -583,14 +583,15 @@ def _start_agent_studio_temporal_worker() -> None:
     and on the team being enabled. Authoring CRUD (start conversation / send
     message / clone / save) does not use Temporal: dispatch always calls
     :class:`AgentStudioService` in-process, and the worker starter no-ops when
-    there are no authoring workflows to register. A false return here is a
-    fully-functional mode, not a degraded state. Log-and-continue on failure,
+    there are no authoring workflows to register. This helper always returns
+    ``None``. A ``False`` return from the starter is a fully-functional mode
+    (in-process CRUD), not a degraded state. Log-and-continue on failure,
     matching the other lifespan startup steps.
 
     Preconditions:
         - ``TEAM_CONFIGS`` includes ``agent_studio``.
     Postconditions:
-        - Logs at INFO and returns without starting a worker when
+        - Returns ``None``. Logs at INFO and does not start a worker when
           ``UNIFIED_API_AGENT_STUDIO_TEMPORAL_WORKER`` is false.
         - Logs at INFO when a worker actually started, or when the starter
           returns ``False`` (nothing to register, or Temporal unset) — Agent
