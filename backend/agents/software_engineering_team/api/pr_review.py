@@ -1138,13 +1138,33 @@ def _files_for_scope(mode: ReviewModeDecision) -> Dict[str, str]:
     return files
 
 
+def _is_not_reviewed_coverage_finding(issue: Any) -> bool:
+    """True when ``issue`` is a blocking unreviewed-range coverage finding.
+
+    Those findings are merged into ``output.issues`` only when
+    ``CODE_REVIEW_BLOCK_ON_UNREVIEWED`` is set; they must not go through
+    scope verification (an unsure tag would route them to proposals and
+    defeat the fail-closed gate).
+
+    Postconditions: True iff the finding description contains
+        ``NOT_REVIEWED_FINDING_MARKER``. Never raises.
+    """
+    from software_engineering_team.code_review_agent.mapping import (
+        NOT_REVIEWED_FINDING_MARKER,
+    )
+
+    return NOT_REVIEWED_FINDING_MARKER in (getattr(issue, "description", "") or "")
+
+
 def _tag_review_issues_for_scope(output: Any, mode: ReviewModeDecision) -> None:
     """Tag out-of-scope findings before partition so they are not posted.
 
     Preconditions: ``output`` is a successful reviewer result with ``issues``.
     Postconditions: ``output.issues`` is replaced with scope-tagged copies when
-        the verifier runs; on Dummy LLM / verifier failure the list is left
-        unchanged. Never raises.
+        the verifier runs; blocking "could not be reviewed" coverage findings
+        are excluded from the verifier and merged back unchanged so they cannot
+        be routed to issue proposals. On Dummy LLM / verifier failure the list
+        is left unchanged. Never raises.
     """
     issues = getattr(output, "issues", None) or []
     if not issues:
@@ -1155,14 +1175,20 @@ def _tag_review_issues_for_scope(output: Any, mode: ReviewModeDecision) -> None:
             apply_scope_verification,
         )
 
+        genuine = [i for i in issues if not _is_not_reviewed_coverage_finding(i)]
+        if not genuine:
+            return
         tagged = apply_scope_verification(
             get_client(),
-            issues=issues,
+            issues=genuine,
             changed_by_path=mode.changed_by_path,
             files=_files_for_scope(mode),
             repo_reader=mode.repo_reader,
         )
-        output.issues = tagged
+        tagged_iter = iter(tagged)
+        output.issues = [
+            i if _is_not_reviewed_coverage_finding(i) else next(tagged_iter) for i in issues
+        ]
     except Exception as exc:  # noqa: BLE001 — tagging must never fail the review
         logger.warning(
             "PR review: scope verification skipped (%s: %s)",

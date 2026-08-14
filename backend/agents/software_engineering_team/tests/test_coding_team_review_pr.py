@@ -3182,7 +3182,9 @@ class TestFixedRunPrReview:
             apply_scope_verdicts,
         )
 
-        def _force_unsure(llm, *, issues, changed_by_path, files, repo_reader=None, input_data=None):
+        def _force_unsure(
+            llm, *, issues, changed_by_path, files, repo_reader=None, input_data=None
+        ):
             converted = [
                 CodeReviewIssue(
                     severity=getattr(i, "severity", "high"),
@@ -3225,7 +3227,8 @@ class TestFixedRunPrReview:
         job = review_app["jobs"].get_job(resp.json()["job_id"])
         assert job["review_summary"]["pending_issue_proposals"]
         assert (
-            job["review_summary"]["pending_issue_proposals"][0]["description"] == "maybe out of scope"
+            job["review_summary"]["pending_issue_proposals"][0]["description"]
+            == "maybe out of scope"
         )
 
     def test_scope_verifier_omission_still_posts(self, review_app, monkeypatch) -> None:
@@ -3236,7 +3239,9 @@ class TestFixedRunPrReview:
             apply_scope_verdicts,
         )
 
-        def _force_omission(llm, *, issues, changed_by_path, files, repo_reader=None, input_data=None):
+        def _force_omission(
+            llm, *, issues, changed_by_path, files, repo_reader=None, input_data=None
+        ):
             converted = [
                 CodeReviewIssue(
                     severity=getattr(i, "severity", "high"),
@@ -3277,6 +3282,81 @@ class TestFixedRunPrReview:
         assert any("should have added missing.py" in c[1] for c in gh.comments)
         job = review_app["jobs"].get_job(resp.json()["job_id"])
         assert job["review_summary"]["pending_issue_proposals"] == []
+
+    def test_scope_verifier_leaves_not_reviewed_coverage_findings_untagged(
+        self, review_app, monkeypatch
+    ) -> None:
+        """Blocking unreviewed-range findings must not enter scope verification.
+
+        If they did, an unsure/fail-closed tag would route them to issue
+        proposals and they would no longer reject the PR.
+        """
+        from software_engineering_team.code_review_agent.mapping import (
+            NOT_REVIEWED_FINDING_MARKER,
+        )
+        from software_engineering_team.code_review_agent.models import CodeReviewIssue
+
+        seen: list[str] = []
+
+        def _tag_all_received_as_pre_existing(
+            llm, *, issues, changed_by_path, files, repo_reader=None, input_data=None
+        ):
+            seen.extend(getattr(i, "description", "") or "" for i in issues)
+            return [
+                CodeReviewIssue(
+                    severity=getattr(i, "severity", "high"),
+                    category=getattr(i, "category", "logic"),
+                    file_path=getattr(i, "file_path", ""),
+                    line=getattr(i, "line", None),
+                    description=getattr(i, "description", ""),
+                    suggestion=getattr(i, "suggestion", ""),
+                    pre_existing=True,
+                )
+                for i in issues
+            ]
+
+        monkeypatch.setattr(
+            "software_engineering_team.code_review_agent.scope_filter.apply_scope_verification",
+            _tag_all_received_as_pre_existing,
+        )
+        coverage_desc = (
+            f"This code {NOT_REVIEWED_FINDING_MARKER} automatically (TimeoutError); "
+            "a.py (lines 90-99) was not reviewed. Blocking review so unreviewed "
+            "code is not approved."
+        )
+        review_app["github"]["client"] = _FakeReviewClient()
+        review_app["github"]["agent_output"] = _FakeOutput(
+            issues=[
+                _FakeReviewIssue(
+                    "high",
+                    line=99,
+                    file_path="a.py",
+                    description=coverage_desc,
+                ),
+                _FakeReviewIssue(
+                    "high",
+                    line=50,
+                    file_path="a.py",
+                    description="unrelated context nit",
+                ),
+            ]
+        )
+        resp = review_app["client"].post("/review-pr", json=_review_body())
+        assert resp.status_code == 200
+        assert coverage_desc not in seen
+        assert "unrelated context nit" in seen
+        gh = review_app["github"]["client"]
+        posted = " ".join(c.get("body", "") for c in gh.review_comments)
+        posted += " ".join(body for _n, body in gh.comments)
+        for review in gh.reviews:
+            posted += " ".join(c.get("body", "") for c in review.get("comments", []))
+        assert NOT_REVIEWED_FINDING_MARKER in posted
+        job = review_app["jobs"].get_job(resp.json()["job_id"])
+        proposals = job["review_summary"]["pending_issue_proposals"]
+        assert all(
+            NOT_REVIEWED_FINDING_MARKER not in (p.get("description") or "") for p in proposals
+        )
+        assert any("unrelated context nit" in (p.get("description") or "") for p in proposals)
 
 
 # ---------------------------------------------------------------------------
