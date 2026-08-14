@@ -21,6 +21,10 @@ def pytest_configure(config: pytest.Config) -> None:
         "markers",
         "real_postgres: run against the real shared.postgres connection",
     )
+    config.addinivalue_line(
+        "markers",
+        "real_llm: invoke a live LLM provider; skipped unless LLM_PROVIDER and resolve_provider() are non-dummy",
+    )
 
 
 def make_mission(**overrides: Any) -> BrandingMission:
