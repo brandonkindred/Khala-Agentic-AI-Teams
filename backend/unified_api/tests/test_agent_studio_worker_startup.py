@@ -166,3 +166,5 @@ def test_lifespan_shuts_down_authoring_executor_before_postgres_close() -> None:
     src = inspect.getsource(main.lifespan)
     assert src.index("shutdown_authoring_executor") < src.index("close_pool")
     assert src.index("shutdown_authoring_executor") > src.index("_stop_in_process_temporal_workers")
+    gate = src.index('TEAM_CONFIGS["agent_studio"].enabled')
+    assert gate < src.index("shutdown_authoring_executor")

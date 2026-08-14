@@ -159,7 +159,7 @@ Order is load-bearing so buffered `llm_call_records` are not lost:
 1. Cancel cognition scheduler, graph sync, console pruner, sandbox reaper, and the health loop.
 2. `close_graphiti()`.
 3. `_stop_in_process_temporal_workers()` (`stop_all_team_workers`) — Studio and sandbox activities can still invoke the LLM; they must finish before the observer unregisters.
-4. `shutdown_authoring_executor()` — Agent Studio in-process authoring pool. Rejects new CRUD submits; daemon workers are not joined (a stalled LLM HTTP call cannot be cancelled from another thread, and CPython `ThreadPoolExecutor` atexit would otherwise block reload for up to `resolve_timeout()` / 3600s).
+4. `shutdown_authoring_executor()` — Agent Studio in-process authoring pool, gated on `TEAM_CONFIGS["agent_studio"].enabled` so a disabled team is never imported. Rejects new CRUD submits; daemon workers are not joined (a stalled LLM HTTP call cannot be cancelled from another thread, and CPython `ThreadPoolExecutor` atexit would otherwise block reload for up to `resolve_timeout()` / 3600s).
 5. `llm_service.usage_flusher.shutdown()` — stop the heartbeat, unregister the observer, final synchronous drain.
 6. `close_pool()` — only after the drain, so the flusher still has a live pool.
 7. `_shutdown_probe_executor()`.
