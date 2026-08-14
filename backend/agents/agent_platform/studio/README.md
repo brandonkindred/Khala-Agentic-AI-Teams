@@ -13,6 +13,12 @@ registered agent back into an editable draft.
 - Save: `POST /agents`
 - Drafts (separate, opaque-payload CRUD; not `AgentDefinition`-typed): `/drafts`
 
+The router is included from `unified_api/main.py` at import time when
+`TEAM_CONFIGS["agent_studio"]` is enabled. The Studio Temporal worker
+(`agent-studio-queue`) boots from the unified-API lifespan, not Pattern A
+import-time start — catalog:
+[`docs/UNIFIED_API_LIFESPAN.md`](../../../../docs/UNIFIED_API_LIFESPAN.md).
+
 ## Identity: `AgentDefinition` view-model vs. `AgentManifest` SoT
 
 `agent_platform.registry.models.AgentManifest` is the only persisted, writable **catalog**
