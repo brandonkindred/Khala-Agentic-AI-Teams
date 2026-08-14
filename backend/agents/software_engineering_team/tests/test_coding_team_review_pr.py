@@ -3183,7 +3183,7 @@ class TestFixedRunPrReview:
         )
 
         def _force_unsure(
-            llm, *, issues, changed_by_path, files, repo_reader=None, input_data=None
+            llm, *, issues, changed_by_path, files, repo_reader=None, input_data=None, **_kw
         ):
             converted = [
                 CodeReviewIssue(
@@ -3240,7 +3240,7 @@ class TestFixedRunPrReview:
         )
 
         def _force_omission(
-            llm, *, issues, changed_by_path, files, repo_reader=None, input_data=None
+            llm, *, issues, changed_by_path, files, repo_reader=None, input_data=None, **_kw
         ):
             converted = [
                 CodeReviewIssue(
@@ -3299,7 +3299,7 @@ class TestFixedRunPrReview:
         seen: list[str] = []
 
         def _tag_all_received_as_pre_existing(
-            llm, *, issues, changed_by_path, files, repo_reader=None, input_data=None
+            llm, *, issues, changed_by_path, files, repo_reader=None, input_data=None, **_kw
         ):
             seen.extend(getattr(i, "description", "") or "" for i in issues)
             return [
@@ -3357,6 +3357,39 @@ class TestFixedRunPrReview:
             NOT_REVIEWED_FINDING_MARKER not in (p.get("description") or "") for p in proposals
         )
         assert any("unrelated context nit" in (p.get("description") or "") for p in proposals)
+
+    def test_scope_verifier_receives_pr_task_text(self, review_app, monkeypatch) -> None:
+        """The PR hook must pass title/body into the verifier, not files-only input."""
+        captured: dict[str, Any] = {}
+
+        def _capture(
+            llm, *, issues, changed_by_path, files, repo_reader=None, input_data=None, **_kw
+        ):
+            captured["input_data"] = input_data
+            captured["removed"] = _kw.get("removed_by_path")
+            return list(issues)
+
+        monkeypatch.setattr(
+            "software_engineering_team.code_review_agent.scope_filter.apply_scope_verification",
+            _capture,
+        )
+        review_app["github"]["client"] = _FakeReviewClient()
+        review_app["github"]["agent_output"] = _FakeOutput(
+            issues=[
+                _FakeReviewIssue(
+                    "high",
+                    line=99,
+                    file_path="a.py",
+                    description="maybe related",
+                )
+            ]
+        )
+        resp = review_app["client"].post("/review-pr", json=_review_body())
+        assert resp.status_code == 200
+        data = captured.get("input_data")
+        assert data is not None
+        assert "Add feature" in (data.task_description or "")
+        assert "body" in (data.task_requirements or "")
 
 
 # ---------------------------------------------------------------------------

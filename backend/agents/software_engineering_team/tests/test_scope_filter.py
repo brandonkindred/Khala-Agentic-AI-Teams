@@ -9,11 +9,12 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
-from code_review_agent.models import CodeReviewIssue
+from code_review_agent.models import CodeReviewInput, CodeReviewIssue
 from code_review_agent.scope_filter import (
     ScopeVerdict,
     apply_scope_verdicts,
     apply_scope_verification,
+    finding_overlaps_changed_lines,
 )
 
 from llm_service.clients.dummy import DummyLLMClient
@@ -23,6 +24,7 @@ def _issue(
     *,
     file_path: str = "a.py",
     line: Optional[int] = 1,
+    start_line: Optional[int] = None,
     description: str = "bug",
     pre_existing: bool = False,
 ) -> CodeReviewIssue:
@@ -31,6 +33,7 @@ def _issue(
         category="logic",
         file_path=file_path,
         line=line,
+        start_line=start_line,
         description=description,
         suggestion="fix",
         pre_existing=pre_existing,
@@ -316,3 +319,52 @@ def test_ungrounded_oos_from_llm_is_preserved(monkeypatch: Any) -> None:
         _Stub(), issues=[issue], changed_by_path=_changed(lines=[1]), files={"a.py": "x = 1\n"}
     )
     assert out[0].pre_existing is False
+
+
+def test_multi_line_span_overlapping_added_line_stays_in_scope() -> None:
+    """start_line on an added line keeps the finding in-scope even if `line` is context."""
+    issue = _issue(start_line=2, line=10, description="span")
+    assert finding_overlaps_changed_lines(issue, _changed(lines=[2])) is True
+    out = apply_scope_verdicts(
+        [issue],
+        changed_by_path=_changed(lines=[2]),
+        verdicts={0: ScopeVerdict(scope="unsure", confidence="low")},
+        grounded=True,
+    )
+    assert out[0].pre_existing is False
+
+
+def test_deletion_only_unsure_preserves_original_tag() -> None:
+    """Deletion-only diffs have no added lines; unsure must not fail-close posting."""
+    issue = _issue(line=10, description="deleted helper was the bug", pre_existing=False)
+    out = apply_scope_verdicts(
+        [issue],
+        changed_by_path={"a.py": []},
+        verdicts={0: ScopeVerdict(scope="unsure", confidence="low")},
+        grounded=True,
+        removed_by_path={"a.py": [10, 11]},
+    )
+    assert out[0].pre_existing is False
+
+
+def test_scope_prompt_includes_task_span_and_deleted_lines() -> None:
+    from code_review_agent.scope_filter import _build_scope_prompt
+
+    issue = _issue(start_line=4, line=8, description="range bug")
+    prompt = _build_scope_prompt(
+        "a.py",
+        [issue],
+        {"a.py": [1]},
+        removed_by_path={"a.py": [9]},
+        patches_by_path={"a.py": "@@ -9,1 +9,0 @@\n-secret_token = 1"},
+        input_data=CodeReviewInput(
+            files={"a.py": "x = 1\n"},
+            task_description="Review pull request #7: Fix auth",
+            task_requirements="Must not leak tokens",
+        ),
+    )
+    assert "Fix auth" in prompt
+    assert "Must not leak tokens" in prompt
+    assert "a.py:4-8" in prompt
+    assert "secret_token" in prompt
+    assert "deleted" in prompt.lower()

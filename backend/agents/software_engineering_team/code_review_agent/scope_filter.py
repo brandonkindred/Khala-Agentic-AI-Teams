@@ -21,17 +21,21 @@ from strands.agent.conversation_manager import SlidingWindowConversationManager
 
 from llm_service.interface import LLMClient
 from shared.env import env_flag_enabled
-from software_engineering_team.github_source.pr_review_mapping import is_within_diff
+from software_engineering_team.github_source.pr_review_mapping import (
+    _normalize_path,
+    format_removed_excerpt,
+)
 from software_engineering_team.shared.llm import extract_json_from_response
 
 from .false_positive_filter import (
     CodebaseIndex,
     _agent_read_the_cited_file,
     _build_tools,
+    _cap_context_field,
     _render_finding_block,
 )
 from .model_resolution import resolve_code_review_verify_model
-from .models import CodeReviewInput, CodeReviewIssue
+from .models import CodeReviewInput, CodeReviewIssue, coerce_line
 from .prompts import SCOPE_VERIFY_FORMATTING_INSTRUCTIONS, SCOPE_VERIFY_REASONING_SYSTEM_PROMPT
 from .via_reasoning import run_agent_via_reasoning
 
@@ -58,6 +62,50 @@ class ScopeVerdict:
     reasoning: str = ""
 
 
+def finding_overlaps_changed_lines(
+    issue: Any, changed_by_path: Mapping[str, Sequence[int]]
+) -> bool:
+    """True when any line in the finding's span sits on an added/modified line.
+
+    Multi-line findings use ``start_line..line`` (inclusive). A finding that
+    starts on a changed line and ends on unchanged context is still in-scope.
+
+    Postconditions: False when the path cannot be resolved or no positive line
+        span exists. Never raises.
+    """
+    changed_sets: Dict[str, set[int]] = {
+        path: {int(n) for n in lines} for path, lines in changed_by_path.items()
+    }
+    path = _normalize_path(getattr(issue, "file_path", "") or "", changed_sets)
+    if path is None:
+        return False
+    end = coerce_line(getattr(issue, "line", None))
+    start = coerce_line(getattr(issue, "start_line", None))
+    if start is None and end is None:
+        return False
+    if start is None:
+        start = end
+    if end is None:
+        end = start
+    assert start is not None and end is not None
+    if start > end:
+        start, end = end, start
+    changed = changed_sets[path]
+    return any(n in changed for n in range(start, end + 1))
+
+
+def _cited_file_has_deletions(issue: Any, removed_by_path: Mapping[str, Sequence[int]]) -> bool:
+    """True when the finding's file has at least one deleted old-file line.
+
+    Postconditions: False when the path cannot be resolved. Never raises.
+    """
+    removed_sets: Dict[str, set[int]] = {
+        path: {int(n) for n in lines} for path, lines in removed_by_path.items()
+    }
+    path = _normalize_path(getattr(issue, "file_path", "") or "", removed_sets)
+    return path is not None and bool(removed_sets[path])
+
+
 def apply_scope_verdicts(
     issues: Sequence[CodeReviewIssue],
     *,
@@ -65,17 +113,23 @@ def apply_scope_verdicts(
     verdicts: Mapping[int, ScopeVerdict],
     grounded: bool,
     preserve_original: Optional[AbstractSet[int]] = None,
+    removed_by_path: Optional[Mapping[str, Sequence[int]]] = None,
 ) -> List[CodeReviewIssue]:
     """Tag findings for PR posting eligibility from verifier verdicts.
 
     Preconditions:
         - ``issues`` are genuine reviewer findings (not coverage/safety).
         - ``changed_by_path`` maps paths to 1-based added/modified line numbers.
+        - ``removed_by_path`` maps paths to 1-based old-file deleted line numbers.
 
     Postconditions:
-        - Returns a new list of the same length. Findings whose file/line sit
-          on an added/modified line are never tagged ``pre_existing``.
+        - Returns a new list of the same length. Findings whose span overlaps
+          an added/modified line are never tagged ``pre_existing``.
         - Indices in ``preserve_original`` keep their original ``pre_existing``.
+        - Off-diff findings on a file that deletes lines keep their original
+          ``pre_existing`` when the verdict is missing, unsure, or
+          low-confidence — deletion-only diffs have no added-line map, so
+          fail-closed unsure would drop every real finding.
         - A confident grounded ``out_of_scope`` verdict, an ``unsure``/missing/
           low-confidence verdict, or a low-confidence ``in_scope`` tags
           ``pre_existing=True`` (fail closed for posting).
@@ -84,14 +138,11 @@ def apply_scope_verdicts(
         - Confident ``in_scope`` / ``omission`` keep ``pre_existing=False``.
         - Never raises.
     """
-    changed_sets: Dict[str, set[int]] = {
-        path: {int(n) for n in lines} for path, lines in changed_by_path.items()
-    }
     keep = preserve_original or frozenset()
     tagged: List[CodeReviewIssue] = []
     for idx, issue in enumerate(issues):
         copy = _copy_issue(issue)
-        if idx in keep or is_within_diff(copy, changed_sets):
+        if idx in keep or finding_overlaps_changed_lines(copy, changed_by_path):
             tagged.append(copy)
             continue
         verdict = verdicts.get(idx)
@@ -104,6 +155,11 @@ def apply_scope_verdicts(
             and verdict.confidence in _CONFIDENT
         ):
             copy.pre_existing = False
+            tagged.append(copy)
+            continue
+        if _cited_file_has_deletions(copy, removed_by_path or {}) and (
+            verdict is None or verdict.scope == "unsure" or verdict.confidence not in _CONFIDENT
+        ):
             tagged.append(copy)
             continue
         copy.pre_existing = True
@@ -119,6 +175,8 @@ def apply_scope_verification(
     files: Mapping[str, str],
     repo_reader: Any = None,
     input_data: Optional[CodeReviewInput] = None,
+    removed_by_path: Optional[Mapping[str, Sequence[int]]] = None,
+    patches_by_path: Optional[Mapping[str, str]] = None,
 ) -> List[CodeReviewIssue]:
     """Run the scope verifier and return issues tagged for posting eligibility.
 
@@ -128,13 +186,16 @@ def apply_scope_verification(
 
     Postconditions:
         - Unscripted ``DummyLLMClient``, a disabled env toggle, empty
-          ``changed_by_path``, or empty ``issues`` return copies unchanged.
+          ``changed_by_path`` *and* empty ``removed_by_path``, or empty
+          ``issues`` return copies unchanged.
         - Otherwise off-diff findings are classified; posting is fail-closed
-          except that ungrounded out-of-scope verdicts are discarded.
+          except that ungrounded out-of-scope verdicts are discarded and
+          deletion-only files preserve original tags on unsure/missing.
         - Never raises: setup/LLM failure returns copies unchanged.
     """
     snapshot = [_copy_issue(i) for i in issues]
-    if not issues or not changed_by_path:
+    removed = removed_by_path or {}
+    if not issues or (not changed_by_path and not removed):
         return snapshot
     if not env_flag_enabled(_FILTER_ENV):
         return snapshot
@@ -148,6 +209,8 @@ def apply_scope_verification(
             files,
             repo_reader,
             input_data,
+            removed,
+            patches_by_path or {},
         )
     except Exception as exc:  # noqa: BLE001 — must never break the review
         logger.warning(
@@ -227,28 +290,91 @@ def _format_changed_lines(changed_by_path: Mapping[str, Sequence[int]]) -> str:
     return "\n".join(lines) if lines else "(none)"
 
 
+def _format_removed_lines(removed_by_path: Mapping[str, Sequence[int]]) -> str:
+    """Render the deleted old-file line map for the verifier prompt.
+
+    Postconditions: one ``path: line,...`` line per path, paths sorted.
+        Never raises.
+    """
+    lines = []
+    for path in sorted(removed_by_path):
+        nums = ", ".join(str(n) for n in sorted({int(x) for x in removed_by_path[path]}))
+        lines.append(f"- `{path}`: {nums}")
+    return "\n".join(lines) if lines else "(none)"
+
+
+def _render_scope_finding_block(i: int, issue: CodeReviewIssue) -> List[str]:
+    """Render one finding, including a multi-line ``start_line..line`` span.
+
+    Postconditions: same fields as ``_render_finding_block``, plus the span
+        when ``start_line`` is set. Never raises.
+    """
+    block = _render_finding_block(i, issue)
+    start = coerce_line(getattr(issue, "start_line", None))
+    end = coerce_line(getattr(issue, "line", None))
+    if start is not None and end is not None and start != end:
+        loc = f"{issue.file_path or '(file unknown)'}:{start}-{end}"
+        if len(block) > 1:
+            block[1] = f"severity: {issue.severity} | category: {issue.category} | location: {loc}"
+    return block
+
+
 def _build_scope_prompt(
     file_path: str,
     issues: Sequence[CodeReviewIssue],
     changed_by_path: Mapping[str, Sequence[int]],
+    *,
+    removed_by_path: Mapping[str, Sequence[int]],
+    patches_by_path: Mapping[str, str],
+    input_data: Optional[CodeReviewInput],
 ) -> str:
     """User prompt for one file's (or one off-diff group's) scope verdicts.
 
-    Postconditions: names ``file_path``, inlines the changed-line map, and
-        indexes findings; does not inline file bodies. Never raises.
+    Postconditions: names ``file_path``, inlines added and removed line maps,
+        task/requirements when present, a deleted-line excerpt for this file,
+        and indexes findings with their line span. Never raises.
     """
     parts = [
-        "**Lines this pull request added or modified:**",
+        "**Lines this pull request added or modified (new-file line numbers):**",
         _format_changed_lines(changed_by_path),
         "",
-        f"**File the findings below are about: `{file_path}`.**",
-        "Call read_file on that path when it is in the submission. If it is not "
-        "listed, call list_files() to see whether it exists; an omission finding "
-        "stays in-scope even when the path is absent from the diff.",
+        "**Lines this pull request deleted (old-file line numbers):**",
+        _format_removed_lines(removed_by_path),
         "",
     ]
+    if input_data is not None:
+        desc = _cap_context_field(input_data.task_description or "")
+        req = _cap_context_field(input_data.task_requirements or "")
+        if desc:
+            parts.extend(["**Pull request / task description:**", desc, ""])
+        if req:
+            parts.extend(["**Task requirements / PR body:**", req, ""])
+        ac = [str(x).strip() for x in (input_data.acceptance_criteria or []) if str(x).strip()]
+        if ac:
+            parts.append("**Acceptance criteria:**")
+            parts.extend(f"- {_cap_context_field(item)}" for item in ac)
+            parts.append("")
+    excerpt = format_removed_excerpt(patches_by_path.get(file_path, ""))
+    if excerpt:
+        parts.extend(
+            [
+                f"**Deleted source from `{file_path}`:**",
+                excerpt,
+                "",
+            ]
+        )
+    parts.extend(
+        [
+            f"**File the findings below are about: `{file_path}`.**",
+            "Call read_file on that path when it is in the submission. If it is not "
+            "listed, call list_files() to see whether it exists; an omission finding "
+            "stays in-scope even when the path is absent from the diff. A finding about "
+            "deleted code is in-scope when the PR removed that code.",
+            "",
+        ]
+    )
     for i, issue in enumerate(issues):
-        parts.extend(_render_finding_block(i, issue))
+        parts.extend(_render_scope_finding_block(i, issue))
         parts.append("")
     return "\n".join(parts)
 
@@ -289,21 +415,34 @@ def _verify_scope(
     files: Mapping[str, str],
     repo_reader: Any,
     input_data: Optional[CodeReviewInput],
+    removed_by_path: Mapping[str, Sequence[int]],
+    patches_by_path: Mapping[str, str],
 ) -> List[CodeReviewIssue]:
     """LLM-backed tagging; may raise on model resolution (caller catches).
 
-    Findings already on added lines skip the LLM. Remaining findings are
-    grouped by cited path (blank path → one group).
+    Findings whose span overlaps added lines skip the LLM. Remaining findings
+    are grouped by cited path (blank path → one group).
     """
-    changed_sets: Dict[str, set[int]] = {
-        path: {int(n) for n in lines} for path, lines in changed_by_path.items()
-    }
     need_llm: List[int] = [
-        idx for idx, issue in enumerate(issues) if not is_within_diff(issue, changed_sets)
+        idx
+        for idx, issue in enumerate(issues)
+        if not finding_overlaps_changed_lines(issue, changed_by_path)
     ]
-    if not need_llm or not files:
+    if not need_llm:
         return apply_scope_verdicts(
-            issues, changed_by_path=changed_by_path, verdicts={}, grounded=True
+            issues,
+            changed_by_path=changed_by_path,
+            verdicts={},
+            grounded=True,
+            removed_by_path=removed_by_path,
+        )
+    if not files:
+        return apply_scope_verdicts(
+            issues,
+            changed_by_path=changed_by_path,
+            verdicts={},
+            grounded=True,
+            removed_by_path=removed_by_path,
         )
 
     source = input_data or CodeReviewInput(files=dict(files))
@@ -319,7 +458,14 @@ def _verify_scope(
     preserve: set[int] = set()
     for file_path, orig_indices in groups.items():
         group_issues = [issues[i] for i in orig_indices]
-        prompt = _build_scope_prompt(file_path, group_issues, changed_by_path)
+        prompt = _build_scope_prompt(
+            file_path,
+            group_issues,
+            changed_by_path,
+            removed_by_path=removed_by_path,
+            patches_by_path=patches_by_path,
+            input_data=source,
+        )
         captured: List[Any] = []
 
         def _on_agent(agent: Any) -> None:
@@ -353,4 +499,5 @@ def _verify_scope(
         verdicts=combined,
         grounded=True,
         preserve_original=preserve,
+        removed_by_path=removed_by_path,
     )

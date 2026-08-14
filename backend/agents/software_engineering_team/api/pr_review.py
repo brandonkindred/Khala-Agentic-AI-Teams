@@ -42,6 +42,7 @@ from software_engineering_team.github_source import (
     inline_comment_to_timeline_body,
     is_within_diff,
     map_issues_to_comments,
+    parse_removed_lines,
     parse_valid_lines,
     partition_issues_by_existing_comments,
     proposal_from_findings,
@@ -1156,10 +1157,14 @@ def _is_not_reviewed_coverage_finding(issue: Any) -> bool:
     return NOT_REVIEWED_FINDING_MARKER in (getattr(issue, "description", "") or "")
 
 
-def _tag_review_issues_for_scope(output: Any, mode: ReviewModeDecision) -> None:
+def _tag_review_issues_for_scope(
+    output: Any, mode: ReviewModeDecision, pr: Any, files: List[Any]
+) -> None:
     """Tag out-of-scope findings before partition so they are not posted.
 
     Preconditions: ``output`` is a successful reviewer result with ``issues``.
+        ``pr`` is the GitHub PR object used for the reviewer task text.
+        ``files`` is the PR file list (patches) from admission.
     Postconditions: ``output.issues`` is replaced with scope-tagged copies when
         the verifier runs; blocking "could not be reviewed" coverage findings
         are excluded from the verifier and merged back unchanged so they cannot
@@ -1171,6 +1176,7 @@ def _tag_review_issues_for_scope(output: Any, mode: ReviewModeDecision) -> None:
         return
     try:
         from llm_service import get_client
+        from software_engineering_team.code_review_agent.models import CodeReviewInput
         from software_engineering_team.code_review_agent.scope_filter import (
             apply_scope_verification,
         )
@@ -1178,12 +1184,33 @@ def _tag_review_issues_for_scope(output: Any, mode: ReviewModeDecision) -> None:
         genuine = [i for i in issues if not _is_not_reviewed_coverage_finding(i)]
         if not genuine:
             return
+        scope_files = _files_for_scope(mode)
+        input_data = None
+        if scope_files:
+            input_data = CodeReviewInput(
+                files=dict(scope_files),
+                task_description=(
+                    f"Review pull request #{getattr(pr, 'number', '')}: "
+                    f"{getattr(pr, 'title', '') or ''}"
+                ),
+                task_requirements=_diff_first_focus(getattr(pr, "body", None) or ""),
+            )
+        removed_by_path = {
+            f.filename: sorted(parse_removed_lines(getattr(f, "patch", None) or "")) for f in files
+        }
+        removed_by_path = {path: lines for path, lines in removed_by_path.items() if lines}
+        patches_by_path = {
+            f.filename: getattr(f, "patch", None) or "" for f in files if getattr(f, "filename", "")
+        }
         tagged = apply_scope_verification(
             get_client(),
             issues=genuine,
             changed_by_path=mode.changed_by_path,
-            files=_files_for_scope(mode),
+            files=scope_files,
             repo_reader=mode.repo_reader,
+            input_data=input_data,
+            removed_by_path=removed_by_path,
+            patches_by_path=patches_by_path,
         )
         tagged_iter = iter(tagged)
         output.issues = [
@@ -1905,7 +1932,7 @@ def _run_pr_review_body(
             if output is None:
                 return
 
-            _tag_review_issues_for_scope(output, mode)
+            _tag_review_issues_for_scope(output, mode, pr, files)
 
             partition = _partition_review_issues(
                 output,
