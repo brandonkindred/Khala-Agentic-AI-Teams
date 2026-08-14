@@ -30,7 +30,7 @@
     — `persona_from_manifest`, `resolve_persona`, and
     `llm_persona_lists_explicitly_empty`, whose presence-based "explicit vs. absent"
     pattern this contract reuses.
-  - `backend/agents/agent_team_studio/agent_studio/registration.py:1-164` — Studio's
+  - `backend/agents/agent_platform/studio/registration.py` — Studio's
     `build_studio_agent_manifest`, which stamps the same shared entrypoint onto
     saved Studio agents, so they are bound by this same contract, not a separate one.
 
@@ -108,17 +108,35 @@ written back to the manifest):
 | Body field | Manifest default source | Notes |
 |---|---|---|
 | `role` | `persona_from_manifest(manifest).role` — `manifest.summary`, falling back to `manifest.name` | Existing mapping, unchanged (`roster_resolve.py:53-56`). |
-| `skills` | non-marker `manifest.tags`, via `skill_tags_from_manifest` | Existing mapping, unchanged. |
+| `skills` | non-plumbing `manifest.tags` | Must strip every plumbing marker, not only generated-team ones: `generated`, `agentic_team_provisioning`, and `studio`. Today's `skill_tags_from_manifest` strips only the first two; the implementation must expand that shared projection (or pass the unioned strip set) so a Studio-saved agent does not inject `studio` into `Skills:`. |
 | `capabilities` | `[]` | The manifest has no capabilities concept today; the manifest "default" is simply empty unless the request supplies it. |
 | `expertise` | `[manifest.team]` when non-empty, else `[]` | Existing mapping, unchanged. |
-| `system_prompt` *(new field on `GeneratedAgentInvokeInput`, added by the implementation story)* | `manifest.states[key == state].system_prompt` | **Full replacement**, not a merge, when the request supplies it — the request's `system_prompt` entirely stands in for the composed prompt that would otherwise be built. |
-| `state` *(new field, default `"executing"`)* | Selects which `AgentStateSpec` backs `system_prompt`'s manifest default | Meaningful only when the manifest carries a matching, non-blank state; otherwise falls through per the backward-compatibility rule below. |
-| `tools` | **Out of scope** — permanently `cognition.tools`-governed | Unchanged by this contract; see "Explicitly out of scope" below. |
+| `system_prompt` *(new field on `GeneratedAgentInvokeInput`, added by the implementation story)* | `manifest.states[key == state].system_prompt` | Two cases — see **Prompt composition** below. An explicit request `system_prompt` is **full replacement**. A *manifest-sourced* state prompt is **composed with** the resolved persona fields, not a replacement of them. |
+| `state` *(new field, default `"executing"`)* | Selects which `AgentStateSpec` backs the manifest-sourced state prompt | Meaningful only when the manifest carries a matching, non-blank state; otherwise falls through per the backward-compatibility rule below. |
+| `tools` | **Out of scope of this binding** — runtime tool list stays `[]` on this entrypoint | The request `tools` field stays inert. This contract also does **not** start passing `manifest.cognition.tools` into `resolve_tools` / `call_agent_with_cognition`. See "Explicitly out of scope" below. |
+
+### Prompt composition
 
 `build_system_prompt(agent_name, role, skills, capabilities, tools, expertise)`
-remains the generic composer used whenever no manifest `system_prompt` applies (no
-matching state, blank state prompt, or no manifest at all) — this ADR does not
-replace it, only adds a higher-precedence source ahead of it.
+remains the generic persona composer. Studio-saved agents almost always have a
+non-blank `executing` state prompt (`_manifest_states` folds the authored
+top-level `system_prompt` there), so treating that string as a full replacement
+would drop the resolved `role` / `skills` / `capabilities` / `expertise` from
+the prompt and make per-field request overrides of those fields inert. The
+implementation must therefore distinguish:
+
+1. **Request explicitly supplies `system_prompt`** — that string is the entire
+   base prompt (full replacement). The caller owns the prompt; persona fields are
+   not spliced in a second time.
+2. **Matching non-blank manifest state prompt, request omitted `system_prompt`** —
+   compose `build_system_prompt(...)` from the resolved persona fields, then
+   append the state prompt as additional authored instruction. Persona still
+   binds; the persisted Studio role is not discarded.
+3. **No matching / blank state prompt (or no manifest)** — `build_system_prompt(...)`
+   only, identical to today.
+
+Cognition advisory wrapping (`render_cognition_prompt`) still applies on top of
+whichever base prompt those three cases produce.
 
 ### Explicit-vs-omitted test
 
@@ -195,11 +213,17 @@ no behavior change at all.
 
 ### Explicitly out of scope
 
-- **`tools` field precedence.** Stays permanently `cognition.tools`-governed; the
-  request's `tools` field remains inert regardless of presence or absence. This is
-  an existing, separate escalation-prevention decision (`agent_builder.py`'s "no
-  silent code-exec/network fallback" comment, lines 246-248) unrelated to persona
-  binding — this contract does not touch it.
+- **Runtime tools on `invoke_generated_agent`.** The request's `tools` field
+  remains inert regardless of presence or absence. The sandbox entrypoint also
+  continues to pass `[]` into `call_agent_with_cognition` — it must **not** start
+  resolving `manifest.cognition.tools` just because Studio's
+  `build_studio_agent_manifest` can persist a nonempty list. Generated-team
+  manifests advertise `cognition.tools = []` today; Studio manifests may advertise
+  names such as `python` / `http_request`. Feeding those ids to `resolve_tools`
+  would grant unaudited code/network capabilities and bypass the brokered tool
+  loop (`agent_builder.py`'s empty-list grant, lines 321-327). Binding advertised
+  tools waits on the separate brokering story. This ADR only binds persona/state
+  text.
 - **Contract tests.** Encoding this table as executable, possibly-red tests is a
   separate sibling story.
 - **The runtime implementation itself** — including exactly how the manifest/id is
@@ -239,12 +263,13 @@ no behavior change at all.
   "explicitly cleared" and would either always defer to the manifest (breaking
   legitimate overrides) or never defer to it (reintroducing today's bug) depending
   on which way the ambiguity is resolved.
-- **Merging the manifest's `system_prompt` with a request-supplied one** (e.g.
-  request text appended to the manifest prompt) instead of full replacement.
-  Rejected: an implicit merge makes the effective prompt unpredictable to the
-  caller and impossible to specify precisely enough for the contract tests this ADR
-  exists to unblock; full replacement keeps the rule identical in shape to every
-  other field in the table.
+- **Merging a *request-supplied* `system_prompt` with the manifest state prompt**
+  (e.g. request text appended to the persisted prompt) instead of full
+  replacement of the base prompt. Rejected: an implicit merge makes the effective
+  prompt unpredictable to the caller. This is distinct from composing a
+  *manifest-sourced* state prompt with `build_system_prompt(...)` (required; see
+  Prompt composition) — that composition binds authored state text *onto* persona
+  fields, it does not mix two caller-owned prompt strings.
 - **Resolving the manifest from a body-supplied `agent_id`/`agent_name` instead of
   the shim's URL-resolved one.** Rejected: the body is caller-controlled, so this
   would let a request claim a different agent's persona than the one the URL path
@@ -283,11 +308,10 @@ no behavior change at all.
 Studio-saved agents raise no separate compatibility question because there is only
 one `AgentManifest` Pydantic model in this codebase, not a Studio variant and a
 generated-team variant. `build_studio_agent_manifest`
-(`registration.py:117-164`) constructs a plain `AgentManifest` — same `states:
+(`registration.py`) constructs a plain `AgentManifest` — same `states:
 list[AgentStateSpec]`, same `cognition`, same `source.entrypoint` field types a
-generated team manifest has — and the function's own last line,
-`return revalidate(manifest)`, re-validates it through that identical model before
-returning. `_manifest_states` (`registration.py:93-114`) is what populates
+generated team manifest has — via `shared.manifests.build_manifest`.
+`_manifest_states` is what populates
 `states` for a Studio agent (folding the top-level `system_prompt` into the
 `executing` key), but the *shape* it produces is exactly the `list[AgentStateSpec]`
 the generic Per-field precedence and Backward compatibility rules above already
@@ -325,11 +349,13 @@ A future implementation must satisfy exactly this surface:
   `role` / `skills` / `capabilities` / `expertise` / `system_prompt`, uses that
   manifest-derived default unless the raw request body explicitly carries that key
   — per the table and presence test above.
-- `system_prompt`, when manifest-sourced, comes from `manifest.states[key ==
-  state].system_prompt`; when request-sourced, fully replaces the composed prompt
-  rather than merging with it.
-- `tools` remains untouched by this change — still always `cognition.tools`, still
-  ignoring the request field entirely.
+- `system_prompt` follows Prompt composition: request-sourced is full replacement
+  of the base prompt; manifest-sourced is `build_system_prompt(...)` plus the
+  matching `manifest.states[key == state].system_prompt`.
+- `skills` defaults strip plumbing tags `{generated, agentic_team_provisioning,
+  studio}` so Studio's registration stamp never appears in the Skills line.
+- Runtime tools on this entrypoint stay `[]`. The request `tools` field stays
+  inert; `manifest.cognition.tools` is not newly granted here.
 - No manifest resolvable → every field behaves exactly as `invoke_generated_agent`
   does today (pure request-body values).
 - Empty/absent `manifest.states` → falls through to `build_system_prompt(...)`
