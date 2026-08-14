@@ -550,5 +550,5 @@ After implementing improvements, validate with:
 | Migration tooling | `alembic upgrade head && alembic downgrade -1` | Both succeed |
 | Structured logging | Inspect log output from any team service | Contains `trace_id`, `job_id` fields |
 | No dead code | `grep -r "from event_bus" backend/` | 0 results |
-| No SQLite fallback | `grep -r "sqlite" backend/agents/branding_team/ backend/agents/agentic_team_provisioning/` | 0 results |
+| No SQLite fallback | `grep -r "sqlite" backend/agents/branding_team/ backend/agents/agent_team_studio/agentic_team_provisioning/` | 0 results |
 | Credentials | `grep -rn "postgres.*:-postgres" docker/docker-compose.yml` | 0 results (no defaults) |

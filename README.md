@@ -176,7 +176,8 @@ flowchart LR
 | Temporal workers | [`backend/shared/temporal/`](backend/shared/temporal/) | Pattern A: teams export `WORKFLOWS` / `ACTIVITIES` |
 | LLM client | [`backend/agents/llm_service/`](backend/agents/llm_service/) | Ordered Postgres provider list + failover |
 | Agent cache | `AGENT_CACHE` (Docker: `/data/agents`) | Per-team namespaced artifacts under `{team_name}/` |
-| Agent Console / Registry | UI `/agent-console`; [`agent_platform/registry`](backend/agents/agent_platform/registry/), [`agent_platform/console`](backend/agents/agent_platform/console/) | Discover, inspect, and run specialist agents |
+| Agent platform | [`agent_platform/`](backend/agents/agent_platform/) | In-process registry, console, sandbox, and Studio authoring |
+| Agent Console / Registry | UI `/agent-console`; [`registry`](backend/agents/agent_platform/registry/), [`console`](backend/agents/agent_platform/console/) | Discover, inspect, and run specialist agents |
 
 The Software Engineering deep dive (phases, task graphs, quality gates, Product Delivery loop) lives in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md). Repo orientation for agents and humans: [`CLAUDE.md`](CLAUDE.md).
 
