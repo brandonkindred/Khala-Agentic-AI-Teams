@@ -234,8 +234,9 @@ def _revert_disk(prior_disk: Dict[Path, Optional[bytes]]) -> None:
 
     Postconditions:
         Each path with ``prior_bytes is None`` is deleted (it did not exist
-        before); each other path is restored to ``prior_bytes``. A current
-        symlink, directory, or other non-regular path at that location is
+        before); each other path is restored to ``prior_bytes``. An existing
+        regular file is overwritten in place so its mode bits are preserved.
+        A current symlink, directory, or other non-regular path at that location is
         removed first so ``write_bytes`` cannot follow a verifier-planted
         link or fail on ``IsADirectoryError``. Ancestors are processed before
         descendants so a replacement directory-symlink is cleared before a
@@ -247,10 +248,13 @@ def _revert_disk(prior_disk: Dict[Path, Optional[bytes]]) -> None:
     ordered = sorted(prior_disk.items(), key=lambda item: (len(item[0].parts), str(item[0])))
     for full_path, prior_bytes in ordered:
         try:
-            _clear_path(full_path)
-            if prior_bytes is not None:
-                full_path.parent.mkdir(parents=True, exist_ok=True)
-                full_path.write_bytes(prior_bytes)
+            if prior_bytes is None:
+                _clear_path(full_path)
+                continue
+            if full_path.is_symlink() or (full_path.exists() and not full_path.is_file()):
+                _clear_path(full_path)
+            full_path.parent.mkdir(parents=True, exist_ok=True)
+            full_path.write_bytes(prior_bytes)
         except OSError as exc:
             logger.warning("Failed to revert %s to its prior state (ignored): %s", full_path, exc)
 
@@ -587,7 +591,15 @@ def _run_dbc_self_review(
             sorted(set(raw_dbc_files) - set(dbc_files)),
         )
     root = Path(repo_path).resolve()
-    escaped_paths = [path for path in dbc_files if _contained_write_path(root, path) is None]
+    escaped_paths: list[str] = []
+    dest_to_keys: Dict[Path, list[str]] = {}
+    for path in dbc_files:
+        dest = _contained_write_path(root, path)
+        if dest is None:
+            escaped_paths.append(path)
+            continue
+        dest_to_keys.setdefault(dest, []).append(path)
+    colliding_paths = [path for keys in dest_to_keys.values() if len(keys) > 1 for path in keys]
     if escaped_paths:
         logger.warning(
             "[%s] Microtask %s: discarding %d DbC path(s) that escape the worktree "
@@ -597,9 +609,17 @@ def _run_dbc_self_review(
             len(escaped_paths),
             sorted(escaped_paths),
         )
-        dbc_files = {
-            path: content for path, content in dbc_files.items() if path not in set(escaped_paths)
-        }
+    if colliding_paths:
+        logger.warning(
+            "[%s] Microtask %s: discarding %d DbC path(s) that resolve to the same file: %s",
+            task_id,
+            mt.id,
+            len(colliding_paths),
+            sorted(colliding_paths),
+        )
+    discard = set(escaped_paths) | set(colliding_paths)
+    if discard:
+        dbc_files = {path: content for path, content in dbc_files.items() if path not in discard}
     if not dbc_files:
         logger.info("[%s] Microtask %s: DbC self-review made no changes", task_id, mt.id)
         return

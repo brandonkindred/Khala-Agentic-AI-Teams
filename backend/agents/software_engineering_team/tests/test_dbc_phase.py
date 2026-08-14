@@ -313,6 +313,36 @@ def test_dbc_self_review_rejects_absolute_map_key(tmp_path):
     assert all_files["keep.py"] == "keep new\n"
 
 
+def test_dbc_self_review_rejects_alias_keys_same_destination(tmp_path):
+    """Lexical aliases of one file must not write twice with divergent map keys."""
+    (tmp_path / "pkg").mkdir()
+    (tmp_path / "a.py").write_text("orig a\n")
+    (tmp_path / "keep.py").write_text("keep orig\n")
+
+    def _review(*, code, **kwargs: Any) -> SimpleNamespace:
+        return SimpleNamespace(
+            files={"a.py": "from a\n", "pkg/../a.py": "from alias\n", "keep.py": "keep new\n"}
+        )
+
+    microtask_files = {
+        "a.py": "orig a\n",
+        "pkg/../a.py": "orig alias\n",
+        "keep.py": "keep orig\n",
+    }
+
+    _, microtask_files, _, _ = _call(
+        tmp_path=tmp_path,
+        gate_config=_gate_config(_review),
+        microtask_files=microtask_files,
+    )
+
+    assert (tmp_path / "a.py").read_text() == "orig a\n"
+    assert (tmp_path / "keep.py").read_text() == "keep new\n"
+    assert microtask_files["a.py"] == "orig a\n"
+    assert microtask_files["pkg/../a.py"] == "orig alias\n"
+    assert microtask_files["keep.py"] == "keep new\n"
+
+
 def test_dbc_self_review_rejects_symlink_escape_write(tmp_path):
     """A reviewed path through a repo symlink must not write outside the worktree."""
     outside = tmp_path.parent.resolve() / f"dbc-write-escape-{tmp_path.name}"
@@ -374,7 +404,11 @@ def test_dbc_self_review_symlink_escape_only_is_noop(tmp_path):
 def test_dbc_self_review_write_rejects_batch_if_containment_filter_misses(tmp_path, monkeypatch):
     """write_repo_text_files remains all-or-nothing if an unsafe key slips the filter."""
 
-    monkeypatch.setattr(dbc_phase, "_contained_write_path", lambda root, rel_path: root / "a.py")
+    monkeypatch.setattr(
+        dbc_phase,
+        "_contained_write_path",
+        lambda root, rel_path: root / (rel_path.lstrip("./") or "a.py"),
+    )
 
     def _review(*, code, **kwargs: Any) -> SimpleNamespace:
         return SimpleNamespace(files={"a.py": "safe", "../escape.py": "evil"})
@@ -633,6 +667,30 @@ def test_dbc_self_review_build_verifier_failure_reverts_verifier_repairs(tmp_pat
     assert not (tmp_path / "new_fix.py").exists()
     assert microtask_files == {"a.py": "orig a\n", "other.py": "orig other\n"}
     assert all_files == microtask_files
+
+
+def test_dbc_self_review_revert_preserves_executable_mode(tmp_path):
+    """Failed verify must not strip execute bits from an untouched script."""
+    script = tmp_path / "run.sh"
+    script.write_text("#!/bin/sh\necho hi\n")
+    script.chmod(0o755)
+    (tmp_path / "a.py").write_text("orig a\n")
+
+    def _review(*, code, **kwargs: Any) -> SimpleNamespace:
+        return SimpleNamespace(files={"a.py": "dbc a\n"})
+
+    def _verify(repo_path, label, tid):
+        return False, "broke"
+
+    _call(
+        tmp_path=tmp_path,
+        gate_config=_gate_config(_review),
+        microtask_files={"a.py": "orig a\n"},
+        deps=ReviewDependencies(build_verifier=_verify),
+    )
+
+    assert (tmp_path / "a.py").read_text() == "orig a\n"
+    assert (script.stat().st_mode & 0o777) == 0o755
 
 
 def test_dbc_self_review_pre_verify_snapshot_oserror_skips_verify(tmp_path, monkeypatch):
