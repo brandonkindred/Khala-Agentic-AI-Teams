@@ -428,6 +428,25 @@ def test_unflushed_entries_returns_requeued_batch(monkeypatch) -> None:
     assert transcript.merge_unflushed("job-1", [{"stage": "durable"}])[0]["stage"] == "durable"
 
 
+def test_merge_unflushed_skips_buffered_ids_already_durable() -> None:
+    """A GET during a retry window must not show the same entry_id twice."""
+    with llm_attribution(job_id="job-1"):
+        transcript.record_transcript_entry("chunk_review", "a.py", "p", "r")
+    extra = transcript.unflushed_entries("job-1")
+    assert len(extra) == 1
+    entry_id = extra[0]["entry_id"]
+    durable = [
+        {
+            "entry_id": entry_id,
+            "stage": "chunk_review",
+            "target": "a.py",
+            "started_at": "2020-01-01T00:00:00+00:00",
+        }
+    ]
+    merged = transcript.merge_unflushed("job-1", durable)
+    assert merged == durable
+
+
 def test_merge_unflushed_keeps_buffer_when_first_durable_load_fails() -> None:
     """A blip while loading durable rows must not wipe the buffer snapshot
     already taken under the drain lock — otherwise GET drops in-flight entries."""

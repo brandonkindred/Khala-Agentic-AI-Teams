@@ -286,7 +286,7 @@ def append_review_transcript_entries(job_id: str, entries: list[dict[str, Any]])
             if to_add:
                 cur.execute(
                     """UPDATE code_review_transcripts
-                          SET entries = entries || %s
+                          SET entries = entries || %s::jsonb
                         WHERE job_id = %s""",
                     (Json(to_add), job_id),
                 )

@@ -520,8 +520,9 @@ def merge_unflushed(
     Postconditions:
         Returns the durable list unchanged when the buffer has nothing for
         ``job_id``. Otherwise returns a new list of durable + buffered
-        entries sorted by ``started_at`` (same order as the durable GET).
-        Never raises.
+        entries that are not already in the durable list (matched by
+        ``entry_id``), sorted by ``started_at`` (same order as the durable
+        GET). Never raises.
     """
     extra: list[dict[str, Any]] = []
     loaded: list[dict[str, Any]] = []
@@ -537,6 +538,16 @@ def merge_unflushed(
             loaded = loaded or []
         except Exception:  # noqa: BLE001
             loaded = []
+    if not extra:
+        return loaded
+    try:
+        from software_engineering_team.review_history_store import (
+            unpersisted_transcript_entries,
+        )
+
+        extra = unpersisted_transcript_entries(loaded, extra)
+    except Exception:  # noqa: BLE001 - merge must still return durable + extra
+        logger.warning("code review transcript: merge_unflushed dedupe failed", exc_info=True)
     if not extra:
         return loaded
     return sorted(list(loaded) + extra, key=lambda e: e.get("started_at") or "")

@@ -12,6 +12,7 @@ from pydantic import BaseModel
 from llm_service.clients.dummy import DummyLLMClient
 from llm_service.interface import (
     LLMClient,
+    record_complete_json_turn,
     reset_complete_json_observer_state,
     take_complete_json_turns,
 )
@@ -309,6 +310,35 @@ def test_stream_records_observer_turns_for_each_chat_call() -> None:
     assert json.loads(prompt)[0]["role"] == "system"
     assert "QA expert" in prompt
     assert "done" in response
+
+
+def test_stream_replays_provider_turns_recorded_inside_to_thread() -> None:
+    """chat() runs in a worker thread; ContextVar writes there must be
+    returned and re-recorded on the awaiting task or self-correction
+    turns never reach the transcript observer."""
+
+    class _InnerTurnClient(_RecordingClient):
+        def chat(self, messages: list, **kwargs: Any) -> Any:
+            super().chat(messages, **kwargs)
+            record_complete_json_turn("first messages", "prose analysis")
+            record_complete_json_turn("corrective messages", '{"ok": true}')
+            return self.response
+
+    client = _InnerTurnClient({"ok": True})
+    model = LLMClientModel(client, agent_key="qa_agent")
+
+    async def _run() -> list:
+        async for _event in model.stream(
+            messages=[{"role": "user", "content": [{"text": "review this"}]}],
+        ):
+            pass
+        return take_complete_json_turns()
+
+    turns = asyncio.run(_run())
+    assert [(p, r) for p, r, _s in turns] == [
+        ("first messages", "prose analysis"),
+        ("corrective messages", '{"ok": true}'),
+    ]
 
 
 def test_stream_merges_system_prompt_content_blocks() -> None:

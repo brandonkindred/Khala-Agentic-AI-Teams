@@ -123,6 +123,41 @@ def test_unpersisted_transcript_entries_skips_known_ids() -> None:
     ]
 
 
+def test_append_casts_concat_operand_to_jsonb(monkeypatch) -> None:
+    """``entries || json`` is not a Postgres operator; the batch must be jsonb."""
+    monkeypatch.setattr(store, "is_postgres_enabled", lambda: True)
+    seen: list[str] = []
+
+    class _FakeCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_a):
+            return False
+
+        def execute(self, query, _params=None):
+            seen.append(str(query))
+
+        def fetchone(self):
+            return ([],)
+
+    class _FakeConn:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_a):
+            return False
+
+        def cursor(self, *_a, **_kw):
+            return _FakeCursor()
+
+    monkeypatch.setattr(store, "get_conn", lambda: _FakeConn())
+    assert store.append_review_transcript_entries("j", [{"entry_id": "e", "prompt": "p"}]) is True
+    updates = [q for q in seen if "SET entries" in q]
+    assert updates
+    assert "%s::jsonb" in updates[0]
+
+
 def test_get_review_transcript_none_when_postgres_disabled(monkeypatch) -> None:
     monkeypatch.setattr(store, "is_postgres_enabled", lambda: False)
     assert store.get_review_transcript("j") is None
