@@ -23,5 +23,10 @@ nothing. Callers import from the subpackage façades.
 - Unified-API HTTP route modules for registry/console/sandbox (`unified_api/routes/sandboxes.py` stays
   a bare `include_router` mount). Studio's router lives in `agent_platform.studio`.
 
+Those `include_router` mounts happen at import time. Sandbox and Studio Temporal
+workers, the console run pruner, and Pattern B schema registration boot from the
+unified-API lifespan. Catalog:
+[`docs/UNIFIED_API_LIFESPAN.md`](../../../docs/UNIFIED_API_LIFESPAN.md).
+
 Layout and import map: `system_design/adr/ADR-013-agent-platform-package-layout.md`.
 Migration order and non-goals: `system_design/adr/ADR-014-agent-platform-non-goals-and-migration-order.md`.
