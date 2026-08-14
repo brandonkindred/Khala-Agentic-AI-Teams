@@ -9,7 +9,12 @@ public ``run_build_verification`` wrapper in ``quality_gate_tools`` that calls
 Invariants:
     - ``_run_build_verification`` is the only consumer of
       ``EXCEPTION_HANDLER_TEST_PATTERNS``.
-    - Neither function raises into the build gate: failures return ``(False, summary)``.
+    - The public build-gate wrappers convert failures into a failed result
+      (``(False, summary)`` or ``BuildResult(success=False)``), including
+      exceptions that escape ``_run_build_verification`` /
+      ``_try_build_fix_one_at_a_time``. Those two functions do not wrap every
+      helper; they return ``(False, summary)`` for handled failures and
+      otherwise propagate (see ``_try_build_fix_one_at_a_time`` Raises).
 
 No ``sys.path`` mutation on import: per-team imports (``backend_code_v2_team`` /
 ``frontend_code_v2_team`` prompts and templates) use absolute
@@ -78,6 +83,15 @@ def _run_build_verification(
     those to their base ``"backend"``/``"frontend"`` verification path so v2 jobs
     actually run syntax check / ``ng build`` instead of silently no-op'ing to
     ``(True, "")`` via the fallthrough at the end of this function.
+
+    Raises:
+        Propagates uncaught exceptions from ``_try_build_fix_one_at_a_time``
+        (this function has no extra boundary around those calls) and from
+        unbounded ``Path.rglob`` project probes. Production callers convert
+        those into a failed result:
+        :func:`software_engineering_team.quality_gate_tools.run_build_verification`,
+        :func:`software_engineering_team.shared.deliver_utils.run_pre_merge_quality_gate`,
+        and the v2 review ``_run_build_verification`` wrappers.
     """
     from shared.command_runner.angular_repair import run_ng_build_with_nvm_fallback
     from shared.command_runner.executor import (
@@ -303,6 +317,9 @@ def _try_build_fix_one_at_a_time(
         from ``parse_problem_solving_single_issue_template`` or the uncaught
         post-fix re-run of ``run_ng_build_with_nvm_fallback``. Those paths are
         not wrapped the way the LLM / install / file I/O helpers are.
+        :func:`_run_build_verification` does not catch them either, so they
+        reach the public build-gate wrappers listed on that function, which
+        convert them into a failed result rather than leaking into the gate.
     """
     from shared.command_runner.angular_repair import run_ng_build_with_nvm_fallback
     from shared.command_runner.executor import (
