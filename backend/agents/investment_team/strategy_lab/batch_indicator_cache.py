@@ -18,7 +18,7 @@ a cache entry is keyed on ``(indicator_name, canonical_params, symbol,
 timeframe, data_fingerprint)``, digested with SHA-256 in that fixed order —
 mirroring :class:`..backtest_cache.BacktestCache`'s ``_key`` pattern of
 digesting canonicalized components in a fixed order. ``data_fingerprint``
-hashes bars in the *supplied* sequence (OHLCV fields). The market-data
+hashes bars in the *supplied* sequence (date plus OHLCV). The market-data
 ``compute_dataset_fingerprint`` / ``_hash_bars`` helpers sort by ``date``
 because they identify a dataset; indicator math (trailing windows) is
 order-sensitive, so two permutations of the same dated bars must not
@@ -95,9 +95,10 @@ class BatchIndicatorCache:
     def _data_fingerprint(symbol: str, bars: Sequence[Any]) -> str:
         """Content fingerprint of one symbol's bar slice in supplied order.
 
-        Hashes OHLCV fields in the sequence the caller passed. Sorting by
-        ``date`` (as :func:`compute_dataset_fingerprint` does) would make
-        distinct trailing windows of the same dated bars collide.
+        Hashes each bar's ``date`` plus OHLCV fields in the sequence the
+        caller passed. Sorting by ``date`` (as
+        :func:`compute_dataset_fingerprint` does) would make distinct
+        trailing windows of the same dated bars collide.
 
         This is strictly more precise than a ``(start_date, end_date)`` pair
         since it also distinguishes a data restatement, a backfilled gap, or
