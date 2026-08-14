@@ -334,23 +334,23 @@ def _run_chunk_review(
     model_name = model_label(llm)
     target = input_data.file_path_or_label
     last_attempt_start = time.monotonic()
-    attempt_index = 0
+    in_formatting = False
+
+    def _on_formatting_start() -> None:
+        nonlocal in_formatting
+        in_formatting = True
 
     def _on_attempt(attempt_prompt: str, attempt_response: str) -> None:
-        # One transcript entry per LLM call the via-reasoning path makes: the
-        # reasoning ``complete`` plus every ``complete_validated`` formatting
-        # attempt (initial call and every corrective retry). Recording only
-        # the final successful formatting reply would silently drop the
-        # reasoning prose and any malformed earlier reply.
-        # First callback is the reasoning pass (reasoning system prompt);
-        # every later callback is a formatting attempt (formatting guard).
-        nonlocal last_attempt_start, attempt_index
+        # One transcript entry per LLM HTTP turn: reasoning ``complete``
+        # (including text continuations) then every formatting attempt.
+        # Phase is stamped by ``on_formatting_start``, not callback index —
+        # reasoning continuations must keep the reasoning system prompt.
+        nonlocal last_attempt_start
         now = time.monotonic()
         started = observer_turn_started_monotonic()
         if started is None:
             started = last_attempt_start
-        system_prompt = reasoning_system_prompt if attempt_index == 0 else formatting_system_prompt
-        attempt_index += 1
+        system_prompt = formatting_system_prompt if in_formatting else reasoning_system_prompt
         record_transcript_entry(
             "chunk_review",
             target,
@@ -372,6 +372,7 @@ def _run_chunk_review(
         reasoning_think=True if think is None else think,
         temperature=0.0,
         on_attempt=_on_attempt,
+        on_formatting_start=_on_formatting_start,
     )
 
     # Issue dicts are passed through raw: normalization (defaults, line

@@ -326,6 +326,26 @@ def test_validated_via_reasoning_on_attempt_sees_reasoning_then_format() -> None
     assert "approved" in seen[1][1]
 
 
+def test_validated_via_reasoning_on_formatting_start_fires_before_complete_json() -> None:
+    """on_formatting_start must run after reasoning and before formatting."""
+    client = _RecordingClient()
+    order: list[str] = []
+
+    complete_validated_via_reasoning_local(
+        client,
+        schema=_Out,
+        reasoning_prompt="Review this code",
+        reasoning_system_prompt="Prose only.",
+        formatting_instructions="JSON shape here",
+        objective="review code chunk",
+        on_attempt=lambda _p, _r: order.append("attempt"),
+        on_formatting_start=lambda: order.append("formatting_start"),
+    )
+    assert order[0] == "attempt"
+    assert "formatting_start" in order
+    assert order.index("formatting_start") < order.index("attempt", 1)
+
+
 def test_validated_via_reasoning_on_attempt_exception_is_swallowed() -> None:
     """A buggy on_attempt observer must not fail the review."""
     client = _RecordingClient()

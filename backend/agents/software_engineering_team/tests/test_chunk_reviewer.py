@@ -160,6 +160,54 @@ def test_chunk_review_records_each_retry_attempt_in_transcript(monkeypatch) -> N
     assert captured[2][1]["system_prompt"] == format_system
 
 
+def test_chunk_review_reasoning_continuations_keep_reasoning_system_prompt(
+    monkeypatch,
+) -> None:
+    """Reasoning ``complete`` may record multiple inner HTTP turns. Those
+    callbacks must keep the reasoning system prompt; only turns after
+    ``on_formatting_start`` use the formatting guard."""
+    from code_review_agent.via_reasoning import formatting_system_prompt_with_untrusted_guard
+
+    from llm_service import llm_attribution
+    from llm_service.interface import record_complete_json_turn, reset_complete_json_observer_state
+
+    reset_complete_json_observer_state()
+    canned = {
+        "approved": True,
+        "issues": [],
+        "summary": "ok",
+        "spec_compliance_notes": "",
+    }
+
+    class _ReasoningContinuationClient(DummyLLMClient):
+        def complete(self, prompt: str, **kwargs: Any) -> str:
+            record_complete_json_turn("reasoning turn 1", "PARTIAL")
+            record_complete_json_turn("reasoning turn 2", " REST")
+            return "PARTIAL REST"
+
+        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+            return canned
+
+    captured: list = []
+    monkeypatch.setattr(
+        "code_review_agent.chunk_reviewer.record_transcript_entry",
+        lambda *args, **kwargs: captured.append((args, kwargs)),
+    )
+
+    agent = ChunkReviewAgent(llm=_ReasoningContinuationClient())
+    with llm_attribution(job_id="job-1"):
+        agent.run(_chunk_input())
+
+    format_system = formatting_system_prompt_with_untrusted_guard(None)
+    reasoning_system = build_review_reasoning_system_prompt("code_review")
+    assert len(captured) == 3
+    assert captured[0][0][2] == "reasoning turn 1"
+    assert captured[1][0][2] == "reasoning turn 2"
+    assert captured[0][1]["system_prompt"] == reasoning_system
+    assert captured[1][1]["system_prompt"] == reasoning_system
+    assert captured[2][1]["system_prompt"] == format_system
+
+
 def test_chunk_review_raises_llm_json_parse_error_on_non_json_model_output() -> None:
     """When the injected client's ``complete_json`` cannot produce parseable
     JSON on any of ``complete_validated``'s attempts, ``LLMJsonParseError``

@@ -31,7 +31,11 @@ from typing import TYPE_CHECKING, Any, Callable, List, Tuple
 
 from shared.cache import get_shared_cache, with_cache_build_id
 
-from .interface import LLMTruncatedError
+from .interface import (
+    LLMTruncatedError,
+    observer_turn_started,
+    take_complete_json_turns,
+)
 
 if TYPE_CHECKING:
     from .interface import LLMClient
@@ -192,6 +196,30 @@ def _invoke_on_attempt(
         logger.warning("compact_text: on_attempt callback failed", exc_info=True)
 
 
+def _observe_complete_turns(
+    on_attempt: Callable[[str, str], None] | None,
+    prompt: str,
+    fallback_response: str,
+) -> None:
+    """Notify ``on_attempt`` for each recorded ``complete`` continuation turn.
+
+    Preconditions:
+        ``prompt`` is the compaction user message. ``fallback_response`` is
+        used when the provider recorded no inner turns.
+    Postconditions:
+        Inner continuation turns, when present, are each observed in record
+        order with that turn's start time bound. Otherwise ``on_attempt`` is
+        invoked once with ``(prompt, fallback_response)``. Never raises.
+    """
+    turns = take_complete_json_turns()
+    if turns:
+        for turn_prompt, turn_response, started in turns:
+            with observer_turn_started(started):
+                _invoke_on_attempt(on_attempt, turn_prompt, turn_response)
+        return
+    _invoke_on_attempt(on_attempt, prompt, fallback_response)
+
+
 def _compact_single(
     text: str,
     target_chars: int,
@@ -219,12 +247,12 @@ def _compact_single(
             prompt, objective=f"compact oversized {content_description}", temperature=0.0
         )
     except LLMTruncatedError as exc:
-        _invoke_on_attempt(on_attempt, prompt, exc.partial_content or "")
+        _observe_complete_turns(on_attempt, prompt, exc.partial_content or "")
         raise
     except Exception:
-        _invoke_on_attempt(on_attempt, prompt, "")
+        _observe_complete_turns(on_attempt, prompt, "")
         raise
-    _invoke_on_attempt(on_attempt, prompt, result)
+    _observe_complete_turns(on_attempt, prompt, result)
     return result.strip()
 
 

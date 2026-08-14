@@ -332,6 +332,7 @@ def complete_validated_via_reasoning_local(
     temperature: float = 0.0,
     correction_attempts: int = 1,
     on_attempt: Callable[[str, str], None] | None = None,
+    on_formatting_start: Callable[[], None] | None = None,
     **kwargs: Any,
 ) -> T:
     """Two-call split with configurable thinking on the reasoning pass.
@@ -355,10 +356,13 @@ def complete_validated_via_reasoning_local(
         including each inner text-continuation HTTP turn when the provider
         recorded them; and including :class:`LLMTruncatedError`
         ``partial_content`` and other :class:`LLMError` completions such as
-        :class:`LLMSemanticExhaustionError` before that error is re-raised)
-        and then forwarded to :func:`complete_validated` so each formatting
-        attempt (initial plus corrective retries) is observed too; observer
-        exceptions are swallowed and never fail the review.
+        :class:`LLMSemanticExhaustionError` before that error is re-raised).
+        ``on_formatting_start``, when given, is invoked after reasoning
+        succeeds and immediately before the formatting ``complete_validated``
+        call so callers can stamp the formatting phase. ``on_attempt`` is then
+        forwarded to :func:`complete_validated` so each formatting attempt
+        (initial plus corrective retries) is observed too; observer exceptions
+        are swallowed and never fail the review.
     """
     _require_non_empty("objective", objective)
     _require_non_empty("reasoning_prompt", reasoning_prompt)
@@ -391,6 +395,10 @@ def complete_validated_via_reasoning_local(
     format_prompt = (
         f"{_DEFAULT_FORMAT_INSTRUCTIONS}\n\n{formatting_instructions}\n\n"
         f"{wrap_with_analysis_delimiters(prose)}"
+    )
+    _invoke_start_observer(
+        "complete_validated_via_reasoning_local: on_formatting_start",
+        on_formatting_start,
     )
     return complete_validated(
         client,
