@@ -412,11 +412,17 @@ def _try_build_fix_one_at_a_time(
                 req_txt = project_dir / "requirements.txt"
                 if req_txt.exists():
                     try:
-                        run_command(
+                        pip_result = run_command(
                             [sys.executable, "-m", "pip", "install", "-r", "requirements.txt"],
                             cwd=project_dir,
                             timeout=120,
                         )
+                        if not pip_result.success:
+                            logger.warning(
+                                "Build fix: pip install -r requirements.txt failed "
+                                "(non-fatal): %s",
+                                pip_result.error_summary,
+                            )
                     except Exception as e:
                         logger.warning(
                             "Build fix: failed to install requirements.txt before test run: %s", e
