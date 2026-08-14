@@ -85,6 +85,12 @@ unset. See [`shared.postgres/README.md`](../backend/shared/postgres/README.md).
 | `agent_cognition.postgres.SCHEMA` | none |
 | `product_delivery.postgres.SCHEMA` | `TEAM_CONFIGS["product_delivery"].enabled` (uses `ensure_team_schema` so partial DDL marks the team unhealthy; **only this team** is added to `_in_process_schema_failures` and retried by step 3) |
 
+Immediately after `unified_api.postgres.SCHEMA` (which owns `llm_call_records`),
+`register_usage_flusher()` starts the process-local LLM usage heartbeat. Log-and-continue
+on failure. The observer enqueues INSERT rows with no DB I/O on the LLM call path;
+the heartbeat drains to Postgres. Not registered in agent-sandbox containers
+(isolated ephemeral DB, no path to platform Postgres).
+
 ### 1. Team-assistant mount specs
 
 `_maybe_register_team_assistants()`, gated on `UNIFIED_API_TEAM_ASSISTANTS_ENABLED`.
@@ -148,9 +154,14 @@ in-process instead — a mode switch, not a degraded state.
 
 ## Shutdown (after yield)
 
-Cancel cognition scheduler, graph sync, console pruner, sandbox reaper, and the
-health loop. Then `close_graphiti()`, `close_pool()`, and
-`_shutdown_probe_executor()`.
+Order is load-bearing so buffered `llm_call_records` are not lost:
+
+1. Cancel cognition scheduler, graph sync, console pruner, sandbox reaper, and the health loop.
+2. `close_graphiti()`.
+3. `_stop_in_process_temporal_workers()` (`stop_all_team_workers`) — Studio and sandbox activities can still invoke the LLM; they must finish before the observer unregisters.
+4. `llm_service.usage_flusher.shutdown()` — stop the heartbeat, unregister the observer, final synchronous drain.
+5. `close_pool()` — only after the drain, so the flusher still has a live pool.
+6. `_shutdown_probe_executor()`.
 
 ## Worker ownership (do not relocate)
 

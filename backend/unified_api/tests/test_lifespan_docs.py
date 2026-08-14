@@ -50,6 +50,10 @@ def test_lifespan_catalog_documents_worker_and_route_registration() -> None:
         "team_service",
         "_retry_in_process_schema_registration",
         "_in_process_schema_failures",
+        "register_usage_flusher",
+        "_stop_in_process_temporal_workers",
+        "usage_flusher.shutdown",
+        "llm_call_records",
     ):
         assert token in text, f"catalog missing {token!r}"
 
