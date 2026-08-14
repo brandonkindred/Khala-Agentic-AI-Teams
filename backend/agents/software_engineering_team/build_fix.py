@@ -417,8 +417,10 @@ def _execute_llm_repair_attempt(
     Postconditions:
         Returns True when the model produced at least one file mapping (writes
         are best-effort; a write failure is logged and other files still apply).
-        Returns False on LLM error or when the template parser yields no files,
-        leaving ``current_files`` unchanged in those cases.
+        Successful writes also update ``current_files`` in place so later
+        repair attempts prompt on the latest code. Returns False on LLM error
+        or when the template parser yields no files, leaving ``current_files``
+        unchanged in those cases.
     """
     assert "description" in issue, "issue must include a description"
     desc = issue["description"]
@@ -476,6 +478,7 @@ def _execute_llm_repair_attempt(
         try:
             out_path.parent.mkdir(parents=True, exist_ok=True)
             out_path.write_text(content, encoding="utf-8")
+            # In-place: later repair prompts read current_files, not a fresh disk scan.
             current_files[rel_path] = content
         except Exception as e:
             logger.warning("Build fix: could not write %s: %s", rel_path, e)
