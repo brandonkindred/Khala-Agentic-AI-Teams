@@ -343,6 +343,43 @@ def test_dbc_self_review_rejects_alias_keys_same_destination(tmp_path):
     assert microtask_files["keep.py"] == "keep new\n"
 
 
+def test_dbc_self_review_rejects_symlink_alias_keys_same_destination(tmp_path):
+    """In-repo symlink aliases of one file must not write twice with divergent keys."""
+    real_dir = tmp_path / "real"
+    real_dir.mkdir()
+    (real_dir / "a.py").write_text("orig a\n")
+    (tmp_path / "alias").symlink_to(real_dir)
+    (tmp_path / "keep.py").write_text("keep orig\n")
+
+    def _review(*, code, **kwargs: Any) -> SimpleNamespace:
+        return SimpleNamespace(
+            files={
+                "real/a.py": "from real\n",
+                "alias/a.py": "from alias\n",
+                "keep.py": "keep new\n",
+            }
+        )
+
+    microtask_files = {
+        "real/a.py": "orig a\n",
+        "alias/a.py": "orig alias\n",
+        "keep.py": "keep orig\n",
+    }
+    try:
+        _, microtask_files, _, _ = _call(
+            tmp_path=tmp_path,
+            gate_config=_gate_config(_review),
+            microtask_files=microtask_files,
+        )
+        assert (real_dir / "a.py").read_text() == "orig a\n"
+        assert (tmp_path / "keep.py").read_text() == "keep new\n"
+        assert microtask_files["real/a.py"] == "orig a\n"
+        assert microtask_files["alias/a.py"] == "orig alias\n"
+        assert microtask_files["keep.py"] == "keep new\n"
+    finally:
+        (tmp_path / "alias").unlink(missing_ok=True)
+
+
 def test_dbc_self_review_rejects_symlink_escape_write(tmp_path):
     """A reviewed path through a repo symlink must not write outside the worktree."""
     outside = tmp_path.parent.resolve() / f"dbc-write-escape-{tmp_path.name}"
@@ -680,6 +717,31 @@ def test_dbc_self_review_revert_preserves_executable_mode(tmp_path):
         return SimpleNamespace(files={"a.py": "dbc a\n"})
 
     def _verify(repo_path, label, tid):
+        return False, "broke"
+
+    _call(
+        tmp_path=tmp_path,
+        gate_config=_gate_config(_review),
+        microtask_files={"a.py": "orig a\n"},
+        deps=ReviewDependencies(build_verifier=_verify),
+    )
+
+    assert (tmp_path / "a.py").read_text() == "orig a\n"
+    assert (script.stat().st_mode & 0o777) == 0o755
+
+
+def test_dbc_self_review_revert_restores_verifier_changed_mode(tmp_path):
+    """Failed verify must restore a script's original mode after the verifier chmod's it."""
+    script = tmp_path / "run.sh"
+    script.write_text("#!/bin/sh\necho hi\n")
+    script.chmod(0o755)
+    (tmp_path / "a.py").write_text("orig a\n")
+
+    def _review(*, code, **kwargs: Any) -> SimpleNamespace:
+        return SimpleNamespace(files={"a.py": "dbc a\n"})
+
+    def _verify(repo_path, label, tid):
+        (Path(repo_path) / "run.sh").chmod(0o644)
         return False, "broke"
 
     _call(
@@ -1161,7 +1223,7 @@ def test_revert_disk_swallows_oserror(tmp_path, monkeypatch):
     monkeypatch.setattr(Path, "write_bytes", _raise_write_bytes)
 
     # Should not raise even though the underlying restore attempt fails.
-    dbc_phase._revert_disk({tmp_path / "a.py": b"orig a\n"})
+    dbc_phase._revert_disk({tmp_path / "a.py": (b"orig a\n", 0o644)})
 
 
 def test_restore_symlinks_swallows_oserror(tmp_path, monkeypatch):
@@ -1281,7 +1343,7 @@ def test_sync_verifier_repairs_skips_unreadable_binary_and_outside(tmp_path, mon
     try:
         dbc_phase._sync_verifier_repairs_into_maps(
             root=root,
-            pre_verify_disk={outside_prior: b"out\n"},
+            pre_verify_disk={outside_prior: (b"out\n", 0o644)},
             microtask_files=microtask_files,
             all_files=all_files,
             mt=_microtask(),

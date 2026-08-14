@@ -23,6 +23,7 @@ import logging
 import os
 import re
 import shutil
+import stat
 from pathlib import Path
 from typing import (
     TYPE_CHECKING,
@@ -229,32 +230,35 @@ def _clear_path(full_path: Path) -> None:
     full_path.unlink(missing_ok=True)
 
 
-def _revert_disk(prior_disk: Dict[Path, Optional[bytes]]) -> None:
-    """Best-effort restore of each snapshotted path to its prior on-disk bytes.
+def _revert_disk(prior_disk: Dict[Path, Optional[tuple[bytes, int]]]) -> None:
+    """Best-effort restore of each snapshotted path to its prior bytes and mode.
 
     Postconditions:
-        Each path with ``prior_bytes is None`` is deleted (it did not exist
-        before); each other path is restored to ``prior_bytes``. An existing
-        regular file is overwritten in place so its mode bits are preserved.
-        A current symlink, directory, or other non-regular path at that location is
-        removed first so ``write_bytes`` cannot follow a verifier-planted
-        link or fail on ``IsADirectoryError``. Ancestors are processed before
-        descendants so a replacement directory-symlink is cleared before a
-        nested file restore. An ordinary filesystem failure is logged and
-        skipped per-path rather than raised -- this is already the fallback
-        path of a "never fails" phase, so it must not itself introduce a new
-        way to fail loud.
+        Each path with ``prior_record is None`` is deleted (it did not exist
+        before); each other path is restored to its snapshotted bytes and
+        ``stat.S_IMODE`` permission bits. An existing regular file is
+        overwritten in place. A current symlink, directory, or other
+        non-regular path at that location is removed first so ``write_bytes``
+        cannot follow a verifier-planted link or fail on
+        ``IsADirectoryError``. Ancestors are processed before descendants so
+        a replacement directory-symlink is cleared before a nested file
+        restore. An ordinary filesystem failure is logged and skipped
+        per-path rather than raised -- this is already the fallback path of
+        a "never fails" phase, so it must not itself introduce a new way to
+        fail loud.
     """
     ordered = sorted(prior_disk.items(), key=lambda item: (len(item[0].parts), str(item[0])))
-    for full_path, prior_bytes in ordered:
+    for full_path, prior_record in ordered:
         try:
-            if prior_bytes is None:
+            if prior_record is None:
                 _clear_path(full_path)
                 continue
+            prior_bytes, prior_mode = prior_record
             if full_path.is_symlink() or (full_path.exists() and not full_path.is_file()):
                 _clear_path(full_path)
             full_path.parent.mkdir(parents=True, exist_ok=True)
             full_path.write_bytes(prior_bytes)
+            os.chmod(full_path, stat.S_IMODE(prior_mode))
         except OSError as exc:
             logger.warning("Failed to revert %s to its prior state (ignored): %s", full_path, exc)
 
@@ -327,9 +331,9 @@ def _iter_worktree_files(
 
 
 class _WorktreeSnapshot(NamedTuple):
-    """Pre-verify worktree inventory: regular-file bytes and symlink targets."""
+    """Pre-verify worktree inventory: regular-file bytes/modes and symlink targets."""
 
-    files: Dict[Path, bytes]
+    files: Dict[Path, tuple[bytes, int]]
     symlinks: Dict[Path, str]
 
 
@@ -337,26 +341,27 @@ def _snapshot_worktree(root: Path) -> _WorktreeSnapshot:
     """Read every non-excluded regular file under ``root``.
 
     Postconditions:
-        ``files`` maps resolved regular-file paths to their bytes. ``symlinks``
-        maps file- and directory-symlink paths (unfollowed) to their
-        ``os.readlink`` targets so revert can restore a deleted or retargeted
-        link. Raises ``OSError`` if a walk, read, or ``readlink`` fails.
+        ``files`` maps resolved regular-file paths to ``(bytes, st_mode)``.
+        ``symlinks`` maps file- and directory-symlink paths (unfollowed) to
+        their ``os.readlink`` targets so revert can restore a deleted or
+        retargeted link. Raises ``OSError`` if a walk, read, ``stat``, or
+        ``readlink`` fails.
     """
-    files: Dict[Path, bytes] = {}
+    files: Dict[Path, tuple[bytes, int]] = {}
     links: Dict[Path, str] = {}
     for path in _iter_worktree_files(root, include_symlinks=True):
         if path.is_symlink():
             links[path] = os.readlink(path)
             continue
-        files[path] = path.read_bytes()
+        files[path] = (path.read_bytes(), path.stat().st_mode)
     return _WorktreeSnapshot(files=files, symlinks=links)
 
 
 def _revert_verifier_side_effects(
     *,
     root: Path,
-    prior_disk: Dict[Path, Optional[bytes]],
-    pre_verify_disk: Dict[Path, bytes],
+    prior_disk: Dict[Path, Optional[tuple[bytes, int]]],
+    pre_verify_disk: Dict[Path, tuple[bytes, int]],
     pre_verify_symlinks: Dict[Path, str],
 ) -> None:
     """Restore pre-DbC DbC files and undo any other verifier worktree writes.
@@ -371,7 +376,7 @@ def _revert_verifier_side_effects(
         at their recorded targets. Restore failures are swallowed by
         ``_revert_disk`` / ``_restore_symlinks``.
     """
-    revert_map: Dict[Path, Optional[bytes]] = dict(pre_verify_disk)
+    revert_map: Dict[Path, Optional[tuple[bytes, int]]] = dict(pre_verify_disk)
     revert_map.update(prior_disk)
     current = _list_worktree_files_for_revert(root)
     for path in current:
@@ -422,7 +427,7 @@ def _posix_rel(root: Path, path: Path) -> Optional[str]:
 def _sync_verifier_repairs_into_maps(
     *,
     root: Path,
-    pre_verify_disk: Dict[Path, bytes],
+    pre_verify_disk: Dict[Path, tuple[bytes, int]],
     microtask_files: Dict[str, str],
     all_files: Dict[str, str],
     mt: Any,
@@ -457,7 +462,7 @@ def _sync_verifier_repairs_into_maps(
         except OSError as exc:
             logger.warning("Could not read %s while syncing verifier repairs: %s", path, exc)
             continue
-        if prior is not None and prior == now:
+        if prior is not None and prior[0] == now:
             continue
         rel = _posix_rel(root, path)
         if rel is None:
@@ -598,7 +603,7 @@ def _run_dbc_self_review(
         if dest is None:
             escaped_paths.append(path)
             continue
-        dest_to_keys.setdefault(dest, []).append(path)
+        dest_to_keys.setdefault(dest.resolve(), []).append(path)
     colliding_paths = [path for keys in dest_to_keys.values() if len(keys) > 1 for path in keys]
     if escaped_paths:
         logger.warning(
@@ -635,7 +640,7 @@ def _run_dbc_self_review(
     prior_microtask: Dict[str, Optional[str]] = {}
     prior_all: Dict[str, Optional[str]] = {}
     prior_output: Dict[str, Optional[str]] = {}
-    prior_disk: Dict[Path, Optional[bytes]] = {}
+    prior_disk: Dict[Path, Optional[tuple[bytes, int]]] = {}
 
     try:
         for rel_path in dbc_files:
@@ -646,7 +651,9 @@ def _run_dbc_self_review(
                 full_path = resolve_safe_repo_path(root, rel_path)
             except UnsafeRepoPathError:
                 continue  # write_repo_text_files rejects the whole batch below.
-            prior_disk[full_path] = full_path.read_bytes() if full_path.exists() else None
+            prior_disk[full_path] = (
+                (full_path.read_bytes(), full_path.stat().st_mode) if full_path.exists() else None
+            )
     except OSError as exc:
         logger.warning(
             "[%s] Microtask %s: could not snapshot prior DbC file state, skipping: %s",
