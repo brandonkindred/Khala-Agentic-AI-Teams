@@ -368,17 +368,19 @@ export class AgentStudioShellComponent {
    *   `false` and `state` is unchanged. A call superseded by a later
    *   `loadDraft` (its token no longer matches `loadDraftToken`) discards
    *   its response instead of applying it. If the handoff IDs change while
-   *   the GET is in flight, hydration is aborted so concurrent stage work
+   *   the GET is in flight, or a clean session becomes dirty (e.g. bound-draft
+   *   delete invalidated the snapshot), hydration is aborted so that work
    *   is not overwritten.
    */
   private fetchAndHydrate(draftId: string): void {
     this.loadingDraft.set(true);
     const token = ++this.loadDraftToken;
     const captured = { ...this.state.handoff() };
+    const wasDirty = this.state.isDirty();
     this.facade.loadDraft(draftId).subscribe({
       next: (draft) => {
         if (token !== this.loadDraftToken) return;
-        if (!sameHandoff(this.state.handoff(), captured)) {
+        if (!sameHandoff(this.state.handoff(), captured) || (!wasDirty && this.state.isDirty())) {
           this.loadingDraft.set(false);
           return;
         }

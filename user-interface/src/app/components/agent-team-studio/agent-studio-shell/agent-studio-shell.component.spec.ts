@@ -315,10 +315,16 @@ describe('AgentStudioShellComponent', () => {
     });
 
     it('the Load-draft menu is wired to loadDraft and reflects loadingDraft as busy', () => {
-      facade.loadDraft.mockReturnValue(of(draft({})));
+      const pending = new Subject<AgentStudioDraft>();
+      facade.loadDraft.mockReturnValue(pending.asObservable());
       const menu = fixture.debugElement.query(By.directive(LoadDraftMenuComponent));
       expect(menu).toBeTruthy();
       menu.triggerEventHandler('draftSelected', 'd-1');
+      fixture.detectChanges();
+      expect(component.loadingDraft()).toBe(true);
+      expect(menu.componentInstance.busy).toBe(true);
+      pending.next(draft({}));
+      pending.complete();
       expect(component.state.currentDraftId()).toBe('d-1');
     });
 
@@ -337,7 +343,7 @@ describe('AgentStudioShellComponent', () => {
       expect(component.state.isDirty()).toBe(false);
     });
 
-    it('aborts hydration when the handoff changes while getDraft is in flight', () => {
+    it('aborts hydration when the handoff changes while loadDraft is in flight', () => {
       const pending = new Subject<AgentStudioDraft>();
       facade.loadDraft.mockReturnValue(pending.asObservable());
       component.loadDraft('d-1');
@@ -345,6 +351,22 @@ describe('AgentStudioShellComponent', () => {
       pending.next(draft({ registryAgentId: 'reg-1' }));
       pending.complete();
       expect(component.state.registryAgentId()).toBe('local-2');
+      expect(component.state.currentDraftId()).toBeNull();
+      expect(component.state.isDirty()).toBe(true);
+      expect(component.loadingDraft()).toBe(false);
+    });
+
+    it('aborts hydration when bound-draft delete dirties the session during the GET', () => {
+      component.state.setRegistryAgentId('local-1');
+      component.state.markClean();
+      component.state.setCurrentDraft('bound-1', 'Bound');
+      const pending = new Subject<AgentStudioDraft>();
+      facade.loadDraft.mockReturnValue(pending.asObservable());
+      component.loadDraft('d-2');
+      component.onDraftDeleted('bound-1');
+      pending.next(draft({ registryAgentId: 'reg-1' }));
+      pending.complete();
+      expect(component.state.registryAgentId()).toBe('local-1');
       expect(component.state.currentDraftId()).toBeNull();
       expect(component.state.isDirty()).toBe(true);
       expect(component.loadingDraft()).toBe(false);
