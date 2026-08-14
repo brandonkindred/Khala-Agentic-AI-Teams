@@ -250,7 +250,7 @@ Ensure Ollama is running with the model (e.g. `ollama run kimi-k2.7-code:cloud`)
 
 **Per-phase retry limits:** each per-microtask review gate (Code Review, QA, Security, Documentation) has a hardcoded retry cap of `3` fix attempts (`max_retries`/`code_review_max_retries`/`qa_max_retries`/`security_max_retries`/`documentation_max_retries` on `MicrotaskReviewConfig`/`BaseMicrotaskReviewConfig` in `backend_code_v2_team/models.py`, `frontend_code_v2_team/models.py`, and `shared/v2_models.py`). These are not environment-configurable.
 
-**Coding-team concurrency (environment variables, `progress_config.py`):** lowering these can reduce parallel LLM load but slows runs.
+**Coding-team and code-v2 execution concurrency (environment variables):** lowering these can reduce parallel LLM load but slows runs.
 
 | Variable | Description | Default |
 |----------|-------------|---------|
@@ -258,6 +258,7 @@ Ensure Ollama is running with the model (e.g. `ollama run kimi-k2.7-code:cloud`)
 | `CODING_TEAM_REVIEW_CONCURRENCY` | Max Tech Lead review LLM calls dispatched concurrently | `4` |
 | `CODING_TEAM_GROOM_CONCURRENCY` | Max Tech Lead task-grooming LLM calls dispatched concurrently | `4` |
 | `CODING_TEAM_IMPLEMENTATION_CONCURRENCY` | Max implementation workers dispatched concurrently in one round | `4` |
+| `SE_EXECUTION_WAVE_CONCURRENCY` | Max concurrent microtask workers in one independent code-v2 execution wave | `4` |
 
 **Faster runs:** Set `SW_SKIP_PLANNING_AGENTS=observability,performance_doc` to skip specific planning agents, or `SW_MINIMAL_PLANNING=1` to skip all domain planning (spec → Tech Lead ↔ Architecture → consolidation → execution).
 
