@@ -310,9 +310,11 @@ export class AgentStudioShellComponent {
    *   dialog; `draftId` is the draft to load after a successful persist.
    * Postconditions: when bound (`currentDraftId` + `currentDraftName`), PUTs
    *   via `saveDraft` with `loadingDraft()` true for the whole PUT+hydrate.
-   *   On success, records the submitted snapshot as saved; hydrates only if
-   *   the handoff still matches that snapshot. Concurrent edits stay dirty
-   *   and are not overwritten. On PUT error, does not hydrate and
+   *   On success, records the submitted snapshot as saved and hydrates only
+   *   if the session is still bound to `boundId` and the handoff still
+   *   matches that snapshot. Concurrent edits, or a delete that unbound the
+   *   draft while the PUT was in flight, stay dirty and are not overwritten.
+   *   On PUT error, does not hydrate and
    *   `loadingDraft()` returns to false. When unbound, opens the Save-draft
    *   dialog; hydrates only if the session is still bound to the saved
    *   draft and the handoff still matches the submitted payload;
@@ -326,6 +328,10 @@ export class AgentStudioShellComponent {
       const submitted = { ...this.state.handoff() };
       this.facade.saveDraft({ name: boundName, payload: submitted }, boundId).subscribe({
         next: (summary) => {
+          if (this.state.currentDraftId() !== boundId) {
+            this.loadingDraft.set(false);
+            return;
+          }
           this.state.setCurrentDraft(summary.draft_id, summary.name);
           this.state.markSaved(submitted);
           if (this.state.isDirty()) {

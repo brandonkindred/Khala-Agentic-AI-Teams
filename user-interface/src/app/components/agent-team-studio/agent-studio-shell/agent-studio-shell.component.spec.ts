@@ -451,6 +451,23 @@ describe('AgentStudioShellComponent', () => {
       expect(component.loadingDraft()).toBe(false);
     });
 
+    it('Save first does not hydrate when the bound draft is deleted during the PUT', () => {
+      component.state.setRegistryAgentId('local-1');
+      component.state.setCurrentDraft('bound-1', 'Bound');
+      openSpy.mockReturnValue({ afterClosed: () => of('save') } as unknown as ReturnType<MatDialog['open']>);
+      const pending = new Subject<AgentStudioDraftSummary>();
+      facade.saveDraft.mockReturnValue(pending.asObservable());
+      component.loadDraft('d-1');
+      component.onDraftDeleted('bound-1');
+      pending.next({ draft_id: 'bound-1', name: 'Bound', updated_at: '2026-01-01T00:00:00Z' });
+      pending.complete();
+      expect(facade.loadDraft).not.toHaveBeenCalled();
+      expect(component.state.currentDraftId()).toBeNull();
+      expect(component.state.registryAgentId()).toBe('local-1');
+      expect(component.state.isDirty()).toBe(true);
+      expect(component.loadingDraft()).toBe(false);
+    });
+
     it('a second Load during save-first PUT is a no-op', () => {
       component.state.setRegistryAgentId('local-1');
       component.state.setCurrentDraft('bound-1', 'Bound');
