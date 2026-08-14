@@ -341,6 +341,37 @@ def test_stream_replays_provider_turns_recorded_inside_to_thread() -> None:
     ]
 
 
+def test_stream_replays_worker_turns_when_chat_raises() -> None:
+    """Self-correction that still fails records turns in the worker; those
+    must replay onto the parent task even though ``chat()`` raised."""
+    from llm_service.interface import LLMJsonParseError
+
+    class _FailAfterTurns(_RecordingClient):
+        def chat(self, messages: list, **kwargs: Any) -> Any:
+            super().chat(messages, **kwargs)
+            record_complete_json_turn("first messages", "prose analysis")
+            record_complete_json_turn("corrective messages", '{"ok": false}')
+            raise LLMJsonParseError("not json", response_preview="nope")
+
+    model = LLMClientModel(_FailAfterTurns({"ok": True}), agent_key="qa_agent")
+
+    async def _run() -> list:
+        try:
+            async for _event in model.stream(
+                messages=[{"role": "user", "content": [{"text": "review this"}]}],
+            ):
+                pass
+        except LLMJsonParseError:
+            return take_complete_json_turns()
+        raise AssertionError("expected LLMJsonParseError")
+
+    turns = asyncio.run(_run())
+    assert [(p, r) for p, r, _s in turns] == [
+        ("first messages", "prose analysis"),
+        ("corrective messages", '{"ok": false}'),
+    ]
+
+
 def test_stream_merges_system_prompt_content_blocks() -> None:
     """``system_prompt_content`` (Strands' structured system prompt) must not be
     silently dropped — its flattened text reaches the emitted system message

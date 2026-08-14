@@ -31,6 +31,7 @@ from typing import List, Optional
 from pydantic import BaseModel, Field
 
 from llm_service import LLMClient
+from llm_service.interface import take_complete_json_turns
 
 from .model_resolution import resolve_code_review_model
 from .models import CodeReviewInput, CodeReviewIssue
@@ -43,6 +44,7 @@ from .prompts import (
 from .transcript import (
     model_label,
     record_formatting_transcript_turns,
+    record_reasoning_transcript_turns,
     record_transcript_entry,
     resolve_format_turn_started,
 )
@@ -183,22 +185,26 @@ def _run_via_reasoning_with_transcript(
 
     Postconditions:
         Returns the parsed JSON object from the formatting pass. Records the
-        reasoning-pass ``agent.messages`` conversation once that agent exists,
-        and a formatting-pass entry per formatting LLM turn once those calls
-        return (or raise ``LLMJsonParseError`` with a raw body), even if parse
-        later fails. A no-op on the transcript when no ``job_id`` is bound.
-        Raises whatever ``run_agent_via_reasoning`` raises.
+        reasoning pass as one entry per model invocation (inner HTTP turns
+        when the Strands adapter recorded them, otherwise per assistant
+        message in ``agent.messages``), and a formatting-pass entry per
+        formatting LLM turn once those calls return (or raise
+        ``LLMJsonParseError`` with a raw body), even if parse later fails.
+        A no-op on the transcript when no ``job_id`` is bound. Raises
+        whatever ``run_agent_via_reasoning`` raises.
     """
     reasoning_agent = None
+    reasoning_turns: list[tuple[str, str, float]] = []
     format_turns: list[tuple[str, str, float]] = []
     started = time.monotonic()
     reasoning_done_at = started
     format_turn_started_at: float | None = None
 
     def _capture(agent: object) -> None:
-        nonlocal reasoning_agent, reasoning_done_at
+        nonlocal reasoning_agent, reasoning_done_at, reasoning_turns
         reasoning_agent = agent
         reasoning_done_at = time.monotonic()
+        reasoning_turns = take_complete_json_turns()
 
     def _on_formatting_start() -> None:
         nonlocal format_turn_started_at
@@ -226,22 +232,18 @@ def _run_via_reasoning_with_transcript(
         )
     finally:
         now = time.monotonic()
-        if reasoning_agent is not None:
-            try:
-                transcript_response = json.dumps(
-                    getattr(reasoning_agent, "messages", []), default=str
-                )
-            except Exception:  # noqa: BLE001 - transcript recording must never break synthesis
-                transcript_response = ""
-            record_transcript_entry(
-                stage,
-                "",
-                prompt,
-                transcript_response,
-                system_prompt=reasoning_system_prompt,
-                model=model_label(model),
-                duration_ms=(reasoning_done_at - started) * 1000,
-            )
+        record_reasoning_transcript_turns(
+            stage,
+            "",
+            turns=reasoning_turns,
+            agent=reasoning_agent,
+            fallback_prompt=prompt,
+            started=started,
+            reasoning_done_at=reasoning_done_at,
+            system_prompt=reasoning_system_prompt,
+            model=model_label(model),
+            recorder=record_transcript_entry,
+        )
         record_formatting_transcript_turns(
             stage,
             "",

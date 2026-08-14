@@ -10,6 +10,8 @@ overflow semantics, batching-by-job_id, and zero DB I/O on enqueue.
 from __future__ import annotations
 
 import threading
+import time
+from datetime import datetime
 
 import pytest
 
@@ -84,6 +86,34 @@ def test_record_builds_entry_fields(monkeypatch) -> None:
     assert entry["duration_ms"] == 42
     assert entry["started_at"]  # non-empty ISO timestamp
     assert entry["entry_id"]
+
+
+def test_record_uses_started_monotonic_for_started_at(monkeypatch) -> None:
+    """Two entries with the same duration_ms still get distinct started_at
+    when the caller passes the original monotonic start of each LLM call."""
+    captured: list = []
+
+    def _write(job_id, entries):
+        captured.append((job_id, entries))
+        return True
+
+    monkeypatch.setattr(
+        "software_engineering_team.review_history_store.append_review_transcript_entries",
+        _write,
+    )
+    t0 = time.monotonic()
+    with llm_attribution(job_id="job-1"):
+        transcript.record_transcript_entry(
+            "chunk_review", "a.py", "p1", "r1", duration_ms=1.0, started_monotonic=t0 - 10.0
+        )
+        transcript.record_transcript_entry(
+            "chunk_review", "a.py", "p2", "r2", duration_ms=1.0, started_monotonic=t0
+        )
+    transcript.drain()
+    first = datetime.fromisoformat(captured[0][1][0]["started_at"])
+    second = datetime.fromisoformat(captured[0][1][1]["started_at"])
+    assert first < second
+    assert (second - first).total_seconds() >= 9.0
 
 
 def test_sequential_turn_durations_end_at_next_start() -> None:

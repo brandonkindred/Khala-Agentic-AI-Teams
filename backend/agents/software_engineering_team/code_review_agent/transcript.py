@@ -48,6 +48,7 @@ from __future__ import annotations
 import json
 import logging
 import threading
+import time
 import uuid
 from collections import deque
 from datetime import datetime, timedelta, timezone
@@ -228,6 +229,7 @@ def record_reasoning_transcript_turns(
                 system_prompt=system_prompt,
                 model=model,
                 duration_ms=max(0.0, (ended - turn_started) * 1000),
+                started_monotonic=turn_started,
             )
         return
     if agent is None:
@@ -244,6 +246,7 @@ def record_reasoning_transcript_turns(
         system_prompt=system_prompt,
         model=model,
         duration_ms=(reasoning_done_at - started) * 1000,
+        started_monotonic=started,
     )
 
 
@@ -312,7 +315,7 @@ def record_formatting_transcript_turns(
         return
     write = recorder if recorder is not None else record_transcript_entry
     durations = sequential_turn_durations_ms([started for _, _, started in turns], last_ended)
-    for (prompt, response, _started), duration_ms in zip(turns, durations, strict=True):
+    for (prompt, response, started), duration_ms in zip(turns, durations, strict=True):
         write(
             stage,
             target,
@@ -321,6 +324,7 @@ def record_formatting_transcript_turns(
             system_prompt=system_prompt,
             model=model,
             duration_ms=duration_ms,
+            started_monotonic=started,
         )
 
 
@@ -333,6 +337,7 @@ def record_transcript_entry(
     system_prompt: str = "",
     model: str = "",
     duration_ms: float = 0.0,
+    started_monotonic: float | None = None,
 ) -> None:
     """Buffer one completed LLM call for the current job's durable transcript.
 
@@ -348,10 +353,12 @@ def record_transcript_entry(
           — omitting it would leave the recorded entry missing the instruction
           layer that actually governed the model's behavior for that call.
         - ``duration_ms`` is the caller's own measured wall-clock time for the
-          call (``0.0`` when not measured); used only to backdate this entry's
-          ``started_at`` so entries the reader sorts by that field approximate
-          real call order even though concurrent chunk reviews complete out of
-          start order.
+          call (``0.0`` when not measured). ``started_monotonic``, when given,
+          is ``time.monotonic()`` from when that LLM request began and is the
+          source of ``started_at`` (converted to wall clock at record time).
+          When omitted, ``started_at`` is backdated from ``duration_ms``
+          alone, which is accurate only if this entry is buffered immediately
+          when the call ends.
 
     Postconditions:
         - Does zero Postgres I/O — see the module docstring's "off the hot
@@ -384,7 +391,11 @@ def record_transcript_entry(
             if _should_prefix_system_prompt(prompt, system_prompt)
             else prompt
         )
-        started_at = datetime.now(timezone.utc) - timedelta(milliseconds=max(duration_ms, 0.0))
+        if started_monotonic is not None:
+            elapsed_ms = max(0.0, (time.monotonic() - started_monotonic) * 1000)
+            started_at = datetime.now(timezone.utc) - timedelta(milliseconds=elapsed_ms)
+        else:
+            started_at = datetime.now(timezone.utc) - timedelta(milliseconds=max(duration_ms, 0.0))
         entry = {
             "entry_id": str(uuid.uuid4()),
             "stage": stage,

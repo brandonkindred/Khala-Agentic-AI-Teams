@@ -359,6 +359,7 @@ def _run_chunk_review(
             system_prompt=system_prompt,
             model=model_name,
             duration_ms=(now - started) * 1000,
+            started_monotonic=started,
         )
         last_attempt_start = now
 
