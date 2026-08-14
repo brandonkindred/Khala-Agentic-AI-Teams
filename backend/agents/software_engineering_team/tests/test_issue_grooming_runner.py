@@ -1,4 +1,10 @@
-"""Tests for IssueGroomingRunner (GitHub issue grooming Phase A -> Phase B orchestration)."""
+"""Tests for IssueGroomingRunner (GitHub issue grooming Phase A -> Phase B orchestration).
+
+Phase A stubs ``score_issue_by_mode`` with ``issue_scoring.ScoreBreakdown`` --
+the schema the LLM/heuristic facade returns. Job/progress assertions use the
+legacy ``issue_grooming_scoring.ScoreBreakdown`` keys after
+``from_unified_score`` adapts that result.
+"""
 
 from __future__ import annotations
 
@@ -12,9 +18,7 @@ from software_engineering_team.github_source import issue_scorer as scorer_mod
 from software_engineering_team.github_source.client import GitHubAPIError, Issue, SubIssue
 from software_engineering_team.github_source.issue_grooming_runner import IssueGroomingRunner
 from software_engineering_team.github_source.issue_grooming_split import MAX_SUB_ISSUES
-from software_engineering_team.github_source.issue_scoring import (
-    ScoreBreakdown as UnifiedScoreBreakdown,
-)
+from software_engineering_team.github_source.issue_scoring import ScoreBreakdown
 from software_engineering_team.models import JobStatus
 
 
@@ -161,15 +165,15 @@ def _big_issue() -> Issue:
     return _issue(number=7, title="Big feature", body=body)
 
 
-def _big_unified_score() -> UnifiedScoreBreakdown:
-    """A unified-scorer score whose from_unified_score-adapted aggregate (13,
+def _forced_split_score() -> ScoreBreakdown:
+    """A scorer-schema stub whose from_unified_score-adapted aggregate (13,
     comfortably above SPLIT_THRESHOLD) is independent of any scoring
     algorithm's own keyword/length heuristics -- decouples Phase-B-
     orchestration tests from whichever scoring path (LLM/heuristic) runs.
     aggregate_score is deliberately NOT max(13, 1, 1), proving Phase B's
     trigger uses from_unified_score's recomputed aggregate, never this field.
     """
-    return UnifiedScoreBreakdown(
+    return ScoreBreakdown(
         conceptual_score=13,
         conceptual_rationale="Stub: forced high complexity for Phase B testing.",
         loc_score=1,
@@ -183,7 +187,7 @@ def _big_unified_score() -> UnifiedScoreBreakdown:
 
 class TestPhaseBSplit:
     def test_splits_when_large_and_checklisted(self, monkeypatch) -> None:
-        monkeypatch.setattr(runner_mod, "score_issue_by_mode", lambda *a, **k: _big_unified_score())
+        monkeypatch.setattr(runner_mod, "score_issue_by_mode", lambda *a, **k: _forced_split_score())
         issue = _big_issue()
         client = _FakeGroomingClient(issue)
         update_job_fn, get_job_fn, job, _calls = _job_store()
@@ -217,7 +221,7 @@ class TestPhaseBSplit:
         assert job["status"] == JobStatus.COMPLETED.value
 
     def test_caps_sub_issues_at_max_with_remaining_items_tail(self, monkeypatch) -> None:
-        monkeypatch.setattr(runner_mod, "score_issue_by_mode", lambda *a, **k: _big_unified_score())
+        monkeypatch.setattr(runner_mod, "score_issue_by_mode", lambda *a, **k: _forced_split_score())
         body = "\n".join(
             [
                 "This is a breaking change requiring a database migration and new authentication architecture.",
@@ -285,7 +289,7 @@ class TestCancellation:
         assert job["phase"] == "cancelled"
 
     def test_stops_mid_phase_b_loop_when_cancel_requested(self, monkeypatch) -> None:
-        monkeypatch.setattr(runner_mod, "score_issue_by_mode", lambda *a, **k: _big_unified_score())
+        monkeypatch.setattr(runner_mod, "score_issue_by_mode", lambda *a, **k: _forced_split_score())
         issue = _big_issue()
         client = _FakeGroomingClient(issue)
         update_job_fn, _get_job_fn, job, _calls = _job_store()
@@ -305,7 +309,7 @@ class TestCancellation:
         assert len(client.updated) == 1
 
     def test_emits_incremental_progress_during_phase_b_loop(self, monkeypatch) -> None:
-        monkeypatch.setattr(runner_mod, "score_issue_by_mode", lambda *a, **k: _big_unified_score())
+        monkeypatch.setattr(runner_mod, "score_issue_by_mode", lambda *a, **k: _forced_split_score())
         issue = _big_issue()
         client = _FakeGroomingClient(issue)
         update_job_fn, get_job_fn, _job, calls = _job_store()
@@ -353,7 +357,7 @@ class TestScoringModeWiring:
     }
 
     def test_emits_legacy_score_shape_on_llm_success(self, monkeypatch) -> None:
-        llm_score = UnifiedScoreBreakdown(
+        llm_score = ScoreBreakdown(
             conceptual_score=5,
             conceptual_rationale="LLM: moderate novelty.",
             loc_score=3,
@@ -383,7 +387,7 @@ class TestScoringModeWiring:
         # Forces the auto-mode fallback explicitly (rather than relying on the
         # dummy LLM provider's incidental schema-validation failure) so this
         # test's intent doesn't depend on dummy.py never growing a matching stub.
-        def _raise_not_configured(*_a: Any, **_kw: Any) -> UnifiedScoreBreakdown:
+        def _raise_not_configured(*_a: Any, **_kw: Any) -> ScoreBreakdown:
             raise LLMNotConfiguredError("no provider configured")
 
         monkeypatch.setattr(scorer_mod, "score_issue_via_llm", _raise_not_configured)

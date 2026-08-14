@@ -814,8 +814,8 @@ class IndicatorRegistry:
 
         # Attempt warm-path advance.
         warm = False
-        bars_dq: Deque[Tuple[float, float, float]]
-        k_dq: Deque[float]
+        bars_dq: Deque[Tuple[float, float, float]] = deque()
+        k_dq: Deque[float] = deque()
         if state is not None and "bars_dq" in state:
             kind = self._advance_kind(state, bars, fp)
             if kind in ("expand", "slide"):
@@ -1002,7 +1002,7 @@ class IndicatorRegistry:
             return state["value"].get(select)
 
         kind = self._advance_kind(state, bars, fp) if state is not None else "none"
-        macd_line: Deque[float]
+        macd_line: Deque[float] = deque()
         # Set only on an ``expand`` step that has a previous cached signal
         # value to step from — see the ``expand`` branch below for why this
         # is bit-identical to (not an approximation of) the full walk.
