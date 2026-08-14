@@ -16,10 +16,12 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from strands.models.model import Model
 from strands.types.content import Message
+from strands.types.exceptions import ModelThrottledException
 
 logger = logging.getLogger(__name__)
 
@@ -67,6 +69,7 @@ class _ProviderConfig:
     base_url: str
     model: str
     api_key: str
+    entry_id: Optional[int] = None
 
 
 class LLMClient:
@@ -113,8 +116,8 @@ class LLMClient:
         are accumulated; lifecycle, reasoning, tool-use, and metadata events do
         not belong in this single-shot text API.
         """
-        config = self._resolve_config()
-        if config.provider == "dummy" or not config.model:
+        configs = self._resolve_configs()
+        if not configs or configs[0].provider == "dummy" or not configs[0].model:
             if not LLMClient._warned_fallback:
                 logger.warning(
                     "LLMClient: no LLM model configured — using deterministic fallback. "
@@ -123,6 +126,43 @@ class LLMClient:
                 LLMClient._warned_fallback = True
             return self._fallback(request)
 
+        last_throttling_error: Optional[Exception] = None
+        for config in configs:
+            try:
+                return await self._complete_with_config(request, config)
+            except Exception as exc:
+                if config.entry_id is None or not self._is_throttling_error(exc):
+                    raise
+
+                from llm_service import config as llm_config
+                from llm_service import provider_store
+                from llm_service.limit_classification import LIMIT_KIND_RATE
+
+                reset_at = datetime.now(timezone.utc) + timedelta(
+                    seconds=llm_config.failover_rate_window_seconds()
+                )
+                provider_store.mark_exhausted(
+                    config.entry_id,
+                    limit_type=LIMIT_KIND_RATE,
+                    reset_at=reset_at,
+                )
+                logger.warning(
+                    "LLM provider entry %s was throttled; trying the next configured provider",
+                    config.entry_id,
+                )
+                last_throttling_error = exc
+
+        if last_throttling_error is not None:
+            raise last_throttling_error
+
+        # All resolved entries normally have a model. Keep the fallback explicit
+        # for a malformed provider-list snapshot rather than returning None.
+        return self._fallback(request)
+
+    async def _complete_with_config(
+        self, request: LLMRequest, config: _ProviderConfig
+    ) -> str:
+        """Run one native provider attempt and collect its text deltas."""
         native_model = self._create_model(request, config)
         messages: list[Message] = [{"role": "user", "content": [{"text": request.user}]}]
         chunks: list[str] = []
@@ -166,11 +206,10 @@ class LLMClient:
         if resolved.provider == "claude":
             from strands.models.anthropic import AnthropicModel
 
-            client_args = {}
-            if resolved.api_key:
-                client_args["api_key"] = resolved.api_key
+            if not resolved.api_key:
+                raise ValueError("Claude provider entry requires a non-empty API key")
             return AnthropicModel(
-                client_args=client_args or None,
+                client_args={"api_key": resolved.api_key},
                 model_id=resolved.model,
                 max_tokens=request.max_tokens,
                 params={"temperature": request.temperature},
@@ -190,19 +229,30 @@ class LLMClient:
         call so settings changes and usage-limit selection are honored without a
         process restart. Secret values never fall back to the environment.
         """
+        configs = self._resolve_configs()
+        return configs[0] if configs else _ProviderConfig("dummy", "", "", "")
+
+    def _resolve_configs(self) -> list[_ProviderConfig]:
+        """Resolve the ordered provider candidates for the current call."""
         if self._explicit_config is not None:
-            return self._explicit_config
+            return [self._explicit_config]
 
         from llm_service import config as llm_config
         from llm_service import provider_store
 
         if llm_config.resolve_provider() == "dummy":
-            return _ProviderConfig("dummy", "", "", "")
+            return []
 
-        entry = provider_store.select_active_entry(provider_store.load_ordered_entries())
-        if entry is None:
-            return _ProviderConfig("dummy", "", "", "")
+        entries = provider_store.load_ordered_entries()
+        active = provider_store.select_active_entry(entries)
+        if active is None:
+            return []
 
+        start = next((i for i, entry in enumerate(entries) if entry.id == active.id), 0)
+        return [self._config_from_entry(entry, llm_config) for entry in entries[start:]]
+
+    def _config_from_entry(self, entry, llm_config) -> _ProviderConfig:
+        """Map one stored provider entry to native Strands settings."""
         provider = self._normalize_provider(entry.provider)
         model = entry.model.strip() or llm_config.resolve_model_for_provider(
             None, provider=provider
@@ -210,7 +260,22 @@ class LLMClient:
         base_url = ""
         if provider == "ollama":
             base_url = entry.base_url.strip() or llm_config.resolve_base_url()
-        return _ProviderConfig(provider, base_url, model, entry.api_key.strip())
+        return _ProviderConfig(
+            provider,
+            base_url,
+            model,
+            entry.api_key.strip(),
+            entry_id=entry.id,
+        )
+
+    @staticmethod
+    def _is_throttling_error(exc: Exception) -> bool:
+        """Return whether a native provider error represents HTTP 429."""
+        if isinstance(exc, ModelThrottledException):
+            return True
+        if getattr(exc, "status_code", None) == 429:
+            return True
+        return getattr(getattr(exc, "response", None), "status_code", None) == 429
 
     @staticmethod
     def _normalize_provider(provider: str) -> str:
