@@ -651,7 +651,11 @@ Per-agent config travels in the manifest `CognitionSpec` block (`agent_platform/
 
 ## 13. Repo Layout
 
-The repository contains two independent agent systems. The software engineering team is the primary system documented above; a separate blogging agent system exists under `agents/blogging/`.
+The software engineering team is the primary system documented above; a separate blogging agent system exists under `agents/blogging/`. In-process platform code lives beside those teams, not inside them:
+
+- **Platform** — `backend/agents/agent_platform/` (registry, console, sandbox, Studio). Shared cognitive substrate is `backend/agents/agent_cognition/`. Cross-cutting infra is `backend/shared/` (`shared.postgres`, `shared.temporal`, `shared.agent_invoke`).
+- **Infra (not platform)** — Docker/environment provisioning stays in `backend/agents/agent_team_studio/agent_provisioning_team/`.
+- **Domain apps** — `backend/agents/agent_team_studio/agentic_team_provisioning/` and `backend/agents/agent_team_studio/user_agent_founder/` consume the platform; they are not members of it.
 
 ```mermaid
 flowchart TB
@@ -659,6 +663,9 @@ flowchart TB
 
     Root --> SWTeam["agents/software_engineering_team/"]
     Root --> BlogTeam["agents/blogging/"]
+    Root --> Platform["agents/agent_platform/"]
+    Root --> Studio["agents/agent_team_studio/"]
+    Root --> Shared["backend/shared/"]
 
     SWTeam --> swOrch["orchestrator.py"]
     SWTeam --> swAPI["api/"]

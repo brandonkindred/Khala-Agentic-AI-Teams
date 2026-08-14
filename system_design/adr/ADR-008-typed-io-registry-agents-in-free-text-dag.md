@@ -19,15 +19,15 @@
 Agent Studio lets a roster **mix** two kinds of agent:
 
 - **Registry agents** — real, catalogued `AgentManifest`s
-  (`backend/agents/agent_registry/models.py`) that declare **typed** input/output schemas. The types are
+  (`backend/agents/agent_platform/registry/models.py`) that declare **typed** input/output schemas. The types are
   carried as lazy dotted pointers (`IOSchema.schema_ref`, resolved via
-  `agent_registry/schema_resolver.py`), not inline schemas.
+  `agent_platform/registry/schema_resolver.py`), not inline schemas.
 - **Generated agents** — thin roster refs (`AgenticTeamAgent`: `agent_name`, `source`,
   `manifest_id`) whose persona is stored on an in-process `AgentManifest` registered via
   `register_team_manifests` (LLM ``role`` → manifest ``summary``).
 
 The runtime that executes a team is a **single linear DAG**, not a typed dataflow. The pipeline runner
-(`backend/agents/agentic_team_provisioning/runtime/pipeline_runner.py`) walks a `ProcessDefinition` in
+(`backend/agents/agent_team_studio/agentic_team_provisioning/runtime/pipeline_runner.py`) walks a `ProcessDefinition` in
 topological order and threads a **plain `str`** (`prev_output`) from one step to the next; `WAIT` steps
 pause for one **free-text** human/persona answer. Nothing in the DAG is schema-aware.
 
@@ -37,7 +37,7 @@ forward. The spec (§6) names this the **deepest unknown** of the redesign.
 
 The registry → roster **bridge** already ships (spec §5 item 3): `AgenticTeamAgent` carries
 `source: "generated" | "registry"` + `manifest_id`, and the `from-registry` / `PUT` / `DELETE` roster
-endpoints exist (`backend/agents/agentic_team_provisioning/api/main.py`,
+endpoints exist (`backend/agents/agent_team_studio/agentic_team_provisioning/api/main.py`,
 `tests/test_registry_roster.py`). But the bridge only lets a registry agent **sit on** a roster — it does
 not make the DAG honor its typed IO. Two current-code sites make that concrete:
 
