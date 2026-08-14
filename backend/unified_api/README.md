@@ -180,6 +180,14 @@ Status values:
 
 ## Architecture
 
+### Startup lifespan
+
+Worker and route registration for the unified API — Postgres schemas, proxy
+catch-alls, lazy assistant mounts, sandbox/Studio/console/cognition workers,
+and the import-time `include_router` list — is catalogued in
+[`docs/UNIFIED_API_LIFESPAN.md`](../../docs/UNIFIED_API_LIFESPAN.md). That file
+is the single map; env-var gates stay in [`docs/ENV_VARS.md`](../../docs/ENV_VARS.md).
+
 ### File Structure
 
 ```

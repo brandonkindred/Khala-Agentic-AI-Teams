@@ -50,7 +50,9 @@ Routes are mounted on the unified API from
 Reuses `shared.postgres` exactly like blogging and branding:
 
 - `SCHEMA: TeamSchema` exported from `agent_platform.console.postgres` (pure data).
-- `register_team_schemas(SCHEMA)` called once from the unified API lifespan.
+- `register_team_schemas(SCHEMA)` called once from the unified API lifespan
+  (step 0 in [`docs/UNIFIED_API_LIFESPAN.md`](../../../../docs/UNIFIED_API_LIFESPAN.md);
+  the run pruner is step 5).
 - `get_conn()` for queries; `@timed_query(store="agent_console", op=...)` for
   slow-query logging.
 - When `POSTGRES_HOST` is unset, every store method raises

@@ -642,6 +642,10 @@ async def lifespan(app: FastAPI):  # noqa: PLR0915 - linear startup orchestrator
     """Application lifespan: register Postgres schemas, register assistant
     mount specs, register proxy routes, then boot in-process workers.
 
+    Numbered step catalog (schemas, routes, workers): ``docs/UNIFIED_API_LIFESPAN.md``.
+    Import-time ``include_router`` mounts are listed there too — they are not
+    registered inside this function.
+
     Platform sandbox Temporal worker ownership: this lifespan is the sole
     boot site for ``start_agent_platform_sandbox_temporal_worker_thread``
     (``agent_platform.sandbox.temporal.worker``). The worker polls
