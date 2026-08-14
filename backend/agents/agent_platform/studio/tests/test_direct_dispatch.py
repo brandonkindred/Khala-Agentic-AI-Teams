@@ -193,3 +193,18 @@ def test_start_conversation_timeout_raises_runtime_error(
 
     with pytest.raises(RuntimeError, match="dispatch timeout"):
         dispatch.start_conversation("new", None, "hi")
+
+
+def test_shutdown_authoring_executor_is_idempotent() -> None:
+    dispatch.shutdown_authoring_executor()
+    dispatch.shutdown_authoring_executor()
+
+
+def test_authoring_crud_works_after_executor_shutdown(service: Mock) -> None:
+    resp = ConversationStateResponse(conversation_id="c1", mode="new", definition=AgentDefinition())
+    service.start_conversation.return_value = resp
+    dispatch.shutdown_authoring_executor()
+
+    out = dispatch.start_conversation("new", None, None)
+
+    assert out is resp

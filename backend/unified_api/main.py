@@ -876,6 +876,15 @@ async def lifespan(app: FastAPI):  # noqa: PLR0915 - linear startup orchestrator
 
     _stop_in_process_temporal_workers()
 
+    # In-process Studio authoring CRUD (daemon pool). Rejects new work before
+    # usage/Postgres teardown. In-flight HTTP cannot be aborted from this thread.
+    try:
+        from agent_platform.studio.temporal.dispatch import shutdown_authoring_executor
+
+        shutdown_authoring_executor()
+    except Exception:
+        logger.warning("studio authoring executor shutdown failed", exc_info=True)
+
     try:
         from llm_service.usage_flusher import shutdown as usage_flush_shutdown
 

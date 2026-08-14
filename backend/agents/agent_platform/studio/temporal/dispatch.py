@@ -12,8 +12,11 @@ unchanged; the route maps them to 400 / 404.
 Each helper waits at most :data:`AUTHORING_TIMEOUT_S` (180s, matching the former
 Temporal activity ``start_to_close_timeout``). That bound keeps a stalled LLM
 provider from occupying a FastAPI threadpool worker until the client default
-(3600s). On timeout the caller gets ``RuntimeError`` (HTTP 500); the service
-call may still finish on the dedicated authoring pool.
+(3600s). On timeout the caller gets ``RuntimeError`` (HTTP 500). Work runs on
+daemon threads so interpreter exit does not join a 3600s LLM HTTP call.
+``shutdown_authoring_executor`` is part of unified-API lifespan teardown: it
+rejects new submits and queued slot waiters; an in-flight HTTP request cannot
+be aborted from another thread.
 """
 
 from __future__ import annotations
@@ -35,28 +38,131 @@ from agent_platform.studio.models import AgentDefinition, ConversationStateRespo
 AUTHORING_TIMEOUT_S = 180.0
 _AUTHORING_POOL_WORKERS = 4
 
-_authoring_pool: concurrent.futures.ThreadPoolExecutor | None = None
+_authoring_pool: _DaemonAuthoringPool | None = None
 _authoring_pool_lock = threading.Lock()
 
 T = TypeVar("T")
 
 
-def _authoring_executor() -> concurrent.futures.ThreadPoolExecutor:
+class _DaemonAuthoringPool:
+    """Bounded authoring pool whose workers do not atexit-join the interpreter.
+
+    CPython ``ThreadPoolExecutor`` registers ``_python_exit``, which joins
+    running workers even when they are daemon threads. A stalled LLM call
+    using ``resolve_timeout()`` (3600s) would then block reload/shutdown for
+    up to an hour after the caller already timed out. Daemon ``Thread``s
+    without that atexit hook let the process exit; in-flight HTTP still
+    cannot be cancelled from another thread.
+    """
+
+    def __init__(self) -> None:
+        self._sem = threading.BoundedSemaphore(_AUTHORING_POOL_WORKERS)
+        self._lock = threading.Lock()
+        self._shutdown = False
+
+    def submit(self, fn: Callable[..., T], *args: object) -> concurrent.futures.Future[T]:
+        """Run ``fn(*args)`` on a daemon thread, or fail if this pool is shut down.
+
+        Preconditions:
+            - ``fn`` is callable; ``args`` match ``fn``.
+        Postconditions:
+            - Returns a future for the call, or a completed future whose
+              exception is ``RuntimeError`` when the pool is shut down.
+        """
+        fut: concurrent.futures.Future[T] = concurrent.futures.Future()
+        with self._lock:
+            if self._shutdown:
+                fut.set_exception(RuntimeError("Agent Studio authoring executor is shut down"))
+                return fut
+
+        def _worker() -> None:
+            acquired = self._sem.acquire(timeout=AUTHORING_TIMEOUT_S)
+            if not acquired:
+                if not fut.done():
+                    fut.set_exception(
+                        RuntimeError(
+                            "Agent Studio authoring call did not complete within the dispatch timeout"
+                        )
+                    )
+                return
+            try:
+                with self._lock:
+                    stopped = self._shutdown
+                if stopped or fut.done():
+                    if not fut.done():
+                        fut.set_exception(RuntimeError("Agent Studio authoring executor is shut down"))
+                    return
+                try:
+                    result = fn(*args)
+                except Exception as exc:
+                    if not fut.done():
+                        fut.set_exception(exc)
+                    return
+                if not fut.done():
+                    fut.set_result(result)
+            finally:
+                self._sem.release()
+
+        threading.Thread(target=_worker, name="studio-authoring", daemon=True).start()
+        return fut
+
+    def shutdown(self) -> None:
+        """Reject new work. In-flight daemon workers are not joined.
+
+        Preconditions:
+            - None.
+        Postconditions:
+            - Subsequent ``submit`` calls complete with ``RuntimeError``.
+            - Idempotent.
+        """
+        with self._lock:
+            self._shutdown = True
+
+    def is_live(self) -> bool:
+        """Return whether ``submit`` still accepts work.
+
+        Preconditions:
+            - None.
+        Postconditions:
+            - ``True`` until ``shutdown``; ``False`` after.
+        """
+        with self._lock:
+            return not self._shutdown
+
+
+def _authoring_executor() -> _DaemonAuthoringPool:
     """Return the process-wide pool that runs authoring CRUD off the FastAPI worker.
 
     Preconditions:
         - None.
     Postconditions:
-        - Returns the same executor on every call within a process.
+        - Returns a live pool, recreating one after ``shutdown_authoring_executor``.
     """
     global _authoring_pool
     with _authoring_pool_lock:
-        if _authoring_pool is None:
-            _authoring_pool = concurrent.futures.ThreadPoolExecutor(
-                max_workers=_AUTHORING_POOL_WORKERS,
-                thread_name_prefix="studio-authoring",
-            )
+        pool = _authoring_pool
+        if pool is not None and pool.is_live():
+            return pool
+        _authoring_pool = _DaemonAuthoringPool()
         return _authoring_pool
+
+
+def shutdown_authoring_executor() -> None:
+    """Drop the authoring pool so unified-API lifespan can tear down without joining LLM HTTP.
+
+    Preconditions:
+        - None.
+    Postconditions:
+        - The current pool rejects new submits; the module slot is cleared so
+          the next CRUD call (reload / in-process test app) gets a fresh pool.
+        - Idempotent when no pool exists.
+    """
+    global _authoring_pool
+    with _authoring_pool_lock:
+        pool = _authoring_pool
+        _authoring_pool = None
+    if pool is not None:
+        pool.shutdown()
 
 
 def _run(fn: Callable[..., T], *args: object) -> T:

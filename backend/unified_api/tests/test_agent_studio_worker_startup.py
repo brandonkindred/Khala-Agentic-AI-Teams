@@ -160,3 +160,9 @@ def test_stop_in_process_temporal_workers_swallows_errors(monkeypatch: pytest.Mo
 def test_lifespan_stops_temporal_workers_before_usage_flusher() -> None:
     src = inspect.getsource(main.lifespan)
     assert src.index("_stop_in_process_temporal_workers") < src.index("usage_flush_shutdown")
+
+
+def test_lifespan_shuts_down_authoring_executor_before_postgres_close() -> None:
+    src = inspect.getsource(main.lifespan)
+    assert src.index("shutdown_authoring_executor") < src.index("close_pool")
+    assert src.index("shutdown_authoring_executor") > src.index("_stop_in_process_temporal_workers")

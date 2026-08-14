@@ -149,8 +149,8 @@ is unset.
 
 Sole worker for `agent_platform.studio.temporal.TASK_QUEUE` (`agent-studio-queue`).
 Activities delegate to this process's `AgentStudioService` / `drafts_runtime`
-singletons. When `TEMPORAL_ADDRESS` is unset, authoring CRUD dispatches
-in-process instead — a mode switch, not a degraded state.
+singletons. Authoring CRUD always runs in-process (no 1-activity workflows);
+this worker starter is a no-op unless workflows are restored.
 
 ## Shutdown (after yield)
 
@@ -159,9 +159,10 @@ Order is load-bearing so buffered `llm_call_records` are not lost:
 1. Cancel cognition scheduler, graph sync, console pruner, sandbox reaper, and the health loop.
 2. `close_graphiti()`.
 3. `_stop_in_process_temporal_workers()` (`stop_all_team_workers`) — Studio and sandbox activities can still invoke the LLM; they must finish before the observer unregisters.
-4. `llm_service.usage_flusher.shutdown()` — stop the heartbeat, unregister the observer, final synchronous drain.
-5. `close_pool()` — only after the drain, so the flusher still has a live pool.
-6. `_shutdown_probe_executor()`.
+4. `shutdown_authoring_executor()` — Agent Studio in-process authoring pool. Rejects new CRUD submits; daemon workers are not joined (a stalled LLM HTTP call cannot be cancelled from another thread, and CPython `ThreadPoolExecutor` atexit would otherwise block reload for up to `resolve_timeout()` / 3600s).
+5. `llm_service.usage_flusher.shutdown()` — stop the heartbeat, unregister the observer, final synchronous drain.
+6. `close_pool()` — only after the drain, so the flusher still has a live pool.
+7. `_shutdown_probe_executor()`.
 
 ## Worker ownership (do not relocate)
 
