@@ -9,6 +9,7 @@ isolation, per the module's own docstring.
 from __future__ import annotations
 
 import os
+import shutil
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Dict, Optional
@@ -811,6 +812,63 @@ def test_dbc_self_review_revert_restores_retargeted_symlink(tmp_path):
     link = tmp_path / "existing_link.txt"
     assert link.is_symlink()
     assert os.readlink(link) == "real.txt"
+
+
+def test_dbc_self_review_revert_clears_dir_replaced_by_symlink_before_descendants(tmp_path):
+    (tmp_path / "pkg").mkdir()
+    (tmp_path / "pkg" / "a.py").write_text("orig a\n")
+    outside = tmp_path.parent.resolve() / f"dbc-anc-{tmp_path.name}"
+    outside.mkdir()
+    (outside / "a.py").write_text("outside orig\n")
+
+    def _review(*, code, **kwargs: Any) -> SimpleNamespace:
+        return SimpleNamespace(files={"pkg/a.py": "dbc a\n"})
+
+    def _verify(repo, label, tid):
+        pkg = Path(repo) / "pkg"
+        shutil.rmtree(pkg)
+        pkg.symlink_to(outside)
+        return False, "broke"
+
+    try:
+        _call(
+            tmp_path=tmp_path,
+            gate_config=_gate_config(_review),
+            microtask_files={"pkg/a.py": "orig a\n"},
+            deps=ReviewDependencies(build_verifier=_verify),
+        )
+        assert not (tmp_path / "pkg").is_symlink()
+        assert (tmp_path / "pkg" / "a.py").is_file()
+        assert (tmp_path / "pkg" / "a.py").read_text() == "orig a\n"
+        assert (outside / "a.py").read_text() == "outside orig\n"
+    finally:
+        (outside / "a.py").unlink(missing_ok=True)
+        outside.rmdir()
+
+
+def test_dbc_self_review_revert_restores_symlink_when_parent_dir_deleted(tmp_path):
+    (tmp_path / "a.py").write_text("orig a\n")
+    (tmp_path / "real.txt").write_text("real\n")
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "sub" / "link.txt").symlink_to("../real.txt")
+
+    def _review(*, code, **kwargs: Any) -> SimpleNamespace:
+        return SimpleNamespace(files={"a.py": "dbc a\n"})
+
+    def _verify(repo, label, tid):
+        shutil.rmtree(Path(repo) / "sub")
+        return False, "broke"
+
+    _call(
+        tmp_path=tmp_path,
+        gate_config=_gate_config(_review),
+        microtask_files={"a.py": "orig a\n"},
+        deps=ReviewDependencies(build_verifier=_verify),
+    )
+
+    link = tmp_path / "sub" / "link.txt"
+    assert link.is_symlink()
+    assert os.readlink(link) == "../real.txt"
 
 
 def test_dbc_self_review_build_verifier_raises_reverts(tmp_path):

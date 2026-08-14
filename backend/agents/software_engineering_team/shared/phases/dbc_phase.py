@@ -211,12 +211,15 @@ def _revert_disk(prior_disk: Dict[Path, Optional[bytes]]) -> None:
         before); each other path is restored to ``prior_bytes``. A current
         symlink, directory, or other non-regular path at that location is
         removed first so ``write_bytes`` cannot follow a verifier-planted
-        link or fail on ``IsADirectoryError``. An ordinary filesystem
-        failure is logged and skipped per-path rather than raised -- this is
-        already the fallback path of a "never fails" phase, so it must not
-        itself introduce a new way to fail loud.
+        link or fail on ``IsADirectoryError``. Ancestors are processed before
+        descendants so a replacement directory-symlink is cleared before a
+        nested file restore. An ordinary filesystem failure is logged and
+        skipped per-path rather than raised -- this is already the fallback
+        path of a "never fails" phase, so it must not itself introduce a new
+        way to fail loud.
     """
-    for full_path, prior_bytes in prior_disk.items():
+    ordered = sorted(prior_disk.items(), key=lambda item: (len(item[0].parts), str(item[0])))
+    for full_path, prior_bytes in ordered:
         try:
             _clear_path(full_path)
             if prior_bytes is not None:
@@ -240,6 +243,7 @@ def _restore_symlinks(symlinks: Dict[Path, str]) -> None:
     for full_path, target in symlinks.items():
         try:
             _clear_path(full_path)
+            full_path.parent.mkdir(parents=True, exist_ok=True)
             full_path.symlink_to(target)
         except OSError as exc:
             logger.warning("Failed to restore symlink %s (ignored): %s", full_path, exc)
@@ -638,6 +642,20 @@ def _run_dbc_self_review(
             pre_verify = None
 
         if pre_verify is not None:
+
+            def _revert_after_verify() -> None:
+                for rel_path in dbc_files:
+                    _restore_dict_entry(microtask_files, rel_path, prior_microtask[rel_path])
+                    _restore_dict_entry(all_files, rel_path, prior_all[rel_path])
+                    _restore_dict_entry(output_files, rel_path, prior_output[rel_path])
+                mt.output_files = output_files
+                _revert_verifier_side_effects(
+                    root=root,
+                    prior_disk=prior_disk,
+                    pre_verify_disk=pre_verify.files,
+                    pre_verify_symlinks=pre_verify.symlinks,
+                )
+
             try:
                 ok, msg = deps.build_verifier(repo_path, build_verify_label, task_id)
             except Exception as exc:
@@ -654,17 +672,7 @@ def _run_dbc_self_review(
                     msg,
                     len(dbc_files),
                 )
-                for rel_path in dbc_files:
-                    _restore_dict_entry(microtask_files, rel_path, prior_microtask[rel_path])
-                    _restore_dict_entry(all_files, rel_path, prior_all[rel_path])
-                    _restore_dict_entry(output_files, rel_path, prior_output[rel_path])
-                mt.output_files = output_files
-                _revert_verifier_side_effects(
-                    root=root,
-                    prior_disk=prior_disk,
-                    pre_verify_disk=pre_verify.files,
-                    pre_verify_symlinks=pre_verify.symlinks,
-                )
+                _revert_after_verify()
                 return
 
             if not _sync_verifier_repairs_into_maps(
@@ -681,17 +689,7 @@ def _run_dbc_self_review(
                     mt.id,
                     len(dbc_files),
                 )
-                for rel_path in dbc_files:
-                    _restore_dict_entry(microtask_files, rel_path, prior_microtask[rel_path])
-                    _restore_dict_entry(all_files, rel_path, prior_all[rel_path])
-                    _restore_dict_entry(output_files, rel_path, prior_output[rel_path])
-                mt.output_files = output_files
-                _revert_verifier_side_effects(
-                    root=root,
-                    prior_disk=prior_disk,
-                    pre_verify_disk=pre_verify.files,
-                    pre_verify_symlinks=pre_verify.symlinks,
-                )
+                _revert_after_verify()
                 return
 
     logger.info(

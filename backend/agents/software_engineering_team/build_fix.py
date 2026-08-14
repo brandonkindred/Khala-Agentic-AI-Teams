@@ -75,8 +75,9 @@ def _safe_repair_write_path(project_dir: Path, rel_path: str) -> Optional[Path]:
         Returns a path contained in ``project_dir`` whose parts do not include
         a directory in ``_REPAIR_SKIP_WRITE_DIRS``. ``None`` when ``rel_path``
         is empty, is absolute (``resolve_safe_repo_path`` would ``lstrip`` a
-        leading ``/`` and write under the repo), escapes ``project_dir``, or
-        targets an unsnapshotted / venv / pytest-cache directory.
+        leading ``/`` and write under the repo), escapes ``project_dir``
+        lexically or via a pre-existing symlink ancestor, or targets an
+        unsnapshotted / venv / pytest-cache directory.
     """
     if os.path.isabs(rel_path):
         return None
@@ -84,6 +85,10 @@ def _safe_repair_write_path(project_dir: Path, rel_path: str) -> Optional[Path]:
     try:
         out = resolve_safe_repo_path(root, rel_path)
     except UnsafeRepoPathError:
+        return None
+    try:
+        out.resolve().relative_to(root)
+    except ValueError:
         return None
     if any(part in _REPAIR_SKIP_WRITE_DIRS for part in out.relative_to(root).parts):
         return None

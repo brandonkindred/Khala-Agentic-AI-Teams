@@ -103,3 +103,17 @@ def test_safe_repair_write_path_accepts_in_repo_source(tmp_path: Path) -> None:
     root = tmp_path.resolve()
     out = _safe_repair_write_path(root, "app/main.py")
     assert out == root / "app" / "main.py"
+
+
+def test_safe_repair_write_path_rejects_symlink_escape(tmp_path: Path) -> None:
+    from software_engineering_team.build_fix import _safe_repair_write_path
+
+    root = tmp_path.resolve()
+    outside = tmp_path.parent.resolve() / f"dbc-repair-escape-{tmp_path.name}"
+    outside.mkdir()
+    (root / "link").symlink_to(outside)
+    try:
+        assert _safe_repair_write_path(root, "link/fix.py") is None
+    finally:
+        (root / "link").unlink(missing_ok=True)
+        outside.rmdir()
