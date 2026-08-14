@@ -164,7 +164,7 @@ Specialist factories pass `agent_key=` to `build_agent()` directly (a phase-scop
 
 `BrandComplianceAgent` (outside the graph — see [Agent roles and outputs](#agent-roles-and-outputs)) is deliberately excluded from this scheme: it's a keyword-matching `@dataclass` with no LLM call, so no `agent_key` applies to it. The `"branding_assistant"` key used by the separate conversational assistant (`assistant/agent.py`) is also out of scope here — it predates this scheme and routes the assistant, not a pipeline agent.
 
-Assigning which physical model/provider backs each tier (e.g. a lighter model for `branding_channel_activation` and `branding_governance`, a stronger one for `branding_strategic_core` and `branding_narrative_messaging`) is an operational decision made post-deploy via `LLM_MODEL_<agent_key>` env vars (e.g. `export LLM_MODEL_branding_strategic_core=...`) — see [`docs/ENV_VARS.md`](../../../docs/ENV_VARS.md) — not part of this naming scheme itself.
+Assigning which physical model/provider backs each tier (e.g. a lighter model for `branding_channel_activation` and `branding_governance`, a stronger one for `branding_strategic_core` and `branding_narrative_messaging`) is an operational decision made post-deploy via `LLM_MODEL_<agent_key>` env vars (e.g. `export LLM_MODEL_branding_strategic_core=...`) — see [`docs/ENV_VARS.md`](../../../docs/ENV_VARS.md) — not part of this naming scheme itself. Compose stacks forward the six tier variables into `branding-service` (`docker/docker-compose.yml`) and into `unified-api` (`backend/docker-compose.yml`); leave them blank to keep the global `LLM_MODEL`.
 
 ## API and session flow
 
