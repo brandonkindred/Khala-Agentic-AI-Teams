@@ -1,6 +1,6 @@
 """Live-Postgres tests for the code-review history store.
 
-Skipped unless ``POSTGRES_HOST`` is set (mirrors ``agent_console`` store tests).
+Skipped unless ``POSTGRES_HOST`` is set (mirrors ``agent_platform.console`` store tests).
 Covers record/list, status transitions, the missing-row no-op, the PR filter,
 ON CONFLICT idempotency, and the empty-result path.
 """

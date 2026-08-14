@@ -15,12 +15,23 @@ def _stub_otel(monkeypatch) -> None:
     """Neutralize OTel global side effects; record that they were invoked."""
     calls = {"init": [], "instrument": []}
     monkeypatch.setattr(factory, "init_otel", lambda **kw: calls["init"].append(kw))
-    monkeypatch.setattr(
-        factory, "instrument_fastapi_app", lambda app, **kw: calls["instrument"].append(kw)
-    )
+    monkeypatch.setattr(factory, "instrument_fastapi_app", lambda app, **kw: calls["instrument"].append(kw))
     factory._test_calls = calls  # type: ignore[attr-defined]
     yield
     delattr(factory, "_test_calls")
+
+
+_REAL_REGISTER_USAGE = factory._register_usage_flusher
+_REAL_SHUTDOWN_USAGE = factory._shutdown_usage_flusher
+_REAL_STOP_WORKERS = factory._stop_in_process_temporal_workers
+
+
+@pytest.fixture(autouse=True)
+def _stub_usage_flusher(monkeypatch) -> None:
+    """Keep factory tests from starting the real usage-flusher heartbeat."""
+    monkeypatch.setattr(factory, "_register_usage_flusher", lambda _t: None)
+    monkeypatch.setattr(factory, "_shutdown_usage_flusher", lambda _t: None)
+    monkeypatch.setattr(factory, "_stop_in_process_temporal_workers", lambda _t: None)
 
 
 def test_create_team_app_wires_otel_and_returns_app() -> None:
@@ -34,15 +45,11 @@ def test_create_team_app_wires_otel_and_returns_app() -> None:
 
 def test_excluded_urls_forwarded_to_instrument() -> None:
     create_team_app(service_name="svc", team_key="tk", title="T", excluded_urls="metrics,healthz")
-    assert factory._test_calls["instrument"] == [
-        {"team_key": "tk", "excluded_urls": "metrics,healthz"}
-    ]
+    assert factory._test_calls["instrument"] == [{"team_key": "tk", "excluded_urls": "metrics,healthz"}]
 
 
 def test_fastapi_kwargs_passthrough() -> None:
-    app = create_team_app(
-        service_name="svc", team_key="tk", title="T", description="d", docs_url="/d"
-    )
+    app = create_team_app(service_name="svc", team_key="tk", title="T", description="d", docs_url="/d")
     assert app.description == "d"
     assert app.docs_url == "/d"
 
@@ -104,9 +111,7 @@ def test_extra_schemas_only_no_primary(monkeypatch) -> None:
     monkeypatch.setattr(shared.postgres, "close_pool", lambda: None)
 
     schema2 = object()
-    app = create_team_app(
-        service_name="svc", team_key="tk", title="T", extra_postgres_schemas=[schema2]
-    )
+    app = create_team_app(service_name="svc", team_key="tk", title="T", extra_postgres_schemas=[schema2])
     assert app.state.postgres_schema is None
     assert app.state.postgres_schemas == [schema2]
     with TestClient(app):
@@ -168,16 +173,14 @@ def test_no_postgres_schema_skips_db_wiring(monkeypatch) -> None:
     app = create_team_app(service_name="svc", team_key="tk", title="T")
     with TestClient(app):
         pass
-    assert called == []  # postgres_schema=None ⇒ no register / no close
+    assert called == ["close"]  # no schema register; pool still closed (flusher may have opened it)
 
 
 def test_postgres_schema_registers_on_startup_and_closes_on_shutdown(monkeypatch) -> None:
     import shared.postgres
 
     events = []
-    monkeypatch.setattr(
-        shared.postgres, "register_team_schemas", lambda s: events.append(("register", s))
-    )
+    monkeypatch.setattr(shared.postgres, "register_team_schemas", lambda s: events.append(("register", s)))
     monkeypatch.setattr(shared.postgres, "close_pool", lambda: events.append(("close", None)))
 
     schema = object()
@@ -285,6 +288,106 @@ def test_on_shutdown_failure_still_closes_pool(monkeypatch) -> None:
     with TestClient(app):
         pass
     assert closed == [True]  # pool closed despite the shutdown-hook failure
+
+
+def test_usage_flusher_registers_before_startup_and_shuts_down_before_pool_close(
+    monkeypatch,
+) -> None:
+    """Team apps register the process-local usage flusher so LLM calls made in
+    this worker (not the unified-api gateway) reach llm_call_records."""
+    import shared.postgres
+
+    order: list[str] = []
+    monkeypatch.setattr(factory, "_register_usage_flusher", lambda _t: order.append("usage_register"))
+    monkeypatch.setattr(factory, "_stop_in_process_temporal_workers", lambda _t: order.append("workers_stop"))
+    monkeypatch.setattr(factory, "_shutdown_usage_flusher", lambda _t: order.append("usage_shutdown"))
+    monkeypatch.setattr(shared.postgres, "register_team_schemas", lambda s: order.append("schema"))
+    monkeypatch.setattr(shared.postgres, "close_pool", lambda: order.append("close"))
+
+    app = create_team_app(
+        service_name="svc",
+        team_key="tk",
+        title="T",
+        postgres_schema=object(),
+        on_startup=lambda: order.append("startup"),
+        on_shutdown=lambda: order.append("shutdown"),
+    )
+    with TestClient(app):
+        assert order == ["schema", "usage_register", "startup"]
+    assert order == [
+        "schema",
+        "usage_register",
+        "startup",
+        "shutdown",
+        "workers_stop",
+        "usage_shutdown",
+        "close",
+    ]
+
+
+def test_usage_flusher_registers_without_postgres_schema(monkeypatch) -> None:
+    """Usage persistence is independent of the team's own schema."""
+    import shared.postgres
+
+    order: list[str] = []
+    monkeypatch.setattr(factory, "_register_usage_flusher", lambda _t: order.append("usage_register"))
+    monkeypatch.setattr(factory, "_stop_in_process_temporal_workers", lambda _t: order.append("workers_stop"))
+    monkeypatch.setattr(factory, "_shutdown_usage_flusher", lambda _t: order.append("usage_shutdown"))
+    monkeypatch.setattr(shared.postgres, "close_pool", lambda: order.append("close"))
+
+    app = create_team_app(service_name="svc", team_key="tk", title="T")
+    with TestClient(app):
+        assert order == ["usage_register"]
+    assert order == ["usage_register", "workers_stop", "usage_shutdown", "close"]
+
+
+def test_register_usage_flusher_helper_swallows_failure(monkeypatch, caplog) -> None:
+    import logging
+    import sys
+    import types
+
+    monkeypatch.setattr(factory, "_register_usage_flusher", _REAL_REGISTER_USAGE)
+    fake = types.ModuleType("llm_service.usage_flusher")
+
+    def boom() -> None:
+        raise RuntimeError("nope")
+
+    fake.register_usage_flusher = boom
+    monkeypatch.setitem(sys.modules, "llm_service.usage_flusher", fake)
+    with caplog.at_level(logging.WARNING, logger=factory.logger.name):
+        factory._register_usage_flusher("tk")
+    assert any("llm usage flusher registration failed" in r.getMessage() for r in caplog.records)
+
+
+def test_shutdown_usage_flusher_helper_swallows_failure(monkeypatch, caplog) -> None:
+    import logging
+    import sys
+    import types
+
+    monkeypatch.setattr(factory, "_shutdown_usage_flusher", _REAL_SHUTDOWN_USAGE)
+    fake = types.ModuleType("llm_service.usage_flusher")
+
+    def boom() -> None:
+        raise RuntimeError("nope")
+
+    fake.shutdown = boom
+    monkeypatch.setitem(sys.modules, "llm_service.usage_flusher", fake)
+    with caplog.at_level(logging.WARNING, logger=factory.logger.name):
+        factory._shutdown_usage_flusher("tk")
+    assert any("llm usage flusher shutdown failed" in r.getMessage() for r in caplog.records)
+
+
+def test_stop_in_process_temporal_workers_helper_swallows_failure(monkeypatch, caplog) -> None:
+    import logging
+
+    def boom() -> None:
+        raise RuntimeError("nope")
+
+    monkeypatch.setattr(factory, "_stop_in_process_temporal_workers", _REAL_STOP_WORKERS)
+    monkeypatch.setattr("shared.temporal.worker.stop_all_team_workers", boom)
+    with caplog.at_level(logging.WARNING, logger=factory.logger.name):
+        factory._stop_in_process_temporal_workers("tk")
+    assert any("Temporal worker shutdown failed" in r.getMessage() for r in caplog.records)
 
 
 def test_create_team_app_rejects_lifespan_in_fastapi_kwargs() -> None:

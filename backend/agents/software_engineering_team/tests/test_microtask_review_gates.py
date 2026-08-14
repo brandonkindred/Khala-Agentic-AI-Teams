@@ -911,15 +911,14 @@ class TestBackendRunExecutionWithReviewGates:
         mt2 = Microtask(id="mt-2", title="Will Pass", tool_agent=ToolAgentKind.GENERAL)
         planning_result = PlanningResult(microtasks=[mt1, mt2], language="python")
 
-        gen_call_count = 0
-
         def mock_complete_text(prompt: str) -> Any:
             # The coordinator's chunk reviewer calls complete_json directly and
             # needs a schema-shaped dict; code generation (below) goes through
             # the Strands Agent/stream() path and needs raw template text --
             # branch on the chunk-review prompt's own anchor text (matches
-            # DummyLLMClient's own "code to review" catch-all).
-            nonlocal gen_call_count
+            # DummyLLMClient's own "code to review" catch-all). Generation is
+            # keyed on the microtask title, not call order, so concurrent wave
+            # members still get the intended file each.
             if "code to review" in prompt.lower():
                 if "eval(" in prompt:
                     return {
@@ -942,8 +941,7 @@ class TestBackendRunExecutionWithReviewGates:
                     "summary": "Good code.",
                     "spec_compliance_notes": "",
                 }
-            gen_call_count += 1
-            if gen_call_count == 1:
+            if "Will Fail" in prompt:
                 return "## FILE bad.py ##\neval('bad')\n\n## SUMMARY ##\nBad code.\n"
             return "## FILE good.py ##\nprint('good')\n\n## SUMMARY ##\nGood code.\n"
 

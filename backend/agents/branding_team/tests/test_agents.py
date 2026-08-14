@@ -5,34 +5,74 @@ data-driven ``AgentPromptSpec``/``render_agent_prompt`` pattern
 (``branding_team.prompt_spec``) against the original hand-written
 prose, so an accidental wording change in a spec constant is caught here
 rather than silently drifting.
+
+The completeness and AST guards at the bottom of this module are the epic's
+final sweep: a new ``make_*`` factory fails until it has a snapshot row, and
+any ``build_agent(..., system_prompt=...)`` that is not
+``render_agent_prompt(...)`` fails until the hand-written path is removed.
 """
 
 from __future__ import annotations
 
+import ast
+import os
+from collections.abc import Iterator
+from pathlib import Path
+from typing import Callable
+
+import pytest
+from strands import Agent
+
+from branding_team import agents as branding_agents
 from branding_team.agents import (
+    make_approval_workflow_designer,
     make_archetype_analyst,
+    make_asset_wiki_planner,
     make_audience_segmenter,
+    make_brand_architecture_builder,
+    make_brand_experience_principler,
+    make_brand_in_action_illustrator,
+    make_brand_rules_codifier,
     make_color_system_builder,
     make_converge_decider,
     make_creative_director,
     make_design_system_codifier,
     make_differentiation_mapper,
     make_discovery_auditor,
+    make_email_guide,
+    make_events_guide,
+    make_evolution_framer,
     make_iconography_director,
+    make_internal_guide,
+    make_kpi_designer,
     make_logo_specifier,
     make_message_mapper,
     make_moodboard_conceptualist,
+    make_ownership_definer,
+    make_partnerships_guide,
     make_persona_builder,
     make_photography_video_director,
     make_positioning_synthesizer,
     make_purpose_vision_writer,
+    make_social_guide,
     make_storyteller,
     make_tagline_writer,
+    make_training_planner,
     make_typography_builder,
     make_values_articulator,
     make_voice_principles_drafter,
     make_voice_tone_builder,
+    make_website_guide,
 )
+from branding_team.graphs.shared import _branding_model, serialize_mission
+from branding_team.models import (
+    BrandDiscoveryAuditOutput,
+    BrandStoryOutput,
+    ChannelGuidelineOutput,
+    IconographyOutput,
+    OwnershipOutput,
+)
+from branding_team.tests.conftest import make_mission
 
 _EXPECTED_PURPOSE_VISION_PROMPT = (
     "You are a Purpose & Vision Writer. Given a branding mission, write three things:\n"
@@ -229,6 +269,127 @@ _EXPECTED_TYPOGRAPHY_BUILDER_PROMPT = (
     "1. typography_system — role, font_family, weight_range, usage_notes"
 )
 
+_EXPECTED_BRAND_EXPERIENCE_PRINCIPLER_PROMPT = (
+    "You are a Brand Experience Architect. Define:\n"
+    "1. brand_experience_principles — 3-5 principles that govern every brand touchpoint\n"
+    "2. signature_moments — 3-5 key moments in the customer journey that should feel "
+    "distinctly on-brand\n"
+    "3. sensory_elements — 2-4 sensory cues (sound, texture, scent, etc.) if applicable"
+)
+
+_EXPECTED_BRAND_ARCHITECTURE_BUILDER_PROMPT = (
+    "You are a Brand Architecture Specialist. Define:\n"
+    "1. brand_architecture — rules for parent brand, sub-brands, product lines. Each "
+    "with: entity, relationship, naming_convention, visual_treatment\n"
+    "2. naming_conventions — 3-5 naming rules\n"
+    "3. terminology_glossary — 5-10 key terms with definitions (dict)"
+)
+
+_EXPECTED_OWNERSHIP_DEFINER_PROMPT = (
+    "You are a Brand Ownership Definer. Define:\n"
+    "1. ownership_model — who owns the brand (paragraph)\n"
+    "2. decision_authority — a dict mapping decision types to responsible roles "
+    "(e.g. 'logo_changes': 'Brand Director', 'campaign_messaging': 'Marketing Lead')"
+)
+
+_EXPECTED_APPROVAL_WORKFLOW_DESIGNER_PROMPT = (
+    "You are an Approval Workflow Designer. Define:\n"
+    "1. approval_workflows — 3-5 workflows, each with: asset_type, approvers (list), "
+    "sla, escalation_path\n"
+    "2. agency_briefing_protocols — 3-5 protocols for briefing external agencies"
+)
+
+_EXPECTED_ASSET_WIKI_PLANNER_PROMPT = (
+    "You are an Asset & Wiki Planner. Define:\n"
+    "1. asset_management_guidance — 3-5 guidelines for managing brand assets\n"
+    "2. wiki_backlog — 4-6 wiki entries, each with: title, summary, owners (list), "
+    "update_cadence. Cover: Brand North Star, Voice Playbook, Design System, Brand "
+    "Review Intake, Channel Playbook, Governance Charter."
+)
+
+_EXPECTED_KPI_DESIGNER_PROMPT = (
+    "You are a Brand KPI Designer. Define:\n"
+    "1. brand_health_kpis — 4-6 KPIs, each with: metric, measurement_method, target, "
+    "review_frequency\n"
+    "2. tracking_methodology — paragraph describing the measurement approach\n"
+    "3. review_trigger_points — 3-5 events that should trigger a brand health review"
+)
+
+_EXPECTED_EVOLUTION_FRAMER_PROMPT = (
+    "You are a Brand Evolution Framer. Define:\n"
+    "1. evolution_framework — paragraph describing how the brand evolves over time\n"
+    "2. version_control_cadence — how often the brand system is formally reviewed "
+    "and versioned"
+)
+
+
+# Dash-colon field bullets (`- channel: 'website'`) become numbered em-dash
+# lines; ``Context: {description}`` is the spec closing sentence. Same
+# conversion MoodBoardConceptualist used for its parameterized variants.
+def _expected_channel_guide_prompt(channel: str, description: str) -> str:
+    return (
+        f"You are a {channel.title()} Channel Specialist. Define guidelines for the "
+        f"{channel} channel:\n"
+        f"1. channel — '{channel}'\n"
+        f"2. strategy — overall approach for this channel\n"
+        f"3. dos — 3-4 best practices\n"
+        f"4. donts — 3-4 things to avoid\n"
+        f"5. content_types — 3-5 recommended content formats\n"
+        f"6. frequency_guidance — recommended cadence\n"
+        f"Context: {description}"
+    )
+
+
+_EXPECTED_WEBSITE_GUIDE_PROMPT = _expected_channel_guide_prompt(
+    "website", "Company website, landing pages, product pages."
+)
+_EXPECTED_SOCIAL_GUIDE_PROMPT = _expected_channel_guide_prompt(
+    "social", "Social media platforms (LinkedIn, Twitter, Instagram)."
+)
+_EXPECTED_EMAIL_GUIDE_PROMPT = _expected_channel_guide_prompt(
+    "email", "Email marketing, newsletters, transactional emails."
+)
+_EXPECTED_EVENTS_GUIDE_PROMPT = _expected_channel_guide_prompt(
+    "events", "Conferences, webinars, meetups, trade shows."
+)
+_EXPECTED_PARTNERSHIPS_GUIDE_PROMPT = _expected_channel_guide_prompt(
+    "partnerships", "Co-branding, sponsorships, partner marketing."
+)
+_EXPECTED_INTERNAL_GUIDE_PROMPT = _expected_channel_guide_prompt(
+    "internal", "Internal comms, employee branding, onboarding."
+)
+
+# Nested dash-colon bullets (`- context: ...`) collapsed into the
+# ``brand_in_action`` field description, matching Phase 3 logo/color nested
+# member style. Trailing newline dropped (renderer has none).
+_EXPECTED_BRAND_IN_ACTION_ILLUSTRATOR_PROMPT = (
+    "You are a Brand-in-Action Illustrator. Create 3-5 applied examples showing correct "
+    "vs incorrect brand usage:\n"
+    "1. brand_in_action — each example has: context (where this applies, e.g. 'sales deck "
+    "header'), correct_example (the on-brand version), incorrect_example (the off-brand "
+    "version), rationale (why the correct version is better)"
+)
+
+# Original was a single unnumbered sentence; the renderer requires a numbered
+# field line, so ``Define training_onboarding_plan —`` becomes ``Define:`` plus
+# ``1. training_onboarding_plan —``.
+_EXPECTED_TRAINING_PLANNER_PROMPT = (
+    "You are a Training Planner. Define:\n"
+    "1. training_onboarding_plan — 4-6 training initiatives for onboarding new team "
+    "members and maintaining brand literacy."
+)
+
+# ``produce brand_guidelines — ...`` split into a numbered field; the ``Cover:``
+# clause moves to the spec closing sentence.
+_EXPECTED_BRAND_RULES_CODIFIER_PROMPT = (
+    "You are a Brand Rules Codifier. Using the full brand context (positioning, promise, "
+    "values, narrative, visual identity), produce:\n"
+    "1. brand_guidelines — a list of 5-8 governance rules that everyone in the organisation "
+    "must follow. Each rule is a single clear sentence.\n"
+    "Cover: identity usage, messaging hierarchy, approval gates, asset management, and "
+    "evolution."
+)
+
 
 def test_purpose_vision_writer_prompt_matches_original_wording() -> None:
     assert make_purpose_vision_writer().system_prompt == _EXPECTED_PURPOSE_VISION_PROMPT
@@ -335,3 +496,466 @@ def test_color_system_builder_prompt_matches_spec() -> None:
 
 def test_typography_builder_prompt_matches_spec() -> None:
     assert make_typography_builder().system_prompt == _EXPECTED_TYPOGRAPHY_BUILDER_PROMPT
+
+
+def test_brand_experience_principler_prompt_matches_original_wording() -> None:
+    assert (
+        make_brand_experience_principler().system_prompt
+        == _EXPECTED_BRAND_EXPERIENCE_PRINCIPLER_PROMPT
+    )
+
+
+def test_brand_architecture_builder_prompt_matches_original_wording() -> None:
+    assert (
+        make_brand_architecture_builder().system_prompt
+        == _EXPECTED_BRAND_ARCHITECTURE_BUILDER_PROMPT
+    )
+
+
+def test_ownership_definer_prompt_matches_original_wording() -> None:
+    assert make_ownership_definer().system_prompt == _EXPECTED_OWNERSHIP_DEFINER_PROMPT
+
+
+def test_approval_workflow_designer_prompt_matches_original_wording() -> None:
+    assert (
+        make_approval_workflow_designer().system_prompt
+        == _EXPECTED_APPROVAL_WORKFLOW_DESIGNER_PROMPT
+    )
+
+
+def test_asset_wiki_planner_prompt_matches_original_wording() -> None:
+    assert make_asset_wiki_planner().system_prompt == _EXPECTED_ASSET_WIKI_PLANNER_PROMPT
+
+
+def test_kpi_designer_prompt_matches_original_wording() -> None:
+    assert make_kpi_designer().system_prompt == _EXPECTED_KPI_DESIGNER_PROMPT
+
+
+def test_evolution_framer_prompt_matches_original_wording() -> None:
+    assert make_evolution_framer().system_prompt == _EXPECTED_EVOLUTION_FRAMER_PROMPT
+
+
+def test_website_guide_prompt_matches_spec() -> None:
+    assert make_website_guide().system_prompt == _EXPECTED_WEBSITE_GUIDE_PROMPT
+
+
+def test_social_guide_prompt_matches_spec() -> None:
+    assert make_social_guide().system_prompt == _EXPECTED_SOCIAL_GUIDE_PROMPT
+
+
+def test_email_guide_prompt_matches_spec() -> None:
+    assert make_email_guide().system_prompt == _EXPECTED_EMAIL_GUIDE_PROMPT
+
+
+def test_events_guide_prompt_matches_spec() -> None:
+    assert make_events_guide().system_prompt == _EXPECTED_EVENTS_GUIDE_PROMPT
+
+
+def test_partnerships_guide_prompt_matches_spec() -> None:
+    assert make_partnerships_guide().system_prompt == _EXPECTED_PARTNERSHIPS_GUIDE_PROMPT
+
+
+def test_internal_guide_prompt_matches_spec() -> None:
+    assert make_internal_guide().system_prompt == _EXPECTED_INTERNAL_GUIDE_PROMPT
+
+
+def test_brand_in_action_illustrator_prompt_matches_spec() -> None:
+    assert (
+        make_brand_in_action_illustrator().system_prompt
+        == _EXPECTED_BRAND_IN_ACTION_ILLUSTRATOR_PROMPT
+    )
+
+
+def test_training_planner_prompt_matches_spec() -> None:
+    assert make_training_planner().system_prompt == _EXPECTED_TRAINING_PLANNER_PROMPT
+
+
+def test_brand_rules_codifier_prompt_matches_spec() -> None:
+    assert make_brand_rules_codifier().system_prompt == _EXPECTED_BRAND_RULES_CODIFIER_PROMPT
+
+
+# ---------------------------------------------------------------------------
+# Epic 5e sweep — completeness, no leftover string builders, per-phase spot-check
+# ---------------------------------------------------------------------------
+
+
+def _call_func_name(node: ast.expr) -> str | None:
+    """Return the function name of a Call's ``func``, or None if not a bare name.
+
+    Preconditions:
+        ``node`` is an AST expression (the ``func`` of an ``ast.Call``).
+    Postconditions:
+        Returns ``id`` for ``ast.Name``, ``attr`` for ``ast.Attribute``, else None.
+    """
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        return node.attr
+    return None
+
+
+def _make_factory_from_system_prompt_expr(node: ast.expr) -> str | None:
+    """Return ``make_*`` if ``node`` is ``make_*(...).system_prompt``, else None.
+
+    Preconditions:
+        ``node`` is an AST expression.
+    Postconditions:
+        Returns the ``make_*`` function name, or ``None`` when ``node`` is not
+        a ``make_*`` call whose ``system_prompt`` attribute is read.
+    """
+    if not isinstance(node, ast.Attribute) or node.attr != "system_prompt":
+        return None
+    if not isinstance(node.value, ast.Call):
+        return None
+    name = _call_func_name(node.value.func)
+    if name is not None and name.startswith("make_"):
+        return name
+    return None
+
+
+def _is_expected_prompt_operand(node: ast.expr) -> bool:
+    """Return True when ``node`` is an ``_EXPECTED_*`` name or a non-empty string.
+
+    Preconditions:
+        ``node`` is an AST expression.
+    Postconditions:
+        True iff ``node`` is a snapshot expected-prompt operand.
+    """
+    if isinstance(node, ast.Constant) and isinstance(node.value, str) and node.value:
+        return True
+    return isinstance(node, ast.Name) and node.id.startswith("_EXPECTED")
+
+
+def _snapshot_factory_from_assert_compare(node: ast.Compare) -> str | None:
+    """Return ``make_*`` if ``node`` is a single ``system_prompt == expected`` equality.
+
+    Chained or mixed-operator comparisons are rejected: ``a != b == c`` can
+    contain both a factory prompt and an ``Eq`` without asserting those two
+    operands equal.
+
+    Preconditions:
+        ``node`` is an ``ast.Compare`` (the ``test`` of an ``ast.Assert``).
+    Postconditions:
+        The factory name when ``node`` is exactly one ``==`` between a
+        ``make_*(...).system_prompt`` operand and an expected-prompt operand;
+        ``None`` otherwise.
+    """
+    if len(node.ops) != 1 or not isinstance(node.ops[0], ast.Eq) or len(node.comparators) != 1:
+        return None
+    left, right = node.left, node.comparators[0]
+    left_factory = _make_factory_from_system_prompt_expr(left)
+    right_factory = _make_factory_from_system_prompt_expr(right)
+    left_expected = _is_expected_prompt_operand(left)
+    right_expected = _is_expected_prompt_operand(right)
+    if left_factory is not None and right_expected and right_factory is None:
+        return left_factory
+    if right_factory is not None and left_expected and left_factory is None:
+        return right_factory
+    return None
+
+
+def _make_factories_with_prompt_snapshots(tree: ast.AST) -> set[str]:
+    """Return ``make_*`` names locked by an ``assert`` of ``system_prompt`` equality.
+
+    A name-only registry is not a snapshot: adding ``make_foo`` to a set would
+    pass a completeness check without locking ``system_prompt``. A bare
+    comparison (assignment or expression) also cannot fail pytest. This walks
+    ``test_*`` functions for ``assert make_*(...).system_prompt == _EXPECTED...``.
+
+    Preconditions:
+        ``tree`` is a parsed Python module AST.
+    Postconditions:
+        The set of ``make_*`` names that appear in a ``test_*`` function as
+        ``assert make_*(...).system_prompt == <expected prompt>``. Empty when
+        none match.
+    """
+    names: set[str] = set()
+    for func in ast.walk(tree):
+        if not isinstance(func, ast.FunctionDef) or not func.name.startswith("test_"):
+            continue
+        for node in ast.walk(func):
+            if not isinstance(node, ast.Assert):
+                continue
+            if not isinstance(node.test, ast.Compare):
+                continue
+            factory_name = _snapshot_factory_from_assert_compare(node.test)
+            if factory_name is not None:
+                names.add(factory_name)
+    return names
+
+
+def test_prompt_snapshot_guard_requires_system_prompt_equality() -> None:
+    """A factory is covered only by ``assert make_*(...).system_prompt == _EXPECTED_*``.
+
+    Preconditions:
+        The helpers parse a synthetic module AST.
+    Postconditions:
+        A bare ``make_*()`` call, a non-assert comparison, an assignment of
+        that comparison, a ``!=`` assert, and a mixed chained comparison are
+        ignored; a single ``assert`` equality is counted.
+    """
+    uncovered = ast.parse("def test_x():\n    make_new_agent()\n")
+    assert _make_factories_with_prompt_snapshots(uncovered) == set()
+    assigned = ast.parse("def test_x():\n    ok = make_new_agent().system_prompt == _EXPECTED_X\n")
+    assert _make_factories_with_prompt_snapshots(assigned) == set()
+    expr = ast.parse("def test_x():\n    make_new_agent().system_prompt == _EXPECTED_X\n")
+    assert _make_factories_with_prompt_snapshots(expr) == set()
+    not_eq = ast.parse("def test_x():\n    assert make_new_agent().system_prompt != _EXPECTED_X\n")
+    assert _make_factories_with_prompt_snapshots(not_eq) == set()
+    chained = ast.parse(
+        'def test_x():\n    assert make_new_agent().system_prompt != _EXPECTED_X == "foo"\n'
+    )
+    assert _make_factories_with_prompt_snapshots(chained) == set()
+    covered = ast.parse("def test_x():\n    assert make_new_agent().system_prompt == _EXPECTED_X\n")
+    assert _make_factories_with_prompt_snapshots(covered) == {"make_new_agent"}
+    swapped = ast.parse("def test_x():\n    assert _EXPECTED_X == make_new_agent().system_prompt\n")
+    assert _make_factories_with_prompt_snapshots(swapped) == {"make_new_agent"}
+
+
+def test_every_make_factory_has_a_prompt_snapshot() -> None:
+    """A new ``make_*`` factory fails here until a snapshot assertion exists.
+
+    Preconditions:
+        ``branding_team.agents`` is importable and defines public ``make_*``
+        callables. This module contains the snapshot tests.
+    Postconditions:
+        Every discovered ``make_*`` name appears in a ``test_*`` function as
+        ``assert make_*(...).system_prompt == _EXPECTED...`` (parameterized
+        factories count once; variants are locked by those individual tests).
+    """
+    discovered = {
+        name
+        for name in dir(branding_agents)
+        if name.startswith("make_") and callable(getattr(branding_agents, name))
+    }
+    tree = ast.parse(Path(__file__).read_text(encoding="utf-8"))
+    assert discovered == _make_factories_with_prompt_snapshots(tree)
+
+
+def test_agents_py_build_agent_calls_use_render_agent_prompt() -> None:
+    """No ``build_agent`` in ``agents.py`` may take a hand-written prompt literal.
+
+    Preconditions:
+        ``branding_team.agents.__file__`` points at a readable Python source file.
+    Postconditions:
+        Every ``build_agent(...)`` call in that file passes
+        ``system_prompt=render_agent_prompt(...)``. At least one such call exists.
+    """
+    source_path = Path(branding_agents.__file__).resolve()
+    tree = ast.parse(source_path.read_text(encoding="utf-8"))
+    build_agent_calls = 0
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        if _call_func_name(node.func) != "build_agent":
+            continue
+        build_agent_calls += 1
+        keywords = {kw.arg: kw.value for kw in node.keywords if kw.arg is not None}
+        system_prompt = keywords.get("system_prompt")
+        assert system_prompt is not None, "build_agent is missing system_prompt="
+        assert isinstance(system_prompt, ast.Call), (
+            "build_agent(system_prompt=...) must be render_agent_prompt(...), "
+            f"got {ast.unparse(system_prompt)}"
+        )
+        assert _call_func_name(system_prompt.func) == "render_agent_prompt", (
+            "build_agent(system_prompt=...) must call render_agent_prompt, "
+            f"got {ast.unparse(system_prompt)}"
+        )
+    assert build_agent_calls > 0
+
+
+_PHASE_SPOT_CHECKS: tuple[tuple[str, Callable[[], Agent], type], ...] = (
+    ("phase1_discovery_auditor", make_discovery_auditor, BrandDiscoveryAuditOutput),
+    ("phase2_storyteller", make_storyteller, BrandStoryOutput),
+    ("phase3_iconography_director", make_iconography_director, IconographyOutput),
+    ("phase4_website_guide", make_website_guide, ChannelGuidelineOutput),
+    ("phase5_ownership_definer", make_ownership_definer, OwnershipOutput),
+)
+_PHASE_SPOT_CHECK_IDS: tuple[str, ...] = tuple(
+    case_id for case_id, _factory, _model in _PHASE_SPOT_CHECKS
+)
+
+
+@pytest.fixture
+def force_dummy_llm(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """Pin this test to DummyLLMClient even when a live provider is configured.
+
+    ``conftest`` uses ``setdefault``, so an explicit ``LLM_PROVIDER`` survives
+    collection. ``resolve_provider`` also prefers UI runtime config over the
+    env var, so Postgres + a saved live provider would ignore
+    ``LLM_PROVIDER=dummy``. Combined with ``_branding_model``'s lru cache,
+    that would let this unmarked spot-check hit a live provider (and then
+    the ``real_llm`` parametrization would hit it again). Blank the runtime
+    lookup so the dummy env wins, stub the provider-list read so Strands
+    model construction does not round-trip Postgres for a fingerprint, and
+    drop cached models so ``pytest -m 'not real_llm'`` stays offline.
+
+    Preconditions:
+        ``monkeypatch`` is pytest's env-patch fixture.
+    Postconditions:
+        For the duration of the test, ``_runtime`` returns a blank string,
+        ``load_ordered_entries`` returns an empty list, ``LLM_PROVIDER`` is
+        ``dummy``, and the branding-model / LLM-client caches have been
+        cleared. Caches are cleared again on teardown so a later ``real_llm``
+        test can resolve the caller's provider.
+    """
+    from llm_service import config as llm_config
+    from llm_service import factory as llm_factory
+    from llm_service import provider_store as llm_provider_store
+    from llm_service.strands_provider import _clear_strands_model_cache_for_testing
+
+    monkeypatch.setenv("LLM_PROVIDER", "dummy")
+    # Runtime UI config outranks the env var in resolve_provider(); a blank
+    # lookup makes the dummy env win even when Postgres has a live provider.
+    monkeypatch.setattr(llm_config, "_runtime", lambda _key: "")
+    # get_strands_model always fingerprints the provider list, even for dummy.
+    # An empty list keeps that path offline when POSTGRES_HOST is set.
+    monkeypatch.setattr(llm_provider_store, "load_ordered_entries", lambda *a, **k: [])
+    llm_factory.clear_client_cache()
+    _clear_strands_model_cache_for_testing()
+    _branding_model.cache_clear()
+    yield
+    _branding_model.cache_clear()
+    _clear_strands_model_cache_for_testing()
+    llm_factory.clear_client_cache()
+
+
+@pytest.mark.parametrize(
+    ("_case_id", "factory", "output_model"),
+    _PHASE_SPOT_CHECKS,
+    ids=_PHASE_SPOT_CHECK_IDS,
+)
+def test_one_migrated_agent_per_phase_yields_schema_valid_output(
+    _case_id: str,
+    factory: Callable[[], Agent],
+    output_model: type,
+    force_dummy_llm: None,
+) -> None:
+    """Production event-loop path: one factory per phase returns its schema.
+
+    Always uses the dummy provider (see ``force_dummy_llm``). A live provider
+    is exercised only by ``test_one_migrated_agent_per_phase_against_live_llm``.
+
+    Preconditions:
+        ``factory`` builds an agent with ``structured_output=output_model``.
+        ``force_dummy_llm`` has blanked runtime config and pinned
+        ``LLM_PROVIDER=dummy``, then cleared caches.
+    Postconditions:
+        ``result.structured_output`` is an instance of ``output_model``.
+    """
+    agent = factory()
+    result = agent(serialize_mission(make_mission()))
+    assert isinstance(result.structured_output, output_model)
+
+
+def test_runtime_provider_outranks_dummy_env_until_lookup_is_blanked(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """UI runtime config beats ``LLM_PROVIDER=dummy`` until ``_runtime`` is blanked.
+
+    Preconditions:
+        ``monkeypatch`` can replace ``llm_service.config._runtime``.
+    Postconditions:
+        A live runtime provider wins over the dummy env var; blanking the
+        lookup makes ``resolve_provider()`` return ``dummy``.
+    """
+    from llm_service import config as llm_config
+
+    monkeypatch.setenv("LLM_PROVIDER", "dummy")
+    monkeypatch.setattr(llm_config, "_runtime", lambda _key: "claude")
+    assert llm_config.resolve_provider() == "claude"
+    monkeypatch.setattr(llm_config, "_runtime", lambda _key: "")
+    assert llm_config.resolve_provider() == "dummy"
+
+
+def test_force_dummy_llm_overrides_runtime_provider_config(
+    force_dummy_llm: None,
+) -> None:
+    """The dummy fixture blanks runtime lookup so ``get_client`` stays DummyLLMClient.
+
+    Preconditions:
+        ``force_dummy_llm`` has blanked ``_runtime``, stubbed the provider list,
+        and set ``LLM_PROVIDER=dummy``.
+    Postconditions:
+        ``resolve_provider()`` is ``dummy`` and ``get_client()`` returns a
+        ``DummyLLMClient``.
+    """
+    from llm_service import DummyLLMClient
+    from llm_service import config as llm_config
+    from llm_service.factory import get_client
+
+    assert llm_config._runtime("any") == ""
+    assert llm_config.resolve_provider() == "dummy"
+    assert isinstance(get_client(), DummyLLMClient)
+
+
+def _skip_unless_effective_provider_is_live() -> None:
+    """Skip when UI runtime config makes the effective provider dummy.
+
+    ``LLM_PROVIDER`` is only the collection-time opt-in (see the ``skipif`` on
+    the live spot-check). ``resolve_provider`` prefers runtime config, so a
+    non-dummy env with a dummy UI setting would otherwise run these cases
+    against ``DummyLLMClient`` and count as live coverage.
+
+    Preconditions:
+        None — reads the current llm_service resolution.
+    Postconditions:
+        Returns only when ``resolve_provider()`` is not ``dummy`` and
+        ``get_client()`` is not a ``DummyLLMClient``. Otherwise pytest.skip.
+    """
+    from llm_service import DummyLLMClient
+    from llm_service import config as llm_config
+    from llm_service.factory import get_client
+
+    if llm_config.resolve_provider() == "dummy":
+        pytest.skip("effective provider is dummy; UI runtime config outranks LLM_PROVIDER")
+    assert not isinstance(get_client(), DummyLLMClient)
+
+
+def test_live_llm_spot_check_skips_when_runtime_resolves_to_dummy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Non-dummy ``LLM_PROVIDER`` is not live coverage when runtime is dummy.
+
+    Preconditions:
+        ``monkeypatch`` can replace ``llm_service.config._runtime``.
+    Postconditions:
+        ``_skip_unless_effective_provider_is_live`` skips.
+    """
+    from llm_service import config as llm_config
+
+    monkeypatch.setenv("LLM_PROVIDER", "claude")
+    monkeypatch.setattr(llm_config, "_runtime", lambda _key: "dummy")
+    with pytest.raises(pytest.skip.Exception, match="effective provider is dummy"):
+        _skip_unless_effective_provider_is_live()
+
+
+@pytest.mark.real_llm
+@pytest.mark.skipif(
+    os.environ.get("LLM_PROVIDER", "dummy") == "dummy",
+    reason="real LLM provider not configured; dummy event-loop spot-checks cover CI",
+)
+@pytest.mark.parametrize(
+    ("_case_id", "factory", "output_model"),
+    _PHASE_SPOT_CHECKS,
+    ids=_PHASE_SPOT_CHECK_IDS,
+)
+def test_one_migrated_agent_per_phase_against_live_llm(
+    _case_id: str, factory: Callable[[], Agent], output_model: type
+) -> None:
+    """Same per-phase spot-check against a real provider when one is configured.
+
+    Preconditions:
+        ``LLM_PROVIDER`` is set to a non-dummy value before test collection
+        (``conftest`` uses ``setdefault``, so an explicit provider is preserved).
+        ``resolve_provider()`` is also non-dummy — runtime UI config outranks
+        the env var. ``factory`` builds an agent with
+        ``structured_output=output_model``.
+    Postconditions:
+        ``result.structured_output`` is an instance of ``output_model``.
+        The backing client is not ``DummyLLMClient``.
+    """
+    _skip_unless_effective_provider_is_live()
+    agent = factory()
+    result = agent(serialize_mission(make_mission()))
+    assert isinstance(result.structured_output, output_model)

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Optional
 
@@ -23,9 +24,11 @@ from software_engineering_team.github_source.pr_review_mapping import (
     choose_event,
     format_comment_body,
     format_issue_comment,
+    format_numbered_source_line,
     inline_comment_to_timeline_body,
     is_within_diff,
     map_issues_to_comments,
+    numbered_line_width,
     parse_valid_lines,
     render_annotated_hunks,
     split_review_comments,
@@ -98,24 +101,92 @@ def test_parse_valid_lines_ignores_lines_before_first_hunk() -> None:
 # ---------------------------------------------------------------------------
 
 
+def _gutter_and_source(line: str) -> tuple[str, str]:
+    """Split one numbered review line into ``(gutter, source)``.
+
+    Accepts either the ``N: `` or ``N| `` gutter so this helper can describe
+    the alignment contract independently of the separator character.
+    """
+    match = re.match(r"^([ ]*\d+(?:: |\| ))(.*)$", line)
+    assert match is not None, f"expected a numbered gutter, got {line!r}"
+    return match.group(1), match.group(2)
+
+
 def test_render_annotated_hunks_single_hunk() -> None:
     patch = "@@ -1,2 +1,3 @@\n ctx\n+added\n more"
-    assert render_annotated_hunks(patch) == "1: ctx\n2: added\n3: more"
+    assert render_annotated_hunks(patch) == "1| ctx\n2| added\n3| more"
+
+
+def test_render_annotated_hunks_aligns_source_columns_across_digit_widths() -> None:
+    """A 4-space hanging indent must stay 4 columns when line numbers cross 9→10.
+
+    Unpadded ``9: `` (3 chars) vs ``10: `` (4 chars) shifts every later source
+    column by one, so ``        'bar',`` looks like a 5-space hang — the
+    false "inconsistent leading whitespace" finding on continuation arguments.
+    """
+    patch = "@@ -9,2 +9,3 @@\n     foo(\n+        'bar',\n     )"
+    lines = render_annotated_hunks(patch).splitlines()
+    gutters, sources = zip(*(_gutter_and_source(line) for line in lines))
+    assert list(sources) == ["    foo(", "        'bar',", "    )"]
+    assert len({len(g) for g in gutters}) == 1
+    # The argument's extra indent is exactly one 4-space hang, not 5.
+    assert sources[1].index("'") - sources[0].index("f") == 4
+
+
+def test_render_annotated_hunks_preserves_call_argument_hanging_indent() -> None:
+    """Continuation arguments keep their source indent after the gutter.
+
+    Regression: the reviewer flagged ``append_review_transcript_entries(\n        "j1",``
+    as extra leading whitespace on the string argument. The hanging indent is
+    real, legal Python; only the numbered rendering made it look irregular.
+    """
+    patch = (
+        "@@ -149,3 +149,5 @@ def test_flush() -> None:\n"
+        '     record_review_start("j1", "o", "r", 7, "u", "alice")\n'
+        "+    append_review_transcript_entries(\n"
+        '+        "j1",\n'
+        "+    )\n"
+    )
+    lines = render_annotated_hunks(patch).splitlines()
+    gutters, sources = zip(*(_gutter_and_source(line) for line in lines))
+    assert sources[1] == "    append_review_transcript_entries("
+    assert sources[2] == '        "j1",'
+    assert len({len(g) for g in gutters}) == 1
+    assert sources[2].index('"') - sources[1].index("a") == 4
 
 
 def test_render_annotated_hunks_omits_removed_lines() -> None:
     patch = "@@ -1,3 +1,2 @@\n keep\n-deleted\n+replacement"
     # Removed line has no new-file position and is dropped; numbering stays aligned.
-    assert render_annotated_hunks(patch) == "1: keep\n2: replacement"
+    assert render_annotated_hunks(patch) == "1| keep\n2| replacement"
 
 
 def test_render_annotated_hunks_separates_multiple_hunks() -> None:
     patch = "@@ -1,1 +1,2 @@\n a\n+b\n@@ -10,1 +11,2 @@\n c\n+d"
-    assert render_annotated_hunks(patch) == "1: a\n2: b\n...\n11: c\n12: d"
+    assert render_annotated_hunks(patch) == " 1| a\n 2| b\n...\n11| c\n12| d"
 
 
 def test_render_annotated_hunks_empty_patch() -> None:
     assert render_annotated_hunks("") == ""
+
+
+def test_numbered_line_width_empty_and_widest() -> None:
+    assert numbered_line_width([]) == 1
+    assert numbered_line_width([9]) == 1
+    assert numbered_line_width([9, 10]) == 2
+    assert numbered_line_width([99, 100]) == 3
+
+
+def test_format_numbered_source_line_equal_gutter_width() -> None:
+    width = numbered_line_width([9, 10])
+    nine = format_numbered_source_line(9, "    foo(", width=width)
+    ten = format_numbered_source_line(10, "        'bar',", width=width)
+    g9, s9 = _gutter_and_source(nine)
+    g10, s10 = _gutter_and_source(ten)
+    assert s9 == "    foo("
+    assert s10 == "        'bar',"
+    assert len(g9) == len(g10)
+    assert s10.index("'") - s9.index("f") == 4
 
 
 def test_render_annotated_hunks_lines_align_with_valid_lines() -> None:
@@ -123,7 +194,7 @@ def test_render_annotated_hunks_lines_align_with_valid_lines() -> None:
     patch = "@@ -5,2 +5,3 @@\n keep\n+new1\n+new2"
     rendered = render_annotated_hunks(patch)
     for line in parse_valid_lines(patch):
-        assert f"{line}: " in rendered
+        assert f"{line}|" in rendered
 
 
 # ---------------------------------------------------------------------------
