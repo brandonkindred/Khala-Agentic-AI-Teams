@@ -152,6 +152,100 @@ def _should_prefix_system_prompt(prompt: str, system_prompt: str) -> bool:
     return True
 
 
+def reasoning_turns_from_agent_messages(
+    agent: object,
+    fallback_prompt: str,
+    started: float,
+) -> list[tuple[str, str, float]]:
+    """Split a Strands conversation into one transcript turn per assistant message.
+
+    Preconditions:
+        ``agent.messages`` is the completed reasoning conversation (may be
+        empty or malformed). ``started`` is monotonic time from before the
+        Agent run.
+    Postconditions:
+        Returns ``(prompt, response, started)`` triples in conversation order:
+        each assistant message is a response whose prompt is the JSON of prior
+        messages (or ``fallback_prompt`` when the prefix is empty). Returns
+        an empty list when there are no assistant messages.
+    """
+    try:
+        messages = list(getattr(agent, "messages", []) or [])
+    except Exception:  # noqa: BLE001 - transcript fallback must never break the caller
+        return []
+    turns: list[tuple[str, str, float]] = []
+    for index, message in enumerate(messages):
+        if not isinstance(message, dict) or message.get("role") != "assistant":
+            continue
+        prefix = messages[:index]
+        try:
+            prompt = json.dumps(prefix, default=str) if prefix else fallback_prompt
+            response = json.dumps(message, default=str)
+        except Exception:  # noqa: BLE001
+            continue
+        turns.append((prompt, response, started))
+    return turns
+
+
+def record_reasoning_transcript_turns(
+    stage: str,
+    target: str,
+    *,
+    turns: list[tuple[str, str, float]],
+    agent: object | None,
+    fallback_prompt: str,
+    started: float,
+    reasoning_done_at: float,
+    system_prompt: str,
+    model: str,
+    recorder: Callable[..., None] | None = None,
+) -> None:
+    """Buffer one transcript entry per reasoning-pass model invocation.
+
+    Preconditions:
+        ``turns`` is the inner HTTP turns drained after the Agent run, or
+        empty when the provider recorded none. ``agent`` may be None when
+        reasoning never constructed an Agent.
+    Postconditions:
+        Records ``turns`` when non-empty; otherwise splits ``agent.messages``
+        into per-assistant-message entries; otherwise dumps the full
+        conversation as one entry when the agent exists. ``recorder``, when
+        given, is used instead of :func:`record_transcript_entry` so callers
+        that tests monkeypatch keep intercepting writes. Never raises.
+    """
+    write = recorder if recorder is not None else record_transcript_entry
+    if not turns and agent is not None:
+        turns = reasoning_turns_from_agent_messages(agent, fallback_prompt, started)
+    if turns:
+        for index, (turn_prompt, turn_response, turn_started) in enumerate(turns):
+            ended = turns[index + 1][2] if index + 1 < len(turns) else reasoning_done_at
+            write(
+                stage,
+                target,
+                turn_prompt,
+                turn_response,
+                system_prompt=system_prompt,
+                model=model,
+                duration_ms=max(0.0, (ended - turn_started) * 1000),
+            )
+        return
+    if agent is None:
+        return
+    try:
+        transcript_response = json.dumps(getattr(agent, "messages", []), default=str)
+    except Exception:  # noqa: BLE001 - transcript recording must never break the caller
+        transcript_response = ""
+    write(
+        stage,
+        target,
+        fallback_prompt,
+        transcript_response,
+        system_prompt=system_prompt,
+        model=model,
+        duration_ms=(reasoning_done_at - started) * 1000,
+    )
+
+
 def record_transcript_entry(
     stage: str,
     target: str,
@@ -529,6 +623,8 @@ def _reset_for_test() -> None:
 __all__ = [
     "model_label",
     "record_transcript_entry",
+    "record_reasoning_transcript_turns",
+    "reasoning_turns_from_agent_messages",
     "drain",
     "unflushed_entries",
     "merge_unflushed",

@@ -64,7 +64,7 @@ from strands.types.tools import ToolChoice, ToolSpec
 
 from .attribution import caller_agent, caller_team, current_attribution, llm_attribution
 from .factory import client_agent_key, get_client, unwrap_client
-from .interface import LLMClient, record_complete_json_turn
+from .interface import LLMClient, complete_json_turn_count, record_complete_json_turn
 from .util import _flatten_system_prompt_content
 
 logger = logging.getLogger(__name__)
@@ -538,6 +538,7 @@ class LLMClientModel(Model):
         # ``cfg.agent_key`` (which may differ after ``clone``/``update_config``)
         # is the effective binding rather than the wrapper's original key.
         turn_started = time.monotonic()
+        recorded_before = complete_json_turn_count()
         with llm_attribution(agent_key=agent_key or None, team=team):
             result = await asyncio.to_thread(
                 unwrap_client(self._client).chat,
@@ -550,15 +551,16 @@ class LLMClientModel(Model):
                 max_tokens=max_tokens,
             )
 
-        try:
-            observer_response = json.dumps(result, default=str)
-        except (TypeError, ValueError):
-            observer_response = str(result)
-        record_complete_json_turn(
-            json.dumps(oai_messages, default=str),
-            observer_response,
-            started_monotonic=turn_started,
-        )
+        if complete_json_turn_count() == recorded_before:
+            try:
+                observer_response = json.dumps(result, default=str)
+            except (TypeError, ValueError):
+                observer_response = str(result)
+            record_complete_json_turn(
+                json.dumps(oai_messages, default=str),
+                observer_response,
+                started_monotonic=turn_started,
+            )
 
         yield {"messageStart": {"role": "assistant"}}
 

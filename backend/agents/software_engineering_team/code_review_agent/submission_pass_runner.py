@@ -35,17 +35,16 @@ Invariants:
 
 from __future__ import annotations
 
-import json
 import logging
 import time
 from dataclasses import dataclass
 from typing import Callable, List, Tuple, TypeVar, Union
 
 from llm_service import LLMClient, LLMTruncatedError
-from llm_service.interface import observer_turn_started_monotonic
+from llm_service.interface import observer_turn_started_monotonic, take_complete_json_turns
 
 from .model_resolution import resolve_code_review_model
-from .transcript import model_label, record_transcript_entry
+from .transcript import model_label, record_reasoning_transcript_turns, record_transcript_entry
 from .via_reasoning import formatting_system_prompt_with_untrusted_guard, run_agent_via_reasoning
 
 try:
@@ -181,24 +180,28 @@ def _call_agent(
         - Tools are attached only to the reasoning pass (call 1).
         - Raises whatever ``run_agent_via_reasoning`` or ``parse`` raises —
           recovery is entirely the caller's concern.
-        - Records the reasoning-pass ``agent.messages`` conversation (JSON) and
-          a separate formatting-pass entry per formatting LLM turn (format
-          prompt + JSON reply, including continuation turns) into the durable
-          transcript once each call exists, even if the formatting pass or
-          ``parse`` later fails, so a tool-using call's intermediate turns
-          and the subsequent JSON transcription are not silently dropped.
-          A no-op when no ``job_id`` is bound.
+        - Records one transcript entry per reasoning-pass model invocation
+          (inner HTTP turns when the Strands adapter recorded them, otherwise
+          one entry per assistant message) and a separate formatting-pass
+          entry per formatting LLM turn (format prompt + JSON reply,
+          including continuation turns) into the durable transcript once each
+          call exists, even if the formatting pass or ``parse`` later fails,
+          so a tool-using call's requests and the subsequent JSON
+          transcription are not silently dropped. A no-op when no ``job_id``
+          is bound.
     """
     reasoning_agent = None
+    reasoning_turns: list[tuple[str, str, float]] = []
     format_turns: list[tuple[str, str, float]] = []
     started = time.monotonic()
     reasoning_done_at = started
     format_turn_started_at: float | None = None
 
     def _capture_reasoning_agent(agent: object) -> None:
-        nonlocal reasoning_agent, reasoning_done_at
+        nonlocal reasoning_agent, reasoning_done_at, reasoning_turns
         reasoning_agent = agent
         reasoning_done_at = time.monotonic()
+        reasoning_turns = take_complete_json_turns()
 
     def _on_formatting_start() -> None:
         nonlocal format_turn_started_at
@@ -227,22 +230,18 @@ def _call_agent(
         )
     finally:
         now = time.monotonic()
-        if reasoning_agent is not None:
-            try:
-                transcript_response = json.dumps(
-                    getattr(reasoning_agent, "messages", []), default=str
-                )
-            except Exception:  # noqa: BLE001 - transcript recording must never break the pass
-                transcript_response = ""
-            record_transcript_entry(
-                pass_label,
-                batch_target,
-                prompt,
-                transcript_response,
-                system_prompt=reasoning_system_prompt,
-                model=model_label(model),
-                duration_ms=(reasoning_done_at - started) * 1000,
-            )
+        record_reasoning_transcript_turns(
+            pass_label,
+            batch_target,
+            turns=reasoning_turns,
+            agent=reasoning_agent,
+            fallback_prompt=prompt,
+            started=started,
+            reasoning_done_at=reasoning_done_at,
+            system_prompt=reasoning_system_prompt,
+            model=model_label(model),
+            recorder=record_transcript_entry,
+        )
         if format_turns:
             for format_prompt, format_response, turn_started in format_turns:
                 record_transcript_entry(

@@ -352,6 +352,18 @@ def take_complete_json_turns() -> list[tuple[str, str, float]]:
     return list(turns)
 
 
+def complete_json_turn_count() -> int:
+    """How many inner HTTP turns are currently recorded on this context.
+
+    Preconditions:
+        none.
+    Postconditions:
+        Returns ``0`` when none are recorded; does not clear the slot.
+    """
+    turns = _complete_json_turns_var.get()
+    return 0 if not turns else len(turns)
+
+
 @contextmanager
 def observer_turn_started(started_monotonic: float | None) -> Iterator[None]:
     """Bind this continuation turn's start time for transcript writers.

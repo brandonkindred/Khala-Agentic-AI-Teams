@@ -50,7 +50,6 @@ Three invariants hold:
 from __future__ import annotations
 
 import ast
-import json
 import logging
 import os
 import re
@@ -86,7 +85,7 @@ from .prompts import (
     FALSE_POSITIVE_VERIFY_REASONING_SYSTEM_PROMPT,
 )
 from .repo_reader import DEFAULT_MAX_LISTED_FILES, DiskRepoReader, RepoReader
-from .transcript import model_label, record_transcript_entry
+from .transcript import model_label, record_reasoning_transcript_turns, record_transcript_entry
 from .via_reasoning import formatting_system_prompt_with_untrusted_guard, run_agent_via_reasoning
 
 logger = logging.getLogger(__name__)
@@ -1955,41 +1954,6 @@ def _agent_read_the_cited_file(agent: Agent, index: CodebaseIndex, file_path: st
         return False
 
 
-def _reasoning_turns_from_agent_messages(
-    agent: Agent,
-    fallback_prompt: str,
-    started: float,
-) -> list[tuple[str, str, float]]:
-    """Split a Strands conversation into one transcript turn per assistant message.
-
-    Preconditions:
-        ``agent.messages`` is the completed reasoning conversation (may be
-        empty or malformed). ``started`` is monotonic time from before the
-        Agent run.
-    Postconditions:
-        Returns ``(prompt, response, started)`` triples in conversation order:
-        each assistant message is a response whose prompt is the JSON of prior
-        messages (or ``fallback_prompt`` when the prefix is empty). Returns
-        an empty list when there are no assistant messages.
-    """
-    try:
-        messages = list(getattr(agent, "messages", []) or [])
-    except Exception:  # noqa: BLE001 - transcript fallback must never break verification
-        return []
-    turns: list[tuple[str, str, float]] = []
-    for index, message in enumerate(messages):
-        if not isinstance(message, dict) or message.get("role") != "assistant":
-            continue
-        prefix = messages[:index]
-        try:
-            prompt = json.dumps(prefix, default=str) if prefix else fallback_prompt
-            response = json.dumps(message, default=str)
-        except Exception:  # noqa: BLE001
-            continue
-        turns.append((prompt, response, started))
-    return turns
-
-
 def _verify_group(
     model: _StrandsModel,
     index: CodebaseIndex,
@@ -2043,10 +2007,7 @@ def _verify_group(
         reasoning_agent = agent
         reasoning_done_at = time.monotonic()
         recorded = take_complete_json_turns()
-        if recorded:
-            reasoning_turns = recorded
-        else:
-            reasoning_turns = _reasoning_turns_from_agent_messages(agent, prompt, started)
+        reasoning_turns = recorded
 
     def _on_formatting_start() -> None:
         nonlocal format_turn_started_at
@@ -2080,36 +2041,18 @@ def _verify_group(
         # pass, so a malformed reply is still visible in the transcript. A
         # reasoning-pass exception that never constructed the agent is a no-op.
         now = time.monotonic()
-        if reasoning_turns:
-            for index, (turn_prompt, turn_response, turn_started) in enumerate(reasoning_turns):
-                ended = (
-                    reasoning_turns[index + 1][2]
-                    if index + 1 < len(reasoning_turns)
-                    else reasoning_done_at
-                )
-                record_transcript_entry(
-                    "false_positive_filter",
-                    file_path,
-                    turn_prompt,
-                    turn_response,
-                    system_prompt=FALSE_POSITIVE_VERIFY_REASONING_SYSTEM_PROMPT,
-                    model=model_label(model),
-                    duration_ms=max(0.0, (ended - turn_started) * 1000),
-                )
-        elif reasoning_agent is not None:
-            try:
-                transcript_response = json.dumps(reasoning_agent.messages, default=str)
-            except Exception:  # noqa: BLE001 - transcript recording must never break verification
-                transcript_response = ""
-            record_transcript_entry(
-                "false_positive_filter",
-                file_path,
-                prompt,
-                transcript_response,
-                system_prompt=FALSE_POSITIVE_VERIFY_REASONING_SYSTEM_PROMPT,
-                model=model_label(model),
-                duration_ms=(reasoning_done_at - started) * 1000,
-            )
+        record_reasoning_transcript_turns(
+            "false_positive_filter",
+            file_path,
+            turns=reasoning_turns,
+            agent=reasoning_agent,
+            fallback_prompt=prompt,
+            started=started,
+            reasoning_done_at=reasoning_done_at,
+            system_prompt=FALSE_POSITIVE_VERIFY_REASONING_SYSTEM_PROMPT,
+            model=model_label(model),
+            recorder=record_transcript_entry,
+        )
         if format_turns:
             for format_prompt, format_response, turn_started in format_turns:
                 record_transcript_entry(

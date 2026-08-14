@@ -71,6 +71,57 @@ class _FailIfAsked(DummyLLMClient):
         raise AssertionError(f"must not call the LLM, got prompt: {prompt!r}")
 
 
+def test_call_agent_records_each_reasoning_model_turn(monkeypatch) -> None:
+    """A tool-using reasoning pass with two assistant messages must record
+    each as its own transcript call, not one collapsed conversation blob."""
+    from llm_service import llm_attribution
+
+    class _Agent:
+        messages = [
+            {"role": "user", "content": [{"text": "user prompt"}]},
+            {"role": "assistant", "content": [{"toolUse": {"name": "read_file"}}]},
+            {"role": "user", "content": [{"toolResult": {"status": "success"}}]},
+            {"role": "assistant", "content": [{"text": "done"}]},
+        ]
+
+    def _fake(**kwargs: Any) -> str:
+        on_agent = kwargs.get("on_reasoning_agent")
+        if on_agent is not None:
+            on_agent(_Agent())
+        on_fmt = kwargs.get("on_formatting")
+        if on_fmt is not None:
+            on_fmt("format prompt", '{"ok": true}')
+        return kwargs["parse"]('{"ok": true}')
+
+    captured: List[Any] = []
+    monkeypatch.setattr(runner_mod, "run_agent_via_reasoning", _fake)
+    monkeypatch.setattr(
+        runner_mod,
+        "record_transcript_entry",
+        lambda *args, **kwargs: captured.append((args, kwargs)),
+    )
+
+    with llm_attribution(job_id="job-1"):
+        runner_mod._call_agent(
+            object(),
+            "system prompt",
+            "format json as an object",
+            [],
+            "user prompt",
+            parse=lambda raw: raw,
+            pass_label="architecture",
+            batch_target="batch 1/1",
+        )
+
+    assert len(captured) == 3
+    first_response = json.loads(captured[0][0][3])
+    second_response = json.loads(captured[1][0][3])
+    assert first_response["role"] == "assistant"
+    assert "toolUse" in (first_response.get("content") or [{}])[0]
+    assert second_response["role"] == "assistant"
+    assert captured[2][0][2] == "format prompt"
+
+
 def test_call_agent_records_full_conversation_in_transcript(monkeypatch) -> None:
     """The transcript records the reasoning ``agent.messages`` conversation and
     a separate formatting-pass entry (format prompt + JSON reply). This call
@@ -124,11 +175,9 @@ def test_call_agent_records_full_conversation_in_transcript(monkeypatch) -> None
     stage, target, prompt, response = captured[0][0]
     assert stage == "architecture"
     assert target == "batch 1/1"
-    assert prompt == "user prompt"
-    messages = json.loads(response)
-    assert isinstance(messages, list)
-    assert len(messages) >= 2  # at least the user turn and the model's reply
-    assert messages[0]["role"] == "user"
+    assistant = json.loads(response)
+    assert assistant["role"] == "assistant"
+    assert "user prompt" in prompt or "user" in prompt
     fmt_stage, fmt_target, fmt_prompt, fmt_response = captured[1][0]
     assert fmt_stage == "architecture"
     assert fmt_target == "batch 1/1"

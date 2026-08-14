@@ -2298,6 +2298,9 @@ class OllamaLLMClient(LLMClient):
         Postconditions:
             - Returns a parsed JSON ``dict``, or a ``{"__tool_calls__": [...]}``
               envelope when the correction invokes a tool.
+            - Records this corrective HTTP turn (and the caller records the
+              rejected first reply) so transcript observers see both provider
+              calls, not only the recovered result.
             - On a second non-JSON reply, re-raises ``first_error`` (or the
               second parse error) after recording telemetry — never loops.
         """
@@ -2324,6 +2327,7 @@ class OllamaLLMClient(LLMClient):
             self.model,
         )
         try:
+            request_started = time.monotonic()
             content = self._ollama_post(
                 payload,
                 max_retries,
@@ -2338,6 +2342,11 @@ class OllamaLLMClient(LLMClient):
         except LLMSemanticExhaustionError:
             self._record_telemetry(status="error", error_type="semantic_exhaustion")
             raise
+        record_complete_json_turn(
+            json.dumps(corrective_messages, default=str),
+            content or "",
+            started_monotonic=request_started,
+        )
         stripped = (content or "").strip()
         if stripped.startswith("{") and "__tool_calls__" in stripped:
             try:
@@ -2411,6 +2420,7 @@ class OllamaLLMClient(LLMClient):
             payload["tools"] = tools
         elif response_format == "json":
             payload["response_format"] = {"type": "json_object"}
+        request_started = time.monotonic()
         try:
             content = self._ollama_post(
                 payload,
@@ -2456,6 +2466,11 @@ class OllamaLLMClient(LLMClient):
             # wire, so a prose reply here is common (not a truncated `{...`).
             # One corrective follow-up recovers most of these turns.
             if tools:
+                record_complete_json_turn(
+                    json.dumps(list(messages), default=str),
+                    content or "",
+                    started_monotonic=request_started,
+                )
                 return self._chat_json_self_correct(
                     messages=list(messages),
                     bad_content=content or "",

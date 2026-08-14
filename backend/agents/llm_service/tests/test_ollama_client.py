@@ -21,6 +21,7 @@ from llm_service.interface import (
     LLMSemanticExhaustionError,
     LLMTemporaryError,
     record_complete_json_turn,
+    reset_complete_json_observer_state,
     take_complete_json_raw,
     take_complete_json_turns,
 )
@@ -1143,6 +1144,7 @@ def test_ollama_chat_json_self_corrects_prose_when_tools_present(
     perform one corrective follow-up that recovers a JSON object instead of
     raising LLMJsonParseError (code_review Strands tool-loop failure mode).
     """
+    reset_complete_json_observer_state()
     monkeypatch.setenv("LLM_PROVIDER", "ollama")
     prose = (
         "I'll analyze the file structure you've provided to understand the "
@@ -1203,6 +1205,11 @@ def test_ollama_chat_json_self_corrects_prose_when_tools_present(
     assert msgs[-1]["role"] == "user"
     assert "rejected" in msgs[-1]["content"].lower()
     assert "json" in msgs[-1]["content"].lower()
+    turns = take_complete_json_turns()
+    assert len(turns) == 2
+    assert "architecture" in turns[0][1]
+    assert "findings" in turns[1][1]
+    assert "rejected" in turns[1][0].lower() or "assistant" in turns[1][0]
 
 
 def test_ollama_chat_json_self_correct_exhausted_still_raises(
@@ -1235,6 +1242,7 @@ def test_ollama_chat_json_self_correct_exhausted_still_raises(
                 temperature=0.0,
             )
     assert mock_client.__enter__.return_value.stream.call_count == 2
+    assert len(take_complete_json_turns()) == 2
 
 
 def test_ollama_get_max_context_tokens_deepseek_v4_pro(monkeypatch: pytest.MonkeyPatch) -> None:
