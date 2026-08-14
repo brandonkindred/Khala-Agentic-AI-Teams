@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
+from software_engineering_team.github_source import issue_scoring as scoring_schema
 from software_engineering_team.github_source.issue_grooming_scoring import (
     FIBONACCI,
     PHASE_A_END,
@@ -19,9 +20,6 @@ from software_engineering_team.github_source.issue_grooming_scoring import (
     render_complexity_markdown,
     score_issue,
     strip_grooming_blocks,
-)
-from software_engineering_team.github_source.issue_scoring import (
-    ScoreBreakdown as UnifiedScoreBreakdown,
 )
 
 # ---------------------------------------------------------------------------
@@ -229,13 +227,13 @@ class TestScoreBreakdownInvariants:
 # ---------------------------------------------------------------------------
 
 
-def _unified_score(
+def _scorer_breakdown(
     conceptual_score: int = 2,
     loc_score: int = 2,
     code_complexity_score: int = 2,
     aggregate_score: int = 2,
-) -> UnifiedScoreBreakdown:
-    return UnifiedScoreBreakdown(
+) -> scoring_schema.ScoreBreakdown:
+    return scoring_schema.ScoreBreakdown(
         conceptual_score=conceptual_score,
         conceptual_rationale="Unified: conceptual rationale.",
         loc_score=loc_score,
@@ -250,7 +248,7 @@ def _unified_score(
 
 class TestFromUnifiedScore:
     def test_maps_fields_and_rationales(self) -> None:
-        unified = _unified_score(
+        unified = _scorer_breakdown(
             conceptual_score=3, loc_score=5, code_complexity_score=8, aggregate_score=8
         )
 
@@ -267,7 +265,7 @@ class TestFromUnifiedScore:
         # aggregate_score (1) deliberately disagrees with nearest_fibonacci(max(dims))
         # (8) -- from_unified_score must recompute, never trust the input's own
         # aggregate_score.
-        unified = _unified_score(
+        unified = _scorer_breakdown(
             conceptual_score=8, loc_score=1, code_complexity_score=1, aggregate_score=1
         )
 
@@ -277,7 +275,7 @@ class TestFromUnifiedScore:
         assert adapted.aggregate != unified.aggregate_score
 
     def test_drops_fields_with_no_legacy_equivalent(self) -> None:
-        dumped = from_unified_score(_unified_score()).model_dump()
+        dumped = from_unified_score(_scorer_breakdown()).model_dump()
         assert set(dumped) == {
             "conceptual",
             "conceptual_rationale",
@@ -289,11 +287,11 @@ class TestFromUnifiedScore:
         }
 
     @pytest.mark.parametrize("value", [1, 2, 3, 5, 8, 13])
-    def test_every_legal_unified_score_value_adapts_without_error(self, value: int) -> None:
+    def test_every_legal_scorer_breakdown_value_adapts_without_error(self, value: int) -> None:
         # issue_scoring.FIBONACCI_COMPLEXITY_VALUES is a proper subset of this
         # module's FIBONACCI, so every legal unified score value must adapt
         # cleanly and satisfy this module's own validator.
-        adapted = from_unified_score(_unified_score(value, value, value, value))
+        adapted = from_unified_score(_scorer_breakdown(value, value, value, value))
         assert adapted.aggregate == nearest_fibonacci(value)
 
 
