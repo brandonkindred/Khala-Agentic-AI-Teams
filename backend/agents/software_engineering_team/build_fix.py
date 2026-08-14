@@ -9,6 +9,10 @@ public ``run_build_verification`` wrapper in ``quality_gate_tools`` that calls
 Invariants:
     - ``_run_build_verification`` is the only consumer of
       ``EXCEPTION_HANDLER_TEST_PATTERNS``.
+    - ``_try_build_fix_one_at_a_time`` orchestrates discovery, then delegates
+      file collection, one LLM repair, and post-fix verification to
+      ``_collect_project_files``, ``_execute_llm_repair_attempt``, and
+      ``_run_post_fix_build_verification``.
     - The public build-gate wrappers convert failures into a failed result
       (``(False, summary)`` or ``BuildResult(success=False)``), including
       exceptions that escape ``_run_build_verification`` /
@@ -28,7 +32,9 @@ from __future__ import annotations
 
 import logging
 import sys
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 from strands import Agent
 
@@ -284,6 +290,193 @@ def _run_build_verification(
     return True, ""
 
 
+_EXT_MAP = {
+    "frontend": (".ts", ".tsx", ".html", ".scss", ".css", ".js", ".jsx"),
+    "backend": (".py",),
+}
+
+
+def _collect_project_files(project_dir: Path, agent_type: str) -> dict[str, str]:
+    """Load source files for the build-fix LLM briefing, capped by char budget.
+
+    Preconditions:
+        ``project_dir`` is an existing directory. ``agent_type`` is ``"backend"``
+        or ``"frontend"`` (unknown types fall back to ``.py`` suffixes).
+    Postconditions:
+        Returned keys are paths relative to ``project_dir``. Excluded subtrees
+        (``_BUILD_FIX_EXCLUDE_DIRS``) are never descended into. Collection stops
+        once the running total of content plus path length exceeds
+        ``_BUILD_FIX_MAX_CODE_CHARS``. Unreadable files are skipped.
+    """
+    assert project_dir.is_dir(), "project_dir must be an existing directory"
+    current_files: dict[str, str] = {}
+    exts = _EXT_MAP.get(agent_type, (".py",))
+    max_chars = _BUILD_FIX_MAX_CODE_CHARS
+    total = 0
+    # Pruned os.walk (find_repo_files) so excluded subtrees are never descended
+    # into — the prior ``rglob("*{ext}")`` materialized every entry under
+    # node_modules/.git/dist/build/__pycache__/.angular before the post-filter
+    # discarded them, the same redundant I/O the streamed repo-walk refactor
+    # removed elsewhere. ``find_repo_files`` returns regular files only, so the
+    # old ``is_file()`` guard is now handled inside it.
+    for f in find_repo_files(project_dir, suffixes=exts, exclude_dirs=_BUILD_FIX_EXCLUDE_DIRS):
+        try:
+            rel = str(f.relative_to(project_dir))
+            content = f.read_text(encoding="utf-8", errors="replace")
+            current_files[rel] = content
+            total += len(content) + len(rel)
+            if total > max_chars:
+                break
+        except Exception as e:
+            logger.debug("Build fix: could not read file %s: %s", f, e)
+            continue
+    return current_files
+
+
+def _relevant_code_snippet(file_path: str, current_files: dict[str, str]) -> str:
+    """Build the code briefing for one repair attempt.
+
+    Preconditions:
+        ``current_files`` maps relative paths to file contents (may be empty).
+    Postconditions:
+        Returns a non-empty string. When ``file_path`` is present in
+        ``current_files``, only that file is included (capped at 50_000 chars);
+        otherwise files are concatenated until the same cap is reached.
+    """
+    if file_path and file_path in current_files:
+        return f"--- {file_path} ---\n{current_files[file_path][:50_000]}"
+    parts = []
+    remaining = 50_000
+    for p, c in current_files.items():
+        if remaining <= 0:
+            break
+        snippet = c[:remaining]
+        parts.append(f"--- {p} ---\n{snippet}")
+        remaining -= len(snippet)
+    return "\n".join(parts) if parts else "(no code)"
+
+
+def _execute_llm_repair_attempt(
+    *,
+    issue: dict[str, str],
+    current_files: dict[str, str],
+    project_dir: Path,
+    model: object,
+    parse_fn: Callable[[str], dict[str, Any]],
+    fix_prompt: str,
+    is_frontend: bool,
+    language_conventions: str,
+    task_id: str,
+    attempt: int,
+    max_attempts: int,
+) -> bool:
+    """Ask the repair model for one issue and write any returned files.
+
+    Preconditions:
+        ``issue`` has ``description`` (and optionally ``file_path`` /
+        ``recommendation``). ``project_dir`` exists. ``fix_prompt`` is a
+        ``str.format`` template matching the frontend or backend single-issue
+        prompt. ``attempt`` is 0-based.
+    Postconditions:
+        Returns True when the model produced at least one file mapping (writes
+        are best-effort; a write failure is logged and other files still apply).
+        Returns False on LLM error or when the template parser yields no files,
+        leaving ``current_files`` unchanged in those cases.
+    """
+    assert "description" in issue, "issue must include a description"
+    desc = issue["description"]
+    logger.info(
+        "[%s] Build fix attempt %d/%d: Next step -> Fixing issue: %s",
+        task_id,
+        attempt + 1,
+        max_attempts,
+        desc[:80],
+    )
+    file_path = issue.get("file_path") or ""
+    rec = issue.get("recommendation") or "Fix the issue."
+    relevant_code = _relevant_code_snippet(file_path, current_files)
+    if is_frontend:
+        prompt = fix_prompt.format(
+            source="build",
+            severity="critical",
+            description=desc,
+            file_path=file_path or "N/A",
+            recommendation=rec,
+            current_code=relevant_code,
+        )
+    else:
+        prompt = fix_prompt.format(
+            language_conventions=language_conventions,
+            source="build",
+            severity="critical",
+            description=desc,
+            file_path=file_path or "N/A",
+            recommendation=rec,
+            current_code=relevant_code,
+        )
+    try:
+        _agent = Agent(model=model)
+        _result = _agent(prompt)
+        raw = str(_result).strip()
+    except Exception as e:
+        logger.warning(
+            "[%s] Build fix attempt %d/%d failed: LLM call error: %s. Next step -> Skipping to next issue",
+            task_id,
+            attempt + 1,
+            max_attempts,
+            e,
+        )
+        return False
+    parsed = parse_fn(raw)
+    fixed_files = parsed.get("files") or {}
+    if not fixed_files:
+        return False
+    for rel_path, content in fixed_files.items():
+        out_path = project_dir / rel_path
+        try:
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            out_path.write_text(content, encoding="utf-8")
+            current_files[rel_path] = content
+        except Exception as e:
+            logger.warning("Build fix: could not write %s: %s", rel_path, e)
+    return True
+
+
+class _BuildFixCommandError(Exception):
+    """A build/test helper raised; the repair loop must abort with this message."""
+
+
+def _run_post_fix_build_verification(project_dir: Path, agent_type: str) -> Any:
+    """Re-run the agent-type build/test gate after applying a repair.
+
+    Preconditions:
+        ``project_dir`` is the project root used for the original failure.
+        ``agent_type`` is ``"frontend"`` or ``"backend"``.
+    Postconditions:
+        Frontend always returns the ``ng build`` result. Backend returns the
+        syntax-check result, or the pytest result when syntax passed and a
+        ``tests/`` tree with ``test_*.py`` files exists. If ``run_pytest``
+        itself raises, logs ``Build fix: pytest failed to run`` and raises
+        ``_BuildFixCommandError`` so the orchestrator can return
+        ``(False, message)`` without aborting the process.
+    """
+    from shared.command_runner.angular_repair import run_ng_build_with_nvm_fallback
+    from shared.command_runner.executor import run_pytest, run_python_syntax_check
+
+    if agent_type == "frontend":
+        return run_ng_build_with_nvm_fallback(project_dir)
+    result = run_python_syntax_check(project_dir)
+    if result.success:
+        tests_dir = project_dir / "tests"
+        if tests_dir.exists() and any(tests_dir.rglob("test_*.py")):
+            try:
+                result = run_pytest(project_dir, python_exe=sys.executable)
+            except Exception as e:
+                logger.warning("Build fix: pytest failed to run: %s", e)
+                raise _BuildFixCommandError(str(e)) from e
+    return result
+
+
 def _try_build_fix_one_at_a_time(
     repo_path: Path,
     agent_type: str,
@@ -304,8 +497,9 @@ def _try_build_fix_one_at_a_time(
         and skipped (``requirements.txt`` install, per-file reads/writes,
         individual LLM calls). Returns ``(False, error_summary)`` when the
         project is missing, ``agent_type`` is unsupported, ng-build cannot
-        launch, the Strands model cannot be acquired, or final verification
-        is still failing after the repair loop.
+        launch, the Strands model cannot be acquired, a pytest runner crash
+        is converted via ``_BuildFixCommandError``, or final verification is
+        still failing after the repair loop.
 
         Best-effort helpers are logged and do **not** propagate and do **not**
         by themselves force a False result. ``find_repo_files`` never raises
@@ -314,13 +508,13 @@ def _try_build_fix_one_at_a_time(
         ``CommandResult`` rather than raising ``subprocess.CalledProcessError``.
 
     Raises:
-        OSError from unbounded ``Path.rglob`` project probes, and exceptions
-        from ``parse_problem_solving_single_issue_template`` or the uncaught
-        post-fix re-run of ``run_ng_build_with_nvm_fallback``. Those paths are
-        not wrapped the way the LLM / install / file I/O helpers are.
-        :func:`_run_build_verification` does not catch them either, so they
-        reach the public build-gate wrappers listed on that function, which
-        convert them into a failed result rather than leaking into the gate.
+        OSError from unbounded ``Path.rglob`` project probes, exceptions from
+        ``parse_problem_solving_single_issue_template``, and the uncaught
+        post-fix frontend re-run of ``run_ng_build_with_nvm_fallback``.
+        Pytest runner crashes are logged and returned as ``(False, message)``
+        rather than propagating. :func:`_run_build_verification` does not
+        catch the remaining uncaught paths, so those reach the public
+        build-gate wrappers listed on that function.
     """
     from shared.command_runner.angular_repair import run_ng_build_with_nvm_fallback
     from shared.command_runner.executor import (
@@ -428,7 +622,11 @@ def _try_build_fix_one_at_a_time(
                         logger.warning(
                             "Build fix: failed to install requirements.txt before test run: %s", e
                         )
-                test_result = run_pytest(project_dir, python_exe=sys.executable)
+                try:
+                    test_result = run_pytest(project_dir, python_exe=sys.executable)
+                except Exception as e:
+                    logger.warning("Build fix: pytest failed to run: %s", e)
+                    return False, str(e)
                 if not test_result.success:
                     for f in test_result.parsed_failures("pytest"):
                         issues.append(
@@ -459,32 +657,7 @@ def _try_build_fix_one_at_a_time(
     else:
         return False, "Unsupported agent_type for build fix"
 
-    # Read current files from project_dir (relative paths)
-    current_files: dict[str, str] = {}
-    ext_map = {
-        "frontend": (".ts", ".tsx", ".html", ".scss", ".css", ".js", ".jsx"),
-        "backend": (".py",),
-    }
-    exts = ext_map.get(agent_type, (".py",))
-    max_chars = _BUILD_FIX_MAX_CODE_CHARS
-    total = 0
-    # Pruned os.walk (find_repo_files) so excluded subtrees are never descended
-    # into — the prior ``rglob("*{ext}")`` materialized every entry under
-    # node_modules/.git/dist/build/__pycache__/.angular before the post-filter
-    # discarded them, the same redundant I/O the streamed repo-walk refactor
-    # removed elsewhere. ``find_repo_files`` returns regular files only, so the
-    # old ``is_file()`` guard is now handled inside it.
-    for f in find_repo_files(project_dir, suffixes=exts, exclude_dirs=_BUILD_FIX_EXCLUDE_DIRS):
-        try:
-            rel = str(f.relative_to(project_dir))
-            content = f.read_text(encoding="utf-8", errors="replace")
-            current_files[rel] = content
-            total += len(content) + len(rel)
-            if total > max_chars:
-                break
-        except Exception as e:
-            logger.debug("Build fix: could not read file %s: %s", f, e)
-            continue
+    current_files = _collect_project_files(project_dir, agent_type)
 
     try:
         # response_format="text": the build-fix loop parses the assistant
@@ -524,82 +697,25 @@ def _try_build_fix_one_at_a_time(
         if not issues:
             break
         issue = issues.pop(0)
-        desc = issue["description"]
-        logger.info(
-            "[%s] Build fix attempt %d/%d: Next step -> Fixing issue: %s",
-            task_id,
-            attempt + 1,
-            max_fix_attempts,
-            desc[:80],
+        applied = _execute_llm_repair_attempt(
+            issue=issue,
+            current_files=current_files,
+            project_dir=project_dir,
+            model=_build_fix_model,
+            parse_fn=parse_problem_solving_single_issue_template,
+            fix_prompt=FIX_PROMPT,
+            is_frontend=prompt_module == "frontend_code_v2_team.prompts",
+            language_conventions=language_conventions,
+            task_id=task_id,
+            attempt=attempt,
+            max_attempts=max_fix_attempts,
         )
-        file_path = issue.get("file_path") or ""
-        rec = issue.get("recommendation") or "Fix the issue."
-        # Build relevant code snippet
-        if file_path and file_path in current_files:
-            relevant_code = f"--- {file_path} ---\n{current_files[file_path][:50_000]}"
-        else:
-            parts = []
-            remaining = 50_000
-            for p, c in current_files.items():
-                if remaining <= 0:
-                    break
-                snippet = c[:remaining]
-                parts.append(f"--- {p} ---\n{snippet}")
-                remaining -= len(snippet)
-            relevant_code = "\n".join(parts) if parts else "(no code)"
-        if prompt_module == "frontend_code_v2_team.prompts":
-            prompt = FIX_PROMPT.format(
-                source="build",
-                severity="critical",
-                description=desc,
-                file_path=file_path or "N/A",
-                recommendation=rec,
-                current_code=relevant_code,
-            )
-        else:
-            prompt = FIX_PROMPT.format(
-                language_conventions=language_conventions,
-                source="build",
-                severity="critical",
-                description=desc,
-                file_path=file_path or "N/A",
-                recommendation=rec,
-                current_code=relevant_code,
-            )
+        if not applied:
+            continue
         try:
-            _agent = Agent(model=_build_fix_model)
-            _result = _agent(prompt)
-            raw = str(_result).strip()
-        except Exception as e:
-            logger.warning(
-                "[%s] Build fix attempt %d/%d failed: LLM call error: %s. Next step -> Skipping to next issue",
-                task_id,
-                attempt + 1,
-                max_fix_attempts,
-                e,
-            )
-            continue
-        parsed = parse_problem_solving_single_issue_template(raw)
-        fixed_files = parsed.get("files") or {}
-        if not fixed_files:
-            continue
-        for rel_path, content in fixed_files.items():
-            out_path = project_dir / rel_path
-            try:
-                out_path.parent.mkdir(parents=True, exist_ok=True)
-                out_path.write_text(content, encoding="utf-8")
-                current_files[rel_path] = content
-            except Exception as e:
-                logger.warning("Build fix: could not write %s: %s", rel_path, e)
-        # Re-run build
-        if agent_type == "frontend":
-            result = run_ng_build_with_nvm_fallback(project_dir)
-        else:
-            result = run_python_syntax_check(project_dir)
-            if result.success:
-                tests_dir = project_dir / "tests"
-                if tests_dir.exists() and any(tests_dir.rglob("test_*.py")):
-                    result = run_pytest(project_dir, python_exe=sys.executable)
+            result = _run_post_fix_build_verification(project_dir, agent_type)
+        except _BuildFixCommandError as e:
+            return False, str(e)
         if result.success:
             logger.info(
                 "Build fix (tool agent): task %s build passed after fixing one issue at a time",
@@ -652,8 +768,12 @@ def _try_build_fix_one_at_a_time(
                         }
                     )
             else:
-                test_result = run_pytest(project_dir, python_exe=sys.executable)
-                result = test_result
+                try:
+                    test_result = run_pytest(project_dir, python_exe=sys.executable)
+                    result = test_result
+                except Exception as e:
+                    logger.warning("Build fix: pytest failed to run: %s", e)
+                    return False, str(e)
                 if not result.success:
                     issues = [
                         {
