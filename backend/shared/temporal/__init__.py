@@ -7,7 +7,7 @@ every team can adopt durable, resumable job tracking with minimal code.
 Public API:
     from shared.temporal import (
         get_temporal_client, is_temporal_enabled, connect_temporal_client,
-        start_team_worker, run_team_job,
+        start_team_worker, stop_team_worker, stop_all_team_workers, run_team_job,
         save_checkpoint, load_checkpoint, wait_for_input, submit_input,
         json_safe, merge_context, is_final_attempt, fail_job, guarded,
     )
@@ -57,6 +57,8 @@ from shared.temporal.worker import (
     is_team_worker_alive,
     is_team_worker_ready,
     start_team_worker,
+    stop_all_team_workers,
+    stop_team_worker,
     wait_for_team_worker_ready,
 )
 
@@ -91,6 +93,8 @@ __all__ = [
     "set_temporal_loop",
     "start_team_worker",
     "start_workflow_sync",
+    "stop_all_team_workers",
+    "stop_team_worker",
     "submit_input",
     "terminate_and_await_workflow_sync",
     "translate_workflow_failure",
