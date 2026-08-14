@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -86,7 +87,7 @@ async def test_llm_client_collects_only_native_strands_text_deltas(monkeypatch) 
             yield {"metadata": {"usage": {}}}
 
     client = LLMClient(provider="ollama", model="qwen")
-    monkeypatch.setattr(client, "_create_model", lambda request: _NativeModel())
+    monkeypatch.setattr(client, "_create_model", lambda request, config: _NativeModel())
 
     result = await client.complete(LLMRequest(system="system", user="user"))
 
@@ -131,10 +132,93 @@ def test_llm_client_builds_native_anthropic_model_for_claude() -> None:
         assert client._create_model(request) is model_cls.return_value
 
     model_cls.assert_called_once_with(
-        client_args={"api_key": "secret", "base_url": "https://anthropic.example"},
+        client_args={"api_key": "secret"},
         model_id="claude-test",
         max_tokens=456,
         params={"temperature": 0.1},
+    )
+
+
+def test_llm_client_resolves_each_call_from_active_provider_entry(monkeypatch) -> None:
+    from llm_service import config as llm_config
+    from llm_service import provider_store
+
+    entries = iter(
+        [
+            [
+                SimpleNamespace(
+                    provider="ollama",
+                    model="qwen",
+                    base_url="https://ollama.example",
+                    api_key="ollama-key",
+                )
+            ],
+            [
+                SimpleNamespace(
+                    provider="claude",
+                    model="claude-test",
+                    base_url="https://ollama.com",
+                    api_key="claude-key",
+                )
+            ],
+        ]
+    )
+    monkeypatch.setattr(llm_config, "resolve_provider", lambda: "ollama")
+    monkeypatch.setattr(provider_store, "load_ordered_entries", lambda: next(entries))
+    monkeypatch.setattr(provider_store, "select_active_entry", lambda loaded: loaded[0])
+
+    client = LLMClient()
+    first = client._resolve_config()
+    second = client._resolve_config()
+
+    assert (first.provider, first.model, first.base_url, first.api_key) == (
+        "ollama",
+        "qwen",
+        "https://ollama.example",
+        "ollama-key",
+    )
+    assert (second.provider, second.model, second.base_url, second.api_key) == (
+        "claude",
+        "claude-test",
+        "",
+        "claude-key",
+    )
+
+
+def test_llm_client_does_not_use_environment_without_provider_entry(monkeypatch) -> None:
+    from llm_service import provider_store
+
+    monkeypatch.setenv("LLM_PROVIDER", "claude")
+    monkeypatch.setenv("LLM_MODEL", "claude-env")
+    monkeypatch.setenv("LLM_CLAUDE_API_KEY", "env-secret")
+    monkeypatch.setattr(provider_store, "load_ordered_entries", lambda: [])
+
+    client = LLMClient()
+
+    assert client.is_configured is False
+    assert client._resolve_config().api_key == ""
+
+
+def test_llm_client_uses_shared_defaults_for_blank_ollama_entry(monkeypatch) -> None:
+    from llm_service import config as llm_config
+    from llm_service import provider_store
+
+    entry = SimpleNamespace(provider="ollama", model="", base_url="", api_key="")
+    monkeypatch.setattr(llm_config, "resolve_provider", lambda: "ollama")
+    monkeypatch.setattr(
+        llm_config,
+        "resolve_model_for_provider",
+        lambda agent_key, provider: "default-model",
+    )
+    monkeypatch.setattr(llm_config, "resolve_base_url", lambda: "https://ollama.default")
+    monkeypatch.setattr(provider_store, "load_ordered_entries", lambda: [entry])
+    monkeypatch.setattr(provider_store, "select_active_entry", lambda loaded: loaded[0])
+
+    config = LLMClient()._resolve_config()
+
+    assert (config.model, config.base_url) == (
+        "default-model",
+        "https://ollama.default",
     )
 
 
