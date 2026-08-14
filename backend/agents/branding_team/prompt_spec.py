@@ -1,12 +1,10 @@
 """Data-driven system-prompt spec and renderer for branding team agents.
 
-Each ``make_*`` factory in ``branding_team.agents`` hand-writes a system
-prompt that lists the Pydantic fields its ``structured_output`` model
-expects. ``AgentPromptSpec`` captures that prompt as data (an opening
-sentence, a numbered field list, and an optional closing sentence) and
-``render_agent_prompt`` renders it back to the exact prose string, so the
-prompt content lives as reviewable data instead of a hand-formatted string
-literal duplicated across factories.
+Every ``make_*`` factory in ``branding_team.agents`` declares an
+``AgentPromptSpec`` (an opening sentence, a numbered field list, and an
+optional closing sentence). ``render_agent_prompt`` turns that spec into
+the system-prompt string passed to ``build_agent``, so prompt content lives
+as reviewable data instead of a hand-formatted string literal.
 """
 
 from __future__ import annotations
