@@ -184,7 +184,8 @@ microtask's output into a shared `all_files: Dict[str, str]` dict and writes
 it to a shared `repo_path` git worktree. Independent microtasks in the same
 scheduled wave run concurrently via `parallel_map` with `wait_for_stragglers=True`
 so a stop-on-review-failure does not return while a sibling is still writing
-the worktree. Generation runs unlocked; write through review, docs, and
+the worktree. The pool is capped by `SE_EXECUTION_WAVE_CONCURRENCY` (default 4),
+not wave size. Generation runs unlocked; write through review, docs, and
 rollback then hold a per-run worktree lock because review tools (build/lint)
 observe the whole repo and review/docs can introduce paths that were not in
 the initial generation set. Per-path `KeyedLockManager` locks still

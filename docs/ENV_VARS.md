@@ -1684,6 +1684,14 @@ with the issues it depends on so the UI can flag blocked issues; the lookups fan
 semaphore of this width (default `8`). A failed/absent lookup degrades to no dependencies for that
 issue and never fails the list.
 
+### SE_EXECUTION_WAVE_CONCURRENCY
+Maximum number of microtask workers the code-v2 execution loops
+(`run_execution_impl` / `run_gated_execution_impl`) dispatch concurrently within
+one independent wave (default `4`; garbage/empty → default; floored at `1`).
+`parallel_map` sizes the pool at `min(this, wave size)`, so a large planner
+wave cannot spawn one thread per microtask. Cycle-flush batches with intra-batch
+edges still run sequentially.
+
 ### CODING_TEAM_REVIEW_RETRIES
 Number of times the coding-team Tech Lead `run_code_review` LLM call is retried (with jittered
 exponential backoff) on a transient failure (rate limit / timeout / provider outage) before the

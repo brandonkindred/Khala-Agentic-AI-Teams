@@ -9,12 +9,13 @@ import threading
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 from llm_service import LLMClient
 from llm_service.strands_model import LlmRunner
 from shared.concurrency import KeyedLockManager, parallel_map
 from shared.dev_models.models import ReviewContext, SystemArchitecture, Task
+from shared.env import parse_int
 from software_engineering_team.shared.agent_review import AgentReviewCache
 from software_engineering_team.shared.code_completeness import reject_invalid_python
 from software_engineering_team.shared.phases.documentation_phase import _run_documentation_phase
@@ -30,6 +31,72 @@ from software_engineering_team.shared.phases.rollback import (
 from software_engineering_team.shared.stack_profile import PhaseModels, StackProfile
 
 logger = logging.getLogger(__name__)
+
+# Cap concurrent microtask workers in one independent wave, independent of wave
+# size. ``parallel_map`` further mins this with ``len(batch)``.
+_WAVE_EXECUTION_CONCURRENCY = 4
+
+
+def _execution_wave_concurrency() -> int:
+    """Max concurrent microtask workers in one independent wave.
+
+    Configurable via ``SE_EXECUTION_WAVE_CONCURRENCY`` (default 4; garbage/empty
+    → default; floored at 1 so a wave always makes progress).
+
+    Preconditions:
+        None (reads only the optional environment variable).
+    Postconditions:
+        Returns an int >= 1.
+    """
+    return parse_int("SE_EXECUTION_WAVE_CONCURRENCY", _WAVE_EXECUTION_CONCURRENCY, minimum=1)
+
+
+def _wave_max_workers(n: int) -> int:
+    """Return the pool width for a wave of ``n`` independent microtasks.
+
+    Preconditions:
+        ``n >= 1``.
+    Postconditions:
+        Returns an int in ``[1, n]``.
+    """
+    if n < 1:
+        raise ValueError("n must be >= 1")
+    return min(n, _execution_wave_concurrency())
+
+
+def _expect_progress_indices(
+    progress_callback: Optional[Callable[..., None]],
+    indices: Sequence[int],
+) -> None:
+    """Register wave members with the coalescer before concurrent fan-out.
+
+    Preconditions:
+        ``indices`` are the 1-based progress indices of the current independent
+        wave.
+    Postconditions:
+        No-op when ``progress_callback`` has no ``expect``; otherwise those
+        indices block ``completed`` publication until each has ticked or been
+        released.
+    """
+    expect = getattr(progress_callback, "expect", None)
+    if expect is not None:
+        expect(indices)
+
+
+def _release_progress_index(
+    progress_callback: Optional[Callable[..., None]],
+    current_idx: int,
+) -> None:
+    """Drop a coalescer registration if the worker finished without a tick.
+
+    Preconditions:
+        ``current_idx`` is the 1-based progress index of this worker.
+    Postconditions:
+        No-op when ``progress_callback`` has no ``release``.
+    """
+    release = getattr(progress_callback, "release", None)
+    if release is not None:
+        release(current_idx)
 
 
 class ReviewDependencies:
@@ -209,8 +276,9 @@ def run_execution_impl(
         Returns an ``ExecutionResult``; a failed microtask is marked FAILED and
         execution continues with the rest. Microtasks are grouped into
         dependency-respecting waves via :func:`_schedule_microtask_batches`;
-        independent members of a wave run concurrently via ``parallel_map``.
-        An unmet ``depends_on`` is logged and
+        independent members of a wave run concurrently via ``parallel_map``,
+        with the pool capped by ``SE_EXECUTION_WAVE_CONCURRENCY`` (default 4)
+        rather than wave size. An unmet ``depends_on`` is logged and
         the microtask still runs ("running anyway") rather than being skipped or
         failed outright: ``depends_on`` is an LLM-planned ordering hint, not a
         verified DAG, so failing closed on it would silently drop a legitimately
@@ -244,34 +312,38 @@ def run_execution_impl(
 
         def _run_one(pair: Tuple[Any, int]) -> None:
             mt, current_idx = pair
-            _run_one_ungated_microtask(
-                llm=llm,
-                mt=mt,
-                task=task,
-                current_idx=current_idx,
-                planning_result=planning_result,
-                repo_path=repo_path,
-                architecture=architecture,
-                existing_code=existing_code,
-                runners=runners,
-                models=models,
-                run_general_microtask=run_general_microtask,
-                all_files=all_files,
-                completed_ids=completed_ids,
-                file_locks=file_locks,
-                progress_callback=progress_callback,
-                total=total,
-                microtask_status_enum=microtask_status_enum,
-            )
+            try:
+                _run_one_ungated_microtask(
+                    llm=llm,
+                    mt=mt,
+                    task=task,
+                    current_idx=current_idx,
+                    planning_result=planning_result,
+                    repo_path=repo_path,
+                    architecture=architecture,
+                    existing_code=existing_code,
+                    runners=runners,
+                    models=models,
+                    run_general_microtask=run_general_microtask,
+                    all_files=all_files,
+                    completed_ids=completed_ids,
+                    file_locks=file_locks,
+                    progress_callback=progress_callback,
+                    total=total,
+                    microtask_status_enum=microtask_status_enum,
+                )
+            finally:
+                _release_progress_index(progress_callback, current_idx)
 
         if len(indexed) == 1 or _batch_has_intra_dependencies(batch):
             for pair in indexed:
                 _run_one(pair)
         else:
+            _expect_progress_indices(progress_callback, [i for _, i in indexed])
             parallel_map(
                 indexed,
                 _run_one,
-                max_workers=len(indexed),
+                max_workers=_wave_max_workers(len(indexed)),
                 skip_none=False,
                 wait_for_stragglers=True,
             )
@@ -566,10 +638,90 @@ def _clone_review_deps(deps: ReviewDependencies) -> ReviewDependencies:
     )
 
 
+class _ProgressCoalescer:
+    """Serialize concurrent progress ticks so the dashboard cannot regress.
+
+    Invariants:
+        ``_pending`` holds expected wave indices that have not ticked yet;
+        ``_active`` holds indices whose last tick was not ``completed``.
+    """
+
+    def __init__(
+        self,
+        progress_callback: Callable[[int, int, int, str, str, str], None],
+        lock: threading.Lock,
+    ) -> None:
+        self._cb = progress_callback
+        self._lock = lock
+        self._pending: set[int] = set()
+        self._active: set[int] = set()
+        self._in_progress: Dict[int, Tuple[int, str, str, str]] = {}
+        self._max_completed = 0
+
+    def expect(self, indices: Sequence[int]) -> None:
+        """Register wave members that have not ticked yet.
+
+        Preconditions:
+            ``indices`` are the 1-based progress indices of the current
+            independent wave; called before ``parallel_map`` starts workers.
+        Postconditions:
+            Those indices block ``completed`` publication until each has
+            either emitted a tick or been :meth:`release`d.
+        """
+        with self._lock:
+            self._pending.update(indices)
+
+    def release(self, current_index: int) -> None:
+        """Drop a registered index that finished without a further tick.
+
+        Preconditions:
+            ``current_index`` is a 1-based progress index previously passed
+            to :meth:`expect` or to ``__call__``.
+        Postconditions:
+            ``current_index`` is no longer in ``_pending`` or ``_active``.
+        """
+        with self._lock:
+            self._pending.discard(current_index)
+            self._active.discard(current_index)
+            self._in_progress.pop(current_index, None)
+
+    def __call__(
+        self,
+        current_index: int,
+        completed: int,
+        total: int,
+        title: str,
+        microtask_phase: str,
+        phase_detail: str,
+    ) -> None:
+        with self._lock:
+            if microtask_phase == "completed":
+                self._pending.discard(current_index)
+                self._active.discard(current_index)
+                self._in_progress.pop(current_index, None)
+            else:
+                self._pending.discard(current_index)
+                self._active.add(current_index)
+                self._in_progress[current_index] = (total, title, microtask_phase, phase_detail)
+            self._max_completed = max(self._max_completed, completed)
+            blockers = self._pending | self._active
+            if microtask_phase == "completed" and blockers:
+                if self._in_progress:
+                    live_idx = max(self._in_progress)
+                    tot, live_title, live_phase, live_detail = self._in_progress[live_idx]
+                    self._cb(
+                        live_idx, self._max_completed, tot, live_title, live_phase, live_detail
+                    )
+                return
+            self._cb(
+                current_index, self._max_completed, total, title, microtask_phase, phase_detail
+            )
+
+
 def _serialize_progress(
     progress_callback: Optional[Callable[[int, int, int, str, str, str], None]],
     lock: threading.Lock,
-) -> Optional[Callable[[int, int, int, str, str, str], None]]:
+) -> Optional[_ProgressCoalescer]:
     """Wrap ``progress_callback`` so concurrent workers cannot regress dashboard state.
 
     ``shared.v2_orchestrator._build_progress_callback`` persists every tick's
@@ -580,52 +732,22 @@ def _serialize_progress(
     Coalescing under ``lock``:
         - Published ``completed`` is monotonic.
         - A ``completed``-phase tick is not forwarded while another index is
-          still in a non-completed phase. Instead the still-active sibling's
-          last in-progress snapshot is re-emitted with the updated completed
-          count so the progress bar can advance without freezing on a
-          sibling's ``completed`` snapshot.
+          still in a non-completed phase, or while a wave member registered
+          via :meth:`_ProgressCoalescer.expect` has not started. Instead the
+          still-active sibling's last in-progress snapshot is re-emitted
+          with the updated completed count (or the tick is suppressed when
+          no sibling has started yet).
         - In-progress ticks always forward (they are live work).
 
     Preconditions:
         ``lock`` is dedicated to this callback (not reused for file writes).
     Postconditions:
         Returns ``None`` when ``progress_callback`` is ``None``; otherwise a
-        wrapper that holds ``lock`` for the duration of each call.
+        coalescer that holds ``lock`` for the duration of each call.
     """
     if progress_callback is None:
         return None
-
-    active: set[int] = set()
-    max_completed = 0
-    in_progress: Dict[int, Tuple[int, str, str, str]] = {}
-
-    def _wrapped(
-        current_index: int,
-        completed: int,
-        total: int,
-        title: str,
-        microtask_phase: str,
-        phase_detail: str,
-    ) -> None:
-        nonlocal max_completed
-        with lock:
-            if microtask_phase == "completed":
-                active.discard(current_index)
-                in_progress.pop(current_index, None)
-            else:
-                active.add(current_index)
-                in_progress[current_index] = (total, title, microtask_phase, phase_detail)
-            max_completed = max(max_completed, completed)
-            if microtask_phase == "completed" and active:
-                live_idx = max(active)
-                tot, live_title, live_phase, live_detail = in_progress[live_idx]
-                progress_callback(live_idx, max_completed, tot, live_title, live_phase, live_detail)
-                return
-            progress_callback(
-                current_index, max_completed, total, title, microtask_phase, phase_detail
-            )
-
-    return _wrapped
+    return _ProgressCoalescer(progress_callback, lock)
 
 
 def _run_one_gated_microtask(
@@ -696,6 +818,10 @@ def _run_one_gated_microtask(
             )
             mt.status = microtask_status.SKIPPED
             mt.notes = f"Skipped: depends on review-failed microtasks {unmet}"
+            if progress_callback:
+                progress_callback(
+                    current_idx, len(completed_ids), total, mt.title or mt.id, "completed", ""
+                )
             return
         logger.warning(
             "[%s] Microtask %s has unmet deps %s — running anyway", task_id, mt.id, unmet
@@ -980,7 +1106,9 @@ def run_gated_execution_impl(
     Postconditions:
         Returns an ``ExecutionResult``; each microtask ends COMPLETED, SKIPPED,
         FAILED or REVIEW_FAILED. Independent members of a scheduled wave run
-        concurrently via ``parallel_map``. Generation of independent wave
+        concurrently via ``parallel_map``, with the pool capped by
+        ``SE_EXECUTION_WAVE_CONCURRENCY`` (default 4) rather than wave size.
+        Generation of independent wave
         members runs concurrently; write through review, docs, and rollback
         hold a per-run worktree lock because review tools observe the whole
         repo and review/docs can introduce paths not present in the initial
@@ -1050,45 +1178,49 @@ def run_gated_execution_impl(
 
         def _run_one(pair: Tuple[Any, int]) -> None:
             mt, current_idx = pair
-            _run_one_gated_microtask(
-                gate_config=gate_config,
-                llm=llm,
-                task=task,
-                task_id=task_id,
-                mt=mt,
-                current_idx=current_idx,
-                planning_result=planning_result,
-                repo_path=repo_path,
-                architecture=architecture,
-                existing_code=existing_code,
-                runners=runners,
-                models=models,
-                review_context=review_context,
-                config=config,
-                deps=_clone_review_deps(deps),
-                all_files=all_files,
-                review_failed_ids=review_failed_ids,
-                completed_ids=completed_ids,
-                microtask_status=microtask_status,
-                review_result_cls=review_result_cls,
-                review_failed_error_cls=review_failed_error_cls,
-                tool_agent_kind=tool_agent_kind,
-                max_total_cycles=max_total_cycles,
-                code_review_retry_cap=code_review_retry_cap,
-                total=total,
-                file_locks=file_locks,
-                worktree_lock=worktree_lock,
-                progress_callback=progress_callback,
-            )
+            try:
+                _run_one_gated_microtask(
+                    gate_config=gate_config,
+                    llm=llm,
+                    task=task,
+                    task_id=task_id,
+                    mt=mt,
+                    current_idx=current_idx,
+                    planning_result=planning_result,
+                    repo_path=repo_path,
+                    architecture=architecture,
+                    existing_code=existing_code,
+                    runners=runners,
+                    models=models,
+                    review_context=review_context,
+                    config=config,
+                    deps=_clone_review_deps(deps),
+                    all_files=all_files,
+                    review_failed_ids=review_failed_ids,
+                    completed_ids=completed_ids,
+                    microtask_status=microtask_status,
+                    review_result_cls=review_result_cls,
+                    review_failed_error_cls=review_failed_error_cls,
+                    tool_agent_kind=tool_agent_kind,
+                    max_total_cycles=max_total_cycles,
+                    code_review_retry_cap=code_review_retry_cap,
+                    total=total,
+                    file_locks=file_locks,
+                    worktree_lock=worktree_lock,
+                    progress_callback=progress_callback,
+                )
+            finally:
+                _release_progress_index(progress_callback, current_idx)
 
         if len(indexed) == 1 or _batch_has_intra_dependencies(batch):
             for pair in indexed:
                 _run_one(pair)
         else:
+            _expect_progress_indices(progress_callback, [i for _, i in indexed])
             parallel_map(
                 indexed,
                 _run_one,
-                max_workers=len(indexed),
+                max_workers=_wave_max_workers(len(indexed)),
                 skip_none=False,
                 wait_for_stragglers=True,
             )

@@ -444,6 +444,44 @@ def test_run_execution_impl_independent_microtasks_all_complete():
     assert result.files == {"src/mt-1.py": "print(1)\n", "src/mt-2.py": "print(1)\n"}
 
 
+def test_run_execution_impl_caps_parallel_map_workers(monkeypatch):
+    """Independent waves do not size the pool at wave length."""
+    seen: list[int] = []
+    real = sh_exec.parallel_map
+
+    def _wrapped(*args, **kwargs):
+        seen.append(kwargs["max_workers"])
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(sh_exec, "parallel_map", _wrapped)
+    monkeypatch.setenv("SE_EXECUTION_WAVE_CONCURRENCY", "2")
+
+    planning = be_models.PlanningResult(
+        microtasks=[
+            be_models.Microtask(
+                id=f"mt-{i}", tool_agent=be_models.ToolAgentKind.GENERAL, description="x"
+            )
+            for i in range(5)
+        ],
+        language="python",
+    )
+    result = sh_exec.run_execution_impl(
+        llm=object(),
+        task=_task(),
+        planning_result=planning,
+        repo_path=Path("/tmp"),
+        architecture=None,
+        existing_code="",
+        tool_runners={},
+        progress_callback=None,
+        only_microtask_ids=None,
+        models=be_models,
+        run_general_microtask=lambda **kw: {f"src/{kw['microtask'].id}.py": "print(1)\n"},
+    )
+    assert seen == [2]
+    assert {m.status for m in result.microtasks} == {be_models.MicrotaskStatus.COMPLETED}
+
+
 def test_run_execution_impl_sequential_chain_runs_in_dependency_order():
     """A fully sequential chain is scheduled into one-microtask waves and runs A then B then C."""
     order: list[str] = []

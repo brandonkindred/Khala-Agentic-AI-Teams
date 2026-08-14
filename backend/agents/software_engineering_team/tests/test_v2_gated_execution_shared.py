@@ -38,11 +38,14 @@ from llm_service.clients.dummy import DummyLLMClient
 from shared.dev_models.models import SystemArchitecture
 from software_engineering_team.backend_code_v2_team import models as be_models
 from software_engineering_team.shared.phases.execution import (
+    _WAVE_EXECUTION_CONCURRENCY,
     GatedExecutionConfig,
     GateOutcome,
     ReviewDependencies,
+    _execution_wave_concurrency,
     _schedule_microtask_batches,
     _serialize_progress,
+    _wave_max_workers,
     run_gated_execution_impl,
 )
 from software_engineering_team.shared.v2_models import ReviewIssue
@@ -411,6 +414,72 @@ def test_serialize_progress_does_not_publish_completed_while_sibling_active():
     assert calls[-1][3] == "mt-1"
     assert calls[-1][4] == "completed"
     assert calls[-1][1] == 1
+
+
+def test_serialize_progress_does_not_publish_completed_before_sibling_starts():
+    """A faster worker must not publish completed before a registered sibling ticks."""
+    calls: List[tuple] = []
+    cb = _serialize_progress(lambda *a: calls.append(a), threading.Lock())
+    assert cb is not None
+    cb.expect([1, 2])
+    cb(2, 1, 2, "mt-2", "completed", "")
+
+    assert not any(c[4] == "completed" for c in calls)
+
+    cb(1, 1, 2, "mt-1", "coding", "")
+    assert calls[-1][3] == "mt-1"
+    assert calls[-1][4] == "coding"
+    assert calls[-1][1] == 1
+
+    cb(1, 1, 2, "mt-1", "completed", "")
+    assert calls[-1][3] == "mt-1"
+    assert calls[-1][4] == "completed"
+
+
+def test_execution_wave_concurrency_env(monkeypatch):
+    monkeypatch.delenv("SE_EXECUTION_WAVE_CONCURRENCY", raising=False)
+    assert _execution_wave_concurrency() == _WAVE_EXECUTION_CONCURRENCY
+    monkeypatch.setenv("SE_EXECUTION_WAVE_CONCURRENCY", "not-a-number")
+    assert _execution_wave_concurrency() == _WAVE_EXECUTION_CONCURRENCY
+    monkeypatch.setenv("SE_EXECUTION_WAVE_CONCURRENCY", "0")
+    assert _execution_wave_concurrency() == 1
+    monkeypatch.setenv("SE_EXECUTION_WAVE_CONCURRENCY", "7")
+    assert _execution_wave_concurrency() == 7
+
+
+def test_wave_max_workers_caps_at_concurrency(monkeypatch):
+    monkeypatch.setenv("SE_EXECUTION_WAVE_CONCURRENCY", "2")
+    assert _wave_max_workers(5) == 2
+    assert _wave_max_workers(1) == 1
+
+
+def test_gated_wave_caps_parallel_map_workers(tmp_path, monkeypatch):
+    import software_engineering_team.shared.phases.execution as execution_mod
+
+    seen: List[int] = []
+    real = execution_mod.parallel_map
+
+    def _wrapped(*args: Any, **kwargs: Any) -> Any:
+        seen.append(kwargs["max_workers"])
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(execution_mod, "parallel_map", _wrapped)
+    monkeypatch.setenv("SE_EXECUTION_WAVE_CONCURRENCY", "2")
+
+    def coder(**kwargs: Any) -> Dict[str, str]:
+        mid = kwargs["microtask"].id
+        return {f"src/{mid}.py": f"print({mid!r})\n"}
+
+    mts = [_microtask(f"mt-{i}") for i in range(5)]
+    _run(
+        _make_gate_config(coder=coder),
+        mts,
+        tmp_path,
+        review_config=_config(),
+    )
+
+    assert seen == [2]
+    assert all(mt.status == MS.COMPLETED for mt in mts)
 
 
 # ---------------------------------------------------------------------------
