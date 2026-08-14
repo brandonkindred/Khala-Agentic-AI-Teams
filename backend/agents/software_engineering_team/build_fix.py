@@ -277,12 +277,32 @@ def _try_build_fix_one_at_a_time(
 ) -> tuple[bool, str]:
     """
     Use a tool-agent style flow to identify all build issues, then fix them one at a time.
-    Returns (True, "") if build passes after fixes; otherwise (False, error_summary).
 
     Preconditions:
         ``agent_type`` is already normalized to the base type (``"backend"`` or
         ``"frontend"``) by the caller (:func:`_run_build_verification`) — this
         function never receives a ``_code_v2``-suffixed value.
+        ``repo_path`` is a ``Path`` to the generated task repo.
+
+    Postconditions:
+        Returns ``(True, "")`` when the frontend build or backend syntax/tests
+        pass after the one-at-a-time repair loop. Returns ``(False, error_summary)``
+        when the project is missing, ``agent_type`` is unsupported, verification
+        still fails, or a recoverable helper failure is logged and converted
+        into that False result.
+
+        Recoverable failures are logged and do **not** propagate: ng-build
+        launch, ``requirements.txt`` install, per-file reads/writes, Strands
+        model acquisition, and LLM calls. ``find_repo_files`` never raises
+        (best-effort walk). ``run_pytest`` / ``run_command`` map subprocess
+        failures (timeout, missing binary, unexpected errors) into
+        ``CommandResult`` rather than raising ``subprocess.CalledProcessError``.
+
+    Raises:
+        OSError from unbounded ``Path.rglob`` project probes, and exceptions
+        from ``parse_problem_solving_single_issue_template`` or the uncaught
+        post-fix re-run of ``run_ng_build_with_nvm_fallback``. Those paths are
+        not wrapped the way the LLM / install / file I/O helpers are.
     """
     from shared.command_runner.angular_repair import run_ng_build_with_nvm_fallback
     from shared.command_runner.executor import (
