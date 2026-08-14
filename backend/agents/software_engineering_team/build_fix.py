@@ -300,14 +300,15 @@ def _try_build_fix_one_at_a_time(
 
     Postconditions:
         Returns ``(True, "")`` when the frontend build or backend syntax/tests
-        pass after the one-at-a-time repair loop. Returns ``(False, error_summary)``
-        when the project is missing, ``agent_type`` is unsupported, verification
-        still fails, or a recoverable helper failure is logged and converted
-        into that False result.
+        pass — including after a best-effort helper failure that was logged
+        and skipped (``requirements.txt`` install, per-file reads/writes,
+        individual LLM calls). Returns ``(False, error_summary)`` when the
+        project is missing, ``agent_type`` is unsupported, ng-build cannot
+        launch, the Strands model cannot be acquired, or final verification
+        is still failing after the repair loop.
 
-        Recoverable failures are logged and do **not** propagate: ng-build
-        launch, ``requirements.txt`` install, per-file reads/writes, Strands
-        model acquisition, and LLM calls. ``find_repo_files`` never raises
+        Best-effort helpers are logged and do **not** propagate and do **not**
+        by themselves force a False result. ``find_repo_files`` never raises
         (best-effort walk). ``run_pytest`` / ``run_command`` map subprocess
         failures (timeout, missing binary, unexpected errors) into
         ``CommandResult`` rather than raising ``subprocess.CalledProcessError``.
