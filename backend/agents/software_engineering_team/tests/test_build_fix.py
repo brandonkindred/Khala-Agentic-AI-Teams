@@ -1,10 +1,8 @@
-"""Regression tests for ``_run_build_verification``'s ``agent_type`` handling.
+"""Tests for ``_run_build_verification`` aliases and the extracted build-fix helpers.
 
-Covers the bug where the v2 phase-pipeline teams pass ``"backend_code_v2"`` /
-``"frontend_code_v2"`` as ``agent_type``, which matched none of the original
-``"backend"``/``"frontend"``/``"devops"`` branches and fell through to an
-unconditional ``(True, "")`` -- silently skipping syntax check / pytest / ng
-build for every v2 coding-team job.
+Covers the v2 ``agent_type`` aliases that must not skip syntax check / pytest /
+ng build, plus unit tests for ``_collect_project_files``,
+``_execute_llm_repair_attempt``, and ``_run_post_fix_build_verification``.
 """
 
 from __future__ import annotations
@@ -16,7 +14,10 @@ import pytest
 
 from shared.command_runner.executor import CommandResult
 from software_engineering_team.build_fix import (
+    _collect_project_files,
+    _execute_llm_repair_attempt,
     _run_build_verification,
+    _run_post_fix_build_verification,
     _try_build_fix_one_at_a_time,
 )
 
@@ -57,9 +58,9 @@ def test_frontend_code_v2_alias_normalizes_agent_type(
 
     assert success is True
     assert error_output == ""
-    assert any(
-        "no frontend project found" in record.message for record in caplog.records
-    ), "frontend branch was not actually entered"
+    assert any("no frontend project found" in record.message for record in caplog.records), (
+        "frontend branch was not actually entered"
+    )
 
 
 def test_backend_code_v2_passes_on_valid_python(tmp_path: Path) -> None:
@@ -69,6 +70,170 @@ def test_backend_code_v2_passes_on_valid_python(tmp_path: Path) -> None:
 
     assert success is True
     assert error_output == ""
+
+
+def test_collect_project_files_reads_backend_python_and_skips_excluded_dirs(tmp_path: Path) -> None:
+    """Backend collection includes ``.py`` sources and never descends into ``__pycache__``."""
+    _write(tmp_path / "app" / "main.py", "def foo():\n    return 1\n")
+    _write(tmp_path / "__pycache__" / "main.cpython-311.py", "should_not_be_collected")
+    _write(tmp_path / "app" / "notes.txt", "ignored")
+
+    files = _collect_project_files(tmp_path, "backend")
+
+    assert files == {"app/main.py": "def foo():\n    return 1\n"}
+
+
+def test_collect_project_files_caps_total_chars(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Collection stops once the briefing budget is exceeded."""
+    monkeypatch.setattr(
+        "software_engineering_team.build_fix._BUILD_FIX_MAX_CODE_CHARS",
+        20,
+    )
+    _write(tmp_path / "a.py", "x" * 30)
+    _write(tmp_path / "b.py", "y" * 30)
+
+    files = _collect_project_files(tmp_path, "backend")
+
+    assert len(files) == 1
+
+
+def test_collect_project_files_skips_unreadable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    good = tmp_path / "ok.py"
+    bad = tmp_path / "bad.py"
+    _write(good, "ok")
+    _write(bad, "nope")
+
+    original_read = Path.read_text
+
+    def _maybe_fail(self: Path, *args: object, **kwargs: object) -> str:
+        if self.name == "bad.py":
+            raise OSError("permission denied")
+        return original_read(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", _maybe_fail)
+
+    files = _collect_project_files(tmp_path, "backend")
+
+    assert files == {"ok.py": "ok"}
+
+
+def test_run_post_fix_build_verification_frontend_delegates(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    sentinel = object()
+    called: list[Path] = []
+
+    def _fake_ng(project_dir: Path) -> object:
+        called.append(project_dir)
+        return sentinel
+
+    monkeypatch.setattr(
+        "shared.command_runner.angular_repair.run_ng_build_with_nvm_fallback",
+        _fake_ng,
+    )
+
+    result = _run_post_fix_build_verification(tmp_path, "frontend")
+
+    assert result is sentinel
+    assert called == [tmp_path]
+
+
+def test_run_post_fix_build_verification_backend_runs_pytest_when_tests_exist(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _write(tmp_path / "app.py", "x = 1\n")
+    _write(tmp_path / "tests" / "test_app.py", "def test_ok():\n    assert True\n")
+
+    syntax_ok = type("R", (), {"success": True})()
+    pytest_result = type("R", (), {"success": False, "error_summary": "fail"})()
+    calls: list[str] = []
+
+    monkeypatch.setattr(
+        "shared.command_runner.executor.run_python_syntax_check",
+        lambda project_dir: calls.append("syntax") or syntax_ok,
+    )
+    monkeypatch.setattr(
+        "shared.command_runner.executor.run_pytest",
+        lambda project_dir, python_exe=None: calls.append("pytest") or pytest_result,
+    )
+
+    result = _run_post_fix_build_verification(tmp_path, "backend")
+
+    assert result is pytest_result
+    assert calls == ["syntax", "pytest"]
+
+
+def test_execute_llm_repair_attempt_writes_parsed_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    current_files = {"app.py": "old"}
+    issue = {
+        "description": "broken",
+        "file_path": "app.py",
+        "recommendation": "Fix it.",
+    }
+
+    class _FakeAgent:
+        def __init__(self, model: object) -> None:
+            self.model = model
+
+        def __call__(self, prompt: str) -> str:
+            assert "broken" in prompt
+            return "TEMPLATE"
+
+    monkeypatch.setattr("software_engineering_team.build_fix.Agent", _FakeAgent)
+
+    applied = _execute_llm_repair_attempt(
+        issue=issue,
+        current_files=current_files,
+        project_dir=tmp_path,
+        model=object(),
+        parse_fn=lambda raw: {"files": {"app.py": "new"}},
+        fix_prompt="{source} {severity} {description} {file_path} {recommendation} {current_code}",
+        is_frontend=True,
+        language_conventions="",
+        task_id="t1",
+        attempt=0,
+        max_attempts=3,
+    )
+
+    assert applied is True
+    assert (tmp_path / "app.py").read_text(encoding="utf-8") == "new"
+    assert current_files["app.py"] == "new"
+
+
+def test_execute_llm_repair_attempt_returns_false_on_llm_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class _Boom:
+        def __init__(self, model: object) -> None:
+            pass
+
+        def __call__(self, prompt: str) -> str:
+            raise RuntimeError("llm down")
+
+    monkeypatch.setattr("software_engineering_team.build_fix.Agent", _Boom)
+
+    applied = _execute_llm_repair_attempt(
+        issue={"description": "x", "file_path": "", "recommendation": "Fix."},
+        current_files={},
+        project_dir=tmp_path,
+        model=object(),
+        parse_fn=lambda raw: {"files": {"app.py": "new"}},
+        fix_prompt="{source} {severity} {description} {file_path} {recommendation} {current_code}",
+        is_frontend=True,
+        language_conventions="",
+        task_id="t1",
+        attempt=0,
+        max_attempts=3,
+    )
+
+    assert applied is False
+    assert not (tmp_path / "app.py").exists()
 
 
 def test_try_build_fix_survives_pytest_runner_exception(
