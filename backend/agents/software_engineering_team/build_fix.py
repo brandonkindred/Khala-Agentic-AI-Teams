@@ -13,8 +13,12 @@ Invariants:
       file collection, one LLM repair, and post-fix verification to
       ``_collect_project_files``, ``_execute_llm_repair_attempt``, and
       ``_run_post_fix_build_verification``.
-    - Neither ``_run_build_verification`` nor ``_try_build_fix_one_at_a_time``
-      raises into the build gate: failures return ``(False, summary)``.
+    - The public build-gate wrappers convert failures into a failed result
+      (``(False, summary)`` or ``BuildResult(success=False)``), including
+      exceptions that escape ``_run_build_verification`` /
+      ``_try_build_fix_one_at_a_time``. Those two functions do not wrap every
+      helper; they return ``(False, summary)`` for handled failures and
+      otherwise propagate (see ``_try_build_fix_one_at_a_time`` Raises).
 
 No ``sys.path`` mutation on import: per-team imports (``backend_code_v2_team`` /
 ``frontend_code_v2_team`` prompts and templates) use absolute
@@ -121,6 +125,15 @@ def _run_build_verification(
     those to their base ``"backend"``/``"frontend"`` verification path so v2 jobs
     actually run syntax check / ``ng build`` instead of silently no-op'ing to
     ``(True, "")`` via the fallthrough at the end of this function.
+
+    Raises:
+        Propagates uncaught exceptions from ``_try_build_fix_one_at_a_time``
+        (this function has no extra boundary around those calls) and from
+        unbounded ``Path.rglob`` project probes. Production callers convert
+        those into a failed result:
+        :func:`software_engineering_team.quality_gate_tools.run_build_verification`,
+        :func:`software_engineering_team.shared.deliver_utils.run_pre_merge_quality_gate`,
+        and the v2 review ``_run_build_verification`` wrappers.
     """
     from shared.command_runner.angular_repair import run_ng_build_with_nvm_fallback
     from shared.command_runner.executor import (
@@ -510,12 +523,37 @@ def _try_build_fix_one_at_a_time(
 ) -> tuple[bool, str]:
     """
     Use a tool-agent style flow to identify all build issues, then fix them one at a time.
-    Returns (True, "") if build passes after fixes; otherwise (False, error_summary).
 
     Preconditions:
         ``agent_type`` is already normalized to the base type (``"backend"`` or
         ``"frontend"``) by the caller (:func:`_run_build_verification`) — this
         function never receives a ``_code_v2``-suffixed value.
+        ``repo_path`` is a ``Path`` to the generated task repo.
+
+    Postconditions:
+        Returns ``(True, "")`` when the frontend build or backend syntax/tests
+        pass — including after a best-effort helper failure that was logged
+        and skipped (``requirements.txt`` install, per-file reads/writes,
+        individual LLM calls). Returns ``(False, error_summary)`` when the
+        project is missing, ``agent_type`` is unsupported, ng-build cannot
+        launch, the Strands model cannot be acquired, a pytest runner crash
+        is converted via ``_BuildFixCommandError``, or final verification is
+        still failing after the repair loop.
+
+        Best-effort helpers are logged and do **not** propagate and do **not**
+        by themselves force a False result. ``find_repo_files`` never raises
+        (best-effort walk). ``run_pytest`` / ``run_command`` map subprocess
+        failures (timeout, missing binary, unexpected errors) into
+        ``CommandResult`` rather than raising ``subprocess.CalledProcessError``.
+
+    Raises:
+        OSError from unbounded ``Path.rglob`` project probes, exceptions from
+        ``parse_problem_solving_single_issue_template``, and the uncaught
+        post-fix frontend re-run of ``run_ng_build_with_nvm_fallback``.
+        Pytest runner crashes are logged and returned as ``(False, message)``
+        rather than propagating. :func:`_run_build_verification` does not
+        catch the remaining uncaught paths, so those reach the public
+        build-gate wrappers listed on that function.
     """
     from shared.command_runner.angular_repair import run_ng_build_with_nvm_fallback
     from shared.command_runner.executor import (
@@ -608,11 +646,17 @@ def _try_build_fix_one_at_a_time(
                 req_txt = project_dir / "requirements.txt"
                 if req_txt.exists():
                     try:
-                        run_command(
+                        pip_result = run_command(
                             [sys.executable, "-m", "pip", "install", "-r", "requirements.txt"],
                             cwd=project_dir,
                             timeout=120,
                         )
+                        if not pip_result.success:
+                            logger.warning(
+                                "Build fix: pip install -r requirements.txt failed "
+                                "(non-fatal): %s",
+                                pip_result.error_summary,
+                            )
                     except Exception as e:
                         logger.warning(
                             "Build fix: failed to install requirements.txt before test run: %s", e
