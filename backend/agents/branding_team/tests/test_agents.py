@@ -627,26 +627,30 @@ def _is_expected_prompt_operand(node: ast.expr) -> bool:
 
 
 def _snapshot_factory_from_assert_compare(node: ast.Compare) -> str | None:
-    """Return ``make_*`` if ``node`` is ``make_*(...).system_prompt == _EXPECTED_*``.
+    """Return ``make_*`` if ``node`` is a single ``system_prompt == expected`` equality.
+
+    Chained or mixed-operator comparisons are rejected: ``a != b == c`` can
+    contain both a factory prompt and an ``Eq`` without asserting those two
+    operands equal.
 
     Preconditions:
         ``node`` is an ``ast.Compare`` (the ``test`` of an ``ast.Assert``).
     Postconditions:
-        The factory name when the comparison is an equality against an expected
-        prompt operand; ``None`` otherwise.
+        The factory name when ``node`` is exactly one ``==`` between a
+        ``make_*(...).system_prompt`` operand and an expected-prompt operand;
+        ``None`` otherwise.
     """
-    if not any(isinstance(op, ast.Eq) for op in node.ops):
+    if len(node.ops) != 1 or not isinstance(node.ops[0], ast.Eq) or len(node.comparators) != 1:
         return None
-    factory_name: str | None = None
-    saw_expected = False
-    for expr in [node.left, *node.comparators]:
-        extracted = _make_factory_from_system_prompt_expr(expr)
-        if extracted is not None:
-            factory_name = extracted
-        if _is_expected_prompt_operand(expr):
-            saw_expected = True
-    if factory_name is not None and saw_expected:
-        return factory_name
+    left, right = node.left, node.comparators[0]
+    left_factory = _make_factory_from_system_prompt_expr(left)
+    right_factory = _make_factory_from_system_prompt_expr(right)
+    left_expected = _is_expected_prompt_operand(left)
+    right_expected = _is_expected_prompt_operand(right)
+    if left_factory is not None and right_expected and right_factory is None:
+        return left_factory
+    if right_factory is not None and left_expected and left_factory is None:
+        return right_factory
     return None
 
 
@@ -686,8 +690,9 @@ def test_prompt_snapshot_guard_requires_system_prompt_equality() -> None:
     Preconditions:
         The helpers parse a synthetic module AST.
     Postconditions:
-        A bare ``make_*()`` call, a non-assert comparison, and an assignment of
-        that comparison are ignored; an ``assert`` equality is counted.
+        A bare ``make_*()`` call, a non-assert comparison, an assignment of
+        that comparison, a ``!=`` assert, and a mixed chained comparison are
+        ignored; a single ``assert`` equality is counted.
     """
     uncovered = ast.parse("def test_x():\n    make_new_agent()\n")
     assert _make_factories_with_prompt_snapshots(uncovered) == set()
@@ -695,8 +700,16 @@ def test_prompt_snapshot_guard_requires_system_prompt_equality() -> None:
     assert _make_factories_with_prompt_snapshots(assigned) == set()
     expr = ast.parse("def test_x():\n    make_new_agent().system_prompt == _EXPECTED_X\n")
     assert _make_factories_with_prompt_snapshots(expr) == set()
+    not_eq = ast.parse("def test_x():\n    assert make_new_agent().system_prompt != _EXPECTED_X\n")
+    assert _make_factories_with_prompt_snapshots(not_eq) == set()
+    chained = ast.parse(
+        'def test_x():\n    assert make_new_agent().system_prompt != _EXPECTED_X == "foo"\n'
+    )
+    assert _make_factories_with_prompt_snapshots(chained) == set()
     covered = ast.parse("def test_x():\n    assert make_new_agent().system_prompt == _EXPECTED_X\n")
     assert _make_factories_with_prompt_snapshots(covered) == {"make_new_agent"}
+    swapped = ast.parse("def test_x():\n    assert _EXPECTED_X == make_new_agent().system_prompt\n")
+    assert _make_factories_with_prompt_snapshots(swapped) == {"make_new_agent"}
 
 
 def test_every_make_factory_has_a_prompt_snapshot() -> None:
