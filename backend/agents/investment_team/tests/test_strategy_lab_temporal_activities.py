@@ -677,6 +677,23 @@ def test_design_context_from_wire_returns_none_for_none_or_empty_input():
     assert act._design_context_from_wire({}) is None
 
 
+def test_design_context_from_wire_rejects_partial_payload():
+    with pytest.raises(ValueError, match="design_context"):
+        act._design_context_from_wire({"rounds": 2})
+
+
+def test_design_context_from_wire_rejects_wrong_field_types():
+    with pytest.raises((TypeError, ValueError)):
+        act._design_context_from_wire(
+            {
+                "rounds": 2,
+                "critiques": {},
+                "stop_reason": "ready",
+                "loop_telemetry": {},
+            }
+        )
+
+
 def test_design_context_round_trips_through_wire_helpers():
     from investment_team.strategy_lab._orchestrator_helpers import _DesignPersistContext
     from investment_team.strategy_lab.agents.design_review import SpecCritique
@@ -1346,6 +1363,54 @@ def test_run_design_attempt_activity_empty_checkpoint_design_context_falls_back_
         generation=1,
         budget_calls=99,
         design_context={},
+    )
+
+    class _FakeRecord:
+        def model_dump(self, *, mode: str = "python") -> Dict[str, Any]:
+            return {"lab_record_id": "rec-1"}
+
+    captured: Dict[str, Any] = {}
+
+    def _fake_attempt(self, **kwargs):
+        captured.update(kwargs)
+        captured["budget_calls_seen"] = active_budget().calls_made
+        return _FakeRecord()
+
+    monkeypatch.setattr(StrategyLabOrchestrator, "_run_design_attempt", _fake_attempt)
+    monkeypatch.setattr(act, "_infer_cycle_scope_from_activity_context", lambda: "run-1-c0")
+    monkeypatch.setattr(
+        act,
+        "load_design_attempt_checkpoint",
+        lambda run_id, cycle_scope, design_attempt: checkpoint,
+    )
+
+    out = act.run_design_attempt_activity(
+        _run_design_attempt_params(run_id="run-1", generation=1, budget_calls=7, gate_results=[])
+    )
+
+    assert captured["resume_spec"] is None
+    assert captured["resume_rationale"] is None
+    assert captured["resume_design_context"] is None
+    assert captured["budget_calls_seen"] == 7
+    assert out["budget_calls"] == 7
+
+
+def test_run_design_attempt_activity_partial_checkpoint_design_context_falls_back_to_scratch(
+    monkeypatch,
+):
+    """A nonempty but incomplete design_context (e.g. only rounds) still
+    passes DesignAttemptCheckpoint validation. Resume must fail open and
+    re-run Phase 1 rather than skip it with defaulted critiques/telemetry."""
+    from investment_team.strategy_lab.agents._llm_budget import active_budget
+    from investment_team.strategy_lab.orchestrator import StrategyLabOrchestrator
+
+    checkpoint = _design_attempt_checkpoint(
+        run_id="run-1",
+        cycle_scope="run-1-c0",
+        design_attempt=0,
+        generation=1,
+        budget_calls=99,
+        design_context={"rounds": 2},
     )
 
     class _FakeRecord:

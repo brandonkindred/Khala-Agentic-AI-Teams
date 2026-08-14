@@ -593,6 +593,9 @@ def load_design_attempt_checkpoint(
     return checkpoint
 
 
+_DESIGN_CONTEXT_WIRE_KEYS = ("rounds", "critiques", "stop_reason", "loop_telemetry")
+
+
 def _design_context_to_wire(
     design_context: Optional["_DesignPersistContext"],
 ) -> Optional[Dict[str, Any]]:
@@ -619,25 +622,48 @@ def _design_context_from_wire(data: Optional[Dict[str, Any]]) -> Optional["_Desi
     """Inverse of :func:`_design_context_to_wire` -- reconstructs real ``SpecCritique`` objects.
 
     Preconditions:
-        ``data`` is ``None`` or a dict shaped like ``_design_context_to_wire``'s output.
+        ``data`` is ``None`` or a dict. A nonempty dict must contain every
+        key produced by :func:`_design_context_to_wire` with the matching
+        types (``rounds`` int, ``critiques`` list, ``stop_reason`` str,
+        ``loop_telemetry`` dict).
     Postconditions:
-        Returns ``None`` when ``data`` is ``None``/empty, else a
+        Returns ``None`` when ``data`` is ``None``/empty. Otherwise returns a
         ``_DesignPersistContext`` with ``critiques`` rebuilt as real
         ``SpecCritique`` instances -- not left as plain dicts, which would
         raise ``AttributeError`` deep inside record assembly
         (``orchestrator_record_assembly.py`` calls ``.model_dump()`` on each
-        ``design_context.critiques`` element).
+        ``design_context.critiques`` element). Raises ``ValueError`` /
+        ``TypeError`` when a nonempty payload is missing keys or has the
+        wrong shape, so checkpoint resume can fail open instead of
+        fabricating default audit fields.
     """
     if not data:
         return None
     from investment_team.strategy_lab._orchestrator_helpers import _DesignPersistContext
     from investment_team.strategy_lab.agents.design_review import SpecCritique
 
+    missing = [key for key in _DESIGN_CONTEXT_WIRE_KEYS if key not in data]
+    if missing:
+        raise ValueError(f"design_context missing wire fields: {missing}")
+    rounds = data["rounds"]
+    critiques = data["critiques"]
+    stop_reason = data["stop_reason"]
+    loop_telemetry = data["loop_telemetry"]
+    if isinstance(rounds, bool) or not isinstance(rounds, int):
+        raise TypeError(f"design_context.rounds must be int, got {type(rounds).__name__}")
+    if not isinstance(critiques, list):
+        raise TypeError(f"design_context.critiques must be list, got {type(critiques).__name__}")
+    if not isinstance(stop_reason, str):
+        raise TypeError(f"design_context.stop_reason must be str, got {type(stop_reason).__name__}")
+    if not isinstance(loop_telemetry, dict):
+        raise TypeError(
+            f"design_context.loop_telemetry must be dict, got {type(loop_telemetry).__name__}"
+        )
     return _DesignPersistContext(
-        rounds=int(data.get("rounds", 0)),
-        critiques=[SpecCritique.model_validate(c) for c in data.get("critiques", [])],
-        stop_reason=data.get("stop_reason", ""),
-        loop_telemetry=dict(data.get("loop_telemetry", {})),
+        rounds=rounds,
+        critiques=[SpecCritique.model_validate(c) for c in critiques],
+        stop_reason=stop_reason,
+        loop_telemetry=dict(loop_telemetry),
     )
 
 
