@@ -82,8 +82,9 @@ def _safe_repair_write_path(project_dir: Path, rel_path: str) -> Optional[Path]:
         ``project_dir`` is the project root the fixer is allowed to write.
 
     Postconditions:
-        Returns a path contained in ``project_dir`` whose parts do not include
-        a directory in ``_REPAIR_SKIP_WRITE_DIRS``. ``None`` when ``rel_path``
+        Returns a path contained in ``project_dir`` whose resolved parts do not
+        include a directory in ``_REPAIR_SKIP_WRITE_DIRS`` (lexical or via an
+        in-repo symlink into an excluded tree). ``None`` when ``rel_path``
         is empty, is absolute (``resolve_safe_repo_path`` would ``lstrip`` a
         leading ``/`` and write under the repo), escapes ``project_dir``
         lexically or via a pre-existing symlink ancestor, or targets an
@@ -97,10 +98,10 @@ def _safe_repair_write_path(project_dir: Path, rel_path: str) -> Optional[Path]:
     except UnsafeRepoPathError:
         return None
     try:
-        out.resolve().relative_to(root)
+        real_rel = out.resolve().relative_to(root)
     except ValueError:
         return None
-    if any(part in _REPAIR_SKIP_WRITE_DIRS for part in out.relative_to(root).parts):
+    if any(part in _REPAIR_SKIP_WRITE_DIRS for part in real_rel.parts):
         return None
     return out
 
@@ -653,8 +654,7 @@ def _try_build_fix_one_at_a_time(
                         )
                         if not pip_result.success:
                             logger.warning(
-                                "Build fix: pip install -r requirements.txt failed "
-                                "(non-fatal): %s",
+                                "Build fix: pip install -r requirements.txt failed (non-fatal): %s",
                                 pip_result.error_summary,
                             )
                     except Exception as e:

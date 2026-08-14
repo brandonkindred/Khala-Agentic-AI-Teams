@@ -81,6 +81,18 @@ def test_safe_repair_write_path_rejects_traversal(tmp_path: Path) -> None:
     assert _safe_repair_write_path(root, "/tmp/fix.py") is None
 
 
+def test_safe_repair_write_path_rejects_symlink_into_excluded_dir(tmp_path: Path) -> None:
+    from software_engineering_team.build_fix import _safe_repair_write_path
+
+    root = tmp_path.resolve()
+    (root / "venv").mkdir()
+    (root / "alias").symlink_to(root / "venv")
+    try:
+        assert _safe_repair_write_path(root, "alias/pkg.py") is None
+    finally:
+        (root / "alias").unlink(missing_ok=True)
+
+
 def test_safe_repair_write_path_rejects_venv(tmp_path: Path) -> None:
     from software_engineering_team.build_fix import _safe_repair_write_path
 

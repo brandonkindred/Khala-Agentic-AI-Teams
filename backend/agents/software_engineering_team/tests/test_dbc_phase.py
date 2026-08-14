@@ -289,6 +289,30 @@ def test_dbc_self_review_unsafe_path_skipped_atomically(tmp_path):
     assert all_files == {"a.py": "safe", "../escape.py": "orig-evil"}
 
 
+def test_dbc_self_review_rejects_absolute_map_key(tmp_path):
+    """Absolute keys must not be rewritten as in-repo paths after slash-stripping."""
+    abs_key = "/tmp/a.py"
+
+    def _review(*, code, **kwargs: Any) -> SimpleNamespace:
+        return SimpleNamespace(files={abs_key: "leaked\n", "keep.py": "keep new\n"})
+
+    (tmp_path / "keep.py").write_text("keep orig\n")
+    microtask_files = {abs_key: "orig abs\n", "keep.py": "keep orig\n"}
+    all_files = dict(microtask_files)
+
+    _, microtask_files, all_files, _ = _call(
+        tmp_path=tmp_path,
+        gate_config=_gate_config(_review),
+        microtask_files=microtask_files,
+        all_files=all_files,
+    )
+
+    assert not (tmp_path / "tmp" / "a.py").exists()
+    assert microtask_files[abs_key] == "orig abs\n"
+    assert (tmp_path / "keep.py").read_text() == "keep new\n"
+    assert all_files["keep.py"] == "keep new\n"
+
+
 def test_dbc_self_review_rejects_symlink_escape_write(tmp_path):
     """A reviewed path through a repo symlink must not write outside the worktree."""
     outside = tmp_path.parent.resolve() / f"dbc-write-escape-{tmp_path.name}"

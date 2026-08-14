@@ -192,9 +192,12 @@ def _contained_write_path(root: Path, rel_path: str) -> Optional[Path]:
     Postconditions:
         Returns the lexical path from ``resolve_safe_repo_path`` when that path's
         ``Path.resolve()`` target is still under ``root``. ``None`` when the
-        path is empty, lexically escapes, or traverses a symlink out of the
-        worktree.
+        path is empty, absolute (the shared resolver would strip a leading ``/``
+        and write under the repo), lexically escapes, or traverses a symlink
+        out of the worktree.
     """
+    if os.path.isabs(rel_path):
+        return None
     try:
         out = resolve_safe_repo_path(root, rel_path)
     except UnsafeRepoPathError:
