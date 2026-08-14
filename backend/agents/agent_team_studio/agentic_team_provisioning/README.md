@@ -27,7 +27,10 @@ into an `EnrichedRosterAgent`, and consumed the same way by `roster_validation.p
 persona field with `400` — edit the linked `AgentManifest` instead.
 
 The process designer LLM emits roster JSON alongside process JSON; generated agents are
-stamped with `manifest_id` and registered via `register_team_manifests`. Older roster
+stamped with `manifest_id` and registered via `register_team_manifests`. Roster
+manifests are built through [`shared.manifests`](../../../../shared/manifests/README.md)
+(`build_manifest` / generated-agent entrypoint and schema refs); this package
+owns roster ids, skill-tag wrapping, and registration. Older roster
 rows written before this model was thinned may still carry the legacy fat JSON shape —
 `roster_resolve.migrate_roster_row` eagerly coerces those to thin refs (stamping a
 generated `manifest_id` when needed) the first time they're read.
