@@ -313,3 +313,60 @@ def test_flag_on_distinct_params_produce_distinct_cache_entries(monkeypatch) -> 
     assert cache.misses == 2
     assert cache.hits == 0
     assert v_10 != v_20
+
+
+def test_cache_hit_clears_stale_streaming_state_before_next_expand(monkeypatch) -> None:
+    """A cache hit must not leave ``reg._state`` keyed to a different prefix.
+
+    Fingerprints only identify the trailing bar (id/len/timestamp/close). If
+    a registry walked history H1, then returned a cache hit for H2 with the
+    same length and last bar but a revised earlier prefix, the next one-bar
+    extension of H2 would otherwise classify as ``expand`` and MACD would
+    step from H1's streaming state instead of H2.
+    """
+    monkeypatch.setenv(_ENV_VAR, "true")
+    cache = BatchIndicatorCache()
+    h1 = _series("AAPL", 50, seed=1)
+    h2 = list(h1)
+    early = h1[0]
+    h2[0] = _SymBar(
+        symbol=early.symbol,
+        timestamp=early.timestamp,
+        date=early.date,
+        open=early.open + 25.0,
+        high=early.high + 25.0,
+        low=early.low + 25.0,
+        close=early.close + 25.0,
+        volume=early.volume,
+    )
+    extra = _SymBar(
+        symbol="AAPL",
+        timestamp="2024-02-23",
+        date="2024-02-23",
+        open=110.0,
+        high=111.0,
+        low=109.0,
+        close=110.5,
+        volume=1_000.0,
+    )
+    h2_plus = h2 + [extra]
+    macd_params = {"fast": 12, "slow": 26, "signal": 9, "output": "signal"}
+
+    prefill = IndicatorRegistry(batch_cache=cache, timeframe="1d")
+    resolve_indicator(prefill, "macd", h2, **macd_params)
+    assert cache.misses == 1
+    assert cache.hits == 0
+
+    reg = IndicatorRegistry(batch_cache=cache, timeframe="1d")
+    resolve_indicator(reg, "macd", h1, **macd_params)
+    assert cache.misses == 2
+    assert reg._state
+
+    hit_value = resolve_indicator(reg, "macd", h2, **macd_params)
+    assert cache.hits == 1
+    assert hit_value == resolve_indicator(IndicatorRegistry(), "macd", h2, **macd_params)
+    assert reg._state == {}
+
+    got = resolve_indicator(reg, "macd", h2_plus, **macd_params)
+    want = resolve_indicator(IndicatorRegistry(), "macd", h2_plus, **macd_params)
+    assert got == want

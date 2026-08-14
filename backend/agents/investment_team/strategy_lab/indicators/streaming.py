@@ -1667,7 +1667,10 @@ def resolve_indicator(
     ever changes *how* that value is produced (a cache hit skips walking
     ``reg``'s own streaming state), never *what* value is returned, since the
     cache's key is fully determined by these same inputs plus ``bars``'
-    content.
+    content. On a cache hit, ``reg._state`` is cleared: fingerprints only
+    identify the trailing bar, so leaving prior streaming state in place
+    would let a later one-bar append classify as ``expand`` against a
+    different prefix.
 
     The batch cache (``reg._batch_cache``, set only when
     ``STRATEGY_LAB_BATCH_INDICATOR_CACHE_ENABLED`` was true at ``reg``'s
@@ -1712,8 +1715,14 @@ def resolve_indicator(
             # indicators but isn't itself in `params`, so it must be folded
             # in here (see BatchIndicatorCache.get_or_compute's docstring).
             cache_params["source"] = source
-            value, _hit = cache.get_or_compute(
-                name, cache_params, symbol, timeframe, bars, _compute
-            )
+            value, hit = cache.get_or_compute(name, cache_params, symbol, timeframe, bars, _compute)
+            if hit:
+                # A hit skipped ``_compute``, so ``reg._state`` still
+                # describes whatever history this registry last walked —
+                # which may share this trailing bar while differing in
+                # prefix. ``_advance_kind`` would then treat the next
+                # one-bar extension as ``expand`` and step incremental
+                # indicators (MACD, RSI, …) from the stale prefix.
+                reg._state.clear()
             return value
     return _compute()
