@@ -12,7 +12,7 @@ so a saved agent's persisted ``role`` / ``system_prompt`` (the latter via the
 ``executing`` state — see :func:`build_studio_agent_manifest`) are advertised but
 not yet bound at invoke time. Binding is the same tracked follow-up generated team
 agents carry; out of scope for this Stage-1 backend slice. See
-``system_design/adr/ADR-013-invoke-generated-agent-persona-state-precedence.md``
+``system_design/adr/ADR-015-invoke-generated-agent-persona-state-precedence.md``
 for the locked precedence contract.
 
 Registration scope tracks ``AgentRegistry.register()``'s own write-through: when a

@@ -310,7 +310,7 @@ class GeneratedAgentInvokeInput(BaseModel):
     tools regardless of this field (a caller cannot escalate to ``python`` /
     ``http_request``). Until binding lands, a generated manifest selects which
     agent is *advertised*, not an enforced persona. See
-    ``system_design/adr/ADR-013-invoke-generated-agent-persona-state-precedence.md``
+    ``system_design/adr/ADR-015-invoke-generated-agent-persona-state-precedence.md``
     for the locked precedence contract binding will implement.
     """
 

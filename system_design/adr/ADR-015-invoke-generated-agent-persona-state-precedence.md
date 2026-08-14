@@ -1,4 +1,4 @@
-# ADR-013 — Persona/state override precedence contract for `invoke_generated_agent`
+# ADR-015 — Persona/state override precedence contract for `invoke_generated_agent`
 
 - **Status**: Proposed — design-note only, no behavior change. Locks the contract the
   runtime-binding implementation story (and its sibling contract-tests story) build

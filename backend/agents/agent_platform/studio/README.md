@@ -63,5 +63,5 @@ agent's `role` / `system_prompt` are advertised on the manifest but the shared
 generated-agent runtime still reconstructs persona from the invoke request body,
 not the stored manifest, at invoke time (binding is a separate, tracked follow-up).
 See
-[`system_design/adr/ADR-013-invoke-generated-agent-persona-state-precedence.md`](../../../../system_design/adr/ADR-013-invoke-generated-agent-persona-state-precedence.md)
+[`system_design/adr/ADR-015-invoke-generated-agent-persona-state-precedence.md`](../../../../system_design/adr/ADR-015-invoke-generated-agent-persona-state-precedence.md)
 for the locked precedence contract that follow-up implements.

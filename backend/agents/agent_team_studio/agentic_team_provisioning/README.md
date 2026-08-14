@@ -28,7 +28,7 @@ persona field with `400` — edit the linked `AgentManifest` instead.
 
 `runtime/agent_builder.py`'s sandbox invoke path (`invoke_generated_agent`) does not
 yet bind this manifest at invoke time — see
-[`system_design/adr/ADR-013-invoke-generated-agent-persona-state-precedence.md`](../../../../system_design/adr/ADR-013-invoke-generated-agent-persona-state-precedence.md)
+[`system_design/adr/ADR-015-invoke-generated-agent-persona-state-precedence.md`](../../../../system_design/adr/ADR-015-invoke-generated-agent-persona-state-precedence.md)
 for the locked precedence contract the runtime-binding follow-up implements.
 
 The process designer LLM emits roster JSON alongside process JSON; generated agents are
