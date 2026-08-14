@@ -354,6 +354,11 @@ and small payloads are nowhere near the warning threshold anyway).
 ### SECURITY_GATEWAY_ENABLED
 Security gateway toggle (default: true).
 
+Unified-API lifespan worker/route registration (which step boots which worker,
+which routers mount at import time vs inside `lifespan()`) is catalogued in
+[`UNIFIED_API_LIFESPAN.md`](UNIFIED_API_LIFESPAN.md). The toggles below are the
+gates for those steps.
+
 ### UNIFIED_API_SANDBOX_TEMPORAL_WORKER
 Platform sandbox reaper/worker toggle (default: true). When true, the
 unified-api `lifespan` starts the platform sandbox idle reaper — a
