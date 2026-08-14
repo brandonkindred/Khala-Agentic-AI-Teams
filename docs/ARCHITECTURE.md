@@ -20,6 +20,7 @@ This document describes the architecture of the Software Engineering Team — a 
 - [11. Product Delivery Loop](#11-product-delivery-loop)
 - [12. Agent Cognition Core](#12-agent-cognition-core)
 - [13. Repo Layout](#13-repo-layout)
+- [14. Unified API lifespan](#14-unified-api-lifespan)
 
 ---
 
@@ -676,3 +677,17 @@ flowchart TB
 ```
 
 Each agent directory follows a consistent structure: `agent.py` (core logic), `models.py` (Pydantic input/output contracts), and `prompts.py` (LLM prompt templates). Shared utilities (LLM client, git operations, repo I/O, logging) live in `shared/`.
+
+---
+
+## 14. Unified API lifespan
+
+The Unified API's FastAPI `lifespan` (`backend/unified_api/main.py`) is the sole
+boot site for platform-core workers that share process-local state with this
+process's HTTP handlers (sandbox `Lifecycle`, Studio `AgentStudioService`), and
+the place that registers Postgres schemas, team-assistant mount specs, and
+container-team proxy routes. In-process platform HTTP routers
+(`app.include_router`) mount at import time, not inside `lifespan()`.
+
+The numbered step catalog, import-time router table, and worker-ownership rules
+live in [`UNIFIED_API_LIFESPAN.md`](UNIFIED_API_LIFESPAN.md).

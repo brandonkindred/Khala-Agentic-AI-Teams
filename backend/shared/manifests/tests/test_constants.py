@@ -12,6 +12,7 @@ from shared.manifests import (
     GENERATED_AGENT_OUTPUT_REF,
     default_cognition_block,
 )
+from shared.manifests import constants as manifest_constants
 
 
 def test_generated_agent_constants_have_canonical_values() -> None:
@@ -54,10 +55,19 @@ def test_package_docstring_documents_hashing_team_and_cognition_rules() -> None:
     assert "default_guardrails" in doc
 
 
-def test_studio_shim_reexports_the_same_constant_objects() -> None:
-    assert manifest_shared.GENERATED_AGENT_ENTRYPOINT is GENERATED_AGENT_ENTRYPOINT
-    assert manifest_shared.GENERATED_AGENT_INPUT_REF is GENERATED_AGENT_INPUT_REF
-    assert manifest_shared.GENERATED_AGENT_OUTPUT_REF is GENERATED_AGENT_OUTPUT_REF
+def test_package_reexports_the_same_generated_ref_objects() -> None:
+    assert manifests.GENERATED_AGENT_ENTRYPOINT is manifest_constants.GENERATED_AGENT_ENTRYPOINT
+    assert manifests.GENERATED_AGENT_INPUT_REF is manifest_constants.GENERATED_AGENT_INPUT_REF
+    assert manifests.GENERATED_AGENT_OUTPUT_REF is manifest_constants.GENERATED_AGENT_OUTPUT_REF
+
+
+def test_studio_shim_does_not_reexport_generated_refs() -> None:
+    assert not hasattr(manifest_shared, "GENERATED_AGENT_ENTRYPOINT")
+    assert not hasattr(manifest_shared, "GENERATED_AGENT_INPUT_REF")
+    assert not hasattr(manifest_shared, "GENERATED_AGENT_OUTPUT_REF")
+
+
+def test_studio_shim_reexports_the_same_anatomy_and_cognition_objects() -> None:
     assert manifest_shared.AGENT_ANATOMY_REF is AGENT_ANATOMY_REF
     assert manifest_shared.DEFAULT_RULE_PACKS is DEFAULT_RULE_PACKS
     assert manifest_shared.default_cognition_block is default_cognition_block
