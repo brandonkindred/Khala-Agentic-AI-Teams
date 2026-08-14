@@ -604,9 +604,10 @@ def _design_context_to_wire(
     Preconditions:
         None.
     Postconditions:
-        Returns ``None`` when ``design_context`` is ``None``, else
-        ``{"rounds", "critiques", "stop_reason", "loop_telemetry"}`` with
-        every ``SpecCritique`` in ``critiques`` dumped to a JSON-shaped dict.
+        Returns ``None`` when ``design_context`` is ``None``, else a dict
+        with keys ``rounds``, ``critiques``, ``stop_reason``, and
+        ``loop_telemetry``, with every ``SpecCritique`` in ``critiques``
+        dumped to a JSON-shaped dict.
     """
     if design_context is None:
         return None
@@ -966,7 +967,7 @@ def run_design_attempt_activity(params: Dict[str, Any]) -> Dict[str, Any]:
     # Pre-charge the per-cycle budget to what prior attempts already spent so
     # the ceiling is a true whole-cycle cap, not a per-attempt allowance.
     budget = LLMCallBudget(_design_max_llm_calls())
-    budget.calls_made = min(int(params.get("budget_calls", 0)), budget.limit)
+    budget.calls_made = min(int(params.get("budget_calls") or 0), budget.limit)
 
     # ── Checkpoint resume (ADR-012) ─────────────────────────────────────
     # Must run BEFORE gate_results_len_before is captured below: a valid

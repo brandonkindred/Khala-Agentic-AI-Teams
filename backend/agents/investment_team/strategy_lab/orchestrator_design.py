@@ -1239,7 +1239,15 @@ class DesignMixin:
         same process and does its own wire-conversion before persisting.
         Both default to ``None``, so thread mode's caller (which passes
         neither) is unaffected.
+
+        Preconditions:
+            ``resume_spec is None`` if and only if ``resume_design_context
+            is None``.
         """
+        if (resume_spec is None) != (resume_design_context is None):
+            raise ValueError(
+                "resume_spec and resume_design_context must both be set or both be None"
+            )
         # Reset per-attempt counters so a re-entry starts fresh.
         self._consecutive_spec_mutation_rounds = {}
         # Fresh, attempt-scoped backtest memo. Discarding it per attempt keeps

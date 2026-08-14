@@ -529,6 +529,24 @@ def test_run_design_attempt_resume_skips_phase_one(monkeypatch: pytest.MonkeyPat
     assert record.strategy_rationale == "resumed rationale"
 
 
+def test_run_design_attempt_rejects_resume_spec_without_design_context() -> None:
+    orch = StrategyLabOrchestrator()
+    resume_spec = orch._build_spec_from_dict(_spec_dict(), strategy_id="resumed-strategy")
+
+    with pytest.raises(ValueError, match="resume_spec and resume_design_context"):
+        orch._run_design_attempt(
+            prior_records=[],
+            config=_config(),
+            signal_brief=None,
+            emit=lambda *_a, **_kw: None,
+            exclude_asset_classes=None,
+            directives=[],
+            resume_spec=resume_spec,
+            resume_rationale="resumed rationale",
+            resume_design_context=None,
+        )
+
+
 def _record_attempt_drift(orch: StrategyLabOrchestrator, collector: Any, attempt: int) -> None:
     """Record one spec revision into ``collector`` tagged for ``attempt``.
 

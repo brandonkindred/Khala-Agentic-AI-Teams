@@ -352,6 +352,14 @@ def test_design_attempt_checkpoint_round_trips_through_model_dump():
     assert restored.cycle_scope == "run-1-c0"
 
 
+def test_design_attempt_checkpoint_is_frozen():
+    from pydantic import ValidationError
+
+    checkpoint = _design_attempt_checkpoint()
+    with pytest.raises(ValidationError, match="frozen"):
+        checkpoint.rationale = "mutated"
+
+
 def test_persist_design_attempt_checkpoint_delegates_to_persist_run_state(monkeypatch):
     from investment_team.strategy_lab import orchestrator_api, run_state
 
@@ -827,6 +835,28 @@ def _run_design_attempt_params(**overrides: Any) -> Dict[str, Any]:
     }
     base.update(overrides)
     return base
+
+
+def test_run_design_attempt_activity_treats_null_budget_calls_as_zero(monkeypatch):
+    from investment_team.strategy_lab.agents._llm_budget import active_budget
+    from investment_team.strategy_lab.orchestrator import StrategyLabOrchestrator
+
+    class _FakeRecord:
+        def model_dump(self, *, mode: str = "python") -> Dict[str, Any]:
+            return {"lab_record_id": "rec-1"}
+
+    captured: Dict[str, Any] = {}
+
+    def _fake_attempt(self, **kwargs):
+        captured["budget_calls_seen"] = active_budget().calls_made
+        return _FakeRecord()
+
+    monkeypatch.setattr(StrategyLabOrchestrator, "_run_design_attempt", _fake_attempt)
+
+    out = act.run_design_attempt_activity(_run_design_attempt_params(budget_calls=None))
+
+    assert captured["budget_calls_seen"] == 0
+    assert out["budget_calls"] == 0
 
 
 def test_run_design_attempt_activity_returns_record_outcome(monkeypatch):

@@ -1312,6 +1312,8 @@ class DesignAttemptCheckpoint(BaseModel):
         onward without redoing or double-charging Phase 1's work.
     """
 
+    model_config = ConfigDict(frozen=True)
+
     run_id: str
     cycle_scope: str = Field(..., min_length=1)
     design_attempt: int = Field(..., ge=0)
