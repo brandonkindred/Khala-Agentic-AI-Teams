@@ -12,6 +12,8 @@ helpers — independently of the two team wrappers that also drive them.
 from __future__ import annotations
 
 import subprocess
+import threading
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -398,6 +400,140 @@ def test_run_execution_impl_filters_and_handles_failure():
     assert ran[0].status == be_models.MicrotaskStatus.FAILED
 
 
+def test_run_execution_impl_independent_microtasks_all_complete():
+    """Independent microtasks both complete and contribute disjoint files."""
+    a_entered = threading.Event()
+    b_entered = threading.Event()
+
+    def overlapping_coder(**kwargs):
+        mid = kwargs["microtask"].id
+        if mid == "mt-1":
+            a_entered.set()
+            assert b_entered.wait(timeout=2), "mt-2 never overlapped with mt-1"
+        else:
+            b_entered.set()
+            assert a_entered.wait(timeout=2), "mt-1 never overlapped with mt-2"
+        time.sleep(0.02)
+        return {f"src/{mid}.py": "print(1)\n"}
+
+    planning = be_models.PlanningResult(
+        microtasks=[
+            be_models.Microtask(
+                id="mt-1", tool_agent=be_models.ToolAgentKind.GENERAL, description="one"
+            ),
+            be_models.Microtask(
+                id="mt-2", tool_agent=be_models.ToolAgentKind.GENERAL, description="two"
+            ),
+        ],
+        language="python",
+    )
+    result = sh_exec.run_execution_impl(
+        llm=object(),
+        task=_task(),
+        planning_result=planning,
+        repo_path=Path("/tmp"),
+        architecture=None,
+        existing_code="",
+        tool_runners={},
+        progress_callback=None,
+        only_microtask_ids=None,
+        models=be_models,
+        run_general_microtask=overlapping_coder,
+    )
+    assert {m.status for m in result.microtasks} == {be_models.MicrotaskStatus.COMPLETED}
+    assert result.files == {"src/mt-1.py": "print(1)\n", "src/mt-2.py": "print(1)\n"}
+
+
+def test_run_execution_impl_caps_parallel_map_workers(monkeypatch):
+    """Independent waves do not size the pool at wave length."""
+    seen: list[int] = []
+    real = sh_exec.parallel_map
+
+    def _wrapped(*args, **kwargs):
+        seen.append(kwargs["max_workers"])
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(sh_exec, "parallel_map", _wrapped)
+    monkeypatch.setenv("SE_EXECUTION_WAVE_CONCURRENCY", "2")
+
+    planning = be_models.PlanningResult(
+        microtasks=[
+            be_models.Microtask(
+                id=f"mt-{i}", tool_agent=be_models.ToolAgentKind.GENERAL, description="x"
+            )
+            for i in range(5)
+        ],
+        language="python",
+    )
+    result = sh_exec.run_execution_impl(
+        llm=object(),
+        task=_task(),
+        planning_result=planning,
+        repo_path=Path("/tmp"),
+        architecture=None,
+        existing_code="",
+        tool_runners={},
+        progress_callback=None,
+        only_microtask_ids=None,
+        models=be_models,
+        run_general_microtask=lambda **kw: {f"src/{kw['microtask'].id}.py": "print(1)\n"},
+    )
+    assert seen == [2]
+    assert {m.status for m in result.microtasks} == {be_models.MicrotaskStatus.COMPLETED}
+
+
+def test_run_execution_impl_sequential_chain_runs_in_dependency_order():
+    """A fully sequential chain is scheduled into one-microtask waves and runs A then B then C."""
+    order: list[str] = []
+
+    def recording_coder(**kwargs):
+        order.append(kwargs["microtask"].id)
+        return {f"src/{kwargs['microtask'].id}.py": "ok\n"}
+
+    planning = be_models.PlanningResult(
+        microtasks=[
+            be_models.Microtask(
+                id="mt-c",
+                tool_agent=be_models.ToolAgentKind.GENERAL,
+                description="c",
+                depends_on=["mt-b"],
+            ),
+            be_models.Microtask(
+                id="mt-b",
+                tool_agent=be_models.ToolAgentKind.GENERAL,
+                description="b",
+                depends_on=["mt-a"],
+            ),
+            be_models.Microtask(
+                id="mt-a",
+                tool_agent=be_models.ToolAgentKind.GENERAL,
+                description="a",
+            ),
+        ],
+        language="python",
+    )
+    result = sh_exec.run_execution_impl(
+        llm=object(),
+        task=_task(),
+        planning_result=planning,
+        repo_path=Path("/tmp"),
+        architecture=None,
+        existing_code="",
+        tool_runners={},
+        progress_callback=None,
+        only_microtask_ids=None,
+        models=be_models,
+        run_general_microtask=recording_coder,
+    )
+    assert order == ["mt-a", "mt-b", "mt-c"]
+    assert all(m.status == be_models.MicrotaskStatus.COMPLETED for m in result.microtasks)
+    assert result.files == {
+        "src/mt-a.py": "ok\n",
+        "src/mt-b.py": "ok\n",
+        "src/mt-c.py": "ok\n",
+    }
+
+
 def test_run_execution_impl_logs_cleanly_when_tool_agent_is_none():
     """A microtask with no tool_agent runs to completion without an AttributeError."""
     mt = be_models.Microtask(
@@ -731,7 +867,7 @@ def test_write_microtask_output_or_fail_success_and_rejection(tmp_path: Path):
     sh_rollback._record_prior_values(
         rollback, tmp_path, all_files, {"gen.py": "g2", "shared.py": "clob"}
     )
-    ok = sh_exec.write_microtask_output_or_fail(
+    ok = sh_review_cycle.write_microtask_output_or_fail(
         tmp_path,
         {"gen.py": "g2", "shared.py": "clob"},
         mt=mt,
@@ -749,7 +885,7 @@ def test_write_microtask_output_or_fail_success_and_rejection(tmp_path: Path):
     # Unsafe path → no exception, marks review-failed, rolls back this microtask's
     # contributions: ``gen.py`` (created) is removed/unlinked and ``shared.py`` (an
     # earlier file this one overwrote) is restored — in all_files and on disk.
-    rejected = sh_exec.write_microtask_output_or_fail(
+    rejected = sh_review_cycle.write_microtask_output_or_fail(
         tmp_path,
         {"../evil.py": "x"},
         mt=mt,
@@ -788,6 +924,16 @@ def test_resolve_physical_path_and_snapshot_states(tmp_path: Path):
     directory = sh_rollback._snapshot_disk_state(root / "adir")
     assert directory.file_bytes is None and not directory.absent
     assert sh_rollback._snapshot_disk_state(root / "missing").absent
+
+
+def test_file_lock_keys_collapse_lexical_aliases(tmp_path: Path):
+    """``shared.py`` and ``./shared.py`` map to the same physical lock key."""
+    root = tmp_path.resolve()
+    (tmp_path / "shared.py").write_text("x", encoding="utf-8")
+    keys = sh_rollback._file_lock_keys(root, ["shared.py", "./shared.py", "shared.py"])
+    expected = sh_rollback._resolve_physical_path_in_repo(root, root / "shared.py")
+    assert expected is not None
+    assert keys == [str(expected)]
 
 
 def test_snapshot_disk_state_degrades_on_read_error(tmp_path: Path, monkeypatch):
