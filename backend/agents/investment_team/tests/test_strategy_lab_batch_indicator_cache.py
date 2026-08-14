@@ -155,6 +155,40 @@ def test_same_bar_content_different_object_still_hits() -> None:
     assert len(calls) == 1
 
 
+def test_same_bars_in_different_order_is_a_miss() -> None:
+    """Indicator math is order-sensitive; the fingerprint must not sort by date.
+
+    ``compute_dataset_fingerprint`` / ``_hash_bars`` sort by ``date`` because
+    they identify a *dataset*. Reusing that here would make
+    closes ``[1, 2, 10]`` and ``[10, 2, 1]`` share a key.
+    """
+    cache = BatchIndicatorCache()
+    calls, compute = _counting_compute()
+
+    def _ohlcv(date: str, close: float) -> OHLCVBar:
+        return OHLCVBar(
+            date=date,
+            open=close,
+            high=close,
+            low=close,
+            close=close,
+            volume=1_000.0,
+        )
+
+    chronological = [
+        _ohlcv("2023-01-02", 1.0),
+        _ohlcv("2023-01-03", 2.0),
+        _ohlcv("2023-01-04", 10.0),
+    ]
+    reversed_order = list(reversed(chronological))
+
+    cache.get_or_compute("sma", {"period": 2}, "AAPL", "1d", chronological, compute)
+    _, hit = cache.get_or_compute("sma", {"period": 2}, "AAPL", "1d", reversed_order, compute)
+
+    assert hit is False
+    assert len(calls) == 2
+
+
 def test_none_result_is_cached_and_hits_on_second_call() -> None:
     """A ``compute`` that legitimately returns ``None`` (e.g. an indicator
     during warm-up) must still be cached — a second identical call is a hit,

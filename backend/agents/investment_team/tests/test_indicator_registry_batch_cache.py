@@ -31,10 +31,9 @@ class _SymBar:
     """Bar-shaped record carrying both ``symbol`` and ``date``.
 
     ``date`` is required for ``BatchIndicatorCache`` to fingerprint the bar
-    content (it reuses ``market_data_cache.store.compute_dataset_fingerprint``,
-    which hashes on ``bar.date`` — see the note in ``resolve_indicator``'s
-    docstring). Real ``contract.Bar`` streaming bars carry ``timestamp``, not
-    ``date`` — :class:`_ContractLikeBar` below models that shape instead.
+    content (OHLCV fields hashed in supplied order). Real ``contract.Bar``
+    streaming bars carry ``timestamp``, not ``date`` — :class:`_ContractLikeBar`
+    below models that shape instead.
     """
 
     symbol: str
@@ -370,3 +369,42 @@ def test_cache_hit_clears_stale_streaming_state_before_next_expand(monkeypatch) 
     got = resolve_indicator(reg, "macd", h2_plus, **macd_params)
     want = resolve_indicator(IndicatorRegistry(), "macd", h2_plus, **macd_params)
     assert got == want
+
+
+def test_flag_on_reversed_bar_order_does_not_reuse_cached_sma(monkeypatch) -> None:
+    """Same dated bars in a different sequence must not share a cache entry.
+
+    SMA's trailing window is order-sensitive: closes ``[1, 2, 10]`` with
+    period 2 average to ``6.0`` while ``[10, 2, 1]`` average to ``1.5``. A
+    date-sorted fingerprint would return the first call's value for both.
+    """
+    monkeypatch.setenv(_ENV_VAR, "true")
+    cache = BatchIndicatorCache()
+
+    def _bar(date: str, close: float) -> _SymBar:
+        return _SymBar(
+            symbol="AAPL",
+            timestamp=date,
+            date=date,
+            open=close,
+            high=close,
+            low=close,
+            close=close,
+            volume=1.0,
+        )
+
+    chronological = [_bar("2023-01-02", 1.0), _bar("2023-01-03", 2.0), _bar("2023-01-04", 10.0)]
+    reversed_order = list(reversed(chronological))
+
+    reg_a = IndicatorRegistry(batch_cache=cache, timeframe="1d")
+    reg_b = IndicatorRegistry(batch_cache=cache, timeframe="1d")
+
+    v_chrono = resolve_indicator(reg_a, "sma", chronological, period=2)
+    v_rev = resolve_indicator(reg_b, "sma", reversed_order, period=2)
+
+    assert cache.misses == 2
+    assert cache.hits == 0
+    assert v_chrono == 6.0
+    assert v_rev == 1.5
+    assert v_chrono == resolve_indicator(IndicatorRegistry(), "sma", chronological, period=2)
+    assert v_rev == resolve_indicator(IndicatorRegistry(), "sma", reversed_order, period=2)

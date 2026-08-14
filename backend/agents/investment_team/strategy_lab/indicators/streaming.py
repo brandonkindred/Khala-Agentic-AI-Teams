@@ -1685,17 +1685,15 @@ def resolve_indicator(
         :class:`~..batch_indicator_cache.BatchIndicatorCache`'s precondition
         that ``symbol`` be a non-empty string).
       - every bar in ``bars`` carries a ``date`` attribute.
-        ``BatchIndicatorCache._data_fingerprint`` reuses
-        ``market_data_cache.store.compute_dataset_fingerprint``, whose
-        ``_hash_bars`` helper sorts and hashes on ``bar.date`` — the shape
-        of ``market_data_service.OHLCVBar``, not
+        ``BatchIndicatorCache._data_fingerprint`` hashes OHLCV in the
+        supplied sequence and reads ``bar.date`` as part of that record —
+        the shape of ``market_data_service.OHLCVBar``, not
         ``trading_service.strategy.contract.Bar`` (the streaming engine's
         actual bar type, which carries ``timestamp``/no ``date``). Until the
         cache's fingerprint helper (or its bar inputs) is extended to cover
         ``timestamp``-only bars, consulting it with ``contract.Bar``-shaped
-        streams would raise ``AttributeError`` instead of returning a value
-        — a caller-visible regression on the very code path this feature
-        exists to speed up. Guarding on ``hasattr(..., "date")`` here keeps
+        streams would key on empty dates and could collide unrelated
+        series. Guarding on ``hasattr(..., "date")`` here keeps
         that gap non-fatal: it declines to consult (falls through to
         :func:`_dispatch_indicator`) rather than crashing, for exactly the
         bar shapes the cache cannot key today.
