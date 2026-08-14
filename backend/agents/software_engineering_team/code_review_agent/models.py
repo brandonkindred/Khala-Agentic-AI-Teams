@@ -812,6 +812,13 @@ class CodeReviewInput(BaseModel):
           ``{path: content}`` mapping). Constructing the input with
           ``files=None`` or ``files={}`` raises ``ValueError`` so a caller
           bug never silently becomes an approved empty review.
+
+    Caller contracts:
+        - ``full_content`` overlays ``CodebaseIndex.files`` only when it covers
+          every changed path; a partial overlay does not re-enable whole-file
+          tail passes. Ignored when ``pre_numbered`` is False.
+        - ``skip_tail_passes`` is honored by the in-process coordinator; the
+          Temporal workflow path does not yet thread it through.
     """
 
     files: Optional[Dict[str, str]] = Field(
@@ -820,24 +827,12 @@ class CodeReviewInput(BaseModel):
     )
     pre_numbered: bool = Field(
         default=False,
-        description="True when every content line already carries its original line number "
-        "as an 'N| ' prefix (the coding team's PR-diff hunks); issue lines are then "
-        "reported verbatim instead of re-anchored.",
+        description="True when each files line already has an 'N| ' prefix; issue lines are reported as given.",
     )
     full_content: Optional[Dict[str, str]] = Field(
         default=None,
-        description="Optional full (non-numbered) content for some or all of the changed paths, "
-        "supplied alongside a bounded ``pre_numbered=True`` ``files=`` submission. Overlaid onto "
-        "``CodebaseIndex.files`` (see ``CodebaseIndex.from_input``) so whole-codebase passes that "
-        "need complete file bodies -- the side-effect/blast-radius pass, and the merged "
-        "architecture/side-effect pass's side-effect half -- can still run their full analysis "
-        "even though the chunk reviewer itself only sees the bounded diff surface. Those passes' "
-        "``pre_numbered`` skip guard checks ``pre_numbered and not full_content``, so supplying "
-        "this re-enables them without changing what the chunk reviewer is bounded to. ``None`` "
-        "(the default) preserves today's behavior for every existing ``pre_numbered=True`` "
-        "caller (PR-review hunk fallback has no fuller content to offer). Ignored when "
-        "``pre_numbered`` is False (those passes already read full content from ``files`` "
-        "directly).",
+        description="Optional full (non-numbered) bodies for changed paths when files is a bounded "
+        "pre-numbered diff. Enables whole-file tail passes. Ignored when pre_numbered is False.",
     )
     spec_content: str = Field(
         default="",
@@ -869,46 +864,25 @@ class CodeReviewInput(BaseModel):
     )
     user_decisions: Optional[List[str]] = Field(
         default=None,
-        description="Product/design questions the user has already answered ('question → answer' "
-        "lines); the reviewer treats them as settled facts, not as open issues to flag.",
+        description="Settled 'question → answer' facts; do not flag as open issues.",
     )
     profile: ReviewProfile = Field(
         default=ReviewProfile.CODE_REVIEW,
-        description="Role/criteria profile selecting which reviewer persona and checklist the "
-        "engine applies (the gate calling the engine sets this). Defaults to the standard code "
-        "review, reproducing today's behavior for every existing caller.",
+        description="Reviewer persona/checklist. Default is standard code review.",
     )
     skip_false_positive_filter: bool = Field(
         default=False,
-        description="When True, the coordinator skips the whole-codebase false-positive "
-        "re-check and stands behind the per-chunk findings as-is. Default False keeps the "
-        "filter on for every existing caller; an escape hatch for gates whose findings must "
-        "not be silently dropped.",
+        description="Skip the whole-codebase false-positive re-check. Default False.",
     )
     skip_tail_passes: bool = Field(
         default=False,
-        description="When True, the coordinator skips BOTH tail passes entirely (the "
-        "false-positive filter and the merged architecture/side-effect pass) and returns "
-        "the per-chunk findings as-is, with no additional LLM calls from those two passes "
-        "after the map phase. Default False keeps both passes on for every existing caller. "
-        "Intended for a lightweight fallback caller that wants speed over full tail-pass "
-        "rigor; implies skip_false_positive_filter's effect (setting both is redundant, not "
-        "conflicting). Does NOT affect the separate, independently-gated post-dedupe "
-        "spec-compliance synthesis pass: when CODE_REVIEW_SPEC_COMPLIANCE_PASS is enabled "
-        "for the CODE_REVIEW profile, that single synthesize_spec_compliance call still runs "
-        "even if skip_tail_passes is set. Only honored by the in-process coordinator today — "
-        "the Temporal workflow path does not yet thread it through.",
+        description="Skip the false-positive filter and merged architecture/side-effect tail "
+        "passes. Does not skip spec-compliance synthesis. Default False.",
     )
     repo_root: Optional[str] = Field(
         default=None,
-        description="Absolute path to a materialized disk checkout of the whole repository, used "
-        "to reconstruct a fail-safe ``DiskRepoReader`` for the false-positive and "
-        "architecture/redundancy passes. Unlike a live ``RepoReader`` object, this string "
-        "survives ``model_dump(mode='json')``, so it is the channel that gives those passes "
-        "off-diff read access when the review runs as a durable Temporal workflow. ``None`` (or a "
-        "path that no longer exists) means no off-diff read access — the passes then keep more "
-        "findings (fail-safe), never fewer. GitHub-backed reviews leave this unset (their reader "
-        "cannot be rebuilt from a path); they honor the live reader via the in-process path.",
+        description="Absolute checkout path so durable workflows can rebuild off-diff reads. "
+        "None means no reconstructed disk reader.",
     )
 
     @model_validator(mode="after")

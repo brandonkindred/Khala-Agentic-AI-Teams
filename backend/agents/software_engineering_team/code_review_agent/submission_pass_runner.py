@@ -195,17 +195,12 @@ def _run_batch_with_recovery(
 ) -> List[T]:
     """Run one batch call, recovering from an overflow-shaped failure; never raises.
 
-    Preconditions: ``batch.items`` is non-empty.
+    Preconditions:
+        ``batch.items`` is non-empty.
 
     Postconditions:
-        - Returns ``[result]`` on success.
-        - Returns ``[]`` immediately (no retry) when the call raises a
-          non-overflow-shaped exception — matches the pre-runner fail-safe
-          posture (a bad batch must not discard other batches' findings).
-        - On an overflow-shaped exception, recovers via
-          :func:`_recover_from_overflow` (bisect while possible), returning
-          whatever that recovers (possibly ``[]``). Content is never
-          truncated as a recovery strategy.
+        Returns ``[result]`` on success, ``[]`` on a non-overflow failure, or
+        the recovered result on overflow.
     """
     try:
         prompt = build_prompt(batch)

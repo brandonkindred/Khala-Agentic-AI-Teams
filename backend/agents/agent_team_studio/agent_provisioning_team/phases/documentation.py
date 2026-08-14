@@ -4,6 +4,7 @@ Documentation phase: Generate onboarding packet for the agent.
 This is phase 5 of the provisioning workflow.
 """
 
+import asyncio
 from typing import Callable, Dict, List, Optional
 
 from ..anatomy_assets import try_materialize_anatomy_bundle
@@ -144,8 +145,8 @@ def _generate_summary(
             tool_names=sanitize_prompt_var(", ".join(tool_names or [])),
         )
         try:
-            return _LLM.complete(
-                LLMRequest(system=_SUMMARY_SYSTEM, user=prompt, max_tokens=300)
+            return asyncio.run(
+                _LLM.complete(LLMRequest(system=_SUMMARY_SYSTEM, user=prompt, max_tokens=300))
             ).strip()
         except Exception:  # noqa: BLE001 — fall through to deterministic template
             pass
@@ -188,8 +189,8 @@ def _generate_getting_started(
             permissions=sanitize_prompt_var(", ".join(result.permissions or [])),
         )
         try:
-            return _LLM.complete(
-                LLMRequest(system=_TOOL_DOC_SYSTEM, user=prompt, max_tokens=400)
+            return asyncio.run(
+                _LLM.complete(LLMRequest(system=_TOOL_DOC_SYSTEM, user=prompt, max_tokens=400))
             ).strip()
         except Exception:  # noqa: BLE001
             pass
