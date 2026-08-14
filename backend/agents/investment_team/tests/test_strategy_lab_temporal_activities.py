@@ -1329,6 +1329,55 @@ def test_run_design_attempt_activity_malformed_checkpoint_gate_results_falls_bac
     assert len(captured["drift_collector"].spec_history) == 0
 
 
+def test_run_design_attempt_activity_empty_checkpoint_design_context_falls_back_to_scratch(
+    monkeypatch,
+):
+    """A checkpoint whose design_context is {} still passes DesignAttemptCheckpoint
+    validation (the field is Dict[str, Any]) and _design_context_from_wire
+    returns None without raising. Resume must treat that as reconstruction
+    failure and re-run Phase 1 rather than skip it with a missing context."""
+    from investment_team.strategy_lab.agents._llm_budget import active_budget
+    from investment_team.strategy_lab.orchestrator import StrategyLabOrchestrator
+
+    checkpoint = _design_attempt_checkpoint(
+        run_id="run-1",
+        cycle_scope="run-1-c0",
+        design_attempt=0,
+        generation=1,
+        budget_calls=99,
+        design_context={},
+    )
+
+    class _FakeRecord:
+        def model_dump(self, *, mode: str = "python") -> Dict[str, Any]:
+            return {"lab_record_id": "rec-1"}
+
+    captured: Dict[str, Any] = {}
+
+    def _fake_attempt(self, **kwargs):
+        captured.update(kwargs)
+        captured["budget_calls_seen"] = active_budget().calls_made
+        return _FakeRecord()
+
+    monkeypatch.setattr(StrategyLabOrchestrator, "_run_design_attempt", _fake_attempt)
+    monkeypatch.setattr(act, "_infer_cycle_scope_from_activity_context", lambda: "run-1-c0")
+    monkeypatch.setattr(
+        act,
+        "load_design_attempt_checkpoint",
+        lambda run_id, cycle_scope, design_attempt: checkpoint,
+    )
+
+    out = act.run_design_attempt_activity(
+        _run_design_attempt_params(run_id="run-1", generation=1, budget_calls=7, gate_results=[])
+    )
+
+    assert captured["resume_spec"] is None
+    assert captured["resume_rationale"] is None
+    assert captured["resume_design_context"] is None
+    assert captured["budget_calls_seen"] == 7
+    assert out["budget_calls"] == 7
+
+
 def test_run_design_attempt_activity_no_valid_checkpoint_runs_from_scratch(monkeypatch):
     """run_id present but no valid checkpoint found (e.g. first-ever attempt)
     -- resume kwargs are all None, matching the no-checkpoint case."""

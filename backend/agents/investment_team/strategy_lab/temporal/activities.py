@@ -971,14 +971,19 @@ def run_design_attempt_activity(params: Dict[str, Any]) -> Dict[str, Any]:
             # fields like gate_results are typed loosely (List[Dict[str,
             # Any]]) so a malformed entry (e.g. missing gate_name) survives
             # that validation and only fails here, reconstructing the real
-            # QualityGateResult/SpecCritique objects. Without this guard that
-            # raises straight out of the activity, and every Temporal retry
-            # reloads the same unusable checkpoint and fails identically --
-            # exactly the crash loop the fail-open contract exists to avoid.
-            # Treat any reconstruction failure the same as "no checkpoint
-            # found": fall through to a normal Phase 1 re-run. Reconstruct
-            # into temporaries first and only adopt them together -- never
-            # leave drift_collector/cumulative_gate_results/budget in a
+            # QualityGateResult/SpecCritique objects. design_context is the
+            # same kind of hole: Dict[str, Any] accepts {}, and
+            # _design_context_from_wire returns None without raising, which
+            # would otherwise set resume_spec while leaving
+            # resume_design_context None -- skipping Phase 1 with a blank
+            # context. Without this guard that raises straight out of the
+            # activity, and every Temporal retry reloads the same unusable
+            # checkpoint and fails identically -- exactly the crash loop the
+            # fail-open contract exists to avoid. Treat any reconstruction
+            # failure the same as "no checkpoint found": fall through to a
+            # normal Phase 1 re-run. Reconstruct into temporaries first and
+            # only adopt them together -- never leave
+            # drift_collector/cumulative_gate_results/budget in a
             # partially-checkpointed, partially-params-seeded mix if
             # reconstruction fails partway through.
             try:
@@ -991,6 +996,10 @@ def run_design_attempt_activity(params: Dict[str, Any]) -> Dict[str, Any]:
                     QualityGateResult.model_validate(g) for g in checkpoint.gate_results
                 ]
                 checkpoint_design_context = _design_context_from_wire(checkpoint.design_context)
+                if checkpoint_design_context is None:
+                    raise ValueError(
+                        "checkpoint design_context is empty; treating as invalid for resume"
+                    )
             except Exception as exc:  # noqa: BLE001 -- fail open, see comment above
                 logger.warning(
                     "design attempt checkpoint for run %s attempt %s failed to "
