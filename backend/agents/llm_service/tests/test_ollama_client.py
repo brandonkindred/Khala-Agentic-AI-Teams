@@ -777,6 +777,46 @@ def test_ollama_httpstatuserror_5xx_exhaustion_raises(monkeypatch: pytest.Monkey
     assert exc_info.value.status_code == 503
 
 
+def test_ollama_httpstatuserror_4xx_raises_permanent(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A 4xx httpx.HTTPStatusError raises LLMPermanentError without retrying."""
+    monkeypatch.setenv("LLM_PROVIDER", "ollama")
+    monkeypatch.setenv("LLM_MAX_RETRIES", "3")
+    req = httpx.Request("POST", "http://localhost:9999/v1/chat/completions")
+    resp = httpx.Response(403, request=req, text="forbidden")
+    err = httpx.HTTPStatusError("403", request=req, response=resp)
+    mock_client = MagicMock()
+    # A single side-effect entry: any retry would exhaust it and raise
+    # StopIteration, so a clean LLMPermanentError proves the loop fails fast.
+    mock_client.__enter__.return_value.stream.side_effect = [err]
+    with patch("httpx.Client") as mock_client_cls:
+        mock_client_cls.return_value = mock_client
+        client = OllamaLLMClient(model="test", base_url="http://localhost:9999", timeout=5)
+        with pytest.raises(LLMPermanentError) as exc_info:
+            client.complete_json("hello", objective="test", temperature=0)
+    assert exc_info.value.status_code == 403
+    assert mock_client.__enter__.return_value.stream.call_count == 1
+
+
+def test_ollama_httpstatuserror_unhandled_status_raises_permanent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A status outside 429/5xx/4xx hits the catch-all: raise, never loop forever."""
+    monkeypatch.setenv("LLM_PROVIDER", "ollama")
+    monkeypatch.setenv("LLM_MAX_RETRIES", "3")
+    req = httpx.Request("POST", "http://localhost:9999/v1/chat/completions")
+    resp = httpx.Response(302, request=req, text="found")
+    err = httpx.HTTPStatusError("302", request=req, response=resp)
+    mock_client = MagicMock()
+    mock_client.__enter__.return_value.stream.side_effect = [err]
+    with patch("httpx.Client") as mock_client_cls:
+        mock_client_cls.return_value = mock_client
+        client = OllamaLLMClient(model="test", base_url="http://localhost:9999", timeout=5)
+        with pytest.raises(LLMPermanentError) as exc_info:
+            client.complete_json("hello", objective="test", temperature=0)
+    assert exc_info.value.status_code == 302
+    assert mock_client.__enter__.return_value.stream.call_count == 1
+
+
 def test_ollama_read_timeout_exhaustion_raises(monkeypatch: pytest.MonkeyPatch) -> None:
     """A transport ReadTimeout with no transient budget raises LLMTemporaryError."""
     monkeypatch.setenv("LLM_PROVIDER", "ollama")
