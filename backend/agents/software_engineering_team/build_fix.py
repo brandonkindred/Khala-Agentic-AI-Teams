@@ -112,9 +112,8 @@ def _run_build_verification(
         else agent_type
     )
 
-    if (
-        base_agent_type == "frontend"
-    ):  # pragma: no cover  # integration-only: invokes ng build and downstream LLM fix loop
+    # integration-only: invokes ng build and downstream LLM fix loop
+    if base_agent_type == "frontend":  # pragma: no cover
         # repo_path may be frontend repo root (package.json here) or work path (frontend/ subdir)
         frontend_dir = (
             repo_path if (repo_path / "package.json").exists() else (repo_path / "frontend")
@@ -164,7 +163,8 @@ def _run_build_verification(
             logger.info("Build verification: no Python files found, skipping")
             return True, ""
         result = run_python_syntax_check(backend_dir)
-        if not result.success:  # pragma: no cover  # integration-only: syntax-check + LLM fix loop
+        # integration-only: syntax-check + LLM fix loop
+        if not result.success:  # pragma: no cover
             logger.warning("Syntax check failed for task %s: %s", task_id, result.error_summary)
             fixed, fix_error = _try_build_fix_one_at_a_time(repo_path, base_agent_type, task_id)
             if fixed:
@@ -178,9 +178,8 @@ def _run_build_verification(
         if tests_dir.exists() and any(tests_dir.rglob("test_*.py")):
             # Install deps before pytest so agent-added packages (e.g. sqlalchemy) are available
             req_txt = backend_dir / "requirements.txt"
-            if (
-                req_txt.exists()
-            ):  # pragma: no cover  # integration-only: shells out to `pip install`
+            # integration-only: shells out to `pip install`
+            if req_txt.exists():  # pragma: no cover
                 try:
                     pip_result = run_command(
                         [sys.executable, "-m", "pip", "install", "-r", "requirements.txt"],
@@ -228,9 +227,8 @@ def _run_build_verification(
         logger.info("Build verification passed for backend task %s", task_id)
         return True, ""
 
-    elif (
-        base_agent_type == "devops"
-    ):  # pragma: no cover  # integration-only: docker build + yaml parsing on real workflow files
+    # integration-only: docker build + yaml parsing on real workflow files
+    elif base_agent_type == "devops":  # pragma: no cover
         # Validate YAML files and run docker build if Dockerfile exists
         import yaml
 
@@ -553,9 +551,8 @@ def _try_build_fix_one_at_a_time(
     # "Build failed" message rather than a NameError.
     result = None
 
-    if (
-        agent_type == "frontend"
-    ):  # pragma: no cover  # integration-only: invokes ng build + LLM repair loop
+    # integration-only: invokes ng build + LLM repair loop
+    if agent_type == "frontend":  # pragma: no cover
         project_dir = repo_path if (repo_path / "package.json").exists() else repo_path / "frontend"
         if not (project_dir / "package.json").exists():
             return False, "No frontend project found"
@@ -592,9 +589,8 @@ def _try_build_fix_one_at_a_time(
             )
         language = "typescript"
         prompt_module = "frontend_code_v2_team.prompts"
-    elif (
-        agent_type == "backend"
-    ):  # pragma: no cover  # integration-only: runs python syntax check + pytest + LLM repair loop
+    # integration-only: runs python syntax check + pytest + LLM repair loop
+    elif agent_type == "backend":  # pragma: no cover
         project_dir = repo_path if any(repo_path.rglob("*.py")) else repo_path / "backend"
         if not project_dir.exists() or not any(project_dir.rglob("*.py")):
             return False, "No Python project found"
@@ -715,9 +711,8 @@ def _try_build_fix_one_at_a_time(
         language_conventions = JAVA_CONVENTIONS if language == "java" else PYTHON_CONVENTIONS
 
     max_fix_attempts = _MAX_BUILD_FIX_ATTEMPTS
-    for attempt in range(
-        max_fix_attempts
-    ):  # pragma: no cover  # integration-only: LLM fix loop reruns build/test after each repair
+    # integration-only: LLM fix loop reruns build/test after each repair
+    for attempt in range(max_fix_attempts):  # pragma: no cover
         if not issues:
             break
         issue = issues.pop(0)
