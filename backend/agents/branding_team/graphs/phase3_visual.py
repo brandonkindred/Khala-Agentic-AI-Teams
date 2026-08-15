@@ -59,8 +59,16 @@ _PHASE3_SPECIALIST_FACTORIES = {
 def build_phase3_graph() -> Graph:
     """Construct the Phase 3 Visual & Expressive Identity graph.
 
-    Returns a :class:`Graph` whose entry points are the three moodboard
-    conceptualists and whose terminal node is the ``visual_compositor``.
+    Wires the module-level topology: three MoodBoardConceptualist variants fan out
+    into ``CreativeDirector``, then ``converge_decider`` fans out into the seven
+    visual specialists, which fan in to an inline ``visual_compositor`` join node.
+
+    Preconditions:
+        None — the builder wires the fixed conceptualist variants and specialist
+        factories and takes no arguments.
+    Postconditions:
+        Returns a built ``Graph`` whose entry points are the three moodboard
+        conceptualists and whose terminal node is ``visual_compositor``.
     """
 
     builder = GraphBuilder()

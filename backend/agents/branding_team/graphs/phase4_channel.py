@@ -42,10 +42,13 @@ def build_phase4_graph() -> Graph:
     once every entry node has completed and merges their outputs into a
     single unified channel-activation deliverable.
 
-    Returns
-    -------
-    Graph
-        A callable ``Graph`` instance.
+    Preconditions:
+        None — the builder wires a fixed nine-agent factory set and takes no
+        arguments.
+    Postconditions:
+        Returns a built ``Graph`` whose nine specialist nodes are entry points
+        running in parallel and whose sole terminal node, ``channel_compositor``,
+        depends on all nine (fan-out / fan-in).
     """
     builder = GraphBuilder()
 
