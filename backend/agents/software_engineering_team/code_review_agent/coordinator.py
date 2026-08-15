@@ -681,16 +681,17 @@ def run_coordinator(
           when that removes the last critical/high finding the gate approves (a
           chunk-local false positive never blocks the merge). The check is
           fail-safe — any verifier failure keeps the findings — and never
-          touches the not-reviewed coverage findings. This pass and the merged
-          architecture/side-effect pass below it — their concurrency/fallback
-          scheduling, finding-list order, and ``skip_tail_passes`` behavior —
-          are exactly as documented on ``_run_tail_passes``, which this
-          function calls unchanged.
-        - After the false-positive filter and the merged additive pass, related
-          ``side-effects`` findings may be optionally consolidated (gated by
-          ``CODE_REVIEW_SIDE_EFFECT_CONSOLIDATION``; fail-safe on error — see
-          the consolidation step in the body) before the deterministic
-          dedupe/severity gate.
+          touches the not-reviewed coverage findings. This pass runs after (not
+          concurrently with) the merged architecture/side-effect pass and the
+          finding-combination step: their sequential order, fail-safe behavior,
+          and ``skip_tail_passes`` handling are exactly as documented on
+          ``_run_tail_passes``, which this function calls unchanged.
+        - Related ``side-effects`` findings are optionally consolidated as the
+          ``side-effects`` special case of ``combine_findings`` (step 2 of
+          ``_run_tail_passes``), gated by ``CODE_REVIEW_SIDE_EFFECT_CONSOLIDATION``
+          and applied before the false-positive filter rather than as a separate
+          post-filter step. The final deterministic dedupe below only folds in
+          the coverage findings.
         - When ``CODE_REVIEW_SPEC_COMPLIANCE_PASS`` is enabled and
           ``input_data.profile`` is ``ReviewProfile.CODE_REVIEW``, every chunk's
           prompt omits the ``acceptance_criteria``/``spec_excerpt`` blocks

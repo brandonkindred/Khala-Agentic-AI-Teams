@@ -87,10 +87,10 @@ def _tokenize_for_similarity(text: str) -> "frozenset[str]":
     """Reduce a description to a comparable bag of words.
 
     Postconditions:
-        - Returns the lowercased word tokens of ``text`` with backtick/quoted
-          spans and standalone digit runs dropped first (so "bare import `os`"
-          and "bare import `sys`" tokenize identically). Empty for
-          blank/punctuation-only input. Pure; never raises.
+        - Returns a ``frozenset`` of the lowercased word tokens of ``text`` with
+          backtick/quoted spans and standalone digit runs dropped first (so
+          "bare import `os`" and "bare import `sys`" tokenize identically). Empty
+          frozenset for blank/punctuation-only input. Pure; never raises.
     """
     normalized = _QUOTED_RE.sub(" ", text.lower())
     normalized = _DIGITS_RE.sub(" ", normalized)

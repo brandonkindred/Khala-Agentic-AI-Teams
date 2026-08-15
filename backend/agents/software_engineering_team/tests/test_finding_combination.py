@@ -324,6 +324,31 @@ def test_non_python_same_anchor_duplicate_merges_but_different_lines_do_not() ->
     assert len(combine_findings(same_line, index)) == 1  # same-anchor near-duplicate
 
 
+def test_fail_open_on_unreadable_or_unparseable_files() -> None:
+    """Fail-open contract: findings that cite files absent from the index, or
+    whose content will not parse, contribute no construct/proximity signal and
+    combine_findings degrades gracefully (same-anchor de-duplication still
+    applies) rather than raising."""
+    # (a) file not in the index -> no construct resolvable; different lines stay
+    #     separate, and nothing raises.
+    idx_missing = _index({"app/present.py": _TWO_FUNCS})
+    absent = [
+        _issue(file_path="app/missing.py", line=5, category="logic", description="alpha finding"),
+        _issue(file_path="app/missing.py", line=9, category="logic", description="beta finding"),
+    ]
+    assert len(combine_findings(absent, idx_missing)) == 2
+
+    # (b) unparseable Python content -> construct resolution yields nothing, but
+    #     the same-anchor rule (same line, similar wording) still de-dupes, and
+    #     no exception escapes.
+    idx_broken = _index({"app/broken.py": "def (:\n    x = 1\n"})
+    broken = [
+        _issue(file_path="app/broken.py", line=2, category="logic", description="unchecked access"),
+        _issue(file_path="app/broken.py", line=2, category="logic", description="unchecked access"),
+    ]
+    assert len(combine_findings(broken, idx_broken)) == 1
+
+
 def test_fewer_than_two_findings_returns_copy() -> None:
     """A list shorter than two is returned as a shallow copy, unchanged."""
     index = _index({"app/foo.py": _TWO_FUNCS})
