@@ -847,8 +847,10 @@ _TS_EXPORT_LIST_RE = re.compile(r"^[ \t]*export[ \t]*\{([^}]*)\}", re.MULTILINE)
 # docstring), so stripping it is safe for already-plain content too -- there is
 # nothing to strip there. Indented dict keys (``    1: value``) do not match:
 # they use ``: `` after a 4-space indent, whereas the live ``| `` gutter never
-# uses ``: ``, and the legacy ``N: `` gutter is column-zero only.
-_LINE_NUMBER_PREFIX_RE = re.compile(r"^(?:\d+: |[ ]*\d+\| )", re.MULTILINE)
+# uses ``: ``, and the legacy ``N: `` gutter is column-zero only. The optional
+# ``[+>]`` consumes a change-surface marker column (``+ 9| code``) so a marked
+# gutter is stripped as cleanly as an un-marked one.
+_LINE_NUMBER_PREFIX_RE = re.compile(r"^(?:\d+: |[+>]?[ ]*\d+\| )", re.MULTILINE)
 
 
 def _symbol_surface(content: str) -> List[str]:

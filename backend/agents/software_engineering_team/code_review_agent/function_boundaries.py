@@ -29,9 +29,13 @@ _HEURISTIC_SKIP = ("}", ")", "]", "*/", "/*", "//", "#", "*", "...")
 # fixtures still use ``4242: const x = 1;``). A pipe gutter is the live format
 # so the prefix cannot be mistaken for Python ``def``/dict syntax. Leading
 # spaces before the digits are width-padding (``  9| ``), never source indent.
-# Indented dict keys (``    1: value``) do not match: they use ``: `` and sit
-# at a 4-space indent, whereas a padded ``| `` gutter never uses ``: ``.
-_LINE_NUMBER_PREFIX_RE = re.compile(r"^(?:(\d+): |[ ]*(\d+)\| )")
+# A change-surface body prepends a single ``+``/``>`` marker column on
+# added/modified lines (``+ 9| ``); the optional ``[+>]`` here consumes that
+# marker so only the digit run is captured — the recovered line number is the
+# same with or without the marker. Indented dict keys (``    1: value``) do not
+# match: they use ``: `` and sit at a 4-space indent, whereas a padded ``| ``
+# gutter never uses ``: ``.
+_LINE_NUMBER_PREFIX_RE = re.compile(r"^(?:(\d+): |[+>]?[ ]*(\d+)\| )")
 
 # Bare inter-hunk gap marker emitted by ``render_annotated_hunks`` between
 # non-contiguous hunks. Joining across it would attach a later hunk's indented
@@ -79,8 +83,9 @@ def strip_numbered_prefixes(
 
     Postconditions:
         - If the first non-blank line does NOT match ``r'^(\\d+): '`` or
-          ``r'^[ ]*(\\d+)\\| '``, the content is not pre-numbered; returns
-          ``(content, line_number, None)`` unchanged — no remap is needed.
+          ``r'^[+>]?[ ]*(\\d+)\\| '`` (the optional ``[+>]`` tolerates a
+          change-surface marker column), the content is not pre-numbered;
+          returns ``(content, line_number, None)`` unchanged — no remap needed.
         - Otherwise returns ``(stripped_content, physical_index, line_mapper)``
           where:
           - ``stripped_content`` is the content with all ``N| `` / legacy

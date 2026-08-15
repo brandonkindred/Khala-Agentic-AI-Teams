@@ -62,6 +62,15 @@ _HUNK_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@")
 # dict key. Source text always starts at column ``width + 2``.
 _NUMBERED_LINE_SEP = "| "
 
+# Change-surface gutter markers occupying a single fixed leading column so the
+# reviewer has direct evidence of what the diff touched. Added/modified (new-side)
+# lines carry ``+``; enclosing context lines carry a space so the line numbers stay
+# column-aligned and every gutter in a marked block is the same width. The marker
+# is a separate column BEFORE the number, so it never changes the rendered line
+# number the posting/mapping layer relies on.
+TOUCHED_LINE_MARKER = "+"
+CONTEXT_LINE_MARKER = " "
+
 
 class ReviewFinding(Protocol):
     """Duck-typed shape consumed by PR review comment mappers."""
@@ -131,16 +140,26 @@ def numbered_line_width(line_numbers: Iterable[int]) -> int:
     return len(str(widest)) if widest else 1
 
 
-def format_numbered_source_line(n: int, text: str, *, width: int) -> str:
+def format_numbered_source_line(n: int, text: str, *, width: int, marker: str = "") -> str:
     """Render one source line with a column-aligned ``N| `` gutter.
 
     Preconditions:
         - ``n`` is a positive 1-based line number; ``width >= len(str(n))``.
+        - ``marker`` is either ``""`` (no marker column) or a single character
+          (a change-surface gutter marker such as ``"+"`` on a touched line or
+          ``" "`` on a context line).
     Postconditions:
-        - Returns ``f"{n:>width}| {text}"``. Equal ``width`` across an excerpt
-          keeps hanging indents visually 4 columns, not 5, at 9→10 / 99→100.
+        - When ``marker`` is ``""`` returns ``f"{n:>width}| {text}"`` exactly —
+          byte-identical to the un-marked gutter every existing caller relies on.
+        - When ``marker`` is a single character it is prepended as a fixed
+          leading column: ``f"{marker}{n:>width}| {text}"``. The rendered line
+          NUMBER is unchanged (only a marker column is added), so a marked and
+          an un-marked line cite the same number; keeping ``width`` equal across
+          an excerpt keeps hanging indents visually 4 columns, not 5, at
+          9→10 / 99→100.
     """
-    return f"{n:>{width}}{_NUMBERED_LINE_SEP}{text}"
+    assert marker == "" or len(marker) == 1, "marker must be empty or a single character"
+    return f"{marker}{n:>{width}}{_NUMBERED_LINE_SEP}{text}"
 
 
 def parse_valid_lines(patch: str, *, added_only: bool = COMMENT_ON_ADDED_LINES_ONLY) -> set[int]:
@@ -191,18 +210,21 @@ def render_annotated_hunks(patch: str) -> str:
           or empty for a binary/oversized/unchanged file.
     Postconditions:
         - Returns the added (``+``) and context (`` ``) lines of each hunk, each
-          prefixed with a right-aligned 1-based new-file line number and a
-          ``| `` gutter (``  9| <code>``), with a ``...`` marker between
-          non-contiguous hunks. Removed (``-``) lines are omitted (they are
-          not in the new file). Gutter width is the widest line number in the
-          excerpt so source columns (and therefore hanging indents) stay
-          aligned across 9→10 / 99→100. The emitted line numbers align 1:1
-          with ``parse_valid_lines`` so a cited line maps to a real location.
-          Scoping the reviewer to the diff (plus its context) — rather than
-          whole files — keeps the review on what the PR actually changed. An
-          empty/binary patch yields an empty string.
+          prefixed with a change-surface marker column (``+`` on an
+          added/modified line, a space on a context line), a right-aligned
+          1-based new-file line number, and a ``| `` gutter (``+ 9| <code>`` /
+          ``  9| <code>``), with a ``...`` marker between non-contiguous hunks.
+          The marker column is BEFORE the number, so it never alters the
+          rendered line number: the emitted numbers still align 1:1 with
+          ``parse_valid_lines`` so a cited line maps to a real location.
+          Removed (``-``) lines are omitted (they are not in the new file).
+          Gutter width is the widest line number in the excerpt so source
+          columns (and therefore hanging indents) stay aligned across
+          9→10 / 99→100. Scoping the reviewer to the diff (plus its context) —
+          rather than whole files — keeps the review on what the PR actually
+          changed. An empty/binary patch yields an empty string.
     """
-    rows: list[tuple[Optional[int], str]] = []
+    rows: list[tuple[Optional[int], str, str]] = []
     new_line = 0
     in_hunk = False
     first_hunk = True
@@ -210,7 +232,7 @@ def render_annotated_hunks(patch: str) -> str:
         header = _HUNK_RE.match(raw)
         if header:
             if not first_hunk:
-                rows.append((None, "..."))
+                rows.append((None, "...", ""))
             first_hunk = False
             new_line = int(header.group(1))
             in_hunk = True
@@ -218,13 +240,17 @@ def render_annotated_hunks(patch: str) -> str:
         if not in_hunk:
             continue
         tag = raw[:1]
-        if tag == "+" or tag == " " or raw == "":
-            rows.append((new_line, raw[1:] if raw else ""))
+        if tag == "+":
+            rows.append((new_line, raw[1:], TOUCHED_LINE_MARKER))
+            new_line += 1
+        elif tag == " " or raw == "":
+            rows.append((new_line, raw[1:] if raw else "", CONTEXT_LINE_MARKER))
             new_line += 1
         # '-' removed lines and '\' ("\ No newline...") have no new-file line.
-    width = numbered_line_width(n for n, _ in rows if n is not None)
+    width = numbered_line_width(n for n, _, _ in rows if n is not None)
     return "\n".join(
-        text if n is None else format_numbered_source_line(n, text, width=width) for n, text in rows
+        text if n is None else format_numbered_source_line(n, text, width=width, marker=marker)
+        for n, text, marker in rows
     )
 
 
