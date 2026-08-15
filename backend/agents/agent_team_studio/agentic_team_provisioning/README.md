@@ -75,6 +75,11 @@ process DAG, running each step's agent and pausing at WAIT steps for human input
 Both modes write the same run-store rows, so the status/list endpoints and UI polling
 are identical. See `docs/ENV_VARS.md` for the WAIT-timeout/poll/stale knobs.
 
+For the reproducible evidence that a **saved** manifest drives a Stage-2 run across the
+sandbox/pipeline/test-chat paths — and the unbound-vs-bound signal it reports — see
+[`docs/STAGE2_BINDING_VERIFICATION.md`](docs/STAGE2_BINDING_VERIFICATION.md)
+(automated suite: `tests/test_stage2_binding_after_save.py`).
+
 ## Agent Provisioning bridge
 
 When enabled (`AGENTIC_TEAM_AGENT_PROVISIONING_ENABLED`), saving a process can schedule background provisioning via `agent_provisioning_team` for step agents. See `agent_env_provisioning.py`.

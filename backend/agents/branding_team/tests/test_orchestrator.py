@@ -814,6 +814,44 @@ def test_extract_phase_output_uses_structured_output_when_present() -> None:
     assert output.brand_promise == agent_result.structured_output.brand_promise
 
 
+@pytest.mark.parametrize(
+    "node_id,full_output,model_cls",
+    [
+        ("phase3_visual", _full_visual_identity(), VisualIdentityOutput),
+        ("phase4_channel", _full_channel_activation(), ChannelActivationOutput),
+        ("phase5_governance", _full_governance(), GovernanceOutput),
+    ],
+    ids=["phase3_visual", "phase4_channel", "phase5_governance"],
+)
+def test_extract_compositor_output_uses_structured_output_not_text_parse(
+    node_id, full_output, model_cls
+) -> None:
+    """The Phase 3/4/5 compositors now pass ``structured_output=``, so their
+    typed payload lands on ``AgentResult.structured_output`` and extraction
+    consumes it via the structured path — ``_parse_model_from_text`` is never
+    reached. The empty ``message`` proves the result is taken from the
+    structured field, not recovered from any text block.
+    """
+    agent_result = MagicMock()
+    agent_result.message = {"content": []}
+    agent_result.structured_output = full_output
+
+    node_result = MagicMock()
+    node_result.get_agent_results.return_value = [agent_result]
+
+    mock_result = MagicMock()
+    mock_result.result = {node_id: node_result}
+
+    with patch("branding_team.orchestrator._parse_model_from_text") as mock_parse:
+        output, degraded = BrandingTeamOrchestrator._extract_phase_output(
+            mock_result, node_id, model_cls
+        )
+
+    assert degraded is False
+    assert output == full_output
+    mock_parse.assert_not_called()
+
+
 def _phase1_leaf_node(structured_output) -> MagicMock:
     """A mock NodeResult for a single Phase 1 fan-out/fan-in leaf agent."""
     agent_result = MagicMock()
