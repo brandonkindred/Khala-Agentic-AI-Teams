@@ -172,6 +172,29 @@ def test_batch_runs_one_wave_and_completes():
     assert harness.activity_calls.count("snapshot_prior_records_activity") == 1
 
 
+def test_each_cycle_gets_the_batch_scoped_cache_key():
+    """Every cycle in a batch carries the same deterministic ``batch_cache_key``
+    (``f"{run_id}-b{batch_idx}"``), so the worker resolves one shared
+    BatchIndicatorCache per batch from it. Two batches → two distinct keys."""
+    child_results = {
+        "run-1-c0": _child_record("0"),
+        "run-1-c1": _child_record("1"),
+        "run-1-c2": _child_record("2"),
+        "run-1-c3": _child_record("3"),
+    }
+    harness = _Harness(
+        child_results=child_results,
+        activity_handlers=_default_activity_handlers(),
+    )
+    _run(_batch_input(batch_size=2, batch_count=2), harness)
+
+    # Batch 0's two cycles share key "run-1-b0"; batch 1's share "run-1-b1".
+    assert harness.child_start_args["run-1-c0"]["batch_cache_key"] == "run-1-b0"
+    assert harness.child_start_args["run-1-c1"]["batch_cache_key"] == "run-1-b0"
+    assert harness.child_start_args["run-1-c2"]["batch_cache_key"] == "run-1-b1"
+    assert harness.child_start_args["run-1-c3"]["batch_cache_key"] == "run-1-b1"
+
+
 def test_all_children_in_wave_start_before_any_is_awaited():
     """Per-wave concurrency: the whole wave is started before gather awaits any
     child (reproducing ThreadPoolExecutor(max_workers=len(wave))'s fan-out)."""

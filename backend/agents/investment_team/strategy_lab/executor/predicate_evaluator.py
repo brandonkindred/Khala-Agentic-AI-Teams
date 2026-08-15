@@ -19,6 +19,7 @@ from typing import Any, Dict, Literal, Optional, Protocol, Sequence, Tuple
 
 import pandas as pd
 
+from ..batch_cache_context import new_registry
 from ..indicators.streaming import IndicatorRegistry, resolve_indicator
 from ..runtime_window import STREAMING_WINDOW_BARS
 from ..spec_dsl import (
@@ -336,7 +337,7 @@ def compute_indicator_series(ref: IndicatorRef, df: pd.DataFrame) -> pd.Series:
     def _at(arr, idx: int) -> float:
         return float(arr[idx]) if arr is not None else 0.0
 
-    reg = IndicatorRegistry()
+    reg = new_registry()
     window: deque[_FrameBar] = deque(maxlen=_SERIES_WINDOW)
     out: list[float] = []
     for idx in range(n):
@@ -507,7 +508,16 @@ class StreamingHistoryView:
         self._bars_list: list[BarRecord] = []
         self._bars_list_counter: Optional[int] = None
         # One registry for the view's lifetime; per-``sig_id`` scalar buffers.
-        self._registry = IndicatorRegistry()
+        # Built via ``new_registry`` so it shares the active batch cache when one
+        # is bound. This is inert today for the streaming path: the batch cache
+        # is consulted (in ``resolve_indicator``) only when the trailing bar
+        # carries both a non-empty ``symbol`` and a ``date`` attribute, and this
+        # view is fed ``contract.Bar``-shaped bars (``timestamp``, no ``date``),
+        # so consultation — and its ``reg._state.clear()``-on-hit path — is never
+        # reached here. If the streaming bar type ever gains a ``date``, that
+        # interaction with the long-lived per-bar streaming state must be
+        # revisited.
+        self._registry = new_registry()
         # sig_id -> {"buf": deque[Optional[float]], "synced": int}
         self._buffers: Dict[str, Dict[str, Any]] = {}
 
