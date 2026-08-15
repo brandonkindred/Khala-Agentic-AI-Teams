@@ -28,7 +28,7 @@ from typing import Any, Callable, Optional, Union
 from . import config as llm_config
 from . import provider_store
 from .attribution import llm_attribution
-from .clients import ClaudeLLMClient, DummyLLMClient, OllamaLLMClient
+from .clients import ClaudeLLMClient, DummyLLMClient, OllamaLLMClient, RunPodLLMClient
 from .interface import (
     OLLAMA_WEEKLY_LIMIT_MESSAGE,
     LLMClient,
@@ -62,6 +62,9 @@ _client_cache: dict[tuple[str, str, int, int, str], OllamaLLMClient] = {}
 # key, model, timeout, or rate-limit-override change yields a fresh client (and a
 # stale key never lingers behind a cached client).
 _claude_cache: dict[tuple[str, str, int, int], ClaudeLLMClient] = {}
+# RunPod clients cache by (model, base_url, timeout-ms, rl-override, api-key fingerprint)
+# mirroring the Ollama cache layout; api_key is mandatory for RunPod (no empty-key path).
+_runpod_cache: dict[tuple[str, str, int, int, str], RunPodLLMClient] = {}
 _cache_lock = threading.Lock()
 
 
@@ -116,6 +119,47 @@ def _ollama_cached(
                 api_key=api_key,
             )
             _client_cache[cache_key] = client
+    return client, miss
+
+
+def _runpod_cached(
+    model: str,
+    base_url: str,
+    timeout: float,
+    rate_limit_max_retries: Optional[int],
+    api_key: str,
+) -> "tuple[RunPodLLMClient, bool]":
+    """Return a cached RunPod client for the args, building one on a miss.
+
+    Cache key: ``(model, base_url, timeout_ms, rl_key, key_fingerprint)``.
+    RunPod always requires an API key, so ``api_key`` is mandatory (no default).
+
+    Preconditions: ``model``/``base_url`` are resolved strings; ``timeout`` is a
+        number; ``api_key`` is non-empty.
+    Postconditions: returns ``(client, was_miss)`` where ``client`` is the shared
+        singleton for the given args and ``was_miss`` is True only when this call
+        constructed it. Thread-safe.
+    """
+    fingerprint = sha256_fingerprint(api_key)
+    cache_key = (
+        model,
+        base_url,
+        _timeout_cache_key(timeout),
+        _rl_key(rate_limit_max_retries),
+        fingerprint,
+    )
+    with _cache_lock:
+        client = _runpod_cache.get(cache_key)
+        miss = client is None
+        if miss:
+            client = RunPodLLMClient(
+                model=model,
+                base_url=base_url,
+                timeout=timeout,
+                rate_limit_max_retries=rate_limit_max_retries,
+                api_key=api_key,
+            )
+            _runpod_cache[cache_key] = client
     return client, miss
 
 
