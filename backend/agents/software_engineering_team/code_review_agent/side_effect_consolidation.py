@@ -298,7 +298,7 @@ def _merge_group(
           copied from the highest-severity member.
     """
     assert shared_index is not None, "_merge_group requires a CodebaseIndex (see preconditions)"
-    file_counts: "OrderedDict[str, int]" = OrderedDict()
+    file_counts: OrderedDict[str, int] = OrderedDict()
     for issue in group:
         fp = _canonical_path(shared_index, issue.file_path or "")
         if not fp:

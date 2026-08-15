@@ -972,7 +972,9 @@ def run_coordinator(
     # submission/repo_reader, so a single index avoids parsing the submission
     # twice. CodebaseIndex is read-only after construction (see its own
     # docstring's Invariants), so this one instance is safe to hand to the tail
-    # passes (see ``_run_tail_passes``).
+    # passes (see ``_run_tail_passes``). It is a local: passed only into the tail
+    # passes and never stored on any coordinator/instance state, so it is not
+    # retained past this call and cannot outlive the submission it describes.
     shared_index = CodebaseIndex.from_input(input_data, repo_reader=repo_reader)
 
     # ``_run_tail_passes`` now runs sequentially: the merged architecture/

@@ -83,7 +83,7 @@ _DIGITS_RE = re.compile(r"\b\d+\b")
 _WORD_RE = re.compile(r"[a-z0-9]+")
 
 
-def _tokenize_for_similarity(text: str) -> "frozenset[str]":
+def _tokenize_for_similarity(text: str) -> frozenset[str]:
     """Reduce a description to a comparable bag of words.
 
     Postconditions:
@@ -97,7 +97,7 @@ def _tokenize_for_similarity(text: str) -> "frozenset[str]":
     return frozenset(_WORD_RE.findall(normalized))
 
 
-def _jaccard_similarity(a: "frozenset[str]", b: "frozenset[str]") -> float:
+def _jaccard_similarity(a: frozenset[str], b: frozenset[str]) -> float:
     """Postconditions: returns ``|a & b| / |a | b|``, or 0.0 when both are empty."""
     union = a | b
     if not union:
@@ -243,7 +243,8 @@ def combine_findings(
     for pos, issue in enumerate(issues):
         if not consolidate_side_effects or categories[pos] != _SIDE_EFFECT_CATEGORY:
             continue
-        for cited_key in resolver.citation_keys(f"{issue.description} {issue.suggestion}"):
+        citation_text = f"{issue.description or ''} {issue.suggestion or ''}"
+        for cited_key in resolver.citation_keys(citation_text):
             for target_pos in construct_positions.get((categories[pos], cited_key), []):
                 if target_pos != pos:
                     uf.union(pos, target_pos)
