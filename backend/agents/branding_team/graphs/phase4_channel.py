@@ -21,14 +21,16 @@ from branding_team.agents import (
     make_website_guide,
 )
 from branding_team.graphs.shared import build_agent, build_fan_out_fan_in
+from branding_team.models import ChannelActivationOutput
 
-# Compositor system prompt, extracted to a module-level constant so regression
-# tests can assert its field bullets against the ``ChannelActivationOutput``
-# schema without reaching into Strands graph-node internals. The bulleted
-# ``Output covers`` list names the schema fields the model must emit; every
-# bullet must match a real ``ChannelActivationOutput`` field name — an
-# LLM that follows a misspelled bullet emits a key that fails validation and
-# is silently dropped from the deliverable.
+# Compositor system prompt, extracted to a module-level constant so a regression
+# test can assert its field bullets against the ``ChannelActivationOutput``
+# schema. The bulleted "covers" list names the schema fields the model must
+# emit; every bullet must match a real ``ChannelActivationOutput`` field name —
+# an LLM that follows a misspelled bullet emits a key that fails validation and
+# is silently dropped from the deliverable. The typed ``structured_output=``
+# model (wired at the ``build_agent`` call below) is the output-format contract,
+# so the prompt carries no redundant "output valid JSON" reminder.
 _CHANNEL_COMPOSITOR_SYSTEM_PROMPT = (
     "You are a Channel Activation Compositor. You receive outputs from nine specialist "
     "agents: brand experience principles, website guidelines, social media guidelines, "
@@ -40,8 +42,7 @@ _CHANNEL_COMPOSITOR_SYSTEM_PROMPT = (
     "- brand_experience_principles\n"
     "- channel_guidelines (list of per-channel guideline objects)\n"
     "- brand_architecture\n"
-    "- brand_in_action\n\n"
-    "Output valid JSON matching the ChannelActivationOutput schema."
+    "- brand_in_action"
 )
 
 
@@ -77,6 +78,7 @@ def build_phase4_graph() -> Graph:
             name="channel_compositor",
             description="Assembles all channel and experience outputs into a unified deliverable.",
             system_prompt=_CHANNEL_COMPOSITOR_SYSTEM_PROMPT,
+            structured_output=ChannelActivationOutput,
         ),
         node_id="channel_compositor",
     )
