@@ -1206,7 +1206,12 @@ class OllamaLLMClient(LLMClient):
                                 finish_reason: Optional[str] = None
                                 tool_call_buffers: dict[int, dict] = {}
                                 has_reasoning: bool = False
-                                partial_buf = ""  # buffer for lines split across TCP chunks
+                                # Buffer for lines split across TCP chunks. This is
+                                # a str because httpx's Response.iter_lines() yields
+                                # decoded str (via iter_text()), unlike requests'
+                                # iter_lines() which yields bytes — so every
+                                # startswith/slice below operates on str.
+                                partial_buf = ""
                                 usage_data: Optional[Dict[str, Any]] = (
                                     None  # token usage from final chunk
                                 )
@@ -1214,8 +1219,16 @@ class OllamaLLMClient(LLMClient):
                                     if not raw_line:
                                         continue
 
-                                    # --- Resolve partial-buffer / current-line into chunk_data ---
-                                    chunk_data: Optional[str] = None
+                                    # --- Resolve partial-buffer / current-line into a
+                                    # parsed chunk. Each SSE payload is parsed exactly
+                                    # once; the resolved value feeds the rest of the loop.
+                                    #
+                                    # Postcondition of this block: `chunk` is either None
+                                    # (nothing usable this line — skip via continue) or a
+                                    # parsed JSON *object* (dict). No unparsed string
+                                    # survives past here, so downstream `.get(...)` calls
+                                    # never re-parse and never hit a raw JSONDecodeError.
+                                    chunk: Optional[dict] = None
                                     if partial_buf:
                                         # Try joining buffered partial with this line
                                         combined = partial_buf + raw_line
@@ -1225,8 +1238,7 @@ class OllamaLLMClient(LLMClient):
                                             if cdata.strip() == "[DONE]":
                                                 break
                                             try:
-                                                json.loads(cdata)  # validate
-                                                chunk_data = cdata
+                                                chunk = json.loads(cdata)
                                             except json.JSONDecodeError:
                                                 # Combined still invalid — discard buffer,
                                                 # fall through to try raw_line on its own.
@@ -1234,7 +1246,7 @@ class OllamaLLMClient(LLMClient):
                                                     "Discarding unrecoverable partial SSE buffer"
                                                 )
 
-                                    if chunk_data is None:
+                                    if chunk is None:
                                         # Process raw_line normally
                                         if not raw_line.startswith("data:"):
                                             continue
@@ -1242,13 +1254,21 @@ class OllamaLLMClient(LLMClient):
                                         if chunk_data.strip() == "[DONE]":
                                             break
                                         try:
-                                            json.loads(chunk_data)  # validate
+                                            chunk = json.loads(chunk_data)
                                         except json.JSONDecodeError:
                                             # May be split across TCP frames — buffer for next line
                                             partial_buf = raw_line
                                             continue
 
-                                    chunk = json.loads(chunk_data)
+                                    # A syntactically valid but non-object payload (e.g.
+                                    # `data: 123` or `data: "x"`) parses cleanly yet has no
+                                    # `.get`; skip it rather than crash the stream.
+                                    if not isinstance(chunk, dict):
+                                        logger.debug(
+                                            "Skipping non-object SSE chunk: %r", chunk
+                                        )
+                                        continue
+
                                     # Capture token usage (typically in the last SSE chunk)
                                     chunk_usage = chunk.get("usage")
                                     if chunk_usage and isinstance(chunk_usage, dict):
@@ -1311,6 +1331,17 @@ class OllamaLLMClient(LLMClient):
                                         fr = choices[0].get("finish_reason")
                                         if fr:
                                             finish_reason = fr
+                                # The stream loop terminates two ways, and BOTH end
+                                # here: an explicit `break` on a `[DONE]` sentinel, or
+                                # natural exhaustion of `iter_lines()` when the server
+                                # closes the stream without one. Natural completion is
+                                # not a stuck state — it falls through to the
+                                # unconditional `return` below (same as `[DONE]`), so
+                                # the enclosing `while` cannot spin on a
+                                # sentinel-less stream. Whatever content accumulated is
+                                # assembled and returned; if none did,
+                                # `_parse_response_content` raises `_EmptyResponseSignal`,
+                                # which the loop resolves on finite retry budgets.
                                 elapsed = time.monotonic() - t0
                                 joined_content = "".join(content_parts)
                                 caller = _caller_var.get()
@@ -1655,8 +1686,10 @@ class OllamaLLMClient(LLMClient):
                     if _retry_transient_step(f"server error {status}", kind="server error"):
                         continue
                     raise last_error
-                if status and 400 <= status < 500:
-                    raise LLMPermanentError(str(e), status_code=status or 0, cause=e)
+                # Catch-all for every remaining status — 4xx client errors, plus
+                # any 1xx/3xx or a missing response. All are non-retryable; raising
+                # here (never falling through) is the postcondition that the retry
+                # loop can never spin forever on an unhandled status code.
                 raise LLMPermanentError(str(e), status_code=status or 0, cause=e)
             except (
                 httpx.ConnectError,

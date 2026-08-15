@@ -19,6 +19,23 @@ The router is included from `unified_api/main.py` at import time when
 import-time start — catalog:
 [`docs/UNIFIED_API_LIFESPAN.md`](../../../../docs/UNIFIED_API_LIFESPAN.md).
 
+### Dispatch
+
+Authoring CRUD (start conversation / send message / clone / save) dispatches
+through `temporal/dispatch.py`, which picks a path per call. When a Temporal
+cluster is configured *and* the `agent-studio-queue` worker has finished
+connecting, each helper runs the matching Studio workflow. Otherwise — worker
+disabled, still connecting, or absent — it calls the process-wide
+`AgentStudioService` singleton directly, in-process. Both paths share one
+conversation store and identical business logic, so the `agent-studio-queue`
+worker and its workflow wrappers are **not a hard requirement** for authoring:
+their absence is a mode switch, not a degraded state.
+
+This does not make Temporal optional for the platform. Temporal remains a
+required dependency for the durable, long-running subsystems (provisioning,
+sandbox lifecycle, pipeline runs, persona founder); only Studio authoring's
+single-activity workflow wrappers have been demoted to optional.
+
 ## Identity: `AgentDefinition` view-model vs. `AgentManifest` SoT
 
 `agent_platform.registry.models.AgentManifest` is the only persisted, writable **catalog**

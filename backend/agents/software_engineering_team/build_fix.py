@@ -31,14 +31,16 @@ bootstrap still used in ``orchestrator.py``).
 from __future__ import annotations
 
 import logging
+import os
 import sys
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 from strands import Agent
 
 from llm_service import get_strands_model
+from shared.git.git_utils import UnsafeRepoPathError, resolve_safe_repo_path
 from shared.repo_context.repo_utils import find_repo_files
 
 logger = logging.getLogger(__name__)
@@ -67,6 +69,41 @@ _BUILD_FIX_MAX_CODE_CHARS = 30_000
 _BUILD_FIX_EXCLUDE_DIRS = frozenset(
     {"node_modules", ".git", "dist", "build", "__pycache__", ".angular"}
 )
+# Directories the repair writer must not touch. Union of the LLM-context prune
+# set with venv / pytest-cache names the DbC worktree snapshot also skips, so
+# a repair cannot land in a tree the snapshot would not restore.
+_REPAIR_SKIP_WRITE_DIRS = _BUILD_FIX_EXCLUDE_DIRS | frozenset({"venv", ".venv", ".pytest_cache"})
+
+
+def _safe_repair_write_path(project_dir: Path, rel_path: str) -> Optional[Path]:
+    """Resolve an LLM repair path under ``project_dir``, or ``None`` if unsafe.
+
+    Preconditions:
+        ``project_dir`` is the project root the fixer is allowed to write.
+
+    Postconditions:
+        Returns a path contained in ``project_dir`` whose resolved parts do not
+        include a directory in ``_REPAIR_SKIP_WRITE_DIRS`` (lexical or via an
+        in-repo symlink into an excluded tree). ``None`` when ``rel_path``
+        is empty, is absolute (``resolve_safe_repo_path`` would ``lstrip`` a
+        leading ``/`` and write under the repo), escapes ``project_dir``
+        lexically or via a pre-existing symlink ancestor, or targets an
+        unsnapshotted / venv / pytest-cache directory.
+    """
+    if os.path.isabs(rel_path):
+        return None
+    root = Path(project_dir).resolve()
+    try:
+        out = resolve_safe_repo_path(root, rel_path)
+    except UnsafeRepoPathError:
+        return None
+    try:
+        real_rel = out.resolve().relative_to(root)
+    except ValueError:
+        return None
+    if any(part in _REPAIR_SKIP_WRITE_DIRS for part in real_rel.parts):
+        return None
+    return out
 
 
 def _run_build_verification(
@@ -112,9 +149,8 @@ def _run_build_verification(
         else agent_type
     )
 
-    if (
-        base_agent_type == "frontend"
-    ):  # pragma: no cover  # integration-only: invokes ng build and downstream LLM fix loop
+    # integration-only: invokes ng build and downstream LLM fix loop
+    if base_agent_type == "frontend":  # pragma: no cover
         # repo_path may be frontend repo root (package.json here) or work path (frontend/ subdir)
         frontend_dir = (
             repo_path if (repo_path / "package.json").exists() else (repo_path / "frontend")
@@ -164,7 +200,8 @@ def _run_build_verification(
             logger.info("Build verification: no Python files found, skipping")
             return True, ""
         result = run_python_syntax_check(backend_dir)
-        if not result.success:  # pragma: no cover  # integration-only: syntax-check + LLM fix loop
+        # integration-only: syntax-check + LLM fix loop
+        if not result.success:  # pragma: no cover
             logger.warning("Syntax check failed for task %s: %s", task_id, result.error_summary)
             fixed, fix_error = _try_build_fix_one_at_a_time(repo_path, base_agent_type, task_id)
             if fixed:
@@ -178,9 +215,8 @@ def _run_build_verification(
         if tests_dir.exists() and any(tests_dir.rglob("test_*.py")):
             # Install deps before pytest so agent-added packages (e.g. sqlalchemy) are available
             req_txt = backend_dir / "requirements.txt"
-            if (
-                req_txt.exists()
-            ):  # pragma: no cover  # integration-only: shells out to `pip install`
+            # integration-only: shells out to `pip install`
+            if req_txt.exists():  # pragma: no cover
                 try:
                     pip_result = run_command(
                         [sys.executable, "-m", "pip", "install", "-r", "requirements.txt"],
@@ -228,9 +264,8 @@ def _run_build_verification(
         logger.info("Build verification passed for backend task %s", task_id)
         return True, ""
 
-    elif (
-        base_agent_type == "devops"
-    ):  # pragma: no cover  # integration-only: docker build + yaml parsing on real workflow files
+    # integration-only: docker build + yaml parsing on real workflow files
+    elif base_agent_type == "devops":  # pragma: no cover
         # Validate YAML files and run docker build if Dockerfile exists
         import yaml
 
@@ -381,9 +416,9 @@ def _execute_llm_repair_attempt(
         Returns True when the model produced at least one file mapping (writes
         are best-effort; a write failure is logged and other files still apply).
         Successful writes also update ``current_files`` in place so later
-        repair attempts prompt on the latest code. Returns False on LLM error
-        or when the template parser yields no files, leaving ``current_files``
-        unchanged in those cases.
+        repair attempts prompt on the latest code. Returns False on LLM error,
+        when the template parser raises or returns a non-dict, or when it
+        yields no files, leaving ``current_files`` unchanged in those cases.
     """
     assert "description" in issue, "issue must include a description"
     desc = issue["description"]
@@ -429,12 +464,26 @@ def _execute_llm_repair_attempt(
             e,
         )
         return False
-    parsed = parse_fn(raw)
-    fixed_files = parsed.get("files") or {}
+    try:
+        parsed = parse_fn(raw)
+    except Exception as e:
+        logger.warning(
+            "[%s] Build fix attempt %d/%d: could not parse repair response (%s). "
+            "Next step -> Skipping to next issue",
+            task_id,
+            attempt + 1,
+            max_attempts,
+            e,
+        )
+        return False
+    fixed_files = parsed.get("files") if isinstance(parsed, dict) else None
     if not fixed_files:
         return False
     for rel_path, content in fixed_files.items():
-        out_path = project_dir / rel_path
+        out_path = _safe_repair_write_path(project_dir, rel_path)
+        if out_path is None:
+            logger.warning("Build fix: refusing to write unsafe path %s", rel_path)
+            continue
         try:
             out_path.parent.mkdir(parents=True, exist_ok=True)
             out_path.write_text(content, encoding="utf-8")
@@ -447,6 +496,23 @@ def _execute_llm_repair_attempt(
 
 class _BuildFixCommandError(Exception):
     """A build/test helper raised; the repair loop must abort with this message."""
+
+
+def _is_command_result(result: Any) -> bool:
+    """Return True when ``result`` exposes the CommandResult interface the loop relies on.
+
+    Preconditions:
+        None.
+    Postconditions:
+        Returns ``True`` iff ``result`` is non-None, exposes a ``success``
+        attribute, and exposes a callable ``parsed_failures`` method; returns
+        ``False`` otherwise. Never raises.
+    """
+    return (
+        result is not None
+        and hasattr(result, "success")
+        and callable(getattr(result, "parsed_failures", None))
+    )
 
 
 def _run_post_fix_build_verification(project_dir: Path, agent_type: str) -> Any:
@@ -509,11 +575,16 @@ def _try_build_fix_one_at_a_time(
         (best-effort walk). ``run_pytest`` / ``run_command`` map subprocess
         failures (timeout, missing binary, unexpected errors) into
         ``CommandResult`` rather than raising ``subprocess.CalledProcessError``.
+        A single ``_execute_llm_repair_attempt`` call that raises unexpectedly
+        (template parse failure, prompt formatting mismatch, snippet
+        extraction) is logged and skipped so the loop continues with the next
+        issue rather than aborting.
 
     Raises:
-        OSError from unbounded ``Path.rglob`` project probes, exceptions from
-        ``parse_problem_solving_single_issue_template``, and the uncaught
+        OSError from unbounded ``Path.rglob`` project probes and the uncaught
         post-fix frontend re-run of ``run_ng_build_with_nvm_fallback``.
+        Exceptions from ``parse_problem_solving_single_issue_template`` are now
+        caught, since it only runs inside the guarded repair-attempt call.
         Pytest runner crashes are logged and returned as ``(False, message)``
         rather than propagating. :func:`_run_build_verification` does not
         catch the remaining uncaught paths, so those reach the public
@@ -531,9 +602,8 @@ def _try_build_fix_one_at_a_time(
     # "Build failed" message rather than a NameError.
     result = None
 
-    if (
-        agent_type == "frontend"
-    ):  # pragma: no cover  # integration-only: invokes ng build + LLM repair loop
+    # integration-only: invokes ng build + LLM repair loop
+    if agent_type == "frontend":  # pragma: no cover
         project_dir = repo_path if (repo_path / "package.json").exists() else repo_path / "frontend"
         if not (project_dir / "package.json").exists():
             return False, "No frontend project found"
@@ -570,9 +640,8 @@ def _try_build_fix_one_at_a_time(
             )
         language = "typescript"
         prompt_module = "frontend_code_v2_team.prompts"
-    elif (
-        agent_type == "backend"
-    ):  # pragma: no cover  # integration-only: runs python syntax check + pytest + LLM repair loop
+    # integration-only: runs python syntax check + pytest + LLM repair loop
+    elif agent_type == "backend":  # pragma: no cover
         project_dir = repo_path if any(repo_path.rglob("*.py")) else repo_path / "backend"
         if not project_dir.exists() or not any(project_dir.rglob("*.py")):
             return False, "No Python project found"
@@ -586,7 +655,10 @@ def _try_build_fix_one_at_a_time(
                     line = line.strip()
                     if not line or ":" not in line:
                         continue
-                    path, _, msg = line.partition(":")
+                    # Line format is "<path>: <message>"; split on the ": " delimiter
+                    # (not the first bare colon) so a Windows drive letter (e.g. "C:\\")
+                    # and colon-bearing messages are preserved.
+                    path, _, msg = line.partition(": ")
                     path, msg = path.strip(), msg.strip()
                     if path and msg:
                         issues.append(
@@ -617,8 +689,7 @@ def _try_build_fix_one_at_a_time(
                         )
                         if not pip_result.success:
                             logger.warning(
-                                "Build fix: pip install -r requirements.txt failed "
-                                "(non-fatal): %s",
+                                "Build fix: pip install -r requirements.txt failed (non-fatal): %s",
                                 pip_result.error_summary,
                             )
                     except Exception as e:
@@ -694,31 +765,54 @@ def _try_build_fix_one_at_a_time(
         language_conventions = JAVA_CONVENTIONS if language == "java" else PYTHON_CONVENTIONS
 
     max_fix_attempts = _MAX_BUILD_FIX_ATTEMPTS
-    for attempt in range(
-        max_fix_attempts
-    ):  # pragma: no cover  # integration-only: LLM fix loop reruns build/test after each repair
+    # integration-only: LLM fix loop reruns build/test after each repair
+    for attempt in range(max_fix_attempts):  # pragma: no cover
         if not issues:
             break
         issue = issues.pop(0)
-        applied = _execute_llm_repair_attempt(
-            issue=issue,
-            current_files=current_files,
-            project_dir=project_dir,
-            model=_build_fix_model,
-            parse_fn=parse_problem_solving_single_issue_template,
-            fix_prompt=FIX_PROMPT,
-            is_frontend=prompt_module == "frontend_code_v2_team.prompts",
-            language_conventions=language_conventions,
-            task_id=task_id,
-            attempt=attempt,
-            max_attempts=max_fix_attempts,
-        )
+        try:
+            applied = _execute_llm_repair_attempt(
+                issue=issue,
+                current_files=current_files,
+                project_dir=project_dir,
+                model=_build_fix_model,
+                parse_fn=parse_problem_solving_single_issue_template,
+                fix_prompt=FIX_PROMPT,
+                is_frontend=prompt_module == "frontend_code_v2_team.prompts",
+                language_conventions=language_conventions,
+                task_id=task_id,
+                attempt=attempt,
+                max_attempts=max_fix_attempts,
+            )
+        except Exception as e:
+            # A single repair attempt is best-effort: an unexpected error
+            # (template parse failure, prompt formatting mismatch, snippet
+            # extraction, etc.) must not abort the whole loop. Log and skip
+            # to the next issue.
+            logger.warning(
+                "[%s] Build fix attempt %d/%d: unexpected error during repair "
+                "of issue %r: %s. Next step -> Skipping to next issue",
+                task_id,
+                attempt + 1,
+                max_fix_attempts,
+                (issue.get("description") or "")[:80],
+                e,
+            )
+            continue
         if not applied:
             continue
         try:
             result = _run_post_fix_build_verification(project_dir, agent_type)
         except _BuildFixCommandError as e:
             return False, str(e)
+        if not _is_command_result(result):
+            logger.warning(
+                "Build fix: post-fix verification returned an unusable result (%r) for task %s; "
+                "aborting repair loop",
+                result,
+                task_id,
+            )
+            return False, "Build fix aborted: post-fix verification produced no usable result"
         if result.success:
             logger.info(
                 "Build fix (tool agent): task %s build passed after fixing one issue at a time",
@@ -752,7 +846,10 @@ def _try_build_fix_one_at_a_time(
                     for line in stderr.split("\n")[1:]:
                         line = line.strip()
                         if ":" in line:
-                            path, _, msg = line.partition(":")
+                            # Line format is "<path>: <message>"; split on the ": "
+                            # delimiter (not the first bare colon) so a Windows drive
+                            # letter (e.g. "C:\\") and colon-bearing messages survive.
+                            path, _, msg = line.partition(": ")
                             path, msg = path.strip(), msg.strip()
                             if path and msg:
                                 issues.append(
@@ -777,6 +874,14 @@ def _try_build_fix_one_at_a_time(
                 except Exception as e:
                     logger.warning("Build fix: pytest failed to run: %s", e)
                     return False, str(e)
+                if not _is_command_result(result):
+                    logger.warning(
+                        "Build fix: in-loop pytest returned an unusable result (%r) for task %s; "
+                        "aborting repair loop",
+                        result,
+                        task_id,
+                    )
+                    return False, "Build fix aborted: in-loop pytest produced no usable result"
                 if not result.success:
                     issues = [
                         {
