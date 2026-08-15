@@ -149,8 +149,11 @@ is unset.
 
 Sole worker for `agent_platform.studio.temporal.TASK_QUEUE` (`agent-studio-queue`).
 Activities delegate to this process's `AgentStudioService` / `drafts_runtime`
-singletons. When `TEMPORAL_ADDRESS` is unset, authoring CRUD dispatches
-in-process instead — a mode switch, not a degraded state.
+singletons. This worker and its workflow wrappers are not a hard requirement for
+authoring CRUD: when it is disabled or unavailable, `dispatch.py` calls the same
+in-process singletons directly — a mode switch, not a degraded state. Temporal
+itself remains required for the platform's durable subsystems; only Studio
+authoring's workflow wrappers are optional.
 
 ## Shutdown (after yield)
 

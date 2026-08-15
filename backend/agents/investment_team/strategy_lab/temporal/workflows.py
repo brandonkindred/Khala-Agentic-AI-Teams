@@ -210,6 +210,11 @@ class StrategyLabCycleWorkflow:
         tracker_state = cycle_input.get("convergence_tracker_state") or {}
         run_id = cycle_input.get("run_id")
         generation = int(cycle_input.get("generation", _DEFAULT_FENCING_GENERATION))
+        # Per-batch cache key threaded from the parent batch workflow; forwarded
+        # verbatim to run_design_attempt_activity so the worker can resolve the
+        # one shared BatchIndicatorCache for this batch (when the flag is on).
+        # ``.get`` tolerates old-shaped/resumed inputs that predate this field.
+        batch_cache_key = cycle_input.get("batch_cache_key")
 
         # Gather convergence directives once from the batch-level tracker
         # (pure counter/set reads — safe in the sandbox), appended to on each
@@ -273,6 +278,7 @@ class StrategyLabCycleWorkflow:
                     "budget_calls": budget_calls,
                     "regime_summary": regime_summary,
                     "convergence_tracker_state": tracker_state,
+                    "batch_cache_key": batch_cache_key,
                 },
                 timeout=_DESIGN_ATTEMPT_TIMEOUT,
                 heartbeat_timeout=_DESIGN_ATTEMPT_HEARTBEAT_TIMEOUT,
@@ -546,6 +552,13 @@ class StrategyLabBatchWorkflow:
                         "exclude_asset_classes": exclude_asset_classes,
                         "convergence_tracker_state": _snapshot_tracker_wire(primary_tracker_state),
                         "workflow_config": wf_config,
+                        # Deterministic per-batch key (a string — safe to build in
+                        # the workflow sandbox). Every cycle of this batch carries
+                        # the same key, so when the batch-indicator-cache flag is
+                        # on the worker resolves one shared BatchIndicatorCache per
+                        # batch from it (see run_design_attempt_activity). Inert
+                        # payload when the flag is off.
+                        "batch_cache_key": f"{run_id}-b{batch_idx}",
                     }
                     handle = await workflow.start_child_workflow(
                         StrategyLabCycleWorkflow.run,
