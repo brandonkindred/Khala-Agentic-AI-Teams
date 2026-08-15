@@ -42,6 +42,7 @@ from software_engineering_team.github_source import (
     inline_comment_to_timeline_body,
     is_within_diff,
     map_issues_to_comments,
+    parse_removed_lines,
     parse_valid_lines,
     partition_issues_by_existing_comments,
     proposal_from_findings,
@@ -1129,6 +1130,113 @@ def _fetch_pr_metadata(
     return pr, files, reviewer_login
 
 
+def _files_for_scope(mode: ReviewModeDecision) -> Dict[str, str]:
+    """Collect reviewer-visible file bodies for the scope verifier index.
+
+    Postconditions: union of ``head_files``, ``hunk_files``, and non-empty
+        change-surface blocks. Never raises.
+    """
+    files: Dict[str, str] = {}
+    files.update(mode.head_files or {})
+    files.update(mode.hunk_files or {})
+    surface = mode.change_surface
+    if surface is not None and not surface.is_empty:
+        files.update(dict(surface.blocks))
+    return files
+
+
+def _is_not_reviewed_coverage_finding(issue: Any) -> bool:
+    """True when ``issue`` is a blocking unreviewed-range coverage finding.
+
+    Those findings are merged into ``output.issues`` only when
+    ``CODE_REVIEW_BLOCK_ON_UNREVIEWED`` is set; they must not go through
+    scope verification (an unsure tag would route them to proposals and
+    defeat the fail-closed gate).
+
+    Postconditions: True iff the finding description contains
+        ``NOT_REVIEWED_FINDING_MARKER``. Never raises.
+    """
+    from software_engineering_team.code_review_agent.mapping import (
+        NOT_REVIEWED_FINDING_MARKER,
+    )
+
+    return NOT_REVIEWED_FINDING_MARKER in (getattr(issue, "description", "") or "")
+
+
+def _tag_review_issues_for_scope(
+    output: Any, mode: ReviewModeDecision, pr: Any, files: List[Any]
+) -> None:
+    """Tag out-of-scope findings before partition so they are not posted.
+
+    Preconditions: ``output`` is a successful reviewer result with ``issues``.
+        ``pr`` is the GitHub PR object used for the reviewer task text.
+        ``files`` is the PR file list (patches) from admission.
+    Postconditions: ``output.issues`` is replaced with scope-tagged copies when
+        the verifier runs; blocking "could not be reviewed" coverage findings
+        are excluded from the verifier and merged back unchanged so they cannot
+        be routed to issue proposals. On Dummy LLM / verifier failure the list
+        is left unchanged. Never raises.
+    """
+    issues = getattr(output, "issues", None) or []
+    if not issues:
+        return
+    try:
+        from llm_service import get_client
+        from software_engineering_team.code_review_agent.models import CodeReviewInput
+        from software_engineering_team.code_review_agent.scope_filter import (
+            apply_scope_verification,
+        )
+
+        genuine = [i for i in issues if not _is_not_reviewed_coverage_finding(i)]
+        if not genuine:
+            return
+        scope_files = _files_for_scope(mode)
+        input_data = None
+        if scope_files:
+            input_data = CodeReviewInput(
+                files=dict(scope_files),
+                task_description=(
+                    f"Review pull request #{getattr(pr, 'number', '')}: "
+                    f"{getattr(pr, 'title', '') or ''}"
+                ),
+                task_requirements=_diff_first_focus(getattr(pr, "body", None) or ""),
+            )
+        removed_by_path = {
+            f.filename: sorted(parse_removed_lines(getattr(f, "patch", None) or "")) for f in files
+        }
+        removed_by_path = {path: lines for path, lines in removed_by_path.items() if lines}
+        patches_by_path = {
+            f.filename: getattr(f, "patch", None) or "" for f in files if getattr(f, "filename", "")
+        }
+        tagged = apply_scope_verification(
+            get_client(),
+            issues=genuine,
+            changed_by_path=mode.changed_by_path,
+            files=scope_files,
+            repo_reader=mode.repo_reader,
+            input_data=input_data,
+            removed_by_path=removed_by_path,
+            patches_by_path=patches_by_path,
+        )
+        # apply_scope_verification preserves finding count and order, so `tagged`
+        # aligns 1:1 with `genuine`. Assert that postcondition here so a contract
+        # breach surfaces as a clear, caught failure below rather than a
+        # StopIteration raised mid-splice from next(tagged_iter).
+        assert len(tagged) == len(genuine), (
+            f"scope verification must preserve finding count: {len(tagged)} != {len(genuine)}"
+        )
+        tagged_iter = iter(tagged)
+        output.issues = [
+            i if _is_not_reviewed_coverage_finding(i) else next(tagged_iter) for i in issues
+        ]
+    except Exception as exc:  # noqa: BLE001 — tagging must never fail the review
+        logger.warning(
+            "PR review: scope verification skipped (%s: %s)",
+            type(exc).__name__,
+            scrub_token_from_text(str(exc)),
+        )
+
+
 class ReviewModeDecision(NamedTuple):
     """Whole-file vs. hunk review-mode decision, plus every input ``_run_reviewer`` needs."""
 
@@ -1836,6 +1944,8 @@ def _run_pr_review_body(
             )
             if output is None:
                 return
+
+            _tag_review_issues_for_scope(output, mode, pr, files)
 
             partition = _partition_review_issues(
                 output,
