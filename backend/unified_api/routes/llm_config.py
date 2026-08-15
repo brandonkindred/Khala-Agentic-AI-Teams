@@ -539,6 +539,18 @@ async def update_provider(entry_id: int, body: LlmProviderUpdate) -> LlmProvider
     else:
         effective_api_key = existing.api_key
     _guard_entry_credentials(merged_provider, merged_base_url, effective_api_key)
+    # RunPod branch: when endpoint_id is provided, validate it and reconstruct base_url.
+    # This overrides any body.base_url value (which is ignored for RunPod entries) and
+    # ensures update_entry receives a non-None base_url so the connection-affecting field
+    # change triggers limit-state clearing per requirements 2.7 and 2.8.
+    # When endpoint_id is absent/empty, base_url remains None (leave stored value unchanged)
+    # per requirement 2.2.
+    if merged_provider == "runpod" and body.endpoint_id.strip():
+        try:
+            _validate_runpod_endpoint_id(body.endpoint_id.strip())
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
+        base_url = _build_runpod_base_url(body.endpoint_id.strip())
     try:
         updated = provider_store.update_entry(
             entry_id,
