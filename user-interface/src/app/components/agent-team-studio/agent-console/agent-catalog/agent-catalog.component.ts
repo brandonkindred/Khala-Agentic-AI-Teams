@@ -46,7 +46,8 @@ import type {
 export class AgentCatalogComponent implements OnInit, OnDestroy {
   private readonly api = inject(AgentCatalogApiService);
 
-  /** Emitted when the user clicks "Run agent" in the detail drawer. Consumed by AgentConsoleComponent. */
+  /** Emitted when the user clicks "Run agent" in the detail drawer. Consumed by the host
+   *  (Agent Studio's Build Agent stage) to hand off the selected agent id. */
   @Output() readonly requestRun = new EventEmitter<string>();
 
   /** Cancellable handle to the in-flight list request so late responses can't
