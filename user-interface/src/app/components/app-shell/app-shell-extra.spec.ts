@@ -25,7 +25,7 @@ describe('AppShellComponent (extra coverage)', () => {
 
   it('isGroupActive uses findGroupForRoute', () => {
     const router = TestBed.inject(Router);
-    Object.defineProperty(router, 'url', { value: '/agent-console', writable: true, configurable: true });
+    Object.defineProperty(router, 'url', { value: '/agent-studio', writable: true, configurable: true });
     const someGroup = component.navGroups.find((g) => g.key !== component.navGroups[0].key) ?? component.navGroups[0];
     component.isGroupActive(someGroup);
     // Cover the path: result depends on NAV_GROUPS routes, just ensure no throw
