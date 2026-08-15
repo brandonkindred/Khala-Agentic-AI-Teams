@@ -184,6 +184,52 @@ def test_run_skips_config_resolution_when_already_supplied():
     assert "resolve_workflow_config_activity" not in calls
 
 
+def test_run_forwards_batch_cache_key_to_the_attempt_activity():
+    """The cycle workflow threads the parent's ``batch_cache_key`` into every
+    ``run_design_attempt_activity`` call so the worker can resolve the batch's
+    shared cache."""
+    seen: Dict[str, Any] = {}
+
+    def _attempt(args):
+        seen["batch_cache_key"] = args[0].get("batch_cache_key")
+        return _record_outcome()
+
+    handlers = {"run_design_attempt_activity": _attempt}
+    with _patch_execute(handlers):
+        _run(
+            {
+                "prior_records": [],
+                "config": _config_dict(),
+                "convergence_tracker_state": {},
+                "workflow_config": _WF_CONFIG,
+                "batch_cache_key": "run-1-b3",
+            }
+        )
+    assert seen["batch_cache_key"] == "run-1-b3"
+
+
+def test_run_tolerates_missing_batch_cache_key():
+    """Old-shaped/resumed cycle inputs predating the key still run; the forwarded
+    value is simply ``None``."""
+    seen: Dict[str, Any] = {}
+
+    def _attempt(args):
+        seen["batch_cache_key"] = args[0].get("batch_cache_key", "MISSING")
+        return _record_outcome()
+
+    handlers = {"run_design_attempt_activity": _attempt}
+    with _patch_execute(handlers):
+        _run(
+            {
+                "prior_records": [],
+                "config": _config_dict(),
+                "convergence_tracker_state": {},
+                "workflow_config": _WF_CONFIG,
+            }
+        )
+    assert seen["batch_cache_key"] is None
+
+
 def test_run_fetches_regime_summary_when_enabled_and_passes_it_down():
     seen: Dict[str, Any] = {}
 

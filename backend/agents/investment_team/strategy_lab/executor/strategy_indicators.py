@@ -52,6 +52,19 @@ except ImportError:  # flat sandbox layout
         resolve_indicator,
     )
 
+# ``new_registry`` builds an ``IndicatorRegistry`` wired to the active batch
+# indicator cache when one is bound (see ``batch_cache_context``). In the flat
+# sandbox subprocess ``batch_cache_context`` is not copied in — and a separate
+# process could not share the parent's in-memory cache anyway — so fall back to
+# a plain constructor there, leaving ``_shared_registry`` behaving exactly as
+# before in the sandbox.
+try:  # in-package use
+    from ..batch_cache_context import new_registry
+except ImportError:  # pragma: no cover - flat sandbox layout has no batch cache
+
+    def new_registry():  # type: ignore[no-redef]
+        return IndicatorRegistry()
+
 
 # Ambient "which execution is dispatching strategy code right now" signal for
 # the 16 wrapper functions below (and any indicator_value call with no
@@ -268,7 +281,7 @@ def _shared_registry(
     """
     last = _trailing_element(reference)
     if last is None:
-        return IndicatorRegistry()
+        return new_registry()
     # _safe_getattr (not plain getattr) because this metadata was never read
     # at all before sharing existed — a lazily-loaded timestamp/symbol
     # descriptor that raises on access must degrade to "unavailable", the
@@ -278,20 +291,20 @@ def _shared_registry(
         last.get("timestamp") if isinstance(last, dict) else _safe_getattr(last, "timestamp")
     )
     if timestamp is None:
-        return IndicatorRegistry()
+        return new_registry()
     symbol = last.get("symbol") if isinstance(last, dict) else _safe_getattr(last, "symbol")
     if symbol is None:
-        return IndicatorRegistry()
+        return new_registry()
     if registries is not None:
         key = (symbol, source)
     else:
         registries = _active_registries.get()
         if registries is None:
-            return IndicatorRegistry()
+            return new_registry()
         key = (symbol, source, len(reference))
     reg = registries.get(key)
     if reg is None:
-        reg = IndicatorRegistry()
+        reg = new_registry()
         registries[key] = reg
     return reg
 
