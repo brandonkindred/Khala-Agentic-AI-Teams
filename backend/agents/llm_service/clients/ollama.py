@@ -1655,8 +1655,10 @@ class OllamaLLMClient(LLMClient):
                     if _retry_transient_step(f"server error {status}", kind="server error"):
                         continue
                     raise last_error
-                if status and 400 <= status < 500:
-                    raise LLMPermanentError(str(e), status_code=status or 0, cause=e)
+                # Catch-all for every remaining status — 4xx client errors, plus
+                # any 1xx/3xx or a missing response. All are non-retryable; raising
+                # here (never falling through) is the postcondition that the retry
+                # loop can never spin forever on an unhandled status code.
                 raise LLMPermanentError(str(e), status_code=status or 0, cause=e)
             except (
                 httpx.ConnectError,
