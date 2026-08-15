@@ -53,6 +53,7 @@ import ast
 import logging
 import os
 import re
+import time
 from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -62,6 +63,7 @@ from strands.agent.conversation_manager import SlidingWindowConversationManager
 from strands.models.model import Model as _StrandsModel
 
 from llm_service import LLMClient
+from llm_service.interface import take_complete_json_turns
 from shared.concurrency import parallel_map
 from shared.env import env_flag_enabled
 from software_engineering_team.shared.context_sizing import parse_env_int
@@ -83,7 +85,14 @@ from .prompts import (
     FALSE_POSITIVE_VERIFY_REASONING_SYSTEM_PROMPT,
 )
 from .repo_reader import DEFAULT_MAX_LISTED_FILES, DiskRepoReader, RepoReader
-from .via_reasoning import run_agent_via_reasoning
+from .transcript import (
+    model_label,
+    record_formatting_transcript_turns,
+    record_reasoning_transcript_turns,
+    record_transcript_entry,
+    resolve_format_turn_started,
+)
+from .via_reasoning import formatting_system_prompt_with_untrusted_guard, run_agent_via_reasoning
 
 logger = logging.getLogger(__name__)
 
@@ -1978,26 +1987,87 @@ def _verify_group(
           result rather than returned -- the caller treats an absent index as
           "keep", so an ungrounded drop never reaches the merge (see
           ``_agent_read_the_cited_file``).
+        - On a successful call, buffers ``false_positive_filter`` transcript
+          entries (target ``file_path``) for later batched, off-hot-path
+          persistence to ``code_review_transcripts`` — see
+          ``transcript.record_transcript_entry``. The reasoning pass records
+          one entry per underlying model invocation (tool-use request and the
+          follow-up after ``read_file``), using inner HTTP turns when the
+          Strands adapter recorded them, otherwise one entry per assistant
+          message in ``agent.messages``. Each formatting-pass callback is a
+          separate entry (format prompt + JSON reply, including continuation
+          turns). A no-op when no ``job_id`` is bound on the current
+          ``llm_attribution`` context (see ``CodeReviewAgent.run``); never
+          raises and never blocks on I/O.
     """
     prompt = _build_group_prompt(index, file_path, issues, input_data)
     reasoning_agent: Agent | None = None
+    reasoning_turns: list[tuple[str, str, float]] = []
+    format_turns: list[tuple[str, str, float]] = []
+    started = time.monotonic()
+    reasoning_done_at = started
+    format_turn_started_at: float | None = None
 
     def _capture_reasoning_agent(agent: Agent) -> None:
-        nonlocal reasoning_agent
+        nonlocal reasoning_agent, reasoning_done_at, reasoning_turns
         reasoning_agent = agent
+        reasoning_done_at = time.monotonic()
+        recorded = take_complete_json_turns()
+        reasoning_turns = recorded
 
-    data = run_agent_via_reasoning(
-        model=model,
-        reasoning_prompt=prompt,
-        reasoning_system_prompt=FALSE_POSITIVE_VERIFY_REASONING_SYSTEM_PROMPT,
-        formatting_instructions=FALSE_POSITIVE_VERIFY_FORMATTING_INSTRUCTIONS,
-        parse=extract_json_from_response,
-        tools=_build_tools(index),
-        reasoning_think=True,
-        agent_key="code_review_verify",
-        conversation_manager=SlidingWindowConversationManager(should_truncate_results=False),
-        on_reasoning_agent=_capture_reasoning_agent,
-    )
+    def _on_formatting_start() -> None:
+        nonlocal format_turn_started_at
+        format_turn_started_at = time.monotonic()
+
+    def _capture_formatting(prompt_text: str, response: str) -> None:
+        turn_started = resolve_format_turn_started(
+            [started for _, _, started in format_turns],
+            format_turn_started_at,
+            time.monotonic(),
+        )
+        format_turns.append((prompt_text, response, turn_started))
+
+    try:
+        data = run_agent_via_reasoning(
+            model=model,
+            reasoning_prompt=prompt,
+            reasoning_system_prompt=FALSE_POSITIVE_VERIFY_REASONING_SYSTEM_PROMPT,
+            formatting_instructions=FALSE_POSITIVE_VERIFY_FORMATTING_INSTRUCTIONS,
+            parse=extract_json_from_response,
+            tools=_build_tools(index),
+            reasoning_think=True,
+            agent_key="code_review_verify",
+            conversation_manager=SlidingWindowConversationManager(should_truncate_results=False),
+            on_reasoning_agent=_capture_reasoning_agent,
+            on_formatting=_capture_formatting,
+            on_formatting_start=_on_formatting_start,
+        )
+    finally:
+        # Record even when formatting/parse fails after a successful reasoning
+        # pass, so a malformed reply is still visible in the transcript. A
+        # reasoning-pass exception that never constructed the agent is a no-op.
+        now = time.monotonic()
+        record_reasoning_transcript_turns(
+            "false_positive_filter",
+            file_path,
+            turns=reasoning_turns,
+            agent=reasoning_agent,
+            fallback_prompt=prompt,
+            started=started,
+            reasoning_done_at=reasoning_done_at,
+            system_prompt=FALSE_POSITIVE_VERIFY_REASONING_SYSTEM_PROMPT,
+            model=model_label(model),
+            recorder=record_transcript_entry,
+        )
+        record_formatting_transcript_turns(
+            "false_positive_filter",
+            file_path,
+            turns=format_turns,
+            last_ended=now,
+            system_prompt=formatting_system_prompt_with_untrusted_guard(None),
+            model=model_label(model),
+            recorder=record_transcript_entry,
+        )
     verdicts = _parse_verdicts(data, len(issues))
     if reasoning_agent is None or not _agent_read_the_cited_file(reasoning_agent, index, file_path):
         false_positive_count = sum(1 for v in verdicts.values() if v.is_false_positive)

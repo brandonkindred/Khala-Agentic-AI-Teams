@@ -96,9 +96,11 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 from typing import Callable, List, NamedTuple, Optional, Tuple
 
 from llm_service import LLMClient, compact_text
+from llm_service.interface import observer_turn_started_monotonic
 from shared.cache import get_shared_cache
 from shared.env import env_flag_enabled
 from shared.env_config import env_bool
@@ -162,6 +164,7 @@ from .side_effect_consolidation import (
     consolidate_side_effect_issues,
 )
 from .synthesis import synthesize_review_findings, synthesize_spec_compliance
+from .transcript import model_label, record_transcript_entry
 
 logger = logging.getLogger(__name__)
 
@@ -608,6 +611,49 @@ def _run_tail_passes(
     )
 
 
+def _compact_for_review(
+    text: str,
+    max_chars: int,
+    llm: LLMClient,
+    content_description: str,
+) -> str:
+    """Compact shared review context and record each LLM call in the transcript.
+
+    Preconditions:
+        ``max_chars`` is a non-negative character budget.
+
+    Postconditions:
+        Returns ``compact_text(...)[:max_chars]``. Each ``llm.complete``
+        compaction call is buffered as a ``compaction`` transcript entry
+        (no-op when no ``job_id`` is bound). Cache hits make no LLM call and
+        record nothing.
+    """
+    if max_chars < 0:
+        raise ValueError("max_chars must be a non-negative character budget")
+    last = time.monotonic()
+
+    def _on_attempt(prompt: str, response: str) -> None:
+        nonlocal last
+        now = time.monotonic()
+        started = observer_turn_started_monotonic()
+        if started is None:
+            started = last
+        record_transcript_entry(
+            "compaction",
+            content_description,
+            prompt,
+            response,
+            model=model_label(llm),
+            duration_ms=(now - started) * 1000,
+            started_monotonic=started,
+        )
+        last = now
+
+    return compact_text(text, max_chars, llm, content_description, on_attempt=_on_attempt)[
+        :max_chars
+    ]
+
+
 def run_coordinator(
     llm: LLMClient,
     input_data: CodeReviewInput,
@@ -809,7 +855,9 @@ def run_coordinator(
                     )
                 cached = None
             else:
-                logger.info("CodeReviewCoordinator: submission cache hit; skipping review (approved)")
+                logger.info(
+                    "CodeReviewCoordinator: submission cache hit; skipping review (approved)"
+                )
                 notify_review_progress(
                     progress_callback,
                     "done",
@@ -817,7 +865,6 @@ def run_coordinator(
                     _PROGRESS_DONE,
                 )
                 return cached
-
 
     notify_review_progress(
         progress_callback, "preparing", "preparing review input", _PROGRESS_PREPARING_INPUT
@@ -848,20 +895,20 @@ def run_coordinator(
     # Hard caps after compaction: compact_text returns the original text when
     # its LLM call fails, so the slice is what actually guarantees the chunk
     # reviewer's bounded-prompt precondition.
-    spec_content = compact_text(input_data.spec_content or "", max_spec, llm, "specification")[
-        :max_spec
-    ]
+    spec_content = _compact_for_review(
+        input_data.spec_content or "", max_spec, llm, "specification"
+    )
     arch_overview = ""
     if input_data.architecture:
-        arch_overview = compact_text(
+        arch_overview = _compact_for_review(
             _render_architecture_context(input_data.architecture),
             max_arch,
             llm,
             "architecture overview",
-        )[:max_arch]
-    existing_codebase = compact_text(
+        )
+    existing_codebase = _compact_for_review(
         input_data.existing_codebase or "", max_existing, llm, "existing codebase"
-    )[:max_existing]
+    )
 
     chunks = build_review_chunks(
         blocks, compute_code_review_map_chunk_chars(llm), input_data.pre_numbered
