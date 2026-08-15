@@ -1205,3 +1205,19 @@ class TestDocumentationSelfReviewWiring:
         # The team's own prompt template was the one shown to the LLM.
         prefix = DOCUMENTATION_SELF_REVIEW_PROMPT.split("{", 1)[0]
         assert prefix and prefix in client.prompts[0]
+
+
+class TestDbCSelfReviewWiring:
+    """The backend GATE_CONFIG must point the DbC self-review seam at the shared,
+    reusable ``run_dbc_comments_review`` callable so completed microtasks get DbC
+    comment coverage by default (gated at the call site by ``enable_dbc_comments``).
+    """
+
+    def test_gate_config_wires_dbc_self_review(self):
+        from backend_code_v2_team.phases.execution import GATE_CONFIG
+
+        from software_engineering_team.shared.phases.dbc_phase import run_dbc_comments_review
+
+        # Identity, not just truthiness: the shared loop and its tests rely on this
+        # being the exact shared callable, not a team-local wrapper around it.
+        assert GATE_CONFIG.run_dbc_self_review is run_dbc_comments_review

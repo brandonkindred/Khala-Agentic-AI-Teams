@@ -598,6 +598,65 @@ def test_run_design_attempt_activity_returns_record_outcome(monkeypatch):
     assert "drift" in out
 
 
+_BATCH_CACHE_ENV_VAR = "STRATEGY_LAB_BATCH_INDICATOR_CACHE_ENABLED"
+
+
+def _run_attempt_capturing_bound_cache(monkeypatch, **param_overrides):
+    """Run the activity with ``_run_design_attempt`` monkeypatched to record the
+    batch cache bound at the time it runs; return that recorded value."""
+    from investment_team.strategy_lab.batch_cache_context import active_batch_indicator_cache
+    from investment_team.strategy_lab.orchestrator import StrategyLabOrchestrator
+
+    class _FakeRecord:
+        def model_dump(self, *, mode: str = "python") -> Dict[str, Any]:
+            return {"lab_record_id": "rec-1"}
+
+    captured: Dict[str, Any] = {}
+
+    def _fake_attempt(self, **kwargs):
+        captured["bound_cache"] = active_batch_indicator_cache()
+        return _FakeRecord()
+
+    monkeypatch.setattr(StrategyLabOrchestrator, "_run_design_attempt", _fake_attempt)
+    act.run_design_attempt_activity(_run_design_attempt_params(**param_overrides))
+    return captured["bound_cache"]
+
+
+def test_run_design_attempt_activity_binds_shared_cache_when_flag_on(monkeypatch):
+    """Flag on + a batch_cache_key ⇒ the attempt runs with the batch's shared
+    BatchIndicatorCache bound, and it is the same instance
+    ``get_or_create_batch_cache`` hands out for that key."""
+    from investment_team.strategy_lab import batch_cache_context as bcc
+
+    monkeypatch.setenv(_BATCH_CACHE_ENV_VAR, "true")
+    bcc._caches.clear()
+
+    bound = _run_attempt_capturing_bound_cache(monkeypatch, batch_cache_key="run-1-b0")
+    assert bound is not None
+    assert bound is bcc.get_or_create_batch_cache("run-1-b0")
+    bcc._caches.clear()
+
+
+def test_run_design_attempt_activity_no_cache_when_flag_off(monkeypatch):
+    """Flag off ⇒ nothing is bound and the process registry stays empty even when
+    a key is supplied (behavior unchanged)."""
+    from investment_team.strategy_lab import batch_cache_context as bcc
+
+    monkeypatch.delenv(_BATCH_CACHE_ENV_VAR, raising=False)
+    bcc._caches.clear()
+
+    bound = _run_attempt_capturing_bound_cache(monkeypatch, batch_cache_key="run-1-b0")
+    assert bound is None
+    assert "run-1-b0" not in bcc._caches
+
+
+def test_run_design_attempt_activity_no_cache_when_key_absent(monkeypatch):
+    """Flag on but no batch_cache_key (old-shaped params) ⇒ nothing bound, no crash."""
+    monkeypatch.setenv(_BATCH_CACHE_ENV_VAR, "true")
+    bound = _run_attempt_capturing_bound_cache(monkeypatch)
+    assert bound is None
+
+
 def test_run_design_attempt_activity_returns_reentry_outcome(monkeypatch):
     """A ``SpecImplementabilityError`` is caught and surfaced as a structured
     ``kind='reentry'`` outcome carrying last spec/code/evidence + design context

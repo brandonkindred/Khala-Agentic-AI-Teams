@@ -18,6 +18,7 @@ from shared.dev_models.models import ReviewContext, SystemArchitecture, Task
 from shared.env import parse_int
 from software_engineering_team.shared.agent_review import AgentReviewCache
 from software_engineering_team.shared.code_completeness import reject_invalid_python
+from software_engineering_team.shared.phases.dbc_phase import _run_dbc_self_review
 from software_engineering_team.shared.phases.documentation_phase import _run_documentation_phase
 from software_engineering_team.shared.phases.review_cycle import (
     GateOutcome,
@@ -427,6 +428,12 @@ class GatedExecutionConfig:
     # ``_run_review_cycles``'s concurrent branch). Defaults to ``None``, in
     # which case the concurrent branch falls back to ``status_qa``.
     status_qa_security: Any = None
+    # Injected DbC comments self-review callable (the inner
+    # ``gate_config.run_dbc_self_review`` that ``dbc_phase._run_dbc_self_review``
+    # calls). ``None`` (the default) means the team has not wired DbC yet, and the
+    # gated loop skips the phase entirely -- fully backward-compatible until a
+    # team's ``GATE_CONFIG`` sets it to a real review callable.
+    run_dbc_self_review: Optional[Callable[..., Any]] = None
 
 
 def _generate_coding_phase(
@@ -780,6 +787,7 @@ def _run_one_gated_microtask(
     file_locks: KeyedLockManager[str],
     worktree_lock: threading.Lock,
     progress_callback: Optional[Callable[[int, int, int, str, str, str], None]],
+    build_verify_label: str = "",
 ) -> None:
     """Run one microtask's full gated pipeline (coding, review cycles, docs).
 
@@ -925,6 +933,34 @@ def _run_one_gated_microtask(
             )
 
             if not phase_failed:
+                # Optional DbC comments self-review, mirroring the Documentation
+                # phase: a non-blocking, best-effort step that runs only once the
+                # review-gate cycles have passed, and before Documentation so the
+                # latter sees any DbC-augmented code as its ``code_files``. Inert
+                # unless a team wired ``run_dbc_self_review`` and left
+                # ``enable_dbc_comments`` on. ``_run_dbc_self_review`` never raises,
+                # never sets ``mt.status``/``completed_ids``, and mutates
+                # ``microtask_files`` in place.
+                if gate_config.run_dbc_self_review is not None and config.enable_dbc_comments:
+                    _run_dbc_self_review(
+                        gate_config=gate_config,
+                        task=task,
+                        task_id=task_id,
+                        mt=mt,
+                        microtask_files=microtask_files,
+                        repo_path=repo_path,
+                        all_files=all_files,
+                        architecture=architecture,
+                        language=planning_result.language,
+                        deps=deps,
+                        build_verify_label=build_verify_label,
+                        progress_callback=progress_callback,
+                        current_idx=current_idx,
+                        completed_ids=completed_ids,
+                        total=total,
+                        detail_cb=_detail_cb,
+                    )
+
                 _run_documentation_phase(
                     gate_config=gate_config,
                     llm=llm,
@@ -1053,6 +1089,7 @@ def run_gated_execution_impl(
     only_microtask_ids: Optional[List[str]] = None,
     review_config: Optional[Any] = None,
     review_deps: Optional[ReviewDependencies] = None,
+    build_verify_label: str = "",
 ) -> Any:
     """Execute microtasks with batch-based review cycles (shared skeleton).
 
@@ -1061,23 +1098,29 @@ def run_gated_execution_impl(
        in place up to ``code_review_retry_cap`` before failing the microtask.
     2. QA Testing — batch-fix all issues, then restart from Code Review.
     3. Security Testing — batch-fix all issues, then restart from Code Review.
-    4. Documentation — self-review loop (never fails).
+    4. DbC comments — optional, non-blocking self-review (never fails), run only
+       when ``gate_config.run_dbc_self_review`` is wired and
+       ``config.enable_dbc_comments`` is on, before Documentation so it sees any
+       DbC-augmented code.
+    5. Documentation — self-review loop (never fails).
 
     ``gate_config`` supplies every per-team divergence; the control flow, retry
     behaviour, rollback, and the ``progress_callback`` contract are identical to
     the pre-refactor per-team ``run_execution_with_review_gates`` loops. The
-    per-microtask work itself is delegated to three helpers, one per group of
-    phases: :func:`_generate_coding_phase` / :func:`_commit_coding_write` (Phase 1), :func:`_run_review_cycles`
-    (Phases 2-4: code review/QA/security with retries, the grounding circuit
-    breaker, and max-cycles resolution), and :func:`_run_documentation_phase`
-    (Phase 5). This function is the orchestrator: per-microtask setup (the
-    dependency/SKIPPED check, ``IN_PROGRESS`` bookkeeping, the shared detail
-    callback), calling those three helpers in order, and the final summary.
+    per-microtask work itself is delegated to per-phase helpers:
+    :func:`_generate_coding_phase` / :func:`_commit_coding_write` (Phase 1),
+    :func:`_run_review_cycles` (Phases 2-4: code review/QA/security with retries,
+    the grounding circuit breaker, and max-cycles resolution), the optional
+    ``dbc_phase._run_dbc_self_review`` (DbC comments), and
+    :func:`_run_documentation_phase` (Documentation). This function is the
+    orchestrator: per-microtask setup (the dependency/SKIPPED check,
+    ``IN_PROGRESS`` bookkeeping, the shared detail callback), calling those
+    helpers in order, and the final summary.
 
     ``progress_callback(current_index, completed, total, title, microtask_phase, phase_detail)``
     is called during execution; ``current_index`` is 1-based and ``microtask_phase``
     is one of "coding", "code_review", "qa_testing", "security_testing",
-    "qa_security_testing", "documentation", "completed". "qa_security_testing"
+    "qa_security_testing", "dbc", "documentation", "completed". "qa_security_testing"
     is reported only while ``parallelize_qa_security`` is in effect and QA and
     Security are both in flight concurrently -- neither has a confirmed outcome
     yet, so it must not be read as "qa_testing has passed".
@@ -1208,6 +1251,7 @@ def run_gated_execution_impl(
                     file_locks=file_locks,
                     worktree_lock=worktree_lock,
                     progress_callback=progress_callback,
+                    build_verify_label=build_verify_label,
                 )
             finally:
                 _release_progress_index(progress_callback, current_idx)

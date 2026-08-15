@@ -26,6 +26,11 @@ into an `EnrichedRosterAgent`, and consumed the same way by `roster_validation.p
 `runtime/pipeline_runner.py` (execution). Roster `PUT` rejects any body that supplies a
 persona field with `400` — edit the linked `AgentManifest` instead.
 
+`runtime/agent_builder.py`'s sandbox invoke path (`invoke_generated_agent`) does not
+yet bind this manifest at invoke time — see
+[`system_design/adr/ADR-015-invoke-generated-agent-persona-state-precedence.md`](../../../../system_design/adr/ADR-015-invoke-generated-agent-persona-state-precedence.md)
+for the locked precedence contract the runtime-binding follow-up implements.
+
 The process designer LLM emits roster JSON alongside process JSON; generated agents are
 stamped with `manifest_id` and registered via `register_team_manifests`. Roster
 manifests are built through [`shared.manifests`](../../../../shared/manifests/README.md)
@@ -69,6 +74,11 @@ process DAG, running each step's agent and pausing at WAIT steps for human input
 
 Both modes write the same run-store rows, so the status/list endpoints and UI polling
 are identical. See `docs/ENV_VARS.md` for the WAIT-timeout/poll/stale knobs.
+
+For the reproducible evidence that a **saved** manifest drives a Stage-2 run across the
+sandbox/pipeline/test-chat paths — and the unbound-vs-bound signal it reports — see
+[`docs/STAGE2_BINDING_VERIFICATION.md`](docs/STAGE2_BINDING_VERIFICATION.md)
+(automated suite: `tests/test_stage2_binding_after_save.py`).
 
 ## Agent Provisioning bridge
 

@@ -18,20 +18,17 @@ a cache entry is keyed on ``(indicator_name, canonical_params, symbol,
 timeframe, data_fingerprint)``, digested with SHA-256 in that fixed order —
 mirroring :class:`..backtest_cache.BacktestCache`'s ``_key`` pattern of
 digesting canonicalized components in a fixed order. ``data_fingerprint``
-reuses :func:`..market_data_cache.store.compute_dataset_fingerprint`, scoped
-to a single symbol's bar slice, per the ADR's guidance to reuse that public
-function rather than a bespoke date-range key or the module-private
-``_hash_bars`` helper. Because the key is fully content-addressed, the
+hashes bars in the *supplied* sequence (date plus OHLCV). The market-data
+``compute_dataset_fingerprint`` / ``_hash_bars`` helpers sort by ``date``
+because they identify a dataset; indicator math (trailing windows) is
+order-sensitive, so two permutations of the same dated bars must not
+collide. Because the key is fully content-addressed, the
 invalidation boundary is the key itself: any difference in the five
 components produces a different key, so a stale read is structurally
 impossible as long as every input that affects the computed series is
 represented in the key (see the ADR for the full invalidation contract,
 including the custom-code-bypass and batch-only-scope rules that govern how
 callers must use this cache — not enforced by this module itself).
-
-Reused building blocks:
-  * :func:`..market_data_cache.store.compute_dataset_fingerprint` — canonical
-    SHA-256 over a symbol's OHLCV bars.
 """
 
 from __future__ import annotations
@@ -40,8 +37,6 @@ import hashlib
 import json
 import threading
 from typing import Any, Callable, Dict, Mapping, Sequence, Tuple
-
-from ..market_data_cache.store import compute_dataset_fingerprint
 
 # Sentinel distinguishing "no entry for this key" from "entry present with
 # value None" — some indicators (e.g. IndicatorRegistry's EMA/SMA methods)
@@ -98,14 +93,27 @@ class BatchIndicatorCache:
 
     @staticmethod
     def _data_fingerprint(symbol: str, bars: Sequence[Any]) -> str:
-        """Content fingerprint of one symbol's bar slice.
+        """Content fingerprint of one symbol's bar slice in supplied order.
 
-        Reuses :func:`compute_dataset_fingerprint`, scoped to a single-symbol
-        dict, per ADR-012 — this is strictly more precise than a
-        ``(start_date, end_date)`` pair since it also distinguishes a data
-        restatement or a backfilled gap within the same nominal range.
+        Hashes each bar's ``date`` plus OHLCV fields in the sequence the
+        caller passed. Sorting by ``date`` (as
+        :func:`compute_dataset_fingerprint` does) would make distinct
+        trailing windows of the same dated bars collide.
+
+        This is strictly more precise than a ``(start_date, end_date)`` pair
+        since it also distinguishes a data restatement, a backfilled gap, or
+        a permutation of the same dates.
         """
-        return compute_dataset_fingerprint({symbol: bars})
+        digest = hashlib.sha256()
+        digest.update(symbol.encode("utf-8"))
+        digest.update(b"\n")
+        for bar in bars:
+            digest.update(
+                f"{getattr(bar, 'date', '')}|{repr(getattr(bar, 'open', None))}|"
+                f"{repr(getattr(bar, 'high', None))}|{repr(getattr(bar, 'low', None))}|"
+                f"{repr(getattr(bar, 'close', None))}|{repr(getattr(bar, 'volume', None))}\n".encode()
+            )
+        return digest.hexdigest()
 
     def _key(
         self,

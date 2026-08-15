@@ -968,6 +968,98 @@ class TestBackendRunExecutionWithReviewGates:
         mt2_result = next(m for m in result.microtasks if m.id == "mt-2")
         assert mt2_result.status == MicrotaskStatus.COMPLETED
 
+    def test_completed_microtask_can_include_dbc_inserted_comments(self, tmp_path, monkeypatch):
+        """Smoke test: with DbC wired on by default, a completed backend microtask's
+        output files carry any comments the DbC agent chose to insert.
+
+        Drives the real backend ``run_execution_with_review_gates`` end to end (clean
+        gates -> the microtask reaches the DbC self-review step before Documentation),
+        with the ``DbcCommentsAgent`` stubbed to insert a contract comment into the
+        coder-produced file. The insertion must survive to ``result.files``.
+        """
+        from backend_code_v2_team.models import (
+            Microtask,
+            MicrotaskReviewConfig,
+            MicrotaskStatus,
+            PlanningResult,
+            ToolAgentKind,
+        )
+        from backend_code_v2_team.phases.execution import (
+            ReviewDependencies,
+            run_execution_with_review_gates,
+        )
+
+        from software_engineering_team.shared.phases import dbc_phase
+        from software_engineering_team.technical_writers.dbc_comments_agent.models import (
+            DbcCommentsOutput,
+        )
+
+        (tmp_path / ".git").mkdir()
+
+        task = _create_test_task("backend")
+        mt = Microtask(id="mt-1", title="Will Pass", tool_agent=ToolAgentKind.GENERAL)
+        planning_result = PlanningResult(microtasks=[mt], language="python")
+
+        _call_count = [0]
+
+        def mock_complete_text(prompt: str) -> Any:
+            # Chunk review calls complete_json with a schema-shaped dict; the
+            # first text-template call is code generation. Later text-template
+            # calls (the documentation self-review iterations) must NOT return a
+            # ``## FILE good.py ##`` block, or the doc phase would parse it back
+            # and overwrite the DbC-augmented file -- return a review-status
+            # template (no code file) instead, as the frontend smoke test does.
+            if "code to review" in prompt.lower():
+                return {
+                    "approved": True,
+                    "issues": [],
+                    "summary": "Good code.",
+                    "spec_compliance_notes": "",
+                }
+            _call_count[0] += 1
+            if _call_count[0] == 1:
+                return "## FILE good.py ##\nprint('good')\n\n## SUMMARY ##\nGood code.\n"
+            return "## REVIEW_STATUS ##\npassed\n\n## ISSUES ##\n\n## SUMMARY ##\nAll good.\n"
+
+        mock_llm = _CallableTextClient(mock_complete_text)
+
+        # Stub the DbC agent so it deterministically inserts a Design-by-Contract
+        # comment into the file the coder produced (``good.py`` -- a reviewed path,
+        # so the self-review phase writes it back rather than filtering it out).
+        augmented = "print('good')\n# Preconditions: none\n"
+
+        class _InsertingAgent:
+            def __init__(self, *args: Any, **kwargs: Any) -> None:
+                pass
+
+            def run(self, input_data: Any, on_status: Any = None) -> DbcCommentsOutput:
+                return DbcCommentsOutput(files={"good.py": augmented})
+
+        monkeypatch.setattr(dbc_phase, "DbcCommentsAgent", _InsertingAgent)
+
+        # Default config -> ``enable_dbc_comments`` is True.
+        config = MicrotaskReviewConfig()
+        mock_qa = MagicMock()
+        mock_qa.run.return_value = MagicMock(bugs_found=[], issues=[])
+        mock_sec = MagicMock()
+        mock_sec.run.return_value = MagicMock(vulnerabilities=[], issues=[])
+        deps = ReviewDependencies(qa_agent=mock_qa, security_agent=mock_sec)
+
+        result = run_execution_with_review_gates(
+            llm=mock_llm,
+            task=task,
+            planning_result=planning_result,
+            repo_path=tmp_path,
+            review_config=config,
+            review_deps=deps,
+        )
+
+        completed = [m for m in result.microtasks if m.status == MicrotaskStatus.COMPLETED]
+        assert len(completed) == 1
+        assert completed[0].id == "mt-1"
+        # The DbC-inserted contract comment reached the completed microtask's output.
+        assert "# Preconditions" in result.files["good.py"]
+
     def test_code_review_gate_forwards_enable_llm_review_grounding(self, tmp_path, monkeypatch):
         """Kill switch on MicrotaskReviewConfig must reach run_code_review_phase."""
         from backend_code_v2_team.models import Microtask
