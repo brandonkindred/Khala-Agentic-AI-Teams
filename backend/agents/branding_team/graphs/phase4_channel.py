@@ -21,6 +21,7 @@ from branding_team.agents import (
     make_website_guide,
 )
 from branding_team.graphs.shared import build_agent, build_fan_out_fan_in
+from branding_team.models import ChannelActivationOutput
 
 
 def build_phase4_graph() -> Graph:
@@ -65,9 +66,9 @@ def build_phase4_graph() -> Graph:
                 "- brand_experience_principles\n"
                 "- channel_guidelines (list of per-channel guideline objects)\n"
                 "- brand_architecture\n"
-                "- brand_in_action_examples\n\n"
-                "Output valid JSON matching the ChannelActivationOutput schema."
+                "- brand_in_action_examples"
             ),
+            structured_output=ChannelActivationOutput,
         ),
         node_id="channel_compositor",
     )
