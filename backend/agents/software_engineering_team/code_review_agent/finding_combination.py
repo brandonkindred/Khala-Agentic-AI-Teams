@@ -15,11 +15,14 @@ representative when any of these signals holds:
       (the column-0 heuristic cannot distinguish indented methods and would
       false-merge — the same guard the side-effect consolidation documents).
     - **Same-anchor near-duplicate** — the same finding reported twice: same
-      resolved file, and either the same line or one copy unanchored
-      (``line=None``), with tokenized-description Jaccard ``>= threshold``
-      (default ``0.6``). This subsumes the exact-match dedupe (and its
-      unanchored-copy rule) with a fuzzy description match. It deliberately does
-      NOT merge separate occurrences on *different* lines.
+      resolved file, and either the same explicit line or *exactly one* copy
+      unanchored (``line=None``), with tokenized-description Jaccard
+      ``>= threshold`` (default ``0.6``). This subsumes the exact-match dedupe
+      (and its unanchored-copy rule) with a fuzzy description match. It
+      deliberately does NOT merge separate occurrences on *different* lines, nor
+      two *both*-unanchored (file-level) findings -- those are distinct
+      observations about the file (e.g. two unmet acceptance criteria), each
+      reported on its own.
     - **Side-effects citation** — for ``side-effects`` findings only, a finding
       whose prose cites a ``path:line`` inside another side-effects finding's
       construct combines with it (the "same root cause described from both ends"
@@ -177,10 +180,12 @@ def combine_findings(
           module docstring for the full rationale): they are anchored in the
           same enclosing Python construct and are either ``side-effects`` or
           have Jaccard ``>= threshold`` descriptions (proximity); or they are the
-          same-anchor near-duplicate (same file, same line or one unanchored,
-          Jaccard ``>= threshold``); or, for ``side-effects`` only, one cites a
-          ``path:line`` inside the other's construct. Grouping is transitive
-          (union-find). Separate occurrences on different lines are NOT merged.
+          same-anchor near-duplicate (same file, and same explicit line or
+          *exactly one* unanchored, Jaccard ``>= threshold``); or, for
+          ``side-effects`` only, one cites a ``path:line`` inside the other's
+          construct. Grouping is transitive (union-find). Separate occurrences on
+          different lines -- and two both-unanchored file-level findings -- are
+          NOT merged.
         - Each group of ``>= 2`` findings becomes exactly one merged
           ``CodeReviewIssue`` (see ``side_effect_consolidation._merge_group``,
           called with the group's shared category): ``severity`` is the group
@@ -258,7 +263,15 @@ def combine_findings(
         for i in range(len(positions)):
             for j in range(i + 1, len(positions)):
                 a, b = positions[i], positions[j]
-                same_anchor = lines[a] == lines[b] or lines[a] is None or lines[b] is None
+                # "Same anchor" = the same explicit line, or exactly one copy
+                # unanchored (an anchored finding and its body/inline twin).
+                # NOT both unanchored: two file-level findings (line=None) are
+                # separate observations about the file, not one reported twice
+                # -- e.g. two unmet acceptance criteria whose descriptions
+                # tokenize alike -- and must each be reported.
+                same_anchor = (lines[a] is not None and lines[a] == lines[b]) or (
+                    (lines[a] is None) != (lines[b] is None)
+                )
                 if same_anchor and _jaccard_similarity(tokens[a], tokens[b]) >= threshold:
                     uf.union(a, b)
 

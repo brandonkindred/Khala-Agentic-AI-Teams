@@ -174,6 +174,23 @@ def test_exact_duplicate_findings_collapse() -> None:
     assert result[0].line == 2
 
 
+def test_both_unanchored_file_level_findings_do_not_merge() -> None:
+    """Two file-level findings (both line=None) in one file are distinct
+    observations and must each survive, even when their descriptions tokenize
+    alike (e.g. two unmet acceptance criteria differing only by numbers, which
+    the digit-dropping tokenizer collapses)."""
+    index = _index({"app/foo.py": _TWO_FUNCS})
+    issues = [
+        _issue(
+            line=None, category="spec-compliance", description="add(1, 2) returns 3 :: no evidence"
+        ),
+        _issue(
+            line=None, category="spec-compliance", description="add(0, 0) returns 0 :: no evidence"
+        ),
+    ]
+    assert len(combine_findings(issues, index)) == 2
+
+
 def test_unanchored_copy_merges_into_anchored_and_keeps_anchor() -> None:
     """An unanchored (line=None) copy folds into its anchored twin, preserving the anchor."""
     index = _index({"app/foo.py": _TWO_FUNCS})
