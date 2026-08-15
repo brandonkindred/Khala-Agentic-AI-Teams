@@ -5,6 +5,7 @@ import { environment } from '../../environments/environment';
 import { skipErrorNotify } from '../core/error-handler.interceptor';
 import type {
   CodeReviewRunItem,
+  CodeReviewTranscript,
   CreateReviewIssuesRequest,
   CreateReviewIssuesResponse,
   GitHubConfigResponse,
@@ -242,6 +243,19 @@ export class IntegrationsApiService {
     return this.http.post<CreateReviewIssuesResponse>(
       `${this.baseUrl}/github/reviews/${encodeURIComponent(jobId)}/issues`,
       body,
+    );
+  }
+
+  /**
+   * GET /api/integrations/github/reviews/{jobId}/transcript — a completed review's
+   * full durable transcript (every LLM call the pipeline made, in call order).
+   * ``owner``/``repo`` name the repository the review belongs to (validated
+   * server-side, same gate as ``getGitHubReviewHistory``/``createGitHubReviewIssues``).
+   */
+  getGitHubReviewTranscript(owner: string, repo: string, jobId: string): Observable<CodeReviewTranscript> {
+    return this.http.get<CodeReviewTranscript>(
+      `${this.baseUrl}/github/reviews/${encodeURIComponent(jobId)}/transcript`,
+      { params: { owner, repo } },
     );
   }
 

@@ -3,6 +3,7 @@
 import pytest
 
 from llm_service.interface import (
+    LLMJsonParseError,
     LLMSemanticExhaustionError,
     LLMTemporaryError,
     LLMUnreachableAfterRetriesError,
@@ -125,3 +126,14 @@ def test_extract_json_from_response_clean_object_unaffected() -> None:
     """A case the existing strategies already handle must not be touched by
     the new fallback path (it returns before the fallback is ever reached)."""
     assert extract_json_from_response('{"tasks": [{"id": "t1"}]}') == {"tasks": [{"id": "t1"}]}
+
+
+def test_extract_json_from_response_attaches_full_raw_response_on_parse_error() -> None:
+    """response_preview stays truncated for logs; raw_response keeps the full reply."""
+    blob = "not json at all " + ("x" * 800)
+    with pytest.raises(LLMJsonParseError) as ei:
+        extract_json_from_response(blob)
+    exc = ei.value
+    assert exc.response_preview == blob[:500]
+    assert exc.raw_response == blob
+    assert len(exc.raw_response) > 500
