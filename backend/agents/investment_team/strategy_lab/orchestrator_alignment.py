@@ -51,7 +51,7 @@ from ._orchestrator_helpers import (
     _format_execution_diagnostics,
     _maybe_attach_coverage_report,
 )
-from .agents._llm_budget import DesignBudgetExhausted
+from .agents._llm_budget import DesignBudgetExhausted, _annotate_budget_exhaustion
 from .agents.alignment import TradeAlignmentReport
 from .budget_config import StrategyLabBudgetConfig
 from .exceptions import OrchestratorContractError, SpecImplementabilityError
@@ -391,8 +391,7 @@ class AlignmentMixin:
                 config=config,
             )
         except DesignBudgetExhausted as exc:
-            exc.latest_spec = spec
-            exc.latest_code = code
+            _annotate_budget_exhaustion(exc, spec, code=code)
             raise
         alignment_reports.append(report)
 
