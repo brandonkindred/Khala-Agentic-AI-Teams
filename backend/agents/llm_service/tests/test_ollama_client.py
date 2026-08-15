@@ -367,6 +367,25 @@ def test_ollama_sse_malformed_chunk_skipped(monkeypatch: pytest.MonkeyPatch) -> 
         assert result == {"v": 1}
 
 
+def test_ollama_sse_non_object_chunk_skipped(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A syntactically valid but non-object SSE chunk (e.g. ``data: 123``) is skipped,
+    not crashed on — valid content around it is still returned."""
+    monkeypatch.setenv("LLM_PROVIDER", "ollama")
+    monkeypatch.setenv("LLM_MAX_RETRIES", "0")
+    sse_lines = [
+        'data: {"choices":[{"delta":{"content":"{\\"v\\":1}"},"finish_reason":null}]}',
+        "data: 123",  # valid JSON, but a bare int has no .get() — must be skipped
+        'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}',
+        "data: [DONE]",
+    ]
+    mock_client, _ = _make_streaming_mock(200, sse_lines)
+    with patch("httpx.Client") as mock_client_cls:
+        mock_client_cls.return_value = mock_client
+        client = OllamaLLMClient(model="test", base_url="http://localhost:9999", timeout=5)
+        result = client.complete_json("test", objective="test", temperature=0)
+    assert result == {"v": 1}
+
+
 def test_ollama_sse_no_space_after_colon(monkeypatch: pytest.MonkeyPatch) -> None:
     """SSE lines with data:{...} (no space after colon) must be parsed correctly."""
     monkeypatch.setenv("LLM_PROVIDER", "ollama")

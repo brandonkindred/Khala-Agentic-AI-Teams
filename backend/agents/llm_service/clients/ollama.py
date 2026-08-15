@@ -1219,8 +1219,16 @@ class OllamaLLMClient(LLMClient):
                                     if not raw_line:
                                         continue
 
-                                    # --- Resolve partial-buffer / current-line into chunk_data ---
-                                    chunk_data: Optional[str] = None
+                                    # --- Resolve partial-buffer / current-line into a
+                                    # parsed chunk. Each SSE payload is parsed exactly
+                                    # once; the resolved value feeds the rest of the loop.
+                                    #
+                                    # Postcondition of this block: `chunk` is either None
+                                    # (nothing usable this line — skip via continue) or a
+                                    # parsed JSON *object* (dict). No unparsed string
+                                    # survives past here, so downstream `.get(...)` calls
+                                    # never re-parse and never hit a raw JSONDecodeError.
+                                    chunk: Optional[dict] = None
                                     if partial_buf:
                                         # Try joining buffered partial with this line
                                         combined = partial_buf + raw_line
@@ -1230,8 +1238,7 @@ class OllamaLLMClient(LLMClient):
                                             if cdata.strip() == "[DONE]":
                                                 break
                                             try:
-                                                json.loads(cdata)  # validate
-                                                chunk_data = cdata
+                                                chunk = json.loads(cdata)
                                             except json.JSONDecodeError:
                                                 # Combined still invalid — discard buffer,
                                                 # fall through to try raw_line on its own.
@@ -1239,7 +1246,7 @@ class OllamaLLMClient(LLMClient):
                                                     "Discarding unrecoverable partial SSE buffer"
                                                 )
 
-                                    if chunk_data is None:
+                                    if chunk is None:
                                         # Process raw_line normally
                                         if not raw_line.startswith("data:"):
                                             continue
@@ -1247,13 +1254,21 @@ class OllamaLLMClient(LLMClient):
                                         if chunk_data.strip() == "[DONE]":
                                             break
                                         try:
-                                            json.loads(chunk_data)  # validate
+                                            chunk = json.loads(chunk_data)
                                         except json.JSONDecodeError:
                                             # May be split across TCP frames — buffer for next line
                                             partial_buf = raw_line
                                             continue
 
-                                    chunk = json.loads(chunk_data)
+                                    # A syntactically valid but non-object payload (e.g.
+                                    # `data: 123` or `data: "x"`) parses cleanly yet has no
+                                    # `.get`; skip it rather than crash the stream.
+                                    if not isinstance(chunk, dict):
+                                        logger.debug(
+                                            "Skipping non-object SSE chunk: %r", chunk
+                                        )
+                                        continue
+
                                     # Capture token usage (typically in the last SSE chunk)
                                     chunk_usage = chunk.get("usage")
                                     if chunk_usage and isinstance(chunk_usage, dict):
