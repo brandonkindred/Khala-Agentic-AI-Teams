@@ -31,14 +31,16 @@ bootstrap still used in ``orchestrator.py``).
 from __future__ import annotations
 
 import logging
+import os
 import sys
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 from strands import Agent
 
 from llm_service import get_strands_model
+from shared.git.git_utils import UnsafeRepoPathError, resolve_safe_repo_path
 from shared.repo_context.repo_utils import find_repo_files
 
 logger = logging.getLogger(__name__)
@@ -67,6 +69,41 @@ _BUILD_FIX_MAX_CODE_CHARS = 30_000
 _BUILD_FIX_EXCLUDE_DIRS = frozenset(
     {"node_modules", ".git", "dist", "build", "__pycache__", ".angular"}
 )
+# Directories the repair writer must not touch. Union of the LLM-context prune
+# set with venv / pytest-cache names the DbC worktree snapshot also skips, so
+# a repair cannot land in a tree the snapshot would not restore.
+_REPAIR_SKIP_WRITE_DIRS = _BUILD_FIX_EXCLUDE_DIRS | frozenset({"venv", ".venv", ".pytest_cache"})
+
+
+def _safe_repair_write_path(project_dir: Path, rel_path: str) -> Optional[Path]:
+    """Resolve an LLM repair path under ``project_dir``, or ``None`` if unsafe.
+
+    Preconditions:
+        ``project_dir`` is the project root the fixer is allowed to write.
+
+    Postconditions:
+        Returns a path contained in ``project_dir`` whose resolved parts do not
+        include a directory in ``_REPAIR_SKIP_WRITE_DIRS`` (lexical or via an
+        in-repo symlink into an excluded tree). ``None`` when ``rel_path``
+        is empty, is absolute (``resolve_safe_repo_path`` would ``lstrip`` a
+        leading ``/`` and write under the repo), escapes ``project_dir``
+        lexically or via a pre-existing symlink ancestor, or targets an
+        unsnapshotted / venv / pytest-cache directory.
+    """
+    if os.path.isabs(rel_path):
+        return None
+    root = Path(project_dir).resolve()
+    try:
+        out = resolve_safe_repo_path(root, rel_path)
+    except UnsafeRepoPathError:
+        return None
+    try:
+        real_rel = out.resolve().relative_to(root)
+    except ValueError:
+        return None
+    if any(part in _REPAIR_SKIP_WRITE_DIRS for part in real_rel.parts):
+        return None
+    return out
 
 
 def _run_build_verification(
@@ -379,9 +416,9 @@ def _execute_llm_repair_attempt(
         Returns True when the model produced at least one file mapping (writes
         are best-effort; a write failure is logged and other files still apply).
         Successful writes also update ``current_files`` in place so later
-        repair attempts prompt on the latest code. Returns False on LLM error
-        or when the template parser yields no files, leaving ``current_files``
-        unchanged in those cases.
+        repair attempts prompt on the latest code. Returns False on LLM error,
+        when the template parser raises or returns a non-dict, or when it
+        yields no files, leaving ``current_files`` unchanged in those cases.
     """
     assert "description" in issue, "issue must include a description"
     desc = issue["description"]
@@ -427,12 +464,26 @@ def _execute_llm_repair_attempt(
             e,
         )
         return False
-    parsed = parse_fn(raw)
-    fixed_files = parsed.get("files") or {}
+    try:
+        parsed = parse_fn(raw)
+    except Exception as e:
+        logger.warning(
+            "[%s] Build fix attempt %d/%d: could not parse repair response (%s). "
+            "Next step -> Skipping to next issue",
+            task_id,
+            attempt + 1,
+            max_attempts,
+            e,
+        )
+        return False
+    fixed_files = parsed.get("files") if isinstance(parsed, dict) else None
     if not fixed_files:
         return False
     for rel_path, content in fixed_files.items():
-        out_path = project_dir / rel_path
+        out_path = _safe_repair_write_path(project_dir, rel_path)
+        if out_path is None:
+            logger.warning("Build fix: refusing to write unsafe path %s", rel_path)
+            continue
         try:
             out_path.parent.mkdir(parents=True, exist_ok=True)
             out_path.write_text(content, encoding="utf-8")

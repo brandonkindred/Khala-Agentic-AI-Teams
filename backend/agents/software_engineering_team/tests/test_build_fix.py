@@ -73,6 +73,70 @@ def test_backend_code_v2_passes_on_valid_python(tmp_path: Path) -> None:
     assert error_output == ""
 
 
+def test_safe_repair_write_path_rejects_traversal(tmp_path: Path) -> None:
+    from software_engineering_team.build_fix import _safe_repair_write_path
+
+    root = tmp_path.resolve()
+    assert _safe_repair_write_path(root, "../escape.py") is None
+    assert _safe_repair_write_path(root, "") is None
+    assert _safe_repair_write_path(root, "/tmp/fix.py") is None
+
+
+def test_safe_repair_write_path_rejects_symlink_into_excluded_dir(tmp_path: Path) -> None:
+    from software_engineering_team.build_fix import _safe_repair_write_path
+
+    root = tmp_path.resolve()
+    (root / "venv").mkdir()
+    (root / "alias").symlink_to(root / "venv")
+    try:
+        assert _safe_repair_write_path(root, "alias/pkg.py") is None
+    finally:
+        (root / "alias").unlink(missing_ok=True)
+
+
+def test_safe_repair_write_path_rejects_venv(tmp_path: Path) -> None:
+    from software_engineering_team.build_fix import _safe_repair_write_path
+
+    root = tmp_path.resolve()
+    assert _safe_repair_write_path(root, "venv/lib/site.py") is None
+    assert _safe_repair_write_path(root, ".venv/lib/site.py") is None
+
+
+def test_safe_repair_write_path_rejects_unsnapshotted_dirs(tmp_path: Path) -> None:
+    from software_engineering_team.build_fix import _safe_repair_write_path
+
+    root = tmp_path.resolve()
+    assert _safe_repair_write_path(root, "build/out.js") is None
+    assert _safe_repair_write_path(root, "dist/app.js") is None
+    assert _safe_repair_write_path(root, "node_modules/pkg/index.js") is None
+    assert _safe_repair_write_path(root, ".pytest_cache/README.md") is None
+    assert _safe_repair_write_path(root, "__pycache__/a.pyc") is None
+    assert _safe_repair_write_path(root, ".angular/cache") is None
+    assert _safe_repair_write_path(root, ".git/config") is None
+
+
+def test_safe_repair_write_path_accepts_in_repo_source(tmp_path: Path) -> None:
+    from software_engineering_team.build_fix import _safe_repair_write_path
+
+    root = tmp_path.resolve()
+    out = _safe_repair_write_path(root, "app/main.py")
+    assert out == root / "app" / "main.py"
+
+
+def test_safe_repair_write_path_rejects_symlink_escape(tmp_path: Path) -> None:
+    from software_engineering_team.build_fix import _safe_repair_write_path
+
+    root = tmp_path.resolve()
+    outside = tmp_path.parent.resolve() / f"dbc-repair-escape-{tmp_path.name}"
+    outside.mkdir()
+    (root / "link").symlink_to(outside)
+    try:
+        assert _safe_repair_write_path(root, "link/fix.py") is None
+    finally:
+        (root / "link").unlink(missing_ok=True)
+        outside.rmdir()
+
+
 def test_collect_project_files_reads_backend_python_and_skips_excluded_dirs(tmp_path: Path) -> None:
     """Backend collection includes ``.py`` sources and never descends into ``__pycache__``."""
     _write(tmp_path / "app" / "main.py", "def foo():\n    return 1\n")
@@ -235,6 +299,68 @@ def test_execute_llm_repair_attempt_returns_false_on_llm_error(
 
     assert applied is False
     assert not (tmp_path / "app.py").exists()
+
+
+def test_execute_llm_repair_attempt_returns_false_when_parser_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class _FakeAgent:
+        def __init__(self, model: object) -> None:
+            pass
+
+        def __call__(self, prompt: str) -> str:
+            return "TEMPLATE"
+
+    monkeypatch.setattr("software_engineering_team.build_fix.Agent", _FakeAgent)
+
+    def _boom(raw: str) -> dict:
+        raise ValueError("malformed template")
+
+    applied = _execute_llm_repair_attempt(
+        issue={"description": "x", "file_path": "", "recommendation": "Fix."},
+        current_files={},
+        project_dir=tmp_path,
+        model=object(),
+        parse_fn=_boom,
+        fix_prompt="{source} {severity} {description} {file_path} {recommendation} {current_code}",
+        is_frontend=True,
+        language_conventions="",
+        task_id="t1",
+        attempt=0,
+        max_attempts=3,
+    )
+
+    assert applied is False
+    assert not (tmp_path / "app.py").exists()
+
+
+def test_execute_llm_repair_attempt_returns_false_on_non_dict_parse(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class _FakeAgent:
+        def __init__(self, model: object) -> None:
+            pass
+
+        def __call__(self, prompt: str) -> str:
+            return "TEMPLATE"
+
+    monkeypatch.setattr("software_engineering_team.build_fix.Agent", _FakeAgent)
+
+    applied = _execute_llm_repair_attempt(
+        issue={"description": "x", "file_path": "", "recommendation": "Fix."},
+        current_files={},
+        project_dir=tmp_path,
+        model=object(),
+        parse_fn=lambda raw: None,  # type: ignore[arg-type,return-value]
+        fix_prompt="{source} {severity} {description} {file_path} {recommendation} {current_code}",
+        is_frontend=True,
+        language_conventions="",
+        task_id="t1",
+        attempt=0,
+        max_attempts=3,
+    )
+
+    assert applied is False
 
 
 def test_try_build_fix_survives_pytest_runner_exception(
