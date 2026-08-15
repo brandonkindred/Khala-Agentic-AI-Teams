@@ -32,7 +32,7 @@ from typing import Literal
 from urllib.parse import urlparse
 
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, ValidationInfo, field_validator
 
 from llm_service import clear_client_cache, provider_store, runtime_config
 from llm_service import config as llm_config
@@ -154,30 +154,53 @@ def _build_runpod_base_url(endpoint_id: str) -> str:
     return f"https://api.runpod.ai/v2/{endpoint_id}/openai/v1"
 
 
+#: Wall-clock ceiling (seconds) for the RunPod reachability probe. It bounds the
+#: added latency of create/update requests that configure a RunPod provider — the
+#: handler blocks for at most this long while the probe runs. Kept short so a slow
+#: or unreachable endpoint fails fast instead of tripping client/gateway timeouts.
+_RUNPOD_PROBE_TIMEOUT_SECONDS = 5.0
+
+
 async def _probe_runpod_endpoint(endpoint_id: str, api_key: str) -> None:
     """Send a GET to the RunPod /models endpoint to verify it is reachable.
 
     Fires a single authenticated GET request to
-    ``https://api.runpod.ai/v2/{endpoint_id}/openai/v1/models`` with a 10 s
-    timeout. Used at create time to validate that the supplied credentials work
-    before persisting the entry.
+    ``https://api.runpod.ai/v2/{endpoint_id}/openai/v1/models`` with a
+    ``_RUNPOD_PROBE_TIMEOUT_SECONDS`` timeout. Used at create/update time to
+    validate that the supplied credentials work before persisting the entry.
 
     Preconditions: ``endpoint_id`` has passed ``_validate_runpod_endpoint_id``;
         ``api_key`` is non-empty (caller already checked).
     Postconditions: returns ``None`` when the endpoint responds with a 2xx status.
-        Raises ``HTTPException(400)`` with the underlying error message on any
-        failure: connection error, timeout, or non-2xx response.
+        On failure raises an ``HTTPException`` whose status reflects the failure
+        class rather than always 400:
+
+        - a non-2xx response from RunPod is surfaced with the *remote* status code
+          (e.g. 401 for a bad key, 404 for an unknown endpoint, 5xx for a RunPod
+          server error) so the caller isn't told a valid request was malformed;
+        - a connection error or timeout — the endpoint never answered — maps to
+          503 (upstream unreachable).
     """
     import httpx
 
     url = f"https://api.runpod.ai/v2/{endpoint_id}/openai/v1/models"
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
+        async with httpx.AsyncClient(timeout=_RUNPOD_PROBE_TIMEOUT_SECONDS) as client:
             resp = await client.get(url, headers={"Authorization": f"Bearer {api_key}"})
             resp.raise_for_status()
-    except Exception as e:
+    except httpx.HTTPStatusError as e:
+        # RunPod answered with a 4xx/5xx — propagate its status code so an auth
+        # failure reads as 401, an unknown endpoint as 404, a RunPod outage as 5xx,
+        # instead of misrepresenting a remote error as a client-side 400.
         raise HTTPException(
-            status_code=400,
+            status_code=e.response.status_code,
+            detail=f"RunPod endpoint returned {e.response.status_code}: {e}",
+        ) from e
+    except httpx.HTTPError as e:
+        # Connection refused/reset, DNS failure, or timeout — the endpoint never
+        # produced a response, so it is unreachable (503), not a bad request.
+        raise HTTPException(
+            status_code=503,
             detail=f"RunPod endpoint could not be reached: {e}",
         ) from e
 
@@ -267,7 +290,13 @@ class LlmProviderCreate(BaseModel):
 
     @field_validator("base_url")
     @classmethod
-    def _validate_base_url(cls, v: str) -> str:
+    def _validate_base_url(cls, v: str, info: ValidationInfo) -> str:
+        # ``base_url`` is an Ollama-only field — it is ignored for Claude and RunPod
+        # (whose URL is derived from ``endpoint_id``). Only enforce the Ollama URL
+        # shape for an actual Ollama entry so a stray value on a non-Ollama provider
+        # doesn't 422. ``provider`` is declared first, so it's already in ``info.data``.
+        if info.data.get("provider") != "ollama":
+            return v
         return _validate_ollama_base_url_value(v)
 
 
@@ -296,7 +325,12 @@ class LlmProviderUpdate(BaseModel):
 
     @field_validator("base_url")
     @classmethod
-    def _validate_base_url(cls, v: str | None) -> str | None:
+    def _validate_base_url(cls, v: str | None, info: ValidationInfo) -> str | None:
+        # ``base_url`` is Ollama-only (ignored for Claude/RunPod). Skip the URL-shape
+        # check when the provider is explicitly non-Ollama; keep it when ``provider``
+        # is omitted (None = "unchanged"), since the stored entry may well be Ollama.
+        if info.data.get("provider") in ("claude", "runpod"):
+            return v
         return v if v is None else _validate_ollama_base_url_value(v)
 
 
@@ -436,9 +470,13 @@ async def list_providers() -> LlmProviderListResponse:
 async def create_provider(body: LlmProviderCreate) -> LlmProviderListResponse:
     """Add a provider to the end of the fallback list.
 
+    For a RunPod provider this performs a synchronous reachability probe against
+    the endpoint before persisting, so the request can block for up to
+    ``_RUNPOD_PROBE_TIMEOUT_SECONDS`` (currently 5 s) waiting on the network.
+
     Preconditions: Postgres configured; the per-entry key guards pass. Postconditions:
-        the entry is persisted (api key encrypted) at the end of the list, caches are
-        refreshed, and the full list is returned.
+        the entry is persisted (api key encrypted, whitespace-trimmed) at the end of
+        the list, caches are refreshed, and the full list is returned.
     """
     _require_storage()
     _guard_entry_credentials(body.provider, body.base_url, body.api_key.strip())
@@ -463,7 +501,7 @@ async def create_provider(body: LlmProviderCreate) -> LlmProviderListResponse:
             provider=body.provider,
             model=body.model,
             base_url=base_url,
-            api_key=body.api_key,
+            api_key=body.api_key.strip(),
         )
     except Exception as e:  # noqa: BLE001 - surface a clear 503 instead of an opaque 500
         logger.exception("Failed to create LLM provider entry")
@@ -502,6 +540,10 @@ async def reorder_providers(body: LlmProviderOrderUpdate) -> LlmProviderListResp
 @router.put("/providers/{entry_id}", response_model=LlmProviderListResponse)
 async def update_provider(entry_id: int, body: LlmProviderUpdate) -> LlmProviderListResponse:
     """Edit one provider; omitted/empty fields keep the stored value.
+
+    Unlike ``create_provider`` this does not probe the RunPod endpoint, so it adds
+    no network latency: a new ``endpoint_id`` is only validated and used to rebuild
+    the stored base URL.
 
     Preconditions: the entry exists; Postgres configured; the per-entry key guards
         pass for the resulting (merged) provider/base_url/key. Postconditions: the
