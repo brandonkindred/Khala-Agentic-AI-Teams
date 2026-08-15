@@ -11,7 +11,7 @@ from functools import lru_cache
 from typing import TYPE_CHECKING, Any, Callable, Literal, Optional
 
 from strands import Agent
-from strands.multiagent.graph import GraphBuilder
+from strands.multiagent.graph import GraphBuilder, GraphNode
 
 from branding_team.models import BrandPhase
 from llm_service import get_strands_model
@@ -72,21 +72,25 @@ def phase_agent_key(phase: BrandPhase) -> str:
 OutputMode = Literal["json", "text"]
 
 
-# Every branding agent resolves a model keyed by (agent_key, output_mode).
-# Building the graph instantiates ~40 agents per run; without memoisation
-# each one constructs a fresh LLMClientModel. The model is a stateless
-# wrapper over the cached LLM client, so one instance per (agent_key,
-# output_mode) pair is safe to share across all agents and all runs. The
-# Agents themselves are NOT cached — they carry per-invocation conversation
-# state and must stay distinct per graph build.
-#
-# ``maxsize`` bounds the cache: the key space is the agent_key tiers below
-# (five phase tiers + "branding_compositor" + the "branding" default +
-# "branding_assistant") crossed with the two output modes — comfortably
-# under 16 today, with headroom for a future tier without a cache eviction
-# cliff.
 @lru_cache(maxsize=16)
 def _branding_model(agent_key: str, output_mode: OutputMode) -> "LLMClientModel":
+    """Return the shared, cached ``LLMClientModel`` for *(agent_key, output_mode)*.
+
+    Every branding agent resolves a model keyed by ``(agent_key, output_mode)``.
+    Building the graph instantiates ~40 agents per run; without memoisation
+    each one would construct a fresh ``LLMClientModel``. The model is a
+    stateless wrapper over the cached LLM client, so one instance per
+    ``(agent_key, output_mode)`` pair is safe to share across all agents and
+    all runs. The ``Agent`` objects built from this model are NOT cached —
+    they carry per-invocation conversation state and must stay distinct per
+    graph build.
+
+    ``maxsize`` bounds the cache: the key space is the agent_key tiers
+    (five phase tiers + ``"branding_compositor"`` + the ``"branding"``
+    default + ``"branding_assistant"``) crossed with the two output modes —
+    comfortably under 16 today, with headroom for a future tier without a
+    cache eviction cliff.
+    """
     return get_strands_model(agent_key, response_format=output_mode)
 
 
@@ -188,6 +192,7 @@ def build_compositor(*, name: str, system_prompt: str, description: str = "") ->
         name=name,
         system_prompt=system_prompt,
         description=description,
+        output_mode="json",
         agent_key=COMPOSITOR_AGENT_KEY,
     )
 
@@ -200,7 +205,7 @@ def build_compositor(*, name: str, system_prompt: str, description: str = "") ->
 def build_fan_out_fan_in(
     builder: GraphBuilder,
     agents: list[tuple[str, Callable[[], Agent]]],
-    compositor: Any,
+    compositor: GraphNode,
 ) -> None:
     """Wire a fan-out/fan-in topology onto *builder*.
 
@@ -209,7 +214,7 @@ def build_fan_out_fan_in(
     *compositor*, and marks it as a graph entry point.
 
     Preconditions:
-        *agents* is non-empty. *compositor* is a node handle already
+        *agents* is non-empty. *compositor* is the ``GraphNode`` already
         returned by ``builder.add_node(...)`` on the same *builder*.
     Postconditions:
         Every ``(node_id, factory)`` pair is added as a node on *builder*,
