@@ -97,6 +97,7 @@ but the workflow_id it's executing under does not.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import time
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
@@ -695,7 +696,12 @@ def run_design_attempt_activity(params: Dict[str, Any]) -> Dict[str, Any]:
     from investment_team.signal_intelligence_models import SignalIntelligenceBriefV1
     from investment_team.strategy_lab._orchestrator_helpers import _DriftCollector
     from investment_team.strategy_lab.agents._llm_budget import LLMCallBudget, use_budget
+    from investment_team.strategy_lab.batch_cache_context import (
+        get_or_create_batch_cache,
+        use_batch_indicator_cache,
+    )
     from investment_team.strategy_lab.exceptions import SpecImplementabilityError
+    from investment_team.strategy_lab.indicators.streaming import _batch_cache_flag_enabled
     from investment_team.strategy_lab.market_regime import RegimeSummary
     from investment_team.strategy_lab.orchestrator import (
         StrategyLabOrchestrator,
@@ -709,6 +715,20 @@ def run_design_attempt_activity(params: Dict[str, Any]) -> Dict[str, Any]:
 
     prior_records = [StrategyLabRecord.parse_persisted(r) for r in params["prior_records"]]
     config = BacktestConfig(**params["config"])
+
+    # Batch-scoped indicator cache: when the feature flag is on and the batch
+    # workflow supplied a per-batch key, resolve the one shared
+    # BatchIndicatorCache for that key in this worker process and bind it around
+    # the whole attempt, so every IndicatorRegistry the executor builds during it
+    # shares one cache instance. Flag off / no key -> a nullcontext, so nothing
+    # is constructed and behavior is unchanged.
+    batch_cache_key = params.get("batch_cache_key")
+    if _batch_cache_flag_enabled() and batch_cache_key:
+        _batch_cache_cm: contextlib.AbstractContextManager = use_batch_indicator_cache(
+            get_or_create_batch_cache(batch_cache_key)
+        )
+    else:
+        _batch_cache_cm = contextlib.nullcontext()
     signal_brief = (
         SignalIntelligenceBriefV1(**params["signal_brief"]) if params.get("signal_brief") else None
     )
@@ -775,6 +795,7 @@ def run_design_attempt_activity(params: Dict[str, Any]) -> Dict[str, Any]:
                 name="strategy-lab-design-attempt-hb",
             ),
             use_budget(budget),
+            _batch_cache_cm,
         ):
             record = orch._run_design_attempt(
                 prior_records=prior_records,
