@@ -509,11 +509,16 @@ def _try_build_fix_one_at_a_time(
         (best-effort walk). ``run_pytest`` / ``run_command`` map subprocess
         failures (timeout, missing binary, unexpected errors) into
         ``CommandResult`` rather than raising ``subprocess.CalledProcessError``.
+        A single ``_execute_llm_repair_attempt`` call that raises unexpectedly
+        (template parse failure, prompt formatting mismatch, snippet
+        extraction) is logged and skipped so the loop continues with the next
+        issue rather than aborting.
 
     Raises:
-        OSError from unbounded ``Path.rglob`` project probes, exceptions from
-        ``parse_problem_solving_single_issue_template``, and the uncaught
+        OSError from unbounded ``Path.rglob`` project probes and the uncaught
         post-fix frontend re-run of ``run_ng_build_with_nvm_fallback``.
+        Exceptions from ``parse_problem_solving_single_issue_template`` are now
+        caught, since it only runs inside the guarded repair-attempt call.
         Pytest runner crashes are logged and returned as ``(False, message)``
         rather than propagating. :func:`_run_build_verification` does not
         catch the remaining uncaught paths, so those reach the public
@@ -700,19 +705,35 @@ def _try_build_fix_one_at_a_time(
         if not issues:
             break
         issue = issues.pop(0)
-        applied = _execute_llm_repair_attempt(
-            issue=issue,
-            current_files=current_files,
-            project_dir=project_dir,
-            model=_build_fix_model,
-            parse_fn=parse_problem_solving_single_issue_template,
-            fix_prompt=FIX_PROMPT,
-            is_frontend=prompt_module == "frontend_code_v2_team.prompts",
-            language_conventions=language_conventions,
-            task_id=task_id,
-            attempt=attempt,
-            max_attempts=max_fix_attempts,
-        )
+        try:
+            applied = _execute_llm_repair_attempt(
+                issue=issue,
+                current_files=current_files,
+                project_dir=project_dir,
+                model=_build_fix_model,
+                parse_fn=parse_problem_solving_single_issue_template,
+                fix_prompt=FIX_PROMPT,
+                is_frontend=prompt_module == "frontend_code_v2_team.prompts",
+                language_conventions=language_conventions,
+                task_id=task_id,
+                attempt=attempt,
+                max_attempts=max_fix_attempts,
+            )
+        except Exception as e:
+            # A single repair attempt is best-effort: an unexpected error
+            # (template parse failure, prompt formatting mismatch, snippet
+            # extraction, etc.) must not abort the whole loop. Log and skip
+            # to the next issue.
+            logger.warning(
+                "[%s] Build fix attempt %d/%d: unexpected error during repair "
+                "of issue %r: %s. Next step -> Skipping to next issue",
+                task_id,
+                attempt + 1,
+                max_fix_attempts,
+                (issue.get("description") or "")[:80],
+                e,
+            )
+            continue
         if not applied:
             continue
         try:

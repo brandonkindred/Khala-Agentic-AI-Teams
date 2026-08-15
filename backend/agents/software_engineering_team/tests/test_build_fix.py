@@ -327,3 +327,38 @@ def test_try_build_fix_loop_survives_pytest_crash_after_patch(
     assert success is False
     assert "pytest env exploded after patch" in error_output
     assert any("pytest failed to run" in record.message for record in caplog.records)
+
+
+def test_try_build_fix_survives_repair_attempt_exception(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An unexpected error inside a single repair attempt must not abort the loop.
+
+    Preconditions:
+        ``tmp_path`` contains a Python file with a real syntax error so the
+        backend branch populates ``issues`` and enters the repair loop, and
+        ``_execute_llm_repair_attempt`` raises when called.
+    Postconditions:
+        ``_try_build_fix_one_at_a_time`` logs the failure and returns
+        ``(False, summary)`` instead of propagating the exception.
+    """
+    _write(tmp_path / "app.py", "def foo(:\n    return 1\n")
+
+    monkeypatch.setattr(
+        "software_engineering_team.build_fix.get_strands_model",
+        lambda *args, **kwargs: object(),
+    )
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("repair boom")
+
+    monkeypatch.setattr("software_engineering_team.build_fix._execute_llm_repair_attempt", _boom)
+
+    with caplog.at_level(logging.WARNING):
+        success, error_output = _try_build_fix_one_at_a_time(
+            tmp_path, "backend", "task-repair-boom"
+        )
+
+    assert success is False
+    assert error_output
+    assert any("unexpected error during repair" in record.message for record in caplog.records)
