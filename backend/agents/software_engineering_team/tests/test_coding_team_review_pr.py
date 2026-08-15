@@ -3476,10 +3476,19 @@ class TestFixedRunPrReview:
         captured: dict[str, Any] = {}
 
         def _capture(
-            llm, *, issues, changed_by_path, files, repo_reader=None, input_data=None, **_kw
+            llm,
+            *,
+            issues,
+            changed_by_path,
+            files,
+            repo_reader=None,
+            input_data=None,
+            removed_by_path=None,
+            **_kw,
         ):
             captured["input_data"] = input_data
-            captured["removed"] = _kw.get("removed_by_path")
+            captured["changed"] = changed_by_path
+            captured["removed"] = removed_by_path
             return list(issues)
 
         monkeypatch.setattr(
@@ -3503,6 +3512,10 @@ class TestFixedRunPrReview:
         assert data is not None
         assert "Add feature" in (data.task_description or "")
         assert "body" in (data.task_requirements or "")
+        # The PR hook must also thread the added/modified and deleted line maps
+        # into the verifier so scope classification has the diff to reason over.
+        assert captured.get("changed") is not None
+        assert captured.get("removed") is not None
 
 
 # ---------------------------------------------------------------------------
