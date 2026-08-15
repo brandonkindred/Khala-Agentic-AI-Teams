@@ -387,6 +387,41 @@ def _build_ollama_concrete(
     return client
 
 
+def _build_runpod_concrete(
+    model: str,
+    base_url: str,
+    timeout: float,
+    on_reasoning: Optional[Callable[[str], None]],
+    rate_limit_max_retries: Optional[int],
+    api_key: str,
+) -> RunPodLLMClient:
+    """Build an unwrapped RunPod client — cached unless ``on_reasoning`` is set.
+
+    Follows the exact pattern of :func:`_build_ollama_concrete` and
+    :func:`_build_claude_concrete`: a per-caller reasoning-token sink forces a fresh,
+    uncached client so the callback never leaks into the shared cache; all other
+    calls return the shared cached singleton.
+
+    Preconditions: ``model``/``base_url`` are resolved strings; ``timeout`` is a
+        number; ``api_key`` is non-empty (RunPod always requires a Bearer token);
+        ``on_reasoning`` is callable or ``None``.
+    Postconditions: returns a ready client whose 429 backoff budget is
+        ``rate_limit_max_retries``; goes through the shared cache only when
+        ``on_reasoning is None``.
+    """
+    if on_reasoning is not None:
+        return RunPodLLMClient(
+            model=model,
+            base_url=base_url,
+            timeout=timeout,
+            on_reasoning=on_reasoning,
+            rate_limit_max_retries=rate_limit_max_retries,
+            api_key=api_key,
+        )
+    client, _ = _runpod_cached(model, base_url, timeout, rate_limit_max_retries, api_key)
+    return client
+
+
 def _build_entry_client(
     entry: "provider_store.ProviderEntry",
     agent_key: Optional[str],
@@ -409,7 +444,8 @@ def _build_entry_client(
     Claude entry ignores it and keeps its configured model, so a failover hop across
     provider types still resolves a model valid for that provider.
 
-    Preconditions: ``entry.provider`` is ``"ollama"`` or ``"claude"``. Postconditions:
+    Preconditions: ``entry.provider`` is ``"ollama"``, ``"claude"``, or ``"runpod"``.
+    Postconditions:
         returns a ready concrete client whose 429 backoff budget is
         ``rate_limit_max_retries`` (``0`` for fast-fail failover hops); an Ollama
         client uses ``model_override`` (when given) in place of its configured model.
@@ -419,6 +455,10 @@ def _build_entry_client(
     if entry.provider == "claude":
         model = entry.model.strip() or llm_config.resolve_claude_model(agent_key)
         return _build_claude_concrete(model, entry.api_key, timeout, on_reasoning, rate_limit_max_retries)
+    elif entry.provider == "runpod":
+        model = entry.model.strip() or llm_config.resolve_model(agent_key)
+        base_url = entry.base_url  # always stored; no env fallback for RunPod
+        return _build_runpod_concrete(model, base_url, timeout, on_reasoning, rate_limit_max_retries, entry.api_key)
     model = (model_override or "").strip() or entry.model.strip() or llm_config.resolve_model(agent_key)
     base_url = entry.base_url.strip() or llm_config.resolve_base_url()
     # The entry carries its own key (empty → no Authorization header, i.e. a local
@@ -699,7 +739,7 @@ def get_client(
 
 
 def clear_client_cache() -> None:
-    """Drop all cached provider clients (Ollama + Claude) and Strands adapters.
+    """Drop all cached provider clients (Ollama + Claude + RunPod) and Strands adapters.
 
     Called by the settings endpoint after a config change so the next
     :func:`get_client` / :func:`get_strands_model` rebuilds against the new
@@ -717,6 +757,7 @@ def clear_client_cache() -> None:
     with _cache_lock:
         _client_cache.clear()
         _claude_cache.clear()
+        _runpod_cache.clear()
     provider_store.clear_cache()
     # Lazy import to avoid a circular import (strands_provider imports get_client).
     # Kept broad (not just ImportError): this guards BOTH the optional-dependency

@@ -115,6 +115,73 @@ def _is_ollama_cloud_url(url: str) -> bool:
     return host == "ollama.com" or host.endswith(".ollama.com")
 
 
+# ---------------------------------------------------------------------------
+# RunPod-specific helper functions
+# ---------------------------------------------------------------------------
+
+
+def _validate_runpod_endpoint_id(endpoint_id: str) -> str:
+    """Validate and return the endpoint_id, raising ValueError on bad format.
+
+    Only alphanumeric characters (a-zA-Z0-9) are accepted. A valid endpoint ID
+    is a non-empty string containing exclusively letters and digits — no spaces,
+    hyphens, slashes, or other special characters that would corrupt a URL path
+    segment.
+
+    Preconditions: ``endpoint_id`` is a string.
+    Postconditions: returns ``endpoint_id`` unchanged when it matches
+        ``^[a-zA-Z0-9]+$``; raises ``ValueError`` with a descriptive message
+        otherwise. Never makes network calls.
+    """
+    import re
+
+    if not re.fullmatch(r"[a-zA-Z0-9]+", endpoint_id):
+        raise ValueError(
+            "endpoint_id must contain only alphanumeric characters (letters and digits)."
+        )
+    return endpoint_id
+
+
+def _build_runpod_base_url(endpoint_id: str) -> str:
+    """Construct the canonical RunPod OpenAI-compatible base URL for an endpoint.
+
+    Preconditions: ``endpoint_id`` is a valid alphanumeric string (caller must
+        validate first via ``_validate_runpod_endpoint_id``).
+    Postconditions: returns exactly
+        ``https://api.runpod.ai/v2/{endpoint_id}/openai/v1`` with no trailing
+        slash, no extra path segments, and no query parameters.
+    """
+    return f"https://api.runpod.ai/v2/{endpoint_id}/openai/v1"
+
+
+async def _probe_runpod_endpoint(endpoint_id: str, api_key: str) -> None:
+    """Send a GET to the RunPod /models endpoint to verify it is reachable.
+
+    Fires a single authenticated GET request to
+    ``https://api.runpod.ai/v2/{endpoint_id}/openai/v1/models`` with a 10 s
+    timeout. Used at create time to validate that the supplied credentials work
+    before persisting the entry.
+
+    Preconditions: ``endpoint_id`` has passed ``_validate_runpod_endpoint_id``;
+        ``api_key`` is non-empty (caller already checked).
+    Postconditions: returns ``None`` when the endpoint responds with a 2xx status.
+        Raises ``HTTPException(400)`` with the underlying error message on any
+        failure: connection error, timeout, or non-2xx response.
+    """
+    import httpx
+
+    url = f"https://api.runpod.ai/v2/{endpoint_id}/openai/v1/models"
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.get(url, headers={"Authorization": f"Bearer {api_key}"})
+            resp.raise_for_status()
+    except Exception as e:
+        raise HTTPException(
+            status_code=400,
+            detail=f"RunPod endpoint could not be reached: {e}",
+        ) from e
+
+
 class OllamaModelsResponse(BaseModel):
     """Response for ``GET /api/llm-config/ollama-models``.
 
@@ -191,11 +258,12 @@ class LlmProviderListResponse(BaseModel):
 class LlmProviderCreate(BaseModel):
     """Request body to add a provider to the fallback list."""
 
-    label: str = Field(..., min_length=1, description="Human-readable name, e.g. 'Anthropic API'.")
-    provider: Literal["ollama", "claude"] = Field(..., description="Provider type.")
+    label: str = Field("", description="Human-readable name, e.g. 'Anthropic API'. Defaults to 'RunPod' for the runpod provider.")
+    provider: Literal["ollama", "claude", "runpod"] = Field(..., description="Provider type.")
     model: str = Field("", description="Model id for the provider (empty = provider default).")
-    base_url: str = Field("", description="Ollama base URL (empty = default); ignored for Claude.")
+    base_url: str = Field("", description="Ollama base URL (empty = default); ignored for Claude and RunPod.")
     api_key: str = Field("", description="API key for the provider (never returned by GET).")
+    endpoint_id: str = Field("", description="RunPod endpoint ID (alphanumeric). Required when provider='runpod'.")
 
     @field_validator("base_url")
     @classmethod
@@ -213,10 +281,11 @@ class LlmProviderUpdate(BaseModel):
     # No ``min_length`` here: per the contract an empty/omitted field means "leave
     # unchanged" (normalized to None in the handler), so an empty label must not 422.
     label: str | None = Field(None, description="New label; empty/omitted leaves it unchanged.")
-    provider: Literal["ollama", "claude"] | None = None
+    provider: Literal["ollama", "claude", "runpod"] | None = None
     model: str | None = None
     base_url: str | None = None
     api_key: str = Field("", description="New API key; empty leaves the stored key unchanged.")
+    endpoint_id: str = Field("", description="New RunPod endpoint ID (alphanumeric). Empty leaves the stored base_url unchanged.")
     clear_api_key: bool = Field(
         False,
         description=(
@@ -316,9 +385,16 @@ def _guard_entry_credentials(provider: str, base_url: str, effective_api_key: st
     fallback — an entry can never rely on ``LLM_CLAUDE_API_KEY`` / ``ANTHROPIC_API_KEY``
     / ``OLLAMA_API_KEY`` at call time, so it must not be allowed to persist keyless.
 
-    Preconditions: ``provider`` is ``"ollama"``/``"claude"``. Postconditions: raises
+    Preconditions: ``provider`` is ``"ollama"``/``"claude"``/``"runpod"``. Postconditions: raises
         ``HTTPException(400)`` when the required key is absent; returns otherwise.
     """
+    if provider == "runpod":
+        if not effective_api_key:
+            raise HTTPException(
+                status_code=400,
+                detail="Cannot configure a RunPod provider without an API key. Provide api_key.",
+            )
+        return
     if provider == "claude":
         if not effective_api_key:
             raise HTTPException(
@@ -366,12 +442,27 @@ async def create_provider(body: LlmProviderCreate) -> LlmProviderListResponse:
     """
     _require_storage()
     _guard_entry_credentials(body.provider, body.base_url, body.api_key.strip())
+    if body.provider == "runpod":
+        if not body.endpoint_id.strip():
+            raise HTTPException(status_code=400, detail="endpoint_id is required for RunPod.")
+        try:
+            _validate_runpod_endpoint_id(body.endpoint_id.strip())
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
+        await _probe_runpod_endpoint(body.endpoint_id.strip(), body.api_key.strip())
+        base_url = _build_runpod_base_url(body.endpoint_id.strip())
+        label = body.label.strip() or "RunPod"
+    else:
+        if not body.label.strip():
+            raise HTTPException(status_code=400, detail="label must not be empty.")
+        base_url = body.base_url
+        label = body.label.strip()
     try:
         provider_store.create_entry(
-            label=body.label,
+            label=label,
             provider=body.provider,
             model=body.model,
-            base_url=body.base_url,
+            base_url=base_url,
             api_key=body.api_key,
         )
     except Exception as e:  # noqa: BLE001 - surface a clear 503 instead of an opaque 500
