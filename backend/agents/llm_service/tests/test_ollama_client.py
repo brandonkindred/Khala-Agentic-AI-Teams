@@ -278,6 +278,38 @@ def test_ollama_complete_json_parses_response(monkeypatch: pytest.MonkeyPatch) -
     assert result == {"answer": 42}
 
 
+def test_ollama_sse_parsing_handles_str_lines_from_httpx(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """httpx's Response.iter_lines() yields decoded str (via iter_text()), NOT
+    bytes like requests. The SSE parser therefore operates on str throughout:
+    ``partial_buf`` is a str, and joining it with a raw line via ``+`` plus the
+    subsequent ``startswith("data:")`` must work without a TypeError.
+
+    This exercises the partial-buffer branch by splitting one ``data:`` line
+    across two str chunks (as a mid-frame TCP split would surface it), so a
+    regression to bytes-typed handling would raise here.
+    """
+    monkeypatch.setenv("LLM_PROVIDER", "ollama")
+    payload = '{"choices":[{"delta":{"content":"{\\"answer\\": 42}"},"finish_reason":null}]}'
+    split = len(payload) // 2
+    # First fragment is not valid JSON on its own -> buffered as str partial_buf;
+    # the second fragment completes it -> str concatenation + startswith.
+    sse_lines = [
+        "data: " + payload[:split],
+        payload[split:],
+        'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}',
+        "data: [DONE]",
+    ]
+    assert all(isinstance(line, str) for line in sse_lines)
+    mock_client, _ = _make_streaming_mock(200, sse_lines)
+    with patch("httpx.Client") as mock_client_cls:
+        mock_client_cls.return_value = mock_client
+        client = OllamaLLMClient(model="test", base_url="http://localhost:9999", timeout=5)
+        result = client.complete_json("What is 6*7?", objective="test", temperature=0)
+    assert result == {"answer": 42}
+
+
 def test_complete_json_clears_stale_turns_from_prior_failed_call(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

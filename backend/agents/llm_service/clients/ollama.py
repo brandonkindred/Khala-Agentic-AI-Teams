@@ -1206,7 +1206,12 @@ class OllamaLLMClient(LLMClient):
                                 finish_reason: Optional[str] = None
                                 tool_call_buffers: dict[int, dict] = {}
                                 has_reasoning: bool = False
-                                partial_buf = ""  # buffer for lines split across TCP chunks
+                                # Buffer for lines split across TCP chunks. This is
+                                # a str because httpx's Response.iter_lines() yields
+                                # decoded str (via iter_text()), unlike requests'
+                                # iter_lines() which yields bytes — so every
+                                # startswith/slice below operates on str.
+                                partial_buf = ""
                                 usage_data: Optional[Dict[str, Any]] = (
                                     None  # token usage from final chunk
                                 )
