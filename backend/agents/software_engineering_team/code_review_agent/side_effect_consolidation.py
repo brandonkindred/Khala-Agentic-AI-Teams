@@ -246,8 +246,9 @@ def _canonical_path(shared_index: CodebaseIndex, file_path: str) -> str:
 def _merge_group(
     group: List[CodeReviewIssue],
     shared_index: CodebaseIndex,
+    category: Optional[str] = None,
 ) -> CodeReviewIssue:
-    """Merge two or more side-effect findings into one consolidated issue.
+    """Merge two or more related findings of one category into one issue.
 
     Starts from the highest-severity member's full ``model_dump()`` so any
     ``CodeReviewIssue`` fields this pass does not explicitly recompute
@@ -256,7 +257,12 @@ def _merge_group(
     recomputed from the group.
 
     Preconditions:
-        - ``len(group) >= 2``; every issue's ``category`` is ``"side-effects"``.
+        - ``len(group) >= 2``; every issue in the group shares one category.
+        - ``category`` is that shared category, or ``None`` to default to
+          ``"side-effects"`` (back-compat for the side-effect consolidation
+          caller, which only ever merges ``"side-effects"`` groups). When
+          given, it becomes the merged issue's category and drives the
+          consolidated-description label.
         - ``shared_index`` is the same index used for construct grouping, so
           path aliases (``foo.py`` vs ``app/foo.py``) resolve consistently.
 
@@ -275,11 +281,13 @@ def _merge_group(
           cited, matching a single-line issue's shape).
         - ``severity`` is the highest-ranked severity in the group
           (``critical`` > ``high`` > ``medium`` > ``low`` > ``info``).
-        - ``category`` is always ``"side-effects"``.
+        - ``category`` is ``category`` (the group's shared category), or
+          ``"side-effects"`` when ``category`` is ``None``.
         - ``description`` is the group's non-blank values with exact duplicates
           removed (order-preserving). A single surviving value is used verbatim;
           multiple values are prefixed with "Consolidated N related
-          side-effect findings:" and joined as a bulleted list. Exact (not
+          <category> findings:" (the ``side-effects`` category renders as
+          "side-effect") and joined as a bulleted list. Exact (not
           fuzzy) dedupe is intentional: near-identical wording that cites
           different callers must all survive.
         - ``suggestion`` is the group's non-blank values with exact duplicates
@@ -321,12 +329,19 @@ def _merge_group(
 
     best = min(group, key=lambda i: _severity_rank(i.severity))
 
+    effective_category = category if category else _SIDE_EFFECT_CATEGORY
+    # "side-effects" reads better as "side-effect findings"; every other
+    # category is used verbatim (e.g. "logic findings", "naming findings").
+    category_label = (
+        "side-effect" if effective_category == _SIDE_EFFECT_CATEGORY else effective_category
+    )
+
     descriptions = _dedupe_exact([i.description for i in group if i.description])
     if len(descriptions) <= 1:
         description = descriptions[0] if descriptions else ""
     else:
         description = (
-            f"Consolidated {len(descriptions)} related side-effect findings:\n"
+            f"Consolidated {len(descriptions)} related {category_label} findings:\n"
             + "\n".join(f"- {d}" for d in descriptions)
         )
 
@@ -341,7 +356,7 @@ def _merge_group(
     payload.update(
         {
             "severity": best.severity,
-            "category": _SIDE_EFFECT_CATEGORY,
+            "category": effective_category,
             "file_path": majority_file,
             "line": line,
             "start_line": start_line,
