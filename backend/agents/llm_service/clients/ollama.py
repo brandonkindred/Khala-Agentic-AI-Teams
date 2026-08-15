@@ -462,9 +462,11 @@ class _SemanticRetryDecision:
       empty response is treated as a transient fault. The caller adopts
       ``transient_error`` as ``last_error`` and runs the transient-budget step.
 
-    Invariants: exactly one action is set; the ``retry_semantic`` fields are
-        populated only for that action and ``transient_error`` only for
-        ``retry_transient``.
+    Invariants: ``action`` is either ``"retry_semantic"`` or ``"retry_transient"``.
+        The ``retry_semantic`` fields (``active_think`` / ``stream_payload`` /
+        ``semantic_attempt`` and the reasoning diagnostics) are populated only when
+        ``action == "retry_semantic"``, and ``transient_error`` only when
+        ``action == "retry_transient"``.
     """
 
     action: str
@@ -1773,8 +1775,16 @@ class OllamaLLMClient(LLMClient):
                 # by the loop's closure, so the step runs here, not in the helper.
                 # DbC: the helper raises the terminal outcomes itself, so the only
                 # decision that reaches this point is retry_transient, which always
-                # carries a transient_error — assert rather than silently coerce.
-                assert decision.action == "retry_transient" and decision.transient_error is not None
+                # carries a transient_error. Validate with an explicit raise (not an
+                # assert, so the guard survives `python -O`); the branch is
+                # unreachable given the helper's contract.
+                if (  # pragma: no cover - unreachable DbC guard
+                    decision.action != "retry_transient" or decision.transient_error is None
+                ):
+                    raise RuntimeError(
+                        "_handle_semantic_exhaustion_retry returned an invalid decision: "
+                        f"{decision.action!r}"
+                    )
                 last_error = decision.transient_error
                 if _retry_transient_step(str(last_error)):
                     continue
