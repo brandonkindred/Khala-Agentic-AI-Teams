@@ -16,6 +16,7 @@ from shared.command_runner.executor import CommandResult
 from software_engineering_team.build_fix import (
     _collect_project_files,
     _execute_llm_repair_attempt,
+    _is_command_result,
     _run_build_verification,
     _run_post_fix_build_verification,
     _try_build_fix_one_at_a_time,
@@ -327,3 +328,90 @@ def test_try_build_fix_loop_survives_pytest_crash_after_patch(
     assert success is False
     assert "pytest env exploded after patch" in error_output
     assert any("pytest failed to run" in record.message for record in caplog.records)
+
+
+def test_is_command_result_rejects_none_and_incomplete_objects() -> None:
+    """``_is_command_result`` guards the CommandResult interface the repair loop relies on.
+
+    Preconditions:
+        None.
+    Postconditions:
+        Returns ``False`` for ``None`` and for objects missing ``success`` or a
+        callable ``parsed_failures``; returns ``True`` for a real ``CommandResult``.
+    """
+
+    class _NoParsedFailures:
+        success = False
+
+    class _NonCallableParsedFailures:
+        success = False
+        parsed_failures = "not callable"
+
+    assert _is_command_result(None) is False
+    assert _is_command_result(object()) is False
+    assert _is_command_result(_NoParsedFailures()) is False
+    assert _is_command_result(_NonCallableParsedFailures()) is False
+    assert (
+        _is_command_result(CommandResult(success=True, exit_code=0, stdout="", stderr="")) is True
+    )
+
+
+def test_try_build_fix_aborts_on_unusable_verification_result(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A ``None`` post-fix verification result must abort the loop gracefully, not raise.
+
+    Preconditions:
+        Initial syntax check succeeds and ``run_pytest`` reports a test failure so the
+        LLM repair loop is entered and applies a patch; the post-fix verification then
+        returns ``None`` (an unusable result).
+    Postconditions:
+        ``_try_build_fix_one_at_a_time`` returns ``(False, summary)`` and logs an
+        "unusable result" warning instead of raising ``AttributeError``.
+    """
+    _write(tmp_path / "app.py", "def foo():\n    return 1\n")
+    _write(tmp_path / "tests" / "test_app.py", "def test_foo():\n    assert True\n")
+
+    syntax_ok = CommandResult(success=True, exit_code=0, stdout="", stderr="")
+    pytest_fail = CommandResult(
+        success=False,
+        exit_code=1,
+        stdout="FAILED tests/test_app.py::test_foo",
+        stderr="",
+    )
+
+    monkeypatch.setattr(
+        "shared.command_runner.executor.run_python_syntax_check",
+        lambda *args, **kwargs: syntax_ok,
+    )
+    monkeypatch.setattr(
+        "shared.command_runner.executor.run_pytest",
+        lambda *args, **kwargs: pytest_fail,
+    )
+    # Post-fix verification yields an unusable result to exercise the loop guard.
+    monkeypatch.setattr(
+        "software_engineering_team.build_fix._run_post_fix_build_verification",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        "software_engineering_team.build_fix.get_strands_model",
+        lambda *args, **kwargs: object(),
+    )
+
+    class _FakeAgent:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        def __call__(self, prompt: str) -> str:
+            return "## FILE app.py ##\ndef foo():\n    return 2\n"
+
+    monkeypatch.setattr("software_engineering_team.build_fix.Agent", _FakeAgent)
+
+    with caplog.at_level(logging.WARNING):
+        success, error_output = _try_build_fix_one_at_a_time(
+            tmp_path, "backend", "task-unusable-verification"
+        )
+
+    assert success is False
+    assert "no usable result" in error_output
+    assert any("unusable result" in record.message for record in caplog.records)
