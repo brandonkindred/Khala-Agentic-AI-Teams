@@ -18,6 +18,7 @@ from branding_team.agents import (
     make_training_planner,
 )
 from branding_team.graphs.shared import build_agent, build_fan_out_fan_in
+from branding_team.models import GovernanceOutput
 
 
 def build_phase5_graph() -> Graph:
@@ -44,9 +45,10 @@ def build_phase5_graph() -> Graph:
             "into a unified GovernanceOutput. Combine ownership model, decision authority, approval "
             "workflows, agency briefing protocols, asset management guidance, training plan, brand "
             "health KPIs, tracking methodology, review triggers, evolution framework, version control "
-            "cadence, brand guidelines list, and wiki backlog. Output comprehensive valid JSON."
+            "cadence, brand guidelines list, and wiki backlog."
         ),
         description="Joins all governance fragments into a single GovernanceOutput document.",
+        structured_output=GovernanceOutput,
     )
     compositor = builder.add_node(compositor_agent, node_id="governance_compositor")
 
