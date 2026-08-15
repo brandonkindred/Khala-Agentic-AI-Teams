@@ -10,7 +10,12 @@ import pytest
 from pydantic import BaseModel
 
 from llm_service.clients.dummy import DummyLLMClient
-from llm_service.interface import LLMClient
+from llm_service.interface import (
+    LLMClient,
+    record_complete_json_turn,
+    reset_complete_json_observer_state,
+    take_complete_json_turns,
+)
 from llm_service.strands_adapter import (
     LLMClientModel,
     _flatten_system_prompt_content,
@@ -21,6 +26,14 @@ from llm_service.strands_adapter import (
 from llm_service.strands_adapter import (
     _get_strands_model as get_strands_model,
 )
+
+
+@pytest.fixture(autouse=True)
+def _reset_observer_turns() -> None:
+    reset_complete_json_observer_state()
+    yield
+    reset_complete_json_observer_state()
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -275,6 +288,88 @@ def test_stream_emits_text_events_for_plain_response() -> None:
     assert call["messages"][1] == {"role": "user", "content": "review this"}
     assert call["temperature"] == 0.1
     assert call["think"] is True
+
+
+def test_stream_records_observer_turns_for_each_chat_call() -> None:
+    """Each Strands stream() invocation is one model HTTP turn for transcripts."""
+    client = _RecordingClient({"summary": "done", "status": "ok"})
+    model = LLMClientModel(client, agent_key="qa_agent")
+
+    async def _run() -> list:
+        events = []
+        async for event in model.stream(
+            messages=[{"role": "user", "content": [{"text": "review this"}]}],
+            system_prompt="You are a QA expert.",
+        ):
+            events.append(event)
+        return take_complete_json_turns()
+
+    turns = asyncio.run(_run())
+    assert len(turns) == 1
+    prompt, response, _started = turns[0]
+    assert json.loads(prompt)[0]["role"] == "system"
+    assert "QA expert" in prompt
+    assert "done" in response
+
+
+def test_stream_replays_provider_turns_recorded_inside_to_thread() -> None:
+    """chat() runs in a worker thread; ContextVar writes there must be
+    returned and re-recorded on the awaiting task or self-correction
+    turns never reach the transcript observer."""
+
+    class _InnerTurnClient(_RecordingClient):
+        def chat(self, messages: list, **kwargs: Any) -> Any:
+            super().chat(messages, **kwargs)
+            record_complete_json_turn("first messages", "prose analysis")
+            record_complete_json_turn("corrective messages", '{"ok": true}')
+            return self.response
+
+    client = _InnerTurnClient({"ok": True})
+    model = LLMClientModel(client, agent_key="qa_agent")
+
+    async def _run() -> list:
+        async for _event in model.stream(
+            messages=[{"role": "user", "content": [{"text": "review this"}]}],
+        ):
+            pass
+        return take_complete_json_turns()
+
+    turns = asyncio.run(_run())
+    assert [(p, r) for p, r, _s in turns] == [
+        ("first messages", "prose analysis"),
+        ("corrective messages", '{"ok": true}'),
+    ]
+
+
+def test_stream_replays_worker_turns_when_chat_raises() -> None:
+    """Self-correction that still fails records turns in the worker; those
+    must replay onto the parent task even though ``chat()`` raised."""
+    from llm_service.interface import LLMJsonParseError
+
+    class _FailAfterTurns(_RecordingClient):
+        def chat(self, messages: list, **kwargs: Any) -> Any:
+            super().chat(messages, **kwargs)
+            record_complete_json_turn("first messages", "prose analysis")
+            record_complete_json_turn("corrective messages", '{"ok": false}')
+            raise LLMJsonParseError("not json", response_preview="nope")
+
+    model = LLMClientModel(_FailAfterTurns({"ok": True}), agent_key="qa_agent")
+
+    async def _run() -> list:
+        try:
+            async for _event in model.stream(
+                messages=[{"role": "user", "content": [{"text": "review this"}]}],
+            ):
+                pass
+        except LLMJsonParseError:
+            return take_complete_json_turns()
+        raise AssertionError("expected LLMJsonParseError")
+
+    turns = asyncio.run(_run())
+    assert [(p, r) for p, r, _s in turns] == [
+        ("first messages", "prose analysis"),
+        ("corrective messages", '{"ok": false}'),
+    ]
 
 
 def test_stream_merges_system_prompt_content_blocks() -> None:
@@ -636,8 +731,16 @@ def test_get_strands_model_does_not_alias_distinct_agent_keys(monkeypatch) -> No
     # The provider list is the sole source of LLM resolution — seed a local Ollama
     # entry so get_client resolves (the shared model resolver still drives model_id).
     _entry = ps.ProviderEntry(
-        id=1, label="e", provider="ollama", model="", base_url="http://localhost:11434",
-        api_key="", sort_order=1, limit_exceeded=False, limit_type="", reset_at=None,
+        id=1,
+        label="e",
+        provider="ollama",
+        model="",
+        base_url="http://localhost:11434",
+        api_key="",
+        sort_order=1,
+        limit_exceeded=False,
+        limit_type="",
+        reset_at=None,
     )
     monkeypatch.setattr(ps, "load_ordered_entries", lambda *a, **k: [_entry])
     monkeypatch.setattr(ps, "select_active_entry", lambda es, **k: es[0])

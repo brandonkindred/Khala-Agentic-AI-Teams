@@ -32,11 +32,20 @@ import copy
 import json
 import logging
 import secrets
-from typing import Any, TypeVar
+from typing import Any, Callable, TypeVar
 
 from pydantic import BaseModel, ValidationError
 
-from .interface import LLMClient, LLMJsonParseError, LLMSchemaValidationError
+from .interface import (
+    LLMClient,
+    LLMJsonParseError,
+    LLMSchemaValidationError,
+    LLMTruncatedError,
+    observer_turn_started,
+    reset_complete_json_observer_state,
+    take_complete_json_raw,
+    take_complete_json_turns,
+)
 from .util import sha256_fingerprint
 
 logger = logging.getLogger(__name__)
@@ -169,6 +178,75 @@ def _truncate(text: str, *, limit: int = 500) -> str:
     return text[:limit] + "…"
 
 
+def _invoke_on_attempt(
+    on_attempt: "Callable[[str, str], None] | None", attempt_prompt: str, response_text: str
+) -> None:
+    """Best-effort call to a caller's per-attempt observer; never propagates.
+
+    Postconditions: ``on_attempt`` is invoked with ``(attempt_prompt,
+    response_text)`` when non-``None``; any exception it raises is logged and
+    swallowed so an observer bug (e.g. a transcript recorder) can never break
+    the structured-output call it is merely observing. Never raises.
+    """
+    if on_attempt is None:
+        return
+    try:
+        on_attempt(attempt_prompt, response_text)
+    except Exception:  # noqa: BLE001 - observer must never break the caller's call
+        logger.warning("complete_validated: on_attempt callback failed", exc_info=True)
+
+
+def _observe_complete_json_reply(
+    on_attempt: "Callable[[str, str], None] | None",
+    attempt_prompt: str,
+    fallback_response: str,
+) -> None:
+    """Notify ``on_attempt`` for each recorded continuation turn, else once.
+
+    Preconditions:
+        ``attempt_prompt`` is the prompt ``complete_json`` was called with.
+        ``fallback_response`` is the text to report when the provider recorded
+        no inner turns (success raw / parse preview / truncation partial).
+
+    Postconditions:
+        Inner continuation turns, when present, are each observed in record
+        order and then cleared. Otherwise ``on_attempt`` is invoked once with
+        ``(attempt_prompt, fallback_response)``. Never raises.
+    """
+    turns = take_complete_json_turns()
+    if turns:
+        for turn_prompt, turn_response, started in turns:
+            with observer_turn_started(started):
+                _invoke_on_attempt(on_attempt, turn_prompt, turn_response)
+        return
+    _invoke_on_attempt(on_attempt, attempt_prompt, fallback_response)
+
+
+def complete_json_response_text(client: LLMClient, data: Any) -> str:
+    """Best-effort text of a successful ``complete_json`` reply for observers.
+
+    Preconditions:
+        ``data`` is the dict ``complete_json`` returned. ``client`` is the
+        instance that just returned ``data`` (kept for call-site compatibility;
+        raw text is not read from the client object).
+
+    Postconditions:
+        Returns the per-call raw JSON recorded by the provider client on this
+        context (the model text before parse/unwrap, including fences the
+        shared parser stripped) when that recording is non-empty. Otherwise
+        serializes ``data``. Never raises. The recording is consumed so a
+        later sequential call on the same thread cannot reuse it.
+    """
+    del client  # raw text lives on a ContextVar, not shared client state
+    raw = take_complete_json_raw()
+    if raw:
+        return raw
+    try:
+        return json.dumps(data, default=str)
+    except (TypeError, ValueError):
+        return repr(data)
+
+
 def complete_validated(
     client: LLMClient,
     prompt: str,
@@ -180,6 +258,7 @@ def complete_validated(
     correction_attempts: int = 1,
     context: dict[str, Any] | None = None,
     think: "bool | str | None" = False,
+    on_attempt: "Callable[[str, str], None] | None" = None,
     **kwargs: Any,
 ) -> T:
     """Call ``client.complete_json`` and validate the result against ``schema``.
@@ -208,6 +287,21 @@ def complete_validated(
             every call here requires a schema-conformant JSON reply, and
             extended thinking competes with strict JSON decoding for the
             content channel. Pass an explicit value to override.
+        on_attempt: Optional observer called once per attempt (initial call
+            plus every corrective retry, whether that attempt succeeded or
+            failed) with ``(attempt_prompt, response_text)`` — the exact
+            prompt sent for that attempt and a best-effort text form of what
+            came back (the full raw reply on a parse failure when the raise
+            site captured it, else the truncated preview; ``partial_content``
+            on :class:`LLMTruncatedError`; each inner continuation turn when
+            the provider recorded them; the model text before parse/unwrap
+            when the provider recorded it on this call's context, else the
+            serialized parsed JSON on a validation failure or on success).
+            ``None`` (the default) does nothing extra; a caller that wants a
+            durable per-call transcript covering every attempt (not just the
+            final one) passes a recorder here instead of only logging the
+            function's return value. Never allowed to affect control flow:
+            any exception it raises is logged and swallowed.
         **kwargs: Forwarded to ``client.complete_json``.
 
     Returns:
@@ -232,6 +326,8 @@ def complete_validated(
 
     # Total call budget = 1 initial + correction_attempts follow-ups.
     for attempt in range(correction_attempts + 1):
+        attempt_prompt = current_prompt
+        reset_complete_json_observer_state()
         try:
             data = client.complete_json(
                 current_prompt,
@@ -241,10 +337,16 @@ def complete_validated(
                 think=think,
                 **kwargs,
             )
+        except LLMTruncatedError as exc:
+            _observe_complete_json_reply(on_attempt, attempt_prompt, exc.partial_content or "")
+            raise
         except LLMJsonParseError as exc:
             last_parse_error = exc
             last_validation_error = None
             last_validation_data = None
+            _observe_complete_json_reply(
+                on_attempt, attempt_prompt, exc.raw_response or exc.response_preview or ""
+            )
             if attempt >= correction_attempts:
                 break
             attempts_used = attempt + 1
@@ -255,6 +357,15 @@ def complete_validated(
                 preview=exc.response_preview or "",
             )
             continue
+        except Exception:
+            turns = take_complete_json_turns()
+            take_complete_json_raw()
+            for turn_prompt, turn_response, started in turns:
+                with observer_turn_started(started):
+                    _invoke_on_attempt(on_attempt, turn_prompt, turn_response)
+            raise
+
+        preview = complete_json_response_text(client, data)
 
         try:
             # Deep-copy the context on every attempt so mutations performed by
@@ -268,13 +379,10 @@ def complete_validated(
             last_validation_error = exc
             last_parse_error = None
             last_validation_data = data
+            _observe_complete_json_reply(on_attempt, attempt_prompt, preview)
             if attempt >= correction_attempts:
                 break
             attempts_used = attempt + 1
-            try:
-                preview = json.dumps(data, default=str)
-            except (TypeError, ValueError):
-                preview = repr(data)
             current_prompt = _build_corrective_prompt(
                 prompt,
                 schema=schema,
@@ -283,6 +391,7 @@ def complete_validated(
             )
             continue
 
+        _observe_complete_json_reply(on_attempt, attempt_prompt, preview)
         if attempts_used > 0:
             logger.info(
                 "json_self_correction succeeded after %d retry (schema=%s, prompt_hash=%s)",

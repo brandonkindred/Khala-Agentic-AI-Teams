@@ -264,6 +264,25 @@ class ReviewRunItem(BaseModel):
     completed_at: Optional[datetime] = None
 
 
+class TranscriptEntry(BaseModel):
+    """One LLM call the review pipeline made (GET /reviews/{job_id}/transcript)."""
+
+    stage: str
+    target: str
+    model: str
+    prompt: str
+    response: str
+    started_at: str
+    duration_ms: int
+
+
+class TranscriptResponse(BaseModel):
+    """A review's full durable transcript, in call order."""
+
+    job_id: str
+    entries: List[TranscriptEntry]
+
+
 class CreateReviewIssuesRequest(BaseModel):
     """Request body for POST /reviews/{job_id}/issues."""
 

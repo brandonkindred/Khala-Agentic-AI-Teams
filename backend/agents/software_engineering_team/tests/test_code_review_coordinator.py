@@ -24,6 +24,7 @@ from code_review_agent.coordinator import (
     MAX_CODE_REVIEW_ISSUES,
     MIN_SPLIT_SEGMENT_CHARS,
     _cap_issues,
+    _compact_for_review,
     _is_content_failure,
     _issues_from_chunk_output,
     _map_parallelism,
@@ -355,6 +356,47 @@ def test_shared_context_compaction_is_memoized_across_runs() -> None:
     run_coordinator(client, _make_input())
     # Second run reuses the memoized compactions — no additional compaction calls.
     assert client.compaction_calls == first_run_calls
+
+
+def test_shared_context_compaction_is_recorded_in_transcript(monkeypatch) -> None:
+    """Oversized spec/architecture/existing-codebase compaction is an LLM call
+    and must appear in the durable transcript, not only the later chunk review."""
+    from llm_service import llm_attribution
+    from shared.dev_models.models import SystemArchitecture
+
+    over_budget = "specification detail line. " * 4000
+    arch = SystemArchitecture(
+        overview="architecture overview line. " * 4000,
+        architecture_document="# Arch",
+        components=[],
+        decisions=[],
+        diagrams={},
+    )
+    captured: list = []
+    monkeypatch.setattr(
+        "code_review_agent.coordinator.record_transcript_entry",
+        lambda *args, **kwargs: captured.append(args),
+    )
+    client = _CompactionCountingClient()
+    with llm_attribution(job_id="job-1"):
+        run_coordinator(
+            client,
+            CodeReviewInput(
+                files={"app/main.py": "x" * 500},
+                task_description="Add feature",
+                language="python",
+                spec_content=over_budget,
+                architecture=arch,
+                existing_codebase="prior codebase line. " * 4000,
+            ),
+        )
+    compaction = [args for args in captured if args and args[0] == "compaction"]
+    assert len(compaction) == client.compaction_calls
+    assert {args[1] for args in compaction} == {
+        "specification",
+        "architecture overview",
+        "existing codebase",
+    }
 
 
 def test_render_architecture_context_folds_in_components_and_decisions() -> None:
@@ -2280,6 +2322,38 @@ def test_resolve_code_review_model_think_off_uses_real_factory(monkeypatch) -> N
     assert model.get_config().get("think") is False
     # The default (think=None) path stays on the provider default.
     assert resolve_code_review_model(object()).get_config().get("think") is None
+
+
+def test_compact_for_review_rejects_negative_max_chars() -> None:
+    """The documented non-negative budget is enforced, not left to slice quirks."""
+    from llm_service.clients.dummy import DummyLLMClient
+
+    with pytest.raises(ValueError, match="non-negative"):
+        _compact_for_review("text", -1, DummyLLMClient(), "spec")
+
+
+def test_compact_for_review_uses_provider_start_timestamps(monkeypatch) -> None:
+    """Continuation callbacks share one outer complete(); each transcript
+    entry must keep that turn's provider-recorded start, not the callback time."""
+    from llm_service.clients.dummy import DummyLLMClient
+    from llm_service.interface import record_complete_json_turn, reset_complete_json_observer_state
+
+    reset_complete_json_observer_state()
+    captured: list = []
+    monkeypatch.setattr(
+        "code_review_agent.coordinator.record_transcript_entry",
+        lambda *args, **kwargs: captured.append((args, kwargs)),
+    )
+
+    class _ContinuationClient(DummyLLMClient):
+        def complete(self, prompt: str, **kwargs: Any) -> str:
+            record_complete_json_turn("first prompt", "PARTIAL", started_monotonic=10.0)
+            record_complete_json_turn("continuation messages", " REST", started_monotonic=20.0)
+            return "PARTIAL REST"
+
+    _compact_for_review("x" * 200, 50, _ContinuationClient(), "spec")
+    assert [kwargs["started_monotonic"] for _, kwargs in captured] == [10.0, 20.0]
+    assert [args[3] for args, _ in captured] == ["PARTIAL", " REST"]
 
 
 def test_not_reviewed_range_label_edge_cases() -> None:

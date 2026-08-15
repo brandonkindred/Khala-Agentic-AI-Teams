@@ -13,17 +13,33 @@ Public entry points:
 from __future__ import annotations
 
 import json
+import logging
 import secrets
 from typing import Any, Callable, TypeVar
 
 from pydantic import BaseModel
 from strands import Agent
 
-from llm_service import LLMClient, LLMSemanticExhaustionError, get_strands_model
+from llm_service import (
+    LLMClient,
+    LLMError,
+    LLMJsonParseError,
+    LLMSemanticExhaustionError,
+    LLMTruncatedError,
+    get_strands_model,
+)
+from llm_service.interface import (
+    observer_turn_started,
+    reset_complete_json_observer_state,
+    take_complete_json_turns,
+)
 from llm_service.structured import (
     _DEFAULT_VALIDATED_FORMAT_INSTRUCTIONS,
+    complete_json_response_text,
     complete_validated,
 )
+
+logger = logging.getLogger(__name__)
 
 T = TypeVar("T", bound=BaseModel)
 
@@ -73,6 +89,91 @@ def formatting_system_prompt_with_untrusted_guard(
     if not base:
         return _FORMAT_ANALYSIS_UNTRUSTED_SYSTEM_SUFFIX.strip()
     return base + _FORMAT_ANALYSIS_UNTRUSTED_SYSTEM_SUFFIX
+
+
+def _complete_error_observer_text(exc: BaseException) -> str:
+    """Best-effort model text from a failed ``complete`` / ``complete_json``.
+
+    Preconditions:
+        ``exc`` is the exception raised after the provider attempted a call.
+    Postconditions:
+        Returns ``partial_content`` / raw JSON when the error carries it,
+        otherwise ``""`` (semantic exhaustion and transport faults have none).
+    """
+    if isinstance(exc, LLMTruncatedError):
+        return exc.partial_content or ""
+    if isinstance(exc, LLMJsonParseError):
+        return exc.raw_response or exc.response_preview or ""
+    return ""
+
+
+def _invoke_start_observer(label: str, observer: Callable[[], None] | None) -> None:
+    """Invoke a no-arg start observer; never raise.
+
+    Preconditions:
+        ``label`` identifies the caller in the warning log.
+    Postconditions:
+        ``observer`` is invoked when not None. Exceptions are logged and
+        swallowed so an observer cannot fail the review.
+    """
+    if observer is None:
+        return
+    try:
+        observer()
+    except Exception:  # noqa: BLE001 - observer must never break the review
+        logger.warning("%s callback failed", label, exc_info=True)
+
+
+def _invoke_observer(
+    label: str,
+    observer: Callable[[str, str], None] | None,
+    prompt: str,
+    response: str,
+) -> None:
+    """Invoke ``observer(prompt, response)``; never raise.
+
+    Preconditions:
+        ``label`` identifies the caller in the warning log.
+
+    Postconditions:
+        ``observer`` is invoked when not None. Any exception is logged and
+        swallowed so an observer cannot fail the review.
+    """
+    if observer is None:
+        return
+    try:
+        observer(prompt, response)
+    except Exception:  # noqa: BLE001 - observer must never break the review
+        logger.warning("%s callback failed", label, exc_info=True)
+
+
+def _observe_formatting_turns(
+    on_formatting: Callable[[str, str], None] | None,
+    format_prompt: str,
+    fallback_response: str,
+    *,
+    label: str = "run_agent_via_reasoning: on_formatting",
+) -> None:
+    """Notify ``on_formatting`` for each recorded continuation turn, else once.
+
+    Preconditions:
+        ``format_prompt`` is the prompt passed to ``complete_json`` or
+        ``complete``. ``fallback_response`` is used when the provider
+        recorded no inner turns.
+
+    Postconditions:
+        Inner continuation turns, when present, are each observed in record
+        order with that turn's start time bound for transcript writers.
+        Otherwise ``on_formatting`` is invoked once with
+        ``(format_prompt, fallback_response)``. Never raises.
+    """
+    turns = take_complete_json_turns()
+    if turns:
+        for turn_prompt, turn_response, started in turns:
+            with observer_turn_started(started):
+                _invoke_observer(label, on_formatting, turn_prompt, turn_response)
+        return
+    _invoke_observer(label, on_formatting, format_prompt, fallback_response)
 
 
 def _require_non_empty(name: str, value: str) -> None:
@@ -228,6 +329,8 @@ def complete_validated_via_reasoning_local(
     reasoning_temperature: float = 0.3,
     temperature: float = 0.0,
     correction_attempts: int = 1,
+    on_attempt: Callable[[str, str], None] | None = None,
+    on_formatting_start: Callable[[], None] | None = None,
     **kwargs: Any,
 ) -> T:
     """Two-call split with configurable thinking on the reasoning pass.
@@ -245,25 +348,55 @@ def complete_validated_via_reasoning_local(
         Returns a validated Pydantic instance. A step-1 exception propagates
         immediately and step 2 is never invoked. Empty or whitespace-only
         reasoning output raises ``LLMSemanticExhaustionError`` before
-        formatting so coordinator recovery still runs.
+        formatting so coordinator recovery still runs. ``on_attempt``, when
+        given, is invoked once for the reasoning ``complete`` call (including
+        an empty or whitespace-only reply, before that reply is rejected;
+        including each inner text-continuation HTTP turn when the provider
+        recorded them; and including :class:`LLMTruncatedError`
+        ``partial_content`` and other :class:`LLMError` completions such as
+        :class:`LLMSemanticExhaustionError` before that error is re-raised).
+        ``on_formatting_start``, when given, is invoked after reasoning
+        succeeds and immediately before the formatting ``complete_validated``
+        call so callers can stamp the formatting phase. ``on_attempt`` is then
+        forwarded to :func:`complete_validated` so each formatting attempt
+        (initial plus corrective retries) is observed too; observer exceptions
+        are swallowed and never fail the review.
     """
     _require_non_empty("objective", objective)
     _require_non_empty("reasoning_prompt", reasoning_prompt)
     _require_non_empty("formatting_instructions", formatting_instructions)
     _reject_think_kwarg("complete_validated_via_reasoning_local", kwargs)
 
-    prose = _require_reasoning_prose(
-        client.complete(
+    try:
+        raw_prose = client.complete(
             reasoning_prompt,
             objective=f"{objective} (reasoning)",
             system_prompt=reasoning_system_prompt,
             temperature=reasoning_temperature,
             think=_resolve_reasoning_think(reasoning_think),
         )
+    except LLMError as exc:
+        _observe_formatting_turns(
+            on_attempt,
+            reasoning_prompt,
+            _complete_error_observer_text(exc),
+            label="complete_validated_via_reasoning_local: on_attempt",
+        )
+        raise
+    _observe_formatting_turns(
+        on_attempt,
+        reasoning_prompt,
+        raw_prose,
+        label="complete_validated_via_reasoning_local: on_attempt",
     )
+    prose = _require_reasoning_prose(raw_prose)
     format_prompt = (
         f"{_DEFAULT_VALIDATED_FORMAT_INSTRUCTIONS}\n\n{formatting_instructions}\n\n"
         f"{wrap_with_analysis_delimiters(prose)}"
+    )
+    _invoke_start_observer(
+        "complete_validated_via_reasoning_local: on_formatting_start",
+        on_formatting_start,
     )
     return complete_validated(
         client,
@@ -274,6 +407,7 @@ def complete_validated_via_reasoning_local(
         temperature=temperature,
         correction_attempts=correction_attempts,
         think=False,
+        on_attempt=on_attempt,
         **kwargs,
     )
 
@@ -291,6 +425,8 @@ def run_agent_via_reasoning(
     agent_key: str = "code_review",
     conversation_manager: Any | None = None,
     on_reasoning_agent: Callable[[Agent], None] | None = None,
+    on_formatting: Callable[[str, str], None] | None = None,
+    on_formatting_start: Callable[[], None] | None = None,
 ) -> T:
     """Two-call split for Strands ``Agent`` JSON outcome paths.
 
@@ -311,12 +447,27 @@ def run_agent_via_reasoning(
         ``formatting_instructions`` are non-empty. ``parse`` accepts the raw
         JSON text from the formatting pass. ``on_reasoning_agent``, when given,
         is invoked with the call-1 ``Agent`` after the reasoning prompt run.
+        ``on_formatting_start``, when given, is invoked immediately before
+        each formatting LLM invocation so callers can stamp a real start time.
+        ``on_formatting``, when given, is invoked with the formatting prompt
+        and the formatting pass's raw reply (JSON text, the unparsed body
+        when ``complete_json`` raises ``LLMJsonParseError``, or
+        ``partial_content`` when it raises ``LLMTruncatedError``).
 
     Postconditions:
         Returns ``parse``'s result. Tools are attached only to call 1.
         Both passes honor ``model``'s reserved ``max_tokens`` when one is set.
         Empty reasoning output raises ``LLMSemanticExhaustionError`` before
-        formatting.
+        formatting. ``on_reasoning_agent``, when given, is invoked after the
+        reasoning ``Agent`` run and before emptiness is rejected, so a blank
+        reasoning call is still observable. If the reasoning ``Agent`` raises
+        an :class:`LLMError` (truncation, semantic exhaustion, rate limit,
+        or similar), ``on_reasoning_agent`` still runs before the error is re-raised.
+        ``on_formatting_start`` runs immediately before the formatting LLM
+        call. ``on_formatting`` is invoked after that call returns or raises
+        ``LLMJsonParseError`` / ``LLMTruncatedError`` (so a malformed or
+        truncated reply is still observable) and before ``parse``; observer
+        exceptions are swallowed.
     """
     _require_non_empty("reasoning_prompt", reasoning_prompt)
     _require_non_empty("reasoning_system_prompt", reasoning_system_prompt)
@@ -336,9 +487,16 @@ def run_agent_via_reasoning(
     if conversation_manager is not None:
         reasoning_agent_kwargs["conversation_manager"] = conversation_manager
     reasoning_agent = Agent(**reasoning_agent_kwargs)
-    prose = _require_reasoning_prose(str(reasoning_agent(reasoning_prompt)))
+    reset_complete_json_observer_state()
+    try:
+        raw_prose = str(reasoning_agent(reasoning_prompt))
+    except LLMError:
+        if on_reasoning_agent is not None:
+            on_reasoning_agent(reasoning_agent)
+        raise
     if on_reasoning_agent is not None:
         on_reasoning_agent(reasoning_agent)
+    prose = _require_reasoning_prose(raw_prose)
 
     format_prompt = (
         f"{_DEFAULT_VALIDATED_FORMAT_INSTRUCTIONS}\n\n{formatting_instructions}\n\n"
@@ -357,8 +515,34 @@ def run_agent_via_reasoning(
         max_tokens = _pinned_max_tokens(model)
         if max_tokens is not None:
             format_kwargs["max_tokens"] = max_tokens
-        data = backing_client.complete_json(format_prompt, **format_kwargs)
-        return parse(json.dumps(data))
+        reset_complete_json_observer_state()
+        _invoke_start_observer("run_agent_via_reasoning: on_formatting_start", on_formatting_start)
+        try:
+            data = backing_client.complete_json(format_prompt, **format_kwargs)
+        except LLMJsonParseError as exc:
+            _observe_formatting_turns(on_formatting, format_prompt, exc.raw_response)
+            raise
+        except LLMTruncatedError as exc:
+            _observe_formatting_turns(on_formatting, format_prompt, exc.partial_content or "")
+            raise
+        except Exception:
+            leftover = take_complete_json_turns()
+            for turn_prompt, turn_response, started in leftover:
+                with observer_turn_started(started):
+                    _invoke_observer(
+                        "run_agent_via_reasoning: on_formatting",
+                        on_formatting,
+                        turn_prompt,
+                        turn_response,
+                    )
+            raise
+        raw_text = json.dumps(data)
+        _observe_formatting_turns(
+            on_formatting,
+            format_prompt,
+            complete_json_response_text(backing_client, data),
+        )
+        return parse(raw_text)
 
     json_model = _clone_model_for_pass(
         model,
@@ -371,7 +555,14 @@ def run_agent_via_reasoning(
         system_prompt=format_system,
         tools=[],
     )
+    _invoke_start_observer("run_agent_via_reasoning: on_formatting_start", on_formatting_start)
     raw = str(formatting_agent(format_prompt)).strip()
+    _invoke_observer(
+        "run_agent_via_reasoning: on_formatting",
+        on_formatting,
+        format_prompt,
+        raw,
+    )
     return parse(raw)
 
 
