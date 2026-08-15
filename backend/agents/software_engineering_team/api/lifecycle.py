@@ -78,11 +78,15 @@ async def _se_startup() -> None:
     """
     await _assert_temporal_ready()
     try:
+        from software_engineering_team.code_review_agent.transcript import (
+            register_transcript_flusher,
+        )
         from software_engineering_team.shared.cost_tracker import register_cost_observer
         from software_engineering_team.shared.trace_flusher import register_trace_flusher
 
         register_cost_observer()
         register_trace_flusher()
+        register_transcript_flusher()
     except Exception as e:
         logger.warning("Could not register SE telemetry observers: %s", e)
     from software_engineering_team.temporal.worker import start_se_temporal_worker_thread
@@ -124,6 +128,14 @@ def _se_shutdown() -> None:  # pragma: no cover - integration-only ASGI shutdown
         flush_shutdown()
     except Exception as e:
         logger.warning("Could not flush SE traces on shutdown: %s", e)
+    try:
+        from software_engineering_team.code_review_agent.transcript import (
+            shutdown as transcript_shutdown,
+        )
+
+        transcript_shutdown()
+    except Exception as e:
+        logger.warning("Could not flush code review transcripts on shutdown: %s", e)
     try:
         from software_engineering_team.shared.job_store import mark_all_running_jobs_failed
 

@@ -37,16 +37,22 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 from typing import Optional, Union
 
 from llm_service import LLMClient
+from llm_service.interface import observer_turn_started_monotonic
 
 from .models import ChunkReviewInput, ChunkReviewLLMResponse, ChunkReviewOutput
 from .profiles import (
     build_review_formatting_instructions,
     build_review_reasoning_system_prompt,
 )
-from .via_reasoning import complete_validated_via_reasoning_local
+from .transcript import model_label, record_transcript_entry
+from .via_reasoning import (
+    complete_validated_via_reasoning_local,
+    formatting_system_prompt_with_untrusted_guard,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -204,6 +210,16 @@ def _run_chunk_review(
           dedicated post-dedupe spec-compliance pass instead (see ADR-010).
           ``architecture_overview`` and ``existing_codebase_excerpt`` are
           always passed through verbatim regardless of the flag.
+        - Buffers one ``chunk_review`` transcript entry (target
+          ``input_data.file_path_or_label``) per LLM call the via-reasoning
+          path makes: the reasoning ``complete`` call, then each
+          ``complete_validated`` formatting attempt (the initial call plus
+          every corrective retry), whether that attempt succeeded or failed —
+          for later batched, off-hot-path persistence to
+          ``code_review_transcripts``; see ``transcript.record_transcript_entry``
+          and this function's ``on_attempt`` callback. A no-op when no
+          ``job_id`` is bound on the current ``llm_attribution`` context (see
+          ``CodeReviewAgent.run``); never raises and never blocks on I/O.
 
     Raises:
         LLMJsonParseError: the formatting pass could not produce parseable JSON
@@ -313,15 +329,51 @@ def _run_chunk_review(
     )
 
     prompt = "\n".join(context_parts)
+    reasoning_system_prompt = build_review_reasoning_system_prompt(input_data.profile)
+    formatting_system_prompt = formatting_system_prompt_with_untrusted_guard(None)
+    model_name = model_label(llm)
+    target = input_data.file_path_or_label
+    last_attempt_start = time.monotonic()
+    in_formatting = False
+
+    def _on_formatting_start() -> None:
+        nonlocal in_formatting
+        in_formatting = True
+
+    def _on_attempt(attempt_prompt: str, attempt_response: str) -> None:
+        # One transcript entry per LLM HTTP turn: reasoning ``complete``
+        # (including text continuations) then every formatting attempt.
+        # Phase is stamped by ``on_formatting_start``, not callback index —
+        # reasoning continuations must keep the reasoning system prompt.
+        nonlocal last_attempt_start
+        now = time.monotonic()
+        started = observer_turn_started_monotonic()
+        if started is None:
+            started = last_attempt_start
+        system_prompt = formatting_system_prompt if in_formatting else reasoning_system_prompt
+        record_transcript_entry(
+            "chunk_review",
+            target,
+            attempt_prompt,
+            attempt_response,
+            system_prompt=system_prompt,
+            model=model_name,
+            duration_ms=(now - started) * 1000,
+            started_monotonic=started,
+        )
+        last_attempt_start = now
+
     response = complete_validated_via_reasoning_local(
         llm,
         schema=ChunkReviewLLMResponse,
         reasoning_prompt=prompt,
-        reasoning_system_prompt=build_review_reasoning_system_prompt(input_data.profile),
+        reasoning_system_prompt=reasoning_system_prompt,
         formatting_instructions=build_review_formatting_instructions(input_data.profile),
         objective="review code chunk",
         reasoning_think=True if think is None else think,
         temperature=0.0,
+        on_attempt=_on_attempt,
+        on_formatting_start=_on_formatting_start,
     )
 
     # Issue dicts are passed through raw: normalization (defaults, line

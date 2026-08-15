@@ -1,0 +1,52 @@
+<h2 mat-dialog-title>Review Transcript</h2>
+
+<mat-dialog-content class="transcript-dialog__content">
+  @if (loading()) {
+    <div class="transcript-dialog__loading">
+      <mat-spinner diameter="24"></mat-spinner>
+      <span>Loading transcript…</span>
+    </div>
+  }
+
+  @if (error()) {
+    <app-inline-banner variant="error" [message]="error()!" />
+  }
+
+  @if (!loading() && !error()) {
+    @if (entries().length === 0) {
+      <p class="transcript-dialog__empty">
+        This review made no recordable LLM calls (e.g. it was served from cache).
+      </p>
+    } @else {
+      <ol class="transcript-dialog__entries">
+        @for (entry of entries(); track $index) {
+          <li class="transcript-dialog__entry">
+            <details>
+              <summary class="transcript-dialog__summary">
+                <span class="transcript-dialog__stage">{{ entry.stage || '(unlabeled stage)' }}</span>
+                @if (entry.target) {
+                  <span class="transcript-dialog__target">{{ entry.target }}</span>
+                }
+                @if (entry.model) {
+                  <span class="transcript-dialog__chip">{{ entry.model }}</span>
+                }
+                <span class="transcript-dialog__chip">{{ entry.duration_ms }}ms</span>
+                <span class="transcript-dialog__timestamp">{{ entry.started_at | date: 'short' }}</span>
+              </summary>
+              <div class="transcript-dialog__body">
+                <h3>Prompt</h3>
+                <pre class="transcript-dialog__text">{{ entry.prompt }}</pre>
+                <h3>Response</h3>
+                <pre class="transcript-dialog__text">{{ entry.response }}</pre>
+              </div>
+            </details>
+          </li>
+        }
+      </ol>
+    }
+  }
+</mat-dialog-content>
+
+<mat-dialog-actions align="end">
+  <button mat-button (click)="close()">Close</button>
+</mat-dialog-actions>

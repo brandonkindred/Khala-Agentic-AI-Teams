@@ -884,6 +884,18 @@ class CodeReviewInput(BaseModel):
         description="Absolute checkout path so durable workflows can rebuild off-diff reads. "
         "None means no reconstructed disk reader.",
     )
+    job_id: str = Field(
+        default="",
+        description="Id of the persisted review job this input belongs to (e.g. a "
+        "``code_review_runs`` row), when the caller has one. Purely identity metadata: never "
+        "read by the review logic itself, and deliberately excluded from "
+        "``mapping._submission_fingerprint`` (a per-invocation id must never affect the "
+        "submission-level cache key). Consumed by ``CodeReviewAgent.run`` to bind "
+        "``llm_attribution(job_id=...)`` for the run, which lets each LLM call site record its "
+        "prompt/response into that job's durable transcript (``review_history_store."
+        "append_review_transcript_entries``); ``''`` (the default) means no caller-tracked job, so "
+        "transcript recording is a no-op.",
+    )
 
     @model_validator(mode="after")
     def _require_non_empty_files(self) -> "CodeReviewInput":

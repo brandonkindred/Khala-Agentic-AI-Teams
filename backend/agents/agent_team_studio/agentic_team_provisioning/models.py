@@ -309,7 +309,9 @@ class GeneratedAgentInvokeInput(BaseModel):
     and tool brokering isn't wired for generated agents, so the runtime grants no
     tools regardless of this field (a caller cannot escalate to ``python`` /
     ``http_request``). Until binding lands, a generated manifest selects which
-    agent is *advertised*, not an enforced persona.
+    agent is *advertised*, not an enforced persona. See
+    ``system_design/adr/ADR-015-invoke-generated-agent-persona-state-precedence.md``
+    for the locked precedence contract binding will implement.
     """
 
     agent_name: str = Field(..., description="Roster agent name (stable within the team)")
