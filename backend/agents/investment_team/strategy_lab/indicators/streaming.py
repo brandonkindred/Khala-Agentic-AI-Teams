@@ -1684,19 +1684,25 @@ def resolve_indicator(
       - ``bars[-1]`` carries a non-empty string ``symbol`` attribute (per
         :class:`~..batch_indicator_cache.BatchIndicatorCache`'s precondition
         that ``symbol`` be a non-empty string).
-      - every bar in ``bars`` carries a ``date`` attribute.
-        ``BatchIndicatorCache._data_fingerprint`` hashes OHLCV in the
-        supplied sequence and reads ``bar.date`` as part of that record —
-        the shape of ``market_data_service.OHLCVBar``, not
+      - ``bars[-1]`` carries a ``date`` attribute (checked on the trailing
+        bar only, mirroring the ``symbol`` check above — not a scan of every
+        bar). ``BatchIndicatorCache._data_fingerprint`` hashes OHLCV in the
+        supplied sequence and reads each bar's ``bar.date`` as part of that
+        record — the shape of ``market_data_service.OHLCVBar``, not
         ``trading_service.strategy.contract.Bar`` (the streaming engine's
         actual bar type, which carries ``timestamp``/no ``date``). Until the
         cache's fingerprint helper (or its bar inputs) is extended to cover
         ``timestamp``-only bars, consulting it with ``contract.Bar``-shaped
         streams would key on empty dates and could collide unrelated
-        series. Guarding on ``hasattr(..., "date")`` here keeps
-        that gap non-fatal: it declines to consult (falls through to
-        :func:`_dispatch_indicator`) rather than crashing, for exactly the
-        bar shapes the cache cannot key today.
+        series. Guarding on ``hasattr(bars[-1], "date")`` here keeps that gap
+        non-fatal for the common, homogeneous-bar-type case: it declines to
+        consult (falls through to :func:`_dispatch_indicator`) rather than
+        crashing, for exactly the bar shapes the cache cannot key today. A
+        caller that mixes bar types within a single ``bars`` sequence (some
+        with ``date``, some without) is not guarded against here — that
+        would need a scan of every bar, which this trailing-bar check
+        deliberately avoids, matching the cost profile of the ``symbol``
+        check beside it.
     """
 
     def _compute() -> Optional[float]:
