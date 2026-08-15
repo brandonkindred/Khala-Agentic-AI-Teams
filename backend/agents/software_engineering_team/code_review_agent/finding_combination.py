@@ -2,31 +2,34 @@
 
 Generalizes :mod:`side_effect_consolidation` from the ``side-effects`` category
 to the *whole* finding stream. Two same-category findings are combined into one
-representative when either signal holds:
+representative when any of these signals holds:
 
-    - **Proximity** — both are anchored inside the same enclosing Python
-      construct (function/method/class), resolved via the exact AST-based
+    - **Proximity (co-located)** — both are anchored inside the same enclosing
+      Python construct (function/method/class), resolved via the exact AST-based
       ``enclosing_construct`` (reused through
-      :class:`side_effect_consolidation._ConstructResolver`). Non-Python files
-      contribute no proximity key: the column-0 heuristic cannot distinguish
-      indented methods and would false-merge (the same guard the side-effect
-      consolidation already documents).
-    - **Similarity** — both name the same resolved file *and* their tokenized
-      descriptions have Jaccard word-set overlap ``>= threshold`` (default
-      ``0.6``, reusing :mod:`github_source.issue_proposals`'s tokenizer and
-      Jaccard helper).
-
-Additionally, for ``side-effects`` findings only, the citation signal from the
-side-effect consolidation is preserved: a finding whose prose cites a
-``path:line`` that falls inside another same-category finding's construct is
-combined with it (this is the one signal that can link findings across two
-files, exactly as the side-effect consolidation already did — it is the "same
-root cause described from both ends" case, not a general cross-file merge).
+      :class:`side_effect_consolidation._ConstructResolver`). For ``side-effects``
+      this merges regardless of wording (multiple symptoms of one change);
+      for every other category it merges only when the descriptions are ALSO
+      similar (Jaccard ``>= threshold``), so two genuinely distinct bugs in one
+      function are never collapsed. Non-Python files contribute no proximity key
+      (the column-0 heuristic cannot distinguish indented methods and would
+      false-merge — the same guard the side-effect consolidation documents).
+    - **Same-anchor near-duplicate** — the same finding reported twice: same
+      resolved file, and either the same line or one copy unanchored
+      (``line=None``), with tokenized-description Jaccard ``>= threshold``
+      (default ``0.6``). This subsumes the exact-match dedupe (and its
+      unanchored-copy rule) with a fuzzy description match. It deliberately does
+      NOT merge separate occurrences on *different* lines.
+    - **Side-effects citation** — for ``side-effects`` findings only, a finding
+      whose prose cites a ``path:line`` inside another side-effects finding's
+      construct combines with it (the "same root cause described from both ends"
+      case; the one signal that can link two files, exactly as the side-effect
+      consolidation already did).
 
 Grouping is transitive (union-find) and confined to a single **category**: two
-findings are never combined across categories, and — apart from the
-side-effects citation case above — never across files. Cross-file "same problem
-in different places" is intentionally NOT merged here (a merge would collapse
+findings are never combined across categories, and never across files except
+through the side-effects citation signal above. Cross-line "same problem in
+different places" is intentionally NOT merged here (a merge would collapse
 distinct inline-comment anchors, and ``CodeReviewIssue`` has no multi-location
 field); that theming is surfaced separately by the systemic-synthesis pass.
 
@@ -129,6 +132,17 @@ def _resolve_similarity_threshold(similarity_threshold: Optional[float]) -> floa
     )
 
 
+def resolve_combine_similarity_threshold() -> float:
+    """Public accessor for the env-configured combine threshold.
+
+    Postconditions: returns ``_resolve_similarity_threshold(None)`` -- the
+    ``CODE_REVIEW_COMBINE_SIMILARITY_THRESHOLD`` value clamped to ``[0, 1]``, or
+    ``0.6`` when unset. Used by the submission-cache fingerprint so a threshold
+    change invalidates a stored verdict. Never raises.
+    """
+    return _resolve_similarity_threshold(None)
+
+
 def _normalized_category(issue: CodeReviewIssue) -> str:
     """Return ``issue.category`` lowercased/stripped (``""`` when blank). Pure."""
     return (issue.category or "").strip().lower()
@@ -139,8 +153,9 @@ def combine_findings(
     shared_index: CodebaseIndex,
     *,
     similarity_threshold: Optional[float] = None,
+    consolidate_side_effects: bool = True,
 ) -> List[CodeReviewIssue]:
-    """Combine related findings by proximity and same-file similarity.
+    """Combine related findings by proximity, same-anchor similarity, and citation.
 
     Preconditions:
         - ``issues`` is the merged finding list (map-phase findings plus any
@@ -149,15 +164,23 @@ def combine_findings(
           ``issues`` (its file contents match what the findings cite/anchor).
         - ``similarity_threshold`` is ``None`` (use the env default) or a
           Jaccard threshold; values outside ``[0, 1]`` are clamped.
+        - ``consolidate_side_effects`` preserves the
+          ``CODE_REVIEW_SIDE_EFFECT_CONSOLIDATION`` escape hatch: when False,
+          ``side-effects`` findings get NO special treatment (the
+          merge-regardless-of-wording construct rule and the citation signal are
+          both disabled), so they combine only under the generic same-construct
+          + similar or same-anchor rules like any other category.
 
     Postconditions:
         - Findings are grouped only within one normalized ``category`` (blank
-          categories group among themselves). Two findings combine when they
-          share the same enclosing Python construct (proximity), or the same
-          resolved file with tokenized-description Jaccard ``>= threshold``
-          (similarity); for ``side-effects`` findings only, a finding whose
-          prose cites a ``path:line`` inside another same-category finding's
-          construct also combines (transitively, via union-find).
+          categories group among themselves). Two findings combine when (see the
+          module docstring for the full rationale): they are anchored in the
+          same enclosing Python construct and are either ``side-effects`` or
+          have Jaccard ``>= threshold`` descriptions (proximity); or they are the
+          same-anchor near-duplicate (same file, same line or one unanchored,
+          Jaccard ``>= threshold``); or, for ``side-effects`` only, one cites a
+          ``path:line`` inside the other's construct. Grouping is transitive
+          (union-find). Separate occurrences on different lines are NOT merged.
         - Each group of ``>= 2`` findings becomes exactly one merged
           ``CodeReviewIssue`` (see ``side_effect_consolidation._merge_group``,
           called with the group's shared category): ``severity`` is the group
@@ -182,48 +205,61 @@ def combine_findings(
 
     categories = [_normalized_category(issue) for issue in issues]
     files = [_canonical_path(shared_index, issue.file_path or "") for issue in issues]
+    lines = [issue.line for issue in issues]
     tokens = [_tokenize_for_similarity(issue.description or "") for issue in issues]
     construct_keys = [resolver.construct_key(issue.file_path, issue.line) for issue in issues]
 
-    # Proximity: findings sharing (category, enclosing construct) merge. Keyed
-    # on the normalized category so a naming finding and a logic finding in the
-    # same function are never combined.
-    key_to_positions: Dict[Tuple[str, _ConstructKey], List[int]] = {}
+    # (a) Proximity: findings anchored in the same enclosing Python construct.
+    #     For ``side-effects`` this merges regardless of wording (multiple
+    #     symptoms of one change share a root cause -- the original consolidation
+    #     rule). For every other category it merges only when the descriptions
+    #     are ALSO similar, so two genuinely distinct bugs in one function are
+    #     never collapsed into a single finding. Keyed on the normalized category
+    #     so findings of different categories never combine.
+    construct_positions: Dict[Tuple[str, _ConstructKey], List[int]] = {}
     for pos, key in enumerate(construct_keys):
         if key is not None:
-            key_to_positions.setdefault((categories[pos], key), []).append(pos)
-    for positions in key_to_positions.values():
-        for other in positions[1:]:
-            uf.union(positions[0], other)
-
-    # Citation signal (side-effects only, preserving the side-effect
-    # consolidation's cross-end linking): a finding whose prose cites a
-    # path:line inside another same-category finding's construct merges with it.
-    # Confined to side-effects so the generalized combine introduces no new
-    # cross-file merges for other categories.
-    for pos, issue in enumerate(issues):
-        if categories[pos] != _SIDE_EFFECT_CATEGORY:
-            continue
-        for cited_key in resolver.citation_keys(f"{issue.description} {issue.suggestion}"):
-            for target_pos in key_to_positions.get((categories[pos], cited_key), []):
-                if target_pos != pos:
-                    uf.union(pos, target_pos)
-
-    # Similarity: within each (category, resolved-file) bucket, findings whose
-    # tokenized descriptions overlap at/above the threshold merge. Unanchored
-    # findings (no resolvable file) cannot same-file group. O(k^2) per bucket,
-    # where k is the bucket size (small in practice; the whole list is capped
-    # downstream).
-    similarity_buckets: Dict[Tuple[str, str], List[int]] = {}
-    for pos in range(len(issues)):
-        if not files[pos]:
-            continue
-        similarity_buckets.setdefault((categories[pos], files[pos]), []).append(pos)
-    for positions in similarity_buckets.values():
+            construct_positions.setdefault((categories[pos], key), []).append(pos)
+    for positions in construct_positions.values():
+        side_effect_bucket = consolidate_side_effects and categories[positions[0]] == (
+            _SIDE_EFFECT_CATEGORY
+        )
         for i in range(len(positions)):
             for j in range(i + 1, len(positions)):
                 a, b = positions[i], positions[j]
-                if _jaccard_similarity(tokens[a], tokens[b]) >= threshold:
+                if side_effect_bucket or _jaccard_similarity(tokens[a], tokens[b]) >= threshold:
+                    uf.union(a, b)
+
+    # (b) Citation signal (side-effects only, preserving the side-effect
+    #     consolidation's "same root cause described from both ends" link): a
+    #     finding whose prose cites a path:line inside another same-category
+    #     finding's construct merges with it. Confined to side-effects so the
+    #     generalized combine introduces no new cross-file merges elsewhere.
+    for pos, issue in enumerate(issues):
+        if not consolidate_side_effects or categories[pos] != _SIDE_EFFECT_CATEGORY:
+            continue
+        for cited_key in resolver.citation_keys(f"{issue.description} {issue.suggestion}"):
+            for target_pos in construct_positions.get((categories[pos], cited_key), []):
+                if target_pos != pos:
+                    uf.union(pos, target_pos)
+
+    # (c) Same-anchor near-duplicates (all categories): the SAME finding reported
+    #     twice -- same resolved file, and either the same line or one copy
+    #     unanchored (line=None) -- with similar wording. This subsumes the
+    #     exact-match dedupe and its unanchored-copy rule with a fuzzy
+    #     description match, while deliberately NOT merging separate occurrences
+    #     on different lines (those are reported individually; the systemic pass
+    #     themes them). O(k^2) per (category, file) bucket, small in practice.
+    anchor_buckets: Dict[Tuple[str, str], List[int]] = {}
+    for pos in range(len(issues)):
+        if files[pos]:
+            anchor_buckets.setdefault((categories[pos], files[pos]), []).append(pos)
+    for positions in anchor_buckets.values():
+        for i in range(len(positions)):
+            for j in range(i + 1, len(positions)):
+                a, b = positions[i], positions[j]
+                same_anchor = lines[a] == lines[b] or lines[a] is None or lines[b] is None
+                if same_anchor and _jaccard_similarity(tokens[a], tokens[b]) >= threshold:
                     uf.union(a, b)
 
     groups: Dict[int, List[int]] = {}

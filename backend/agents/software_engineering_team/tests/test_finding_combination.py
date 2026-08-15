@@ -1,9 +1,10 @@
 """Tests for fuzzy + proximity finding combination (``combine_findings``).
 
-Covers the generalized combine step: same-category proximity (Python
-construct) and same-file similarity (Jaccard) merges, the preserved
-side-effects citation signal, the no-cross-category / no-cross-file
-invariants, exact-duplicate collapse, determinism, and the threshold knob.
+Covers the generalized combine step: same-construct proximity (side-effects
+always; other categories only when descriptions are also similar), same-anchor
+near-duplicate collapse (same line or one unanchored), the preserved
+side-effects citation signal, the no-cross-category / no-cross-line / no
+-cross-file invariants, determinism, and the threshold knob.
 """
 
 from __future__ import annotations
@@ -48,20 +49,36 @@ _TWO_FUNCS = "\n".join(
 # --------------------------------------------------------------------------- proximity
 
 
-def test_same_construct_same_category_merges_even_when_descriptions_differ() -> None:
-    """Two findings in one Python function/category merge via proximity alone."""
+def test_side_effects_same_construct_merge_regardless_of_wording() -> None:
+    """Side-effects findings in one construct merge even with distinct wording
+    (multiple symptoms of one change) -- the consolidation rule, generalized."""
     index = _index({"app/foo.py": _TWO_FUNCS})
     issues = [
-        _issue(line=2, description="the loop index is off by one", suggestion="fix bound"),
-        _issue(line=4, description="return value is now None", suggestion="return the sum"),
+        _issue(line=2, category="side-effects", description="mutates shared state", suggestion="a"),
+        _issue(line=4, category="side-effects", description="return type changed", suggestion="b"),
     ]
     result = combine_findings(issues, index)
     assert len(result) == 1
-    assert result[0].category == "logic"
+    assert result[0].category == "side-effects"
     assert result[0].start_line == 2
     assert result[0].line == 4
-    assert "off by one" in result[0].description
-    assert "now None" in result[0].description
+
+
+def test_non_side_effects_same_construct_merge_only_when_similar() -> None:
+    """For non-side-effects, same-construct findings merge only when their
+    descriptions are also similar: two distinct bugs in one function stay
+    separate; two near-identical ones combine."""
+    index = _index({"app/foo.py": _TWO_FUNCS})
+    distinct = [
+        _issue(line=2, category="logic", description="off-by-one in the loop bound"),
+        _issue(line=4, category="logic", description="returns None instead of the sum"),
+    ]
+    assert len(combine_findings(distinct, index)) == 2  # same function, different bugs
+    similar = [
+        _issue(line=2, category="logic", description="unchecked index access on `a`"),
+        _issue(line=4, category="logic", description="unchecked index access on `b`"),
+    ]
+    assert len(combine_findings(similar, index)) == 1  # same function, same issue
 
 
 def test_same_construct_different_category_does_not_merge() -> None:
@@ -89,18 +106,17 @@ def test_different_constructs_dissimilar_do_not_merge() -> None:
 # --------------------------------------------------------------------------- similarity
 
 
-def test_same_file_similar_descriptions_merge_across_constructs() -> None:
-    """Near-identical descriptions in the same file/category merge via similarity."""
+def test_cross_construct_similar_descriptions_do_not_merge() -> None:
+    """Similar findings in DIFFERENT constructs (different lines) are reported
+    individually, never merged -- collapsing separate occurrences would lose an
+    inline-comment anchor. The systemic pass themes them instead."""
     index = _index({"app/foo.py": _TWO_FUNCS})
     issues = [
         _issue(line=2, category="standards", description="bare import `os` at module top"),
         _issue(line=7, category="standards", description="bare import `sys` at module top"),
     ]
     result = combine_findings(issues, index)
-    # The quoted identifier is dropped by the tokenizer, so both descriptions
-    # tokenize identically (Jaccard 1.0) -> one merged finding.
-    assert len(result) == 1
-    assert result[0].category == "standards"
+    assert len(result) == 2
 
 
 def test_same_file_dissimilar_descriptions_do_not_merge() -> None:
@@ -129,18 +145,17 @@ def test_similarity_does_not_cross_files() -> None:
     assert len(result) == 2
 
 
-def test_similarity_threshold_knob_gates_merging() -> None:
-    """Two descriptions with ~0.75 Jaccard merge at the default but not at 0.9."""
+def test_similarity_threshold_knob_gates_same_construct_merge() -> None:
+    """Two non-side-effects findings in one construct with ~0.75 Jaccard merge at
+    the default threshold but not at 0.9."""
     index = _index({"app/foo.py": _TWO_FUNCS})
-    # Lines 2 (in foo) and 7 (in bar) are different constructs, so only the
-    # similarity signal can merge these. Tokens overlap 6/8 -> Jaccard 0.75.
+    # Lines 2 and 3 are both inside foo() (same construct); tokens overlap 6/8
+    # -> Jaccard 0.75, so only the threshold decides whether they merge.
     issues = [
-        _issue(line=2, category="standards", description="missing null check on user input value"),
-        _issue(
-            line=7, category="standards", description="missing null check on user request value"
-        ),
+        _issue(line=2, category="logic", description="missing null check on user input value"),
+        _issue(line=3, category="logic", description="missing null check on user request value"),
     ]
-    assert len(combine_findings(issues, index)) == 1  # default 0.6 <= 0.75 -> merge
+    assert len(combine_findings(issues, index)) == 1  # 0.6 <= 0.75 -> merge
     assert len(combine_findings(issues, index, similarity_threshold=0.9)) == 2  # 0.9 > 0.75
 
 
@@ -198,6 +213,19 @@ def test_side_effects_citation_merges_across_files() -> None:
     assert result[0].category == "side-effects"
 
 
+def test_consolidate_side_effects_false_disables_side_effect_specialcasing() -> None:
+    """With ``consolidate_side_effects=False`` (the escape hatch), side-effects
+    findings get no special treatment: two in one construct with distinct wording
+    no longer merge (they would with it on)."""
+    index = _index({"app/foo.py": _TWO_FUNCS})
+    issues = [
+        _issue(line=2, category="side-effects", description="mutates shared state"),
+        _issue(line=4, category="side-effects", description="return type changed"),
+    ]
+    assert len(combine_findings(issues, index)) == 1  # default on -> consolidated
+    assert len(combine_findings(issues, index, consolidate_side_effects=False)) == 2  # off
+
+
 def test_non_side_effects_citation_does_not_merge_across_files() -> None:
     """The citation link is confined to side-effects; other categories do not cross files."""
     foo = "\n".join(["def foo():", "    return 1", ""])
@@ -222,9 +250,15 @@ def test_non_side_effects_citation_does_not_merge_across_files() -> None:
 def test_merge_takes_max_severity_and_ands_pre_existing() -> None:
     """Merged severity is the group max; pre_existing is True only if all members are."""
     index = _index({"app/foo.py": _TWO_FUNCS})
+    # Side-effects in one construct merge regardless of wording, so this isolates
+    # the severity/pre_existing merge semantics.
     issues = [
-        _issue(line=2, severity="low", description="d one", pre_existing=True),
-        _issue(line=4, severity="high", description="d two", pre_existing=False),
+        _issue(
+            line=2, category="side-effects", severity="low", description="one", pre_existing=True
+        ),
+        _issue(
+            line=4, category="side-effects", severity="high", description="two", pre_existing=False
+        ),
     ]
     result = combine_findings(issues, index)
     assert len(result) == 1
@@ -247,16 +281,13 @@ def test_ungrouped_finding_keeps_position() -> None:
     assert result[1].category == "naming"
 
 
-def test_non_python_file_has_no_proximity_but_similarity_still_applies() -> None:
-    """Non-Python files get no construct grouping, but similarity still merges near-dupes."""
+def test_non_python_same_anchor_duplicate_merges_but_different_lines_do_not() -> None:
+    """Non-Python files get no construct proximity. Same-line near-duplicates
+    still collapse (the same-anchor rule); similar findings on different lines
+    are kept separate."""
     ts = "\n".join([f"const x{i} = {i};" for i in range(20)])
     index = _index({"app/foo.ts": ts})
-    dissimilar = [
-        _issue(file_path="app/foo.ts", line=1, category="logic", description="alpha unrelated"),
-        _issue(file_path="app/foo.ts", line=10, category="logic", description="beta different"),
-    ]
-    assert len(combine_findings(dissimilar, index)) == 2  # no proximity, low similarity
-    similar = [
+    different_lines = [
         _issue(
             file_path="app/foo.ts", line=1, category="logic", description="missing await on `a`"
         ),
@@ -264,7 +295,16 @@ def test_non_python_file_has_no_proximity_but_similarity_still_applies() -> None
             file_path="app/foo.ts", line=10, category="logic", description="missing await on `b`"
         ),
     ]
-    assert len(combine_findings(similar, index)) == 1  # similarity still merges
+    assert len(combine_findings(different_lines, index)) == 2  # no proximity, different anchors
+    same_line = [
+        _issue(
+            file_path="app/foo.ts", line=5, category="logic", description="missing await on `a`"
+        ),
+        _issue(
+            file_path="app/foo.ts", line=5, category="logic", description="missing await on `b`"
+        ),
+    ]
+    assert len(combine_findings(same_line, index)) == 1  # same-anchor near-duplicate
 
 
 def test_fewer_than_two_findings_returns_copy() -> None:

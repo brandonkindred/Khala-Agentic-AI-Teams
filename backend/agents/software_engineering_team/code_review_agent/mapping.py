@@ -1044,9 +1044,15 @@ def _submission_fingerprint(
           it guards fires before any model call. Deterministic (``sort_keys``),
           so a stored approval survives across coordinator calls in a process.
     """
+    # Lazy import: finding_combination pulls the false-positive-filter graph,
+    # which this module is a dependency of; importing at call time keeps the
+    # module-load order acyclic.
+    from .finding_combination import resolve_combine_similarity_threshold
+
     payload = input_data.model_dump(mode="json")
     payload["__model__"] = model_fingerprint
     payload["__side_effect_consolidation__"] = env_flag_enabled(SIDE_EFFECT_CONSOLIDATION_ENV)
+    payload["__combine_similarity_threshold__"] = resolve_combine_similarity_threshold()
     payload["__spec_compliance_single_pass__"] = spec_compliance_single_pass
     return _stable_json_digest(payload)
 

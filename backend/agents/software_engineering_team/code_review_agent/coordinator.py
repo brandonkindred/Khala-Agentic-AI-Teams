@@ -2,17 +2,18 @@
 
 Pipeline: input → (path, content) blocks → bounded ``FileSegment``s →
 ``ReviewChunk``s (``chunking``) → per-chunk LLM review with retry/bisect
-recovery and the map-phase cache (``mapping``) → false-positive verification
-(each genuine finding is re-checked against the *whole* submission, since a
-chunk reviewer saw only a slice, and confirmed false positives are dropped — see
-``false_positive_filter``) → merged architecture-consistency + side-effect /
-blast-radius pass (a single additive LLM call covering architecture
-contradictions, cross-codebase redundancy, and caller-impact / documentation
-mismatches the per-chunk view cannot see — see
-``merged_architecture_side_effect_pass``) → side-effect consolidation (merges
-related ``side-effects`` findings that share an enclosing construct or cite
-one another — see ``side_effect_consolidation``) → deterministic merge (dedupe,
-severity gate, safety nets) → optional post-dedupe spec-compliance synthesis.
+recovery and the map-phase cache (``mapping``) → merged architecture-consistency
++ side-effect / blast-radius pass (a single additive LLM call covering
+architecture contradictions, cross-codebase redundancy, and caller-impact /
+documentation mismatches the per-chunk view cannot see — see
+``merged_architecture_side_effect_pass``) → finding combination (proximity +
+same-anchor similarity, subsuming the exact-match dedupe and the side-effect
+consolidation — see ``finding_combination``) → false-positive verification over
+the combined set (each finding, including the additive ones, re-checked against
+the *whole* submission since a chunk reviewer saw only a slice, and confirmed
+false positives dropped — see ``false_positive_filter``) → deterministic merge
+(fold in coverage findings, severity gate, safety nets) → optional post-dedupe
+spec-compliance synthesis.
 When ``CODE_REVIEW_SPEC_COMPLIANCE_PASS`` is enabled for the ``CODE_REVIEW``
 profile, each chunk's prompt omits the per-chunk ``acceptance_criteria``/
 ``spec_excerpt`` blocks (``architecture_overview`` is unaffected) and, after the
@@ -100,6 +101,7 @@ from typing import List, NamedTuple, Optional, Tuple
 
 from llm_service import LLMClient, compact_text
 from shared.cache import get_shared_cache
+from shared.env import env_flag_enabled
 from shared.env_config import env_bool
 from software_engineering_team.shared.context_sizing import (
     compute_code_review_arch_overview_chars,
@@ -155,6 +157,7 @@ from .models import (
 )
 from .profiles import ReviewProfile
 from .repo_reader import RepoReader
+from .side_effect_consolidation import SIDE_EFFECT_CONSOLIDATION_ENV
 from .synthesis import synthesize_review_findings, synthesize_spec_compliance
 
 logger = logging.getLogger(__name__)
@@ -286,25 +289,6 @@ def _not_reviewed_range_label(issue: CodeReviewIssue) -> str:
     if issue.start_line is not None and issue.line is not None:
         return f"{path} (lines {issue.start_line}-{issue.line})"
     return path
-
-
-def _tail_passes_run_sequentially(llm: LLMClient) -> bool:
-    """True when the coordinator's tail passes must run one at a time.
-
-    Scripted ``DummyLLMClient`` doubles use a shared non-thread-safe response index,
-    so they are not safe under concurrent fan-out. Mirrors
-    ``shared.v2_review._review_steps_run_sequentially``; both delegate to the shared
-    ``is_dummy_llm_client_wrapped`` helper (unwraps a Strands ``LLMClientModel``
-    wrapper before checking) so the detection logic lives in one place.
-
-    Preconditions: ``llm`` is the LLM client that will be handed to the tail-pass thunks.
-    Postconditions: returns ``True`` iff ``llm`` is (or wraps) a ``DummyLLMClient``. Pure.
-    """
-    # Local import: dummy detection is test infrastructure; keep it out of the
-    # production module-load graph while still allowing runtime detection.
-    from llm_service.clients.dummy import is_dummy_llm_client_wrapped
-
-    return is_dummy_llm_client_wrapped(llm)
 
 
 def _dedupe_issues(all_issues: List[CodeReviewIssue]) -> List[CodeReviewIssue]:
@@ -579,7 +563,11 @@ def _run_tail_passes(
     #    consolidation, and shrinks the set the FP filter must verify. Fail-safe:
     #    any error degrades to the uncombined list rather than failing the review.
     try:
-        combined = combine_findings(combined, shared_index)
+        combined = combine_findings(
+            combined,
+            shared_index,
+            consolidate_side_effects=env_flag_enabled(SIDE_EFFECT_CONSOLIDATION_ENV),
+        )
     except Exception:
         logger.exception(
             "CodeReviewCoordinator: finding combination failed; using uncombined tail-pass issues"
