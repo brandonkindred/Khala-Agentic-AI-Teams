@@ -381,11 +381,18 @@ registration entirely (no assistant sub-app is ever mounted, regardless of
 traffic) — team proxy routes and health checks are unaffected.
 
 ### UNIFIED_API_AGENT_STUDIO_TEMPORAL_WORKER
-Agent Studio Temporal worker toggle (default: true). When true, the
-unified-api `lifespan` starts the in-process Agent Studio Temporal worker
-thread. Set to `false`/`0`/`no` to skip booting this worker; authoring CRUD
-(conversations / clone / save) then uses in-process `AgentStudioService`
-instead of `agent-studio-queue`. Other teams' Temporal workers are unaffected.
+Agent Studio Temporal worker toggle (default: true). This governs **only** the
+Studio authoring worker — the sole poller of `agent-studio-queue` — not Temporal
+itself. When true, the unified-api `lifespan` starts the in-process Agent Studio
+Temporal worker thread. Authoring CRUD (conversations / clone / save) works whether
+or not that worker is booted: `agent_platform.studio.temporal.dispatch` runs the
+Studio workflows when the worker is connected and falls back to the in-process
+`AgentStudioService` singleton otherwise, so this toggle only selects which dispatch
+path authoring takes. Set to `false`/`0`/`no` to skip booting the worker; other
+teams' Temporal workers are unaffected. This does not make Temporal optional for the
+platform — the durable subsystems (provisioning, sandbox lifecycle, pipeline runs,
+persona founder) still require a running Temporal cluster; only Studio authoring's
+workflow wrappers have been demoted to optional.
 
 ### ENABLE_LOG_API
 Exposes HTTP log endpoint.

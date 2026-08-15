@@ -76,7 +76,10 @@ def run_backend_build_and_parse(repo_path: Path) -> List[ReviewIssue]:
                 line = line.strip()
                 if not line or ":" not in line:
                     continue
-                path, _, msg = line.partition(":")
+                # Line format is "<path>: <message>"; split on the ": " delimiter
+                # (not the first bare colon) so a Windows drive letter (e.g. "C:\\")
+                # and colon-bearing messages are preserved.
+                path, _, msg = line.partition(": ")
                 path, msg = path.strip(), msg.strip()
                 if path and msg:
                     issues.append(

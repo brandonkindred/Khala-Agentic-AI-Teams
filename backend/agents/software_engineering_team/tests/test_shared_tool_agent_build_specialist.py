@@ -49,6 +49,31 @@ def test_backend_syntax_errors_parsed_per_file(tmp_path: Path, monkeypatch):
     assert "Fix the syntax error" in issues[0].recommendation
 
 
+def test_backend_syntax_error_preserves_windows_path_and_colon_message(tmp_path: Path, monkeypatch):
+    """A Windows drive-letter path and a colon-bearing message must survive parsing.
+
+    The producer joins ``"<path>: <message>"`` with a colon-space delimiter. Splitting
+    on the first bare colon would truncate a Windows path (``C:\\...``) to its drive
+    letter; splitting on the last colon would fold part of the message into the path.
+    The colon-space split preserves both.
+    """
+    (tmp_path / "a.py").write_text("x = (\n")
+    monkeypatch.setattr(
+        cr,
+        "run_python_syntax_check",
+        lambda p: CommandResult(
+            success=False,
+            exit_code=1,
+            stdout="",
+            stderr=("Syntax errors found:\nC:\\proj\\a.py: SyntaxError: invalid syntax"),
+        ),
+    )
+    issues = run_backend_build_and_parse(tmp_path)
+    assert len(issues) == 1
+    assert issues[0].file_path == "C:\\proj\\a.py"
+    assert issues[0].description == "SyntaxError: invalid syntax"
+
+
 def test_backend_syntax_error_generic_when_no_marker(tmp_path: Path, monkeypatch):
     (tmp_path / "a.py").write_text("print('ok')\n")
     monkeypatch.setattr(
