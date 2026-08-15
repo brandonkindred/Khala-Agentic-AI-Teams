@@ -162,7 +162,13 @@ def build_agent(
     return Agent(**kwargs)
 
 
-def build_compositor(*, name: str, system_prompt: str, description: str = "") -> Agent:
+def build_compositor(
+    *,
+    name: str,
+    system_prompt: str,
+    description: str = "",
+    structured_output: Any | None = None,
+) -> Agent:
     """Create a phase-terminal join agent on the shared ``branding_compositor`` tier.
 
     Thin wrapper over :func:`build_agent` that pins ``agent_key=COMPOSITOR_AGENT_KEY``
@@ -171,9 +177,7 @@ def build_compositor(*, name: str, system_prompt: str, description: str = "") ->
     instead of each phase file inlining ``build_agent(..., agent_key=COMPOSITOR_AGENT_KEY)``
     and risking the key drifting out of sync across phases. Always JSON mode
     (every compositor assembles its phase's fragments into a structured
-    ``*Output`` document) and never ``structured_output=`` (a compositor's
-    output shape is the full phase ``*Output`` model, assembled from
-    prose-described fragments in the prompt, not a single upstream schema).
+    ``*Output`` document).
 
     Parameters
     ----------
@@ -183,6 +187,12 @@ def build_compositor(*, name: str, system_prompt: str, description: str = "") ->
         Full system prompt describing what to assemble.
     description:
         Short human-readable description of the agent's purpose.
+    structured_output:
+        Optional Pydantic model forwarded to :func:`build_agent`. Each
+        compositor's output shape is its phase's ``*Output`` model, assembled
+        from prose-described fragments in the prompt — passing that model
+        here forces Strands' structured-output tool instead of relying on a
+        prose "output JSON" reminder in the prompt.
 
     Postconditions:
         Returns a ``build_agent(agent_key=COMPOSITOR_AGENT_KEY)`` result — see
@@ -193,6 +203,7 @@ def build_compositor(*, name: str, system_prompt: str, description: str = "") ->
         system_prompt=system_prompt,
         description=description,
         output_mode="json",
+        structured_output=structured_output,
         agent_key=COMPOSITOR_AGENT_KEY,
     )
 

@@ -101,10 +101,14 @@ callers import submodules directly (`agent_team_studio.agent_studio.temporal.wor
 `.postgres`, `.drafts_runtime`, `.models`, `.temporal.dispatch`, `.registration`, `.runtime`).
 Unlike the other three, it **is** present in `TEAM_CONFIGS`, with `in_process=True` and prefix
 `/api/agent-studio` — already correctly modeled as an in-process team, not a proxied one. It is
-Pattern A, Temporal-only (`agent_studio/temporal/__init__.py` exports `WORKFLOWS`,
-`ACTIVITIES`, `TASK_QUEUE = "agent-studio-queue"`, with no non-Temporal fallback), plus Pattern
+Pattern A (`agent_studio/temporal/__init__.py` exports `WORKFLOWS`, `ACTIVITIES`,
+`TASK_QUEUE = "agent-studio-queue"`), plus Pattern
 B (`agent_studio/postgres.py::SCHEMA`, registered at `main.py:672-679`, gated on
-`TEAM_CONFIGS["agent_studio"].enabled`). Its worker activities delegate to a process-local
+`TEAM_CONFIGS["agent_studio"].enabled`). Authoring CRUD is no longer Temporal-only: it
+dispatches through `agent_studio/temporal/dispatch.py`, which runs the Studio workflows when the
+`agent-studio-queue` worker is connected and falls back to the in-process `AgentStudioService`
+singleton otherwise — so the worker and its workflow wrappers are optional for authoring, not a
+hard requirement. Its worker activities delegate to a process-local
 `AgentStudioService`/`drafts_runtime` singleton (documented in `agent_studio/runtime.py` and
 `agent_studio/temporal/worker.py`) — Decision §4 restates this as the ADR's authoritative,
 citable worker-boot-ownership statement. Studio depends on `agent_registry.models.AgentManifest`;
@@ -305,7 +309,11 @@ change post-move — Studio was never a standalone container; `TEAM_CONFIGS["age
 = True` already guarantees there is none — this section only re-anchors the statement at the
 new import path. Why: worker activities delegate to the process-local `AgentStudioService`
 and `drafts_runtime` singletons that the same process's HTTP handlers populate; a worker
-running elsewhere would act on in-flight state it never saw created.
+running elsewhere would act on in-flight state it never saw created. Ownership is about
+*where* the worker may run, not *whether* authoring needs it: authoring CRUD degrades to
+in-process dispatch against the same singletons when the worker is absent (see
+`agent_platform.studio.temporal.dispatch`), so the worker is not a hard requirement for
+authoring.
 
 Moving these packages under `agent_platform/` is a pure rename with respect to worker
 ownership: it changes where the code lives on disk and what it is imported as, not which

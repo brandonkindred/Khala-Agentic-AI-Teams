@@ -15,8 +15,8 @@ import { MatCardModule } from '@angular/material/card';
 import { MatIconModule } from '@angular/material/icon';
 import { MatProgressSpinnerModule } from '@angular/material/progress-spinner';
 import { MatTableModule } from '@angular/material/table';
-import { SeMetricsApiService } from '../../../../services/se-metrics-api.service';
-import type { SeMetrics } from '../../../../models/se-metrics.model';
+import { SeMetricsApiService } from '../../../services/se-metrics-api.service';
+import type { SeMetrics } from '../../../models/se-metrics.model';
 
 /** Selectable lookback windows, in days. */
 const WINDOW_OPTIONS = [7, 30, 90] as const;

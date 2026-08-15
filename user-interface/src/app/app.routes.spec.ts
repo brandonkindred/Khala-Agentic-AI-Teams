@@ -60,6 +60,33 @@ describe('App routes', () => {
     expect(await loadedComponent('cognition')).toBe(CognitionPageComponent);
   });
 
+  it('lazily loads AgentProvisioningDashboardComponent for agent-studio/provisioning', async () => {
+    const { AgentProvisioningDashboardComponent } = await import(
+      './components/agent-team-studio/agent-provisioning-dashboard/agent-provisioning-dashboard.component'
+    );
+    expect(await loadedComponent('agent-studio/provisioning')).toBe(AgentProvisioningDashboardComponent);
+  });
+
+  it('lazily loads MetricsTabComponent for agent-studio/metrics', async () => {
+    const { MetricsTabComponent } = await import(
+      './components/agent-team-studio/metrics-tab/metrics-tab.component'
+    );
+    expect(await loadedComponent('agent-studio/metrics')).toBe(MetricsTabComponent);
+  });
+
+  it('no longer registers the retired agent-console route', () => {
+    const shell = routes[0];
+    const children = (shell?.children ?? []) as Route[];
+    expect(children.some((r) => r.path === 'agent-console')).toBe(false);
+  });
+
+  it('redirects legacy agent-provisioning to /agent-studio/provisioning', () => {
+    const shell = routes[0];
+    const children = (shell?.children ?? []) as { path?: string; redirectTo?: string }[];
+    const redirect = children.find((r) => r.path === 'agent-provisioning');
+    expect(redirect?.redirectTo).toBe('/agent-studio/provisioning');
+  });
+
   it('redirects empty path to /dashboard', () => {
     const shell = routes[0];
     const children = shell?.children as { path: string; redirectTo: string }[];
