@@ -449,6 +449,23 @@ class _BuildFixCommandError(Exception):
     """A build/test helper raised; the repair loop must abort with this message."""
 
 
+def _is_command_result(result: Any) -> bool:
+    """Return True when ``result`` exposes the CommandResult interface the loop relies on.
+
+    Preconditions:
+        None.
+    Postconditions:
+        Returns ``True`` iff ``result`` is non-None, exposes a ``success``
+        attribute, and exposes a callable ``parsed_failures`` method; returns
+        ``False`` otherwise. Never raises.
+    """
+    return (
+        result is not None
+        and hasattr(result, "success")
+        and callable(getattr(result, "parsed_failures", None))
+    )
+
+
 def _run_post_fix_build_verification(project_dir: Path, agent_type: str) -> Any:
     """Re-run the agent-type build/test gate after applying a repair.
 
@@ -620,8 +637,7 @@ def _try_build_fix_one_at_a_time(
                         )
                         if not pip_result.success:
                             logger.warning(
-                                "Build fix: pip install -r requirements.txt failed "
-                                "(non-fatal): %s",
+                                "Build fix: pip install -r requirements.txt failed (non-fatal): %s",
                                 pip_result.error_summary,
                             )
                     except Exception as e:
@@ -722,6 +738,14 @@ def _try_build_fix_one_at_a_time(
             result = _run_post_fix_build_verification(project_dir, agent_type)
         except _BuildFixCommandError as e:
             return False, str(e)
+        if not _is_command_result(result):
+            logger.warning(
+                "Build fix: post-fix verification returned an unusable result (%r) for task %s; "
+                "aborting repair loop",
+                result,
+                task_id,
+            )
+            return False, "Build fix aborted: post-fix verification produced no usable result"
         if result.success:
             logger.info(
                 "Build fix (tool agent): task %s build passed after fixing one issue at a time",
@@ -783,6 +807,14 @@ def _try_build_fix_one_at_a_time(
                 except Exception as e:
                     logger.warning("Build fix: pytest failed to run: %s", e)
                     return False, str(e)
+                if not _is_command_result(result):
+                    logger.warning(
+                        "Build fix: in-loop pytest returned an unusable result (%r) for task %s; "
+                        "aborting repair loop",
+                        result,
+                        task_id,
+                    )
+                    return False, "Build fix aborted: in-loop pytest produced no usable result"
                 if not result.success:
                     issues = [
                         {
