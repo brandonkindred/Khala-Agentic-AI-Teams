@@ -1212,6 +1212,13 @@ def _tag_review_issues_for_scope(
             removed_by_path=removed_by_path,
             patches_by_path=patches_by_path,
         )
+        # apply_scope_verification preserves finding count and order, so `tagged`
+        # aligns 1:1 with `genuine`. Assert that postcondition here so a contract
+        # breach surfaces as a clear, caught failure below rather than a
+        # StopIteration raised mid-splice from next(tagged_iter).
+        assert len(tagged) == len(genuine), (
+            f"scope verification must preserve finding count: {len(tagged)} != {len(genuine)}"
+        )
         tagged_iter = iter(tagged)
         output.issues = [
             i if _is_not_reviewed_coverage_finding(i) else next(tagged_iter) for i in issues

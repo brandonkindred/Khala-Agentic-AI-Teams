@@ -195,6 +195,13 @@ def parse_removed_lines(patch: str) -> set[int]:
         - Returns the set of 1-based old-file line numbers whose hunk rows
           start with ``-``. Added and context lines are not included.
           An empty patch yields an empty set. Never raises.
+        - Rows before the first ``@@ -old,count +new,count @@`` header are
+          ignored, so a truncated or malformed patch (no header, or hunk body
+          only) yields an empty set rather than raising.
+
+    Example:
+        >>> sorted(parse_removed_lines("@@ -3,2 +3,1 @@\\n ctx\\n-gone"))
+        [4]
     """
     removed: set[int] = set()
     old_line = 0

@@ -123,8 +123,12 @@ def apply_scope_verdicts(
         - ``removed_by_path`` maps paths to 1-based old-file deleted line numbers.
 
     Postconditions:
-        - Returns a new list of the same length. Findings whose span overlaps
-          an added/modified line are never tagged ``pre_existing``.
+        - Returns a new list of the same length. Each element is a fresh copy
+          (``model_copy(deep=True)``) of the corresponding input finding; a
+          duck-typed finding without ``model_copy`` is returned unchanged (same
+          object). Callers must not rely on reference equality with ``issues``.
+          Findings whose span overlaps an added/modified line are never tagged
+          ``pre_existing``.
         - Indices in ``preserve_original`` keep their original ``pre_existing``.
         - Off-diff findings on a file that deletes lines keep their original
           ``pre_existing`` when the verdict is missing, unsure, or
@@ -393,7 +397,8 @@ def _scope_run_was_grounded(agent: Any, index: CodebaseIndex, file_path: str) ->
         return False
     try:
         messages = getattr(agent, "messages", None) or []
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001 — grounding check is best-effort, never raises
+        logger.debug("ScopeFilter: could not read agent messages for grounding check: %s", exc)
         return False
     for msg in messages:
         content = msg.get("content") if isinstance(msg, dict) else getattr(msg, "content", None)
@@ -418,10 +423,44 @@ def _verify_scope(
     removed_by_path: Mapping[str, Sequence[int]],
     patches_by_path: Mapping[str, str],
 ) -> List[CodeReviewIssue]:
-    """LLM-backed tagging; may raise on model resolution (caller catches).
+    """LLM-backed scope tagging for one review's findings.
 
-    Findings whose span overlaps added lines skip the LLM. Remaining findings
-    are grouped by cited path (blank path → one group).
+    Findings whose span overlaps an added/modified line skip the LLM and stay
+    postable. Every remaining (off-diff) finding is grouped by its cited path
+    (blank path → one ``"(unknown)"`` group), and each group is sent to the
+    scope verifier as a single reasoning run over that file.
+
+    Args:
+        llm: Client whose configured model backs the verifier run.
+        issues: The full, ordered finding list (both on- and off-diff).
+        changed_by_path: Path → 1-based added/modified new-file line numbers.
+        files: The submission the reviewer saw; empty means no LLM run.
+        repo_reader: Optional reader letting the verifier open off-submission
+            files (used to confirm omission findings).
+        input_data: The reviewer's ``CodeReviewInput`` (task text, acceptance
+            criteria); when None a files-only input is synthesized.
+        removed_by_path: Path → 1-based old-file deleted line numbers.
+        patches_by_path: Path → unified-diff text, for the deleted-line excerpt.
+
+    Preconditions:
+        - ``issues`` are genuine reviewer findings (no coverage/safety items).
+        - At least one of ``changed_by_path`` / ``removed_by_path`` is non-empty
+          (enforced by the caller).
+
+    Postconditions:
+        - Returns a new same-length list from ``apply_scope_verdicts``; on-diff
+          findings are untouched and off-diff findings are tagged per verdict.
+        - An off-diff finding with no submission (empty ``files``) or no off-diff
+          findings at all short-circuits to fail-closed tagging with no LLM call.
+        - Ungrounded ``out_of_scope`` verdicts are preserved (original tag kept),
+          never used to strip a finding.
+
+    Side effects:
+        - One ``run_agent_via_reasoning`` call per file group (LLM + tool use).
+
+    Raises:
+        - May raise from model resolution or the reasoning run; the public
+          ``apply_scope_verification`` wrapper catches and degrades to no-op.
     """
     need_llm: List[int] = [
         idx

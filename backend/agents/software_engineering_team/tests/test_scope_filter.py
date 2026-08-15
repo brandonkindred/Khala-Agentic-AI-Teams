@@ -66,6 +66,7 @@ def test_unchanged_context_unsure_is_not_posted() -> None:
 
 
 def test_missing_verdict_on_off_diff_is_not_posted() -> None:
+    """A finding on an unchanged line with no verdict fails closed → pre_existing."""
     issue = _issue(line=99, description="context nit")
     out = apply_scope_verdicts(
         [issue], changed_by_path=_changed(lines=[1]), verdicts={}, grounded=True
@@ -74,6 +75,7 @@ def test_missing_verdict_on_off_diff_is_not_posted() -> None:
 
 
 def test_confident_out_of_scope_when_grounded_is_not_posted() -> None:
+    """A confident, grounded out-of-scope verdict tags the finding pre_existing."""
     issue = _issue(line=50, description="pre-existing naming")
     out = apply_scope_verdicts(
         [issue],
@@ -97,6 +99,7 @@ def test_ungrounded_out_of_scope_does_not_strip_in_scope_finding() -> None:
 
 
 def test_omission_off_diff_stays_in_scope() -> None:
+    """A confident omission finding stays postable even when its path is off-diff."""
     issue = _issue(file_path="missing.py", line=1, description="PR should have added missing.py")
     out = apply_scope_verdicts(
         [issue],
@@ -108,6 +111,7 @@ def test_omission_off_diff_stays_in_scope() -> None:
 
 
 def test_confident_in_scope_on_off_diff_file_stays_postable() -> None:
+    """A confident in_scope verdict keeps an off-diff finding postable."""
     issue = _issue(file_path="other.py", line=3, description="should have updated other.py")
     out = apply_scope_verdicts(
         [issue],
@@ -119,6 +123,7 @@ def test_confident_in_scope_on_off_diff_file_stays_postable() -> None:
 
 
 def test_low_confidence_in_scope_fails_closed() -> None:
+    """A low-confidence in_scope verdict fails closed → pre_existing."""
     issue = _issue(line=50, description="maybe related")
     out = apply_scope_verdicts(
         [issue],
@@ -174,6 +179,7 @@ def test_scripted_stub_marks_out_of_scope(monkeypatch: Any) -> None:
 
 
 def test_empty_issues_and_empty_changed_map_are_noop() -> None:
+    """Empty issues, or an empty changed-line map, leaves findings untagged."""
     assert (
         apply_scope_verification(
             DummyLLMClient(), issues=[], changed_by_path=_changed(), files={"a.py": "x"}
@@ -220,6 +226,7 @@ def test_setup_failure_leaves_tags_unchanged(monkeypatch: Any) -> None:
 
 
 def test_parse_scope_verdicts_skips_malformed() -> None:
+    """Malformed verdict payloads are dropped; the first in-range verdict wins."""
     from code_review_agent.scope_filter import _parse_scope_verdicts
 
     assert _parse_scope_verdicts("nope", 1) == {}
@@ -241,6 +248,8 @@ def test_parse_scope_verdicts_skips_malformed() -> None:
 
 
 def test_wrapped_exact_dummy_is_noop() -> None:
+    """A wrapper whose ``client`` is the exact DummyLLMClient is the no-op harness."""
+
     class _Wrap:
         client = DummyLLMClient()
 
@@ -255,6 +264,8 @@ def test_wrapped_exact_dummy_is_noop() -> None:
 
 
 def test_empty_files_fail_closes_off_diff() -> None:
+    """With no submission files, an off-diff finding fails closed → pre_existing."""
+
     class _Stub(DummyLLMClient):
         pass
 
@@ -266,6 +277,7 @@ def test_empty_files_fail_closes_off_diff() -> None:
 
 
 def test_scope_grounding_list_files_and_none() -> None:
+    """Grounding is true only when the verifier read the cited file or ran list_files."""
     from code_review_agent.false_positive_filter import CodebaseIndex
     from code_review_agent.models import CodeReviewInput
     from code_review_agent.scope_filter import _scope_run_was_grounded
@@ -298,6 +310,8 @@ def test_scope_grounding_list_files_and_none() -> None:
 
 
 def test_ungrounded_oos_from_llm_is_preserved(monkeypatch: Any) -> None:
+    """An ungrounded out-of-scope verdict from the LLM keeps the finding's original tag."""
+
     class _Stub(DummyLLMClient):
         def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:  # type: ignore[override]
             return {
