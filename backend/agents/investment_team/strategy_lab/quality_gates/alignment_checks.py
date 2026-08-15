@@ -54,6 +54,7 @@ from pydantic import BaseModel, Field
 from shared.concurrency import parallel_map
 from shared.env_config import env_int
 
+from ..agents._llm_envelope import _FAILURE_FMT
 from ..alignment_findings import (
     AlignmentFinding,
     NearMissVerdict,
@@ -1386,16 +1387,19 @@ class DeterministicAlignmentChecker(GateResultsMixin):
             )
         except Exception as exc:
             # Safety-critical fail-closed: a stuck or erroring adjudicator must
-            # never legitimise a missed predicate. Emit the same structured
-            # five-field schema the LLM envelope uses so on-call can tell a
-            # transport outage apart from a genuine miss.
+            # never legitimise a missed predicate. Reuse the envelope's canonical
+            # ``_FAILURE_FMT`` so this fail-closed site emits the identical
+            # five-field schema (agent/phase/attempt/latency_ms/error_class) —
+            # on-call greps one format across the whole lab, and ``phase`` marks
+            # this as the near-miss guard. This is a single terminal attempt
+            # (no envelope retry loop), so it reports ``attempt=1/1``.
             latency_ms = int((time.monotonic() - t0) * 1000)
             logger.warning(
-                "strategy_lab LLM call failed (fail-closed near-miss): agent=%s phase=%s "
-                "attempt=%s latency_ms=%d error_class=%s",
+                _FAILURE_FMT,
                 "alignment",
                 "alignment_near_miss",
-                "final",
+                1,
+                1,
                 latency_ms,
                 type(exc).__name__,
             )
