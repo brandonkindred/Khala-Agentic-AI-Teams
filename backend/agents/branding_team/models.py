@@ -48,6 +48,97 @@ from shared.hitl.models import HumanReview as HumanReview  # noqa: F401 — re-e
 NonEmptyStr = Annotated[str, Field(min_length=1)]
 
 # ---------------------------------------------------------------------------
+# Cardinality constants — single source for list/dict length constraints
+# ---------------------------------------------------------------------------
+# Each constraint below is the SOLE source of truth for a cardinality that is
+# otherwise stated twice: once in a Pydantic ``Field(min_length=..., max_length=...)``
+# on an agent-output model in this file, and once in the corresponding prompt
+# prose in ``agents.py`` (e.g. "3-5 core values"). Both sites interpolate the
+# same constant, so a schema edit and a prompt edit can no longer silently
+# desync. Constraints that happen to share a value (several ``(3, 4)`` pairs)
+# still get their own named constant: they are independent limits that coincide
+# today, and changing one must not change the others.
+#
+# Fixed-count constraints where ``min == max`` (a list of exactly N items) use a
+# single ``*_COUNT`` constant fed to both ``min_length`` and ``max_length``.
+
+# Phase 1 — Strategic Core
+CORE_VALUES_MIN = 3
+CORE_VALUES_MAX = 5
+AUDIENCE_SEGMENTS_MIN = 1
+AUDIENCE_SEGMENTS_MAX = 3
+DIFFERENTIATION_PILLARS_MIN = 2
+DIFFERENTIATION_PILLARS_MAX = 4
+
+# Phase 2 — Narrative & Messaging
+BOILERPLATE_VARIANTS_COUNT = 3
+ELEVATOR_PITCHES_COUNT = 3
+BRAND_ARCHETYPES_MIN = 1
+BRAND_ARCHETYPES_MAX = 2
+MESSAGING_PILLARS_MIN = 3
+MESSAGING_PILLARS_MAX = 4
+PERSONA_PROFILES_MIN = 2
+PERSONA_PROFILES_MAX = 3
+VOICE_PRINCIPLES_MIN = 3
+VOICE_PRINCIPLES_MAX = 4
+STYLE_DOS_MIN = 3
+STYLE_DOS_MAX = 4
+STYLE_DONTS_MIN = 3
+STYLE_DONTS_MAX = 4
+EDITORIAL_QUALITY_BAR_MIN = 3
+EDITORIAL_QUALITY_BAR_MAX = 4
+
+# Phase 3 — Visual & Expressive Identity
+COLOR_PALETTE_MIN = 5
+COLOR_PALETTE_MAX = 7
+TYPOGRAPHY_SYSTEM_MIN = 3
+TYPOGRAPHY_SYSTEM_MAX = 4
+MOTION_PRINCIPLES_MIN = 3
+MOTION_PRINCIPLES_MAX = 4
+LANGUAGE_DOS_MIN = 4
+LANGUAGE_DOS_MAX = 5
+LANGUAGE_DONTS_MIN = 4
+LANGUAGE_DONTS_MAX = 5
+
+# Phase 4 — Experience & Channel Activation
+CHANNEL_DOS_MIN = 3
+CHANNEL_DOS_MAX = 4
+CHANNEL_DONTS_MIN = 3
+CHANNEL_DONTS_MAX = 4
+CHANNEL_CONTENT_TYPES_MIN = 3
+CHANNEL_CONTENT_TYPES_MAX = 5
+BRAND_EXPERIENCE_PRINCIPLES_MIN = 3
+BRAND_EXPERIENCE_PRINCIPLES_MAX = 5
+SIGNATURE_MOMENTS_MIN = 3
+SIGNATURE_MOMENTS_MAX = 5
+SENSORY_ELEMENTS_MIN = 2
+SENSORY_ELEMENTS_MAX = 4
+NAMING_CONVENTIONS_MIN = 3
+NAMING_CONVENTIONS_MAX = 5
+TERMINOLOGY_GLOSSARY_MIN = 5
+TERMINOLOGY_GLOSSARY_MAX = 10
+BRAND_IN_ACTION_MIN = 3
+BRAND_IN_ACTION_MAX = 5
+
+# Phase 5 — Governance & Evolution
+APPROVAL_WORKFLOWS_MIN = 3
+APPROVAL_WORKFLOWS_MAX = 5
+AGENCY_BRIEFING_PROTOCOLS_MIN = 3
+AGENCY_BRIEFING_PROTOCOLS_MAX = 5
+ASSET_MANAGEMENT_GUIDANCE_MIN = 3
+ASSET_MANAGEMENT_GUIDANCE_MAX = 5
+WIKI_BACKLOG_MIN = 4
+WIKI_BACKLOG_MAX = 6
+TRAINING_ONBOARDING_MIN = 4
+TRAINING_ONBOARDING_MAX = 6
+BRAND_HEALTH_KPIS_MIN = 4
+BRAND_HEALTH_KPIS_MAX = 6
+REVIEW_TRIGGER_POINTS_MIN = 3
+REVIEW_TRIGGER_POINTS_MAX = 5
+BRAND_GUIDELINES_MIN = 5
+BRAND_GUIDELINES_MAX = 8
+
+# ---------------------------------------------------------------------------
 # Strict/soft derived-subclass pattern (see module docstring)
 # ---------------------------------------------------------------------------
 # Nested item models use ``_derive_strict_variant`` immediately below the
@@ -406,7 +497,9 @@ class CoreValuesOutput(BaseModel):
     instead of silently passing.
     """
 
-    core_values: List[CoreValueOutput] = Field(min_length=3, max_length=5)
+    core_values: List[CoreValueOutput] = Field(
+        min_length=CORE_VALUES_MIN, max_length=CORE_VALUES_MAX
+    )
 
 
 class AudienceSegmentsOutput(BaseModel):
@@ -419,7 +512,9 @@ class AudienceSegmentsOutput(BaseModel):
     fail validation instead of silently passing.
     """
 
-    target_audience_segments: List[AudienceSegmentOutput] = Field(min_length=1, max_length=3)
+    target_audience_segments: List[AudienceSegmentOutput] = Field(
+        min_length=AUDIENCE_SEGMENTS_MIN, max_length=AUDIENCE_SEGMENTS_MAX
+    )
 
 
 class DifferentiationPillarsOutput(BaseModel):
@@ -432,7 +527,9 @@ class DifferentiationPillarsOutput(BaseModel):
     fail validation instead of silently passing.
     """
 
-    differentiation_pillars: List[DifferentiationPillarOutput] = Field(min_length=2, max_length=4)
+    differentiation_pillars: List[DifferentiationPillarOutput] = Field(
+        min_length=DIFFERENTIATION_PILLARS_MIN, max_length=DIFFERENTIATION_PILLARS_MAX
+    )
 
 
 class PositioningOutput(BaseModel):
@@ -620,7 +717,9 @@ class BrandStoryOutput(BaseModel):
 
     brand_story: str = Field(min_length=1)
     hero_narrative: str = Field(min_length=1)
-    boilerplate_variants: List[NonEmptyStr] = Field(min_length=3, max_length=3)
+    boilerplate_variants: List[NonEmptyStr] = Field(
+        min_length=BOILERPLATE_VARIANTS_COUNT, max_length=BOILERPLATE_VARIANTS_COUNT
+    )
 
 
 class BrandArchetypesOutput(BrandStoryOutput):
@@ -635,7 +734,9 @@ class BrandArchetypesOutput(BrandStoryOutput):
     fail validation instead of silently passing.
     """
 
-    brand_archetypes: List[BrandArchetypeOutput] = Field(min_length=1, max_length=2)
+    brand_archetypes: List[BrandArchetypeOutput] = Field(
+        min_length=BRAND_ARCHETYPES_MIN, max_length=BRAND_ARCHETYPES_MAX
+    )
 
 
 class TaglineOutput(BrandArchetypesOutput):
@@ -648,7 +749,9 @@ class TaglineOutput(BrandArchetypesOutput):
 
     tagline: str = Field(min_length=1)
     tagline_rationale: str = Field(min_length=1)
-    elevator_pitches: List[ElevatorPitchOutput] = Field(min_length=3, max_length=3)
+    elevator_pitches: List[ElevatorPitchOutput] = Field(
+        min_length=ELEVATOR_PITCHES_COUNT, max_length=ELEVATOR_PITCHES_COUNT
+    )
 
 
 class MessagingFrameworkOutput(TaglineOutput):
@@ -660,7 +763,9 @@ class MessagingFrameworkOutput(TaglineOutput):
     validation instead of silently producing empty output.
     """
 
-    messaging_framework: List[MessagingPillarOutput] = Field(min_length=3, max_length=4)
+    messaging_framework: List[MessagingPillarOutput] = Field(
+        min_length=MESSAGING_PILLARS_MIN, max_length=MESSAGING_PILLARS_MAX
+    )
     audience_message_maps: List[AudienceMessageMapOutput] = Field(min_length=1)
 
 
@@ -672,7 +777,9 @@ class PersonaProfilesOutput(MessagingFrameworkOutput):
     fail validation instead of silently producing empty output.
     """
 
-    persona_profiles: List[PersonaProfileOutput] = Field(min_length=2, max_length=3)
+    persona_profiles: List[PersonaProfileOutput] = Field(
+        min_length=PERSONA_PROFILES_MIN, max_length=PERSONA_PROFILES_MAX
+    )
 
 
 class WritingGuidelinesBody(BaseModel):
@@ -684,10 +791,14 @@ class WritingGuidelinesBody(BaseModel):
     Cardinalities encode the prompt's stated "3-4" for each list.
     """
 
-    voice_principles: List[NonEmptyStr] = Field(min_length=3, max_length=4)
-    style_dos: List[NonEmptyStr] = Field(min_length=3, max_length=4)
-    style_donts: List[NonEmptyStr] = Field(min_length=3, max_length=4)
-    editorial_quality_bar: List[NonEmptyStr] = Field(min_length=3, max_length=4)
+    voice_principles: List[NonEmptyStr] = Field(
+        min_length=VOICE_PRINCIPLES_MIN, max_length=VOICE_PRINCIPLES_MAX
+    )
+    style_dos: List[NonEmptyStr] = Field(min_length=STYLE_DOS_MIN, max_length=STYLE_DOS_MAX)
+    style_donts: List[NonEmptyStr] = Field(min_length=STYLE_DONTS_MIN, max_length=STYLE_DONTS_MAX)
+    editorial_quality_bar: List[NonEmptyStr] = Field(
+        min_length=EDITORIAL_QUALITY_BAR_MIN, max_length=EDITORIAL_QUALITY_BAR_MAX
+    )
 
 
 class WritingGuidelinesOutput(PersonaProfilesOutput):
@@ -883,9 +994,11 @@ class ChannelGuidelineOutput(BaseModel):
 
     channel: str = Field(min_length=1)
     strategy: str = Field(min_length=1)
-    dos: List[NonEmptyStr] = Field(min_length=3, max_length=4)
-    donts: List[NonEmptyStr] = Field(min_length=3, max_length=4)
-    content_types: List[NonEmptyStr] = Field(min_length=3, max_length=5)
+    dos: List[NonEmptyStr] = Field(min_length=CHANNEL_DOS_MIN, max_length=CHANNEL_DOS_MAX)
+    donts: List[NonEmptyStr] = Field(min_length=CHANNEL_DONTS_MIN, max_length=CHANNEL_DONTS_MAX)
+    content_types: List[NonEmptyStr] = Field(
+        min_length=CHANNEL_CONTENT_TYPES_MIN, max_length=CHANNEL_CONTENT_TYPES_MAX
+    )
     frequency_guidance: str = Field(min_length=1)
 
 
@@ -961,9 +1074,15 @@ class BrandExperiencePrinciplesOutput(BaseModel):
     ``min_length``/``max_length`` encode the prompt's stated cardinalities.
     """
 
-    brand_experience_principles: List[NonEmptyStr] = Field(min_length=3, max_length=5)
-    signature_moments: List[NonEmptyStr] = Field(min_length=3, max_length=5)
-    sensory_elements: List[NonEmptyStr] = Field(min_length=2, max_length=4)
+    brand_experience_principles: List[NonEmptyStr] = Field(
+        min_length=BRAND_EXPERIENCE_PRINCIPLES_MIN, max_length=BRAND_EXPERIENCE_PRINCIPLES_MAX
+    )
+    signature_moments: List[NonEmptyStr] = Field(
+        min_length=SIGNATURE_MOMENTS_MIN, max_length=SIGNATURE_MOMENTS_MAX
+    )
+    sensory_elements: List[NonEmptyStr] = Field(
+        min_length=SENSORY_ELEMENTS_MIN, max_length=SENSORY_ELEMENTS_MAX
+    )
 
 
 class BrandArchitectureOutput(BaseModel):
@@ -976,8 +1095,12 @@ class BrandArchitectureOutput(BaseModel):
     """
 
     brand_architecture: List[BrandArchitectureRuleOutput] = Field(min_length=1)
-    naming_conventions: List[NonEmptyStr] = Field(min_length=3, max_length=5)
-    terminology_glossary: Dict[NonEmptyStr, NonEmptyStr] = Field(min_length=5, max_length=10)
+    naming_conventions: List[NonEmptyStr] = Field(
+        min_length=NAMING_CONVENTIONS_MIN, max_length=NAMING_CONVENTIONS_MAX
+    )
+    terminology_glossary: Dict[NonEmptyStr, NonEmptyStr] = Field(
+        min_length=TERMINOLOGY_GLOSSARY_MIN, max_length=TERMINOLOGY_GLOSSARY_MAX
+    )
 
 
 class BrandInActionOutput(BaseModel):
@@ -990,7 +1113,9 @@ class BrandInActionOutput(BaseModel):
     list of blank-field examples must fail validation.
     """
 
-    brand_in_action: List[BrandInActionExampleOutput] = Field(min_length=3, max_length=5)
+    brand_in_action: List[BrandInActionExampleOutput] = Field(
+        min_length=BRAND_IN_ACTION_MIN, max_length=BRAND_IN_ACTION_MAX
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1117,8 +1242,12 @@ class ApprovalWorkflowsOutput(BaseModel):
     required.
     """
 
-    approval_workflows: List[ApprovalWorkflowOutput] = Field(min_length=3, max_length=5)
-    agency_briefing_protocols: List[NonEmptyStr] = Field(min_length=3, max_length=5)
+    approval_workflows: List[ApprovalWorkflowOutput] = Field(
+        min_length=APPROVAL_WORKFLOWS_MIN, max_length=APPROVAL_WORKFLOWS_MAX
+    )
+    agency_briefing_protocols: List[NonEmptyStr] = Field(
+        min_length=AGENCY_BRIEFING_PROTOCOLS_MIN, max_length=AGENCY_BRIEFING_PROTOCOLS_MAX
+    )
 
 
 class AssetWikiOutput(BaseModel):
@@ -1130,8 +1259,12 @@ class AssetWikiOutput(BaseModel):
     ``WikiEntry``) so each entry's fields are individually required.
     """
 
-    asset_management_guidance: List[NonEmptyStr] = Field(min_length=3, max_length=5)
-    wiki_backlog: List[WikiEntryOutput] = Field(min_length=4, max_length=6)
+    asset_management_guidance: List[NonEmptyStr] = Field(
+        min_length=ASSET_MANAGEMENT_GUIDANCE_MIN, max_length=ASSET_MANAGEMENT_GUIDANCE_MAX
+    )
+    wiki_backlog: List[WikiEntryOutput] = Field(
+        min_length=WIKI_BACKLOG_MIN, max_length=WIKI_BACKLOG_MAX
+    )
 
 
 class TrainingOnboardingOutput(BaseModel):
@@ -1142,7 +1275,9 @@ class TrainingOnboardingOutput(BaseModel):
     initiatives".
     """
 
-    training_onboarding_plan: List[NonEmptyStr] = Field(min_length=4, max_length=6)
+    training_onboarding_plan: List[NonEmptyStr] = Field(
+        min_length=TRAINING_ONBOARDING_MIN, max_length=TRAINING_ONBOARDING_MAX
+    )
 
 
 class BrandHealthKPIsOutput(BaseModel):
@@ -1154,9 +1289,13 @@ class BrandHealthKPIsOutput(BaseModel):
     ``BrandHealthKPI``) so each KPI's fields are individually required.
     """
 
-    brand_health_kpis: List[BrandHealthKPIOutput] = Field(min_length=4, max_length=6)
+    brand_health_kpis: List[BrandHealthKPIOutput] = Field(
+        min_length=BRAND_HEALTH_KPIS_MIN, max_length=BRAND_HEALTH_KPIS_MAX
+    )
     tracking_methodology: str = Field(min_length=1)
-    review_trigger_points: List[NonEmptyStr] = Field(min_length=3, max_length=5)
+    review_trigger_points: List[NonEmptyStr] = Field(
+        min_length=REVIEW_TRIGGER_POINTS_MIN, max_length=REVIEW_TRIGGER_POINTS_MAX
+    )
 
 
 class EvolutionFrameworkOutput(BaseModel):
@@ -1177,7 +1316,9 @@ class BrandGuidelinesOutput(BaseModel):
     rules".
     """
 
-    brand_guidelines: List[NonEmptyStr] = Field(min_length=5, max_length=8)
+    brand_guidelines: List[NonEmptyStr] = Field(
+        min_length=BRAND_GUIDELINES_MIN, max_length=BRAND_GUIDELINES_MAX
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1339,7 +1480,9 @@ class ColorPaletteSystemOutput(BaseModel):
     ``min_length``/``max_length`` encode the prompt's stated "5-7 colors".
     """
 
-    color_palette: List[ColorEntryOutput] = Field(min_length=5, max_length=7)
+    color_palette: List[ColorEntryOutput] = Field(
+        min_length=COLOR_PALETTE_MIN, max_length=COLOR_PALETTE_MAX
+    )
 
 
 class TypographySystemOutput(BaseModel):
@@ -1348,7 +1491,9 @@ class TypographySystemOutput(BaseModel):
     ``min_length``/``max_length`` encode the prompt's stated "3-4 type roles".
     """
 
-    typography_system: List[TypographySpecOutput] = Field(min_length=3, max_length=4)
+    typography_system: List[TypographySpecOutput] = Field(
+        min_length=TYPOGRAPHY_SYSTEM_MIN, max_length=TYPOGRAPHY_SYSTEM_MAX
+    )
 
 
 class IconographyOutput(BaseModel):
@@ -1366,7 +1511,9 @@ class PhotographyVideoOutput(BaseModel):
 
     photography_direction: str = Field(min_length=1)
     video_direction: str = Field(min_length=1)
-    motion_principles: List[str] = Field(min_length=3, max_length=4)
+    motion_principles: List[str] = Field(
+        min_length=MOTION_PRINCIPLES_MIN, max_length=MOTION_PRINCIPLES_MAX
+    )
 
 
 class VoiceToneOutput(BaseModel):
@@ -1376,8 +1523,8 @@ class VoiceToneOutput(BaseModel):
     """
 
     voice_tone_spectrum: List[VoiceToneEntryOutput] = Field(min_length=1)
-    language_dos: List[str] = Field(min_length=4, max_length=5)
-    language_donts: List[str] = Field(min_length=4, max_length=5)
+    language_dos: List[str] = Field(min_length=LANGUAGE_DOS_MIN, max_length=LANGUAGE_DOS_MAX)
+    language_donts: List[str] = Field(min_length=LANGUAGE_DONTS_MIN, max_length=LANGUAGE_DONTS_MAX)
 
 
 class DesignSystemDefinitionOutput(BaseModel):

@@ -21,6 +21,71 @@ from strands import Agent
 
 from .graphs.shared import build_agent
 from .models import (
+    AGENCY_BRIEFING_PROTOCOLS_MAX,
+    AGENCY_BRIEFING_PROTOCOLS_MIN,
+    APPROVAL_WORKFLOWS_MAX,
+    APPROVAL_WORKFLOWS_MIN,
+    ASSET_MANAGEMENT_GUIDANCE_MAX,
+    ASSET_MANAGEMENT_GUIDANCE_MIN,
+    AUDIENCE_SEGMENTS_MAX,
+    AUDIENCE_SEGMENTS_MIN,
+    BOILERPLATE_VARIANTS_COUNT,
+    BRAND_ARCHETYPES_MAX,
+    BRAND_ARCHETYPES_MIN,
+    BRAND_EXPERIENCE_PRINCIPLES_MAX,
+    BRAND_EXPERIENCE_PRINCIPLES_MIN,
+    BRAND_GUIDELINES_MAX,
+    BRAND_GUIDELINES_MIN,
+    BRAND_HEALTH_KPIS_MAX,
+    BRAND_HEALTH_KPIS_MIN,
+    BRAND_IN_ACTION_MAX,
+    BRAND_IN_ACTION_MIN,
+    CHANNEL_CONTENT_TYPES_MAX,
+    CHANNEL_CONTENT_TYPES_MIN,
+    CHANNEL_DONTS_MAX,
+    CHANNEL_DONTS_MIN,
+    CHANNEL_DOS_MAX,
+    CHANNEL_DOS_MIN,
+    COLOR_PALETTE_MAX,
+    COLOR_PALETTE_MIN,
+    CORE_VALUES_MAX,
+    CORE_VALUES_MIN,
+    DIFFERENTIATION_PILLARS_MAX,
+    DIFFERENTIATION_PILLARS_MIN,
+    EDITORIAL_QUALITY_BAR_MAX,
+    EDITORIAL_QUALITY_BAR_MIN,
+    LANGUAGE_DONTS_MAX,
+    LANGUAGE_DONTS_MIN,
+    LANGUAGE_DOS_MAX,
+    LANGUAGE_DOS_MIN,
+    MESSAGING_PILLARS_MAX,
+    MESSAGING_PILLARS_MIN,
+    MOTION_PRINCIPLES_MAX,
+    MOTION_PRINCIPLES_MIN,
+    NAMING_CONVENTIONS_MAX,
+    NAMING_CONVENTIONS_MIN,
+    PERSONA_PROFILES_MAX,
+    PERSONA_PROFILES_MIN,
+    REVIEW_TRIGGER_POINTS_MAX,
+    REVIEW_TRIGGER_POINTS_MIN,
+    SENSORY_ELEMENTS_MAX,
+    SENSORY_ELEMENTS_MIN,
+    SIGNATURE_MOMENTS_MAX,
+    SIGNATURE_MOMENTS_MIN,
+    STYLE_DONTS_MAX,
+    STYLE_DONTS_MIN,
+    STYLE_DOS_MAX,
+    STYLE_DOS_MIN,
+    TERMINOLOGY_GLOSSARY_MAX,
+    TERMINOLOGY_GLOSSARY_MIN,
+    TRAINING_ONBOARDING_MAX,
+    TRAINING_ONBOARDING_MIN,
+    TYPOGRAPHY_SYSTEM_MAX,
+    TYPOGRAPHY_SYSTEM_MIN,
+    VOICE_PRINCIPLES_MAX,
+    VOICE_PRINCIPLES_MIN,
+    WIKI_BACKLOG_MAX,
+    WIKI_BACKLOG_MIN,
     ApprovalWorkflowsOutput,
     AssetWikiOutput,
     AudienceSegmentsOutput,
@@ -134,7 +199,7 @@ def make_purpose_vision_writer() -> Agent:
 _VALUES_ARTICULATOR_PROMPT = AgentPromptSpec(
     opening=(
         "You are a Values Articulator. Given a branding mission with optional seed values, "
-        "produce a list of 3-5 core values."
+        f"produce a list of {CORE_VALUES_MIN}-{CORE_VALUES_MAX} core values."
     ),
     fields=(
         PromptFieldSpec(
@@ -164,7 +229,10 @@ def make_values_articulator() -> Agent:
 
 
 _AUDIENCE_SEGMENTER_PROMPT = AgentPromptSpec(
-    opening="You are an Audience Segmenter. Given a branding mission, identify 1-3 target audience segments.",
+    opening=(
+        "You are an Audience Segmenter. Given a branding mission, identify "
+        f"{AUDIENCE_SEGMENTS_MIN}-{AUDIENCE_SEGMENTS_MAX} target audience segments."
+    ),
     fields=(
         PromptFieldSpec(
             "target_audience_segments",
@@ -195,7 +263,8 @@ def make_audience_segmenter() -> Agent:
 _DIFFERENTIATION_MAPPER_PROMPT = AgentPromptSpec(
     opening=(
         "You are a Differentiation Mapper. Given a branding mission with optional "
-        "differentiators, produce 2-4 differentiation pillars."
+        f"differentiators, produce {DIFFERENTIATION_PILLARS_MIN}-{DIFFERENTIATION_PILLARS_MAX} "
+        "differentiation pillars."
     ),
     fields=(
         PromptFieldSpec(
@@ -269,7 +338,8 @@ _STORYTELLER_PROMPT = AgentPromptSpec(
         PromptFieldSpec("brand_story", "a compelling 2-3 paragraph origin/purpose story"),
         PromptFieldSpec("hero_narrative", "a shorter, punchy version for hero sections"),
         PromptFieldSpec(
-            "boilerplate_variants", "3 versions (short/medium/long) for press and bios"
+            "boilerplate_variants",
+            f"{BOILERPLATE_VARIANTS_COUNT} versions (short/medium/long) for press and bios",
         ),
     ),
 )
@@ -294,7 +364,8 @@ def make_storyteller() -> Agent:
 _ARCHETYPE_ANALYST_PROMPT = AgentPromptSpec(
     opening=(
         "You are a Brand Archetype Analyst. Review the brand story from Inputs from previous "
-        "nodes and the strategic core, then select 1-2 brand archetypes (e.g. The Sage, The "
+        f"nodes and the strategic core, then select {BRAND_ARCHETYPES_MIN}-{BRAND_ARCHETYPES_MAX} "
+        "brand archetypes (e.g. The Sage, The "
         "Creator, The Explorer). Carry forward brand_story, hero_narrative, and "
         "boilerplate_variants unchanged, and add:"
     ),
@@ -366,7 +437,8 @@ _MESSAGE_MAPPER_PROMPT = AgentPromptSpec(
     fields=(
         PromptFieldSpec(
             "messaging_framework",
-            "3-4 messaging pillars, each with: pillar, key_message, and proof_points",
+            f"{MESSAGING_PILLARS_MIN}-{MESSAGING_PILLARS_MAX} messaging pillars, each with: "
+            "pillar, key_message, and proof_points",
         ),
         PromptFieldSpec(
             "audience_message_maps",
@@ -402,7 +474,8 @@ _PERSONA_BUILDER_PROMPT = AgentPromptSpec(
     fields=(
         PromptFieldSpec(
             "persona_profiles",
-            "2-3 persona profiles, each with: name, role, demographics, psychographics, "
+            f"{PERSONA_PROFILES_MIN}-{PERSONA_PROFILES_MAX} persona profiles, each with: name, "
+            "role, demographics, psychographics, "
             "goals, frustrations, media_habits, jobs_to_be_done",
         ),
     ),
@@ -432,10 +505,18 @@ _VOICE_PRINCIPLES_DRAFTER_PROMPT = AgentPromptSpec(
         "unchanged and produce writing_guidelines:"
     ),
     fields=(
-        PromptFieldSpec("voice_principles", "3-4 principles (e.g. 'Use a confident, human voice')"),
-        PromptFieldSpec("style_dos", "3-4 writing best practices"),
-        PromptFieldSpec("style_donts", "3-4 things to avoid"),
-        PromptFieldSpec("editorial_quality_bar", "3-4 quality standards every piece must meet"),
+        PromptFieldSpec(
+            "voice_principles",
+            f"{VOICE_PRINCIPLES_MIN}-{VOICE_PRINCIPLES_MAX} principles "
+            "(e.g. 'Use a confident, human voice')",
+        ),
+        PromptFieldSpec("style_dos", f"{STYLE_DOS_MIN}-{STYLE_DOS_MAX} writing best practices"),
+        PromptFieldSpec("style_donts", f"{STYLE_DONTS_MIN}-{STYLE_DONTS_MAX} things to avoid"),
+        PromptFieldSpec(
+            "editorial_quality_bar",
+            f"{EDITORIAL_QUALITY_BAR_MIN}-{EDITORIAL_QUALITY_BAR_MAX} quality standards every "
+            "piece must meet",
+        ),
     ),
     closing="\nThis is the final step in narrative development.",
 )
@@ -621,7 +702,8 @@ def make_logo_specifier() -> Agent:
 _COLOR_SYSTEM_BUILDER_PROMPT = AgentPromptSpec(
     opening=(
         "You are a Color System Builder. Based on the winning moodboard direction, define "
-        "5-7 colors. Include primary, secondary, accent, surface, and critical colors."
+        f"{COLOR_PALETTE_MIN}-{COLOR_PALETTE_MAX} colors. Include primary, secondary, accent, "
+        "surface, and critical colors."
     ),
     fields=(
         PromptFieldSpec(
@@ -652,7 +734,8 @@ def make_color_system_builder() -> Agent:
 _TYPOGRAPHY_BUILDER_PROMPT = AgentPromptSpec(
     opening=(
         "You are a Typography Builder. Based on the winning moodboard direction, define a "
-        "typography system with 3-4 type roles (display, body, caption, code). For each:"
+        f"typography system with {TYPOGRAPHY_SYSTEM_MIN}-{TYPOGRAPHY_SYSTEM_MAX} type roles "
+        "(display, body, caption, code). For each:"
     ),
     fields=(PromptFieldSpec("typography_system", "role, font_family, weight_range, usage_notes"),),
 )
@@ -708,7 +791,10 @@ _PHOTOGRAPHY_VIDEO_DIRECTOR_PROMPT = AgentPromptSpec(
     fields=(
         PromptFieldSpec("photography_direction", "shooting style, lighting, composition, subjects"),
         PromptFieldSpec("video_direction", "pacing, tone, visual style for video content"),
-        PromptFieldSpec("motion_principles", "3-4 principles for animation/motion design"),
+        PromptFieldSpec(
+            "motion_principles",
+            f"{MOTION_PRINCIPLES_MIN}-{MOTION_PRINCIPLES_MAX} principles for animation/motion design",
+        ),
     ),
 )
 
@@ -740,8 +826,12 @@ _VOICE_TONE_BUILDER_PROMPT = AgentPromptSpec(
             "for each context (marketing, support, legal, social, internal), specify the "
             "tone and 2-3 examples",
         ),
-        PromptFieldSpec("language_dos", "4-5 approved language patterns"),
-        PromptFieldSpec("language_donts", "4-5 language anti-patterns"),
+        PromptFieldSpec(
+            "language_dos", f"{LANGUAGE_DOS_MIN}-{LANGUAGE_DOS_MAX} approved language patterns"
+        ),
+        PromptFieldSpec(
+            "language_donts", f"{LANGUAGE_DONTS_MIN}-{LANGUAGE_DONTS_MAX} language anti-patterns"
+        ),
     ),
 )
 
@@ -805,15 +895,18 @@ _BRAND_EXPERIENCE_PRINCIPLER_PROMPT = AgentPromptSpec(
     fields=(
         PromptFieldSpec(
             "brand_experience_principles",
-            "3-5 principles that govern every brand touchpoint",
+            f"{BRAND_EXPERIENCE_PRINCIPLES_MIN}-{BRAND_EXPERIENCE_PRINCIPLES_MAX} principles that "
+            "govern every brand touchpoint",
         ),
         PromptFieldSpec(
             "signature_moments",
-            "3-5 key moments in the customer journey that should feel distinctly on-brand",
+            f"{SIGNATURE_MOMENTS_MIN}-{SIGNATURE_MOMENTS_MAX} key moments in the customer journey "
+            "that should feel distinctly on-brand",
         ),
         PromptFieldSpec(
             "sensory_elements",
-            "2-4 sensory cues (sound, texture, scent, etc.) if applicable",
+            f"{SENSORY_ELEMENTS_MIN}-{SENSORY_ELEMENTS_MAX} sensory cues "
+            "(sound, texture, scent, etc.) if applicable",
         ),
     ),
 )
@@ -859,9 +952,12 @@ def _channel_guide_prompt(channel: str, description: str) -> AgentPromptSpec:
         fields=(
             PromptFieldSpec("channel", f"'{channel}'"),
             PromptFieldSpec("strategy", "overall approach for this channel"),
-            PromptFieldSpec("dos", "3-4 best practices"),
-            PromptFieldSpec("donts", "3-4 things to avoid"),
-            PromptFieldSpec("content_types", "3-5 recommended content formats"),
+            PromptFieldSpec("dos", f"{CHANNEL_DOS_MIN}-{CHANNEL_DOS_MAX} best practices"),
+            PromptFieldSpec("donts", f"{CHANNEL_DONTS_MIN}-{CHANNEL_DONTS_MAX} things to avoid"),
+            PromptFieldSpec(
+                "content_types",
+                f"{CHANNEL_CONTENT_TYPES_MIN}-{CHANNEL_CONTENT_TYPES_MAX} recommended content formats",
+            ),
             PromptFieldSpec("frequency_guidance", "recommended cadence"),
         ),
         closing=f"Context: {description}",
@@ -981,8 +1077,13 @@ _BRAND_ARCHITECTURE_BUILDER_PROMPT = AgentPromptSpec(
             "rules for parent brand, sub-brands, product lines. Each with: entity, "
             "relationship, naming_convention, visual_treatment",
         ),
-        PromptFieldSpec("naming_conventions", "3-5 naming rules"),
-        PromptFieldSpec("terminology_glossary", "5-10 key terms with definitions (dict)"),
+        PromptFieldSpec(
+            "naming_conventions", f"{NAMING_CONVENTIONS_MIN}-{NAMING_CONVENTIONS_MAX} naming rules"
+        ),
+        PromptFieldSpec(
+            "terminology_glossary",
+            f"{TERMINOLOGY_GLOSSARY_MIN}-{TERMINOLOGY_GLOSSARY_MAX} key terms with definitions (dict)",
+        ),
     ),
 )
 
@@ -1005,8 +1106,8 @@ def make_brand_architecture_builder() -> Agent:
 
 _BRAND_IN_ACTION_ILLUSTRATOR_PROMPT = AgentPromptSpec(
     opening=(
-        "You are a Brand-in-Action Illustrator. Create 3-5 applied examples showing correct "
-        "vs incorrect brand usage:"
+        f"You are a Brand-in-Action Illustrator. Create {BRAND_IN_ACTION_MIN}-{BRAND_IN_ACTION_MAX} "
+        "applied examples showing correct vs incorrect brand usage:"
     ),
     fields=(
         PromptFieldSpec(
@@ -1073,11 +1174,13 @@ _APPROVAL_WORKFLOW_DESIGNER_PROMPT = AgentPromptSpec(
     fields=(
         PromptFieldSpec(
             "approval_workflows",
-            "3-5 workflows, each with: asset_type, approvers (list), sla, escalation_path",
+            f"{APPROVAL_WORKFLOWS_MIN}-{APPROVAL_WORKFLOWS_MAX} workflows, each with: asset_type, "
+            "approvers (list), sla, escalation_path",
         ),
         PromptFieldSpec(
             "agency_briefing_protocols",
-            "3-5 protocols for briefing external agencies",
+            f"{AGENCY_BRIEFING_PROTOCOLS_MIN}-{AGENCY_BRIEFING_PROTOCOLS_MAX} protocols for "
+            "briefing external agencies",
         ),
     ),
 )
@@ -1102,10 +1205,15 @@ def make_approval_workflow_designer() -> Agent:
 _ASSET_WIKI_PLANNER_PROMPT = AgentPromptSpec(
     opening="You are an Asset & Wiki Planner. Define:",
     fields=(
-        PromptFieldSpec("asset_management_guidance", "3-5 guidelines for managing brand assets"),
+        PromptFieldSpec(
+            "asset_management_guidance",
+            f"{ASSET_MANAGEMENT_GUIDANCE_MIN}-{ASSET_MANAGEMENT_GUIDANCE_MAX} guidelines for "
+            "managing brand assets",
+        ),
         PromptFieldSpec(
             "wiki_backlog",
-            "4-6 wiki entries, each with: title, summary, owners (list), "
+            f"{WIKI_BACKLOG_MIN}-{WIKI_BACKLOG_MAX} wiki entries, each with: title, summary, "
+            "owners (list), "
             "update_cadence. Cover: Brand North Star, Voice Playbook, Design System, Brand "
             "Review Intake, Channel Playbook, Governance Charter.",
         ),
@@ -1133,7 +1241,8 @@ _TRAINING_PLANNER_PROMPT = AgentPromptSpec(
     fields=(
         PromptFieldSpec(
             "training_onboarding_plan",
-            "4-6 training initiatives for onboarding new team members and maintaining "
+            f"{TRAINING_ONBOARDING_MIN}-{TRAINING_ONBOARDING_MAX} training initiatives for "
+            "onboarding new team members and maintaining "
             "brand literacy.",
         ),
     ),
@@ -1160,12 +1269,14 @@ _KPI_DESIGNER_PROMPT = AgentPromptSpec(
     fields=(
         PromptFieldSpec(
             "brand_health_kpis",
-            "4-6 KPIs, each with: metric, measurement_method, target, review_frequency",
+            f"{BRAND_HEALTH_KPIS_MIN}-{BRAND_HEALTH_KPIS_MAX} KPIs, each with: metric, "
+            "measurement_method, target, review_frequency",
         ),
         PromptFieldSpec("tracking_methodology", "paragraph describing the measurement approach"),
         PromptFieldSpec(
             "review_trigger_points",
-            "3-5 events that should trigger a brand health review",
+            f"{REVIEW_TRIGGER_POINTS_MIN}-{REVIEW_TRIGGER_POINTS_MAX} events that should trigger a "
+            "brand health review",
         ),
     ),
 )
@@ -1226,7 +1337,8 @@ _BRAND_RULES_CODIFIER_PROMPT = AgentPromptSpec(
     fields=(
         PromptFieldSpec(
             "brand_guidelines",
-            "a list of 5-8 governance rules that everyone in the organisation must follow. "
+            f"a list of {BRAND_GUIDELINES_MIN}-{BRAND_GUIDELINES_MAX} governance rules that "
+            "everyone in the organisation must follow. "
             "Each rule is a single clear sentence.",
         ),
     ),
