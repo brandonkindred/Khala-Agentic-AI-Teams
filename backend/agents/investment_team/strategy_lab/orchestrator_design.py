@@ -62,7 +62,7 @@ from ._orchestrator_helpers import (
     _has_critical_failures,
     _RefinementAlignmentResult,
 )
-from .agents._llm_budget import DesignBudgetExhausted, active_budget
+from .agents._llm_budget import DesignBudgetExhausted, _annotate_budget_exhaustion, active_budget
 from .agents.alignment import AlignmentIssue, TradeAlignmentReport
 from .agents.design_review import CritiqueIssue, CritiqueLedger, LedgerDelta, SpecCritique
 from .alignment_findings import AlignmentFinding
@@ -1085,9 +1085,12 @@ class DesignMixin:
                 # repair) and the repair count so the short-circuit record
                 # reflects the spec actually evaluated, not the pre-loop
                 # draft, and its telemetry still reports the repairs applied.
-                exc.latest_spec = spec
-                exc.latest_rationale = rationale
-                exc.mechanical_repair_count = mechanical_repair_count
+                _annotate_budget_exhaustion(
+                    exc,
+                    spec,
+                    rationale=rationale,
+                    mechanical_repair_count=mechanical_repair_count,
+                )
                 raise
             critique.round = review_round
             critique_history.append(critique)
@@ -1159,9 +1162,12 @@ class DesignMixin:
                 regression_notice=regression_notice,
             )
         except DesignBudgetExhausted as exc:
-            exc.latest_spec = spec
-            exc.latest_rationale = rationale
-            exc.mechanical_repair_count = mechanical_repair_count
+            _annotate_budget_exhaustion(
+                exc,
+                spec,
+                rationale=rationale,
+                mechanical_repair_count=mechanical_repair_count,
+            )
             raise
         spec = self._build_spec_from_dict(strategy_dict, strategy_id=strategy_id)
         if drift_collector is not None:

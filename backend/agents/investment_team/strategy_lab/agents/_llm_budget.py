@@ -57,6 +57,49 @@ class DesignBudgetExhausted(Exception):
         )
 
 
+def _annotate_budget_exhaustion(
+    exc: DesignBudgetExhausted,
+    spec: object,
+    *,
+    code: Optional[object] = None,
+    rationale: Optional[object] = None,
+    mechanical_repair_count: Optional[int] = None,
+) -> DesignBudgetExhausted:
+    """Stamp the latest in-loop state onto a budget trip before re-raising.
+
+    The design / refinement / alignment / synthesis loops each catch a
+    :class:`DesignBudgetExhausted` at the point the per-cycle LLM-call budget
+    trips and attach the freshest spec — and, depending on the call site, the
+    code, rationale, and mechanical-repair count they were working on — before
+    re-raising, so the outer ``_run_design_loop`` budget handler can build the
+    ``failed: budget_exhausted`` short-circuit record from the state actually
+    reached rather than a stale pre-loop draft. This centralises that
+    annotate-and-reraise idiom.
+
+    Callers re-raise with a bare ``raise`` immediately after calling this, so
+    the original traceback and propagation semantics are preserved exactly;
+    this function only mutates ``exc`` in place and never raises or swallows.
+
+    Preconditions:
+      ``exc`` is the :class:`DesignBudgetExhausted` currently being handled.
+      ``spec`` is the latest realised spec for the failing attempt.
+    Postconditions:
+      ``exc.latest_spec is spec``. ``exc.latest_code`` /
+      ``exc.latest_rationale`` / ``exc.mechanical_repair_count`` are set only
+      for the keyword arguments that were supplied (non-``None``), leaving any
+      other annotations untouched. Returns the same ``exc`` object.
+    """
+    assert isinstance(exc, DesignBudgetExhausted), "exc must be a DesignBudgetExhausted"
+    exc.latest_spec = spec
+    if code is not None:
+        exc.latest_code = code
+    if rationale is not None:
+        exc.latest_rationale = rationale
+    if mechanical_repair_count is not None:
+        exc.mechanical_repair_count = mechanical_repair_count
+    return exc
+
+
 class LLMCallBudget:
     """Counter for design-phase LLM calls within a single ``run_cycle``.
 
