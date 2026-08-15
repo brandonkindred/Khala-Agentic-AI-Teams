@@ -1250,6 +1250,7 @@ def test_ollama_chat_json_self_correct_exhausted_still_raises(
     after exactly one corrective attempt (two total stream calls)."""
     from llm_service.interface import LLMJsonParseError
 
+    reset_complete_json_observer_state()
     monkeypatch.setenv("LLM_PROVIDER", "ollama")
     prose = "Still thinking about the architecture in markdown."
     prose_sse = [
@@ -2086,7 +2087,6 @@ def test_list_ollama_models_parses_and_sorts_names(monkeypatch: pytest.MonkeyPat
     mock_cls, mock_client = _patch_tags_get(_make_tags_response(200, payload))
     with patch("httpx.Client", mock_cls):
         assert list_ollama_models() == [
-            "deepseek-v4-flash:cloud",
             "deepseek-v4-flash:cloud",
             "qwen3-coder:480b-cloud",
         ]
