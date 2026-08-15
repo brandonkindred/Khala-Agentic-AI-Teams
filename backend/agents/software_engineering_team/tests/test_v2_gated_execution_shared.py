@@ -37,6 +37,7 @@ import pytest
 from llm_service.clients.dummy import DummyLLMClient
 from shared.dev_models.models import SystemArchitecture
 from software_engineering_team.backend_code_v2_team import models as be_models
+from software_engineering_team.shared.phases import execution as execution_mod
 from software_engineering_team.shared.phases.execution import (
     _WAVE_EXECUTION_CONCURRENCY,
     GatedExecutionConfig,
@@ -235,6 +236,13 @@ def _doc_review(*, documentation=None, detail_callback=None, **kwargs: Any) -> S
     return SimpleNamespace(documentation={}, iterations=1, final_quality_score=0.95)
 
 
+def _dbc_review(*, code=None, detail_callback=None, **kwargs: Any) -> SimpleNamespace:
+    """Default no-op DbC review stub (returns no file changes)."""
+    if detail_callback is not None:
+        detail_callback("dbc")
+    return SimpleNamespace(files={})
+
+
 def _make_gate_config(
     *,
     code_review_gate=None,
@@ -242,6 +250,7 @@ def _make_gate_config(
     security_gate=None,
     batch_fix=_batch_fix,
     doc_review=_doc_review,
+    dbc_review=None,
     coder=_coder,
     requires_failing: bool = True,
     verb: str = "failed with",
@@ -271,6 +280,7 @@ def _make_gate_config(
         gate_issue_log_verb=verb,
         parallelize_qa_security=parallelize_qa_security,
         status_qa_security=status_qa_sec,
+        run_dbc_self_review=dbc_review,
     )
 
 
@@ -283,6 +293,7 @@ def _config(
     security_stops: bool = True,
     grounding_limit: int = 3,
     grounding_ratio: float = 0.75,
+    dbc_comments: bool = True,
 ) -> be_models.MicrotaskReviewConfig:
     return be_models.MicrotaskReviewConfig(
         code_review_max_retries=cr,
@@ -292,6 +303,7 @@ def _config(
         security_failure_always_stops=security_stops,
         grounding_failure_cycle_limit=grounding_limit,
         grounding_failure_ratio_threshold=grounding_ratio,
+        enable_dbc_comments=dbc_comments,
     )
 
 
@@ -1709,6 +1721,104 @@ def test_documentation_unsafe_path_is_skipped(tmp_path):
 
     assert mt.status == MS.COMPLETED  # unsafe doc path is best-effort, skipped
     assert "../escape.md" not in result.files
+
+
+# ---------------------------------------------------------------------------
+# DbC comments self-review phase (seam wiring)
+# ---------------------------------------------------------------------------
+
+
+def test_dbc_self_review_called_when_configured(tmp_path, monkeypatch):
+    """The DbC phase runs before Documentation when the callable is wired and on."""
+    calls: List[Dict[str, Any]] = []
+
+    def _recorder(**kwargs: Any) -> None:
+        calls.append(kwargs)
+
+    monkeypatch.setattr(execution_mod, "_run_dbc_self_review", _recorder)
+    mt = _microtask()
+    _run(
+        _make_gate_config(dbc_review=_dbc_review),
+        [mt],
+        tmp_path,
+        review_config=_config(),
+    )
+
+    assert mt.status == MS.COMPLETED
+    assert len(calls) == 1
+    kw = calls[0]
+    assert kw["language"] == "python"  # forwarded from planning_result.language
+    assert kw["build_verify_label"] == ""  # default until a team threads its label
+    assert kw["gate_config"].run_dbc_self_review is _dbc_review
+
+
+def test_dbc_self_review_skipped_when_callable_is_none(tmp_path, monkeypatch):
+    """With no ``run_dbc_self_review`` wired (the default), the phase never runs."""
+    calls: List[Dict[str, Any]] = []
+
+    def _recorder(**kwargs: Any) -> None:
+        calls.append(kwargs)
+
+    monkeypatch.setattr(execution_mod, "_run_dbc_self_review", _recorder)
+    mt = _microtask()
+    _run(_make_gate_config(), [mt], tmp_path, review_config=_config())
+
+    assert mt.status == MS.COMPLETED
+    assert calls == []
+
+
+def test_dbc_self_review_skipped_when_flag_disabled(tmp_path, monkeypatch):
+    """``enable_dbc_comments=False`` suppresses the phase even when wired."""
+    calls: List[Dict[str, Any]] = []
+
+    def _recorder(**kwargs: Any) -> None:
+        calls.append(kwargs)
+
+    monkeypatch.setattr(execution_mod, "_run_dbc_self_review", _recorder)
+    mt = _microtask()
+    _run(
+        _make_gate_config(dbc_review=_dbc_review),
+        [mt],
+        tmp_path,
+        review_config=_config(dbc_comments=False),
+    )
+
+    assert mt.status == MS.COMPLETED
+    assert calls == []
+
+
+def test_dbc_self_review_output_visible_to_documentation(tmp_path):
+    """DbC insertions land on disk and reach the subsequent Documentation call.
+
+    Runs the real ``_run_dbc_self_review`` orchestrator (no monkeypatch): its
+    inner callable rewrites ``src/a.py`` (the file ``_coder`` produced, so it
+    survives the phase's "only write back reviewed paths" filter), and the
+    Documentation stub captures its ``code_files`` kwarg.
+    """
+    augmented = "print(1)\n# Preconditions: none\n"
+
+    def _dbc(*, code=None, detail_callback=None, **kwargs: Any) -> SimpleNamespace:
+        return SimpleNamespace(files={"src/a.py": augmented})
+
+    captured: Dict[str, Dict[str, str]] = {}
+
+    def _doc_capture(
+        *, documentation=None, code_files=None, detail_callback=None, **kwargs: Any
+    ) -> SimpleNamespace:
+        captured["code_files"] = dict(code_files or {})
+        return SimpleNamespace(documentation={}, iterations=1, final_quality_score=0.95)
+
+    mt = _microtask()
+    _run(
+        _make_gate_config(dbc_review=_dbc, doc_review=_doc_capture),
+        [mt],
+        tmp_path,
+        review_config=_config(),
+    )
+
+    assert mt.status == MS.COMPLETED
+    assert captured["code_files"]["src/a.py"] == augmented  # DbC output flows into docs
+    assert (tmp_path / "src" / "a.py").read_text() == augmented  # and is written to disk
 
 
 # ---------------------------------------------------------------------------
