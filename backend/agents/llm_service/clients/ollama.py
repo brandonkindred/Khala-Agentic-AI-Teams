@@ -1311,6 +1311,17 @@ class OllamaLLMClient(LLMClient):
                                         fr = choices[0].get("finish_reason")
                                         if fr:
                                             finish_reason = fr
+                                # The stream loop terminates two ways, and BOTH end
+                                # here: an explicit `break` on a `[DONE]` sentinel, or
+                                # natural exhaustion of `iter_lines()` when the server
+                                # closes the stream without one. Natural completion is
+                                # not a stuck state — it falls through to the
+                                # unconditional `return` below (same as `[DONE]`), so
+                                # the enclosing `while` cannot spin on a
+                                # sentinel-less stream. Whatever content accumulated is
+                                # assembled and returned; if none did,
+                                # `_parse_response_content` raises `_EmptyResponseSignal`,
+                                # which the loop resolves on finite retry budgets.
                                 elapsed = time.monotonic() - t0
                                 joined_content = "".join(content_parts)
                                 caller = _caller_var.get()

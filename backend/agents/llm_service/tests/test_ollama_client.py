@@ -351,6 +351,62 @@ def test_ollama_sse_no_space_after_colon(monkeypatch: pytest.MonkeyPatch) -> Non
     assert result == {"v": 1}
 
 
+def test_ollama_stream_without_done_marker_returns_content(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A 200 stream that ends WITHOUT a ``data: [DONE]`` sentinel is not a stuck
+    state: ``iter_lines()`` exhausts naturally, the inner ``for`` loop completes,
+    and control falls through to the same ``return`` the ``[DONE]`` break reaches.
+    The accumulated content is parsed and returned rather than the ``while True``
+    loop spinning. A single stream attempt is provided, so an unbounded retry
+    would exhaust the mock and fail loudly instead of hanging."""
+    monkeypatch.setenv("LLM_PROVIDER", "ollama")
+    monkeypatch.setenv("LLM_MAX_RETRIES", "0")
+    # No trailing "data: [DONE]" line — the server closed the stream after the
+    # final content/finish chunk.
+    sse_lines = [
+        'data: {"choices":[{"delta":{"content":"{\\"ok\\": 1}"},"finish_reason":null}]}',
+        'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}',
+    ]
+    mock_client, _ = _make_streaming_mock(200, sse_lines)
+    with patch("httpx.Client") as mock_client_cls:
+        mock_client_cls.return_value = mock_client
+        client = OllamaLLMClient(model="test", base_url="http://localhost:9999", timeout=5)
+        result = client.complete_json("test", objective="test", temperature=0)
+    assert result == {"ok": 1}
+
+
+def test_ollama_stream_without_done_marker_empty_is_bounded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An empty (reasoning-only) 200 stream that ends WITHOUT a ``[DONE]`` sentinel
+    terminates on a finite budget, not an infinite retry. The natural for-loop
+    completion falls through to ``_parse_response_content``, which raises
+    ``_EmptyResponseSignal`` for empty content; with ``think=False`` the
+    downgrade ladder yields a single attempt before declaring semantic
+    exhaustion. Exactly one stream attempt is mocked, so an unbounded outer loop
+    would raise ``StopIteration`` on the second ``.stream()`` call rather than
+    silently looping."""
+    monkeypatch.setenv("LLM_PROVIDER", "ollama")
+    # Reasoning delta + a finish chunk, but no content and no "data: [DONE]" line.
+    sse_lines = [
+        'data: {"choices":[{"delta":{"reasoning":"hmm..."},"finish_reason":null}]}',
+        'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}',
+    ]
+    cms = [_stream_cm(200, sse_lines=sse_lines)]
+    with patch("httpx.Client") as mock_client_cls:
+        mock_client, captured = _capturing_multi_client(cms)
+        mock_client_cls.return_value = mock_client
+        client = OllamaLLMClient(
+            model="deepseek-v4-pro:cloud", base_url="http://localhost:9999", timeout=5
+        )
+        with pytest.raises(LLMSemanticExhaustionError) as exc_info:
+            client.complete_json("q", objective="test", temperature=0, think=False)
+    # Single attempt consumed — the empty path is bounded, not infinitely retried.
+    assert len(captured) == 1
+    assert exc_info.value.attempts_used == 1
+
+
 def test_ollama_complete_json_429_raises_rate_limit(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("LLM_PROVIDER", "ollama")
     monkeypatch.setenv("LLM_MAX_RETRIES", "0")
