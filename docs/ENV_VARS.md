@@ -1219,9 +1219,39 @@ matches a finding keyed as `app/foo.py`. Set to `false`/`0`/`no` to
 disable consolidation (any other value, or unset, leaves it enabled) — this
 only turns off merging, the underlying findings are unaffected.
 
+In the in-process thread-mode coordinator this consolidation is now performed
+as the `side-effects` special case of the generalized finding-combination step
+(see `CODE_REVIEW_COMBINE_SIMILARITY_THRESHOLD` below), which runs after the
+merged architecture/side-effect pass and before the false-positive filter;
+setting this flag to `false` disables that `side-effects`-specific merging
+(the merge-regardless-of-wording construct rule and the citation link) while
+the generic same-construct-plus-similar and same-anchor de-duplication still
+apply. The durable Temporal path continues to run the standalone consolidation
+activity gated by this same flag.
+
 Any setup failure is fail-safe: it is logged and the original `side-effects`
 findings pass through unchanged, so a broken consolidation step never blocks
 or changes the rest of the review.
+
+### CODE_REVIEW_COMBINE_SIMILARITY_THRESHOLD
+Jaccard word-set similarity floor (default `0.6`, clamped to `[0, 1]`; garbage
+→ default) used by the thread-mode coordinator's finding-combination step to
+decide when two findings describe the same underlying issue. Combination runs
+once over the whole finding stream — the map-phase findings plus the merged
+architecture/side-effect pass's additive findings — after that pass and
+**before** the false-positive filter, so the filter verifies a smaller, deduped
+set (fewer tokens). Two same-category findings are combined when they are
+anchored in the same enclosing Python construct and are either `side-effects`
+(see `CODE_REVIEW_SIDE_EFFECT_CONSOLIDATION` above) or have description Jaccard
+`>= threshold`; or when they are the same-anchor near-duplicate (same file, same
+line or one unanchored, Jaccard `>= threshold`). Raising the threshold merges
+less (more separate findings, more filter calls); lowering it merges more. It is
+included in the submission-cache fingerprint, so changing it invalidates a
+stored verdict. Separate occurrences on different lines are never merged; that
+cross-line theming is left to the review narrative / systemic synthesis. This
+step subsumes the exact-match dedupe and the standalone side-effect
+consolidation on the in-process path; it is fail-safe (any error degrades to the
+uncombined findings). The durable Temporal path does not yet run it.
 
 ### CODE_REVIEW_SPEC_COMPLIANCE_PASS
 Default-**off** toggle (`env_bool`, unlike the default-on tail passes above)
