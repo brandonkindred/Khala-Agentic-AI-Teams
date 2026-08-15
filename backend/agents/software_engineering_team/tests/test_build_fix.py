@@ -16,6 +16,7 @@ from shared.command_runner.executor import CommandResult
 from software_engineering_team.build_fix import (
     _collect_project_files,
     _execute_llm_repair_attempt,
+    _is_command_result,
     _run_build_verification,
     _run_post_fix_build_verification,
     _try_build_fix_one_at_a_time,
@@ -70,6 +71,70 @@ def test_backend_code_v2_passes_on_valid_python(tmp_path: Path) -> None:
 
     assert success is True
     assert error_output == ""
+
+
+def test_safe_repair_write_path_rejects_traversal(tmp_path: Path) -> None:
+    from software_engineering_team.build_fix import _safe_repair_write_path
+
+    root = tmp_path.resolve()
+    assert _safe_repair_write_path(root, "../escape.py") is None
+    assert _safe_repair_write_path(root, "") is None
+    assert _safe_repair_write_path(root, "/tmp/fix.py") is None
+
+
+def test_safe_repair_write_path_rejects_symlink_into_excluded_dir(tmp_path: Path) -> None:
+    from software_engineering_team.build_fix import _safe_repair_write_path
+
+    root = tmp_path.resolve()
+    (root / "venv").mkdir()
+    (root / "alias").symlink_to(root / "venv")
+    try:
+        assert _safe_repair_write_path(root, "alias/pkg.py") is None
+    finally:
+        (root / "alias").unlink(missing_ok=True)
+
+
+def test_safe_repair_write_path_rejects_venv(tmp_path: Path) -> None:
+    from software_engineering_team.build_fix import _safe_repair_write_path
+
+    root = tmp_path.resolve()
+    assert _safe_repair_write_path(root, "venv/lib/site.py") is None
+    assert _safe_repair_write_path(root, ".venv/lib/site.py") is None
+
+
+def test_safe_repair_write_path_rejects_unsnapshotted_dirs(tmp_path: Path) -> None:
+    from software_engineering_team.build_fix import _safe_repair_write_path
+
+    root = tmp_path.resolve()
+    assert _safe_repair_write_path(root, "build/out.js") is None
+    assert _safe_repair_write_path(root, "dist/app.js") is None
+    assert _safe_repair_write_path(root, "node_modules/pkg/index.js") is None
+    assert _safe_repair_write_path(root, ".pytest_cache/README.md") is None
+    assert _safe_repair_write_path(root, "__pycache__/a.pyc") is None
+    assert _safe_repair_write_path(root, ".angular/cache") is None
+    assert _safe_repair_write_path(root, ".git/config") is None
+
+
+def test_safe_repair_write_path_accepts_in_repo_source(tmp_path: Path) -> None:
+    from software_engineering_team.build_fix import _safe_repair_write_path
+
+    root = tmp_path.resolve()
+    out = _safe_repair_write_path(root, "app/main.py")
+    assert out == root / "app" / "main.py"
+
+
+def test_safe_repair_write_path_rejects_symlink_escape(tmp_path: Path) -> None:
+    from software_engineering_team.build_fix import _safe_repair_write_path
+
+    root = tmp_path.resolve()
+    outside = tmp_path.parent.resolve() / f"dbc-repair-escape-{tmp_path.name}"
+    outside.mkdir()
+    (root / "link").symlink_to(outside)
+    try:
+        assert _safe_repair_write_path(root, "link/fix.py") is None
+    finally:
+        (root / "link").unlink(missing_ok=True)
+        outside.rmdir()
 
 
 def test_collect_project_files_reads_backend_python_and_skips_excluded_dirs(tmp_path: Path) -> None:
@@ -236,6 +301,68 @@ def test_execute_llm_repair_attempt_returns_false_on_llm_error(
     assert not (tmp_path / "app.py").exists()
 
 
+def test_execute_llm_repair_attempt_returns_false_when_parser_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class _FakeAgent:
+        def __init__(self, model: object) -> None:
+            pass
+
+        def __call__(self, prompt: str) -> str:
+            return "TEMPLATE"
+
+    monkeypatch.setattr("software_engineering_team.build_fix.Agent", _FakeAgent)
+
+    def _boom(raw: str) -> dict:
+        raise ValueError("malformed template")
+
+    applied = _execute_llm_repair_attempt(
+        issue={"description": "x", "file_path": "", "recommendation": "Fix."},
+        current_files={},
+        project_dir=tmp_path,
+        model=object(),
+        parse_fn=_boom,
+        fix_prompt="{source} {severity} {description} {file_path} {recommendation} {current_code}",
+        is_frontend=True,
+        language_conventions="",
+        task_id="t1",
+        attempt=0,
+        max_attempts=3,
+    )
+
+    assert applied is False
+    assert not (tmp_path / "app.py").exists()
+
+
+def test_execute_llm_repair_attempt_returns_false_on_non_dict_parse(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class _FakeAgent:
+        def __init__(self, model: object) -> None:
+            pass
+
+        def __call__(self, prompt: str) -> str:
+            return "TEMPLATE"
+
+    monkeypatch.setattr("software_engineering_team.build_fix.Agent", _FakeAgent)
+
+    applied = _execute_llm_repair_attempt(
+        issue={"description": "x", "file_path": "", "recommendation": "Fix."},
+        current_files={},
+        project_dir=tmp_path,
+        model=object(),
+        parse_fn=lambda raw: None,  # type: ignore[arg-type,return-value]
+        fix_prompt="{source} {severity} {description} {file_path} {recommendation} {current_code}",
+        is_frontend=True,
+        language_conventions="",
+        task_id="t1",
+        attempt=0,
+        max_attempts=3,
+    )
+
+    assert applied is False
+
+
 def test_try_build_fix_survives_pytest_runner_exception(
     tmp_path: Path, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -327,3 +454,172 @@ def test_try_build_fix_loop_survives_pytest_crash_after_patch(
     assert success is False
     assert "pytest env exploded after patch" in error_output
     assert any("pytest failed to run" in record.message for record in caplog.records)
+
+
+def test_try_build_fix_backend_syntax_parser_preserves_windows_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The backend syntax-error parser must preserve Windows paths and colon messages.
+
+    Preconditions:
+        ``run_python_syntax_check`` reports a failure whose stderr line uses a
+        Windows drive-letter path and a colon-bearing message
+        (``"C:\\proj\\a.py: SyntaxError: invalid syntax"``).
+    Postconditions:
+        The issue handed to the repair loop carries the full path as ``file_path``
+        and the full text after ``": "`` as ``description`` — the ": " delimiter is
+        used so the drive-letter colon and the message colons are not split on.
+    """
+    _write(tmp_path / "app.py", "def foo():\n    return 1\n")
+
+    syntax_fail = CommandResult(
+        success=False,
+        exit_code=1,
+        stdout="",
+        stderr="Syntax errors found:\nC:\\proj\\a.py: SyntaxError: invalid syntax",
+    )
+    monkeypatch.setattr(
+        "shared.command_runner.executor.run_python_syntax_check",
+        lambda *args, **kwargs: syntax_fail,
+    )
+    monkeypatch.setattr(
+        "software_engineering_team.build_fix.get_strands_model",
+        lambda *args, **kwargs: object(),
+    )
+
+    captured: list[dict] = []
+
+    def _capture(*, issue, **kwargs):
+        captured.append(issue)
+        return False  # do not apply; loop moves on and exhausts
+
+    monkeypatch.setattr("software_engineering_team.build_fix._execute_llm_repair_attempt", _capture)
+
+    success, _ = _try_build_fix_one_at_a_time(tmp_path, "backend", "task-win-path")
+
+    assert success is False
+    assert len(captured) == 1
+    assert captured[0]["file_path"] == "C:\\proj\\a.py"
+    assert captured[0]["description"] == "SyntaxError: invalid syntax"
+
+
+def test_is_command_result_rejects_none_and_incomplete_objects() -> None:
+    """``_is_command_result`` guards the CommandResult interface the repair loop relies on.
+
+    Preconditions:
+        None.
+    Postconditions:
+        Returns ``False`` for ``None`` and for objects missing ``success`` or a
+        callable ``parsed_failures``; returns ``True`` for a real ``CommandResult``.
+    """
+
+    class _NoParsedFailures:
+        success = False
+
+    class _NonCallableParsedFailures:
+        success = False
+        parsed_failures = "not callable"
+
+    assert _is_command_result(None) is False
+    assert _is_command_result(object()) is False
+    assert _is_command_result(_NoParsedFailures()) is False
+    assert _is_command_result(_NonCallableParsedFailures()) is False
+    assert (
+        _is_command_result(CommandResult(success=True, exit_code=0, stdout="", stderr="")) is True
+    )
+
+
+def test_try_build_fix_aborts_on_unusable_verification_result(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A ``None`` post-fix verification result must abort the loop gracefully, not raise.
+
+    Preconditions:
+        Initial syntax check succeeds and ``run_pytest`` reports a test failure so the
+        LLM repair loop is entered and applies a patch; the post-fix verification then
+        returns ``None`` (an unusable result).
+    Postconditions:
+        ``_try_build_fix_one_at_a_time`` returns ``(False, summary)`` and logs an
+        "unusable result" warning instead of raising ``AttributeError``.
+    """
+    _write(tmp_path / "app.py", "def foo():\n    return 1\n")
+    _write(tmp_path / "tests" / "test_app.py", "def test_foo():\n    assert True\n")
+
+    syntax_ok = CommandResult(success=True, exit_code=0, stdout="", stderr="")
+    pytest_fail = CommandResult(
+        success=False,
+        exit_code=1,
+        stdout="FAILED tests/test_app.py::test_foo",
+        stderr="",
+    )
+
+    monkeypatch.setattr(
+        "shared.command_runner.executor.run_python_syntax_check",
+        lambda *args, **kwargs: syntax_ok,
+    )
+    monkeypatch.setattr(
+        "shared.command_runner.executor.run_pytest",
+        lambda *args, **kwargs: pytest_fail,
+    )
+    # Post-fix verification yields an unusable result to exercise the loop guard.
+    monkeypatch.setattr(
+        "software_engineering_team.build_fix._run_post_fix_build_verification",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        "software_engineering_team.build_fix.get_strands_model",
+        lambda *args, **kwargs: object(),
+    )
+
+    class _FakeAgent:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        def __call__(self, prompt: str) -> str:
+            return "## FILE app.py ##\ndef foo():\n    return 2\n"
+
+    monkeypatch.setattr("software_engineering_team.build_fix.Agent", _FakeAgent)
+
+    with caplog.at_level(logging.WARNING):
+        success, error_output = _try_build_fix_one_at_a_time(
+            tmp_path, "backend", "task-unusable-verification"
+        )
+
+    assert success is False
+    assert "no usable result" in error_output
+    assert any("unusable result" in record.message for record in caplog.records)
+
+
+def test_try_build_fix_survives_repair_attempt_exception(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An unexpected error inside a single repair attempt must not abort the loop.
+
+    Preconditions:
+        ``tmp_path`` contains a Python file with a real syntax error so the
+        backend branch populates ``issues`` and enters the repair loop, and
+        ``_execute_llm_repair_attempt`` raises when called.
+    Postconditions:
+        ``_try_build_fix_one_at_a_time`` logs the failure and returns
+        ``(False, summary)`` instead of propagating the exception.
+    """
+    _write(tmp_path / "app.py", "def foo(:\n    return 1\n")
+
+    monkeypatch.setattr(
+        "software_engineering_team.build_fix.get_strands_model",
+        lambda *args, **kwargs: object(),
+    )
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("repair boom")
+
+    monkeypatch.setattr("software_engineering_team.build_fix._execute_llm_repair_attempt", _boom)
+
+    with caplog.at_level(logging.WARNING):
+        success, error_output = _try_build_fix_one_at_a_time(
+            tmp_path, "backend", "task-repair-boom"
+        )
+
+    assert success is False
+    assert error_output
+    assert any("unexpected error during repair" in record.message for record in caplog.records)

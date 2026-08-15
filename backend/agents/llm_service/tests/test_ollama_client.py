@@ -280,6 +280,38 @@ def test_ollama_complete_json_parses_response(monkeypatch: pytest.MonkeyPatch) -
     assert result == {"answer": 42}
 
 
+def test_ollama_sse_parsing_handles_str_lines_from_httpx(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """httpx's Response.iter_lines() yields decoded str (via iter_text()), NOT
+    bytes like requests. The SSE parser therefore operates on str throughout:
+    ``partial_buf`` is a str, and joining it with a raw line via ``+`` plus the
+    subsequent ``startswith("data:")`` must work without a TypeError.
+
+    This exercises the partial-buffer branch by splitting one ``data:`` line
+    across two str chunks (as a mid-frame TCP split would surface it), so a
+    regression to bytes-typed handling would raise here.
+    """
+    monkeypatch.setenv("LLM_PROVIDER", "ollama")
+    payload = '{"choices":[{"delta":{"content":"{\\"answer\\": 42}"},"finish_reason":null}]}'
+    split = len(payload) // 2
+    # First fragment is not valid JSON on its own -> buffered as str partial_buf;
+    # the second fragment completes it -> str concatenation + startswith.
+    sse_lines = [
+        "data: " + payload[:split],
+        payload[split:],
+        'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}',
+        "data: [DONE]",
+    ]
+    assert all(isinstance(line, str) for line in sse_lines)
+    mock_client, _ = _make_streaming_mock(200, sse_lines)
+    with patch("httpx.Client") as mock_client_cls:
+        mock_client_cls.return_value = mock_client
+        client = OllamaLLMClient(model="test", base_url="http://localhost:9999", timeout=5)
+        result = client.complete_json("What is 6*7?", objective="test", temperature=0)
+    assert result == {"answer": 42}
+
+
 def test_complete_json_clears_stale_turns_from_prior_failed_call(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -337,6 +369,25 @@ def test_ollama_sse_malformed_chunk_skipped(monkeypatch: pytest.MonkeyPatch) -> 
         assert result == {"v": 1}
 
 
+def test_ollama_sse_non_object_chunk_skipped(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A syntactically valid but non-object SSE chunk (e.g. ``data: 123``) is skipped,
+    not crashed on — valid content around it is still returned."""
+    monkeypatch.setenv("LLM_PROVIDER", "ollama")
+    monkeypatch.setenv("LLM_MAX_RETRIES", "0")
+    sse_lines = [
+        'data: {"choices":[{"delta":{"content":"{\\"v\\":1}"},"finish_reason":null}]}',
+        "data: 123",  # valid JSON, but a bare int has no .get() — must be skipped
+        'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}',
+        "data: [DONE]",
+    ]
+    mock_client, _ = _make_streaming_mock(200, sse_lines)
+    with patch("httpx.Client") as mock_client_cls:
+        mock_client_cls.return_value = mock_client
+        client = OllamaLLMClient(model="test", base_url="http://localhost:9999", timeout=5)
+        result = client.complete_json("test", objective="test", temperature=0)
+    assert result == {"v": 1}
+
+
 def test_ollama_sse_no_space_after_colon(monkeypatch: pytest.MonkeyPatch) -> None:
     """SSE lines with data:{...} (no space after colon) must be parsed correctly."""
     monkeypatch.setenv("LLM_PROVIDER", "ollama")
@@ -351,6 +402,62 @@ def test_ollama_sse_no_space_after_colon(monkeypatch: pytest.MonkeyPatch) -> Non
         client = OllamaLLMClient(model="test", base_url="http://localhost:9999", timeout=5)
         result = client.complete_json("test", objective="test", temperature=0)
     assert result == {"v": 1}
+
+
+def test_ollama_stream_without_done_marker_returns_content(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A 200 stream that ends WITHOUT a ``data: [DONE]`` sentinel is not a stuck
+    state: ``iter_lines()`` exhausts naturally, the inner ``for`` loop completes,
+    and control falls through to the same ``return`` the ``[DONE]`` break reaches.
+    The accumulated content is parsed and returned rather than the ``while True``
+    loop spinning. A single stream attempt is provided, so an unbounded retry
+    would exhaust the mock and fail loudly instead of hanging."""
+    monkeypatch.setenv("LLM_PROVIDER", "ollama")
+    monkeypatch.setenv("LLM_MAX_RETRIES", "0")
+    # No trailing "data: [DONE]" line — the server closed the stream after the
+    # final content/finish chunk.
+    sse_lines = [
+        'data: {"choices":[{"delta":{"content":"{\\"ok\\": 1}"},"finish_reason":null}]}',
+        'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}',
+    ]
+    mock_client, _ = _make_streaming_mock(200, sse_lines)
+    with patch("httpx.Client") as mock_client_cls:
+        mock_client_cls.return_value = mock_client
+        client = OllamaLLMClient(model="test", base_url="http://localhost:9999", timeout=5)
+        result = client.complete_json("test", objective="test", temperature=0)
+    assert result == {"ok": 1}
+
+
+def test_ollama_stream_without_done_marker_empty_is_bounded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An empty (reasoning-only) 200 stream that ends WITHOUT a ``[DONE]`` sentinel
+    terminates on a finite budget, not an infinite retry. The natural for-loop
+    completion falls through to ``_parse_response_content``, which raises
+    ``_EmptyResponseSignal`` for empty content; with ``think=False`` the
+    downgrade ladder yields a single attempt before declaring semantic
+    exhaustion. Exactly one stream attempt is mocked, so an unbounded outer loop
+    would raise ``StopIteration`` on the second ``.stream()`` call rather than
+    silently looping."""
+    monkeypatch.setenv("LLM_PROVIDER", "ollama")
+    # Reasoning delta + a finish chunk, but no content and no "data: [DONE]" line.
+    sse_lines = [
+        'data: {"choices":[{"delta":{"reasoning":"hmm..."},"finish_reason":null}]}',
+        'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}',
+    ]
+    cms = [_stream_cm(200, sse_lines=sse_lines)]
+    with patch("httpx.Client") as mock_client_cls:
+        mock_client, captured = _capturing_multi_client(cms)
+        mock_client_cls.return_value = mock_client
+        client = OllamaLLMClient(
+            model="deepseek-v4-pro:cloud", base_url="http://localhost:9999", timeout=5
+        )
+        with pytest.raises(LLMSemanticExhaustionError) as exc_info:
+            client.complete_json("q", objective="test", temperature=0, think=False)
+    # Single attempt consumed — the empty path is bounded, not infinitely retried.
+    assert len(captured) == 1
+    assert exc_info.value.attempts_used == 1
 
 
 def test_ollama_complete_json_429_raises_rate_limit(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -777,6 +884,46 @@ def test_ollama_httpstatuserror_5xx_exhaustion_raises(monkeypatch: pytest.Monkey
         with pytest.raises(LLMTemporaryError) as exc_info:
             client.complete_json("hello", objective="test", temperature=0)
     assert exc_info.value.status_code == 503
+
+
+def test_ollama_httpstatuserror_4xx_raises_permanent(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A 4xx httpx.HTTPStatusError raises LLMPermanentError without retrying."""
+    monkeypatch.setenv("LLM_PROVIDER", "ollama")
+    monkeypatch.setenv("LLM_MAX_RETRIES", "3")
+    req = httpx.Request("POST", "http://localhost:9999/v1/chat/completions")
+    resp = httpx.Response(403, request=req, text="forbidden")
+    err = httpx.HTTPStatusError("403", request=req, response=resp)
+    mock_client = MagicMock()
+    # A single side-effect entry: any retry would exhaust it and raise
+    # StopIteration, so a clean LLMPermanentError proves the loop fails fast.
+    mock_client.__enter__.return_value.stream.side_effect = [err]
+    with patch("httpx.Client") as mock_client_cls:
+        mock_client_cls.return_value = mock_client
+        client = OllamaLLMClient(model="test", base_url="http://localhost:9999", timeout=5)
+        with pytest.raises(LLMPermanentError) as exc_info:
+            client.complete_json("hello", objective="test", temperature=0)
+    assert exc_info.value.status_code == 403
+    assert mock_client.__enter__.return_value.stream.call_count == 1
+
+
+def test_ollama_httpstatuserror_unhandled_status_raises_permanent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A status outside 429/5xx/4xx hits the catch-all: raise, never loop forever."""
+    monkeypatch.setenv("LLM_PROVIDER", "ollama")
+    monkeypatch.setenv("LLM_MAX_RETRIES", "3")
+    req = httpx.Request("POST", "http://localhost:9999/v1/chat/completions")
+    resp = httpx.Response(302, request=req, text="found")
+    err = httpx.HTTPStatusError("302", request=req, response=resp)
+    mock_client = MagicMock()
+    mock_client.__enter__.return_value.stream.side_effect = [err]
+    with patch("httpx.Client") as mock_client_cls:
+        mock_client_cls.return_value = mock_client
+        client = OllamaLLMClient(model="test", base_url="http://localhost:9999", timeout=5)
+        with pytest.raises(LLMPermanentError) as exc_info:
+            client.complete_json("hello", objective="test", temperature=0)
+    assert exc_info.value.status_code == 302
+    assert mock_client.__enter__.return_value.stream.call_count == 1
 
 
 def test_ollama_read_timeout_exhaustion_raises(monkeypatch: pytest.MonkeyPatch) -> None:
