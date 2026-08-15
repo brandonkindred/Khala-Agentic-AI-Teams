@@ -39,8 +39,34 @@ def _backing_client(model: Any) -> Any:
     raise TypeError(f"unsupported model for submission-pass test stub: {type(model)!r}")
 
 
-def wire_run_agent_via_reasoning_for_test_clients(monkeypatch: pytest.MonkeyPatch, runner_mod: Any) -> None:
-    """Drive ``run_agent_via_reasoning`` through ``complete`` + ``complete_json`` stubs."""
+class _StubReasoningAgent:
+    """Minimal stand-in so ``on_reasoning_agent`` can serialize ``messages``.
+
+    Postconditions: ``messages`` is a two-turn user/assistant conversation
+        whose user text is the reasoning prompt that drove this stub call.
+    """
+
+    def __init__(self, prompt: str) -> None:
+        self.messages = [
+            {"role": "user", "content": [{"text": prompt}]},
+            {
+                "role": "assistant",
+                "content": [{"text": "Structured prose review summary."}],
+            },
+        ]
+
+
+def wire_run_agent_via_reasoning_for_test_clients(
+    monkeypatch: pytest.MonkeyPatch, runner_mod: Any
+) -> None:
+    """Drive ``run_agent_via_reasoning`` through ``complete`` + ``complete_json`` stubs.
+
+    Honors ``on_reasoning_agent`` and ``on_formatting`` the same way the real
+    helper does after each pass, so transcript-recording call sites still see
+    a ``messages`` conversation and a formatting entry when this autouse stub
+    is active (pytest-xdist loads this plugin session-wide from sibling test
+    modules).
+    """
 
     def _fake(**kwargs: Any) -> Any:
         model = kwargs["model"]
@@ -48,8 +74,15 @@ def wire_run_agent_via_reasoning_for_test_clients(monkeypatch: pytest.MonkeyPatc
         parse = kwargs["parse"]
         client = _backing_client(model)
         client.complete(reasoning_prompt, objective="submission-pass-test")
+        on_reasoning_agent = kwargs.get("on_reasoning_agent")
+        if on_reasoning_agent is not None:
+            on_reasoning_agent(_StubReasoningAgent(reasoning_prompt))
         data = client.complete_json("format", objective="submission-pass-test")
-        return parse(json.dumps(data))
+        raw = json.dumps(data)
+        on_formatting = kwargs.get("on_formatting")
+        if on_formatting is not None:
+            on_formatting("format", raw)
+        return parse(raw)
 
     monkeypatch.setattr(runner_mod, "run_agent_via_reasoning", _fake)
 

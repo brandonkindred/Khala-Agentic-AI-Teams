@@ -263,6 +263,9 @@ def extract_json_from_response(
           caller's original ``expected_keys``, whenever no earlier strategy
           succeeds.
         - Raises ``LLMJsonParseError`` only when every strategy above fails.
+          ``response_preview`` is a truncated log-safe slice of the (possibly
+          fence-stripped) text; ``raw_response`` is the original untruncated
+          model reply.
     """
     original_text = text
     original_expected_keys = expected_keys
@@ -338,4 +341,5 @@ def extract_json_from_response(
         f"Response preview: {text[:500]!r}...",
         error_kind="json_parse",
         response_preview=text[:500],
+        raw_response=original_text,
     )

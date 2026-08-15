@@ -1509,6 +1509,25 @@ class CodeReviewRunItem(BaseModel):
     completed_at: str | None = None
 
 
+class CodeReviewTranscriptEntry(BaseModel):
+    """One LLM call the review pipeline made (GET /github/reviews/{job_id}/transcript)."""
+
+    stage: str
+    target: str
+    model: str
+    prompt: str
+    response: str
+    started_at: str
+    duration_ms: int
+
+
+class CodeReviewTranscript(BaseModel):
+    """A review's full durable transcript, in call order."""
+
+    job_id: str
+    entries: list[CodeReviewTranscriptEntry] = Field(default_factory=list)
+
+
 class CreateReviewIssuesBody(BaseModel):
     """Request body for POST /github/reviews/{job_id}/issues.
 
@@ -2901,6 +2920,59 @@ async def list_github_reviews(
     )
     try:
         return [CodeReviewRunItem.model_validate(item) for item in data]
+    except (ValueError, TypeError) as e:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Coding team service returned an unexpected response: {e}",
+        ) from e
+
+
+@router.get("/github/reviews/{job_id}/transcript", response_model=CodeReviewTranscript)
+async def get_github_review_transcript(
+    job_id: str,
+    owner: str,
+    repo: str,
+) -> CodeReviewTranscript:
+    """Return one review's full durable transcript (every LLM call it made).
+
+    The Code Review page's "View Transcript" action, available once a review
+    row shows a completed status. ``owner``/``repo`` are the repository the
+    review row belongs to (the page already has them from the review list) —
+    required (not looked up) so the PAT-reachability gate below runs before
+    any transcript content is fetched.
+
+    Preconditions:
+        - GitHub integration is enabled with a stored PAT that can reach
+          ``owner``/``repo`` (verified against GitHub, same gate as
+          ``GET /github/reviews``).
+        - ``CODING_TEAM_SERVICE_URL`` points at a reachable coding-team service.
+    Postconditions:
+        - Returns the transcript's entries in call order. Every failure path
+          raises ``HTTPException``; no ``httpx`` error escapes unhandled. A
+          ``job_id`` whose stored review belongs to a different repository than
+          ``owner``/``repo`` is refused by the coding-team service (409),
+          forwarded unchanged.
+    """
+    _cfg, token, owner, repo = await asyncio.to_thread(_resolve_github_target, None, owner, repo)
+
+    coding_team_url = _require_coding_team_url()
+
+    # Same rationale as GET /github/reviews: history lives in Khala's own store,
+    # not GitHub, so gate it on the PAT actually reaching the target repo.
+    await _assert_pat_can_reach_repo(owner, repo, token)
+
+    data = await _forward_to_coding_team(
+        coding_team_url,
+        f"reviews/{job_id}/transcript",
+        method="GET",
+        params={"owner": owner, "repo": repo},
+        timeout_s=30.0,
+        log_prefix="github review transcript",
+        timeout_detail="Coding team service timed out while retrieving the transcript.",
+        generic_failure_detail="Failed to retrieve the review transcript.",
+    )
+    try:
+        return CodeReviewTranscript.model_validate(data)
     except (ValueError, TypeError) as e:
         raise HTTPException(
             status_code=502,
