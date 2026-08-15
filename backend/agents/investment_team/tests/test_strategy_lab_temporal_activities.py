@@ -1589,7 +1589,7 @@ def test_run_design_attempt_activity_write_hook_non_retryable_failure_propagates
 
 
 def test_run_design_attempt_activity_write_hook_retryable_failure_is_swallowed(monkeypatch):
-    """A transient (retryable) checkpoint-write lookup failure is logged and
+    """A transient (retryable) checkpoint-write failure is logged and
     swallowed -- Phase 1's real LLM work already happened, so the activity
     still returns its normal outcome instead of burning a Temporal retry
     purely to recover a checkpoint write."""

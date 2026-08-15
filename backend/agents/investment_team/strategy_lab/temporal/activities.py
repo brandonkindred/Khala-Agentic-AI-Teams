@@ -613,7 +613,7 @@ def _design_context_to_wire(
         return None
     return {
         "rounds": design_context.rounds,
-        "critiques": [c.model_dump(mode="json") for c in design_context.critiques],
+        "critiques": [c.model_dump(mode="json") for c in (design_context.critiques or [])],
         "stop_reason": design_context.stop_reason,
         "loop_telemetry": design_context.loop_telemetry,
     }
