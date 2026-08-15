@@ -17,7 +17,7 @@ bootstrap, or the standalone agent-provisioning container.
 | When | What | Where |
 |---|---|---|
 | **Module import** | In-process HTTP routers (`app.include_router`) | Bottom of `unified_api/main.py`, after `app = FastAPI(...)` |
-| **Lifespan startup** | Postgres schemas, assistant mount specs, proxy catch-alls, background workers | `lifespan()` numbered steps 0–8 |
+| **Lifespan startup** | Postgres schemas, assistant mount specs, proxy catch-alls, background workers | `lifespan()` numbered steps 0–7 |
 
 Looking only at `lifespan()` will miss platform HTTP. Looking only at
 `include_router` will miss workers and proxy routes. This catalog covers both.
@@ -64,9 +64,8 @@ flowchart TB
     S5["5. Console run pruner"]
     S6["6. Cognition graph sync"]
     S7["7. Cognition scheduler"]
-    S8["8. Studio agent-studio-queue worker"]
-    S0 --> S1 --> S2 --> S3 --> S4 --> S5 --> S6 --> S7 --> S8
-    S8 --> Yield["yield — app is serving"]
+    S0 --> S1 --> S2 --> S3 --> S4 --> S5 --> S6 --> S7
+    S7 --> Yield["yield — app is serving"]
 ```
 
 ### 0. Postgres schemas (Pattern B)
@@ -142,18 +141,11 @@ is unset.
 `run_cognition_scheduler()` (rollups → reflection → pruning). Self-disables when
 `POSTGRES_HOST` is unset.
 
-### 8. Agent Studio Temporal worker
-
-`_start_agent_studio_temporal_worker()`, gated on
-`UNIFIED_API_AGENT_STUDIO_TEMPORAL_WORKER` and `TEAM_CONFIGS["agent_studio"].enabled`.
-
-Sole worker for `agent_platform.studio.temporal.TASK_QUEUE` (`agent-studio-queue`).
-Activities delegate to this process's `AgentStudioService` / `drafts_runtime`
-singletons. This worker and its workflow wrappers are not a hard requirement for
-authoring CRUD: when it is disabled or unavailable, `dispatch.py` calls the same
-in-process singletons directly — a mode switch, not a degraded state. Temporal
-itself remains required for the platform's durable subsystems; only Studio
-authoring's workflow wrappers are optional.
+> **Note.** Agent Studio authoring CRUD (start conversation / send message / clone /
+> save) is a plain in-process RPC over `AgentStudioService` — it does **not** run a
+> Temporal worker. There is no `agent-studio-queue` and no lifespan step for it.
+> Temporal remains required for the platform's durable subsystems (sandbox lifecycle,
+> provisioning, agentic pipeline, persona founder).
 
 ## Shutdown (after yield)
 
@@ -161,7 +153,7 @@ Order is load-bearing so buffered `llm_call_records` are not lost:
 
 1. Cancel cognition scheduler, graph sync, console pruner, sandbox reaper, and the health loop.
 2. `close_graphiti()`.
-3. `_stop_in_process_temporal_workers()` (`stop_all_team_workers`) — Studio and sandbox activities can still invoke the LLM; they must finish before the observer unregisters.
+3. `_stop_in_process_temporal_workers()` (`stop_all_team_workers`) — sandbox activities can still invoke the LLM; they must finish before the observer unregisters.
 4. `llm_service.usage_flusher.shutdown()` — stop the heartbeat, unregister the observer, final synchronous drain.
 5. `close_pool()` — only after the drain, so the flusher still has a live pool.
 6. `_shutdown_probe_executor()`.
@@ -171,7 +163,6 @@ Order is load-bearing so buffered `llm_call_records` are not lost:
 | Worker | Lifespan step | Gate | Must not start from |
 |---|---|---|---|
 | Sandbox Temporal (`SANDBOX_TASK_QUEUE`) | 4 | `UNIFIED_API_SANDBOX_TEMPORAL_WORKER` | `team_service`, provisioning container, package import |
-| Studio Temporal (`agent-studio-queue`) | 8 | `UNIFIED_API_AGENT_STUDIO_TEMPORAL_WORKER` + team enabled | any other process |
 | Console run pruner | 5 | none (log-and-continue) | n/a |
 | Cognition graph sync | 6 | `NEO4J_BOLT_URL` | n/a |
 | Cognition scheduler | 7 | self-disables without Postgres | n/a |

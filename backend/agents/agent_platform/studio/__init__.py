@@ -17,13 +17,13 @@ cross-process persistence is a tracked follow-up, mirroring the same caveat the
 generated-agent registration already carries.
 
 Public façade (import these four from ``agent_platform.studio``). Everything else
-(``temporal``, ``postgres``, ``drafts_runtime``, models) is a submodule import.
-Internal modules in this package must import sibling submodules, never this
-façade, so these re-exports cannot create an import cycle.
+(``postgres``, ``drafts_runtime``, models) is a submodule import. Internal modules in
+this package must import sibling submodules, never this façade, so these re-exports
+cannot create an import cycle.
 
-The four public names resolve lazily via PEP 562 ``__getattr__`` so
-``import agent_platform.studio.temporal.workflows`` does not pull ``routes`` or
-``runtime`` (those construct process singletons and are not sandbox-safe).
+The four public names resolve lazily via PEP 562 ``__getattr__`` so importing the
+package (or one of its lightweight submodules) does not eagerly pull ``routes`` or
+``runtime``, which construct process singletons at import time.
 """
 
 from typing import TYPE_CHECKING, Any

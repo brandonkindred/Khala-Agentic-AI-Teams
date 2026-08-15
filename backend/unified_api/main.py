@@ -37,7 +37,6 @@ from shared.env_config import env_float
 from unified_api.bounded_executor import get_or_recreate_executor
 from unified_api.config import (
     TEAM_CONFIGS,
-    UNIFIED_API_AGENT_STUDIO_TEMPORAL_WORKER,
     UNIFIED_API_SANDBOX_TEMPORAL_WORKER,
     UNIFIED_API_TEAM_ASSISTANTS_ENABLED,
     get_enabled_teams,
@@ -575,57 +574,12 @@ def _register_proxy_routes(app: FastAPI) -> dict[str, bool]:
 # ---------------------------------------------------------------------------
 
 
-def _start_agent_studio_temporal_worker() -> None:
-    """Start the in-process Agent Studio Temporal worker.
-
-    Agent Studio is an in-process team (mounted on this app, not a separate
-    ``team_service`` container), so its worker runs here and its activity threads
-    share this process's :class:`AgentStudioService` singleton. Gated on
-    ``UNIFIED_API_AGENT_STUDIO_TEMPORAL_WORKER`` and on the team being enabled.
-    Authoring CRUD (start conversation / send message / clone / save) no longer
-    requires this worker: ``agent_platform.studio.temporal.dispatch``
-    falls back to calling :class:`AgentStudioService` directly, in-process, when
-    Temporal isn't configured — so a missing ``TEMPORAL_ADDRESS`` here is a
-    (fully-functional) mode switch, not a degraded state. The worker is a daemon
-    thread (no shutdown handle needed); log-and-continue on failure, matching
-    the other lifespan startup steps.
-
-    Postconditions:
-        - Logs at INFO and returns without starting a worker when
-          ``UNIFIED_API_AGENT_STUDIO_TEMPORAL_WORKER`` is false.
-        - Logs at INFO when a worker actually started, or when ``start_team_worker``
-          returns ``False`` (``TEMPORAL_ADDRESS`` unset → no worker) — Agent Studio
-          serves authoring requests via direct in-process dispatch instead. Startup is
-          not aborted either way (that would take down every other team for one
-          in-process team's config).
-    """
-    if not UNIFIED_API_AGENT_STUDIO_TEMPORAL_WORKER:
-        logger.info("Agent Studio Temporal worker disabled (UNIFIED_API_AGENT_STUDIO_TEMPORAL_WORKER=false)")
-        return
-    if not TEAM_CONFIGS["agent_studio"].enabled:
-        return
-    try:
-        from agent_platform.studio.temporal.worker import start_agent_studio_temporal_worker_thread
-
-        started = start_agent_studio_temporal_worker_thread()
-    except Exception:
-        logger.warning("Agent Studio Temporal worker failed to start", exc_info=True)
-        return
-    if started:
-        logger.info("Started Agent Studio Temporal worker")
-    else:
-        logger.info(
-            "Agent Studio Temporal worker NOT started (TEMPORAL_ADDRESS unset); "
-            "authoring requests will dispatch directly in-process instead."
-        )
-
-
 def _stop_in_process_temporal_workers() -> None:
     """Stop in-process Temporal workers before usage-flusher / Postgres teardown.
 
-    Agent Studio and the platform sandbox poll from this process. Their
-    activities can invoke the LLM; they must finish (or be shut down) before
-    the usage observer unregisters and the shared pool closes.
+    The platform sandbox polls from this process. Its activities can invoke the
+    LLM; they must finish (or be shut down) before the usage observer unregisters
+    and the shared pool closes.
 
     Preconditions:
         - Safe to call when no workers are registered (no-op).
@@ -854,9 +808,6 @@ async def lifespan(app: FastAPI):  # noqa: PLR0915 - linear startup orchestrator
         logger.info("Started Agent Cognition scheduler")
     except Exception:
         logger.warning("Agent Cognition scheduler failed to start", exc_info=True)
-
-    # 8. Start the Agent Studio Temporal worker (in-process team; see helper).
-    _start_agent_studio_temporal_worker()
 
     yield
 

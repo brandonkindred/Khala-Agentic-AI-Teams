@@ -101,17 +101,13 @@ callers import submodules directly (`agent_team_studio.agent_studio.temporal.wor
 `.postgres`, `.drafts_runtime`, `.models`, `.temporal.dispatch`, `.registration`, `.runtime`).
 Unlike the other three, it **is** present in `TEAM_CONFIGS`, with `in_process=True` and prefix
 `/api/agent-studio` — already correctly modeled as an in-process team, not a proxied one. It is
-Pattern A (`agent_studio/temporal/__init__.py` exports `WORKFLOWS`, `ACTIVITIES`,
-`TASK_QUEUE = "agent-studio-queue"`), plus Pattern
-B (`agent_studio/postgres.py::SCHEMA`, registered at `main.py:672-679`, gated on
-`TEAM_CONFIGS["agent_studio"].enabled`). Authoring CRUD is no longer Temporal-only: it
-dispatches through `agent_studio/temporal/dispatch.py`, which runs the Studio workflows when the
-`agent-studio-queue` worker is connected and falls back to the in-process `AgentStudioService`
-singleton otherwise — so the worker and its workflow wrappers are optional for authoring, not a
-hard requirement. Its worker activities delegate to a process-local
-`AgentStudioService`/`drafts_runtime` singleton (documented in `agent_studio/runtime.py` and
-`agent_studio/temporal/worker.py`) — Decision §4 restates this as the ADR's authoritative,
-citable worker-boot-ownership statement. Studio depends on `agent_registry.models.AgentManifest`;
+Pattern B (`agent_studio/postgres.py::SCHEMA`, registered in the lifespan, gated on
+`TEAM_CONFIGS["agent_studio"].enabled`). Authoring CRUD (start conversation / send message /
+clone / save) is a plain synchronous in-process RPC: each route handler calls the process-local
+`AgentStudioService` singleton (`agent_studio/runtime.py`) directly. These are request/response
+operations, not durable work, so Studio authoring runs **no** Temporal worker — there is no
+`agent-studio-queue`. (Temporal remains required for the platform's durable subsystems; see the
+sandbox worker in Decision §4.) Studio depends on `agent_registry.models.AgentManifest`;
 registry does not depend on Studio.
 
 **Adjacent, distinct concern that stays put.** The sibling directory
@@ -301,19 +297,13 @@ tearing down a sandbox it wrongly believes idle, because it never saw the activi
 recently touched it. Running the sandbox worker only inside the unified-API process guarantees
 exactly one `Lifecycle` instance backs every activity dispatched on `SANDBOX_TASK_QUEUE`.
 
-**Studio.** After the move, the Agent Studio Temporal worker continues to be started **only**
-from `unified_api/main.py`'s lifespan (`_start_agent_studio_temporal_worker`, gated on
-`UNIFIED_API_AGENT_STUDIO_TEMPORAL_WORKER`), as the sole worker for
-`agent_platform.studio.temporal.TASK_QUEUE` ("agent-studio-queue"). This constraint does not
-change post-move — Studio was never a standalone container; `TEAM_CONFIGS["agent_studio"].in_process
-= True` already guarantees there is none — this section only re-anchors the statement at the
-new import path. Why: worker activities delegate to the process-local `AgentStudioService`
-and `drafts_runtime` singletons that the same process's HTTP handlers populate; a worker
-running elsewhere would act on in-flight state it never saw created. Ownership is about
-*where* the worker may run, not *whether* authoring needs it: authoring CRUD degrades to
-in-process dispatch against the same singletons when the worker is absent (see
-`agent_platform.studio.temporal.dispatch`), so the worker is not a hard requirement for
-authoring.
+**Studio.** Agent Studio authoring CRUD (start conversation / send message / clone / save) runs
+**no** Temporal worker: the route handlers call the process-local `AgentStudioService` and
+`drafts_runtime` singletons directly, in-process. These are request/response RPCs, not durable
+or long-running work, so wrapping them in single-activity workflows added queue/worker affinity
+with no durability benefit; that path has been retired. There is therefore no Studio worker-boot
+ownership constraint — only the sandbox worker above needs one. Temporal remains required for the
+platform's durable subsystems, but not for Studio authoring.
 
 Moving these packages under `agent_platform/` is a pure rename with respect to worker
 ownership: it changes where the code lives on disk and what it is imported as, not which

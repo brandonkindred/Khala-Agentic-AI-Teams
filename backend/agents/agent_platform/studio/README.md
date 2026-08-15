@@ -14,27 +14,22 @@ registered agent back into an editable draft.
 - Drafts (separate, opaque-payload CRUD; not `AgentDefinition`-typed): `/drafts`
 
 The router is included from `unified_api/main.py` at import time when
-`TEAM_CONFIGS["agent_studio"]` is enabled. The Studio Temporal worker
-(`agent-studio-queue`) boots from the unified-API lifespan, not Pattern A
-import-time start — catalog:
+`TEAM_CONFIGS["agent_studio"]` is enabled — catalog:
 [`docs/UNIFIED_API_LIFESPAN.md`](../../../../docs/UNIFIED_API_LIFESPAN.md).
 
 ### Dispatch
 
-Authoring CRUD (start conversation / send message / clone / save) dispatches
-through `temporal/dispatch.py`, which picks a path per call. When a Temporal
-cluster is configured *and* the `agent-studio-queue` worker has finished
-connecting, each helper runs the matching Studio workflow. Otherwise — worker
-disabled, still connecting, or absent — it calls the process-wide
-`AgentStudioService` singleton directly, in-process. Both paths share one
-conversation store and identical business logic, so the `agent-studio-queue`
-worker and its workflow wrappers are **not a hard requirement** for authoring:
-their absence is a mode switch, not a degraded state.
+Authoring CRUD (start conversation / send message / clone / save) is a plain,
+synchronous in-process RPC: each route handler calls the process-wide
+`AgentStudioService` singleton (`runtime.get_studio_service()`) directly. These are
+request/response operations, not durable or long-running work, so they do **not** go
+through Temporal — there is no `agent-studio-queue` worker and no Studio workflow. The
+service raises native `ValueError`/`LookupError`, which the routes map to 400/404.
 
-This does not make Temporal optional for the platform. Temporal remains a
-required dependency for the durable, long-running subsystems (provisioning,
-sandbox lifecycle, pipeline runs, persona founder); only Studio authoring's
-single-activity workflow wrappers have been demoted to optional.
+This is not Temporal being optional for the platform. Temporal remains a required
+dependency for the durable, long-running subsystems (provisioning, sandbox lifecycle,
+pipeline runs, persona founder); only Studio authoring CRUD — which never needed
+durability — runs outside it.
 
 ## Identity: `AgentDefinition` view-model vs. `AgentManifest` SoT
 

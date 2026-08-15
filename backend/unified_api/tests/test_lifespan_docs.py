@@ -33,7 +33,7 @@ def test_lifespan_catalog_documents_worker_and_route_registration() -> None:
     assert _CATALOG.is_file(), f"missing lifespan catalog: {_CATALOG}"
     text = _CATALOG.read_text(encoding="utf-8")
 
-    for step in range(9):
+    for step in range(8):
         assert f"{step}." in text, f"catalog missing lifespan step {step}"
 
     for token in (
@@ -42,10 +42,8 @@ def test_lifespan_catalog_documents_worker_and_route_registration() -> None:
         "_register_proxy_routes",
         "include_router",
         "_maybe_register_team_assistants",
-        "_start_agent_studio_temporal_worker",
         "run_pruner",
         "UNIFIED_API_SANDBOX_TEMPORAL_WORKER",
-        "UNIFIED_API_AGENT_STUDIO_TEMPORAL_WORKER",
         "agent_platform.studio.router",
         "team_service",
         "_retry_in_process_schema_registration",

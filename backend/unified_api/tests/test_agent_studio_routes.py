@@ -1,52 +1,28 @@
 """Hermetic route-level tests for the Agent Studio Stage-1 endpoints.
 
-``dispatch`` picks Temporal vs. direct in-process dispatch per call
-(``dispatch._temporal_enabled()``); this file pins the Temporal branch so it keeps
-exercising the full router → dispatch → workflow → activity → service → response
-path **in-process, without a Temporal cluster**, by:
-
-  * forcing ``agent_platform.studio.temporal.dispatch._temporal_enabled`` to
-    ``True`` regardless of whether ``TEMPORAL_ADDRESS`` happens to be set in the
-    environment running the suite,
-  * patching ``agent_platform.studio.runtime.get_studio_service`` so the activities delegate to
-    a scripted assistant + fake registry (no live LLM / Postgres), and
-  * patching ``agent_platform.studio.temporal.dispatch.execute_workflow_sync`` with an inline
-    stand-in that runs the workflow's single activity directly and reproduces
-    Temporal's exception wrapping, so the dispatch layer's ``ValueError`` → 400 /
-    ``LookupError`` → 404 translation is genuinely exercised.
-
-The direct in-process dispatch branch is covered in ``test_agent_studio_direct_routes.py``
-(same ``AgentStudioService``, reached without a workflow round-trip).
+Agent Studio authoring CRUD is a plain in-process RPC over
+:class:`~agent_platform.studio.service.AgentStudioService` — it does **not** go
+through Temporal (Temporal is reserved for the platform's durable subsystems). These
+tests exercise the full router → service → response path in-process by patching
+``agent_platform.studio.runtime.get_studio_service`` with a service wired to a scripted
+assistant + fake registry (no live LLM / Postgres), so the route's
+``ValueError`` → 400 / ``LookupError`` → 404 mapping is genuinely exercised.
 
 ``backend/conftest.py`` already puts ``agents/`` on ``sys.path``.
 """
 
 from __future__ import annotations
 
-from typing import Any
 from unittest.mock import Mock
 
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from temporalio.client import WorkflowFailureError
-from temporalio.exceptions import ApplicationError
 
-import agent_platform.studio.temporal.dispatch as dispatch_mod
 from agent_platform.studio import router
 from agent_platform.studio.assistant import AgentDesignerAgent
 from agent_platform.studio.service import AgentStudioService
 from agent_platform.studio.store import AgentStudioConversationStore
-from agent_platform.studio.temporal.workflows import (
-    CloneFromRegistryWorkflow,
-    SaveAgentWorkflow,
-    SendMessageWorkflow,
-    StartConversationWorkflow,
-    clone_from_registry_activity,
-    save_agent_activity,
-    send_message_activity,
-    start_conversation_activity,
-)
 from agent_platform.studio.testing import FakeRegistry, seed_manifest
 
 _DRAFT_REPLY = """\
@@ -60,32 +36,6 @@ Drafted it.
 ["Add an input?"]
 ```
 """
-
-# Map each workflow's run method to the single activity it executes, so the inline
-# stand-in can run that activity directly (mirroring the workflow's one-activity body).
-_WF_TO_ACTIVITY = {
-    StartConversationWorkflow.run: start_conversation_activity,
-    SendMessageWorkflow.run: send_message_activity,
-    CloneFromRegistryWorkflow.run: clone_from_registry_activity,
-    SaveAgentWorkflow.run: save_agent_activity,
-}
-
-
-def _inline_execute(workflow_run: Any, *args: Any, workflow_id: str, task_queue: str, **_: Any) -> Any:
-    """In-process stand-in for ``execute_workflow_sync``.
-
-    Runs the workflow's single activity directly and reproduces Temporal's failure
-    wrapping: a typed ``ApplicationError`` (the activity's translated contract error)
-    is preserved as the ``WorkflowFailureError`` cause; any other activity exception
-    is wrapped as ``ApplicationError(type=<class name>)`` exactly as Temporal would.
-    """
-    activity_fn = _WF_TO_ACTIVITY[workflow_run]
-    try:
-        return activity_fn(*args)
-    except ApplicationError as exc:
-        raise WorkflowFailureError(cause=exc) from exc
-    except Exception as exc:
-        raise WorkflowFailureError(cause=ApplicationError(str(exc), type=type(exc).__name__)) from exc
 
 
 def _service(reply: str, registry: FakeRegistry) -> AgentStudioService:
@@ -107,17 +57,15 @@ def registry() -> FakeRegistry:
 
 @pytest.fixture()
 def make_client(monkeypatch: pytest.MonkeyPatch):
-    """Factory: a TestClient whose Temporal dispatch runs activities in-process.
+    """Factory: a TestClient whose routes dispatch to the given service in-process.
 
-    Installs the three patches (forced Temporal branch, runtime singleton, inline
-    execute) via ``monkeypatch`` so they auto-revert after the test. Each call builds
-    a fresh app so there is no cross-test router leakage.
+    Patches ``agent_platform.studio.runtime.get_studio_service`` (the same seam the
+    route handlers resolve at call time) via ``monkeypatch`` so it auto-reverts. Each
+    call builds a fresh app so there is no cross-test router leakage.
     """
 
     def _factory(service: object, *, raise_server_exceptions: bool = True) -> TestClient:
-        monkeypatch.setattr(dispatch_mod, "_temporal_enabled", lambda: True)
         monkeypatch.setattr("agent_platform.studio.runtime.get_studio_service", lambda: service)
-        monkeypatch.setattr(dispatch_mod, "execute_workflow_sync", _inline_execute)
         app = FastAPI()
         app.include_router(router)
         return TestClient(app, raise_server_exceptions=raise_server_exceptions)
@@ -252,7 +200,7 @@ def test_send_message_rejects_empty_body(client: TestClient) -> None:
 
 
 def test_send_message_value_error_is_400(registry: FakeRegistry, make_client) -> None:
-    """A service ``ValueError`` maps to 400 (not an unhandled 500) through Temporal."""
+    """A service ``ValueError`` maps to 400 (not an unhandled 500)."""
     service = Mock(spec=AgentStudioService)
     service.send_message.side_effect = ValueError("bad input")
     client = make_client(service)
@@ -276,7 +224,7 @@ def test_clone_from_registry_unknown_is_404(client: TestClient) -> None:
 
 
 def test_clone_from_registry_persists_no_second_identity(client: TestClient, registry: FakeRegistry) -> None:
-    """Regression for #5896: cloning must never register anything on the registry.
+    """Cloning must never register anything on the registry.
 
     The endpoint only projects the source manifest into a draft — it must leave
     `registry.registered` untouched, so no second persisted identity is created
@@ -378,9 +326,8 @@ def test_save_agent_not_ready_is_400(client: TestClient) -> None:
 def test_save_agent_unexpected_error_is_500(registry: FakeRegistry, make_client) -> None:
     """An unmapped service error surfaces as a 500, not a swallowed success.
 
-    Only ``ValueError``/``LookupError`` markers are translated back to a native
-    exception (→ 400/404); any other activity failure re-raises the
-    ``WorkflowFailureError``, which the route does not catch → FastAPI's default 500.
+    Only ``ValueError``/``LookupError`` are mapped by the route (→ 400/404); any other
+    service failure is not caught → FastAPI's default 500.
     ``raise_server_exceptions=False`` lets the TestClient return that 500.
     """
     service = Mock(spec=AgentStudioService)
