@@ -468,7 +468,7 @@ def make_voice_principles_drafter() -> Agent:
     """
     return build_agent(
         name="VoicePrinciplesDrafter",
-        description="Defines writing guidelines: voice principles, style dos/donts, editorial bar.",
+        description="Defines writing guidelines: voice principles, style dos/don'ts, editorial bar.",
         system_prompt=render_agent_prompt(_VOICE_PRINCIPLES_DRAFTER_PROMPT),
         structured_output=WritingGuidelinesOutput,
         agent_key=_PHASE2_AGENT_KEY,
@@ -784,7 +784,7 @@ def make_voice_tone_builder() -> Agent:
     """
     return build_agent(
         name="voice_tone_builder",
-        description="Defines voice/tone spectrum and language dos/donts.",
+        description="Defines voice/tone spectrum and language dos/don'ts.",
         system_prompt=render_agent_prompt(_VOICE_TONE_BUILDER_PROMPT),
         structured_output=VoiceToneOutput,
         agent_key=_PHASE3_AGENT_KEY,

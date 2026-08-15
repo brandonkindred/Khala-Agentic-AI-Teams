@@ -50,27 +50,25 @@ def build_phase4_graph() -> Graph:
     builder = GraphBuilder()
 
     # --- fan-in: compositor assembles all channel outputs ---
-    compositor = builder.add_node(
-        build_compositor(
-            name="channel_compositor",
-            description="Assembles all channel and experience outputs into a unified deliverable.",
-            system_prompt=(
-                "You are a Channel Activation Compositor. You receive outputs from nine specialist "
-                "agents: brand experience principles, website guidelines, social media guidelines, "
-                "email guidelines, events guidelines, partnerships guidelines, internal communications "
-                "guidelines, brand architecture definitions, and brand-in-action examples.\n\n"
-                "Your job is to assemble all of these into a single unified ChannelActivationOutput. "
-                "Ensure consistency across channels, resolve any contradictions, and produce a "
-                "coherent document that covers:\n"
-                "- brand_experience_principles\n"
-                "- channel_guidelines (list of per-channel guideline objects)\n"
-                "- brand_architecture\n"
-                "- brand_in_action_examples\n\n"
-                "Output valid JSON matching the ChannelActivationOutput schema."
-            ),
+    compositor_agent = build_compositor(
+        name="channel_compositor",
+        description="Assembles all channel and experience outputs into a unified deliverable.",
+        system_prompt=(
+            "You are a Channel Activation Compositor. You receive outputs from nine specialist "
+            "agents: brand experience principles, website guidelines, social media guidelines, "
+            "email guidelines, events guidelines, partnerships guidelines, internal communications "
+            "guidelines, brand architecture definitions, and brand-in-action examples.\n\n"
+            "Your job is to assemble all of these into a single unified ChannelActivationOutput. "
+            "Ensure consistency across channels, resolve any contradictions, and produce a "
+            "coherent document that covers:\n"
+            "- brand_experience_principles\n"
+            "- channel_guidelines (list of per-channel guideline objects)\n"
+            "- brand_architecture\n"
+            "- brand_in_action_examples\n\n"
+            "Output valid JSON matching the ChannelActivationOutput schema."
         ),
-        node_id="channel_compositor",
     )
+    compositor = builder.add_node(compositor_agent, node_id="channel_compositor")
 
     # --- fan-out: independent channel / experience nodes, wired into compositor ---
     build_fan_out_fan_in(

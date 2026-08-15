@@ -101,7 +101,7 @@ def build_phase3_graph() -> Graph:
     # ------------------------------------------------------------------
     # Join node only: not one of the Phase 3 structured_output factories.
     # Keep the JSON instruction; strip fields no upstream agent produces.
-    compositor = build_compositor(
+    compositor_agent = build_compositor(
         name="visual_compositor",
         description="Assembles all visual identity fragments into a unified VisualIdentityOutput.",
         system_prompt=(
@@ -109,11 +109,11 @@ def build_phase3_graph() -> Graph:
             "VisualIdentityOutput. Combine the moodboard candidates from the diverge phase, the creative "
             "refinement decision, logo suite, color palette, typography system, iconography style, "
             "illustration style, photography direction, video direction, motion principles, voice tone "
-            "spectrum, language dos/donts, and design system. Output comprehensive valid JSON."
+            "spectrum, language dos/don'ts, and design system. Output comprehensive valid JSON."
         ),
     )
-    compositor_node = builder.add_node(compositor, node_id="visual_compositor")
+    compositor = builder.add_node(compositor_agent, node_id="visual_compositor")
     for node in fan_out_nodes:
-        builder.add_edge(node, compositor_node)
+        builder.add_edge(node, compositor)
 
     return builder.build()
