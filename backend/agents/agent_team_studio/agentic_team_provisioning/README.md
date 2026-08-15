@@ -26,10 +26,15 @@ into an `EnrichedRosterAgent`, and consumed the same way by `roster_validation.p
 `runtime/pipeline_runner.py` (execution). Roster `PUT` rejects any body that supplies a
 persona field with `400` — edit the linked `AgentManifest` instead.
 
-`runtime/agent_builder.py`'s sandbox invoke path (`invoke_generated_agent`) does not
-yet bind this manifest at invoke time — see
+`runtime/agent_builder.py`'s sandbox invoke path (`invoke_generated_agent`) binds this
+manifest at invoke time when the request **omits** a persona/state field: it resolves the
+manifest via the shim's trusted route id and fills `role` / `skills` / `capabilities` /
+`expertise` / the selected state's `system_prompt` from it, while a non-empty request field
+still wins for that invoke. The explicit-override refinement (distinguishing an
+explicitly-cleared empty list from an omitted key, and a request `system_prompt` full
+replacement) is a tracked sibling follow-up. See
 [`system_design/adr/ADR-015-invoke-generated-agent-persona-state-precedence.md`](../../../../system_design/adr/ADR-015-invoke-generated-agent-persona-state-precedence.md)
-for the locked precedence contract the runtime-binding follow-up implements.
+for the locked precedence contract.
 
 The process designer LLM emits roster JSON alongside process JSON; generated agents are
 stamped with `manifest_id` and registered via `register_team_manifests`. Roster

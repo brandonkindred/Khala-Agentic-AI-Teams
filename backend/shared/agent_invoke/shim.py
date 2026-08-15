@@ -236,7 +236,7 @@ async def _invoke_and_drive(
     can outlive a cancelled await, so the broker stops dispatching past it.
     ``audit`` is the caller-owned accumulator the shim can snapshot on timeout.
     """
-    result = await invoke_entrypoint(entrypoint, body)
+    result = await invoke_entrypoint(entrypoint, body, agent_id=agent_id)
     return await asyncio.to_thread(
         maybe_drive_tool_loop,
         result,

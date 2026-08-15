@@ -143,14 +143,22 @@ def build_agent_manifest(
     )
 
 
-def skill_tags_from_manifest(manifest: AgentManifest) -> list[str]:
+def skill_tags_from_manifest(
+    manifest: AgentManifest, *, extra_strip_tags: frozenset[str] = frozenset()
+) -> list[str]:
     """Return non-marker tags from a Manifest (persona skill tags).
 
     Preconditions: ``manifest`` is a validated :class:`AgentManifest`.
     Postconditions: returns tags excluding the ``"generated"`` and team-key markers
-        stamped by :func:`build_agent_manifest`, order preserved.
+        stamped by :func:`build_agent_manifest`, plus any tag in ``extra_strip_tags``,
+        order preserved. ``extra_strip_tags`` defaults to empty, so every existing
+        caller (roster view, ``register_team_manifests``) is unaffected; the invoke
+        binding passes ``{"studio"}`` so a Studio-saved agent's registration stamp
+        never surfaces in its ``Skills:`` line.
     """
-    return project_manifest(manifest, strip_tags=frozenset({"generated", _TEAM_KEY}))["tags"]
+    return project_manifest(
+        manifest, strip_tags=frozenset({"generated", _TEAM_KEY}) | extra_strip_tags
+    )["tags"]
 
 
 def is_generated_manifest(manifest: AgentManifest) -> bool:
