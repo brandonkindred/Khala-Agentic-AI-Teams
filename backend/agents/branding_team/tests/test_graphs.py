@@ -127,6 +127,33 @@ def test_build_phase4_graph_is_a_graph() -> None:
     assert isinstance(build_phase4_graph(), Graph)
 
 
+def test_channel_compositor_prompt_field_bullets_match_schema() -> None:
+    """The compositor prompt's ``Output covers`` bullets must name real schema fields.
+
+    Regression guard: the prompt once instructed the model to emit
+    ``brand_in_action_examples``, but the schema field is ``brand_in_action`` —
+    so a compliant LLM emitted a key that failed validation and was silently
+    dropped from the deliverable. This asserts every bulleted field name resolves
+    to an actual ``ChannelActivationOutput`` field, and that the misspelling is gone.
+    """
+    from branding_team.graphs.phase4_channel import _CHANNEL_COMPOSITOR_SYSTEM_PROMPT
+    from branding_team.models import ChannelActivationOutput
+
+    prompt = _CHANNEL_COMPOSITOR_SYSTEM_PROMPT
+    assert "brand_in_action" in prompt
+    assert "brand_in_action_examples" not in prompt
+
+    schema_fields = set(ChannelActivationOutput.model_fields)
+    # The "coherent document that covers:" section lists the schema fields the
+    # model must emit as "- <field_name>" bullets (the field name is the first
+    # token after the dash). Every such bullet must be a real schema field.
+    bullet_fields = [line[2:].split()[0] for line in prompt.splitlines() if line.startswith("- ")]
+    assert bullet_fields, "expected the compositor prompt to list output field bullets"
+    assert "brand_in_action" in bullet_fields
+    unknown = [name for name in bullet_fields if name not in schema_fields]
+    assert not unknown, f"prompt bullets name non-schema fields: {unknown}"
+
+
 def test_make_channel_guide_rejects_blank_channel_or_description() -> None:
     """Documented channel/description preconditions are enforced before construction."""
     from branding_team.agents import _make_channel_guide
