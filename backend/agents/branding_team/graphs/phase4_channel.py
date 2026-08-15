@@ -22,6 +22,28 @@ from branding_team.agents import (
 )
 from branding_team.graphs.shared import build_agent, build_fan_out_fan_in
 
+# Compositor system prompt, extracted to a module-level constant so regression
+# tests can assert its field bullets against the ``ChannelActivationOutput``
+# schema without reaching into Strands graph-node internals. The bulleted
+# ``Output covers`` list names the schema fields the model must emit; every
+# bullet must match a real ``ChannelActivationOutput`` field name — an
+# LLM that follows a misspelled bullet emits a key that fails validation and
+# is silently dropped from the deliverable.
+_CHANNEL_COMPOSITOR_SYSTEM_PROMPT = (
+    "You are a Channel Activation Compositor. You receive outputs from nine specialist "
+    "agents: brand experience principles, website guidelines, social media guidelines, "
+    "email guidelines, events guidelines, partnerships guidelines, internal communications "
+    "guidelines, brand architecture definitions, and brand-in-action examples.\n\n"
+    "Your job is to assemble all of these into a single unified ChannelActivationOutput. "
+    "Ensure consistency across channels, resolve any contradictions, and produce a "
+    "coherent document that covers:\n"
+    "- brand_experience_principles\n"
+    "- channel_guidelines (list of per-channel guideline objects)\n"
+    "- brand_architecture\n"
+    "- brand_in_action\n\n"
+    "Output valid JSON matching the ChannelActivationOutput schema."
+)
+
 
 def build_phase4_graph() -> Graph:
     """Build the Phase 4 Channel Activation fan-out/fan-in graph.
@@ -54,20 +76,7 @@ def build_phase4_graph() -> Graph:
         build_agent(
             name="channel_compositor",
             description="Assembles all channel and experience outputs into a unified deliverable.",
-            system_prompt=(
-                "You are a Channel Activation Compositor. You receive outputs from nine specialist "
-                "agents: brand experience principles, website guidelines, social media guidelines, "
-                "email guidelines, events guidelines, partnerships guidelines, internal communications "
-                "guidelines, brand architecture definitions, and brand-in-action examples.\n\n"
-                "Your job is to assemble all of these into a single unified ChannelActivationOutput. "
-                "Ensure consistency across channels, resolve any contradictions, and produce a "
-                "coherent document that covers:\n"
-                "- brand_experience_principles\n"
-                "- channel_guidelines (list of per-channel guideline objects)\n"
-                "- brand_architecture\n"
-                "- brand_in_action_examples\n\n"
-                "Output valid JSON matching the ChannelActivationOutput schema."
-            ),
+            system_prompt=_CHANNEL_COMPOSITOR_SYSTEM_PROMPT,
         ),
         node_id="channel_compositor",
     )
