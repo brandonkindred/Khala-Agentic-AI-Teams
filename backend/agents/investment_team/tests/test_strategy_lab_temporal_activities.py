@@ -946,7 +946,7 @@ def test_run_design_attempt_activity_no_cache_when_flag_off(monkeypatch):
     a key is supplied (behavior unchanged)."""
     from investment_team.strategy_lab import batch_cache_context as bcc
 
-    monkeypatch.delenv(_BATCH_CACHE_ENV_VAR, raising=False)
+    monkeypatch.setenv(_BATCH_CACHE_ENV_VAR, "false")
     bcc._caches.clear()
 
     bound = _run_attempt_capturing_bound_cache(monkeypatch, batch_cache_key="run-1-b0")
