@@ -41,6 +41,7 @@ from branding_team.agents import (
     make_voice_tone_builder,
 )
 from branding_team.graphs.shared import build_agent, build_fan_out_fan_in
+from branding_team.models import VisualIdentityOutput
 
 _PHASE3_CONCEPTUALIST_VARIANTS: tuple[str, ...] = ("Editorial", "Minimalist", "Bold")
 
@@ -99,8 +100,10 @@ def build_phase3_graph() -> Graph:
     # ------------------------------------------------------------------
     # 3. Visual compositor (join node) -- inline agent
     # ------------------------------------------------------------------
-    # Join node only: not one of the Phase 3 structured_output factories.
-    # Keep the JSON instruction; strip fields no upstream agent produces.
+    # Join node only: not one of the Phase 3 structured_output factories, but
+    # it carries its own ``structured_output=`` so Strands forces a typed tool
+    # call — the VisualIdentityOutput schema is the contract, not a prose
+    # "output JSON" reminder.
     compositor = build_agent(
         name="visual_compositor",
         description="Assembles all visual identity fragments into a unified VisualIdentityOutput.",
@@ -109,8 +112,9 @@ def build_phase3_graph() -> Graph:
             "VisualIdentityOutput. Combine the moodboard candidates from the diverge phase, the creative "
             "refinement decision, logo suite, color palette, typography system, iconography style, "
             "illustration style, photography direction, video direction, motion principles, voice tone "
-            "spectrum, language dos/donts, and design system. Output comprehensive valid JSON."
+            "spectrum, language dos/donts, and design system."
         ),
+        structured_output=VisualIdentityOutput,
     )
     compositor_node = builder.add_node(compositor, node_id="visual_compositor")
     for node in fan_out_nodes:
