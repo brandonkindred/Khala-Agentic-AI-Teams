@@ -150,8 +150,8 @@ export class AppShellComponent {
   /** Returns true if the given path is the current route (for aria-current).
    *
    * Matches whole path segments against the URL stripped of query/fragment,
-   * so `/agent-console` is active for `/agent-console/runs` but never for
-   * `/agent-console-x`, and only one nav item claims `aria-current` at a time.
+   * so `/agent-studio` is active for `/agent-studio/provisioning` but never for
+   * `/agent-studio-x`, and only one nav item claims `aria-current` at a time.
    */
   isActive(path: string): boolean {
     const url = this.router.url.split(/[?#]/)[0];
