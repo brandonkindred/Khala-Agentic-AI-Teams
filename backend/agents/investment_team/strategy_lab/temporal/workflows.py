@@ -194,7 +194,11 @@ class StrategyLabCycleWorkflow:
         Exactly one ``run_design_attempt_activity`` call happens per design
         attempt; the LLM-call budget, gate-result accumulation, and tracker
         state are threaded attempt→attempt so their ceilings/history span the
-        whole cycle, never resetting per attempt.
+        whole cycle, never resetting per attempt. The re-entry loop bound
+        (``max_reentries``) is resolved once, from ``wf_config``'s
+        ``max_design_reentries`` (falling back to
+        ``_MAX_DESIGN_REENTRIES_FALLBACK`` when absent), and stays constant
+        for every attempt in the cycle.
     """
 
     @workflow.run
