@@ -19,7 +19,6 @@ from typing import Any, Dict, Literal, Optional, Protocol, Sequence, Tuple
 
 import pandas as pd
 
-from ..batch_cache_context import new_registry
 from ..indicators.streaming import IndicatorRegistry, resolve_indicator
 from ..runtime_window import STREAMING_WINDOW_BARS
 from ..spec_dsl import (
@@ -337,6 +336,14 @@ def compute_indicator_series(ref: IndicatorRef, df: pd.DataFrame) -> pd.Series:
     def _at(arr, idx: int) -> float:
         return float(arr[idx]) if arr is not None else 0.0
 
+    # Imported here, not at module top: ``batch_cache_context`` creates a
+    # module-level ``threading.Lock`` on import, which the temporalio workflow
+    # sandbox forbids — and this module is transitively imported (via
+    # ``rule_compiler``) when the workflow module loads in that sandbox. This
+    # function only runs in an activity/executor context (never the sandbox), so
+    # a local import keeps the module's top level sandbox-safe.
+    from ..batch_cache_context import new_registry
+
     reg = new_registry()
     window: deque[_FrameBar] = deque(maxlen=_SERIES_WINDOW)
     out: list[float] = []
@@ -516,7 +523,12 @@ class StreamingHistoryView:
         # so consultation — and its ``reg._state.clear()``-on-hit path — is never
         # reached here. If the streaming bar type ever gains a ``date``, that
         # interaction with the long-lived per-bar streaming state must be
-        # revisited.
+        # revisited. Imported locally (not at module top): ``batch_cache_context``
+        # creates a module-level lock on import, which the temporalio workflow
+        # sandbox that transitively loads this module forbids; this __init__ only
+        # runs in an activity/executor context, never the sandbox.
+        from ..batch_cache_context import new_registry
+
         self._registry = new_registry()
         # sig_id -> {"buf": deque[Optional[float]], "synced": int}
         self._buffers: Dict[str, Dict[str, Any]] = {}
