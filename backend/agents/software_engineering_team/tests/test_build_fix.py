@@ -300,6 +300,68 @@ def test_execute_llm_repair_attempt_returns_false_on_llm_error(
     assert not (tmp_path / "app.py").exists()
 
 
+def test_execute_llm_repair_attempt_returns_false_when_parser_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class _FakeAgent:
+        def __init__(self, model: object) -> None:
+            pass
+
+        def __call__(self, prompt: str) -> str:
+            return "TEMPLATE"
+
+    monkeypatch.setattr("software_engineering_team.build_fix.Agent", _FakeAgent)
+
+    def _boom(raw: str) -> dict:
+        raise ValueError("malformed template")
+
+    applied = _execute_llm_repair_attempt(
+        issue={"description": "x", "file_path": "", "recommendation": "Fix."},
+        current_files={},
+        project_dir=tmp_path,
+        model=object(),
+        parse_fn=_boom,
+        fix_prompt="{source} {severity} {description} {file_path} {recommendation} {current_code}",
+        is_frontend=True,
+        language_conventions="",
+        task_id="t1",
+        attempt=0,
+        max_attempts=3,
+    )
+
+    assert applied is False
+    assert not (tmp_path / "app.py").exists()
+
+
+def test_execute_llm_repair_attempt_returns_false_on_non_dict_parse(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class _FakeAgent:
+        def __init__(self, model: object) -> None:
+            pass
+
+        def __call__(self, prompt: str) -> str:
+            return "TEMPLATE"
+
+    monkeypatch.setattr("software_engineering_team.build_fix.Agent", _FakeAgent)
+
+    applied = _execute_llm_repair_attempt(
+        issue={"description": "x", "file_path": "", "recommendation": "Fix."},
+        current_files={},
+        project_dir=tmp_path,
+        model=object(),
+        parse_fn=lambda raw: None,  # type: ignore[arg-type,return-value]
+        fix_prompt="{source} {severity} {description} {file_path} {recommendation} {current_code}",
+        is_frontend=True,
+        language_conventions="",
+        task_id="t1",
+        attempt=0,
+        max_attempts=3,
+    )
+
+    assert applied is False
+
+
 def test_try_build_fix_survives_pytest_runner_exception(
     tmp_path: Path, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -418,9 +418,9 @@ def _execute_llm_repair_attempt(
         Returns True when the model produced at least one file mapping (writes
         are best-effort; a write failure is logged and other files still apply).
         Successful writes also update ``current_files`` in place so later
-        repair attempts prompt on the latest code. Returns False on LLM error
-        or when the template parser yields no files, leaving ``current_files``
-        unchanged in those cases.
+        repair attempts prompt on the latest code. Returns False on LLM error,
+        when the template parser raises or returns a non-dict, or when it
+        yields no files, leaving ``current_files`` unchanged in those cases.
     """
     assert "description" in issue, "issue must include a description"
     desc = issue["description"]
@@ -466,8 +466,19 @@ def _execute_llm_repair_attempt(
             e,
         )
         return False
-    parsed = parse_fn(raw)
-    fixed_files = parsed.get("files") or {}
+    try:
+        parsed = parse_fn(raw)
+    except Exception as e:
+        logger.warning(
+            "[%s] Build fix attempt %d/%d: could not parse repair response (%s). "
+            "Next step -> Skipping to next issue",
+            task_id,
+            attempt + 1,
+            max_attempts,
+            e,
+        )
+        return False
+    fixed_files = parsed.get("files") if isinstance(parsed, dict) else None
     if not fixed_files:
         return False
     for rel_path, content in fixed_files.items():
