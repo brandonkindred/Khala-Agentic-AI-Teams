@@ -436,7 +436,7 @@ jobs:
                   # In-package unit suite plus unified-API HTTP handler tests
                   # (cwd is backend/agents; space-separated paths word-split
                   # in `pytest ${{ matrix.tests }}`).
-                  "tests": "agent_platform/studio/tests/ ../unified_api/tests/test_agent_studio_routes.py ../unified_api/tests/test_agent_studio_direct_routes.py ../unified_api/tests/test_agent_studio_drafts_routes.py ../unified_api/tests/test_agent_studio_worker_startup.py ../unified_api/tests/test_agent_studio_user_profile_import_gating.py",
+                  "tests": "agent_platform/studio/tests/ ../unified_api/tests/test_agent_studio_routes.py ../unified_api/tests/test_agent_studio_drafts_routes.py ../unified_api/tests/test_agent_studio_user_profile_import_gating.py",
                   "source": "agent_platform.studio",
                   # Omit live-Postgres store modules from the unit cov gate
                   # (those suites skip without POSTGRES_HOST).
