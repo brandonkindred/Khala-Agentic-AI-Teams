@@ -617,8 +617,7 @@ def _try_build_fix_one_at_a_time(
                         )
                         if not pip_result.success:
                             logger.warning(
-                                "Build fix: pip install -r requirements.txt failed "
-                                "(non-fatal): %s",
+                                "Build fix: pip install -r requirements.txt failed (non-fatal): %s",
                                 pip_result.error_summary,
                             )
                     except Exception as e:
