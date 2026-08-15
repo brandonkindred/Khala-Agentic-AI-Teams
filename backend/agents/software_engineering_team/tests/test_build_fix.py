@@ -330,6 +330,53 @@ def test_try_build_fix_loop_survives_pytest_crash_after_patch(
     assert any("pytest failed to run" in record.message for record in caplog.records)
 
 
+def test_try_build_fix_backend_syntax_parser_preserves_windows_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The backend syntax-error parser must preserve Windows paths and colon messages.
+
+    Preconditions:
+        ``run_python_syntax_check`` reports a failure whose stderr line uses a
+        Windows drive-letter path and a colon-bearing message
+        (``"C:\\proj\\a.py: SyntaxError: invalid syntax"``).
+    Postconditions:
+        The issue handed to the repair loop carries the full path as ``file_path``
+        and the full text after ``": "`` as ``description`` — the ": " delimiter is
+        used so the drive-letter colon and the message colons are not split on.
+    """
+    _write(tmp_path / "app.py", "def foo():\n    return 1\n")
+
+    syntax_fail = CommandResult(
+        success=False,
+        exit_code=1,
+        stdout="",
+        stderr="Syntax errors found:\nC:\\proj\\a.py: SyntaxError: invalid syntax",
+    )
+    monkeypatch.setattr(
+        "shared.command_runner.executor.run_python_syntax_check",
+        lambda *args, **kwargs: syntax_fail,
+    )
+    monkeypatch.setattr(
+        "software_engineering_team.build_fix.get_strands_model",
+        lambda *args, **kwargs: object(),
+    )
+
+    captured: list[dict] = []
+
+    def _capture(*, issue, **kwargs):
+        captured.append(issue)
+        return False  # do not apply; loop moves on and exhausts
+
+    monkeypatch.setattr("software_engineering_team.build_fix._execute_llm_repair_attempt", _capture)
+
+    success, _ = _try_build_fix_one_at_a_time(tmp_path, "backend", "task-win-path")
+
+    assert success is False
+    assert len(captured) == 1
+    assert captured[0]["file_path"] == "C:\\proj\\a.py"
+    assert captured[0]["description"] == "SyntaxError: invalid syntax"
+
+
 def test_is_command_result_rejects_none_and_incomplete_objects() -> None:
     """``_is_command_result`` guards the CommandResult interface the repair loop relies on.
 

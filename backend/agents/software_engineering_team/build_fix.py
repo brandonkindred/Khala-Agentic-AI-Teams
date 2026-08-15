@@ -604,7 +604,10 @@ def _try_build_fix_one_at_a_time(
                     line = line.strip()
                     if not line or ":" not in line:
                         continue
-                    path, _, msg = line.partition(":")
+                    # Line format is "<path>: <message>"; split on the ": " delimiter
+                    # (not the first bare colon) so a Windows drive letter (e.g. "C:\\")
+                    # and colon-bearing messages are preserved.
+                    path, _, msg = line.partition(": ")
                     path, msg = path.strip(), msg.strip()
                     if path and msg:
                         issues.append(
@@ -792,7 +795,10 @@ def _try_build_fix_one_at_a_time(
                     for line in stderr.split("\n")[1:]:
                         line = line.strip()
                         if ":" in line:
-                            path, _, msg = line.partition(":")
+                            # Line format is "<path>: <message>"; split on the ": "
+                            # delimiter (not the first bare colon) so a Windows drive
+                            # letter (e.g. "C:\\") and colon-bearing messages survive.
+                            path, _, msg = line.partition(": ")
                             path, msg = path.strip(), msg.strip()
                             if path and msg:
                                 issues.append(
