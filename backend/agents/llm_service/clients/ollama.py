@@ -549,7 +549,7 @@ def _parse_retry_after_seconds(headers: Any) -> Optional[float]:
 
 def _rate_limit_error_from_response(
     *,
-    body: str,
+    body: Optional[str],
     headers: Any,
     attempt: int,
     cause: Optional[Exception] = None,
@@ -557,7 +557,8 @@ def _rate_limit_error_from_response(
     """Build an ``LLMRateLimitError`` from a 429 response, classifying the body.
 
     Preconditions: ``attempt`` is a non-negative int (1-based attempt count in
-        the raised message); ``body`` is the response text (may be empty).
+        the raised message); ``body`` is the response text (may be empty or
+        ``None`` — both are treated as an empty body).
     Postconditions: returns an ``LLMRateLimitError`` with ``limit_kind`` set from
         :func:`classify_ollama_limit_kind`, ``retry_after_seconds`` from headers
         when honoring is enabled, and a message that includes a body snippet.
@@ -876,9 +877,18 @@ class OllamaLLMClient(LLMClient):
         attempt: int,
         reason: str = "",
     ) -> None:
-        """Log full server error details (status, body, useful headers) at ERROR level."""
-        body = (response_text or "")[:_MAX_LOG_BODY]
-        if len(response_text or "") > _MAX_LOG_BODY:
+        """Log full server error details (status, body, useful headers) at ERROR level.
+
+        Preconditions: none — ``response_text``/``response_headers`` may be
+            ``None`` and are handled defensively; ``attempt`` is the 1-based
+            attempt count for the log line.
+        Postconditions: emits exactly one ERROR log line with status, model,
+            base_url, attempt, reason, selected headers, and a body truncated to
+            ``_MAX_LOG_BODY``. Never raises (header access is guarded).
+        """
+        safe_text = response_text or ""
+        body = safe_text[:_MAX_LOG_BODY]
+        if len(safe_text) > _MAX_LOG_BODY:
             body += "... [truncated]"
         extra_headers = ""
         if response_headers is not None:
@@ -1761,6 +1771,10 @@ class OllamaLLMClient(LLMClient):
                     continue
                 # retry_transient (kill switch off): the transient budget is owned
                 # by the loop's closure, so the step runs here, not in the helper.
+                # DbC: the helper raises the terminal outcomes itself, so the only
+                # decision that reaches this point is retry_transient, which always
+                # carries a transient_error — assert rather than silently coerce.
+                assert decision.action == "retry_transient" and decision.transient_error is not None
                 last_error = decision.transient_error
                 if _retry_transient_step(str(last_error)):
                     continue
@@ -1777,6 +1791,15 @@ class OllamaLLMClient(LLMClient):
                 self._log_exhaustion_context(e, attempt + 1, reason="server error")
                 raise last_error
             except httpx.HTTPStatusError as e:
+                # Boundary vs _route_http_status_error: that helper classifies the
+                # non-200 status read manually from the streaming response, INSIDE
+                # the semaphore/stream contexts. This clause instead catches a
+                # status error raised by httpx itself (e.g. from response.read()
+                # or a non-streaming call) that escaped that path — it runs OUTSIDE
+                # those contexts, so it applies the rate-limit/transient backoff
+                # inline (a raise here cannot funnel into the sibling
+                # `except LLMRateLimitError`/`LLMTemporaryError` clauses). The
+                # classification is intentionally duplicated for that reason.
                 resp = e.response
                 status = resp.status_code if resp else None
                 if resp is not None:
