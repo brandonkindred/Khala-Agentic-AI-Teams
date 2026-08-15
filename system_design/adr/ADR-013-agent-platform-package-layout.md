@@ -1,7 +1,7 @@
 # ADR-013 — Agent platform package layout and public import paths
 
-- **Status**: Proposed — design-note only, no code moves. Foundation for the sibling
-  implementation sub-issues under the parent epic.
+- **Status**: Implemented — target tree and import map landed; former top-level
+  `agent_registry/`, `agent_console/`, and `agent_studio/` packages are gone.
 - **Date**: 2026-08-12
 - **Owner**: Agent Studio / Agent Platform
 - **Related**:

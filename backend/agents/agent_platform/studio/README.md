@@ -30,8 +30,8 @@ in-progress `definition_json` on an Agent Studio conversation row
 conversation's definition, or cloning a registered agent into a new refine
 conversation, always crosses this boundary through exactly one pair of pure
 projection functions in `registration.py` (they delegate construction and
-field projection to `shared.manifests`; Studio-owned id, state-fold, and
-refine-draft rules stay in this package):
+field projection to [`shared.manifests`](../../../../shared/manifests/README.md);
+Studio-owned id, state-fold, and refine-draft rules stay in this package):
 
 - **`build_studio_agent_manifest(definition) -> AgentManifest`** — the save/register
   path (`service.py::save_agent`). Called on every `POST /agents`.
@@ -62,3 +62,6 @@ See `registration.py`'s module docstring for the runtime-binding caveat: a saved
 agent's `role` / `system_prompt` are advertised on the manifest but the shared
 generated-agent runtime still reconstructs persona from the invoke request body,
 not the stored manifest, at invoke time (binding is a separate, tracked follow-up).
+See
+[`system_design/adr/ADR-015-invoke-generated-agent-persona-state-precedence.md`](../../../../system_design/adr/ADR-015-invoke-generated-agent-persona-state-precedence.md)
+for the locked precedence contract that follow-up implements.

@@ -3,13 +3,13 @@
 - **Status**: Accepted
 - **Date**: 2026-07-03
 - **Owner**: User Agent Founder team
-- **Related**: `backend/agents/user_agent_founder/system_design/FEATURE_SPEC_testing_personas.md` (Backend Design section — defines the `TargetTeamAdapter` Protocol)
+- **Related**: `backend/agents/agent_team_studio/user_agent_founder/system_design/FEATURE_SPEC_testing_personas.md` (Backend Design section — defines the `TargetTeamAdapter` Protocol)
 
 ## Context
 
 The `user_agent_founder` team lets a testing persona autonomously drive a
 target team end-to-end. Every target sits behind the `TargetTeamAdapter`
-Protocol (`backend/agents/user_agent_founder/targets/base.py`), which assumes
+Protocol (`backend/agents/agent_team_studio/user_agent_founder/targets/base.py`), which assumes
 a **three-phase** target:
 
 1. **Spec** — generated persona-side, no adapter involvement.
@@ -20,7 +20,7 @@ a **three-phase** target:
    again with batched multiple-choice questions.
 
 An **agentic team's test pipeline**
-(`backend/agents/agentic_team_provisioning`) is shaped differently: a single
+(`backend/agents/agent_team_studio/agentic_team_provisioning`) is shaped differently: a single
 linear DAG run (`TestPipelineRun`) that starts from one `initial_input`,
 walks its steps in topological order, and occasionally pauses on a `WAIT`
 step whose `human_prompt` expects one **free-text** answer posted to the
@@ -30,7 +30,7 @@ multiple-choice questions.
 This is a structural impedance mismatch, not a cosmetic one. The
 persona-drives-any-team flow depends on bridging it, and the bridge —
 `AgenticTeamAdapter`
-(`backend/agents/user_agent_founder/targets/agentic_team.py`) — necessarily
+(`backend/agents/agent_team_studio/user_agent_founder/targets/agentic_team.py`) — necessarily
 couples the two contracts: a shape change on either side can break the
 bridge silently.
 
@@ -98,7 +98,7 @@ re-evaluated instead of adding a second collapsing adapter.
 The exact surface the adapter depends on, in both directions. Changing
 anything below requires updating the adapter and the drift tripwire together.
 
-Provisioning → founder (defined in `backend/agents/agentic_team_provisioning`):
+Provisioning → founder (defined in `backend/agents/agent_team_studio/agentic_team_provisioning`):
 
 - `TestPipelineRun` fields the adapter reads: `run_id`, `status`,
   `current_step_id`, `human_prompt`, `error`.
@@ -112,7 +112,7 @@ Provisioning → founder (defined in `backend/agents/agentic_team_provisioning`)
   `POST /teams/{team_id}/test-pipeline/runs/{run_id}/input`, mounted at the
   unified-API prefix `/api/agentic-team-provisioning`.
 
-Founder-internal (defined in `backend/agents/user_agent_founder`):
+Founder-internal (defined in `backend/agents/agent_team_studio/user_agent_founder`):
 
 - The `TargetTeamAdapter` Protocol shape — attributes `team_key`/
   `display_name` and the six method signatures. The Protocol is
@@ -126,7 +126,7 @@ Founder-internal (defined in `backend/agents/user_agent_founder`):
 ## Consequences
 
 - The coupling is accepted and guarded, split across two suites:
-  `backend/agents/user_agent_founder/tests/test_adapter_agentic_team_contract_drift.py`
+  `backend/agents/agent_team_studio/user_agent_founder/tests/test_adapter_agentic_team_contract_drift.py`
   imports the **real** provisioning-side models, DTOs, and app routes and
   fails loudly when the provisioning-side surface or the Protocol signatures
   drift (the behavioral suite in `test_adapter_agentic_team.py` scripts fake
