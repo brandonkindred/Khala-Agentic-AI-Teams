@@ -337,6 +337,28 @@ describe('IntegrationsApiService', () => {
     req.flush({ job_id: 'rev 9', created: [], proposals: [] });
   });
 
+  it('getGitHubReviewTranscript GET with owner/repo params and encoded job id', () => {
+    const entries = [
+      {
+        stage: 'chunk_review',
+        target: 'a.py',
+        model: 'm',
+        prompt: 'p',
+        response: 'r',
+        started_at: '2024-01-01T00:00:00Z',
+        duration_ms: 10,
+      },
+    ];
+    service.getGitHubReviewTranscript('acme', 'widget', 'rev 9').subscribe((res) => {
+      expect(res).toEqual({ job_id: 'rev 9', entries });
+    });
+    const req = httpMock.expectOne((r) => r.url === `${baseUrl}/github/reviews/rev%209/transcript`);
+    expect(req.request.method).toBe('GET');
+    expect(req.request.params.get('owner')).toBe('acme');
+    expect(req.request.params.get('repo')).toBe('widget');
+    req.flush({ job_id: 'rev 9', entries });
+  });
+
   it('getTradingViewConfig GET', () => {
     const mockConfig = {
       enabled: true,

@@ -1045,6 +1045,11 @@ def _submission_fingerprint(
           so a stored approval survives across coordinator calls in a process.
     """
     payload = input_data.model_dump(mode="json")
+    # A per-invocation caller id, not content: two submissions with identical code
+    # and context must still collide here even when their ``job_id``s differ (a
+    # resubmission of the same PR is a fresh job_id every time), or this field alone
+    # would turn every cache hit into a guaranteed miss.
+    payload.pop("job_id", None)
     payload["__model__"] = model_fingerprint
     payload["__side_effect_consolidation__"] = env_flag_enabled(SIDE_EFFECT_CONSOLIDATION_ENV)
     payload["__spec_compliance_single_pass__"] = spec_compliance_single_pass
