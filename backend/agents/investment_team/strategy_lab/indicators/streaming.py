@@ -52,9 +52,10 @@ if TYPE_CHECKING:
 NAN = float("nan")
 
 # Feature flag gating whether a registry constructed with a ``batch_cache``
-# actually consults it (see :class:`IndicatorRegistry`). Defaults to off so
-# every existing caller's behavior is unchanged until a batch caller
-# (tracked separately) both flips this on and passes a real cache/timeframe.
+# actually consults it (see :class:`IndicatorRegistry`). Defaults to ON after
+# the cache's bake-in/validation period: a batch caller that passes a real
+# cache/timeframe now shares indicator values across strategies by default.
+# Set the env var to a falsy value to opt back out.
 _BATCH_CACHE_ENV_VAR = "STRATEGY_LAB_BATCH_INDICATOR_CACHE_ENABLED"
 _TRUE_ENV_VALUES = frozenset({"true", "1", "yes", "on"})
 
@@ -68,10 +69,11 @@ def _batch_cache_flag_enabled() -> bool:
     no ``shared`` package on its path — importing ``shared.env_config`` here
     would crash every sandboxed strategy at import time. This reimplements
     just the boolean-truthiness slice of ``shared.env_config.env_bool``
-    (case-insensitive ``true``/``1``/``yes``/``on``; anything else, including
-    unset, is ``False``) rather than depending on it.
+    (case-insensitive ``true``/``1``/``yes``/``on``; anything else disables)
+    rather than depending on it. The default is ``true``: unset therefore
+    resolves to enabled, and only an explicit falsy value turns the cache off.
     """
-    return os.environ.get(_BATCH_CACHE_ENV_VAR, "").strip().lower() in _TRUE_ENV_VALUES
+    return os.environ.get(_BATCH_CACHE_ENV_VAR, "true").strip().lower() in _TRUE_ENV_VALUES
 
 
 # ---------------------------------------------------------------------------
@@ -424,12 +426,12 @@ class IndicatorRegistry:
         Postconditions:
           - ``self._batch_cache`` is ``batch_cache`` when the
             ``STRATEGY_LAB_BATCH_INDICATOR_CACHE_ENABLED`` env var (read via
-            :func:`_batch_cache_flag_enabled`, default off) is true, and
+            :func:`_batch_cache_flag_enabled`, default on) is truthy, and
             ``None`` otherwise — regardless of what was passed. Every
-            existing zero-arg ``IndicatorRegistry()`` call site, and every
-            call site until the flag is explicitly enabled, therefore gets
-            ``self._batch_cache is None`` and consults nothing, preserving
-            today's behavior byte-for-byte.
+            existing zero-arg ``IndicatorRegistry()`` call site still gets
+            ``self._batch_cache is None`` (nothing was passed to keep), and a
+            deployment that sets the flag to a falsy value opts back out so
+            even a passed cache is discarded and nothing is consulted.
           - ``self._timeframe`` is stored verbatim; :func:`resolve_indicator`
             only consults the batch cache when both a cache is present and
             this is non-empty (bars carry no timeframe of their own).
@@ -1672,12 +1674,13 @@ def resolve_indicator(
     would let a later one-bar append classify as ``expand`` against a
     different prefix.
 
-    The batch cache (``reg._batch_cache``, set only when
-    ``STRATEGY_LAB_BATCH_INDICATOR_CACHE_ENABLED`` was true at ``reg``'s
-    construction — see :meth:`IndicatorRegistry.__init__`) is consulted only
-    when all of the following hold, so that a registry built the ordinary
-    way (no ``batch_cache``/``timeframe`` args, flag off) always falls
-    straight through to :func:`_dispatch_indicator` unchanged:
+    The batch cache (``reg._batch_cache``, set only when a ``batch_cache`` was
+    passed *and* ``STRATEGY_LAB_BATCH_INDICATOR_CACHE_ENABLED`` was truthy at
+    ``reg``'s construction — the flag defaults on, see
+    :meth:`IndicatorRegistry.__init__`) is consulted only when all of the
+    following hold, so that a registry built the ordinary way (no
+    ``batch_cache``/``timeframe`` args) always falls straight through to
+    :func:`_dispatch_indicator` unchanged:
       - ``reg._batch_cache`` is not ``None``.
       - ``bars`` is non-empty and ``reg._timeframe`` is non-empty (bars carry
         no timeframe of their own; it must come from the registry).
