@@ -12,7 +12,9 @@ import pytest
 from llm_service.clients.ollama import (
     DEFAULT_MAX_OUTPUT_TOKENS,
     OllamaLLMClient,
+    _EmptyResponseSignal,
     _parse_retry_after_seconds,
+    _SemanticRetryDecision,
     list_ollama_models,
 )
 from llm_service.interface import (
@@ -2135,3 +2137,171 @@ def test_list_ollama_models_http_error_returns_empty(monkeypatch: pytest.MonkeyP
     mock_cls, _ = _patch_tags_get(httpx.ConnectError("refused"))
     with patch("httpx.Client", mock_cls):
         assert list_ollama_models() == []
+
+
+# ---------------------------------------------------------------------------
+# Direct unit tests for the extracted retry-loop helpers
+# (_route_http_status_error, _handle_semantic_exhaustion_retry). The integration
+# tests above exercise these through _ollama_post; these lock their contracts.
+# ---------------------------------------------------------------------------
+
+
+def _client() -> OllamaLLMClient:
+    return OllamaLLMClient(model="qwen3.5:397b-cloud", base_url="http://localhost:9999", timeout=5)
+
+
+def _resp(body_text: str = "", headers: dict | None = None) -> MagicMock:
+    resp = MagicMock()
+    resp.text = body_text
+    resp.headers = {} if headers is None else headers
+    return resp
+
+
+def test_route_http_status_error_429_attaches_exhaustion_context() -> None:
+    """A 429 is raised as LLMRateLimitError carrying the deferred (status, body, headers) log."""
+    client = _client()
+    headers = {"retry-after": "5"}
+    resp = _resp(body_text='{"error":"rate limited"}', headers=headers)
+    with pytest.raises(LLMRateLimitError) as exc_info:
+        client._route_http_status_error(429, resp, attempt=0, headers={"Authorization": "Bearer k"})
+    ctx = exc_info.value._exhaustion_log_context
+    assert ctx == (429, '{"error":"rate limited"}', headers)
+
+
+def test_route_http_status_error_5xx_attaches_exhaustion_context() -> None:
+    """A 5xx is raised as LLMTemporaryError with status_code and deferred log context."""
+    client = _client()
+    resp = _resp(body_text="upstream boom", headers={"x-request-id": "abc"})
+    with pytest.raises(LLMTemporaryError) as exc_info:
+        client._route_http_status_error(503, resp, attempt=1, headers=None)
+    err = exc_info.value
+    assert err.status_code == 503
+    assert err._exhaustion_log_context == (503, "upstream boom", {"x-request-id": "abc"})
+
+
+def test_route_http_status_error_5xx_adds_qwen35_cloud_hint() -> None:
+    """A 5xx from Ollama Cloud running qwen3.5 appends the think=False hint."""
+    client = OllamaLLMClient(model="qwen3.5:397b-cloud", base_url="https://ollama.com", timeout=5)
+    with pytest.raises(LLMTemporaryError) as exc_info:
+        client._route_http_status_error(500, _resp("boom"), attempt=0, headers=None)
+    assert "try passing think=False" in str(exc_info.value)
+
+
+def test_route_http_status_error_401_permanent_with_auth_hint() -> None:
+    """401 -> LLMPermanentError; the hint depends on whether auth headers were sent."""
+    client = _client()
+    # No auth headers were sent -> tell the caller to set OLLAMA_API_KEY.
+    with pytest.raises(LLMPermanentError) as no_key:
+        client._route_http_status_error(401, _resp("unauthorized"), attempt=0, headers=None)
+    assert no_key.value.status_code == 401
+    assert "Set OLLAMA_API_KEY" in str(no_key.value)
+    assert not hasattr(no_key.value, "_exhaustion_log_context")
+    # A key was sent -> tell the caller to check its validity.
+    with pytest.raises(LLMPermanentError) as bad_key:
+        client._route_http_status_error(
+            401, _resp("unauthorized"), attempt=0, headers={"Authorization": "Bearer k"}
+        )
+    assert "not expired" in str(bad_key.value)
+
+
+def test_route_http_status_error_404_and_generic_4xx_permanent_no_context() -> None:
+    """404 model-not-found and a generic 4xx both raise LLMPermanentError with no deferred log."""
+    client = _client()
+    with pytest.raises(LLMPermanentError) as not_found:
+        client._route_http_status_error(404, _resp("model not found"), attempt=0, headers=None)
+    assert not_found.value.status_code == 404
+    assert not hasattr(not_found.value, "_exhaustion_log_context")
+    with pytest.raises(LLMPermanentError) as generic:
+        client._route_http_status_error(400, _resp("bad request"), attempt=0, headers=None)
+    assert generic.value.status_code == 400
+
+
+def test_route_http_status_error_unexpected_status_permanent() -> None:
+    """A non-2xx/4xx/5xx status (e.g. 3xx) falls through to the unexpected-status branch."""
+    client = _client()
+    with pytest.raises(LLMPermanentError) as exc_info:
+        client._route_http_status_error(302, _resp("redirect"), attempt=0, headers=None)
+    assert exc_info.value.status_code == 302
+    assert "Unexpected LLM response status 302" in str(exc_info.value)
+
+
+def _sig(finish_reason: str = "stop", *, content_len: int = 0) -> _EmptyResponseSignal:
+    return _EmptyResponseSignal(
+        finish_reason,
+        has_reasoning=True,
+        content_len=content_len,
+        reasoning_len=42,
+        reasoning_has_json=True,
+    )
+
+
+def _handle(client: OllamaLLMClient, **overrides: object) -> _SemanticRetryDecision:
+    kwargs: dict = dict(
+        schema_forced=False,
+        attempt=0,
+        resolved_think="max",
+        active_think="max",
+        semantic_attempt=0,
+        max_semantic_retries=2,
+        stream_payload={"model": "m", "stream": True},
+        any_content_bytes=False,
+        reasoning_len_seen=0,
+        reasoning_has_json_seen=False,
+    )
+    kwargs.update(overrides)
+    return client._handle_semantic_exhaustion_retry(_sig(), **kwargs)
+
+
+def test_handle_semantic_exhaustion_schema_forced_raises_immediately(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """schema_forced empty response bails with schema_forced=True regardless of the kill switch."""
+    monkeypatch.setenv("LLM_THINKING_DOWNGRADE_RETRY", "false")
+    client = _client()
+    with pytest.raises(LLMSemanticExhaustionError) as exc_info:
+        _handle(client, schema_forced=True, attempt=2)
+    err = exc_info.value
+    assert err.schema_forced is True
+    assert err.attempts_used == 3
+    assert err.retry_thinking_level is None
+
+
+def test_handle_semantic_exhaustion_kill_switch_off_returns_transient(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Kill switch off -> a retry_transient decision carrying an LLMTemporaryError."""
+    monkeypatch.setenv("LLM_THINKING_DOWNGRADE_RETRY", "false")
+    client = _client()
+    decision = _handle(client)
+    assert decision.action == "retry_transient"
+    assert isinstance(decision.transient_error, LLMTemporaryError)
+
+
+def test_handle_semantic_exhaustion_ladder_retry_returns_downgraded_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A proof-of-change downgrade retry advances the ladder and accumulates diagnostics."""
+    monkeypatch.setenv("LLM_THINKING_DOWNGRADE_RETRY", "true")
+    client = _client()
+    decision = _handle(client, active_think=True, semantic_attempt=0, max_semantic_retries=1)
+    assert decision.action == "retry_semantic"
+    assert decision.active_think is False  # True -> thinking-off
+    assert decision.semantic_attempt == 1
+    assert decision.stream_payload["think"] is False
+    assert decision.reasoning_len_seen == 42
+    assert decision.reasoning_has_json_seen is True
+
+
+def test_handle_semantic_exhaustion_ladder_exhausted_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When no further downgrade is available the call fails with LLMSemanticExhaustionError."""
+    monkeypatch.setenv("LLM_THINKING_DOWNGRADE_RETRY", "true")
+    client = _client()
+    # active_think already False -> _semantic_retry_think returns None -> exhausted.
+    with pytest.raises(LLMSemanticExhaustionError) as exc_info:
+        _handle(client, active_think=False, semantic_attempt=0, max_semantic_retries=1, attempt=3)
+    err = exc_info.value
+    assert err.schema_forced is False
+    assert err.attempts_used == 4
+    assert err.finish_reason == "stop"

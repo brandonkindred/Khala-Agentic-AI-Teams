@@ -15,7 +15,8 @@ import re
 import threading
 import time
 from contextvars import ContextVar
-from typing import Any, Callable, Dict, Optional
+from dataclasses import dataclass
+from typing import Any, Callable, Dict, NoReturn, Optional
 
 import httpx
 from pydantic import BaseModel
@@ -443,6 +444,39 @@ class _EmptyResponseSignal(Exception):
         self.reasoning_has_json = reasoning_has_json
 
 
+@dataclass(frozen=True)
+class _SemanticRetryDecision:
+    """Outcome of the empty-response (semantic-exhaustion) handler.
+
+    ``_handle_semantic_exhaustion_retry`` returns one of these instead of
+    mutating the loop's state directly, so the retry loop stays a flat dispatch.
+    Terminal outcomes (schema-forced starvation, ladder exhausted) are raised by
+    that method itself and never surface as a decision.
+
+    ``action`` discriminates the two non-terminal outcomes:
+
+    - ``"retry_semantic"`` — a proof-of-change downgrade retry is available. The
+      caller adopts ``active_think`` / ``stream_payload`` / ``semantic_attempt``
+      and the accumulated reasoning diagnostics, then ``continue``s the loop.
+    - ``"retry_transient"`` — the thinking-downgrade kill switch is off, so the
+      empty response is treated as a transient fault. The caller adopts
+      ``transient_error`` as ``last_error`` and runs the transient-budget step.
+
+    Invariants: exactly one action is set; the ``retry_semantic`` fields are
+        populated only for that action and ``transient_error`` only for
+        ``retry_transient``.
+    """
+
+    action: str
+    active_think: "bool | str | None" = None
+    stream_payload: Optional[dict] = None
+    semantic_attempt: int = 0
+    any_content_bytes: bool = False
+    reasoning_len_seen: int = 0
+    reasoning_has_json_seen: bool = False
+    transient_error: Optional[Exception] = None
+
+
 def _parse_retry_config() -> tuple[int, float, float]:
     """Parse retry env vars. Returns (max_retries, initial_backoff_seconds, backoff_max_seconds).
 
@@ -535,9 +569,7 @@ def _rate_limit_error_from_response(
     if len(snippet) > 300:
         snippet = snippet[:300] + "…"
     detail = f": {snippet}" if snippet else ""
-    retry_after = (
-        _parse_retry_after_seconds(headers) if _honor_retry_after_enabled() else None
-    )
+    retry_after = _parse_retry_after_seconds(headers) if _honor_retry_after_enabled() else None
     return LLMRateLimitError(
         f"LLM rate limited (429) after {attempt} attempt(s) [{limit_kind}]{detail}",
         status_code=429,
@@ -875,6 +907,274 @@ class OllamaLLMClient(LLMClient):
             body,
         )
 
+    def _log_exhaustion_context(self, error: Exception, attempt: int, *, reason: str) -> None:
+        """Emit the deferred server-error log for a retry-exhausted 429/5xx.
+
+        ``_route_http_status_error`` stamps ``_exhaustion_log_context`` — the
+        ``(status, body, headers)`` captured inside the stream context — onto the
+        429/5xx errors it raises, so the (slow) backoff can run outside the
+        concurrency gate and the body is still logged once retries are exhausted.
+
+        Preconditions: ``error`` is the exception caught by a retry-exhaustion
+            handler; ``attempt`` is the 1-based attempt count for the log line.
+        Postconditions: logs at ERROR exactly once iff ``error`` carries a
+            non-None ``_exhaustion_log_context``; otherwise a no-op (errors from
+            paths that log inline, e.g. 4xx, carry no context).
+        """
+        ctx = getattr(error, "_exhaustion_log_context", None)
+        if ctx is not None:
+            status_code, body, headers = ctx
+            self._log_llm_server_error(status_code, body, headers, attempt, reason=reason)
+
+    def _route_http_status_error(
+        self,
+        status: int,
+        response: Any,
+        attempt: int,
+        headers: Optional[dict],
+    ) -> NoReturn:
+        """Map a non-200 HTTP status to the appropriate ``LLM*`` error and raise it.
+
+        Flattens the status cascade out of the deeply nested stream context of
+        ``_ollama_post`` so that method's loop body handles one concern (reading
+        the stream) and this method handles another (classifying failures).
+
+        The 429 and 5xx errors are stamped with ``_exhaustion_log_context`` — the
+        ``(status, body, headers)`` captured here inside the still-open stream
+        context — instead of being logged now, so their backoff sleep runs in the
+        loop-level handler AFTER the semaphore/stream contexts unwind (never while
+        holding the shared concurrency gate). 4xx/unexpected statuses are terminal
+        and logged inline before raising, mirroring the pre-refactor behavior.
+
+        Preconditions: ``status != 200``; ``response`` has already been fully read
+            (``response.read()``), so ``response.text``/``response.headers`` are
+            available; ``headers`` is the request's auth headers (used only to
+            tailor the 401 hint) or None.
+        Postconditions: always raises. Raises ``LLMRateLimitError`` for 429 (with
+            deferred-log context), ``LLMTemporaryError`` for 5xx (with deferred-log
+            context and ``status_code=status``), ``LLMPermanentError`` for 4xx and
+            any other non-200 status (logged inline). Never returns.
+        """
+        if status == 429:
+            # Capture the body/headers for exhaustion logging, then RAISE so the
+            # `with stream / with Client / with sem` contexts unwind (releasing the
+            # concurrency slot and closing the stream) BEFORE the slow 429 backoff
+            # sleep, which is owned by the loop-level `except LLMRateLimitError`
+            # handler.
+            error = _rate_limit_error_from_response(
+                body=response.text,
+                headers=response.headers,
+                attempt=attempt + 1,
+            )
+            error._exhaustion_log_context = (429, response.text, response.headers)
+            raise error
+        if 500 <= status < 600:
+            hint = ""
+            if "ollama.com" in self.base_url and "qwen3.5" in self.model.lower():
+                hint = " If using Ollama Cloud with qwen3.5, try passing think=False."
+            # Capture body/headers for the exhaustion log, then raise so the
+            # transient backoff runs in the outer ``except LLMTemporaryError``
+            # handler — AFTER the stream/client/semaphore contexts unwind. Sleeping
+            # here would hold the process-global concurrency gate through the
+            # backoff, blocking unrelated calls even though no request is in flight
+            # (mirrors the 429 path).
+            error = LLMTemporaryError(
+                f"LLM server error {status} after {attempt + 1} attempt(s): {response.text}.{hint}",
+                status_code=status,
+            )
+            error._exhaustion_log_context = (status, response.text, response.headers)
+            raise error
+        if 400 <= status < 500:
+            err_text = response.text
+            self._log_llm_server_error(
+                status,
+                response.text,
+                response.headers,
+                attempt + 1,
+                reason="client error",
+            )
+            if status == 404 and ("not found" in err_text.lower() or "model" in err_text.lower()):
+                raise LLMPermanentError(
+                    f"LLM model not found (404). API at {self.base_url} does not have model '{self.model}'. Original: {err_text}",
+                    status_code=status,
+                )
+            if status == 401:
+                auth_hint = (
+                    " Set OLLAMA_API_KEY (or LLM_OLLAMA_API_KEY) for Ollama Cloud."
+                    if not headers
+                    else " Check that the key is valid and not expired."
+                )
+                raise LLMPermanentError(
+                    f"LLM unauthorized (401): {err_text}.{auth_hint}",
+                    status_code=status,
+                )
+            raise LLMPermanentError(f"LLM client error {status}: {err_text}", status_code=status)
+        self._log_llm_server_error(
+            status,
+            response.text,
+            response.headers,
+            attempt + 1,
+            reason="unexpected status",
+        )
+        raise LLMPermanentError(
+            f"Unexpected LLM response status {status}: {response.text}",
+            status_code=status,
+        )
+
+    def _handle_semantic_exhaustion_retry(
+        self,
+        sig: _EmptyResponseSignal,
+        *,
+        schema_forced: bool,
+        attempt: int,
+        resolved_think: "bool | str | None",
+        active_think: "bool | str | None",
+        semantic_attempt: int,
+        max_semantic_retries: int,
+        stream_payload: dict,
+        any_content_bytes: bool,
+        reasoning_len_seen: int,
+        reasoning_has_json_seen: bool,
+    ) -> _SemanticRetryDecision:
+        """Decide what to do with a 200-but-empty (semantic-exhaustion) response.
+
+        Extracted from ``_ollama_post`` so the loop's ``except _EmptyResponseSignal``
+        handler is a flat dispatch. This method owns the whole decision — the
+        schema-forced bail, the thinking-downgrade kill switch, and the
+        proof-of-change downgrade ladder — and either raises the terminal
+        ``LLMSemanticExhaustionError`` itself or returns a ``_SemanticRetryDecision``
+        describing a retry the caller performs.
+
+        Preconditions: ``sig`` is the empty-response signal just caught;
+            ``resolved_think`` is the thinking level of the first attempt and
+            ``active_think`` the current (possibly downgraded) level;
+            ``0 <= semantic_attempt`` and ``max_semantic_retries >= 0`` bound the
+            downgrade ladder; the ``*_seen`` / ``any_content_bytes`` args are the
+            diagnostics accumulated across earlier rungs.
+        Postconditions: returns a ``_SemanticRetryDecision`` with action
+            ``"retry_semantic"`` (a downgraded retry is available — carries the new
+            ``active_think``/``stream_payload``/``semantic_attempt`` and the updated
+            diagnostics) or ``"retry_transient"`` (kill switch off — carries a
+            ``LLMTemporaryError`` for the caller's transient budget). Raises
+            ``LLMSemanticExhaustionError`` directly when schema-forced decoding
+            starved the channel (``schema_forced=True``) or the ladder is
+            exhausted. Never mutates caller state.
+        """
+        if schema_forced:
+            # One strike, no ladder, no retry loop: schema-forced decoding starved
+            # the content channel (the exact failure mode Strategy Lab's earlier
+            # decoder-level format=<json-schema> attempt hit on long code-emitting
+            # turns — see strategy_lab/agents/_response_schemas.py). Bail immediately
+            # with an explicit signal callers can catch/branch on, regardless of the
+            # thinking-downgrade kill switch state — falling through to the legacy
+            # "retry verbatim" branch below would resurrect exactly the retry-loop
+            # shape that was reverted.
+            fingerprint = sha256_fingerprint(
+                json.dumps(stream_payload, sort_keys=True, default=str)
+            )
+            logger.error(
+                "LLM schema-forced decoding starved the content channel: rid=%s %s "
+                "failure_class=semantic_exhaustion schema_forced=True attempts_used=%d "
+                "finish_reason=%s payload_fingerprint=%s",
+                current_request_id() or "-",
+                _attribution_log_fields(),
+                attempt + 1,
+                sig.finish_reason,
+                fingerprint,
+            )
+            raise LLMSemanticExhaustionError(
+                "Schema-forced structured decoding produced no assistant content; "
+                "caller should catch this and retry with schema=None (unconstrained "
+                "json_object mode)",
+                attempts_used=attempt + 1,
+                original_thinking_level=resolved_think,
+                retry_thinking_level=None,
+                content_bytes_seen=sig.content_len > 0,
+                payload_fingerprint=fingerprint,
+                finish_reason=sig.finish_reason,
+                schema_forced=True,
+            )
+        if not _thinking_downgrade_enabled():
+            # Kill switch off: legacy behavior — empty responses retry verbatim on
+            # the transient schedule, then fail as a plain LLMTemporaryError. The
+            # caller runs the transient-budget step because a raise here cannot be
+            # caught by the sibling LLMTemporaryError clause of its try.
+            logger.warning(
+                "LLM returned empty response (rid=%s, %s, finish_reason=%s). Treating as transient error for retry.",
+                current_request_id() or "-",
+                _attribution_log_fields(),
+                sig.finish_reason,
+            )
+            return _SemanticRetryDecision(
+                action="retry_transient",
+                transient_error=LLMTemporaryError(
+                    "Empty response from LLM; treating as transient for retry",
+                ),
+            )
+        # Receipt diagnostics accumulate across rungs so the receipt reflects the
+        # reasoning-heavy early attempts, not the empty thinking-off rung that
+        # usually raises.
+        any_content_bytes = any_content_bytes or sig.content_len > 0
+        reasoning_len_seen = max(reasoning_len_seen, sig.reasoning_len)
+        reasoning_has_json_seen = reasoning_has_json_seen or sig.reasoning_has_json
+        new_think = (
+            _semantic_retry_think(self.model, active_think)
+            if semantic_attempt < max_semantic_retries
+            else None
+        )
+        if new_think is not None:
+            logger.warning(
+                "LLM produced no assistant content (rid=%s, %s, finish=%s, has_reasoning=%s, attempt %d); "
+                "proof-of-change retry with thinking %r -> %r",
+                current_request_id() or "-",
+                _attribution_log_fields(),
+                sig.finish_reason,
+                sig.has_reasoning,
+                attempt + 1,
+                active_think,
+                new_think,
+            )
+            # Immediate retry: the changed payload IS the proof of change — backoff
+            # would not alter the outcome.
+            return _SemanticRetryDecision(
+                action="retry_semantic",
+                active_think=new_think,
+                stream_payload={**stream_payload, **_think_payload_fields(new_think)},
+                semantic_attempt=semantic_attempt + 1,
+                any_content_bytes=any_content_bytes,
+                reasoning_len_seen=reasoning_len_seen,
+                reasoning_has_json_seen=reasoning_has_json_seen,
+            )
+        fingerprint = sha256_fingerprint(json.dumps(stream_payload, sort_keys=True, default=str))
+        retry_level = active_think if semantic_attempt else None
+        logger.error(
+            "LLM semantic exhaustion: rid=%s %s failure_class=semantic_exhaustion attempts_used=%d "
+            "original_thinking_level=%r retry_thinking_level=%r content_bytes_seen=%s "
+            "finish_reason=%s reasoning_len=%d reasoning_has_json=%s payload_fingerprint=%s",
+            current_request_id() or "-",
+            _attribution_log_fields(),
+            attempt + 1,
+            resolved_think,
+            retry_level,
+            any_content_bytes,
+            sig.finish_reason,
+            reasoning_len_seen,
+            reasoning_has_json_seen,
+            fingerprint,
+        )
+        # Raising here (from inside the caller's except handler) guarantees the
+        # sibling `except LLMTemporaryError` clause can never catch it — the call
+        # terminates, with no fall-back into the transient loop.
+        raise LLMSemanticExhaustionError(
+            "LLM produced no assistant content and no further proof-of-change retry is available",
+            attempts_used=attempt + 1,
+            original_thinking_level=resolved_think,
+            retry_thinking_level=retry_level,
+            content_bytes_seen=any_content_bytes,
+            payload_fingerprint=fingerprint,
+            finish_reason=sig.finish_reason,
+        )
+
     def _strip_json_noise(self, s: str) -> str:
         """Drop transport artifacts (BOM/replacement chars/control bytes) from JSON-ish text."""
         if not s:
@@ -1143,14 +1443,11 @@ class OllamaLLMClient(LLMClient):
         max_semantic_retries = _max_semantic_retries(self.model, resolved_think)
         # Log denominator: one slot for the first attempt plus every budget.
         max_total_attempts = max_retries + rate_limit_max_retries + 1 + max_semantic_retries
-        rl_log_body: Optional[str] = None
-        rl_log_headers: Any = None
-        # Same capture-and-log-outside pattern as the 429 path, for HTTP 5xx: the
-        # body/headers are grabbed inside the stream context and logged on
-        # exhaustion by the outer ``except LLMTemporaryError`` handler, so the 5xx
-        # transient backoff sleep never runs while holding the shared gate.
-        srv_log_body: Optional[str] = None
-        srv_log_headers: Any = None
+        # Deferred server-error logging for 429/5xx is carried on the raised error
+        # itself (``_exhaustion_log_context``, set in ``_route_http_status_error``)
+        # rather than in loop-local capture variables, so the body/headers grabbed
+        # inside the stream context are logged on exhaustion by the loop-level
+        # handlers without the backoff sleep ever running while holding the gate.
         attempt = 0
 
         def _retry_transient_step(detail: str, kind: str = "temporary error") -> bool:
@@ -1374,80 +1671,12 @@ class OllamaLLMClient(LLMClient):
                                     ]
                                 }
                                 return self._parse_response_content(synthetic)
-                            if status == 429:
-                                # Capture the body/headers for exhaustion logging,
-                                # then RAISE so the `with stream / with Client /
-                                # with sem` contexts unwind (releasing the
-                                # concurrency slot and closing the stream) BEFORE
-                                # the slow 429 backoff sleep, which is owned by the
-                                # loop-level `except LLMRateLimitError` handler.
-                                rl_log_body = response.text
-                                rl_log_headers = response.headers
-                                raise _rate_limit_error_from_response(
-                                    body=rl_log_body,
-                                    headers=rl_log_headers,
-                                    attempt=attempt + 1,
-                                )
-                            if 500 <= status < 600:
-                                hint = ""
-                                if (
-                                    "ollama.com" in self.base_url
-                                    and "qwen3.5" in self.model.lower()
-                                ):
-                                    hint = " If using Ollama Cloud with qwen3.5, try passing think=False."
-                                # Capture body/headers for the exhaustion log, then
-                                # raise so the transient backoff runs in the outer
-                                # ``except LLMTemporaryError`` handler — AFTER the
-                                # stream/client/semaphore contexts unwind. Sleeping
-                                # here would hold the process-global concurrency gate
-                                # through the backoff, blocking unrelated calls even
-                                # though no request is in flight (mirrors the 429 path).
-                                srv_log_body = response.text
-                                srv_log_headers = response.headers
-                                raise LLMTemporaryError(
-                                    f"LLM server error {status} after {attempt + 1} attempt(s): {response.text}.{hint}",
-                                    status_code=status,
-                                )
-                            if 400 <= status < 500:
-                                err_text = response.text
-                                self._log_llm_server_error(
-                                    status,
-                                    response.text,
-                                    response.headers,
-                                    attempt + 1,
-                                    reason="client error",
-                                )
-                                if status == 404 and (
-                                    "not found" in err_text.lower() or "model" in err_text.lower()
-                                ):
-                                    raise LLMPermanentError(
-                                        f"LLM model not found (404). API at {self.base_url} does not have model '{self.model}'. Original: {err_text}",
-                                        status_code=status,
-                                    )
-                                if status == 401:
-                                    auth_hint = (
-                                        " Set OLLAMA_API_KEY (or LLM_OLLAMA_API_KEY) for Ollama Cloud."
-                                        if not headers
-                                        else " Check that the key is valid and not expired."
-                                    )
-                                    raise LLMPermanentError(
-                                        f"LLM unauthorized (401): {err_text}.{auth_hint}",
-                                        status_code=status,
-                                    )
-                                raise LLMPermanentError(
-                                    f"LLM client error {status}: {err_text}", status_code=status
-                                )
-                            self._log_llm_server_error(
-                                status,
-                                response.text,
-                                response.headers,
-                                attempt + 1,
-                                reason="unexpected status",
-                            )
-                            raise LLMPermanentError(
-                                f"Unexpected LLM response status {status}: {response.text}",
-                                status_code=status,
-                            )
+                            # Non-200: classify and raise. The status cascade lives
+                            # in _route_http_status_error so this loop body stays
+                            # focused on reading the stream; 429/5xx errors carry a
+                            # deferred-log context so their backoff sleeps run in the
+                            # loop-level handlers after the gate/stream unwind.
+                            self._route_http_status_error(status, response, attempt, headers)
             except LLMPermanentError:
                 raise
             except LLMTruncatedError as e:
@@ -1472,143 +1701,49 @@ class OllamaLLMClient(LLMClient):
                     )
                     rate_limit_attempt += 1
                     continue
-                if rl_log_body is not None:
-                    self._log_llm_server_error(
-                        429, rl_log_body, rl_log_headers, attempt + 1, reason="rate limited"
-                    )
+                self._log_exhaustion_context(e, attempt + 1, reason="rate limited")
                 raise e
             except _EmptyResponseSignal as sig:
-                if schema_forced:
-                    # One strike, no ladder, no retry loop: schema-forced
-                    # decoding starved the content channel (the exact failure
-                    # mode Strategy Lab's earlier decoder-level
-                    # format=<json-schema> attempt hit on long code-emitting
-                    # turns — see strategy_lab/agents/_response_schemas.py).
-                    # Bail immediately with an explicit signal callers can
-                    # catch/branch on, regardless of the thinking-downgrade
-                    # kill switch state — falling through to the legacy
-                    # "retry verbatim" branch below would resurrect exactly
-                    # the retry-loop shape that was reverted.
-                    fingerprint = sha256_fingerprint(
-                        json.dumps(stream_payload, sort_keys=True, default=str)
-                    )
-                    logger.error(
-                        "LLM schema-forced decoding starved the content channel: rid=%s %s "
-                        "failure_class=semantic_exhaustion schema_forced=True attempts_used=%d "
-                        "finish_reason=%s payload_fingerprint=%s",
-                        current_request_id() or "-",
-                        _attribution_log_fields(),
-                        attempt + 1,
-                        sig.finish_reason,
-                        fingerprint,
-                    )
-                    raise LLMSemanticExhaustionError(
-                        "Schema-forced structured decoding produced no assistant content; "
-                        "caller should catch this and retry with schema=None (unconstrained "
-                        "json_object mode)",
-                        attempts_used=attempt + 1,
-                        original_thinking_level=resolved_think,
-                        retry_thinking_level=None,
-                        content_bytes_seen=sig.content_len > 0,
-                        payload_fingerprint=fingerprint,
-                        finish_reason=sig.finish_reason,
-                        schema_forced=True,
-                    )
-                if not _thinking_downgrade_enabled():
-                    # Kill switch off: legacy behavior — empty responses retry
-                    # verbatim on the transient schedule, then fail as a plain
-                    # LLMTemporaryError. Handled inline because a raise here
-                    # cannot be caught by the sibling LLMTemporaryError clause.
-                    logger.warning(
-                        "LLM returned empty response (rid=%s, %s, finish_reason=%s). Treating as transient error for retry.",
-                        current_request_id() or "-",
-                        _attribution_log_fields(),
-                        sig.finish_reason,
-                    )
-                    last_error = LLMTemporaryError(
-                        "Empty response from LLM; treating as transient for retry",
-                    )
-                    if _retry_transient_step(str(last_error)):
-                        continue
-                    raise last_error
-                # Receipt state — only consumed by the semantic-exhaustion
-                # receipt below, so only tracked on the downgrade path. The
-                # reasoning diagnostics accumulate across rungs so the receipt
-                # reflects the reasoning-heavy early attempts, not the empty
-                # thinking-off rung that usually raises.
-                any_content_bytes = any_content_bytes or sig.content_len > 0
-                reasoning_len_seen = max(reasoning_len_seen, sig.reasoning_len)
-                reasoning_has_json_seen = reasoning_has_json_seen or sig.reasoning_has_json
-                new_think = (
-                    _semantic_retry_think(self.model, active_think)
-                    if semantic_attempt < max_semantic_retries
-                    else None
+                # The whole empty-response decision (schema-forced bail, kill
+                # switch, downgrade ladder) lives in the helper; here we only apply
+                # the retry it hands back. Terminal outcomes raise inside the helper.
+                decision = self._handle_semantic_exhaustion_retry(
+                    sig,
+                    schema_forced=schema_forced,
+                    attempt=attempt,
+                    resolved_think=resolved_think,
+                    active_think=active_think,
+                    semantic_attempt=semantic_attempt,
+                    max_semantic_retries=max_semantic_retries,
+                    stream_payload=stream_payload,
+                    any_content_bytes=any_content_bytes,
+                    reasoning_len_seen=reasoning_len_seen,
+                    reasoning_has_json_seen=reasoning_has_json_seen,
                 )
-                if new_think is not None:
-                    logger.warning(
-                        "LLM produced no assistant content (rid=%s, %s, finish=%s, has_reasoning=%s, attempt %d); "
-                        "proof-of-change retry with thinking %r -> %r",
-                        current_request_id() or "-",
-                        _attribution_log_fields(),
-                        sig.finish_reason,
-                        sig.has_reasoning,
-                        attempt + 1,
-                        active_think,
-                        new_think,
-                    )
-                    semantic_attempt += 1
-                    active_think = new_think
-                    stream_payload = {**stream_payload, **_think_payload_fields(new_think)}
-                    # Immediate retry: the changed payload IS the proof of
-                    # change — backoff would not alter the outcome.
+                if decision.action == "retry_semantic":
+                    active_think = decision.active_think
+                    stream_payload = decision.stream_payload
+                    semantic_attempt = decision.semantic_attempt
+                    any_content_bytes = decision.any_content_bytes
+                    reasoning_len_seen = decision.reasoning_len_seen
+                    reasoning_has_json_seen = decision.reasoning_has_json_seen
                     continue
-                fingerprint = sha256_fingerprint(
-                    json.dumps(stream_payload, sort_keys=True, default=str)
-                )
-                retry_level = active_think if semantic_attempt else None
-                logger.error(
-                    "LLM semantic exhaustion: rid=%s %s failure_class=semantic_exhaustion attempts_used=%d "
-                    "original_thinking_level=%r retry_thinking_level=%r content_bytes_seen=%s "
-                    "finish_reason=%s reasoning_len=%d reasoning_has_json=%s payload_fingerprint=%s",
-                    current_request_id() or "-",
-                    _attribution_log_fields(),
-                    attempt + 1,
-                    resolved_think,
-                    retry_level,
-                    any_content_bytes,
-                    sig.finish_reason,
-                    reasoning_len_seen,
-                    reasoning_has_json_seen,
-                    fingerprint,
-                )
-                # Raising inside this handler guarantees the sibling
-                # `except LLMTemporaryError` clause can never catch it — the
-                # call terminates here, with no fall-back into the transient loop.
-                raise LLMSemanticExhaustionError(
-                    "LLM produced no assistant content and no further proof-of-change retry is available",
-                    attempts_used=attempt + 1,
-                    original_thinking_level=resolved_think,
-                    retry_thinking_level=retry_level,
-                    content_bytes_seen=any_content_bytes,
-                    payload_fingerprint=fingerprint,
-                    finish_reason=sig.finish_reason,
-                )
+                # retry_transient (kill switch off): the transient budget is owned
+                # by the loop's closure, so the step runs here, not in the helper.
+                last_error = decision.transient_error
+                if _retry_transient_step(str(last_error)):
+                    continue
+                raise last_error
             except LLMTemporaryError as e:
                 last_error = e
                 if _retry_transient_step(str(e)):
                     continue
                 # On exhaustion, emit the structured server-error log for a 5xx
-                # (its body/headers were captured inside the stream context before
-                # the gate was released); other transient errors carry their detail
-                # in the raised exception message.
-                if srv_log_body is not None:
-                    self._log_llm_server_error(
-                        getattr(e, "status_code", None) or 0,
-                        srv_log_body,
-                        srv_log_headers,
-                        attempt + 1,
-                        reason="server error",
-                    )
+                # (its body/headers were captured inside the stream context and
+                # stamped onto the error before the gate was released); other
+                # transient errors carry no context and their detail rides in the
+                # raised exception message.
+                self._log_exhaustion_context(e, attempt + 1, reason="server error")
                 raise last_error
             except httpx.HTTPStatusError as e:
                 resp = e.response
@@ -1883,9 +2018,7 @@ class OllamaLLMClient(LLMClient):
                     "JSON parse failed on content starting with '%s'; treating as implicit truncation and attempting continuation.",
                     stripped[0],
                 )
-                record_complete_json_turn(
-                    prompt, content or "", started_monotonic=request_started
-                )
+                record_complete_json_turn(prompt, content or "", started_monotonic=request_started)
                 return self._complete_json_with_continuation(
                     initial_partial=content,
                     prompt=prompt,
