@@ -24,6 +24,7 @@ from code_review_agent.coordinator import run_coordinator
 from code_review_agent.models import CodeReviewInput, CodeReviewIssue
 from code_review_agent.synthesis import (
     SynthesisResult,
+    _parse_json_object,
     build_findings_digest,
     synthesize_review_findings,
     synthesize_spec_compliance,
@@ -376,6 +377,20 @@ def test_synthesize_returns_none_on_non_object_json() -> None:
         )
         is None
     )
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        pytest.param('```json\n{"summary": "s"}\n```', id="fenced"),
+        pytest.param('Here is the result: {"summary": "s"}', id="prose-prefixed"),
+        pytest.param('{"summary": "s",}', id="trailing-comma"),
+    ],
+)
+def test_parse_json_object_recovers_malformed_but_recoverable(raw: str) -> None:
+    """The formatting-pass parser routes through the canonical recovery ladder, so
+    fenced / prose-prefixed / trailing-comma output is salvaged instead of raising."""
+    assert _parse_json_object(raw) == {"summary": "s"}
 
 
 def test_synthesize_returns_none_on_exception() -> None:
