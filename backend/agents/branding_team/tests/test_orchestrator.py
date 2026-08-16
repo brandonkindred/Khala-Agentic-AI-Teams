@@ -825,19 +825,21 @@ def test_extract_phase_output_uses_structured_output_when_present() -> None:
     "node_id,full_output,model_cls",
     [
         ("phase3_visual", _full_visual_identity(), VisualIdentityOutput),
-        ("phase4_channel", _full_channel_activation(), ChannelActivationOutput),
         ("phase5_governance", _full_governance(), GovernanceOutput),
     ],
-    ids=["phase3_visual", "phase4_channel", "phase5_governance"],
+    ids=["phase3_visual", "phase5_governance"],
 )
 def test_extract_compositor_output_uses_structured_output_not_text_parse(
     node_id, full_output, model_cls
 ) -> None:
-    """The Phase 3/4/5 compositors now pass ``structured_output=``, so their
-    typed payload lands on ``AgentResult.structured_output`` and extraction
+    """The Phase 3/5 compositors pass ``structured_output=``, so their typed
+    payload lands on ``AgentResult.structured_output`` and extraction
     consumes it via the structured path — ``_parse_model_from_text`` is never
     reached. The empty ``message`` proves the result is taken from the
-    structured field, not recovered from any text block.
+    structured field, not recovered from any text block. Phase 4 has no
+    compositor (``check_structured_output=False``), so it's excluded here —
+    see ``test_extract_phase_output_merges_every_phase4_fragment`` and
+    ``test_extract_phase_output_rejects_incomplete_phase4_fragments``.
     """
     agent_result = MagicMock()
     agent_result.message = {"content": []}
@@ -1487,12 +1489,10 @@ def test_merge_phase4_fragments_rejects_incomplete_specialist_set() -> None:
     via field defaults — every field on it defaults to empty/absent, so a
     partial merge would otherwise pass validation silently.
 
-    Tested directly against ``_merge_phase4_fragments`` (require_all=True)
-    rather than through ``_extract_phase_output``: unlike Phase 2,
-    ``channel_compositor`` still terminates the real Phase 4 subgraph (it is
-    not removed until Step 2), so ``_extract_phase_output`` would otherwise
-    fall back to the compositor's own full structured_output rather than
-    exercising this merge_fn's require_all rejection in isolation.
+    Tested directly against ``_merge_phase4_fragments`` (require_all=True) as
+    a focused unit test of the merge function in isolation. See
+    ``test_extract_phase_output_rejects_incomplete_phase4_fragments`` for the
+    end-to-end path through ``_extract_phase_output``.
     """
     channels = ["website", "social", "email", "partnerships", "internal"]  # events_guide omitted
     nested_results = {
@@ -1518,6 +1518,40 @@ def test_merge_phase4_fragments_rejects_incomplete_specialist_set() -> None:
     merged = _merge_phase4_fragments(node_result, ChannelActivationOutput)
 
     assert merged is None
+
+
+def test_extract_phase_output_rejects_incomplete_phase4_fragments() -> None:
+    """Without channel_compositor, a partial Phase 4 run (merge_fn returns
+    None) must degrade to defaults, not accept one specialist's own fragment
+    as the complete ChannelActivationOutput (``check_structured_output`` is
+    False for Phase 4, same guard Phase 2 already relies on)."""
+    nested_results = {
+        "brand_experience_principler": _phase1_leaf_node(
+            BrandExperiencePrinciplesOutput(
+                brand_experience_principles=["Consistent", "Human", "Confident"],
+                signature_moments=["Onboarding email", "First dashboard load", "Renewal call"],
+                sensory_elements=["Signature blue", "Rounded corners"],
+            )
+        ),
+    }
+    inner_multi_result = MagicMock()
+    inner_multi_result.results = nested_results
+
+    node_result = MagicMock()
+    node_result.result = inner_multi_result
+    node_result.get_agent_results.return_value = [
+        nested_results["brand_experience_principler"].get_agent_results.return_value[0]
+    ]
+
+    mock_result = MagicMock()
+    mock_result.result = {"phase4_channel": node_result}
+
+    output, degraded = BrandingTeamOrchestrator._extract_phase_output(
+        mock_result, "phase4_channel", ChannelActivationOutput
+    )
+
+    assert degraded is True
+    assert output == ChannelActivationOutput()
 
 
 def _text_node_result(text: str) -> MagicMock:
