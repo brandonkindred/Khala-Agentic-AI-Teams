@@ -522,8 +522,10 @@ async def create_provider(body: LlmProviderCreate) -> LlmProviderListResponse:
     """Add a provider to the end of the fallback list.
 
     For a RunPod provider this performs a synchronous reachability probe against
-    the endpoint before persisting, so the request can block for up to
-    ``_RUNPOD_PROBE_TIMEOUT_SECONDS`` (currently 5 s) waiting on the network.
+    the endpoint before persisting, so the request will wait for up to
+    ``_RUNPOD_PROBE_TIMEOUT_SECONDS`` (currently 5 s) on the network round trip
+    before returning (the event loop itself is not blocked — this is an ``await``,
+    not a blocking call).
 
     Preconditions: Postgres configured; the per-entry key guards pass. Postconditions:
         the entry is persisted (api key encrypted, whitespace-trimmed) at the end of
@@ -596,7 +598,10 @@ async def update_provider(entry_id: int, body: LlmProviderUpdate) -> LlmProvider
 
     Unlike ``create_provider`` this does not probe the RunPod endpoint, so it adds
     no network latency: a new ``endpoint_id`` is only validated and used to rebuild
-    the stored base URL.
+    the stored base URL. A non-empty ``endpoint_id`` on a (resulting) RunPod entry
+    OVERWRITES the stored ``base_url`` with the canonical
+    ``https://api.runpod.ai/v2/{endpoint_id}/openai/v1`` — any ``base_url`` also sent
+    in the same request is ignored for RunPod, matching ``create_provider``.
 
     Preconditions: the entry exists; Postgres configured; the per-entry key guards
         pass for the resulting (merged) provider/base_url/key. Postconditions: the
