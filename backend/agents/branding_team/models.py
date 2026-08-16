@@ -663,10 +663,13 @@ class PersonaProfilesOutput(MessagingFrameworkOutput):
 class WritingGuidelinesBody(BaseModel):
     """Strict writing-guidelines body nested under ``writing_guidelines``.
 
-    Field-for-field identical to ``WritingGuidelines`` — kept separate so this
-    one can require real content without breaking
+    Field *names* match ``WritingGuidelines`` — kept separate (not collapsed)
+    because the *types* genuinely differ (``List[NonEmptyStr]`` with a required
+    ``min_length=3, max_length=4`` here vs. plain ``List[str]`` with empty
+    defaults there) and because collapsing would break
     ``NarrativeMessagingOutput.writing_guidelines``'s no-argument default.
-    Cardinalities encode the prompt's stated "3-4" for each list.
+    Cardinalities encode the prompt's stated "3-4" for each list. Story 3b
+    Step 1 finding: this pair is genuinely different, not safe to collapse.
     """
 
     voice_principles: List[NonEmptyStr] = Field(min_length=3, max_length=4)
@@ -681,6 +684,12 @@ class WritingGuidelinesOutput(PersonaProfilesOutput):
     VoicePrinciplesDrafter is last in the linear Graph, so its payload must
     include every upstream fragment plus ``writing_guidelines`` in the shape
     ``NarrativeMessagingOutput`` expects (no nest-under remap needed).
+
+    Not a twin of ``WritingGuidelines`` despite the similar name — this class
+    inherits ten fields from ``PersonaProfilesOutput``'s cumulative carry-forward
+    chain on top of its own nested ``writing_guidelines`` field, a different
+    shape and purpose than the flat merge-target ``WritingGuidelines``. Story 3b
+    Step 1 finding: not comparable, not safe to collapse.
     """
 
     writing_guidelines: WritingGuidelinesBody
@@ -1230,7 +1239,13 @@ class BrandBook(BaseModel):
 
 
 class MoodBoardConcept(BaseModel):
-    """A single mood-board direction; merge target for ``MoodBoardConceptOutput``."""
+    """A single mood-board direction; merge target for ``MoodBoardConceptOutput``.
+
+    Field/type identical to ``MoodBoardConceptOutput`` — same names and types on
+    both sides, differing only in default/required strictness (this side keeps
+    empty defaults so partial fragments validate). Safe to collapse (Story 3b
+    Step 2).
+    """
 
     title: str
     visual_direction: str
@@ -1240,7 +1255,12 @@ class MoodBoardConcept(BaseModel):
 
 
 class CreativeRefinementDecision(BaseModel):
-    """Phase 3 converge node output: which moodboard direction won and why."""
+    """Phase 3 converge node output: which moodboard direction won and why.
+
+    Field/type identical to ``CreativeRefinementDecisionOutput`` — same names
+    and types on both sides, differing only in default/required strictness.
+    Safe to collapse (Story 3b Step 2).
+    """
 
     winning_candidate_title: str = ""
     scoring_criteria: List[str] = Field(default_factory=list)
@@ -1251,7 +1271,17 @@ class CreativeRefinementDecision(BaseModel):
 
 
 class WritingGuidelines(BaseModel):
-    """Voice/tone and editorial rules; merge target for ``WritingGuidelinesOutput``."""
+    """Voice/tone and editorial rules; merge target nested at
+    ``NarrativeMessagingOutput.writing_guidelines``.
+
+    Its real structural counterpart is ``WritingGuidelinesBody`` (not
+    ``WritingGuidelinesOutput``, which is a different, much larger construct —
+    see that class's docstring). Field *names* match ``WritingGuidelinesBody``,
+    but the *types* don't: this side is ``List[str]`` with no cardinality bound
+    and empty defaults, while ``WritingGuidelinesBody`` is ``List[NonEmptyStr]``
+    with a required ``min_length=3, max_length=4``. Genuinely different — not
+    safe to collapse (Story 3b Step 1 finding).
+    """
 
     voice_principles: List[str] = Field(default_factory=list)
     style_dos: List[str] = Field(default_factory=list)
@@ -1260,7 +1290,12 @@ class WritingGuidelines(BaseModel):
 
 
 class DesignSystemDefinition(BaseModel):
-    """Codified design system; merge target for ``DesignSystemDefinitionOutput``."""
+    """Codified design system; merge target for ``DesignSystemDefinitionOutput``.
+
+    Field/type identical to ``DesignSystemDefinitionOutput`` — same names and
+    types on both sides, differing only in default/required strictness. Safe
+    to collapse (Story 3b Step 2).
+    """
 
     design_principles: List[str] = Field(default_factory=list)
     foundation_tokens: List[str] = Field(default_factory=list)
