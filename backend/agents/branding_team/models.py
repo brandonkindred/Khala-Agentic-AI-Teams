@@ -28,9 +28,12 @@ the generated class is a real subclass of the soft base.
 This pattern does not apply to the Phase 2 cumulative-inheritance chain
 (``BrandStoryOutput`` → … → ``WritingGuidelinesOutput``) or to remaining
 hand-written sibling pairs that were never collapsed
-(``BrandDiscoveryAudit`` / ``BrandDiscoveryAuditOutput``,
-``ChannelGuideline`` / ``ChannelGuidelineOutput``, and the mood-board /
-design-system agent-output wrappers).
+(``ChannelGuideline`` / ``ChannelGuidelineOutput``, and the mood-board /
+design-system agent-output wrappers). ``BrandDiscoveryAudit`` was fully
+collapsed to a single model (used both as ``discovery_auditor``'s
+``structured_output`` and as ``StrategicCoreOutput.brand_discovery``) rather
+than split into this soft/strict pair, since a no-argument-constructible
+default is needed either way.
 """
 
 from __future__ import annotations
@@ -348,10 +351,10 @@ DifferentiationPillarOutput = _derive_strict_variant(
 class BrandDiscoveryAudit(BaseModel):
     """Brand discovery and audit findings.
 
-    Fields default to empty rather than being required: this model also
-    backs ``StrategicCoreOutput.brand_discovery``'s ``default_factory``, which
-    must construct successfully with no arguments. ``discovery_auditor``'s own
-    agent-facing schema is the stricter ``BrandDiscoveryAuditOutput`` below.
+    Fields default to empty rather than being required: this model backs
+    both ``discovery_auditor``'s agent-facing ``structured_output`` schema
+    and ``StrategicCoreOutput.brand_discovery``'s ``default_factory``, which
+    must construct successfully with no arguments.
     """
 
     current_brand_perception: str = ""
@@ -361,24 +364,6 @@ class BrandDiscoveryAudit(BaseModel):
     opportunities: List[str] = Field(default_factory=list)
     threats: List[str] = Field(default_factory=list)
     stakeholder_insights: List[str] = Field(default_factory=list)
-
-
-class BrandDiscoveryAuditOutput(BaseModel):
-    """Agent-facing brand discovery schema.
-
-    Requires non-empty content so Strands retries blank structured_output.
-    Field-for-field identical to ``BrandDiscoveryAudit`` — kept as a separate
-    model so this one can require real content without breaking
-    ``StrategicCoreOutput.brand_discovery``'s no-argument default construction.
-    """
-
-    current_brand_perception: str = Field(min_length=1)
-    market_position: str = Field(min_length=1)
-    strengths: List[NonEmptyStr] = Field(min_length=1)
-    weaknesses: List[NonEmptyStr] = Field(min_length=1)
-    opportunities: List[NonEmptyStr] = Field(min_length=1)
-    threats: List[NonEmptyStr] = Field(min_length=1)
-    stakeholder_insights: List[NonEmptyStr] = Field(min_length=1)
 
 
 class PurposeVisionOutput(BaseModel):

@@ -28,7 +28,7 @@ from .models import (
     BrandArchitectureOutput,
     BrandCheckRequest,
     BrandCheckResult,
-    BrandDiscoveryAuditOutput,
+    BrandDiscoveryAudit,
     BrandExperiencePrinciplesOutput,
     BrandGuidelinesOutput,
     BrandHealthKPIsOutput,
@@ -94,14 +94,14 @@ def make_discovery_auditor() -> Agent:
 
     Postconditions:
         Returns an ``Agent`` named ``discovery_auditor`` whose structured
-        output is a ``BrandDiscoveryAuditOutput`` covering current brand
+        output is a ``BrandDiscoveryAudit`` covering current brand
         perception, market position, SWOT, and stakeholder insights.
     """
     return build_agent(
         name="discovery_auditor",
         description="Analyses current brand perception, SWOT, and stakeholder insights.",
         system_prompt=render_agent_prompt(_DISCOVERY_AUDITOR_PROMPT),
-        structured_output=BrandDiscoveryAuditOutput,
+        structured_output=BrandDiscoveryAudit,
         agent_key=_PHASE1_AGENT_KEY,
     )
 

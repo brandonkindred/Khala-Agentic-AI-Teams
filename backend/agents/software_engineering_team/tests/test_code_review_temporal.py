@@ -752,6 +752,79 @@ def test_consolidation_activity_enabled_merges_same_function_issues(
     assert doc_issues[0]["description"] == "stale docstring"
 
 
+def test_combine_findings_activity_merges_same_construct_near_duplicates() -> None:
+    """The pure combine activity merges co-located near-duplicate findings.
+
+    Two same-category findings anchored in the same enclosing Python construct,
+    with similar descriptions, collapse into a single representative (severity =
+    group max), while an unrelated finding in a different category passes through
+    untouched -- the durable counterpart of the thread-mode combine step.
+    """
+    from code_review_agent.temporal import activities as A
+
+    content = "def foo():\n    x = 1\n    return x\n"
+    payload = _input(files={"a.py": content}).model_dump(mode="json")
+    issues = [
+        {
+            "severity": "medium",
+            "category": "bug",
+            "file_path": "a.py",
+            "line": 2,
+            "description": "foo assigns unused local variable",
+            "suggestion": "",
+        },
+        {
+            "severity": "high",
+            "category": "bug",
+            "file_path": "a.py",
+            "line": 3,
+            "description": "foo assigns unused local variable here",
+            "suggestion": "",
+        },
+        {
+            "severity": "low",
+            "category": "documentation",
+            "file_path": "a.py",
+            "line": 1,
+            "description": "stale docstring",
+            "suggestion": "",
+        },
+    ]
+
+    result = A.combine_findings_activity(payload, issues)
+    bugs = [i for i in result if i["category"] == "bug"]
+    docs = [i for i in result if i["category"] == "documentation"]
+    assert len(bugs) == 1, "two similar same-construct findings should merge into one"
+    assert bugs[0]["severity"] == "high", "merged severity is the group max"
+    assert len(docs) == 1, "an unrelated category passes through unchanged"
+    assert docs[0]["description"] == "stale docstring"
+
+
+def test_combine_findings_activity_is_fail_safe_on_index_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An index/combination failure returns the original issues unchanged."""
+    from code_review_agent.temporal import activities as A
+
+    issues = [
+        {
+            "severity": "high",
+            "category": "bug",
+            "file_path": "a.py",
+            "line": 1,
+            "description": "boom",
+            "suggestion": "",
+        }
+    ]
+    payload = _input().model_dump(mode="json")
+
+    def _boom(*_a: Any, **_k: Any) -> NoReturn:
+        raise RuntimeError("index boom")
+
+    monkeypatch.setattr("code_review_agent.false_positive_filter.CodebaseIndex.from_input", _boom)
+    assert A.combine_findings_activity(payload, issues) == issues
+
+
 def test_finalize_activity_reconciles_minor_only_to_approved() -> None:
     from code_review_agent.temporal import activities as A
 
@@ -1314,11 +1387,12 @@ def test_workflow_and_activities_are_registered() -> None:
     present in the Temporal worker's ``WORKFLOWS``/``ACTIVITIES`` tables.
     """
     assert CodeReviewWorkflow in WORKFLOWS
-    # 9 = the pre-existing 8 plus find_architecture_and_side_effect_activity.
+    # 10 = the pre-existing 8, plus find_architecture_and_side_effect_activity,
+    # plus the pure combine_findings_activity.
     # find_architecture_and_redundancy_activity / find_side_effect_impact_activity
     # stay registered (not replaced) so a worker can still replay/execute them
     # for workflow histories recorded before the merged pass existed.
-    assert len(ACTIVITIES) == 9
+    assert len(ACTIVITIES) == 10
     names = {getattr(a, "__name__", "") for a in ACTIVITIES}
     assert "review_chunk_activity" in names
     assert "prepare_review_activity" in names
@@ -1327,6 +1401,7 @@ def test_workflow_and_activities_are_registered() -> None:
     assert "find_side_effect_impact_activity" in names
     assert "find_architecture_and_side_effect_activity" in names
     assert "consolidate_side_effect_issues_activity" in names
+    assert "combine_findings_activity" in names
 
 
 # ---------------------------------------------------------------------------
@@ -2057,6 +2132,7 @@ async def test_workflow_raises_cleanly_when_a_later_tail_pass_fails(
         ACTIVITIES,
         TASK_QUEUE,
         CodeReviewWorkflow,
+        combine_findings_activity,
         consolidate_side_effect_issues_activity,
         filter_false_positives_activity,
         finalize_review_activity,
@@ -2077,6 +2153,7 @@ async def test_workflow_raises_cleanly_when_a_later_tail_pass_fails(
         filter_false_positives_activity,
         _raising_merged_activity,
         consolidate_side_effect_issues_activity,
+        combine_findings_activity,
         finalize_review_activity,
         synthesize_findings_activity,
     ]
@@ -2123,6 +2200,7 @@ async def test_workflow_fails_on_map_chunk_failure_without_abandoning_siblings()
         ACTIVITIES,
         TASK_QUEUE,
         CodeReviewWorkflow,
+        combine_findings_activity,
         consolidate_side_effect_issues_activity,
         filter_false_positives_activity,
         finalize_review_activity,
@@ -2168,6 +2246,7 @@ async def test_workflow_fails_on_map_chunk_failure_without_abandoning_siblings()
         filter_false_positives_activity,
         find_architecture_and_side_effect_activity,
         consolidate_side_effect_issues_activity,
+        combine_findings_activity,
         finalize_review_activity,
         synthesize_findings_activity,
     ]

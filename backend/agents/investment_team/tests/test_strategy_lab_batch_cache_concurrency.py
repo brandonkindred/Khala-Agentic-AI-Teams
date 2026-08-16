@@ -159,11 +159,33 @@ def test_primitive_many_distinct_keys_concurrent_no_corruption() -> None:
         for period in periods:
             assert local[period] == _expected(period)
 
-    # Exactly one miss per distinct key; every other call is a hit.
+    # Ledger accounting. Under contention the exact hit/miss split is not
+    # deterministic: ``get_or_compute`` computes *outside* its lock and counts
+    # a same-key race-loser (a call that computed but lost the store race) as a
+    # miss, never a hit (the cache's documented concurrency invariant). So the
+    # only interleaving-independent guarantees are that every distinct key is
+    # computed at least once (>= one miss per key), that further same-key races
+    # only add more misses (never hits), and that the ledger balances against
+    # the call count.
     total_calls = n_threads * len(periods)
-    assert cache.misses == len(periods)
-    assert cache.hits == total_calls - len(periods)
     assert cache.hits + cache.misses == total_calls
+    assert len(periods) <= cache.misses <= total_calls
+    assert 0 <= cache.hits <= total_calls - len(periods)
+
+    # Sharing is still pinned deterministically: every key is now resident, so
+    # a fresh *sequential* read of each must be served from the cache without
+    # recomputing (a compute here would be a bug), and returns the right value.
+    def _must_not_recompute() -> Dict[str, int]:
+        raise AssertionError("resident key was recomputed")
+
+    hits_before = cache.hits
+    for period in periods:
+        value, was_hit = cache.get_or_compute(
+            "sma", {"period": period}, "AAPL", "1d", bars, _must_not_recompute
+        )
+        assert was_hit
+        assert value == _expected(period)
+    assert cache.hits == hits_before + len(periods)
 
 
 # ---------------------------------------------------------------------------
@@ -220,12 +242,26 @@ def test_parallel_strategies_share_cache_without_contamination(monkeypatch) -> N
             f"expected {baseline[_spec_index(spec)]!r}"
         )
 
-    # Accounting: one call per strategy; one miss per distinct spec; the rest hits.
+    # Ledger accounting. ``get_or_compute`` computes *outside* its lock and
+    # counts a same-key race-loser as a miss (never a hit), so when both
+    # strategies for one spec are released together they may both miss -- the
+    # exact hit/miss split is therefore not deterministic under contention.
+    # Assert the interleaving-independent bounds instead: at least one miss per
+    # distinct spec, further same-key races only add misses, and the ledger
+    # balances against the call count.
     total_calls = len(strategy_specs)
-    assert cache.misses == len(distinct_specs)
-    assert cache.hits == total_calls - len(distinct_specs)
-    assert cache.hits > 0  # overlapping specs really were served from the cache
     assert cache.hits + cache.misses == total_calls
+    assert len(distinct_specs) <= cache.misses <= total_calls
+    assert 0 <= cache.hits <= total_calls - len(distinct_specs)
+
+    # Overlap sharing is pinned deterministically rather than relying on a race
+    # outcome: every distinct spec is now resident, so a fresh *sequential*
+    # resolve of each is served from the cache as a hit.
+    hits_before = cache.hits
+    for name, params, bars in distinct_specs:
+        reg = IndicatorRegistry(batch_cache=cache, timeframe="1d")
+        resolve_indicator(reg, name, bars, **params)
+    assert cache.hits == hits_before + len(distinct_specs)
 
 
 # ---------------------------------------------------------------------------

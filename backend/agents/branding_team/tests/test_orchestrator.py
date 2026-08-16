@@ -27,7 +27,7 @@ from branding_team.models import (
     BrandArchetypeOutput,
     BrandArchetypesOutput,
     BrandCheckRequest,
-    BrandDiscoveryAuditOutput,
+    BrandDiscoveryAudit,
     BrandHealthKPI,
     BrandStatus,
     BrandStoryOutput,
@@ -874,7 +874,7 @@ def test_extract_phase_output_merges_every_phase1_fragment() -> None:
     )
     nested_results = {
         "discovery_auditor": _phase1_leaf_node(
-            BrandDiscoveryAuditOutput(
+            BrandDiscoveryAudit(
                 current_brand_perception="Seen as reliable but generic.",
                 market_position="Mid-market challenger.",
                 strengths=["Delivery speed"],
