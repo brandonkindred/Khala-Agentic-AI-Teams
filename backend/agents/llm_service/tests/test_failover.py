@@ -475,6 +475,13 @@ def test_build_entry_client_on_reasoning_is_fresh(monkeypatch):
     assert isinstance(c, OllamaLLMClient) and c.on_reasoning is sink
 
 
+def test_build_entry_client_runpod_on_reasoning_is_fresh(monkeypatch):
+    sink = lambda _t: None  # noqa: E731
+    e = _full_entry("runpod", model="m", base_url="https://api.runpod.ai/v2/abc123/openai/v1", api_key="sk-rp")
+    c = _build_entry_client(e, None, sink, 0)
+    assert isinstance(c, RunPodLLMClient) and c.on_reasoning is sink
+
+
 def test_build_entry_client_claude_empty_key_no_env_fallback(monkeypatch):
     """An entry with an empty api_key does NOT inherit ANTHROPIC_API_KEY from env —
     entries are self-contained for credentials (the route guard blocks keyless Claude,
