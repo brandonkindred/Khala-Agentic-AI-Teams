@@ -593,6 +593,8 @@ def _start_agent_studio_temporal_worker() -> None:
     Postconditions:
         - Returns ``None``. Logs at INFO and does not start a worker when
           ``UNIFIED_API_AGENT_STUDIO_TEMPORAL_WORKER`` is false.
+        - Returns ``None`` and logs nothing (no worker started) when the
+          ``agent_studio`` team is disabled in ``TEAM_CONFIGS``.
         - Logs at INFO when a worker actually started, or when the starter
           returns ``False`` (nothing to register, or Temporal unset) — Agent
           Studio serves authoring requests in-process either way. Startup is

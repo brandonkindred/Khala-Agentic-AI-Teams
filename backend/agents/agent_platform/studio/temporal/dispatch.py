@@ -38,6 +38,9 @@ from agent_platform.studio.models import AgentDefinition, ConversationStateRespo
 AUTHORING_TIMEOUT_S = 180.0
 _AUTHORING_POOL_WORKERS = 4
 
+# Process-wide authoring pool, lazily instantiated by ``_authoring_executor``.
+# ``_authoring_pool_lock`` guards every read/replace of this slot, so lazy
+# construction and ``shutdown_authoring_executor`` are thread-safe.
 _authoring_pool: _DaemonAuthoringPool | None = None
 _authoring_pool_lock = threading.Lock()
 
@@ -90,7 +93,9 @@ class _DaemonAuthoringPool:
                     stopped = self._shutdown
                 if stopped or fut.done():
                     if not fut.done():
-                        fut.set_exception(RuntimeError("Agent Studio authoring executor is shut down"))
+                        fut.set_exception(
+                            RuntimeError("Agent Studio authoring executor is shut down")
+                        )
                     return
                 try:
                     result = fn(*args)
