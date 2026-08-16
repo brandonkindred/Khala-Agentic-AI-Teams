@@ -468,6 +468,17 @@ def test_build_entry_client_runpod_strips_base_url(monkeypatch):
     assert c.base_url == "https://api.runpod.ai/v2/abc123/openai/v1"
 
 
+def test_build_entry_client_runpod_empty_base_url_passes_through(monkeypatch):
+    """Unlike Ollama, a RunPod entry has no base_url fallback: an empty stored
+    base_url is passed through as-is (the route always populates it from
+    endpoint_id at write time — see ``_build_runpod_base_url`` — so an empty value
+    reaching the factory is a data problem to surface, not one to paper over)."""
+    e = _full_entry("runpod", model="m", base_url="", api_key="sk-rp")
+    c = _build_entry_client(e, None, None, 0)
+    assert isinstance(c, RunPodLLMClient)
+    assert c.base_url == ""
+
+
 def test_build_entry_client_runpod_empty_model_falls_back_to_resolver(monkeypatch):
     """An empty ``model`` on a RunPod entry resolves via ``llm_config.resolve_model``
     (the same resolver Ollama falls back to) — RunPod has no model default of its own."""
