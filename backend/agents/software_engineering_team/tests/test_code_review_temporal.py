@@ -2132,6 +2132,7 @@ async def test_workflow_raises_cleanly_when_a_later_tail_pass_fails(
         ACTIVITIES,
         TASK_QUEUE,
         CodeReviewWorkflow,
+        combine_findings_activity,
         consolidate_side_effect_issues_activity,
         filter_false_positives_activity,
         finalize_review_activity,
@@ -2152,6 +2153,7 @@ async def test_workflow_raises_cleanly_when_a_later_tail_pass_fails(
         filter_false_positives_activity,
         _raising_merged_activity,
         consolidate_side_effect_issues_activity,
+        combine_findings_activity,
         finalize_review_activity,
         synthesize_findings_activity,
     ]
@@ -2198,6 +2200,7 @@ async def test_workflow_fails_on_map_chunk_failure_without_abandoning_siblings()
         ACTIVITIES,
         TASK_QUEUE,
         CodeReviewWorkflow,
+        combine_findings_activity,
         consolidate_side_effect_issues_activity,
         filter_false_positives_activity,
         finalize_review_activity,
@@ -2243,6 +2246,7 @@ async def test_workflow_fails_on_map_chunk_failure_without_abandoning_siblings()
         filter_false_positives_activity,
         find_architecture_and_side_effect_activity,
         consolidate_side_effect_issues_activity,
+        combine_findings_activity,
         finalize_review_activity,
         synthesize_findings_activity,
     ]
