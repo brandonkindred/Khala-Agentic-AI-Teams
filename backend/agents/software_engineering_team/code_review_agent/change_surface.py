@@ -257,8 +257,10 @@ def _pre_number_ranges(
         - ``content`` is the full new-file text (may be empty).
         - ``ranges`` is a sequence of inclusive 1-based ``LineRange`` values
           (caller should merge first when desired).
-        - ``touched`` is the set of 1-based new-file line numbers that were
-          added/modified (e.g. ``extract_touched_lines(patch)``). May be empty.
+        - ``touched`` is any collection of 1-based new-file line numbers that
+          were added/modified (e.g. ``extract_touched_lines(patch)``); it is
+          consulted only for membership, so any ``Collection[int]`` is accepted.
+          May be empty.
 
     Postconditions:
         - Emits a column-aligned ``N| <line>`` gutter for each line in each

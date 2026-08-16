@@ -214,11 +214,23 @@ def test_format_numbered_source_line_marker_preserves_number() -> None:
 
 
 def test_render_annotated_hunks_lines_align_with_valid_lines() -> None:
-    # Every commentable (added) line must appear in the rendered output with its number.
+    # Every commentable line appears with its correct number; added lines carry a
+    # ``+`` marker and context lines a space, and the numbers align 1:1 with
+    # parse_valid_lines so a cited line maps to a real location.
     patch = "@@ -5,2 +5,3 @@\n keep\n+new1\n+new2"
     rendered = render_annotated_hunks(patch)
-    for line in parse_valid_lines(patch):
-        assert f"{line}|" in rendered
+    by_number = {}
+    for ln in rendered.splitlines():
+        m = re.match(r"^([+> ])[ ]*(\d+)\| ", ln)
+        assert m is not None, f"expected a marked numbered gutter, got {ln!r}"
+        by_number[int(m.group(2))] = m.group(1)
+    added = parse_valid_lines(patch, added_only=True)
+    assert added == {6, 7}
+    # Every valid (added + context) line is rendered exactly once...
+    assert set(by_number) == parse_valid_lines(patch) == {5, 6, 7}
+    # ...added lines marked ``+``, the context line marked with a space.
+    for number, marker in by_number.items():
+        assert marker == ("+" if number in added else " ")
 
 
 # ---------------------------------------------------------------------------
