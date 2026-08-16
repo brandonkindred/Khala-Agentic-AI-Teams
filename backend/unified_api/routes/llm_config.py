@@ -27,10 +27,12 @@ routes with a real auth dependency.
 from __future__ import annotations
 
 import logging
+import re
 from datetime import datetime
 from typing import Literal
 from urllib.parse import urlparse
 
+import httpx
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field, ValidationInfo, field_validator
 
@@ -146,8 +148,6 @@ def _validate_runpod_endpoint_id(endpoint_id: str) -> str:
         ``^[a-zA-Z0-9]+$``; raises ``ValueError`` with a descriptive message
         otherwise. Never makes network calls.
     """
-    import re
-
     if not re.fullmatch(r"[a-zA-Z0-9]+", endpoint_id):
         raise ValueError(
             "endpoint_id must contain only alphanumeric characters (letters and digits)."
@@ -174,6 +174,20 @@ def _build_runpod_base_url(endpoint_id: str) -> str:
 _RUNPOD_PROBE_TIMEOUT_SECONDS = 5.0
 
 
+class RunPodProbeError(Exception):
+    """A RunPod reachability probe failed; carries the HTTP status a caller should
+    surface for it, without depending on FastAPI/HTTPException itself.
+
+    Kept framework-agnostic so ``_probe_runpod_endpoint`` stays usable from a CLI
+    tool or background task, not just the ``create_provider`` route.
+    """
+
+    def __init__(self, status_code: int, detail: str) -> None:
+        super().__init__(detail)
+        self.status_code = status_code
+        self.detail = detail
+
+
 async def _probe_runpod_endpoint(endpoint_id: str, api_key: str) -> None:
     """Send a GET to the RunPod /models endpoint to verify it is reachable.
 
@@ -185,8 +199,9 @@ async def _probe_runpod_endpoint(endpoint_id: str, api_key: str) -> None:
     Preconditions: ``endpoint_id`` has passed ``_validate_runpod_endpoint_id``;
         ``api_key`` is non-empty (caller already checked).
     Postconditions: returns ``None`` when the endpoint responds with a 2xx status.
-        On failure raises an ``HTTPException`` whose status reflects the failure
-        class rather than always 400:
+        On failure raises a ``RunPodProbeError`` whose ``status_code`` reflects the
+        failure class rather than always 400 (the route handler maps this to an
+        ``HTTPException``):
 
         - a non-2xx response from RunPod is surfaced with the *remote* status code
           (e.g. 401 for a bad key, 404 for an unknown endpoint, 5xx for a RunPod
@@ -194,8 +209,6 @@ async def _probe_runpod_endpoint(endpoint_id: str, api_key: str) -> None:
         - a connection error or timeout — the endpoint never answered — maps to
           503 (upstream unreachable).
     """
-    import httpx
-
     url = f"https://api.runpod.ai/v2/{endpoint_id}/openai/v1/models"
     try:
         async with httpx.AsyncClient(timeout=_RUNPOD_PROBE_TIMEOUT_SECONDS) as client:
@@ -205,14 +218,14 @@ async def _probe_runpod_endpoint(endpoint_id: str, api_key: str) -> None:
         # RunPod answered with a 4xx/5xx — propagate its status code so an auth
         # failure reads as 401, an unknown endpoint as 404, a RunPod outage as 5xx,
         # instead of misrepresenting a remote error as a client-side 400.
-        raise HTTPException(
+        raise RunPodProbeError(
             status_code=e.response.status_code,
             detail=f"RunPod endpoint returned {e.response.status_code}: {e}",
         ) from e
     except httpx.HTTPError as e:
         # Connection refused/reset, DNS failure, or timeout — the endpoint never
         # produced a response, so it is unreachable (503), not a bad request.
-        raise HTTPException(
+        raise RunPodProbeError(
             status_code=503,
             detail=f"RunPod endpoint could not be reached: {e}",
         ) from e
@@ -294,7 +307,13 @@ class LlmProviderListResponse(BaseModel):
 class LlmProviderCreate(BaseModel):
     """Request body to add a provider to the fallback list."""
 
-    label: str = Field("", description="Human-readable name, e.g. 'Anthropic API'. Defaults to 'RunPod' for the runpod provider.")
+    label: str = Field(
+        "",
+        description=(
+            "Human-readable name, e.g. 'Anthropic API'. If omitted/empty, the route handler"
+            " defaults it to 'RunPod' for the runpod provider (this model's own default is ``\"\"``)."
+        ),
+    )
     provider: Literal["ollama", "claude", "runpod"] = Field(..., description="Provider type.")
     model: str = Field("", description="Model id for the provider (empty = provider default).")
     base_url: str = Field("", description="Ollama base URL (empty = default); ignored for Claude and RunPod.")
@@ -339,7 +358,10 @@ class LlmProviderUpdate(BaseModel):
     model: str | None = None
     base_url: str | None = None
     api_key: str = Field("", description="New API key; empty leaves the stored key unchanged.")
-    endpoint_id: str = Field("", description="New RunPod endpoint ID (alphanumeric). Empty leaves the stored base_url unchanged.")
+    endpoint_id: str = Field(
+        "",
+        description="New RunPod endpoint ID (alphanumeric). Empty/omitted leaves the stored endpoint ID and its derived base URL unchanged.",
+    )
     clear_api_key: bool = Field(
         False,
         description=(
@@ -511,7 +533,10 @@ async def create_provider(body: LlmProviderCreate) -> LlmProviderListResponse:
     if body.provider == "runpod":
         if not body.endpoint_id:
             raise HTTPException(status_code=400, detail="endpoint_id is required for RunPod.")
-        await _probe_runpod_endpoint(body.endpoint_id, api_key)
+        try:
+            await _probe_runpod_endpoint(body.endpoint_id, api_key)
+        except RunPodProbeError as e:
+            raise HTTPException(status_code=e.status_code, detail=e.detail) from e
         base_url = _build_runpod_base_url(body.endpoint_id)
         label = body.label.strip() or "RunPod"
     else:
