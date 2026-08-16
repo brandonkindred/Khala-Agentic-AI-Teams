@@ -4,10 +4,13 @@ from __future__ import annotations
 
 from strands import Agent  # noqa: F401  (kept so tests can monkeypatch this module's Agent)
 
+from software_engineering_team.shared.prompt_utils import JSON_OUTPUT_INSTRUCTION
+
 from ...models import ToolAgentPhaseInput
 from .._plan_base import PlanGeneratorToolAgent
 
-DESIGN_SYSTEM_PLAN_PROMPT = """You are an expert Design System & UI Engineering Agent. Your job is to translate design into a reusable component library plan. You prevent copy-pasted UI entropy.
+DESIGN_SYSTEM_PLAN_PROMPT = (
+    """You are an expert Design System & UI Engineering Agent. Your job is to translate design into a reusable component library plan. You prevent copy-pasted UI entropy.
 
 **Your expertise:**
 - Component library planning (shared vs app-specific components)
@@ -35,8 +38,9 @@ Return a single JSON object with:
 - "a11y_in_components": string (focus, keyboard, ARIA per component type)
 - "documentation_plan": string (Storybook-style docs plan)
 - "summary": string (2-3 sentence summary of design system decisions)
-
-Respond with valid JSON only. No explanatory text outside JSON.
+"""
+    + JSON_OUTPUT_INSTRUCTION
+    + """
 
 ---
 
@@ -45,6 +49,7 @@ Respond with valid JSON only. No explanatory text outside JSON.
 **Spec (excerpt):**
 {spec_content}
 """
+)
 
 
 class BrandingThemeToolAgent(PlanGeneratorToolAgent):
