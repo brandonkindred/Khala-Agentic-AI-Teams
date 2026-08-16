@@ -137,8 +137,13 @@ async def test_agent_id_none_never_forwarded() -> None:
 def test_accepts_kwarg_degrades_when_signature_unavailable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # A callable whose signature can't be introspected (some C builtins) must not be
-    # handed an unexpected keyword — degrade to False rather than raising.
+    # ``_accepts_kwarg`` is an internal defensive safeguard, not a public contract:
+    # ``_call_entrypoint`` consults it purely to decide whether forwarding ``agent_id``
+    # is safe, so a callable whose signature can't be introspected (some C builtins)
+    # must degrade to False rather than raising — that is what keeps the public
+    # dispatch call ``callable_obj(body)`` from ever receiving an unexpected keyword.
+    # This test asserts that degradation contract directly; the public dispatch
+    # contract itself is covered by the ``invoke_entrypoint`` tests above.
     def _boom(_obj):
         raise ValueError("no signature found")
 

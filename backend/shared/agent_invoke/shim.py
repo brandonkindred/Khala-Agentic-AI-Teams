@@ -219,7 +219,7 @@ def mount_invoke_shim(app: FastAPI) -> None:
 async def _invoke_and_drive(
     entrypoint: str,
     body: Any,
-    agent_id: str,
+    agent_id: str | None,
     source_run_id: str,
     cognition: dict[str, Any] | None,
     deadline: float | None,
