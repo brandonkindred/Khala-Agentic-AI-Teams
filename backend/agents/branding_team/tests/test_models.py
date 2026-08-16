@@ -15,9 +15,12 @@ covered in dual-mode: the soft base still permits blank/omitted content
 (merge-target contract), the strict subclass still rejects blanks, and
 ``isinstance(strict, soft)`` holds because ``_derive_strict_variant``
 generates a real subclass. Wrapper and compositor schemas
-(``BrandDiscoveryAuditOutput``, ``PurposeVisionOutput``, ``CoreValuesOutput``,
-Phase 2's cumulative chain, Phase 4/5 compositor models) keep their
-cardinality and blank-rejection tests.
+(``PurposeVisionOutput``, ``CoreValuesOutput``, Phase 2's cumulative chain,
+Phase 4/5 compositor models) keep their cardinality and blank-rejection
+tests. ``BrandDiscoveryAudit`` is a fully collapsed single model (used both
+as ``discovery_auditor``'s ``structured_output`` and as
+``StrategicCoreOutput.brand_discovery``'s ``default_factory``), so its
+fields default to empty rather than being required.
 """
 
 from __future__ import annotations
@@ -40,7 +43,7 @@ from branding_team.models import (
     BrandArchitectureOutput,
     BrandArchitectureRule,
     BrandArchitectureRuleOutput,
-    BrandDiscoveryAuditOutput,
+    BrandDiscoveryAudit,
     BrandExperiencePrinciplesOutput,
     BrandHealthKPI,
     BrandHealthKPIOutput,
@@ -92,30 +95,27 @@ _DISCOVERY_KWARGS = dict(
 )
 
 
-def test_brand_discovery_audit_output_rejects_missing_and_empty_fields() -> None:
-    with pytest.raises(ValidationError):
-        BrandDiscoveryAuditOutput()
-    with pytest.raises(ValidationError):
-        BrandDiscoveryAuditOutput(**{**_DISCOVERY_KWARGS, "current_brand_perception": ""})
-    with pytest.raises(ValidationError):
-        BrandDiscoveryAuditOutput(**{**_DISCOVERY_KWARGS, "strengths": []})
+def test_brand_discovery_audit_constructs_with_no_arguments() -> None:
+    """Backs StrategicCoreOutput.brand_discovery's default_factory."""
+    audit = BrandDiscoveryAudit()
+    assert audit.current_brand_perception == ""
+    assert audit.market_position == ""
+    assert audit.strengths == []
+    assert audit.weaknesses == []
+    assert audit.opportunities == []
+    assert audit.threats == []
+    assert audit.stakeholder_insights == []
 
-    output = BrandDiscoveryAuditOutput(**_DISCOVERY_KWARGS)
-    assert output.market_position == "Mid-market challenger."
 
-
-def test_brand_discovery_audit_output_rejects_blank_list_items() -> None:
-    """Container-level min_length isn't enough — blank items must fail too."""
-    with pytest.raises(ValidationError):
-        BrandDiscoveryAuditOutput(**{**_DISCOVERY_KWARGS, "strengths": [""]})
-    with pytest.raises(ValidationError):
-        BrandDiscoveryAuditOutput(**{**_DISCOVERY_KWARGS, "weaknesses": [""]})
-    with pytest.raises(ValidationError):
-        BrandDiscoveryAuditOutput(**{**_DISCOVERY_KWARGS, "opportunities": [""]})
-    with pytest.raises(ValidationError):
-        BrandDiscoveryAuditOutput(**{**_DISCOVERY_KWARGS, "threats": [""]})
-    with pytest.raises(ValidationError):
-        BrandDiscoveryAuditOutput(**{**_DISCOVERY_KWARGS, "stakeholder_insights": [""]})
+def test_brand_discovery_audit_round_trips_given_fields() -> None:
+    audit = BrandDiscoveryAudit(**_DISCOVERY_KWARGS)
+    assert audit.current_brand_perception == "Seen as reliable but generic."
+    assert audit.market_position == "Mid-market challenger."
+    assert audit.strengths == ["Delivery speed"]
+    assert audit.weaknesses == ["Low brand recall"]
+    assert audit.opportunities == ["Category consolidating"]
+    assert audit.threats == ["Bigger competitors out-spending"]
+    assert audit.stakeholder_insights == ["Sales wants sharper differentiation"]
 
 
 def test_purpose_vision_output_rejects_missing_and_empty_fields() -> None:
