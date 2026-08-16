@@ -550,6 +550,40 @@ describe('AgentStudioShellComponent', () => {
     expect(shell.state.registryAgentId()).toBe('reg-keep');
   });
 
+  it('returns to Stage 4 (Personas) when Back to Agent Studio leaves the persona-run child', async () => {
+    // "Back to Agent Studio" in the audit panel targets /agent-studio, which resolves to the
+    // shell's default child (stage host). The stepper must still show the stage that was active
+    // when View full audit was opened — Personas (Stage 4) — not /persona-testing.
+    TestBed.resetTestingModule();
+    await compileNestedStudioShell([
+      { path: '', component: StubStageHostComponent },
+      {
+        path: 'persona-run/:runId',
+        component: StubAuditHostComponent,
+        data: { hideStudioFooter: true },
+      },
+    ]);
+
+    const harness = await RouterTestingHarness.create();
+    const shell = await harness.navigateByUrl('/', AgentStudioShellComponent);
+    shell.state.navigateToStage(3);
+    harness.detectChanges();
+    expect(shell.activeStageDef().key).toBe('personas');
+
+    await harness.navigateByUrl('/persona-run/run-1');
+    harness.detectChanges();
+    expect(harness.routeNativeElement?.querySelector('app-stub-audit-host')).toBeTruthy();
+    expect(harness.routeNativeElement?.querySelector('.studio__footer')).toBeNull();
+
+    // Back to Agent Studio → shell default child.
+    await harness.navigateByUrl('/');
+    harness.detectChanges();
+    expect(harness.routeNativeElement?.querySelector('app-stub-stage-host')).toBeTruthy();
+    expect(harness.routeNativeElement?.querySelector('.studio__footer')).toBeTruthy();
+    expect(shell.state.activeStage()).toBe(3);
+    expect(shell.activeStageDef().key).toBe('personas');
+  });
+
   it('hides the continue footer when hideStudioFooter is on a nested child', async () => {
     TestBed.resetTestingModule();
     await compileNestedStudioShell([
@@ -568,7 +602,8 @@ describe('AgentStudioShellComponent', () => {
     ]);
 
     const harness = await RouterTestingHarness.create();
-    await harness.navigateByUrl('/', AgentStudioShellComponent);
+    const shell = await harness.navigateByUrl('/', AgentStudioShellComponent);
+    shell.state.setRegistryAgentId('reg-deep');
     harness.detectChanges();
     expect(harness.routeNativeElement?.querySelector('.studio__footer')).toBeTruthy();
 
@@ -576,6 +611,7 @@ describe('AgentStudioShellComponent', () => {
     harness.detectChanges();
     expect(harness.routeNativeElement?.querySelector('.studio__footer')).toBeNull();
     expect(harness.routeNativeElement?.querySelector('app-stub-audit-host')).toBeTruthy();
+    expect(shell.state.registryAgentId()).toBe('reg-deep');
   });
 
   it('returns to the stage host when a draft is loaded from the persona-run child', async () => {
