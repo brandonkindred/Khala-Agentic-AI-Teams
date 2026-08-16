@@ -257,6 +257,37 @@ def test_context_fingerprint_normalizes_non_profile_enum_values() -> None:
     )
 
 
+def test_replaced_content_changes_submission_fingerprint() -> None:
+    """A before-image (``replaced_content``) present vs absent yields distinct
+    submission keys, so a with/without-before-image pair can never collide."""
+    without = _one_file_input()
+    with_before = _one_file_input(replaced_content={"app/a.py": "def f():\n    return 0\n"})
+
+    fp_without = mapping._submission_fingerprint(without, "model-A", False)
+    fp_with = mapping._submission_fingerprint(with_before, "model-A", False)
+    assert fp_without != fp_with
+
+    # The no-before-image case reproduces today's key exactly (absent behaves as
+    # before this field existed): a second identical no-before-image input matches.
+    assert mapping._submission_fingerprint(_one_file_input(), "model-A", False) == fp_without
+
+
+def test_identical_replaced_content_matches_submission_fingerprint() -> None:
+    """The same before-image is deterministic (same key); a different before-image
+    forces a distinct key."""
+    before = {"app/a.py": "def f():\n    return 0\n"}
+    one = _one_file_input(replaced_content=before)
+    two = _one_file_input(replaced_content=dict(before))
+    assert mapping._submission_fingerprint(
+        one, "model-A", False
+    ) == mapping._submission_fingerprint(two, "model-A", False)
+
+    other = _one_file_input(replaced_content={"app/a.py": "def f():\n    return 1\n"})
+    assert mapping._submission_fingerprint(
+        one, "model-A", False
+    ) != mapping._submission_fingerprint(other, "model-A", False)
+
+
 def test_cache_hit_reproduces_findings_without_consulting_model() -> None:
     """A hit reuses the stored findings even if the model would now differ."""
     high_issue = {
