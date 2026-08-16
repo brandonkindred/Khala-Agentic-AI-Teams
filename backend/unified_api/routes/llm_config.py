@@ -335,11 +335,15 @@ class LlmProviderCreate(BaseModel):
     @classmethod
     def _validate_endpoint_id(cls, v: str, info: ValidationInfo) -> str:
         # ``endpoint_id`` only applies to RunPod entries; a stray value on any other
-        # provider is ignored downstream, so skip the format check for it. Presence
-        # (it's required for RunPod) stays a route-level check — that needs the
-        # provider-specific "required for RunPod" error message, not a generic 422.
+        # provider is ignored downstream, so leave it untouched (no format check, no
+        # trimming) rather than silently normalizing input for a field that provider
+        # doesn't use — mirrors the sibling ``base_url`` validator's skip behavior.
+        # Presence (it's required for RunPod) stays a route-level check — that needs
+        # the provider-specific "required for RunPod" error message, not a generic 422.
+        if info.data.get("provider") != "runpod":
+            return v
         stripped = v.strip()
-        if info.data.get("provider") != "runpod" or not stripped:
+        if not stripped:
             return stripped
         return _validate_runpod_endpoint_id(stripped)
 
