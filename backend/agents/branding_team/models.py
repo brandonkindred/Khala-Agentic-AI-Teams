@@ -1068,7 +1068,7 @@ class ChannelActivationOutput(BaseModel):
 
 
 class BrandExperiencePrinciplesOutput(BaseModel):
-    """Agent-facing brand_experience_principler schema.
+    """Agent-facing brand_experience_principles schema.
 
     Requires non-empty content so Strands retries blank structured_output.
     ``min_length``/``max_length`` encode the prompt's stated cardinalities.
