@@ -69,10 +69,8 @@ logger = logging.getLogger(__name__)
 # nests under, or None to merge its fields in flat. Every value except
 # discovery_auditor's matches a StrategicCoreOutput field name 1:1 (see
 # agents.py/models.py). discovery_auditor alone nests: StrategicCoreOutput.
-# brand_discovery is typed BrandDiscoveryAudit, not BrandDiscoveryAuditOutput
-# (discovery_auditor's own structured_output= type) -- but the two are
-# field-for-field identical (see models.py), so BrandDiscoveryAuditOutput's
-# model_dump() validates cleanly as a BrandDiscoveryAudit once nested here.
+# brand_discovery and discovery_auditor's own structured_output= are both
+# typed BrandDiscoveryAudit (see models.py), so no conversion is needed here.
 _PHASE1_NODE_MERGE: dict[str, Optional[str]] = {
     "discovery_auditor": "brand_discovery",
     "purpose_vision_writer": None,
