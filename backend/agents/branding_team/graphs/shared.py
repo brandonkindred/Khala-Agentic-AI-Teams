@@ -37,13 +37,14 @@ if TYPE_CHECKING:
 #   asset_wiki_planner) under one dial, so ops can tune per-phase cost/
 #   quality via ``LLM_MODEL_branding_<phase>`` without a code change.
 # - ``branding_compositor`` (``COMPOSITOR_AGENT_KEY``, via ``build_compositor``)
-#   for the three phase-terminal join agents — ``visual_compositor``,
-#   ``channel_compositor``, ``governance_compositor`` — that assemble a
-#   phase's full set of upstream fragments into that phase's structured
-#   output. This is a distinct role from any single phase's specialists
-#   (broad-context synthesis across many fragments, not one bounded task)
-#   and cuts across phases 3-5, so it gets its own tier rather than
-#   inheriting its phase's key.
+#   for the two phase-terminal join agents — ``visual_compositor`` and
+#   ``governance_compositor`` — that assemble a phase's full set of
+#   upstream fragments into that phase's structured output. This is a
+#   distinct role from any single phase's specialists (broad-context
+#   synthesis across many fragments, not one bounded task) and cuts across
+#   phases 3 and 5, so it gets its own tier rather than inheriting its
+#   phase's key. Phase 4 has no compositor: its fragments are merged
+#   deterministically in Python instead.
 #
 # ``BrandComplianceAgent`` (outside the graph) is deliberately excluded: it
 # is a keyword-matching ``@dataclass`` with no LLM call, so no agent_key
@@ -172,8 +173,8 @@ def build_compositor(
     """Create a phase-terminal join agent on the shared ``branding_compositor`` tier.
 
     Thin wrapper over :func:`build_agent` that pins ``agent_key=COMPOSITOR_AGENT_KEY``
-    so every phase's compositor (``visual_compositor``, ``channel_compositor``,
-    ``governance_compositor``) shares one call site for that routing decision,
+    so the phases that still have a compositor (``visual_compositor``,
+    ``governance_compositor``) share one call site for that routing decision,
     instead of each phase file inlining ``build_agent(..., agent_key=COMPOSITOR_AGENT_KEY)``
     and risking the key drifting out of sync across phases. Always JSON mode
     (every compositor assembles its phase's fragments into a structured

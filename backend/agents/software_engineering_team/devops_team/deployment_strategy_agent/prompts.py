@@ -23,5 +23,4 @@ DEPLOYMENT_STRATEGY_PROMPT = build_json_output_prompt(
         "- alerting_configured: boolean\n"
         "- summary: string"
     ),
-    trailer="Return JSON only.\n",
 )

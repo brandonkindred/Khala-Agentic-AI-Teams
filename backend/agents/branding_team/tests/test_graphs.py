@@ -38,7 +38,6 @@ from branding_team.graphs.top_level import (
 from branding_team.models import (
     BrandingMission,
     BrandPhase,
-    ChannelActivationOutput,
     GovernanceOutput,
     VisualIdentityOutput,
 )
@@ -127,31 +126,28 @@ def test_build_phase4_graph_is_a_graph() -> None:
     assert isinstance(build_phase4_graph(), Graph)
 
 
-def test_channel_compositor_prompt_field_bullets_match_schema() -> None:
-    """The compositor prompt's ``Output covers`` bullets must name real schema fields.
-
-    Regression guard: the prompt once instructed the model to emit
-    ``brand_in_action_examples``, but the schema field is ``brand_in_action`` —
-    so a compliant LLM emitted a key that failed validation and was silently
-    dropped from the deliverable. This asserts every bulleted field name resolves
-    to an actual ``ChannelActivationOutput`` field, and that the misspelling is gone.
+def test_build_phase4_graph_wires_pure_fan_out() -> None:
+    """Phase 4 has no compositor: all nine specialists are both entry points
+    and terminal nodes, with no edges between them. Their typed fragments are
+    merged into ``ChannelActivationOutput`` in Python by the orchestrator's
+    Phase-4 ``merge_fn``, not by an LLM fan-in node.
     """
-    from branding_team.graphs.phase4_channel import _CHANNEL_COMPOSITOR_SYSTEM_PROMPT
-    from branding_team.models import ChannelActivationOutput
-
-    prompt = _CHANNEL_COMPOSITOR_SYSTEM_PROMPT
-    assert "brand_in_action" in prompt
-    assert "brand_in_action_examples" not in prompt
-
-    schema_fields = set(ChannelActivationOutput.model_fields)
-    # The "coherent document that covers:" section lists the schema fields the
-    # model must emit as "- <field_name>" bullets (the field name is the first
-    # token after the dash). Every such bullet must be a real schema field.
-    bullet_fields = [line[2:].split()[0] for line in prompt.splitlines() if line.startswith("- ")]
-    assert bullet_fields, "expected the compositor prompt to list output field bullets"
-    assert "brand_in_action" in bullet_fields
-    unknown = [name for name in bullet_fields if name not in schema_fields]
-    assert not unknown, f"prompt bullets name non-schema fields: {unknown}"
+    graph = build_phase4_graph()
+    expected = {
+        "brand_experience_principler",
+        "website_guide",
+        "social_guide",
+        "email_guide",
+        "events_guide",
+        "partnerships_guide",
+        "internal_guide",
+        "brand_architecture_builder",
+        "brand_in_action_illustrator",
+    }
+    assert set(graph.nodes.keys()) == expected
+    assert {n.node_id for n in graph.entry_points} == expected
+    assert len(graph.edges) == 0
+    assert "channel_compositor" not in graph.nodes
 
 
 def test_make_channel_guide_rejects_blank_channel_or_description() -> None:
@@ -247,15 +243,15 @@ def test_phase5_prompts_drop_redundant_json_reminder() -> None:
 # Compositor (fan-in join) nodes — migrated to structured_output=
 # ---------------------------------------------------------------------------
 
-# The three phase-3/4/5 compositors are inline ``build_agent()`` calls in the
+# The remaining phase-3/5 compositors are inline ``build_agent()`` calls in the
 # graph files (not ``agents.py`` factories), so they are reached through the
 # built graph's node executor rather than a factory. Each now carries its own
 # ``structured_output=`` model instead of a prose "output valid JSON" reminder,
 # which forces Strands' typed tool call and removes the compositors' reliance on
-# the free-text ``_parse_model_from_text`` recovery path.
+# the free-text ``_parse_model_from_text`` recovery path. Phase 4 no longer has
+# a compositor (see ``test_build_phase4_graph_wires_pure_fan_out``).
 _COMPOSITOR_CASES = [
     (build_phase3_graph, "visual_compositor", VisualIdentityOutput),
-    (build_phase4_graph, "channel_compositor", ChannelActivationOutput),
     (build_phase5_graph, "governance_compositor", GovernanceOutput),
 ]
 
@@ -533,11 +529,10 @@ def test_phase5_factories_use_governance_agent_key() -> None:
 
 
 def test_compositor_nodes_use_compositor_agent_key() -> None:
-    """The three phase-terminal join agents share the cross-phase compositor tier,
-    not their own phase's agent_key."""
+    """The two phase-terminal join agents share the cross-phase compositor tier,
+    not their own phase's agent_key. Phase 4 has no compositor node."""
     graphs = {
         "visual_compositor": build_phase3_graph(),
-        "channel_compositor": build_phase4_graph(),
         "governance_compositor": build_phase5_graph(),
     }
     for node_id, graph in graphs.items():
