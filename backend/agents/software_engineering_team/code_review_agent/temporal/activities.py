@@ -27,6 +27,11 @@ phase, with independent retries and resumability:
   ``side-effects`` findings after the three tail passes (wraps
   ``side_effect_consolidation.consolidate_side_effect_issues``; gated by
   ``CODE_REVIEW_SIDE_EFFECT_CONSOLIDATION``, fail-safe on error).
+- :func:`combine_findings_activity` — pure (no-LLM) combine of near-duplicate /
+  co-located findings across the whole stream before the false-positive filter
+  (wraps ``finding_combination.combine_findings``; deterministic, fail-safe on
+  error). Generalizes ``consolidate_side_effect_issues_activity`` to every
+  category.
 - :func:`finalize_review_activity` — deterministic reduce gate: dedupe +
   approval reconciliation (wraps ``coordinator._dedupe_issues`` /
   ``_reconcile_approval``).
@@ -527,6 +532,75 @@ def consolidate_side_effect_issues_activity(
         )
         return issues
     return [i.model_dump(mode="json") for i in consolidated]
+
+
+@activity.defn(name="code_review_combine_findings")
+def combine_findings_activity(
+    review_input: Dict[str, Any],
+    issues: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Combine near-duplicate / co-located findings across the whole stream.
+
+    The durable, no-LLM counterpart of the thread-mode combine step
+    (``coordinator._run_tail_passes``): a category-agnostic, deterministic merge
+    of near-duplicate (same file + same category + similar description) and
+    co-located (same enclosing Python construct) findings, run over the full
+    map-phase + additive tail-pass stream before the false-positive filter. It
+    subsumes both the exact-match dedupe and the older
+    :func:`consolidate_side_effect_issues_activity` (an exact duplicate is just a
+    same-file, same-category, Jaccard-1.0 similarity match).
+
+    Preconditions:
+        - ``review_input`` is a ``CodeReviewInput.model_dump(mode="json")`` dict.
+        - ``issues`` is the merged finding list (each a
+          ``CodeReviewIssue.model_dump(mode="json")`` dict), already including any
+          architecture / side-effect tail-pass additions.
+
+    Postconditions:
+        - Returns the combined issue list from ``combine_findings`` — related
+          findings merged into one representative (``severity`` = group max, line
+          span on the majority file, exact-deduped descriptions/suggestions,
+          ``pre_existing`` = AND across the group), every unrelated finding passed
+          through in its original relative position — serialized as
+          ``model_dump(mode="json")`` dicts. ``combine_findings`` is itself
+          deterministic (see its module Invariants), so the same inputs always
+          yield the same output.
+        - Mirrors the thread-mode call by passing
+          ``consolidate_side_effects=env_flag_enabled(SIDE_EFFECT_CONSOLIDATION_ENV)``
+          so the ``CODE_REVIEW_SIDE_EFFECT_CONSOLIDATION`` escape hatch behaves
+          identically in Temporal mode.
+        - Never raises: any reconstruction / index / combination failure logs a
+          warning and returns the original ``issues`` unchanged (fail-safe),
+          matching the in-process coordinator's try/except around the same step —
+          the subsequent finalize gate still applies the exact-match dedupe, so a
+          fail-safe passthrough only ever keeps more findings, never fewer.
+    """
+    from shared.env import env_flag_enabled
+
+    from ..false_positive_filter import CodebaseIndex
+    from ..finding_combination import combine_findings
+    from ..models import CodeReviewInput, CodeReviewIssue
+    from ..side_effect_consolidation import SIDE_EFFECT_CONSOLIDATION_ENV
+
+    try:
+        input_data = CodeReviewInput.model_validate(review_input)
+        parsed_issues = [CodeReviewIssue.model_validate(i) for i in issues]
+        index = CodebaseIndex.from_input(
+            input_data, repo_reader=_repo_reader_from_input(input_data)
+        )
+        combined = combine_findings(
+            parsed_issues,
+            index,
+            consolidate_side_effects=env_flag_enabled(SIDE_EFFECT_CONSOLIDATION_ENV),
+        )
+    except Exception as exc:  # noqa: BLE001 - fail-safe: keep uncombined issues
+        logger.warning(
+            "FindingCombination: activity failed (%s: %s); using uncombined issues",
+            type(exc).__name__,
+            exc,
+        )
+        return issues
+    return [i.model_dump(mode="json") for i in combined]
 
 
 @activity.defn(name="code_review_finalize")
