@@ -1358,7 +1358,7 @@ describe('AgentStudioPersonaComponent', () => {
       fixture.nativeElement.querySelectorAll('button') as NodeListOf<HTMLButtonElement>,
     ).find((b) => b.textContent?.includes('View full audit'));
     expect(btn).toBeTruthy();
-    btn!.click();
+    btn?.click();
     expect(nav).toHaveBeenCalledWith(['/agent-studio', 'persona-run', 'run-1']);
     expect(nav.mock.calls.some((c) => String(c[0]).includes('persona-testing'))).toBe(false);
   });
