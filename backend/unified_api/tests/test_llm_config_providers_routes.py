@@ -493,6 +493,10 @@ def test_update_runpod_endpoint_id_rebuilds_base_url_without_probe(app_client, m
     assert resp.status_code == 200
     kw = _find_op(state, "update")[2]
     assert kw["base_url"] == "https://api.runpod.ai/v2/xyz789/openai/v1"
+    # provider was omitted from the request body, so the route passes through the
+    # None sentinel rather than re-resolving it — provider_store.update_entry treats
+    # None as "leave this column untouched", so the stored provider stays "runpod".
+    assert kw["provider"] is None
 
 
 def test_update_runpod_rejects_bad_endpoint_id(app_client):

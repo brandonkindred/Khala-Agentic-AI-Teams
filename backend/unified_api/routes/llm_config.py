@@ -334,12 +334,14 @@ class LlmProviderCreate(BaseModel):
     @field_validator("endpoint_id")
     @classmethod
     def _validate_endpoint_id(cls, v: str, info: ValidationInfo) -> str:
-        # ``endpoint_id`` only applies to RunPod entries; a stray value on any other
-        # provider is ignored downstream, so leave it untouched (no format check, no
-        # trimming) rather than silently normalizing input for a field that provider
-        # doesn't use — mirrors the sibling ``base_url`` validator's skip behavior.
-        # Presence (it's required for RunPod) stays a route-level check — that needs
-        # the provider-specific "required for RunPod" error message, not a generic 422.
+        # ``endpoint_id`` only applies to RunPod entries. For any OTHER provider, a
+        # stray value is ignored downstream, so this branch returns ``v`` completely
+        # untouched (no format check, no trimming) rather than silently normalizing a
+        # field that provider doesn't use — mirrors the sibling ``base_url``
+        # validator's skip behavior. For a RunPod entry (below), the value IS
+        # trimmed and format-checked. Presence (it's required for RunPod) stays a
+        # route-level check — that needs the provider-specific "required for RunPod"
+        # error message, not a generic 422.
         if info.data.get("provider") != "runpod":
             return v
         stripped = v.strip()
@@ -604,8 +606,11 @@ async def update_provider(entry_id: int, body: LlmProviderUpdate) -> LlmProvider
     in the same request is ignored for RunPod, matching ``create_provider``.
 
     Preconditions: the entry exists; Postgres configured; the per-entry key guards
-        pass for the resulting (merged) provider/base_url/key. Postconditions: the
-        named fields are updated, caches refreshed, and the full list returned.
+        pass for the resulting (merged) provider/base_url/key. Postconditions:
+        provided (non-empty) fields are updated; omitted/empty fields retain their
+        stored values (a ``None`` passed through to ``provider_store.update_entry``
+        is that function's own "leave unchanged" sentinel, not a write of ``NULL``).
+        Caches are refreshed and the full list returned.
     """
     _require_storage()
     existing = provider_store.get_entry(entry_id)
