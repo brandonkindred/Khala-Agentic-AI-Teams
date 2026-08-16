@@ -94,9 +94,11 @@ commit-on-completion contract this document describes:
   loop never accumulates checkpoints from attempts that will never be revisited.
 
 See `ADR-012` for the full contract: checkpoint identity/scoping, the persisted-field set,
-fencing treatment, and resumability semantics. This issue's own implementation (the
-checkpoint-persistence write path and the resume-on-crash wiring) lands separately; this section
-will gain a "Locked in by" row once that lands.
+fencing treatment, and resumability semantics. The checkpoint-persistence write path and the
+read/resume-on-crash wiring into `run_design_attempt_activity` have now landed (see the
+`DesignAttemptCheckpoint`/`persist_design_attempt_checkpoint`/`load_design_attempt_checkpoint`
+row below); checkpoint cleanup on terminal outcome is tracked as a separate, still-open
+follow-up.
 
 ## Locked in by
 
@@ -106,3 +108,4 @@ will gain a "Locked in by" row once that lands.
 | Failed design attempt does not poison the next; short-circuit record preserves failed-attempt drift | `tests/test_strategy_lab_phase_transitions.py` |
 | `ZeroTradeRepairer` purity w.r.t. input code/spec | `tests/test_strategy_lab_zero_trade_repair.py` |
 | Rejected alignment proposal preserves known-good state | `tests/test_strategy_lab_alignment.py` |
+| Intra-attempt checkpoint write/read scoping (`cycle_scope`-disambiguated, generation-fenced), checkpoint-resume skips Phase 1 and never double-charges the LLM budget | `tests/test_strategy_lab_temporal_activities.py`, `tests/test_strategy_lab_phase_transitions.py` |

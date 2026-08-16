@@ -75,6 +75,29 @@ justification, matching the existing pragma markers in both modules.
 ### STRATEGY_LAB_MARKET_DATA_*
 Strategy Lab market-data cache/timeout/provider tuning.
 
+### STRATEGY_LAB_BATCH_INDICATOR_CACHE_ENABLED
+Master toggle for the batch-scoped, cross-strategy `BatchIndicatorCache` (default `true` after
+the cache's bake-in/validation period; accepted truthy values `true`/`1`/`yes`/`on`,
+case-insensitive; anything else — including an explicit `false`/`0`/`no`/`off` — disables). A
+batch backtest commonly evaluates many strategy candidates against the same asset-class
+universe/timeframe/date range, so structurally identical indicator computations (e.g. `SMA(50)`
+on the same symbol/timeframe) recur across candidates. When enabled, the batch/wave Temporal
+workflow constructs one cache per batch and shares it across that batch's strategies, so each
+distinct indicator series is computed once instead of once per strategy, cutting batch
+wall-clock time proportional to indicator-parameter overlap in the design space. The cache key
+is fully determined by the indicator spec + symbol + timeframe + a content fingerprint of the
+bars, so a hit only changes *how* a value is produced, never *what* value is returned (key
+composition and the invalidation contract: `system_design/adr/ADR-012-batch-indicator-cache-key-and-invalidation.md`).
+Consultation is additionally gated: `IndicatorRegistry` consults the cache only when it was
+constructed with a real cache instance **and** a non-empty timeframe, and the bars carry a
+`symbol` and a `date` — the batch workflow supplies all of these per batch, while an ordinary
+`IndicatorRegistry()` (no cache passed) falls straight through regardless of the flag. Note this
+flag is read by a stdlib-only reimplementation in
+`strategy_lab/indicators/streaming.py` (that module is copied verbatim into the flat execution
+sandbox, which has no `shared` package), so its truthy set additionally accepts `on` versus the
+`shared.env_config.env_bool`-backed toggles elsewhere on this page. Set it to a falsy value to
+opt an environment back out.
+
 ## TradingView MCP data source
 
 The Strategy Lab can pull OHLCV price data from a **TradingView MCP server** in preference to the

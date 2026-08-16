@@ -449,6 +449,104 @@ def test_phase_transition_attempt_increments_on_design_reentry(
     ]
 
 
+def test_run_design_attempt_checkpoint_hook_fires_once_at_design_synthesis_boundary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``checkpoint_hook`` (ADR-012) fires exactly once, right after Phase 1
+    converges and before any Phase 1b (code synthesis) work runs -- the exact
+    design/synthesis boundary the checkpoint contract targets."""
+    orch = StrategyLabOrchestrator()
+    _stub_pipeline_for_happy_path(monkeypatch, orch)
+
+    call_order: List[str] = []
+
+    def _tracked_compile(spec: Any) -> str:
+        call_order.append("compile_strategy")
+        return _VALID_CODE
+
+    monkeypatch.setattr(orchestrator_module, "compile_strategy", _tracked_compile)
+
+    hook_calls: List[Tuple[str, Dict[str, Any]]] = []
+
+    def _hook(phase: str, data: Dict[str, Any]) -> None:
+        call_order.append("checkpoint_hook")
+        hook_calls.append((phase, data))
+
+    orch._run_design_attempt(
+        prior_records=[],
+        config=_config(),
+        signal_brief=None,
+        emit=lambda *_a, **_kw: None,
+        exclude_asset_classes=None,
+        directives=[],
+        checkpoint_hook=_hook,
+    )
+
+    assert len(hook_calls) == 1
+    phase, data = hook_calls[0]
+    assert phase == "design_synthesis_boundary"
+    assert data["spec"] is not None
+    assert data["design_context"] is not None
+    assert call_order == ["checkpoint_hook", "compile_strategy"]
+
+
+def test_run_design_attempt_resume_skips_phase_one(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Supplying ``resume_spec``/``resume_rationale``/``resume_design_context``
+    causes the design agent to never be invoked, and the returned record
+    reflects the supplied resume rationale -- Phase 1's LLM calls are never
+    re-issued on a checkpoint resume (ADR-012's no-double-charge requirement
+    is structural precisely because this path never calls
+    ``_orchestrate_design_and_review``)."""
+    from investment_team.strategy_lab._orchestrator_helpers import _DesignPersistContext
+
+    orch = StrategyLabOrchestrator()
+    _force_synthesis_skip(monkeypatch, orch, _VALID_CODE)
+    monkeypatch.setattr(orch.code_conformance_gate, "check", lambda *_a, **_kw: [])
+    _short_circuit_synthesis(monkeypatch)
+
+    def _fail_if_called(**_kw: Any) -> Any:
+        raise AssertionError("design_agent.run must not be called on a checkpoint resume")
+
+    monkeypatch.setattr(orch.design_agent, "run", _fail_if_called)
+
+    resume_spec = orch._build_spec_from_dict(_spec_dict(), strategy_id="resumed-strategy")
+    resume_design_context = _DesignPersistContext(
+        rounds=2, critiques=[], stop_reason="ready", loop_telemetry={}
+    )
+
+    record = orch._run_design_attempt(
+        prior_records=[],
+        config=_config(),
+        signal_brief=None,
+        emit=lambda *_a, **_kw: None,
+        exclude_asset_classes=None,
+        directives=[],
+        resume_spec=resume_spec,
+        resume_rationale="resumed rationale",
+        resume_design_context=resume_design_context,
+    )
+
+    assert record.strategy_rationale == "resumed rationale"
+
+
+def test_run_design_attempt_rejects_resume_spec_without_design_context() -> None:
+    orch = StrategyLabOrchestrator()
+    resume_spec = orch._build_spec_from_dict(_spec_dict(), strategy_id="resumed-strategy")
+
+    with pytest.raises(ValueError, match="resume_spec and resume_design_context"):
+        orch._run_design_attempt(
+            prior_records=[],
+            config=_config(),
+            signal_brief=None,
+            emit=lambda *_a, **_kw: None,
+            exclude_asset_classes=None,
+            directives=[],
+            resume_spec=resume_spec,
+            resume_rationale="resumed rationale",
+            resume_design_context=None,
+        )
+
+
 def _record_attempt_drift(orch: StrategyLabOrchestrator, collector: Any, attempt: int) -> None:
     """Record one spec revision into ``collector`` tagged for ``attempt``.
 

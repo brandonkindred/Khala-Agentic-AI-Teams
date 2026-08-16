@@ -32,7 +32,13 @@ from branding_team.graphs.top_level import (
     DEFAULT_NODE_TIMEOUT_SECONDS,
     build_branding_graph,
 )
-from branding_team.models import BrandingMission, BrandPhase
+from branding_team.models import (
+    BrandingMission,
+    BrandPhase,
+    ChannelActivationOutput,
+    GovernanceOutput,
+    VisualIdentityOutput,
+)
 from branding_team.tests.conftest import make_mission
 
 # ---------------------------------------------------------------------------
@@ -116,6 +122,33 @@ def test_make_moodboard_conceptualist_rejects_blank_variant() -> None:
 
 def test_build_phase4_graph_is_a_graph() -> None:
     assert isinstance(build_phase4_graph(), Graph)
+
+
+def test_channel_compositor_prompt_field_bullets_match_schema() -> None:
+    """The compositor prompt's ``Output covers`` bullets must name real schema fields.
+
+    Regression guard: the prompt once instructed the model to emit
+    ``brand_in_action_examples``, but the schema field is ``brand_in_action`` —
+    so a compliant LLM emitted a key that failed validation and was silently
+    dropped from the deliverable. This asserts every bulleted field name resolves
+    to an actual ``ChannelActivationOutput`` field, and that the misspelling is gone.
+    """
+    from branding_team.graphs.phase4_channel import _CHANNEL_COMPOSITOR_SYSTEM_PROMPT
+    from branding_team.models import ChannelActivationOutput
+
+    prompt = _CHANNEL_COMPOSITOR_SYSTEM_PROMPT
+    assert "brand_in_action" in prompt
+    assert "brand_in_action_examples" not in prompt
+
+    schema_fields = set(ChannelActivationOutput.model_fields)
+    # The "coherent document that covers:" section lists the schema fields the
+    # model must emit as "- <field_name>" bullets (the field name is the first
+    # token after the dash). Every such bullet must be a real schema field.
+    bullet_fields = [line[2:].split()[0] for line in prompt.splitlines() if line.startswith("- ")]
+    assert bullet_fields, "expected the compositor prompt to list output field bullets"
+    assert "brand_in_action" in bullet_fields
+    unknown = [name for name in bullet_fields if name not in schema_fields]
+    assert not unknown, f"prompt bullets name non-schema fields: {unknown}"
 
 
 def test_make_channel_guide_rejects_blank_channel_or_description() -> None:
@@ -205,6 +238,44 @@ def test_phase5_prompts_drop_redundant_json_reminder() -> None:
     ):
         agent = factory()
         assert "Output valid JSON" not in agent.system_prompt, factory.__name__
+
+
+# ---------------------------------------------------------------------------
+# Compositor (fan-in join) nodes — migrated to structured_output=
+# ---------------------------------------------------------------------------
+
+# The three phase-3/4/5 compositors are inline ``build_agent()`` calls in the
+# graph files (not ``agents.py`` factories), so they are reached through the
+# built graph's node executor rather than a factory. Each now carries its own
+# ``structured_output=`` model instead of a prose "output valid JSON" reminder,
+# which forces Strands' typed tool call and removes the compositors' reliance on
+# the free-text ``_parse_model_from_text`` recovery path.
+_COMPOSITOR_CASES = [
+    (build_phase3_graph, "visual_compositor", VisualIdentityOutput),
+    (build_phase4_graph, "channel_compositor", ChannelActivationOutput),
+    (build_phase5_graph, "governance_compositor", GovernanceOutput),
+]
+
+
+@pytest.mark.parametrize(
+    "build_graph,node_id,output_model",
+    _COMPOSITOR_CASES,
+    ids=[node_id for _build, node_id, _model in _COMPOSITOR_CASES],
+)
+def test_compositor_uses_structured_output_and_drops_json_reminder(
+    build_graph, node_id, output_model
+) -> None:
+    """Each fan-in compositor passes ``structured_output=`` and no longer names
+    a raw-JSON output format in its prose — the Pydantic schema is the contract.
+    """
+    graph = build_graph()
+    executor = graph.nodes[node_id].executor
+
+    # The Pydantic schema is wired as the agent's structured-output model
+    # (Strands stores the ``structured_output_model=`` ctor arg here)...
+    assert getattr(executor, "_default_structured_output_model", None) is output_model
+    # ...and the redundant "output valid JSON" prose instruction is gone.
+    assert "valid JSON" not in executor.system_prompt, node_id
 
 
 # ---------------------------------------------------------------------------

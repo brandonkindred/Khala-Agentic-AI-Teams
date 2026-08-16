@@ -1322,6 +1322,95 @@ def test_create_review_issues_404_when_pat_cannot_reach_repo(mock_cfg, mock_cred
 
 
 # ---------------------------------------------------------------------------
+# GET /github/reviews/{job_id}/transcript
+# ---------------------------------------------------------------------------
+#
+# ``_FakeAsyncClient.get`` above is single-purpose (the ``_assert_pat_can_reach_repo``
+# probe only), so this route's own GET forward to the coding-team service is
+# tested by patching ``_forward_to_coding_team``/``_assert_pat_can_reach_repo``
+# directly rather than at the httpx layer.
+
+from unittest.mock import AsyncMock  # noqa: E402
+
+_REVIEW_TRANSCRIPT = "/api/integrations/github/reviews/rev-9/transcript"
+
+
+@patch(f"{_M}.resolve_credential_with_env_fallback", return_value=("ghp_token", True))
+@patch(f"{_M}.get_github_config_meta", return_value=dict(_GH_CFG))
+def test_get_review_transcript_forwards_with_owner_repo(mock_cfg, mock_cred, monkeypatch):
+    monkeypatch.setenv("CODING_TEAM_SERVICE_URL", "http://coding:8103")
+    entries = [
+        {
+            "stage": "chunk_review",
+            "target": "a.py",
+            "model": "m",
+            "prompt": "p1",
+            "response": "r1",
+            "started_at": "2024-01-01T00:00:00+00:00",
+            "duration_ms": 10,
+        }
+    ]
+    forward = AsyncMock(return_value={"job_id": "rev-9", "entries": entries})
+    with (
+        patch(f"{_M}._assert_pat_can_reach_repo", new=AsyncMock(return_value=None)) as gate,
+        patch(f"{_M}._forward_to_coding_team", new=forward),
+    ):
+        resp = client.get(_REVIEW_TRANSCRIPT, params={"owner": "acme", "repo": "widget"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["job_id"] == "rev-9"
+    assert body["entries"][0]["stage"] == "chunk_review"
+    gate.assert_awaited_once()
+    forward.assert_awaited_once()
+    _url, path = forward.await_args.args[:2]
+    assert path == "reviews/rev-9/transcript"
+    assert forward.await_args.kwargs["params"] == {"owner": "acme", "repo": "widget"}
+
+
+@patch(f"{_M}.resolve_credential_with_env_fallback", return_value=("ghp_token", True))
+@patch(f"{_M}.get_github_config_meta", return_value=dict(_GH_CFG))
+def test_get_review_transcript_404_when_pat_cannot_reach_repo(mock_cfg, mock_cred, monkeypatch):
+    """Mirrors GET /github/reviews: a repo the PAT can't reach must refuse before
+    ever contacting the coding-team service, so a job_id cannot be used to read
+    transcript content for a repository outside the PAT's access boundary."""
+    from fastapi import HTTPException
+
+    monkeypatch.setenv("CODING_TEAM_SERVICE_URL", "http://coding:8103")
+    forward = AsyncMock()
+    with (
+        patch(
+            f"{_M}._assert_pat_can_reach_repo",
+            new=AsyncMock(side_effect=HTTPException(status_code=404, detail="not found")),
+        ),
+        patch(f"{_M}._forward_to_coding_team", new=forward),
+    ):
+        resp = client.get(_REVIEW_TRANSCRIPT, params={"owner": "secret", "repo": "repo"})
+    assert resp.status_code == 404
+    forward.assert_not_awaited()
+
+
+@patch(f"{_M}.resolve_credential_with_env_fallback", return_value=("ghp_token", True))
+@patch(f"{_M}.get_github_config_meta", return_value=dict(_GH_CFG))
+def test_get_review_transcript_503_when_service_url_unset(mock_cfg, mock_cred, monkeypatch):
+    monkeypatch.delenv("CODING_TEAM_SERVICE_URL", raising=False)
+    with patch(f"{_M}._assert_pat_can_reach_repo", new=AsyncMock(return_value=None)) as gate:
+        resp = client.get(_REVIEW_TRANSCRIPT, params={"owner": "acme", "repo": "widget"})
+    assert resp.status_code == 503
+    # The route checks CODING_TEAM_SERVICE_URL (_require_coding_team_url) before
+    # the PAT-reachability gate, same order as GET /github/reviews, so a missing
+    # service URL must fail before the gate is ever reached.
+    gate.assert_not_awaited()
+
+
+def test_get_review_transcript_422_without_owner_repo():
+    # owner/repo are required query params — a caller must supply them, not
+    # rely on the configured default (the transcript is fetched by job_id, and
+    # the PAT-reachability gate needs a concrete repo to check against).
+    resp = client.get("/api/integrations/github/reviews/rev-9/transcript")
+    assert resp.status_code == 422
+
+
+# ---------------------------------------------------------------------------
 # _start_pr_review(token=...): webhook path reuses a pre-resolved PAT (no 2nd read)
 # ---------------------------------------------------------------------------
 

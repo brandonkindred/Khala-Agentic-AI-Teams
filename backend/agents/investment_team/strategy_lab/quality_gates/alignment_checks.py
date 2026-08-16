@@ -54,6 +54,7 @@ from pydantic import BaseModel, Field
 from shared.concurrency import parallel_map
 from shared.env_config import env_int
 
+from ..agents._llm_envelope import _FAILURE_FMT
 from ..alignment_findings import (
     AlignmentFinding,
     NearMissVerdict,
@@ -503,8 +504,7 @@ class DeterministicAlignmentChecker(GateResultsMixin):
             severity="info" if passed else "critical",
             details=details,
         )
-        findings.append(finding)
-        gate_results.append(self._emit_for_finding(finding))
+        self._record(finding, findings, gate_results)
 
     # ------------------------------------------------------------------
     # Check 2 — side matches an entry rule's declared side
@@ -540,8 +540,7 @@ class DeterministicAlignmentChecker(GateResultsMixin):
             severity="info" if passed else "critical",
             details=details,
         )
-        findings.append(finding)
-        gate_results.append(self._emit_for_finding(finding))
+        self._record(finding, findings, gate_results)
 
     # ------------------------------------------------------------------
     # Check 3 — sizing within ±1%
@@ -578,8 +577,7 @@ class DeterministicAlignmentChecker(GateResultsMixin):
                     "checkable at trade-level; deferring to engine-side enforcement."
                 ),
             )
-            findings.append(finding)
-            gate_results.append(self._emit_for_finding(finding))
+            self._record(finding, findings, gate_results)
             return
 
         actual = float(trade.position_value)
@@ -648,8 +646,7 @@ class DeterministicAlignmentChecker(GateResultsMixin):
             computed_value=actual,
             expected_value=expected,
         )
-        findings.append(finding)
-        gate_results.append(self._emit_for_finding(finding))
+        self._record(finding, findings, gate_results)
 
     # ------------------------------------------------------------------
     # Check 4 — stop-loss compliance
@@ -677,7 +674,7 @@ class DeterministicAlignmentChecker(GateResultsMixin):
         entry_basis_rules = [r for r in stop_rules if r.basis == "entry_price"]
         trailing_rules = [r for r in stop_rules if r.basis != "entry_price"]
         for tr in trailing_rules:
-            findings.append(
+            self._record(
                 AlignmentFinding(
                     trade_num=trade.trade_num,
                     rule_id=f"exit:stop_loss:{tr.basis}",
@@ -689,9 +686,10 @@ class DeterministicAlignmentChecker(GateResultsMixin):
                         "path-dependent (depends on running peak/trough); deferring "
                         "to engine-side enforcement."
                     ),
-                )
+                ),
+                findings,
+                gate_results,
             )
-            gate_results.append(self._emit_for_finding(findings[-1]))
 
         if not entry_basis_rules:
             return
@@ -713,8 +711,7 @@ class DeterministicAlignmentChecker(GateResultsMixin):
                 computed_value=float(trade.return_pct),
                 expected_value=-tightest * 100.0,
             )
-            findings.append(finding)
-            gate_results.append(self._emit_for_finding(finding))
+            self._record(finding, findings, gate_results)
             return
 
         # No engine stop-loss attribution. A stop-loss is a TRIGGER that
@@ -764,8 +761,7 @@ class DeterministicAlignmentChecker(GateResultsMixin):
             computed_value=return_pct,
             expected_value=floor_pct,
         )
-        findings.append(finding)
-        gate_results.append(self._emit_for_finding(finding))
+        self._record(finding, findings, gate_results)
 
     # ------------------------------------------------------------------
     # Check 5 — take-profit compliance
@@ -797,8 +793,7 @@ class DeterministicAlignmentChecker(GateResultsMixin):
                 computed_value=float(trade.return_pct),
                 expected_value=tightest * 100.0,
             )
-            findings.append(finding)
-            gate_results.append(self._emit_for_finding(finding))
+            self._record(finding, findings, gate_results)
             return
 
         # No engine take-profit attribution. Symmetric to the stop-loss
@@ -836,8 +831,7 @@ class DeterministicAlignmentChecker(GateResultsMixin):
             computed_value=return_pct,
             expected_value=ceiling_pct,
         )
-        findings.append(finding)
-        gate_results.append(self._emit_for_finding(finding))
+        self._record(finding, findings, gate_results)
 
     # ------------------------------------------------------------------
     # Check 6 — entry-signal correlation (with near-miss adjudication)
@@ -879,8 +873,7 @@ class DeterministicAlignmentChecker(GateResultsMixin):
                     "check #2 (side) carries the critical finding."
                 ),
             )
-            findings.append(finding)
-            gate_results.append(self._emit_for_finding(finding))
+            self._record(finding, findings, gate_results)
             return
 
         df = frames.get(trade.symbol)
@@ -896,8 +889,7 @@ class DeterministicAlignmentChecker(GateResultsMixin):
                     f"{trade.symbol!r}. Cannot reproduce entry signal."
                 ),
             )
-            findings.append(finding)
-            gate_results.append(self._emit_for_finding(finding))
+            self._record(finding, findings, gate_results)
             return
 
         matching_positions = np.where(df.index.to_numpy() == trade.entry_date)[0]
@@ -913,8 +905,7 @@ class DeterministicAlignmentChecker(GateResultsMixin):
                     f"not present in market_data for {trade.symbol!r}."
                 ),
             )
-            findings.append(finding)
-            gate_results.append(self._emit_for_finding(finding))
+            self._record(finding, findings, gate_results)
             return
         # Duplicate dates are vanishingly rare in real backtest data —
         # if they exist, the first occurrence is the one the engine
@@ -940,8 +931,7 @@ class DeterministicAlignmentChecker(GateResultsMixin):
                     "before) is not present, cannot reproduce entry signal."
                 ),
             )
-            findings.append(finding)
-            gate_results.append(self._emit_for_finding(finding))
+            self._record(finding, findings, gate_results)
             return
 
         cache = indicator_caches.setdefault(trade.symbol, {})
@@ -996,8 +986,7 @@ class DeterministicAlignmentChecker(GateResultsMixin):
                     computed_value=satisfied.get("lhs"),
                     expected_value=satisfied.get("rhs"),
                 )
-                findings.append(finding)
-                gate_results.append(self._emit_for_finding(finding))
+                self._record(finding, findings, gate_results)
             return
 
         # No matching rule was satisfied. Find the tightest near-miss
@@ -1030,8 +1019,7 @@ class DeterministicAlignmentChecker(GateResultsMixin):
                 # Serial fallback (no collector supplied).
                 verdict = self._consult_near_miss(adjudicator, tightest, trade)
                 finding = self._build_near_miss_finding(trade, tightest, verdict)
-                findings.append(finding)
-                gate_results.append(self._emit_for_finding(finding))
+                self._record(finding, findings, gate_results)
                 return
 
         # Hard miss — emit critical citing the first matching rule that
@@ -1071,8 +1059,7 @@ class DeterministicAlignmentChecker(GateResultsMixin):
             computed_value=primary.get("lhs"),
             expected_value=primary.get("rhs"),
         )
-        findings.append(finding)
-        gate_results.append(self._emit_for_finding(finding))
+        self._record(finding, findings, gate_results)
 
     # ------------------------------------------------------------------
     # Check 7 — signal-exit correlation
@@ -1138,8 +1125,7 @@ class DeterministicAlignmentChecker(GateResultsMixin):
                     f"attribution {exit_reason!r}; signal-exit check N/A."
                 ),
             )
-            findings.append(finding)
-            gate_results.append(self._emit_for_finding(finding))
+            self._record(finding, findings, gate_results)
             return
 
         df = frames.get(trade.symbol)
@@ -1155,8 +1141,7 @@ class DeterministicAlignmentChecker(GateResultsMixin):
                     f"{trade.symbol!r}. Cannot reproduce signal exit."
                 ),
             )
-            findings.append(finding)
-            gate_results.append(self._emit_for_finding(finding))
+            self._record(finding, findings, gate_results)
             return
 
         matching_positions = np.where(df.index.to_numpy() == trade.exit_date)[0]
@@ -1172,8 +1157,7 @@ class DeterministicAlignmentChecker(GateResultsMixin):
                     f"is not present in market_data for {trade.symbol!r}."
                 ),
             )
-            findings.append(finding)
-            gate_results.append(self._emit_for_finding(finding))
+            self._record(finding, findings, gate_results)
             return
 
         fill_idx = int(matching_positions[0])
@@ -1196,8 +1180,7 @@ class DeterministicAlignmentChecker(GateResultsMixin):
                     "before) is not present, cannot reproduce signal exit."
                 ),
             )
-            findings.append(finding)
-            gate_results.append(self._emit_for_finding(finding))
+            self._record(finding, findings, gate_results)
             return
 
         cache = indicator_caches.setdefault(trade.symbol, {})
@@ -1246,8 +1229,7 @@ class DeterministicAlignmentChecker(GateResultsMixin):
                 computed_value=result.lhs,
                 expected_value=result.rhs,
             )
-            findings.append(finding)
-            gate_results.append(self._emit_for_finding(finding))
+            self._record(finding, findings, gate_results)
         if any_satisfied:
             return
 
@@ -1266,8 +1248,7 @@ class DeterministicAlignmentChecker(GateResultsMixin):
                 "the exit bar."
             ),
         )
-        findings.append(finding)
-        gate_results.append(self._emit_for_finding(finding))
+        self._record(finding, findings, gate_results)
 
     def _evaluate_entry_rule_predicate(
         self,
@@ -1406,16 +1387,19 @@ class DeterministicAlignmentChecker(GateResultsMixin):
             )
         except Exception as exc:
             # Safety-critical fail-closed: a stuck or erroring adjudicator must
-            # never legitimise a missed predicate. Emit the same structured
-            # five-field schema the LLM envelope uses so on-call can tell a
-            # transport outage apart from a genuine miss.
+            # never legitimise a missed predicate. Reuse the envelope's canonical
+            # ``_FAILURE_FMT`` so this fail-closed site emits the identical
+            # five-field schema (agent/phase/attempt/latency_ms/error_class) —
+            # on-call greps one format across the whole lab, and ``phase`` marks
+            # this as the near-miss guard. This is a single terminal attempt
+            # (no envelope retry loop), so it reports ``attempt=1/1``.
             latency_ms = int((time.monotonic() - t0) * 1000)
             logger.warning(
-                "strategy_lab LLM call failed (fail-closed near-miss): agent=%s phase=%s "
-                "attempt=%s latency_ms=%d error_class=%s",
+                _FAILURE_FMT,
                 "alignment",
                 "alignment_near_miss",
-                "final",
+                1,
+                1,
                 latency_ms,
                 type(exc).__name__,
             )
@@ -1423,6 +1407,33 @@ class DeterministicAlignmentChecker(GateResultsMixin):
                 legitimate=False,
                 rationale=f"adjudicator error: {type(exc).__name__}",
             )
+
+    # ------------------------------------------------------------------
+    # Per-finding recording helper
+    # ------------------------------------------------------------------
+    def _record(
+        self,
+        finding: AlignmentFinding,
+        findings: List[AlignmentFinding],
+        gate_results: List[QualityGateResult],
+    ) -> None:
+        """Append a finding and its gate-result row, keeping the lists 1:1.
+
+        Collapses the ``findings.append(finding); gate_results.append(
+        self._emit_for_finding(finding))`` idiom every check repeated inline.
+
+        Preconditions:
+          - ``_using_phase`` is active (asserted transitively by
+            :meth:`_emit_for_finding`).
+          - ``findings`` and ``gate_results`` are the same-length output
+            lists being built for this ``check()`` call.
+        Postconditions:
+          - ``finding`` is appended to ``findings`` and its translated
+            :class:`QualityGateResult` to ``gate_results``; both lists grow by
+            exactly one and remain index-aligned.
+        """
+        findings.append(finding)
+        gate_results.append(self._emit_for_finding(finding))
 
     # ------------------------------------------------------------------
     # Per-finding gate-row helper

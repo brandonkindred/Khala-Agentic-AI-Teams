@@ -54,6 +54,7 @@ import asyncio
 import dataclasses
 import json
 import logging
+import time
 from typing import Any, AsyncGenerator, Dict, List, Literal, Optional, Union
 
 from strands.models.model import Model
@@ -63,7 +64,7 @@ from strands.types.tools import ToolChoice, ToolSpec
 
 from .attribution import caller_agent, caller_team, current_attribution, llm_attribution
 from .factory import client_agent_key, get_client, unwrap_client
-from .interface import LLMClient
+from .interface import LLMClient, record_complete_json_turn, take_complete_json_turns
 from .util import _flatten_system_prompt_content
 
 logger = logging.getLogger(__name__)
@@ -536,17 +537,57 @@ class LLMClientModel(Model):
         # outer ``with llm_attribution(...)``; bypassing the wrapper ensures
         # ``cfg.agent_key`` (which may differ after ``clone``/``update_config``)
         # is the effective binding rather than the wrapper's original key.
-        with llm_attribution(agent_key=agent_key or None, team=team):
-            result = await asyncio.to_thread(
-                unwrap_client(self._client).chat,
-                oai_messages,
-                objective=objective,
-                response_format=response_format,
-                temperature=temperature,
-                tools=oai_tools,
-                think=think,
-                max_tokens=max_tokens,
+        turn_started = time.monotonic()
+        client = unwrap_client(self._client)
+        worker_turns: list[tuple[str, str, float]] = []
+
+        def _chat_in_worker() -> Any:
+            # ContextVar writes in this thread do not copy back to the caller.
+            # Drop the inherited snapshot, then stash turns on the shared list
+            # even when chat() raises (self-correction that still fails).
+            take_complete_json_turns()
+            try:
+                return client.chat(
+                    oai_messages,
+                    objective=objective,
+                    response_format=response_format,
+                    temperature=temperature,
+                    tools=oai_tools,
+                    think=think,
+                    max_tokens=max_tokens,
+                )
+            finally:
+                worker_turns.extend(take_complete_json_turns())
+
+        def _replay_worker_turns() -> None:
+            if worker_turns:
+                for turn_prompt, turn_response, started in worker_turns:
+                    record_complete_json_turn(turn_prompt, turn_response, started_monotonic=started)
+                return
+            try:
+                observer_response = json.dumps(result, default=str)
+            except (TypeError, ValueError):
+                observer_response = str(result)
+            record_complete_json_turn(
+                json.dumps(oai_messages, default=str),
+                observer_response,
+                started_monotonic=turn_started,
             )
+
+        chat_error: BaseException | None = None
+        result: Any = None
+        with llm_attribution(agent_key=agent_key or None, team=team):
+            try:
+                result = await asyncio.to_thread(_chat_in_worker)
+            except BaseException as exc:
+                chat_error = exc
+        if worker_turns:
+            for turn_prompt, turn_response, started in worker_turns:
+                record_complete_json_turn(turn_prompt, turn_response, started_monotonic=started)
+        elif chat_error is None:
+            _replay_worker_turns()
+        if chat_error is not None:
+            raise chat_error
 
         yield {"messageStart": {"role": "assistant"}}
 

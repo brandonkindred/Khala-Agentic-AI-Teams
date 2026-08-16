@@ -35,8 +35,8 @@ describe('AppShellComponent', () => {
     (component as any).router = { url: '/job-matching?tab=profile' };
     expect(component.isActive('/job-matching')).toBe(true);
 
-    (component as any).router = { url: '/agent-console/runs' };
-    expect(component.isActive('/agent-console')).toBe(true);
+    (component as any).router = { url: '/agent-studio/provisioning' };
+    expect(component.isActive('/agent-studio')).toBe(true);
   });
 
   it('isActive should return false when router url does not start with path', () => {
