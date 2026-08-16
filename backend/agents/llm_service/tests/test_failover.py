@@ -10,7 +10,7 @@ import pytest
 
 from llm_service import factory
 from llm_service import provider_store as ps
-from llm_service.clients import ClaudeLLMClient, OllamaLLMClient
+from llm_service.clients import ClaudeLLMClient, OllamaLLMClient, RunPodLLMClient
 from llm_service.factory import (
     FailoverLLMClient,
     _AttributingClient,
@@ -443,6 +443,29 @@ def test_build_entry_client_empty_falls_back_to_resolvers(monkeypatch):
     e = _full_entry("ollama")  # no model/base_url
     c = _build_entry_client(e, None, None, None)
     assert c.model == "env-model" and c.base_url == "http://envhost:11434"
+
+
+def test_build_entry_client_runpod(monkeypatch):
+    e = _full_entry(
+        "runpod", model="mixtral", base_url="https://api.runpod.ai/v2/abc123/openai/v1", api_key="sk-rp"
+    )
+    c = _build_entry_client(e, None, None, 0)
+    assert isinstance(c, RunPodLLMClient)
+    assert c.model == "mixtral" and c.base_url == "https://api.runpod.ai/v2/abc123/openai/v1"
+
+
+def test_build_entry_client_runpod_strips_base_url(monkeypatch):
+    """A stored RunPod base_url with stray whitespace is trimmed before use, matching
+    the Ollama branch — otherwise endpoint resolution would break."""
+    e = _full_entry(
+        "runpod",
+        model="m",
+        base_url="  https://api.runpod.ai/v2/abc123/openai/v1  ",
+        api_key="sk-rp",
+    )
+    c = _build_entry_client(e, None, None, 0)
+    assert isinstance(c, RunPodLLMClient)
+    assert c.base_url == "https://api.runpod.ai/v2/abc123/openai/v1"
 
 
 def test_build_entry_client_on_reasoning_is_fresh(monkeypatch):

@@ -428,7 +428,7 @@ def _build_entry_client(
     on_reasoning: Optional[Callable[[str], None]],
     rate_limit_max_retries: Optional[int],
     model_override: Optional[str] = None,
-) -> Union[OllamaLLMClient, ClaudeLLMClient]:
+) -> Union[OllamaLLMClient, ClaudeLLMClient, RunPodLLMClient]:
     """Build the concrete provider client for one configured fallback entry.
 
     The entry is self-contained for credentials: its ``api_key`` authenticates the
@@ -457,7 +457,7 @@ def _build_entry_client(
         return _build_claude_concrete(model, entry.api_key, timeout, on_reasoning, rate_limit_max_retries)
     elif entry.provider == "runpod":
         model = entry.model.strip() or llm_config.resolve_model(agent_key)
-        base_url = entry.base_url  # always stored; no env fallback for RunPod
+        base_url = entry.base_url.strip()  # always stored; no env fallback for RunPod
         return _build_runpod_concrete(model, base_url, timeout, on_reasoning, rate_limit_max_retries, entry.api_key)
     model = (model_override or "").strip() or entry.model.strip() or llm_config.resolve_model(agent_key)
     base_url = entry.base_url.strip() or llm_config.resolve_base_url()
