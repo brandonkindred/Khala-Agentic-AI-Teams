@@ -157,6 +157,9 @@ def test_stop_in_process_temporal_workers_swallows_errors(monkeypatch: pytest.Mo
     assert infos == []
 
 
+# NOTE: These two assertions verify shutdown ordering via source-string indexing
+# of ``main.lifespan``. If the lifecycle hooks are renamed, update the string
+# literals below to match.
 def test_lifespan_stops_temporal_workers_before_usage_flusher() -> None:
     src = inspect.getsource(main.lifespan)
     assert src.index("_stop_in_process_temporal_workers") < src.index("usage_flush_shutdown")
