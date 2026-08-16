@@ -492,15 +492,19 @@ def test_build_entry_client_runpod_empty_model_falls_back_to_resolver(monkeypatc
 def test_build_entry_client_on_reasoning_is_fresh(monkeypatch):
     sink = lambda _t: None  # noqa: E731
     e = _full_entry("ollama", model="m", base_url="http://localhost:11434")
-    c = _build_entry_client(e, None, sink, 0)
-    assert isinstance(c, OllamaLLMClient) and c.on_reasoning is sink
+    c1 = _build_entry_client(e, None, sink, 0)
+    c2 = _build_entry_client(e, None, sink, 0)
+    assert isinstance(c1, OllamaLLMClient) and c1.on_reasoning is sink
+    assert c1 is not c2  # on_reasoning forces a fresh client each call, bypassing the cache
 
 
 def test_build_entry_client_runpod_on_reasoning_is_fresh(monkeypatch):
     sink = lambda _t: None  # noqa: E731
     e = _full_entry("runpod", model="m", base_url="https://api.runpod.ai/v2/abc123/openai/v1", api_key="sk-rp")
-    c = _build_entry_client(e, None, sink, 0)
-    assert isinstance(c, RunPodLLMClient) and c.on_reasoning is sink
+    c1 = _build_entry_client(e, None, sink, 0)
+    c2 = _build_entry_client(e, None, sink, 0)
+    assert isinstance(c1, RunPodLLMClient) and c1.on_reasoning is sink
+    assert c1 is not c2  # on_reasoning forces a fresh client each call, bypassing the cache
 
 
 def test_build_entry_client_claude_empty_key_no_env_fallback(monkeypatch):
