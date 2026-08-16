@@ -84,6 +84,23 @@ describe('RenameDraftDialogComponent', () => {
     expect(fixture.componentInstance.serverError()).toBe('Failed to rename draft.');
   });
 
+  it('handles a primitive-string error without crashing and shows the generic message', () => {
+    const renameDraft = vi.fn().mockReturnValue(throwError(() => 'Simple Error String'));
+    const { fixture, ref } = configure({ draftId: 'd-1', initialName: 'Old' }, renameDraft);
+    fixture.componentInstance.submit();
+    expect(fixture.componentInstance.serverError()).toBe('Failed to rename draft.');
+    expect(fixture.componentInstance.busy()).toBe(false);
+    expect(ref.close).not.toHaveBeenCalled();
+  });
+
+  it('handles a null error without crashing and shows the generic message', () => {
+    const renameDraft = vi.fn().mockReturnValue(throwError(() => null));
+    const { fixture } = configure({ draftId: 'd-1', initialName: 'Old' }, renameDraft);
+    fixture.componentInstance.submit();
+    expect(fixture.componentInstance.serverError()).toBe('Failed to rename draft.');
+    expect(fixture.componentInstance.busy()).toBe(false);
+  });
+
   it('cancel closes with no result', () => {
     const { fixture, ref } = configure({ draftId: 'd-1', initialName: 'Old' });
     fixture.componentInstance.cancel();

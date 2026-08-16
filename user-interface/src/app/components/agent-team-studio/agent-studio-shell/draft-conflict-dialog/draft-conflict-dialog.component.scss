@@ -31,6 +31,9 @@
 }
 
 .draft-conflict-dialog__discard {
+  // `!important` is required to recolor a Material raised button: the MDC theme
+  // sets `--mdc-*` container/label colors via higher-specificity generated
+  // selectors, which a plain class here cannot override.
   background-color: var(--kh-warning) !important;
   color: var(--kh-surface-0) !important;
 }
