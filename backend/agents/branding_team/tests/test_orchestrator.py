@@ -26,13 +26,19 @@ from branding_team.models import (
     Brand,
     BrandArchetypeOutput,
     BrandArchetypesOutput,
+    BrandArchitectureOutput,
+    BrandArchitectureRuleOutput,
     BrandCheckRequest,
     BrandDiscoveryAuditOutput,
+    BrandExperiencePrinciplesOutput,
     BrandHealthKPI,
+    BrandInActionExampleOutput,
+    BrandInActionOutput,
     BrandStatus,
     BrandStoryOutput,
     ChannelActivationOutput,
     ChannelGuideline,
+    ChannelGuidelineOutput,
     ColorEntry,
     CompetitiveSnapshot,
     CoreValue,
@@ -61,6 +67,7 @@ from branding_team.models import (
     WritingGuidelinesBody,
     WritingGuidelinesOutput,
 )
+from branding_team.orchestrator import _merge_phase4_fragments
 from branding_team.store import BrandVersionAppendConflict
 from branding_team.tests.conftest import make_mission
 
@@ -1351,6 +1358,166 @@ def test_extract_phase_output_falls_back_when_not_phase1_shaped() -> None:
     assert isinstance(output, StrategicCoreOutput)
     assert output.positioning_statement == "Fallback statement."
     assert output.brand_promise == "Fallback promise."
+
+
+def _channel_guide_output(channel: str) -> ChannelGuidelineOutput:
+    return ChannelGuidelineOutput(
+        channel=channel,
+        strategy=f"{channel} strategy.",
+        dos=[f"{channel} do 1", f"{channel} do 2", f"{channel} do 3"],
+        donts=[f"{channel} don't 1", f"{channel} don't 2", f"{channel} don't 3"],
+        content_types=[f"{channel} content 1", f"{channel} content 2", f"{channel} content 3"],
+        frequency_guidance=f"{channel} cadence.",
+    )
+
+
+def test_extract_phase_output_merges_every_phase4_fragment() -> None:
+    """Phase 4 wraps nine fan-out agents as one top-level node; the six
+    *_guide specialists each emit a single ChannelGuidelineOutput that must
+    all survive as separate channel_guidelines list elements, not overwrite
+    one another the way a plain nest_under assignment would."""
+    channels = ["website", "social", "email", "events", "partnerships", "internal"]
+    nested_results = {
+        "brand_experience_principler": _phase1_leaf_node(
+            BrandExperiencePrinciplesOutput(
+                brand_experience_principles=["Consistent", "Human", "Confident"],
+                signature_moments=["Onboarding email", "First dashboard load", "Renewal call"],
+                sensory_elements=["Signature blue", "Rounded corners"],
+            )
+        ),
+        **{
+            f"{channel}_guide": _phase1_leaf_node(_channel_guide_output(channel))
+            for channel in channels
+        },
+        "brand_architecture_builder": _phase1_leaf_node(
+            BrandArchitectureOutput(
+                brand_architecture=[
+                    BrandArchitectureRuleOutput(
+                        entity="Parent brand",
+                        relationship="Master brand",
+                        naming_convention="Northstar [Product]",
+                        visual_treatment="Primary logo lockup",
+                    )
+                ],
+                naming_conventions=[
+                    "Title Case product names",
+                    "No internal codenames",
+                    "ASCII only",
+                ],
+                terminology_glossary={
+                    "Brand experience": "How the brand feels across touchpoints",
+                    "Signature moment": "A high-impact touchpoint",
+                    "Channel guideline": "Per-channel execution rules",
+                    "Brand architecture": "How entities relate under the brand",
+                    "Terminology glossary": "Shared vocabulary for the brand",
+                },
+            )
+        ),
+        "brand_in_action_illustrator": _phase1_leaf_node(
+            BrandInActionOutput(
+                brand_in_action=[
+                    BrandInActionExampleOutput(
+                        context="Website hero",
+                        correct_example="On-brand hero copy.",
+                        incorrect_example="Off-brand jargon-heavy copy.",
+                        rationale="Keeps the promise consistent.",
+                    ),
+                    BrandInActionExampleOutput(
+                        context="Support email",
+                        correct_example="Warm, direct reply.",
+                        incorrect_example="Cold, templated reply.",
+                        rationale="Matches the brand's human tone.",
+                    ),
+                    BrandInActionExampleOutput(
+                        context="Sales deck",
+                        correct_example="Outcome-led narrative.",
+                        incorrect_example="Feature-dump narrative.",
+                        rationale="Reinforces the positioning.",
+                    ),
+                ]
+            )
+        ),
+    }
+
+    inner_multi_result = MagicMock()
+    inner_multi_result.results = nested_results
+
+    node_result = MagicMock()
+    node_result.result = inner_multi_result
+    node_result.get_agent_results.return_value = [
+        node.get_agent_results.return_value[0] for node in nested_results.values()
+    ]
+
+    mock_result = MagicMock()
+    mock_result.result = {"phase4_channel": node_result}
+
+    output, degraded = BrandingTeamOrchestrator._extract_phase_output(
+        mock_result, "phase4_channel", ChannelActivationOutput
+    )
+
+    assert degraded is False
+    assert isinstance(output, ChannelActivationOutput)
+    assert output.brand_experience_principles == ["Consistent", "Human", "Confident"]
+    assert output.signature_moments == [
+        "Onboarding email",
+        "First dashboard load",
+        "Renewal call",
+    ]
+    assert output.sensory_elements == ["Signature blue", "Rounded corners"]
+    assert [g.channel for g in output.channel_guidelines] == channels
+    assert output.channel_guidelines[0].strategy == "website strategy."
+    assert output.channel_guidelines[-1].strategy == "internal strategy."
+    assert [r.entity for r in output.brand_architecture] == ["Parent brand"]
+    assert output.naming_conventions == [
+        "Title Case product names",
+        "No internal codenames",
+        "ASCII only",
+    ]
+    assert output.terminology_glossary["Signature moment"] == "A high-impact touchpoint"
+    assert [e.context for e in output.brand_in_action] == [
+        "Website hero",
+        "Support email",
+        "Sales deck",
+    ]
+
+
+def test_merge_phase4_fragments_rejects_incomplete_specialist_set() -> None:
+    """A Phase 4 run missing one of the nine specialists (e.g. events_guide
+    never completed) must not validate as a complete ChannelActivationOutput
+    via field defaults — every field on it defaults to empty/absent, so a
+    partial merge would otherwise pass validation silently.
+
+    Tested directly against ``_merge_phase4_fragments`` (require_all=True)
+    rather than through ``_extract_phase_output``: unlike Phase 2,
+    ``channel_compositor`` still terminates the real Phase 4 subgraph (it is
+    not removed until Step 2), so ``_extract_phase_output`` would otherwise
+    fall back to the compositor's own full structured_output rather than
+    exercising this merge_fn's require_all rejection in isolation.
+    """
+    channels = ["website", "social", "email", "partnerships", "internal"]  # events_guide omitted
+    nested_results = {
+        "brand_experience_principler": _phase1_leaf_node(
+            BrandExperiencePrinciplesOutput(
+                brand_experience_principles=["Consistent", "Human", "Confident"],
+                signature_moments=["Onboarding email", "First dashboard load", "Renewal call"],
+                sensory_elements=["Signature blue", "Rounded corners"],
+            )
+        ),
+        **{
+            f"{channel}_guide": _phase1_leaf_node(_channel_guide_output(channel))
+            for channel in channels
+        },
+    }
+
+    inner_multi_result = MagicMock()
+    inner_multi_result.results = nested_results
+
+    node_result = MagicMock()
+    node_result.result = inner_multi_result
+
+    merged = _merge_phase4_fragments(node_result, ChannelActivationOutput)
+
+    assert merged is None
 
 
 def _text_node_result(text: str) -> MagicMock:
