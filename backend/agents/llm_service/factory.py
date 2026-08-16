@@ -449,7 +449,9 @@ def _build_entry_client(
         returns a ready concrete client whose 429 backoff budget is
         ``rate_limit_max_retries`` (``0`` for fast-fail failover hops); an Ollama
         client uses ``model_override`` (when given) in place of its configured model.
-        Never wraps in attribution — the failover client is wrapped once by the caller.
+        Claude and RunPod entries ignore it and resolve their model via provider
+        defaults. Never wraps in attribution — the failover client is wrapped once by
+        the caller.
     """
     timeout = llm_config.resolve_timeout(agent_key)
     if entry.provider == "claude":

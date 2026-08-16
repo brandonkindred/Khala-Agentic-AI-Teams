@@ -101,6 +101,19 @@ def _validate_ollama_base_url_value(v: str) -> str:
     return v
 
 
+def _strip_or_none(v: str | None) -> str | None:
+    """Trim ``v`` and normalize blank input to ``None`` — the update-route sentinel
+    for "leave the stored field unchanged" — computing ``.strip()`` exactly once.
+
+    Preconditions: none. Postconditions: returns ``None`` when ``v`` is ``None`` or
+        strips to an empty string; otherwise returns the stripped string.
+    """
+    if not v:
+        return None
+    stripped = v.strip()
+    return stripped or None
+
+
 def _is_ollama_cloud_url(url: str) -> bool:
     """Return True when ``url`` points at the Ollama Cloud endpoint.
 
@@ -299,6 +312,18 @@ class LlmProviderCreate(BaseModel):
             return v
         return _validate_ollama_base_url_value(v)
 
+    @field_validator("endpoint_id")
+    @classmethod
+    def _validate_endpoint_id(cls, v: str, info: ValidationInfo) -> str:
+        # ``endpoint_id`` only applies to RunPod entries; a stray value on any other
+        # provider is ignored downstream, so skip the format check for it. Presence
+        # (it's required for RunPod) stays a route-level check — that needs the
+        # provider-specific "required for RunPod" error message, not a generic 422.
+        stripped = v.strip()
+        if info.data.get("provider") != "runpod" or not stripped:
+            return stripped
+        return _validate_runpod_endpoint_id(stripped)
+
 
 class LlmProviderUpdate(BaseModel):
     """Request body to edit a provider; omitted/empty fields leave the stored value.
@@ -479,16 +504,15 @@ async def create_provider(body: LlmProviderCreate) -> LlmProviderListResponse:
         the list, caches are refreshed, and the full list is returned.
     """
     _require_storage()
-    _guard_entry_credentials(body.provider, body.base_url, body.api_key.strip())
+    # ``endpoint_id`` is already trimmed (and, for a RunPod entry, format-validated)
+    # by the model's field validator — no need to re-strip or re-validate it here.
+    api_key = body.api_key.strip()
+    _guard_entry_credentials(body.provider, body.base_url, api_key)
     if body.provider == "runpod":
-        if not body.endpoint_id.strip():
+        if not body.endpoint_id:
             raise HTTPException(status_code=400, detail="endpoint_id is required for RunPod.")
-        try:
-            _validate_runpod_endpoint_id(body.endpoint_id.strip())
-        except ValueError as e:
-            raise HTTPException(status_code=400, detail=str(e)) from e
-        await _probe_runpod_endpoint(body.endpoint_id.strip(), body.api_key.strip())
-        base_url = _build_runpod_base_url(body.endpoint_id.strip())
+        await _probe_runpod_endpoint(body.endpoint_id, api_key)
+        base_url = _build_runpod_base_url(body.endpoint_id)
         label = body.label.strip() or "RunPod"
     else:
         if not body.label.strip():
@@ -501,7 +525,7 @@ async def create_provider(body: LlmProviderCreate) -> LlmProviderListResponse:
             provider=body.provider,
             model=body.model,
             base_url=base_url,
-            api_key=body.api_key.strip(),
+            api_key=api_key,
         )
     except Exception as e:  # noqa: BLE001 - surface a clear 503 instead of an opaque 500
         logger.exception("Failed to create LLM provider entry")
@@ -557,9 +581,9 @@ async def update_provider(entry_id: int, body: LlmProviderUpdate) -> LlmProvider
     # it to None so update_entry (which treats None as unchanged) never clears a stored
     # value — mirrors the api_key handling and the single-provider PUT. Without this, a
     # client sending model:"" or base_url:"" would silently wipe the field.
-    label = body.label.strip() if (body.label and body.label.strip()) else None
-    model = body.model.strip() if (body.model and body.model.strip()) else None
-    base_url = body.base_url.strip() if (body.base_url and body.base_url.strip()) else None
+    label = _strip_or_none(body.label)
+    model = _strip_or_none(body.model)
+    base_url = _strip_or_none(body.base_url)
     # API key resolution: a non-empty api_key sets it; otherwise clear_api_key=True
     # removes it ("" for the store); otherwise leave it unchanged (None for the store).
     new_api_key = body.api_key.strip()
@@ -587,12 +611,15 @@ async def update_provider(entry_id: int, body: LlmProviderUpdate) -> LlmProvider
     # change triggers limit-state clearing per requirements 2.7 and 2.8.
     # When endpoint_id is absent/empty, base_url remains None (leave stored value unchanged)
     # per requirement 2.2.
-    if merged_provider == "runpod" and body.endpoint_id.strip():
+    # ``body.endpoint_id`` is a plain ``str`` field (default ``""``), never ``None`` —
+    # FastAPI/Pydantic rejects a null value for it with a 422 before this code runs.
+    new_endpoint_id = body.endpoint_id.strip()
+    if merged_provider == "runpod" and new_endpoint_id:
         try:
-            _validate_runpod_endpoint_id(body.endpoint_id.strip())
+            _validate_runpod_endpoint_id(new_endpoint_id)
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e)) from e
-        base_url = _build_runpod_base_url(body.endpoint_id.strip())
+        base_url = _build_runpod_base_url(new_endpoint_id)
     try:
         updated = provider_store.update_entry(
             entry_id,

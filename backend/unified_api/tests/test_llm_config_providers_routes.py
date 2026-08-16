@@ -352,6 +352,24 @@ def _patch_probe(monkeypatch, *, exc=None):
     monkeypatch.setattr(route, "_probe_runpod_endpoint", fake_probe)
 
 
+def _patch_async_client_get(monkeypatch, *, get_return=None, get_side_effect=None):
+    """Patch ``httpx.AsyncClient`` so ``async with ... as client: await client.get(...)``
+    returns ``get_return`` or raises ``get_side_effect`` — drives the real
+    ``_probe_runpod_endpoint`` through its ``httpx`` call without a real network request.
+    """
+    from unittest.mock import AsyncMock, MagicMock
+
+    import httpx
+
+    mock_client = AsyncMock()
+    mock_client.__aenter__.return_value = mock_client
+    if get_side_effect is not None:
+        mock_client.get.side_effect = get_side_effect
+    else:
+        mock_client.get.return_value = get_return
+    monkeypatch.setattr(httpx, "AsyncClient", MagicMock(return_value=mock_client))
+
+
 def test_create_runpod_requires_endpoint_id(app_client, monkeypatch):
     client, _state = app_client
     _patch_probe(monkeypatch)
@@ -361,14 +379,16 @@ def test_create_runpod_requires_endpoint_id(app_client, monkeypatch):
 
 
 def test_create_runpod_rejects_non_alphanumeric_endpoint_id(app_client, monkeypatch):
+    """Format is now validated by the model's field_validator (matching base_url), so
+    a malformed endpoint_id 422s at the request boundary rather than 400ing in the route."""
     client, _state = app_client
     _patch_probe(monkeypatch)
     resp = client.post(
         "/api/llm-config/providers",
         json={"provider": "runpod", "api_key": "k", "endpoint_id": "bad-id/../"},
     )
-    assert resp.status_code == 400
-    assert "alphanumeric" in resp.json()["detail"]
+    assert resp.status_code == 422  # pydantic validation
+    assert "alphanumeric" in str(resp.json()["detail"])
 
 
 def test_create_runpod_without_key_is_400(app_client, monkeypatch):
@@ -410,33 +430,21 @@ def test_create_runpod_ignores_stray_base_url(app_client, monkeypatch):
 
 def test_create_runpod_probe_http_error_propagates_remote_status(app_client, monkeypatch):
     """A 4xx/5xx from RunPod is surfaced with the remote status code, not a blanket 400."""
+    from unittest.mock import Mock
+
     import httpx
 
     client, _state = app_client
     request = httpx.Request("GET", "https://api.runpod.ai/v2/abc123/openai/v1/models")
     response = httpx.Response(401, request=request)
 
-    # Drive the real probe by monkeypatching httpx.AsyncClient to raise a status error.
-    class _Resp:
-        status_code = 401
-
-        def raise_for_status(self):
-            raise httpx.HTTPStatusError("unauthorized", request=request, response=response)
-
-    class _Client:
-        def __init__(self, *a, **k):
-            pass
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *a):
-            return False
-
-        async def get(self, url, headers=None):
-            return _Resp()
-
-    monkeypatch.setattr(httpx, "AsyncClient", _Client)
+    # Drive the real probe through a mocked httpx.AsyncClient whose response raises
+    # the status error _probe_runpod_endpoint is expected to catch and remap.
+    mock_response = Mock(status_code=401)
+    mock_response.raise_for_status.side_effect = httpx.HTTPStatusError(
+        "unauthorized", request=request, response=response
+    )
+    _patch_async_client_get(monkeypatch, get_return=mock_response)
     resp = client.post(
         "/api/llm-config/providers",
         json={"provider": "runpod", "api_key": "k", "endpoint_id": "abc123"},
@@ -450,21 +458,7 @@ def test_create_runpod_probe_connection_error_is_503(app_client, monkeypatch):
     import httpx
 
     client, _state = app_client
-
-    class _Client:
-        def __init__(self, *a, **k):
-            pass
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *a):
-            return False
-
-        async def get(self, url, headers=None):
-            raise httpx.ConnectError("connection refused")
-
-    monkeypatch.setattr(httpx, "AsyncClient", _Client)
+    _patch_async_client_get(monkeypatch, get_side_effect=httpx.ConnectError("connection refused"))
     resp = client.post(
         "/api/llm-config/providers",
         json={"provider": "runpod", "api_key": "k", "endpoint_id": "abc123"},
