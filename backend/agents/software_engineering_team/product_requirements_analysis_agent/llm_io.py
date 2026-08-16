@@ -16,27 +16,20 @@ from typing import Optional
 from strands import Agent
 from strands.models.model import Model
 
-from llm_service import LLMJsonParseError, extract_json_from_response
+from llm_service import parse_json_object
 
 
 def parse_llm_json(raw: str) -> Optional[dict]:
-    """Parse JSON from LLM output via the shared recovery-ladder parser.
+    """Parse JSON from LLM output via the canonical recovery-ladder parser.
 
-    Delegates to :func:`extract_json_from_response` (markdown fences,
-    prose-prefix stripping, trailing-comma repair).
+    Thin delegation to :func:`llm_service.parse_json_object` (markdown
+    fences, prose-prefix stripping, trailing-comma repair).
 
     Preconditions: ``raw`` is a string.
     Postconditions: returns a dict on success, None on any parse failure or
         non-dict recovery; never raises.
     """
-    text = raw.strip()
-    if not text:
-        return None
-    try:
-        data = extract_json_from_response(text)
-    except LLMJsonParseError:
-        return None
-    return data if isinstance(data, dict) else None
+    return parse_json_object(raw, on_failure="none")
 
 
 def call_llm_text(model: Model, prompt: str) -> str:

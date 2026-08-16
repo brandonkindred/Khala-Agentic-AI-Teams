@@ -349,14 +349,14 @@ def test_lenient_text_mode_calls_parse_review_hook(monkeypatch):
 
     def boom_extract(*args, **kwargs):
         engine_calls.append(("extract", args, kwargs))
-        raise AssertionError("extract_json_object must not be called in text mode")
+        raise AssertionError("parse_json_object must not be called in text mode")
 
     monkeypatch.setattr(
         "software_engineering_team.shared.tool_agent_base.lenient_json_object",
         boom_lenient,
     )
     monkeypatch.setattr(
-        "shared.llm_recovery.extract_json_object",
+        "llm_service.parse_json_object",
         boom_extract,
         raising=False,
     )
@@ -375,11 +375,12 @@ def test_lenient_text_mode_calls_parse_review_hook(monkeypatch):
 
 
 def test_extract_success_returns_dict(monkeypatch):
-    def fake_extract(raw: str):
+    def fake_extract(raw: str, *, on_failure: str = "none"):
         assert raw == '{"a": 1}'
+        assert on_failure == "none"
         return {"a": 1}
 
-    monkeypatch.setattr("shared.llm_recovery.extract_json_object", fake_extract)
+    monkeypatch.setattr("llm_service.parse_json_object", fake_extract)
 
     class PlanJsonLike(LlmToolAgentBase):
         json_parse_strategy = "extract"

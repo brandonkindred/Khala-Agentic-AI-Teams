@@ -30,6 +30,7 @@ from llm_service import (
     get_client,
     get_llm_config_summary,
     get_strands_model,
+    parse_json_object,
 )
 from llm_service.strands_model import resolve_strands_model
 
@@ -73,12 +74,12 @@ def complete_json_with_continuation(
         invocation_kwargs["think"] = think
     result = agent(prompt, **invocation_kwargs)
     raw = str(result).strip()
-    # Try bare json.loads first; fall back to extract_json_from_response for
-    # responses wrapped in markdown fences or prefixed with explanatory text.
+    # Try bare json.loads first; fall back to the canonical recovery ladder
+    # for responses wrapped in markdown fences or prefixed with explanatory text.
     try:
         return json.loads(raw)
     except (json.JSONDecodeError, ValueError):
-        return extract_json_from_response(raw)
+        return parse_json_object(raw, on_failure="raise")
 
 
 __all__ = [
@@ -99,4 +100,5 @@ __all__ = [
     "get_client",
     "get_llm_config_summary",
     "get_strands_model",
+    "parse_json_object",
 ]

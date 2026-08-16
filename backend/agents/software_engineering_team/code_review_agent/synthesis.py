@@ -31,7 +31,7 @@ from pydantic import BaseModel, Field
 
 from llm_service import LLMClient
 from llm_service.interface import take_complete_json_turns
-from software_engineering_team.shared.llm import extract_json_from_response
+from software_engineering_team.shared.llm import parse_json_object
 
 from .model_resolution import resolve_code_review_model
 from .models import CodeReviewInput, CodeReviewIssue
@@ -160,12 +160,12 @@ def _parse_json_object(raw: str) -> dict:
 
     Postconditions:
         Returns a ``dict`` on success. Parses via the canonical
-        ``extract_json_from_response`` recovery ladder (markdown fences, prose
+        ``parse_json_object`` recovery ladder (markdown fences, prose
         prefixes, and trailing commas are salvaged). Raises
         ``LLMJsonParseError`` when no JSON object can be recovered, or
         ``TypeError`` when the recovered payload is not a JSON object.
     """
-    data = extract_json_from_response(raw)
+    data = parse_json_object(raw, on_failure="raise")
     if not isinstance(data, dict):
         raise TypeError("model returned non-object JSON")
     return data

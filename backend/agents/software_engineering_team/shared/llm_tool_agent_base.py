@@ -196,8 +196,8 @@ class LlmToolAgentBase:
         """Parse model output via the selected JSON-salvage strategy.
 
         When ``json_parse_strategy`` is ``"extract"``, delegates to
-        ``shared.llm_recovery.extract_json_object`` (failure → ``None``).
-        When ``"lenient"`` and ``review_parse_mode == "text"``, calls
+        ``llm_service.parse_json_object`` (failure → ``None``). When
+        ``"lenient"`` and ``review_parse_mode == "text"``, calls
         ``type(self)._parse_review(raw)``. Otherwise uses
         ``tool_agent_base.lenient_json_object`` (failure → ``{}``).
 
@@ -210,7 +210,7 @@ class LlmToolAgentBase:
         Postconditions:
             Returns a ``dict`` for lenient/text paths (``{}`` on lenient JSON
             failure). Returns ``dict | None`` for extract (``None`` on failure).
-            Does not import ``shared.llm_recovery`` or
+            Does not import ``llm_service`` or
             ``tool_agent_base.lenient_json_object`` until the corresponding
             branch runs. For the lenient-JSON branch, ``context``/``on_fail_msg``
             are forwarded to ``lenient_json_object`` when given; otherwise the
@@ -222,9 +222,9 @@ class LlmToolAgentBase:
         assert strategy in ("lenient", "extract"), strategy
 
         if strategy == "extract":
-            from shared.llm_recovery import extract_json_object
+            from llm_service import parse_json_object
 
-            return extract_json_object(raw)
+            return parse_json_object(raw, on_failure="none")
 
         mode = type(self).review_parse_mode
         assert mode in ("json", "text"), mode
