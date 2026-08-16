@@ -92,7 +92,7 @@ def test_binding_restored_on_exception():
 
 
 def test_new_registry_unbound_has_no_cache(monkeypatch):
-    monkeypatch.delenv(_ENV_VAR, raising=False)
+    monkeypatch.setenv(_ENV_VAR, "false")
     reg = bcc.new_registry()
     assert reg._batch_cache is None
 
@@ -104,10 +104,19 @@ def test_new_registry_bound_with_flag_on_shares_instance(monkeypatch):
         assert bcc.new_registry()._batch_cache is cache
 
 
-def test_new_registry_bound_with_flag_off_is_inert(monkeypatch):
+def test_new_registry_bound_with_flag_unset_shares_instance(monkeypatch):
+    """The flag now defaults on, so a bound cache is shared with the env var
+    unset — the flipped bake-in default."""
     monkeypatch.delenv(_ENV_VAR, raising=False)
     cache = BatchIndicatorCache()
     with bcc.use_batch_indicator_cache(cache):
+        assert bcc.new_registry()._batch_cache is cache
+
+
+def test_new_registry_bound_with_flag_off_is_inert(monkeypatch):
+    monkeypatch.setenv(_ENV_VAR, "false")
+    cache = BatchIndicatorCache()
+    with bcc.use_batch_indicator_cache(cache):
         # The registry ctor nulls batch_cache when the flag is off, so a bound
-        # instance is inert until the flag is enabled.
+        # instance is inert once the flag is explicitly disabled.
         assert bcc.new_registry()._batch_cache is None

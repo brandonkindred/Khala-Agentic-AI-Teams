@@ -87,7 +87,9 @@ def _resolve_injected_strands_model(
     """
     cfg = llm.get_config()
     current_format = (
-        cfg.get("response_format", _DEFAULT_RESPONSE_FORMAT) if isinstance(cfg, dict) else _DEFAULT_RESPONSE_FORMAT
+        cfg.get("response_format", _DEFAULT_RESPONSE_FORMAT)
+        if isinstance(cfg, dict)
+        else _DEFAULT_RESPONSE_FORMAT
     )
     if response_format == current_format:
         return llm

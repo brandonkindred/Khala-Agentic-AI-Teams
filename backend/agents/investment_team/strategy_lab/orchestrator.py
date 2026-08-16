@@ -89,6 +89,7 @@ from ..trading_service.modes.sandbox_compat import (  # noqa: F401
 from .agents._llm_budget import (
     DesignBudgetExhausted,
     LLMCallBudget,
+    _annotate_budget_exhaustion,
     use_budget,
 )
 from .agents.alignment import (
@@ -1044,8 +1045,7 @@ class StrategyLabOrchestrator(
                 refinement_attempts,
             )
         except DesignBudgetExhausted as exc:
-            exc.latest_spec = spec
-            exc.latest_code = code
+            _annotate_budget_exhaustion(exc, spec, code=code)
             raise
         try:
             new_spec = self._apply_updates(spec, updates, new_code, failure_phase=failure_phase)
