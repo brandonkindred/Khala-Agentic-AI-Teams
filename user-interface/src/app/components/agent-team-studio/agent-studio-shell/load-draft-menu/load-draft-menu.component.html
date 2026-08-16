@@ -41,7 +41,7 @@
       </span>
     </button>
     <mat-menu #rowMenu="matMenu">
-      <button mat-menu-item type="button" (click)="select(draft.draft_id)">Load</button>
+      <button mat-menu-item type="button" (click)="openDraft(draft.draft_id)">Load</button>
       <button mat-menu-item type="button" (click)="confirmDelete(draft)">
         <mat-icon>delete</mat-icon>
         Delete

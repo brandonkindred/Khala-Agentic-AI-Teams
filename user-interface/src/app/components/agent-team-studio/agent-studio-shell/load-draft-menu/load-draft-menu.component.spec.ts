@@ -122,18 +122,18 @@ describe('LoadDraftMenuComponent', () => {
     expect(fixture.componentInstance.drafts()).toEqual([summary('d-2', 'B')]);
   });
 
-  it('select emits draftSelected and makes no HTTP call', () => {
+  it('openDraft emits draftSelected and makes no HTTP call', () => {
     const { fixture, facade } = configure();
     const spy = vi.fn();
     fixture.componentInstance.draftSelected.subscribe(spy);
-    fixture.componentInstance.select('d-1');
+    fixture.componentInstance.openDraft('d-1');
     expect(spy).toHaveBeenCalledWith('d-1');
     expect(facade.listDrafts).not.toHaveBeenCalled();
   });
 
   it('the busy input disables the trigger button', () => {
     const { fixture } = configure();
-    fixture.componentInstance.busy = true;
+    fixture.componentRef.setInput('busy', true);
     fixture.detectChanges();
     const button: HTMLButtonElement = fixture.nativeElement.querySelector('.studio__draft-btn');
     expect(button.disabled).toBe(true);

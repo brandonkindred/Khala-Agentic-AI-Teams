@@ -1,4 +1,5 @@
-import { ChangeDetectionStrategy, Component, inject, signal } from '@angular/core';
+import { ChangeDetectionStrategy, Component, DestroyRef, inject, signal } from '@angular/core';
+import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { MAT_DIALOG_DATA, MatDialogModule, MatDialogRef } from '@angular/material/dialog';
@@ -41,6 +42,7 @@ export type RenameDraftDialogResult = AgentStudioDraftSummary;
 })
 export class RenameDraftDialogComponent {
   private readonly api = inject(AgentStudioApiService);
+  private readonly destroyRef = inject(DestroyRef);
   readonly data = inject<RenameDraftDialogData>(MAT_DIALOG_DATA);
   readonly ref = inject<MatDialogRef<RenameDraftDialogComponent, RenameDraftDialogResult>>(
     MatDialogRef,
@@ -67,13 +69,16 @@ export class RenameDraftDialogComponent {
     }
     this.busy.set(true);
     this.serverError.set(null);
-    this.api.renameDraft(this.data.draftId, trimmed).subscribe({
-      next: (summary) => this.ref.close(summary),
-      error: (err) => {
-        this.busy.set(false);
-        this.serverError.set(err?.error?.detail ?? err?.message ?? 'Failed to rename draft.');
-      },
-    });
+    this.api
+      .renameDraft(this.data.draftId, trimmed)
+      .pipe(takeUntilDestroyed(this.destroyRef))
+      .subscribe({
+        next: (summary) => this.ref.close(summary),
+        error: (err) => {
+          this.busy.set(false);
+          this.serverError.set(err?.error?.detail ?? err?.message ?? 'Failed to rename draft.');
+        },
+      });
   }
 
   /** Preconditions: none. Postconditions: no-op while `busy()`; otherwise closes with no result. */

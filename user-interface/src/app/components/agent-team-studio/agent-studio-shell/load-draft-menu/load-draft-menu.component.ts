@@ -90,13 +90,13 @@ export class LoadDraftMenuComponent {
   }
 
   /**
-   * Select a draft row.
+   * Open (load) a draft row.
    *
    * Preconditions: `draftId` is a non-empty id from a rendered row.
    * Postconditions: `draftSelected` emits exactly once with `draftId`; no
    *   HTTP call is made by this component.
    */
-  select(draftId: string): void {
+  openDraft(draftId: string): void {
     this.draftSelected.emit(draftId);
   }
 
@@ -148,6 +148,10 @@ export class LoadDraftMenuComponent {
             });
             this.nextOffset = this.drafts().length;
             const refetch = this.loading();
+            // Invalidate any in-flight "Show older" fetch: its offset was
+            // computed against the pre-delete list, so its response would
+            // append a skipped/duplicated boundary row. Bumping the token
+            // makes fetchPage discard that stale response on arrival.
             this.openToken += 1;
             if (refetch) {
               this.fetchPage(this.openToken);
