@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 from software_engineering_team.code_review_agent.change_surface import (
+    extract_removed_text,
     extract_touched_lines,
     render_patch_hunks,
 )
 from software_engineering_team.github_source.pr_review_mapping import (
     render_annotated_hunks,
+    render_removed_hunks,
 )
 
 # Realistic single-file hunk: context, removed, added.
@@ -43,3 +45,22 @@ def test_touched_set_diverges_from_annotated_context_lines() -> None:
     assert "1|" in annotated
     assert "2|" in annotated
     assert "3|" in annotated
+
+
+def test_extract_removed_text_matches_removed_helper() -> None:
+    assert extract_removed_text(_SINGLE_FILE_PATCH) == render_removed_hunks(_SINGLE_FILE_PATCH)
+
+
+def test_extract_removed_text_empty_patch() -> None:
+    assert extract_removed_text("") == ""
+    assert extract_removed_text("   \n") == render_removed_hunks("   \n")
+
+
+def test_removed_text_diverges_from_annotated_added_lines() -> None:
+    """Lock the old-side (removed+context) vs new-side (added+context) split."""
+    removed = extract_removed_text(_SINGLE_FILE_PATCH)
+    annotated = render_patch_hunks(_SINGLE_FILE_PATCH)
+    assert "deleted" in removed
+    assert "added" not in removed
+    assert "added" in annotated
+    assert "deleted" not in annotated

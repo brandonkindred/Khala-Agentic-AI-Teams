@@ -5227,6 +5227,64 @@ class TestDecideReviewModeUnit:
         ]
 
 
+class TestBuildReplacedContent:
+    """Unit tests for ``_build_replaced_content``: derives each changed file's
+    pre-change (old-file) body from the diff's removed-hunk side alone, with
+    no extra GitHub reads."""
+
+    def test_single_file(self) -> None:
+        from software_engineering_team.api import pr_review
+        from software_engineering_team.code_review_agent.change_surface import (
+            extract_removed_text,
+        )
+
+        patch = "@@ -1,2 +1,1 @@\n-old\n keep"
+        files = [PullRequestFile("a.py", "modified", patch, 0, 1, None)]
+
+        assert pr_review._build_replaced_content(files) == {"a.py": extract_removed_text(patch)}
+
+    def test_skips_blank_patch(self) -> None:
+        from software_engineering_team.api import pr_review
+
+        files = [PullRequestFile("a.py", "modified", "", 0, 0, None)]
+        assert pr_review._build_replaced_content(files) == {}
+
+    def test_skips_pure_addition_file(self) -> None:
+        from software_engineering_team.api import pr_review
+
+        files = [PullRequestFile("a.py", "added", "@@ -0,0 +1,2 @@\n+x\n+y", 2, 0, None)]
+        assert pr_review._build_replaced_content(files) == {}
+
+    def test_includes_removed_status_file(self) -> None:
+        """A whole-file deletion IS included -- the key divergence from
+        ``_build_review_code``, which excludes removed-status files entirely."""
+        from software_engineering_team.api import pr_review
+
+        patch = "@@ -1,2 +0,0 @@\n-x\n-y"
+        files = [PullRequestFile("a.py", "removed", patch, 0, 2, None)]
+
+        result = pr_review._build_replaced_content(files)
+        assert result == {"a.py": "x\ny"}
+
+    def test_multi_file(self) -> None:
+        from software_engineering_team.api import pr_review
+        from software_engineering_team.code_review_agent.change_surface import (
+            extract_removed_text,
+        )
+
+        patch_a = "@@ -1,1 +1,1 @@\n-old_a\n+new_a"
+        patch_b = "@@ -1,1 +1,1 @@\n-old_b\n+new_b"
+        files = [
+            PullRequestFile("a.py", "modified", patch_a, 1, 1, None),
+            PullRequestFile("b.py", "modified", patch_b, 1, 1, None),
+        ]
+
+        assert pr_review._build_replaced_content(files) == {
+            "a.py": extract_removed_text(patch_a),
+            "b.py": extract_removed_text(patch_b),
+        }
+
+
 class TestRunReviewerSurfaceFirstDefault:
     """Epic-level regression guard: PR review must default to the change
     surface (diff), not the whole file, whenever a usable surface exists.
@@ -5436,6 +5494,130 @@ class TestRunReviewerFallbackAndMixedMode:
         assert "hunk summary" in result.summary
         assert "surface spec" in result.spec_compliance_notes
         assert "hunk spec" in result.spec_compliance_notes
+
+
+class TestRunReviewerReplacedContent:
+    """``_run_reviewer`` computes ``replaced_content`` once from ``files`` and
+    forwards it identically to every attempt -- it is a property of the diff,
+    not of the review mode."""
+
+    def test_forwards_replaced_content_derived_from_files(self) -> None:
+        from software_engineering_team.api import pr_review
+        from software_engineering_team.code_review_agent.change_surface import (
+            extract_removed_text,
+        )
+
+        head_files = {"a.py": "def a():\n    return 1\n"}
+        patch = "@@ -1,2 +1,1 @@\n-def a():\n     return 1"
+        files = [PullRequestFile("a.py", "modified", patch, 0, 1, None)]
+
+        calls: list[dict[str, Any]] = []
+
+        class _CapProvider:
+            def run_pr_code_review(self, **kw: Any) -> Any:
+                calls.append(dict(kw))
+                return _FakeOutput(issues=[])
+
+        result = pr_review._run_reviewer(
+            _CapProvider(),
+            object(),
+            "o",
+            "r",
+            7,
+            "job1",
+            _mode_pr(),
+            files,
+            hunk_files={},
+            head_files=head_files,
+            change_surface=None,
+        )
+
+        assert result is not None
+        assert len(calls) == 1
+        assert calls[0]["replaced_content"] == {"a.py": extract_removed_text(patch)}
+
+    def test_passes_none_when_no_files_have_removed_lines(self) -> None:
+        from software_engineering_team.api import pr_review
+
+        head_files = {"a.py": "def a():\n    return 1\n"}
+        files = [
+            PullRequestFile(
+                "a.py", "added", "@@ -0,0 +1,2 @@\n+def a():\n+    return 1", 2, 0, None
+            )
+        ]
+
+        calls: list[dict[str, Any]] = []
+
+        class _CapProvider:
+            def run_pr_code_review(self, **kw: Any) -> Any:
+                calls.append(dict(kw))
+                return _FakeOutput(issues=[])
+
+        result = pr_review._run_reviewer(
+            _CapProvider(),
+            object(),
+            "o",
+            "r",
+            7,
+            "job1",
+            _mode_pr(),
+            files,
+            hunk_files={},
+            head_files=head_files,
+            change_surface=None,
+        )
+
+        assert result is not None
+        assert calls[0]["replaced_content"] is None
+
+    def test_replaced_content_identical_across_surface_and_hunk_attempts(self) -> None:
+        """Mixed mode (surface covers a.py, hunk covers the disjoint b.py):
+        both attempts must carry the SAME ``replaced_content``, covering both
+        files -- it is computed once from the full ``files`` list, not
+        per-attempt/per-mode."""
+        from software_engineering_team.api import pr_review
+        from software_engineering_team.code_review_agent.change_surface import (
+            ChangeSurface,
+            extract_removed_text,
+        )
+
+        surface_body = "1: def a():\n2:     return 1\n"
+        hunk_body = "1: def b():\n2:     return 2\n"
+        change_surface = ChangeSurface(blocks={"a.py": surface_body})
+        hunk_files = {"b.py": hunk_body}
+        patch_a = "@@ -1,1 +1,1 @@\n-old_a\n+return 1"
+        patch_b = "@@ -1,1 +1,1 @@\n-old_b\n+return 2"
+        files = [
+            PullRequestFile("a.py", "modified", patch_a, 1, 1, None),
+            PullRequestFile("b.py", "modified", patch_b, 1, 1, None),
+        ]
+
+        calls: list[dict[str, Any]] = []
+
+        class _CapProvider:
+            def run_pr_code_review(self, **kw: Any) -> Any:
+                calls.append(dict(kw))
+                return _FakeOutput(issues=[])
+
+        result = pr_review._run_reviewer(
+            _CapProvider(),
+            object(),
+            "o",
+            "r",
+            7,
+            "job1",
+            _mode_pr(),
+            files,
+            hunk_files=hunk_files,
+            head_files=None,
+            change_surface=change_surface,
+        )
+
+        assert result is not None
+        assert len(calls) == 2
+        expected = {"a.py": extract_removed_text(patch_a), "b.py": extract_removed_text(patch_b)}
+        assert calls[0]["replaced_content"] == expected
+        assert calls[1]["replaced_content"] == expected
 
 
 class TestPartitionReviewIssuesUnit:

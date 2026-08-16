@@ -51,7 +51,9 @@ class CodeEngineProvider(Protocol):
 
     def run_pr_code_review(self, **kwargs: Any) -> Any:
         """Review a pull request's diff. Postconditions: returns an object with
-        an ``issues`` list."""
+        an ``issues`` list. Forward-compatible: accepts and forwards additive
+        kwargs (e.g. ``replaced_content``) the concrete implementation
+        supports, without requiring every caller/stub to declare them."""
         ...
 
 

@@ -33,6 +33,7 @@ from software_engineering_team.github_source.pr_review_mapping import (
     parse_removed_lines,
     parse_valid_lines,
     render_annotated_hunks,
+    render_removed_hunks,
     split_review_comments,
 )
 
@@ -183,6 +184,45 @@ def test_render_annotated_hunks_separates_multiple_hunks() -> None:
 
 def test_render_annotated_hunks_empty_patch() -> None:
     assert render_annotated_hunks("") == ""
+
+
+def test_render_removed_hunks_single_hunk() -> None:
+    patch = "@@ -1,2 +1,3 @@\n ctx\n+added\n more"
+    # Added line has no old-file position and is dropped; context/removed kept raw.
+    assert render_removed_hunks(patch) == "ctx\nmore"
+
+
+def test_render_removed_hunks_includes_removed_and_context_omits_added() -> None:
+    patch = "@@ -1,3 +1,2 @@\n keep\n-deleted\n+replacement"
+    assert render_removed_hunks(patch) == "keep\ndeleted"
+
+
+def test_render_removed_hunks_separates_multiple_hunks() -> None:
+    patch = "@@ -1,1 +1,2 @@\n a\n+b\n@@ -10,1 +11,2 @@\n c\n+d"
+    assert render_removed_hunks(patch) == "a\n...\nc"
+
+
+def test_render_removed_hunks_empty_patch() -> None:
+    assert render_removed_hunks("") == ""
+
+
+def test_render_removed_hunks_pure_addition_patch_is_blank() -> None:
+    patch = "@@ -1,0 +1,2 @@\n+x\n+y"
+    assert render_removed_hunks(patch) == ""
+
+
+def test_render_removed_hunks_no_line_number_gutter() -> None:
+    # A patch that would produce a numbered gutter under render_annotated_hunks
+    # must render as raw, unnumbered source text here.
+    patch = "@@ -9,2 +9,3 @@\n     foo(\n+        'bar',\n     )"
+    assert render_annotated_hunks(patch) != render_removed_hunks(patch)
+    assert not re.search(r"\d+\|", render_removed_hunks(patch))
+    assert render_removed_hunks(patch) == "    foo(\n    )"
+
+
+def test_render_removed_hunks_malformed_patch_yields_empty() -> None:
+    patch = "garbage header\n-not in a hunk\n"
+    assert render_removed_hunks(patch) == ""
 
 
 def test_numbered_line_width_empty_and_widest() -> None:

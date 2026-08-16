@@ -10,6 +10,9 @@ This module locks types, signatures, and empty/no-op builder contracts.
 otherwise a heuristic start or capped context window. ``extract_touched_lines``
 wraps GitHub unified-patch helpers for added-only touched lines.
 ``render_patch_hunks`` wraps annotated hunk rendering for the same patch text.
+``extract_removed_text`` wraps the old-file-side hunk renderer, giving callers
+a before-image body (``CodeReviewInput.replaced_content``) from the diff's
+removed side alone, with no extra network fetch.
 Surface assembly from unified patches is implemented; ``unified_diffs_from_pairs``
 derives per-path diffs from SE old/new maps. Full pairs surface assembly
 remains follow-on work.
@@ -31,6 +34,7 @@ from software_engineering_team.github_source.pr_review_mapping import (
     numbered_line_width,
     parse_valid_lines,
     render_annotated_hunks,
+    render_removed_hunks,
 )
 
 from .function_boundaries import (
@@ -45,6 +49,7 @@ __all__ = [
     "build_change_surface_from_pairs",
     "build_change_surface_from_patches",
     "expand_touched_ranges",
+    "extract_removed_text",
     "extract_touched_lines",
     "render_patch_hunks",
     "unified_diffs_from_pairs",
@@ -164,6 +169,22 @@ def render_patch_hunks(patch: str) -> str:
         - Never raises.
     """
     return render_annotated_hunks(patch or "")
+
+
+def extract_removed_text(patch: str) -> str:
+    """Render raw pre-change (old-file) source text for one file's unified/PR patch.
+
+    Preconditions:
+        - ``patch`` is one file's unified-diff text (GitHub ``files[].patch``
+          style), or empty / blank for binary / oversized / unchanged files.
+
+    Postconditions:
+        - Return value is identical to ``render_removed_hunks(patch)`` for
+          every input (string equality).
+        - Empty or blank ``patch`` → ``""``.
+        - Never raises.
+    """
+    return render_removed_hunks(patch or "")
 
 
 def unified_diffs_from_pairs(

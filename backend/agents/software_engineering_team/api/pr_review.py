@@ -28,6 +28,7 @@ from software_engineering_team.api.coding_team_state import (
 from software_engineering_team.code_review_agent.change_surface import (
     ChangeSurface,
     build_change_surface_from_patches,
+    extract_removed_text,
 )
 from software_engineering_team.github_source import (
     GitHubAPIError,
@@ -394,6 +395,38 @@ def _build_review_code(files: List[Any]) -> ReviewCode:
             continue
         rendered_by_path[f.filename] = rendered
     return ReviewCode(rendered_by_path, len(rendered_by_path))
+
+
+def _build_replaced_content(files: List[Any]) -> Dict[str, str]:
+    """Derive each changed file's pre-change (old-file) body from the diff's
+    removed-hunk side — no extra GitHub reads.
+
+    Mirrors ``_build_review_code``'s zero-network derivation but for the
+    old-file side instead of the new-file side, via :func:`extract_removed_text`
+    instead of ``render_annotated_hunks``. Unlike ``_build_review_code``, a
+    removed file's ``.patch`` IS meaningful here (its removed-side text is the
+    whole old file's worth of deleted lines), so files with
+    ``status == _FILE_STATUS_REMOVED`` are NOT excluded — only files with a
+    blank/falsy ``patch``, or whose extracted old-side text is blank (e.g. a
+    pure-addition patch with no removed/context rows), are omitted so the
+    result stays sparse.
+
+    Postconditions:
+        - Returns ``{f.filename: extract_removed_text(f.patch)}`` for every
+          ``f`` in ``files`` whose ``.patch`` is truthy and whose extracted
+          text is non-blank. Empty ``files`` or an all-pure-addition diff
+          yields ``{}``. Never raises for well-typed inputs.
+    """
+    replaced: Dict[str, str] = {}
+    for f in files:
+        patch = getattr(f, "patch", None)
+        if not patch:
+            continue
+        text = extract_removed_text(patch)
+        if not text:
+            continue
+        replaced[f.filename] = text
+    return replaced
 
 
 def _build_change_surface_for_reviewable(
@@ -799,6 +832,12 @@ def _run_reviewer(
     mixed into a single call (each attempt's ``files=`` covers disjoint
     paths), which is why partial-fetch PRs may need two calls instead of one.
 
+    ``replaced_content`` (each changed file's pre-change body, derived from
+    the diff's removed-hunk side via :func:`_build_replaced_content` — no
+    extra GitHub reads) is computed once from ``files`` and forwarded
+    identically to every attempt via ``common``: it is a property of the
+    diff itself, not of the review mode.
+
     Preconditions:
         - ``provider`` was resolved before the first GitHub call.
         - At least one of ``change_surface`` (non-empty), ``head_files``, or
@@ -845,6 +884,7 @@ def _run_reviewer(
         language=_infer_review_language(files),
         progress_callback=pr_bridge,
         job_id=job_id,
+        replaced_content=_build_replaced_content(files) or None,
     )
     # One reviewer call per non-empty source; see the docstring above.
     attempts: List[Dict[str, Any]] = []

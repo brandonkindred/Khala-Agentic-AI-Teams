@@ -31,7 +31,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, Dict, Optional
 
 # The two-insert idiom is inlined (rather than delegating to
 # ``shared.app.paths.bootstrap_syspath``) because importing ``shared.app`` runs its
@@ -89,6 +89,7 @@ class SECodeEngineProvider:
         existing_codebase: Any = None,
         repo_reader: Any = None,
         job_id: str = "",
+        replaced_content: Optional[Dict[str, str]] = None,
     ) -> Any:
         """Run the PR code-review agent over a pull request's changes.
 
@@ -104,6 +105,10 @@ class SECodeEngineProvider:
               calls can record into that job's durable transcript. ``""`` (the
               default) means no caller-tracked job; transcript recording is then
               a no-op.
+            - ``replaced_content``, when not None, maps changed path -> pre-change
+              (old-file) body, forwarded unchanged into
+              ``CodeReviewInput.replaced_content``. Optional and additive:
+              omitting it (default None) reproduces today's behavior exactly.
 
         Postconditions: returns the reviewer's output (carries an ``issues`` list).
         """
@@ -118,6 +123,7 @@ class SECodeEngineProvider:
             language=language,
             existing_codebase=existing_codebase,
             job_id=job_id,
+            replaced_content=replaced_content,
         )
         run_kwargs: dict = {"progress_callback": progress_callback}
         # Forward the reader only when present: passing ``repo_reader=None`` is a

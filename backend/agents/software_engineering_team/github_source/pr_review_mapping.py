@@ -17,6 +17,9 @@ Pure, side-effect-free helpers used by the ``/review-pr`` flow:
   finding as its own standalone PR conversation (issue) comment.
 - ``build_review_body`` — render the summary-only review body.
 - ``choose_event`` — pick the GitHub review event from issue severity.
+- ``render_removed_hunks`` — the old-file-side analogue of
+  ``render_annotated_hunks``: raw (unnumbered) removed+context source text,
+  for reconstructing a before-image body with no extra GitHub reads.
 
 Every finding gets exactly one comment: a finding on a changed line becomes a
 line-anchored inline comment (rides the single review), a finding whose file
@@ -303,6 +306,50 @@ def render_annotated_hunks(patch: str) -> str:
     return "\n".join(
         text if n is None else format_numbered_source_line(n, text, width=width) for n, text in rows
     )
+
+
+def render_removed_hunks(patch: str) -> str:
+    """Render a file's diff hunks as raw pre-change (old-file) source text.
+
+    The old-file-side analogue of ``render_annotated_hunks``: that function
+    renders the new-file side (added + context, omitting removed) with a
+    line-number gutter for inline-comment anchoring; this renders the
+    old-file side (removed + context, omitting added) as plain unnumbered
+    source text, because callers use it to reconstruct a "replaced" body
+    (``CodeReviewInput.replaced_content``), not to anchor comments.
+
+    Preconditions:
+        - ``patch`` is one file's unified-diff text (GitHub's ``files[].patch``),
+          or empty for a binary/oversized/unchanged file.
+    Postconditions:
+        - Returns the removed (``-``) and context (`` ``) lines of each hunk —
+          the old-file side — as raw source text (no line-number gutter, no
+          clipping), one source line per row, joined with ``\\n``, with a
+          ``...`` marker row between non-contiguous hunks (mirroring
+          ``render_annotated_hunks``'s gap marker) so two unrelated removed
+          blocks are never read as adjacent old-file lines. Added (``+``)
+          lines are omitted (they never existed in the old file). A patch
+          with no hunks, or whose hunks are pure-addition (no ``-``/context
+          rows), yields ``""``. Never raises.
+    """
+    rows: list[str] = []
+    in_hunk = False
+    first_hunk = True
+    for raw in (patch or "").splitlines():
+        header = _HUNK_BOTH_SIDES_RE.match(raw)
+        if header:
+            if not first_hunk:
+                rows.append("...")
+            first_hunk = False
+            in_hunk = True
+            continue
+        if not in_hunk:
+            continue
+        tag = raw[:1]
+        if tag == "-" or tag == " " or raw == "":
+            rows.append(raw[1:] if raw else "")
+        # '+' added lines and '\' ("\ No newline...") have no old-file line.
+    return "\n".join(rows)
 
 
 def _normalize_path(file_path: str, valid_by_path: dict[str, set[int]]) -> Optional[str]:
