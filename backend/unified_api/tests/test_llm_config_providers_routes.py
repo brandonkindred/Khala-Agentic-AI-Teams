@@ -38,6 +38,14 @@ def _entry(entry_id, *, provider="ollama", label="e", api_key="", limit=False):
     )
 
 
+def _find_op(state, op_name):
+    """Return the single ``state["ops"]`` tuple named ``op_name``, with a clear
+    assertion message instead of a bare ``StopIteration`` when it's missing."""
+    matches = [op for op in state["ops"] if isinstance(op, tuple) and op[0] == op_name]
+    assert len(matches) == 1, f"expected exactly one {op_name!r} op, got {len(matches)}: {state['ops']!r}"
+    return matches[0]
+
+
 @pytest.fixture
 def app_client(monkeypatch):
     """TestClient over a minimal app with provider_store + caches stubbed."""
@@ -356,6 +364,9 @@ def _patch_async_client_get(monkeypatch, *, get_return=None, get_side_effect=Non
     """Patch ``httpx.AsyncClient`` so ``async with ... as client: await client.get(...)``
     returns ``get_return`` or raises ``get_side_effect`` — drives the real
     ``_probe_runpod_endpoint`` through its ``httpx`` call without a real network request.
+
+    Returns the ``AsyncMock`` standing in for the client, so a caller can assert on
+    ``mock_client.get.call_args`` (e.g. the requested URL/headers).
     """
     from unittest.mock import AsyncMock, MagicMock
 
@@ -368,6 +379,7 @@ def _patch_async_client_get(monkeypatch, *, get_return=None, get_side_effect=Non
     else:
         mock_client.get.return_value = get_return
     monkeypatch.setattr(httpx, "AsyncClient", MagicMock(return_value=mock_client))
+    return mock_client
 
 
 def test_create_runpod_requires_endpoint_id(app_client, monkeypatch):
@@ -407,8 +419,7 @@ def test_create_runpod_success_builds_base_url_and_trims_key(app_client, monkeyp
         json={"provider": "runpod", "api_key": "  sk-runpod  ", "endpoint_id": "abc123"},
     )
     assert resp.status_code == 200
-    create_op = next(op for op in state["ops"] if isinstance(op, tuple) and op[0] == "create")
-    kw = create_op[1]
+    kw = _find_op(state, "create")[1]
     # The endpoint_id is turned into the canonical OpenAI-compatible base URL, the key
     # is persisted whitespace-trimmed (matching the update path), and the label defaults.
     assert kw["base_url"] == "https://api.runpod.ai/v2/abc123/openai/v1"
@@ -480,7 +491,7 @@ def test_update_runpod_endpoint_id_rebuilds_base_url_without_probe(app_client, m
     monkeypatch.setattr(route, "_probe_runpod_endpoint", _boom)
     resp = client.put("/api/llm-config/providers/1", json={"endpoint_id": "xyz789"})
     assert resp.status_code == 200
-    kw = next(op for op in state["ops"] if isinstance(op, tuple) and op[0] == "update")[2]
+    kw = _find_op(state, "update")[2]
     assert kw["base_url"] == "https://api.runpod.ai/v2/xyz789/openai/v1"
 
 
@@ -495,32 +506,15 @@ def test_update_runpod_rejects_bad_endpoint_id(app_client):
 def test_probe_runpod_endpoint_success_returns_none(monkeypatch):
     """A 2xx response from RunPod resolves the probe with no exception."""
     import asyncio
+    from unittest.mock import Mock
 
-    import httpx
-
-    class _Resp:
-        status_code = 200
-
-        def raise_for_status(self):
-            return None
-
-    class _Client:
-        def __init__(self, *a, **k):
-            pass
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *a):
-            return False
-
-        async def get(self, url, headers=None):
-            assert url.endswith("/v2/abc123/openai/v1/models")
-            assert headers == {"Authorization": "Bearer k"}
-            return _Resp()
-
-    monkeypatch.setattr(httpx, "AsyncClient", _Client)
+    mock_response = Mock(status_code=200)
+    mock_response.raise_for_status.return_value = None
+    mock_client = _patch_async_client_get(monkeypatch, get_return=mock_response)
     assert asyncio.run(route._probe_runpod_endpoint("abc123", "k")) is None
+    call = mock_client.get.call_args
+    assert call.args[0].endswith("/v2/abc123/openai/v1/models")
+    assert call.kwargs["headers"] == {"Authorization": "Bearer k"}
 
 
 # --------------------------------------------------------------------------- #
