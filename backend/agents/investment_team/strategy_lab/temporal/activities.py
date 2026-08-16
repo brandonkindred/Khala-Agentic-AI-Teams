@@ -1065,6 +1065,20 @@ def run_design_attempt_activity(params: Dict[str, Any]) -> Dict[str, Any]:
                 resume_design_context = checkpoint_design_context
 
     def _write_checkpoint(_phase: str, data: Dict[str, Any]) -> None:
+        """``checkpoint_hook`` passed into ``_run_design_attempt`` (``PhaseCallback`` shape).
+
+        Preconditions:
+            ``data`` contains ``"spec"``, ``"rationale"``, and ``"design_context"``
+            -- guaranteed by this closure's sole caller, ``_run_design_attempt``'s
+            single ``checkpoint_hook(...)`` invocation at the design/synthesis
+            boundary (``orchestrator_design.py``), which always passes exactly
+            this literal shape. Not re-validated here: this is a private,
+            single-call-site closure, not a public boundary.
+        Postconditions:
+            No-op when ``checkpoint_enabled`` is ``False``. Otherwise persists
+            (or best-effort-swallows a retryable write failure for, per the
+            ``except`` handling below).
+        """
         if not checkpoint_enabled:
             return
         from investment_team.models import DesignAttemptCheckpoint
