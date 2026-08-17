@@ -755,6 +755,24 @@ class TestRunReviewerUnit:
         assert isinstance(result, pr_review._MergedReviewerOutput)
         assert result.issues == ["s", "h"]
 
+    def test_removed_status_file_omits_replaced_content(self, monkeypatch) -> None:
+        """_build_replaced_content mirrors _build_review_code's eligibility
+        filter: a file whose status is "removed" is excluded even when its
+        patch has a non-empty removed-side body."""
+        self._patch_collaborators(monkeypatch)
+        output = _FakeOutput(["issue"], "", "")
+        provider = _RecordingProvider([output])
+        patch = "@@ -1,2 +0,0 @@\n-line1\n-line2"
+        kwargs = _run_reviewer_kwargs(
+            files=[_FakeFile("a.py", patch=patch, status="removed")],
+            head_files={"a.py": "content"},
+            hunk_files=None,
+        )
+
+        pr_review._run_reviewer(provider, **kwargs)
+
+        assert "replaced_content" not in provider.calls[0]
+
 
 # ---------------------------------------------------------------------------
 # _finalize_review
