@@ -12,16 +12,22 @@ unchanged; the route maps them to 400 / 404.
 Each helper waits at most :data:`AUTHORING_TIMEOUT_S` (180s, matching the former
 Temporal activity ``start_to_close_timeout``). That bound keeps a stalled LLM
 provider from occupying a FastAPI threadpool worker until the client default
-(3600s). On timeout the caller gets ``RuntimeError`` (HTTP 500). Work runs on
-daemon threads so interpreter exit does not join a 3600s LLM HTTP call.
-``shutdown_authoring_executor`` is part of unified-API lifespan teardown: it
-rejects new submits and queued slot waiters; an in-flight HTTP request cannot
-be aborted from another thread.
+(3600s). On timeout the caller gets ``RuntimeError`` (HTTP 500). Work runs on a
+small fixed pool of daemon threads pulling from a queue — concurrency and total
+thread count stay capped at ``_AUTHORING_POOL_WORKERS`` regardless of request
+burst size — so interpreter exit does not join a 3600s LLM HTTP call and a burst
+queues rather than spawning a thread per call. Each task runs inside the
+submitting thread's ``contextvars.copy_context()`` snapshot so LLM attribution /
+trace context survives the hand-off. ``shutdown_authoring_executor`` is part of
+unified-API lifespan teardown: it rejects new submits and wakes the idle workers
+to exit; an in-flight HTTP request cannot be aborted from another thread.
 """
 
 from __future__ import annotations
 
 import concurrent.futures
+import contextvars
+import queue
 import threading
 from collections.abc import Callable
 from typing import TYPE_CHECKING, TypeVar
@@ -48,80 +54,105 @@ T = TypeVar("T")
 
 
 class _DaemonAuthoringPool:
-    """Bounded authoring pool whose workers do not atexit-join the interpreter.
+    """Fixed-size daemon-worker pool whose workers do not atexit-join the interpreter.
+
+    A small fixed set of long-lived daemon worker threads pull tasks from a
+    ``queue.Queue``. Concurrency — and the live thread count — stay capped at
+    ``_AUTHORING_POOL_WORKERS`` no matter how large a request burst is: excess
+    calls queue rather than each spawning its own thread.
 
     CPython ``ThreadPoolExecutor`` registers ``_python_exit``, which joins
     running workers even when they are daemon threads. A stalled LLM call
     using ``resolve_timeout()`` (3600s) would then block reload/shutdown for
-    up to an hour after the caller already timed out. Daemon ``Thread``s
+    up to an hour after the caller already timed out. Raw daemon ``Thread``s
     without that atexit hook let the process exit; in-flight HTTP still
     cannot be cancelled from another thread.
+
+    Each task runs inside a snapshot of the submitting thread's
+    ``contextvars.copy_context()`` so the caller's LLM-attribution / request-id
+    (``llm_service.attribution``) and ``trace_id``
+    (``shared.observability.trace_context``) survive the thread hand-off — the
+    same context-propagation contract ``shared.concurrency`` documents.
+
+    Invariants:
+        - At most ``_AUTHORING_POOL_WORKERS`` worker threads exist for this pool,
+          and at most that many tasks run ``fn`` concurrently.
     """
 
     def __init__(self) -> None:
-        self._sem = threading.BoundedSemaphore(_AUTHORING_POOL_WORKERS)
+        self._queue: queue.Queue[object] = queue.Queue()
         self._lock = threading.Lock()
         self._shutdown = False
+        for n in range(_AUTHORING_POOL_WORKERS):
+            threading.Thread(
+                target=self._worker_loop, name=f"studio-authoring-{n}", daemon=True
+            ).start()
+
+    def _worker_loop(self) -> None:
+        """Pull and run queued tasks until a shutdown sentinel arrives.
+
+        Preconditions:
+            - Runs on a daemon thread started by ``__init__``.
+        Postconditions:
+            - Returns (thread exits) on the ``None`` sentinel; otherwise runs
+              each task's ``fn`` inside its captured context, resolving its
+              future. A task whose caller already timed out (future cancelled)
+              is skipped rather than run.
+        """
+        while True:
+            task = self._queue.get()
+            if task is None:  # shutdown sentinel
+                return
+            fut, ctx, fn, args = task
+            # A caller that timed out cancels its future (see ``_run``); skip a
+            # task no waiter is blocked on rather than mutate registry state.
+            # ``set_running_or_notify_cancel`` returns False iff cancelled.
+            if not fut.set_running_or_notify_cancel():
+                continue
+            try:
+                result = ctx.run(fn, *args)
+            except Exception as exc:
+                fut.set_exception(exc)
+            else:
+                fut.set_result(result)
 
     def submit(self, fn: Callable[..., T], *args: object) -> concurrent.futures.Future[T]:
-        """Run ``fn(*args)`` on a daemon thread, or fail if this pool is shut down.
+        """Enqueue ``fn(*args)`` for a worker thread, or fail if this pool is shut down.
 
         Preconditions:
             - ``fn`` is callable; ``args`` match ``fn``.
         Postconditions:
-            - Returns a future for the call, or a completed future whose
-              exception is ``RuntimeError`` when the pool is shut down.
+            - Returns a pending future a worker will resolve, or a completed
+              future whose exception is ``RuntimeError`` when the pool is shut
+              down. The submitting thread's context is snapshotted so the worker
+              runs ``fn`` with the caller's attribution / trace contextvars.
         """
         fut: concurrent.futures.Future[T] = concurrent.futures.Future()
         with self._lock:
             if self._shutdown:
                 fut.set_exception(RuntimeError("Agent Studio authoring executor is shut down"))
                 return fut
-
-        def _worker() -> None:
-            acquired = self._sem.acquire(timeout=AUTHORING_TIMEOUT_S)
-            if not acquired:
-                if not fut.done():
-                    fut.set_exception(
-                        RuntimeError(
-                            "Agent Studio authoring call did not complete within the dispatch timeout"
-                        )
-                    )
-                return
-            try:
-                with self._lock:
-                    stopped = self._shutdown
-                if stopped or fut.done():
-                    if not fut.done():
-                        fut.set_exception(
-                            RuntimeError("Agent Studio authoring executor is shut down")
-                        )
-                    return
-                try:
-                    result = fn(*args)
-                except Exception as exc:
-                    if not fut.done():
-                        fut.set_exception(exc)
-                    return
-                if not fut.done():
-                    fut.set_result(result)
-            finally:
-                self._sem.release()
-
-        threading.Thread(target=_worker, name="studio-authoring", daemon=True).start()
+            self._queue.put((fut, contextvars.copy_context(), fn, args))
         return fut
 
     def shutdown(self) -> None:
-        """Reject new work. In-flight daemon workers are not joined.
+        """Reject new work and wake idle workers to exit. In-flight tasks are not joined.
 
         Preconditions:
             - None.
         Postconditions:
             - Subsequent ``submit`` calls complete with ``RuntimeError``.
+            - Each worker receives a sentinel and exits once idle (a worker mid
+              ``fn`` exits after that call returns; it is a daemon, so it never
+              blocks interpreter exit).
             - Idempotent.
         """
         with self._lock:
+            if self._shutdown:
+                return
             self._shutdown = True
+        for _ in range(_AUTHORING_POOL_WORKERS):
+            self._queue.put(None)
 
     def is_live(self) -> bool:
         """Return whether ``submit`` still accepts work.
@@ -178,12 +209,18 @@ def _run(fn: Callable[..., T], *args: object) -> T:
     Postconditions:
         - Returns ``fn``'s result, or re-raises ``fn``'s exception.
         - Raises ``RuntimeError`` chained from ``concurrent.futures.TimeoutError``
-          if ``fn`` does not finish within ``AUTHORING_TIMEOUT_S``.
+          if ``fn`` does not finish within ``AUTHORING_TIMEOUT_S``. A task still
+          queued at that point is cancelled so no worker runs it with no caller
+          waiting; a task already running is left to finish (it cannot be
+          cancelled once started).
     """
     fut = _authoring_executor().submit(fn, *args)
     try:
         return fut.result(timeout=AUTHORING_TIMEOUT_S)
     except concurrent.futures.TimeoutError as exc:
+        # Best-effort: cancel() succeeds only while the task is still queued
+        # (PENDING); the worker's set_running_or_notify_cancel then skips it.
+        fut.cancel()
         raise RuntimeError(
             "Agent Studio authoring call did not complete within the dispatch timeout"
         ) from exc
