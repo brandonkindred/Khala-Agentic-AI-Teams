@@ -21,6 +21,12 @@ class _BlankDescriptionModel(BaseModel):
     first_field: str = Field(default="", description="   ")
 
 
+class _PunctuatedDescriptionModel(BaseModel):
+    alpha: str = Field(default="", description="the first thing — with an em dash inside it")
+    beta: str = Field(default="", description="the second (parenthetical) thing, comma included")
+    gamma: str = Field(default="", description="third-thing with a hyphen")
+
+
 def test_prompt_field_spec_rejects_blank_name() -> None:
     with pytest.raises(AssertionError, match="name must be a non-blank string"):
         PromptFieldSpec("", "a description")
@@ -175,6 +181,19 @@ def test_render_agent_prompt_appends_closing_with_structured_output() -> None:
         "1. first_field — the first thing\n"
         "2. second_field — the second thing\n"
         "Be concise."
+    )
+
+
+def test_render_agent_prompt_preserves_order_and_text_with_punctuated_descriptions() -> None:
+    spec = AgentPromptSpec(
+        opening="You are a Test Agent. Do this:",
+        structured_output=_PunctuatedDescriptionModel,
+    )
+    assert render_agent_prompt(spec) == (
+        "You are a Test Agent. Do this:\n"
+        "1. alpha — the first thing — with an em dash inside it\n"
+        "2. beta — the second (parenthetical) thing, comma included\n"
+        "3. gamma — third-thing with a hyphen"
     )
 
 
