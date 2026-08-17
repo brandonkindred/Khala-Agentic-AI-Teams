@@ -74,6 +74,7 @@ def _input(**overrides: object) -> QAInput:
 
 
 def test_identical_review_hits_cache_and_skips_llm_call() -> None:
+    """A byte-identical ``QAInput`` resubmission hits the cache and skips the LLM call."""
     client = _CountingClient(_CLEAN_RESPONSE)
     agent = QAExpertAgent(client)
 
@@ -149,7 +150,12 @@ def test_cache_backend_error_falls_open_to_correct_result(monkeypatch: pytest.Mo
 def test_unapproved_result_is_still_cached() -> None:
     """Unlike code-review's submission short-circuit, every genuine outcome
     is cached regardless of ``approved`` -- QAExpertAgent.run() is a single
-    atomic call with no reduce phase to re-run on a retry."""
+    atomic call with no reduce phase to re-run on a retry.
+
+    Asserts on ``bugs_found`` (the actual precondition: a non-clean result)
+    rather than the derived ``approved`` flag -- that derivation is
+    ``test_qa_agent.py``'s concern, not this cache test's.
+    """
     response = dict(_CLEAN_RESPONSE)
     response["bugs_found"] = [{"severity": "critical", "description": "NPE in /auth"}]
     client = _CountingClient(response)
@@ -158,9 +164,9 @@ def test_unapproved_result_is_still_cached() -> None:
     first = agent.run(_input())
     second = agent.run(_input())
 
-    assert first.approved is False
-    assert second.approved is False
+    assert first.bugs_found  # not a clean result
     assert client.calls == 1
+    assert second.model_dump() == first.model_dump()
 
 
 def test_fallback_result_is_never_cached(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -184,6 +190,7 @@ def test_fallback_result_is_never_cached(monkeypatch: pytest.MonkeyPatch) -> Non
 
 
 def test_cache_disabled_via_env_is_passthrough(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Setting ``QA_REVIEW_CACHE_SIZE=0`` disables the cache; every call invokes the model."""
     monkeypatch.setenv("QA_REVIEW_CACHE_SIZE", "0")
     client = _CountingClient(_CLEAN_RESPONSE)
     agent = QAExpertAgent(client)
