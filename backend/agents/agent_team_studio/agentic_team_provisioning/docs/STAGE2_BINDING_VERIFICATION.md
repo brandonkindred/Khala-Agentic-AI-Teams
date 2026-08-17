@@ -3,7 +3,8 @@
 This is the reproducible evidence that a **saved** Studio / generated-agent
 manifest drives a **Stage-2** run — the user-visible promise of the runtime-binding
 work. It is both an automated suite and a manual checklist, so the result can be
-reproduced by a human and stays valid as the runtime moves from *unbound* to *bound*.
+reproduced by a human and stays valid as a regression guard now that the runtime
+is bound.
 
 The precedence contract these checks encode is
 [`ADR-015`](../../../../../system_design/adr/ADR-015-invoke-generated-agent-persona-state-precedence.md).
@@ -18,12 +19,13 @@ three Stage-2 paths run the *same* saved agent:
 |---|---|---|
 | Pipeline runner (`pipeline_runner._run_agent`) | `resolve_persona(manifest_id)` | **Yes** — bound today |
 | Studio test-chat (`api/services/testing.send_test_chat_message`) | `resolve_persona(manifest_id)` | **Yes** — bound today |
-| Sandbox invoke (`POST /_agents/{id}/invoke` → dispatch → entrypoint) | request body | **No** — unbound until manifest-first binding lands |
+| Sandbox invoke (`POST /_agents/{id}/invoke` → dispatch → entrypoint) | resolved `AgentManifest` (default); explicit request field overrides per invoke (ADR-015) | **Yes** — bound today (ADR-015) |
 
-The pipeline and test-chat paths resolve `role` / `skills` / `expertise` straight
-from the registered manifest, so a saved persona already drives those runs. The
-sandbox invoke path still composes persona from the caller-supplied request body and
-never reads the resolved manifest — the gap the binding implementation closes.
+All three paths resolve `role` / `skills` / `expertise` (and, on the sandbox
+invoke path, `system_prompt` / state) from the registered manifest, so a saved
+persona drives every Stage-2 run. The sandbox invoke path additionally accepts a
+per-invoke request override: a field explicitly present in the request body wins
+over the manifest default for that invoke only, never written back.
 
 ## Automated verification
 
@@ -31,7 +33,10 @@ never reads the resolved manifest — the gap the binding implementation closes.
 save (`build_studio_agent_manifest` / `build_agent_manifest` →
 `AgentRegistry.register`) into a live in-process registry, then drives one Stage-2
 path. The LLM is faked (records the composed system prompt / granted tools); no
-network call and no Postgres are required.
+network call and no Postgres are required. The sandbox invoke path is exercised
+against both manifest producers — a Studio-saved manifest and an agentic-generated
+one — to prove the binding is entrypoint-level, not producer-specific: both share
+the identical save → shim → dispatch → entrypoint path.
 
 ```bash
 cd backend
@@ -40,28 +45,19 @@ cd backend
   -v -rxX
 ```
 
-Expected on today's **unbound** runtime:
+Expected results:
 
 | Test | Result | What it proves |
 |---|---|---|
 | `…_saved_studio_agent_is_resolvable_with_shared_entrypoint` | PASS | Save registers a resolvable manifest carrying the shared entrypoint. |
 | `…_pipeline_stage2_binds_saved_persona_after_save` | PASS | Pipeline run is driven by the saved `role`/`skills`/`expertise`. |
 | `…_test_chat_stage2_binds_saved_persona_after_save` | PASS | Test-chat run is driven by the saved persona. |
-| `…_sandbox_invoke_stage2_binds_saved_persona_after_save` | **XFAIL** | Sandbox invoke does **not** yet bind the saved persona (unbound). |
+| `…_sandbox_invoke_stage2_binds_saved_persona_after_save` | PASS | Sandbox invoke (Studio-saved producer) is driven by the saved `role` and authored `executing`-state prompt. |
 | `…_sandbox_invoke_stage2_honors_explicit_body_override` | PASS | Save → shim → dispatch → entrypoint wiring works; explicit body persona is honored. |
 | `…_sandbox_invoke_stage2_never_grants_tools` | PASS | Runtime tools stay inert even for a manifest advertising `python`/`http_request`. |
-
-### The unbound-vs-bound signal
-
-The single `XFAIL` is the signal, not a silent gap:
-
-- **Unbound (today):** the sandbox binding case reports **XFAIL** — an *expected*
-  failure whose reason states persona is still taken from the request body. If it
-  ever reports a plain **FAIL** (not XFAIL) or **ERROR**, a Stage-2 path regressed.
-- **Bound (once manifest-first binding lands):** the same case starts passing and
-  pytest reports it as **XPASS**. That flip is the proof the promise is now kept;
-  when it happens, remove the `_SANDBOX_UNBOUND` marker so the case becomes a plain
-  green regression guard.
+| `…_sandbox_invoke_stage2_binds_saved_persona_after_save_for_generated_agent` | PASS | Sandbox invoke (agentic-generated producer) is driven by the saved `role`/`skills`/`expertise` — same path as the Studio-saved case. |
+| `…_sandbox_invoke_stage2_honors_explicit_body_override_for_generated_agent` | PASS | Override precedence holds for the agentic-generated producer too. |
+| `…_sandbox_invoke_stage2_never_grants_tools_for_generated_agent` | PASS | Runtime tools stay inert for the agentic-generated producer too. |
 
 ## Manual checklist (UI reproduction)
 
@@ -74,11 +70,9 @@ To reproduce the same result by hand against a running stack:
    or the Studio test-chat. Confirm the reply reflects the saved role (these paths
    are bound today).
 3. **Stage 2 — sandbox invoke.** `POST /api/agents/{agent_id}/invoke` with **only**
-   `{"agent_name", "message"}` (omit `role` / `skills` / `system_prompt`).
-   - **Unbound (today):** the run uses an empty/near-empty persona — the saved role
-     and authored prompt do **not** appear. This matches the automated `XFAIL`.
-   - **Bound (target):** the run is driven by the saved role and the authored
-     `executing`-state prompt without re-supplying them in the body.
+   `{"agent_name", "message"}` (omit `role` / `skills` / `system_prompt`). The run
+   is driven by the saved role and the authored `executing`-state prompt without
+   re-supplying them in the body.
 4. **Override still works.** Repeat step 3 with an explicit `role` in the body and
    confirm that value is used — the manifest is the default, an explicit request
    field wins for that one invoke (never written back).

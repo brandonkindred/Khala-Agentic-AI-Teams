@@ -1,134 +1,240 @@
-"""Dual-path dispatch for the Agent Studio authoring CRUD operations.
+"""In-process dispatch for the Agent Studio authoring CRUD operations.
 
-The synchronous route handlers call these helpers. When Temporal is configured
-(``is_temporal_enabled()``) *and* an in-process Agent Studio worker has finished
-connecting (polling ``agent-studio-queue``), each helper starts the matching workflow and blocks for
-its result on the worker's event loop (via ``shared.temporal.execute_workflow_sync``),
-then rebuilds the Pydantic response the route returns. When Temporal is not
-configured, or the Studio worker is disabled, still connecting, or absent, each helper instead calls the corresponding
-:class:`~agent_platform.studio.service.AgentStudioService` method directly,
-in-process, via the same process-wide singleton
-(:func:`agent_platform.studio.runtime.get_studio_service`) the Temporal
-activities delegate to — so both paths share one conversation store and identical
-business logic. The branch is decided per call, so routes stay unaware of which mode
-ran.
+The synchronous route handlers call these helpers. Each helper delegates to the
+matching :class:`~agent_platform.studio.service.AgentStudioService` method on the
+process-wide singleton (:func:`agent_platform.studio.runtime.get_studio_service`).
+Authoring CRUD (start conversation, send message, clone, save) does **not** start
+Temporal workflows: the former 1-activity wrappers are gone, so a configured
+Temporal cluster or an in-process ``agent_studio`` worker is never required for
+these paths. Native ``ValueError`` / ``LookupError`` from the service propagate
+unchanged; the route maps them to 400 / 404.
 
-Error contract: on the Temporal path, an activity re-shapes the service's
-``ValueError``/``LookupError`` as a typed ``ApplicationError`` (see
-:mod:`agent_platform.studio.temporal.workflows`); Temporal surfaces that as a
-``WorkflowFailureError`` whose cause chain carries the marker.
-:func:`_translate_workflow_failure` walks that chain and re-raises the *native*
-``ValueError``/``LookupError`` so the route's untouched ``ValueError`` → 400 /
-``LookupError`` → 404 mapping still applies. A failure with no such marker is
-re-raised as-is (→ 500). On the direct path there is no round-trip to reshape through:
-the service already raises those native exceptions directly, so they propagate
-unchanged and the same route mapping applies without any translation step.
+Each helper waits at most :data:`AUTHORING_TIMEOUT_S` (180s, matching the former
+Temporal activity ``start_to_close_timeout``). That bound keeps a stalled LLM
+provider from occupying a FastAPI threadpool worker until the client default
+(3600s). On timeout the caller gets ``RuntimeError`` (HTTP 500). Work runs on a
+small fixed pool of daemon threads pulling from a queue — concurrency and total
+thread count stay capped at ``_AUTHORING_POOL_WORKERS`` regardless of request
+burst size — so interpreter exit does not join a 3600s LLM HTTP call and a burst
+queues rather than spawning a thread per call. Each task runs inside the
+submitting thread's ``contextvars.copy_context()`` snapshot so LLM attribution /
+trace context survives the hand-off. ``shutdown_authoring_executor`` is part of
+unified-API lifespan teardown: it rejects new submits and wakes the idle workers
+to exit; an in-flight HTTP request cannot be aborted from another thread.
 """
 
 from __future__ import annotations
 
 import concurrent.futures
-import logging
-import uuid
+import contextvars
+import queue
+import threading
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, TypeVar
 
 if TYPE_CHECKING:
     from agent_platform.studio.service import AgentStudioService
 
-from temporalio.client import WorkflowFailureError
-from temporalio.exceptions import WorkflowAlreadyStartedError
-
 from agent_platform.registry.models import AgentManifest
 from agent_platform.studio.models import AgentDefinition, ConversationStateResponse
-from agent_platform.studio.temporal import (
-    TASK_QUEUE,
-    WORKFLOW_ID_PREFIX_CLONE,
-    WORKFLOW_ID_PREFIX_MSG,
-    WORKFLOW_ID_PREFIX_SAVE,
-    WORKFLOW_ID_PREFIX_START,
-    CloneFromRegistryWorkflow,
-    SaveAgentWorkflow,
-    SendMessageWorkflow,
-    StartConversationWorkflow,
-)
-from shared.temporal import execute_workflow_sync
 
-logger = logging.getLogger(__name__)
+# Former Temporal activity cap for one authoring op. Tighter than
+# ``execute_workflow_sync``'s 300s HTTP wait; well below ``resolve_timeout()``'s
+# 3600s LLM-client default.
+AUTHORING_TIMEOUT_S = 180.0
+_AUTHORING_POOL_WORKERS = 4
 
-# Bounded walk so a cyclic/adversarial cause chain can never loop forever — the same
-# bounded-walk pattern the codebase's other Temporal error translators use.
-_MAX_CAUSE_DEPTH = 12
+# Process-wide authoring pool, lazily instantiated by ``_authoring_executor``.
+# ``_authoring_pool_lock`` guards every read/replace of this slot, so lazy
+# construction and ``shutdown_authoring_executor`` are thread-safe.
+_authoring_pool: _DaemonAuthoringPool | None = None
+_authoring_pool_lock = threading.Lock()
 
-# The ApplicationError.type markers the activities stamp, mapped to the native
-# exception the route's HTTP handler expects.
-_MARKER_EXCEPTIONS: dict[str, type[Exception]] = {
-    "ValueError": ValueError,
-    "LookupError": LookupError,
-}
+T = TypeVar("T")
 
 
-def _translate_workflow_failure(exc: WorkflowFailureError) -> None:
-    """Re-raise the native domain exception a workflow failure carries, if any.
+class _DaemonAuthoringPool:
+    """Fixed-size daemon-worker pool whose workers do not atexit-join the interpreter.
 
-    Walks the standard exception chain (``__cause__`` / ``__context__``) for an
-    ``ApplicationError`` whose ``type`` marker names a contract exception
-    (``ValueError``/``LookupError``) and re-raises that native exception, so the
-    route's HTTP mapping is preserved through Temporal. Temporal surfaces the marker
-    either at the top of the chain (the activity raised it directly) or nested under
-    an ``ActivityError``; the bounded walk handles both. (Temporal's
-    ``FailureError.cause`` is defined as an alias of ``__cause__``, so the standard
-    attributes cover both temporalio and plain exceptions.)
+    A small fixed set of long-lived daemon worker threads pull tasks from a
+    ``queue.Queue``. Concurrency — and the live thread count — stay capped at
+    ``_AUTHORING_POOL_WORKERS`` no matter how large a request burst is: excess
+    calls queue rather than each spawning its own thread.
+
+    CPython ``ThreadPoolExecutor`` registers ``_python_exit``, which joins
+    running workers even when they are daemon threads. A stalled LLM call
+    using ``resolve_timeout()`` (3600s) would then block reload/shutdown for
+    up to an hour after the caller already timed out. Raw daemon ``Thread``s
+    without that atexit hook let the process exit; in-flight HTTP still
+    cannot be cancelled from another thread.
+
+    Each task runs inside a snapshot of the submitting thread's
+    ``contextvars.copy_context()`` so the caller's LLM-attribution / request-id
+    (``llm_service.attribution``) and ``trace_id``
+    (``shared.observability.trace_context``) survive the thread hand-off — the
+    same context-propagation contract ``shared.concurrency`` documents.
+
+    Invariants:
+        - At most ``_AUTHORING_POOL_WORKERS`` worker threads exist for this pool,
+          and at most that many tasks run ``fn`` concurrently.
+    """
+
+    def __init__(self) -> None:
+        self._queue: queue.Queue[object] = queue.Queue()
+        self._lock = threading.Lock()
+        self._shutdown = False
+        for n in range(_AUTHORING_POOL_WORKERS):
+            threading.Thread(
+                target=self._worker_loop, name=f"studio-authoring-{n}", daemon=True
+            ).start()
+
+    def _worker_loop(self) -> None:
+        """Pull and run queued tasks until a shutdown sentinel arrives.
+
+        Preconditions:
+            - Runs on a daemon thread started by ``__init__``.
+        Postconditions:
+            - Returns (thread exits) on the ``None`` sentinel; otherwise runs
+              each task's ``fn`` inside its captured context, resolving its
+              future. A task whose caller already timed out (future cancelled)
+              is skipped rather than run.
+        """
+        while True:
+            task = self._queue.get()
+            if task is None:  # shutdown sentinel
+                return
+            fut, ctx, fn, args = task
+            # A caller that timed out cancels its future (see ``_run``); skip a
+            # task no waiter is blocked on rather than mutate registry state.
+            # ``set_running_or_notify_cancel`` returns False iff cancelled.
+            if not fut.set_running_or_notify_cancel():
+                continue
+            try:
+                result = ctx.run(fn, *args)
+            except Exception as exc:
+                fut.set_exception(exc)
+            else:
+                fut.set_result(result)
+
+    def submit(self, fn: Callable[..., T], *args: object) -> concurrent.futures.Future[T]:
+        """Enqueue ``fn(*args)`` for a worker thread, or fail if this pool is shut down.
+
+        Preconditions:
+            - ``fn`` is callable; ``args`` match ``fn``.
+        Postconditions:
+            - Returns a pending future a worker will resolve, or a completed
+              future whose exception is ``RuntimeError`` when the pool is shut
+              down. The submitting thread's context is snapshotted so the worker
+              runs ``fn`` with the caller's attribution / trace contextvars.
+        """
+        fut: concurrent.futures.Future[T] = concurrent.futures.Future()
+        with self._lock:
+            if self._shutdown:
+                fut.set_exception(RuntimeError("Agent Studio authoring executor is shut down"))
+                return fut
+            self._queue.put((fut, contextvars.copy_context(), fn, args))
+        return fut
+
+    def shutdown(self) -> None:
+        """Reject new work and wake idle workers to exit. In-flight tasks are not joined.
+
+        Preconditions:
+            - None.
+        Postconditions:
+            - Subsequent ``submit`` calls complete with ``RuntimeError``.
+            - Each worker receives a sentinel and exits once idle (a worker mid
+              ``fn`` exits after that call returns; it is a daemon, so it never
+              blocks interpreter exit).
+            - Idempotent.
+        """
+        with self._lock:
+            if self._shutdown:
+                return
+            self._shutdown = True
+        for _ in range(_AUTHORING_POOL_WORKERS):
+            self._queue.put(None)
+
+    def is_live(self) -> bool:
+        """Return whether ``submit`` still accepts work.
+
+        Preconditions:
+            - None.
+        Postconditions:
+            - ``True`` until ``shutdown``; ``False`` after.
+        """
+        with self._lock:
+            return not self._shutdown
+
+
+def _authoring_executor() -> _DaemonAuthoringPool:
+    """Return the process-wide pool that runs authoring CRUD off the FastAPI worker.
 
     Preconditions:
-        - ``exc`` is a ``WorkflowFailureError``.
+        - None.
     Postconditions:
-        - Raises the native ``ValueError``/``LookupError`` if a marker is found;
-          otherwise returns (the caller re-raises the original failure → 500).
-          Never raises anything other than the mapped native exception; bounded and
-          cycle-safe.
+        - Returns a live pool, recreating one after ``shutdown_authoring_executor``.
     """
-    seen: set[int] = set()
-    node: BaseException | None = exc
-    depth = 0
-    while node is not None and id(node) not in seen and depth < _MAX_CAUSE_DEPTH:
-        seen.add(id(node))
-        depth += 1
-        marker = getattr(node, "type", None)
-        native = _MARKER_EXCEPTIONS.get(marker) if isinstance(marker, str) else None
-        if native is not None:
-            raise native(str(node)) from exc
-        node = node.__cause__ or node.__context__
+    global _authoring_pool
+    with _authoring_pool_lock:
+        pool = _authoring_pool
+        if pool is not None and pool.is_live():
+            return pool
+        _authoring_pool = _DaemonAuthoringPool()
+        return _authoring_pool
 
 
-def _temporal_enabled() -> bool:
-    """True when authoring CRUD should dispatch to Temporal.
+def shutdown_authoring_executor() -> None:
+    """Drop the authoring pool so unified-API lifespan can tear down without joining LLM HTTP.
 
-    Requires both a configured Temporal cluster and an in-process
-    ``agent_studio`` worker that has finished connecting (ready, not merely
-    a live thread). When the worker is disabled, still connecting, stuck, or
-    absent, CRUD uses direct in-process ``AgentStudioService`` instead —
-    other teams may still use Temporal in the same process.
-
+    Preconditions:
+        - None.
     Postconditions:
-        - Returns True iff Temporal is configured and
-          ``is_team_worker_ready("agent_studio")`` is True. Never raises.
-          Never blocks on connect.
+        - The current pool rejects new submits; the module slot is cleared so
+          the next CRUD call (reload / in-process test app) gets a fresh pool.
+        - Idempotent when no pool exists.
     """
-    from shared.temporal.client import is_temporal_enabled
-    from shared.temporal.worker import is_team_worker_ready
+    global _authoring_pool
+    with _authoring_pool_lock:
+        pool = _authoring_pool
+        _authoring_pool = None
+    if pool is not None:
+        pool.shutdown()
 
-    return is_temporal_enabled() and is_team_worker_ready("agent_studio")
+
+def _run(fn: Callable[..., T], *args: object) -> T:
+    """Run ``fn`` with a bounded wait so a stalled provider cannot pin the caller.
+
+    Preconditions:
+        - ``fn`` is callable; ``args`` match ``fn``.
+    Postconditions:
+        - Returns ``fn``'s result, or re-raises ``fn``'s exception.
+        - Raises ``RuntimeError`` chained from ``concurrent.futures.TimeoutError``
+          if ``fn`` does not finish within ``AUTHORING_TIMEOUT_S``. A task still
+          queued at that point is cancelled so no worker runs it with no caller
+          waiting; a task already running is left to finish (it cannot be
+          cancelled once started).
+    """
+    fut = _authoring_executor().submit(fn, *args)
+    try:
+        return fut.result(timeout=AUTHORING_TIMEOUT_S)
+    except concurrent.futures.TimeoutError as exc:
+        # Best-effort: cancel() succeeds only while the task is still queued
+        # (PENDING); the worker's set_running_or_notify_cancel then skips it.
+        fut.cancel()
+        raise RuntimeError(
+            "Agent Studio authoring call did not complete within the dispatch timeout"
+        ) from exc
 
 
 def _direct_service() -> "AgentStudioService":
-    """Return the process-wide service singleton for the direct dispatch path.
+    """Return the process-wide service singleton.
 
-    Imported lazily (matching the activities' own lazy import of the same getter) so
-    tests can monkeypatch ``agent_platform.studio.runtime.get_studio_service``
-    and have both the Temporal activities and this direct path pick up the same
-    stand-in, rather than binding a stale reference at this module's import time.
+    Imported lazily so tests can monkeypatch
+    ``agent_platform.studio.runtime.get_studio_service`` and have this path pick
+    up the stand-in, rather than binding a stale reference at import time.
 
+    Preconditions:
+        - None.
     Postconditions:
         - Returns the process-wide ``AgentStudioService`` singleton.
     """
@@ -137,123 +243,58 @@ def _direct_service() -> "AgentStudioService":
     return get_studio_service()
 
 
-def _execute(workflow_run: Callable[..., Any], *args: Any, workflow_id: str) -> Any:
-    """Run a workflow to completion, translating a failed run's domain error.
-
-    Preconditions:
-        - ``workflow_id`` is unique per call. The public helpers below enforce this by
-          minting a fresh ``uuid.uuid4().hex`` per call — there is no runtime assertion,
-          so a future caller that reuses a still-live id gets the
-          ``WorkflowAlreadyStartedError`` → ``RuntimeError`` path below.
-    Postconditions:
-        - Returns the workflow result on success. On ``WorkflowFailureError`` first
-          re-raises a native ``ValueError``/``LookupError`` when the failure carries
-          that marker, else re-raises the original ``WorkflowFailureError``.
-        - If the precondition is violated and ``workflow_id`` collides with a still-live
-          workflow, Temporal raises ``WorkflowAlreadyStartedError``; that is re-raised as
-          a ``RuntimeError`` naming the offending id rather than surfacing the raw
-          Temporal error (which the route would not map, yielding an opaque 500).
-        - If the workflow does not finish within the dispatch timeout,
-          ``execute_workflow_sync`` raises ``concurrent.futures.TimeoutError``; that is
-          re-raised as a ``RuntimeError`` naming the workflow, again to avoid an opaque
-          500 with an unhelpful message.
-    """
-    try:
-        return execute_workflow_sync(
-            workflow_run, *args, workflow_id=workflow_id, task_queue=TASK_QUEUE
-        )
-    except concurrent.futures.TimeoutError as exc:
-        raise RuntimeError(
-            f"Agent Studio workflow {workflow_id} did not complete within the dispatch timeout"
-        ) from exc
-    except WorkflowAlreadyStartedError as exc:
-        # Unreachable in normal operation — every dispatch mints a fresh uuid — but
-        # execute_workflow_sync documents id-uniqueness as a caller precondition, so a
-        # violation surfaces as a clear error instead of an opaque 500.
-        raise RuntimeError(
-            f"Agent Studio dispatch minted a duplicate live workflow id: {workflow_id}"
-        ) from exc
-    except WorkflowFailureError as exc:
-        _translate_workflow_failure(exc)
-        raise
-
-
 def start_conversation(
     mode: str, source_agent_id: str | None, initial_message: str | None
 ) -> ConversationStateResponse:
-    """Start an authoring conversation, via Temporal when enabled else in-process.
+    """Start an authoring conversation in-process.
 
+    Preconditions:
+        - Arguments match ``AgentStudioService.start_conversation``.
     Postconditions:
         - Returns the initial ``ConversationStateResponse``; raises the service's
-          native ``ValueError``/``LookupError`` on a bad request / unknown source, in
-          both dispatch modes. The direct path calls
-          ``AgentStudioService.start_conversation`` and lets its exceptions propagate
-          unchanged — there is no Temporal round-trip to reshape them through.
+          native ``ValueError``/``LookupError`` on a bad request / unknown source.
+        - Raises ``RuntimeError`` if the call exceeds ``AUTHORING_TIMEOUT_S``.
     """
-    if not _temporal_enabled():
-        return _direct_service().start_conversation(mode, source_agent_id, initial_message)
-    out = _execute(
-        StartConversationWorkflow.run,
-        mode,
-        source_agent_id,
-        initial_message,
-        workflow_id=f"{WORKFLOW_ID_PREFIX_START}{uuid.uuid4().hex}",
-    )
-    return ConversationStateResponse.model_validate(out)
+    return _run(_direct_service().start_conversation, mode, source_agent_id, initial_message)
 
 
 def send_message(conversation_id: str, message: str) -> ConversationStateResponse:
-    """Send a message, via Temporal when enabled else in-process.
+    """Send a message in-process.
 
+    Preconditions:
+        - Arguments match ``AgentStudioService.send_message``.
     Postconditions:
         - Returns the updated ``ConversationStateResponse``; raises native
-          ``ValueError``/``LookupError`` on invalid input / unknown conversation, in
-          both dispatch modes.
+          ``ValueError``/``LookupError`` on invalid input / unknown conversation.
+        - Raises ``RuntimeError`` if the call exceeds ``AUTHORING_TIMEOUT_S``.
     """
-    if not _temporal_enabled():
-        return _direct_service().send_message(conversation_id, message)
-    out = _execute(
-        SendMessageWorkflow.run,
-        conversation_id,
-        message,
-        workflow_id=f"{WORKFLOW_ID_PREFIX_MSG}{conversation_id}-{uuid.uuid4().hex}",
-    )
-    return ConversationStateResponse.model_validate(out)
+    return _run(_direct_service().send_message, conversation_id, message)
 
 
 def clone_from_registry(agent_id: str) -> AgentDefinition:
-    """Clone a registered agent into a refine-mode draft, via Temporal when enabled
-    else in-process.
+    """Clone a registered agent into a refine-mode draft in-process.
 
+    Preconditions:
+        - ``agent_id`` is the registry id to clone.
     Postconditions:
-        - Returns the cloned ``AgentDefinition``; raises native ``LookupError`` when
-          ``agent_id`` names no registered agent, in both dispatch modes.
+        - Returns the cloned ``AgentDefinition``; raises native ``LookupError``
+          when ``agent_id`` names no registered agent.
+        - Raises ``RuntimeError`` if the call exceeds ``AUTHORING_TIMEOUT_S``.
     """
-    if not _temporal_enabled():
-        return _direct_service().clone_from_registry(agent_id)
-    out = _execute(
-        CloneFromRegistryWorkflow.run,
-        agent_id,
-        workflow_id=f"{WORKFLOW_ID_PREFIX_CLONE}{agent_id}-{uuid.uuid4().hex}",
-    )
-    return AgentDefinition.model_validate(out)
+    return _run(_direct_service().clone_from_registry, agent_id)
 
 
 def save_agent(definition: AgentDefinition) -> tuple[AgentManifest, bool]:
-    """Save + register a definition, via Temporal when enabled else in-process.
+    """Save + register a definition in-process.
 
     Mirrors ``AgentStudioService.save_agent``'s return shape so the route stays
-    structurally identical regardless of dispatch mode.
+    structurally identical.
 
+    Preconditions:
+        - ``definition`` is an ``AgentDefinition``.
     Postconditions:
-        - Returns ``(AgentManifest, created)``; raises native ``ValueError`` when the
-          definition is not ready to save, in both dispatch modes.
+        - Returns ``(AgentManifest, created)``; raises native ``ValueError`` when
+          the definition is not ready to save.
+        - Raises ``RuntimeError`` if the call exceeds ``AUTHORING_TIMEOUT_S``.
     """
-    if not _temporal_enabled():
-        return _direct_service().save_agent(definition)
-    out = _execute(
-        SaveAgentWorkflow.run,
-        definition.model_dump(),
-        workflow_id=f"{WORKFLOW_ID_PREFIX_SAVE}{uuid.uuid4().hex}",
-    )
-    return AgentManifest.model_validate(out["manifest"]), out["created"]
+    return _run(_direct_service().save_agent, definition)
