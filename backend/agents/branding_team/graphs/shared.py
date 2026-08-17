@@ -34,14 +34,13 @@ from llm_service import get_strands_model
 #   asset_wiki_planner) under one dial, so ops can tune per-phase cost/
 #   quality via ``LLM_MODEL_branding_<phase>`` without a code change.
 # - ``branding_compositor`` (``COMPOSITOR_AGENT_KEY``, via ``build_compositor``)
-#   for the two phase-terminal join agents — ``visual_compositor`` and
-#   ``governance_compositor`` — that assemble a phase's full set of
-#   upstream fragments into that phase's structured output. This is a
-#   distinct role from any single phase's specialists (broad-context
-#   synthesis across many fragments, not one bounded task) and cuts across
-#   phases 3 and 5, so it gets its own tier rather than inheriting its
-#   phase's key. Phase 4 has no compositor: its fragments are merged
-#   deterministically in Python instead.
+#   for the remaining phase-terminal join agent — ``visual_compositor`` —
+#   that assembles a phase's full set of upstream fragments into that
+#   phase's structured output. This is a distinct role from any single
+#   phase's specialists (broad-context synthesis across many fragments,
+#   not one bounded task), so it gets its own tier rather than inheriting
+#   its phase's key. Phases 4 and 5 have no compositor: their fragments
+#   are merged deterministically in Python instead.
 #
 # ``BrandComplianceAgent`` (outside the graph) is deliberately excluded: it
 # is a keyword-matching ``@dataclass`` with no LLM call, so no agent_key
@@ -164,13 +163,13 @@ def build_compositor(
 ) -> Agent:
     """Create a phase-terminal join agent on the shared ``branding_compositor`` tier.
 
-    Thin wrapper over :func:`build_agent` that pins ``agent_key=COMPOSITOR_AGENT_KEY``
-    so the phases that still have a compositor (``visual_compositor``,
-    ``governance_compositor``) share one call site for that routing decision,
-    instead of each phase file inlining ``build_agent(..., agent_key=COMPOSITOR_AGENT_KEY)``
-    and risking the key drifting out of sync across phases. Always JSON mode
-    (every compositor assembles its phase's fragments into a structured
-    ``*Output`` document).
+    Thin wrapper over :func:`build_agent` that pins ``agent_key=COMPOSITOR_AGENT_KEY``,
+    keeping that routing decision at one call site rather than inlining
+    ``build_agent(..., agent_key=COMPOSITOR_AGENT_KEY)`` in the phase file
+    (``visual_compositor``, the only remaining compositor — Phases 4 and 5
+    now merge their fragments deterministically in Python instead). Always
+    JSON mode (every compositor assembles its phase's fragments into a
+    structured ``*Output`` document).
 
     Parameters
     ----------
