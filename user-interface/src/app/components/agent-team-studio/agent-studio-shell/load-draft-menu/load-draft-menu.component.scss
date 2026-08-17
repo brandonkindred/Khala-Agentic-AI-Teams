@@ -51,6 +51,17 @@
     gap: 8px;
   }
 
+  // Overrides Material's default `width: 100%` on `mat-menu-item` so the
+  // load button sizes to its content instead of crowding out the sibling
+  // options trigger in the `&__row` flex layout.
+  &__load {
+    width: auto;
+  }
+
+  &__options {
+    flex: 0 0 auto;
+  }
+
   &__body {
     display: flex;
     flex-direction: column;

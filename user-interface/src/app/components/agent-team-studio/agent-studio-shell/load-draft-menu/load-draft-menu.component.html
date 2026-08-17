@@ -28,20 +28,31 @@
   }
 
   @for (draft of drafts(); track draft.draft_id) {
-    <button
-      mat-menu-item
-      type="button"
-      class="load-draft-menu__row"
-      [matMenuTriggerFor]="rowMenu"
-      [disabled]="isDeleting(draft.draft_id)"
-    >
-      <span class="load-draft-menu__body">
-        <span class="load-draft-menu__name">{{ draft.name }}</span>
-        <span class="load-draft-menu__when">{{ draft.updated_at | date: 'medium' }}</span>
-      </span>
-    </button>
+    <span class="load-draft-menu__row">
+      <button
+        mat-menu-item
+        type="button"
+        class="load-draft-menu__load"
+        [disabled]="isDeleting(draft.draft_id)"
+        (click)="openDraft(draft.draft_id)"
+      >
+        <span class="load-draft-menu__body">
+          <span class="load-draft-menu__name">{{ draft.name }}</span>
+          <span class="load-draft-menu__when">{{ draft.updated_at | date: 'medium' }}</span>
+        </span>
+      </button>
+      <button
+        mat-icon-button
+        type="button"
+        class="load-draft-menu__options"
+        aria-label="Draft options"
+        [matMenuTriggerFor]="rowMenu"
+        [disabled]="isDeleting(draft.draft_id)"
+      >
+        <mat-icon>more_vert</mat-icon>
+      </button>
+    </span>
     <mat-menu #rowMenu="matMenu">
-      <button mat-menu-item type="button" (click)="openDraft(draft.draft_id)">Load</button>
       <button mat-menu-item type="button" (click)="confirmDelete(draft)">
         <mat-icon>delete</mat-icon>
         Delete

@@ -8,6 +8,7 @@ import { MatFormFieldModule } from '@angular/material/form-field';
 import { MatIconModule } from '@angular/material/icon';
 import { MatInputModule } from '@angular/material/input';
 import { MatProgressSpinnerModule } from '@angular/material/progress-spinner';
+import { extractErrorDetail } from '../../../../core/error-handler.interceptor';
 import { AgentStudioApiService } from '../../../../services/agent-studio-api.service';
 import type { AgentStudioDraftSummary } from '../../../../models/agent-studio.model';
 
@@ -76,7 +77,7 @@ export class RenameDraftDialogComponent {
         next: (summary) => this.ref.close(summary),
         error: (err) => {
           this.busy.set(false);
-          this.serverError.set(err?.error?.detail ?? err?.message ?? 'Failed to rename draft.');
+          this.serverError.set(extractErrorDetail(err, 'Failed to rename draft.'));
         },
       });
   }

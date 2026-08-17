@@ -1,4 +1,14 @@
-import { ChangeDetectionStrategy, Component, EventEmitter, Input, Output, inject, signal } from '@angular/core';
+import {
+  ChangeDetectionStrategy,
+  Component,
+  DestroyRef,
+  EventEmitter,
+  Input,
+  Output,
+  inject,
+  signal,
+} from '@angular/core';
+import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { DatePipe } from '@angular/common';
 import { MatButtonModule } from '@angular/material/button';
 import { MatDialog } from '@angular/material/dialog';
@@ -35,6 +45,7 @@ const PAGE_SIZE = 10;
 export class LoadDraftMenuComponent {
   private readonly facade = inject(AgentStudioFacade);
   private readonly dialog = inject(MatDialog);
+  private readonly destroyRef = inject(DestroyRef);
 
   /** Disables the trigger while the shell is mid-hydration from a prior selection. */
   @Input() busy = false;
@@ -135,57 +146,64 @@ export class LoadDraftMenuComponent {
     this.dialog
       .open<ConfirmDialogComponent, ConfirmDialogData, boolean>(ConfirmDialogComponent, { data })
       .afterClosed()
+      .pipe(takeUntilDestroyed(this.destroyRef))
       .subscribe((confirmed) => {
         if (confirmed !== true) return;
         this.deletingIds.update((ids) => new Set(ids).add(draft.draft_id));
-        this.facade.deleteDraft(draft.draft_id).subscribe({
-          next: () => {
-            this.drafts.update((rows) => rows.filter((row) => row.draft_id !== draft.draft_id));
-            this.deletingIds.update((ids) => {
-              const next = new Set(ids);
-              next.delete(draft.draft_id);
-              return next;
-            });
-            this.nextOffset = this.drafts().length;
-            const refetch = this.loading();
-            // Invalidate any in-flight "Show older" fetch: its offset was
-            // computed against the pre-delete list, so its response would
-            // append a skipped/duplicated boundary row. Bumping the token
-            // makes fetchPage discard that stale response on arrival.
-            this.openToken += 1;
-            if (refetch) {
-              this.fetchPage(this.openToken);
-            }
-            this.draftDeleted.emit(draft.draft_id);
-          },
-          error: (err) => {
-            this.deletingIds.update((ids) => {
-              const next = new Set(ids);
-              next.delete(draft.draft_id);
-              return next;
-            });
-            this.error.set(extractErrorDetail(err, 'Failed to delete draft.'));
-          },
-        });
+        this.facade
+          .deleteDraft(draft.draft_id)
+          .pipe(takeUntilDestroyed(this.destroyRef))
+          .subscribe({
+            next: () => {
+              this.drafts.update((rows) => rows.filter((row) => row.draft_id !== draft.draft_id));
+              this.deletingIds.update((ids) => {
+                const next = new Set(ids);
+                next.delete(draft.draft_id);
+                return next;
+              });
+              this.nextOffset = this.drafts().length;
+              const refetch = this.loading();
+              // Invalidate any in-flight "Show older" fetch: its offset was
+              // computed against the pre-delete list, so its response would
+              // append a skipped/duplicated boundary row. Bumping the token
+              // makes fetchPage discard that stale response on arrival.
+              this.openToken += 1;
+              if (refetch) {
+                this.fetchPage(this.openToken);
+              }
+              this.draftDeleted.emit(draft.draft_id);
+            },
+            error: (err) => {
+              this.deletingIds.update((ids) => {
+                const next = new Set(ids);
+                next.delete(draft.draft_id);
+                return next;
+              });
+              this.error.set(extractErrorDetail(err, 'Failed to delete draft.'));
+            },
+          });
       });
   }
 
   private fetchPage(token: number): void {
     this.loading.set(true);
     this.error.set(null);
-    this.facade.listDrafts(PAGE_SIZE, this.nextOffset).subscribe({
-      next: (rows) => {
-        if (token !== this.openToken) return;
-        this.drafts.update((existing) => [...existing, ...rows]);
-        this.hasMore.set(rows.length >= PAGE_SIZE);
-        this.nextOffset += rows.length;
-        this.loading.set(false);
-      },
-      error: (err) => {
-        if (token !== this.openToken) return;
-        this.loading.set(false);
-        this.error.set(extractErrorDetail(err, 'Failed to load drafts.'));
-      },
-    });
+    this.facade
+      .listDrafts(PAGE_SIZE, this.nextOffset)
+      .pipe(takeUntilDestroyed(this.destroyRef))
+      .subscribe({
+        next: (rows) => {
+          if (token !== this.openToken) return;
+          this.drafts.update((existing) => [...existing, ...rows]);
+          this.hasMore.set(rows.length >= PAGE_SIZE);
+          this.nextOffset += rows.length;
+          this.loading.set(false);
+        },
+        error: (err) => {
+          if (token !== this.openToken) return;
+          this.loading.set(false);
+          this.error.set(extractErrorDetail(err, 'Failed to load drafts.'));
+        },
+      });
   }
 }
