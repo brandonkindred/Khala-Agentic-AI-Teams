@@ -221,9 +221,13 @@ export class AgentStudioShellComponent {
     const initialName = this.state.currentDraftName();
     if (!draftId || initialName == null) return;
     const data: RenameDraftDialogData = { draftId, initialName };
+    // `injector` is the shell's session injector so the overlay can resolve
+    // `AgentStudioFacade` (provided here, not `root`) — see `openSaveDraftDialog`.
+    // Without it, MatDialog instantiates the dialog from the root injector
+    // and the façade inject throws NullInjectorError.
     const ref = this.dialog.open<RenameDraftDialogComponent, RenameDraftDialogData, RenameDraftDialogResult>(
       RenameDraftDialogComponent,
-      { data, width: '420px', disableClose: true, closeOnNavigation: false },
+      { data, width: '420px', disableClose: true, closeOnNavigation: false, injector: this.injector },
     );
     ref.afterClosed().subscribe((result) => {
       if (!result) return;

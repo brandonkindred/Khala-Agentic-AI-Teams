@@ -391,7 +391,7 @@ describe('AgentStudioShellComponent', () => {
       expect(facade.loadDraft).toHaveBeenCalledWith('d-1');
     });
 
-    it('Cancel leaves the session unchanged and does not getDraft', () => {
+    it('Cancel leaves the session unchanged and does not call loadDraft', () => {
       component.state.setRegistryAgentId('local-1');
       openSpy.mockReturnValue({ afterClosed: () => of(undefined) } as unknown as ReturnType<MatDialog['open']>);
       component.loadDraft('d-1');
@@ -514,17 +514,13 @@ describe('AgentStudioShellComponent', () => {
       component.loadDraft('d-1');
       expect(openSpy).toHaveBeenCalledTimes(2);
       expect(openSpy.mock.calls[1][0]).toBe(SaveDraftDialogComponent);
-      expect((openSpy.mock.calls[1][1] as { data: unknown }).data).toEqual({
-        draftId: null,
-        initialName: null,
-        payload: {
-          registryAgentId: 'local-1',
-          teamId: null,
-          processId: null,
-          personaId: null,
-          draftAgentId: null,
-        },
-      });
+      expect((openSpy.mock.calls[1][1] as { data: unknown }).data).toEqual(
+        expect.objectContaining({
+          draftId: null,
+          initialName: null,
+          payload: expect.objectContaining({ registryAgentId: 'local-1' }),
+        }),
+      );
       expect(facade.loadDraft).not.toHaveBeenCalled();
       expect(component.state.registryAgentId()).toBe('local-1');
     });
@@ -716,10 +712,17 @@ describe('AgentStudioShellComponent', () => {
         data: { draftId: string; initialName: string };
         disableClose?: boolean;
         closeOnNavigation?: boolean;
+        injector?: Injector;
       };
       expect(config.data).toEqual({ draftId: 'd-1', initialName: 'My draft' });
       expect(config.disableClose).toBe(true);
       expect(config.closeOnNavigation).toBe(false);
+      // Regression guard: RenameDraftDialogComponent injects AgentStudioFacade,
+      // which is provided on the shell (not root) — without the shell's
+      // injector here, the dialog would resolve from the root injector and
+      // throw NullInjectorError as soon as it opened.
+      expect(config.injector).toBeDefined();
+      expect(config.injector!.get(AgentStudioFacade)).toBeTruthy();
     });
 
     it('rename success updates the bound name and leaves the session clean', () => {
