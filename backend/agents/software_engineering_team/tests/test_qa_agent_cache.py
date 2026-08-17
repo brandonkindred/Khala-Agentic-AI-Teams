@@ -1,10 +1,13 @@
 """Tests for QAExpertAgent's shared review-result cache.
 
 Mirrors ``test_code_review_cache.py``'s conventions for the analogous
-code-review submission-level cache: a ``_CountingClient`` counts LLM
-invocations so a hit (no call) can be distinguished from a miss (a call).
-Unlike the code-review chunk map phase, ``QAExpertAgent.run()`` calls are
-never parallelized against each other, so no locking is needed.
+code-review caches: a ``_CountingClient`` counts LLM invocations so a hit
+(no call) can be distinguished from a miss (a call). Unlike the code-review
+chunk map phase, ``QAExpertAgent.run()`` calls are never parallelized
+against each other, so no locking is needed. See ``qa_agent/agent.py``'s
+module-level comment for how this cache's key *shape* (whole-input hash)
+and caching *policy* (every genuine outcome, not just approved ones) map
+onto code review's submission- and chunk-level caches respectively.
 
 The cache itself (``shared.cache`` — Redis when configured, otherwise an
 in-process store) is cleared around every test by the autouse

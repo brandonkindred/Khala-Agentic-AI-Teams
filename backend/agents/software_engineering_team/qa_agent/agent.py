@@ -48,9 +48,13 @@ logger = logging.getLogger(__name__)
 # Shared review-result cache: keyed on the whole QAInput content plus the
 # resolved review model, so a byte-identical resubmission (e.g. across the
 # review->fix->re-review retry loop, or an unchanged sibling task) skips the
-# LLM call entirely. Same key design as code_review_agent.mapping's
-# submission-level cache. Backed by shared.cache (Redis, falls open to an
-# in-process store). Base stem; ``_review_cache_namespace()`` appends build id.
+# LLM call entirely. Same whole-input key *shape* as code_review_agent.
+# coordinator's submission-level cache, but code_review_agent.mapping's
+# chunk-level *policy*: every genuine outcome is cached regardless of
+# ``approved`` (see ``run()``'s ``is_fallback`` guard below), since this is a
+# single atomic call with no reduce phase to short-circuit. Backed by
+# shared.cache (Redis, falls open to an in-process store). Base stem;
+# ``_review_cache_namespace()`` appends build id.
 DEFAULT_REVIEW_CACHE_SIZE = 256  # QA_REVIEW_CACHE_SIZE, floor 0
 _REVIEW_CACHE_NAMESPACE = "qa:review:v1"
 
