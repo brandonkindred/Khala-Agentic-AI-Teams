@@ -145,12 +145,16 @@ is unset.
 ### 8. Agent Studio Temporal worker
 
 `_start_agent_studio_temporal_worker()`, gated on
-`UNIFIED_API_AGENT_STUDIO_TEMPORAL_WORKER` and `TEAM_CONFIGS["agent_studio"].enabled`.
+`UNIFIED_API_AGENT_STUDIO_TEMPORAL_WORKER`, `TEAM_CONFIGS["agent_studio"].enabled`,
+and Temporal being configured (`studio_temporal_enabled()`, i.e. `TEMPORAL_ADDRESS`
+set). When Temporal is not configured, the worker module is not even
+imported — the boot is skipped entirely, not a no-op call.
 
 Sole worker for `agent_platform.studio.temporal.TASK_QUEUE` (`agent-studio-queue`).
 Activities delegate to this process's `AgentStudioService` / `drafts_runtime`
 singletons. Authoring CRUD always runs in-process (no 1-activity workflows);
-this worker starter is a no-op unless workflows are restored.
+even when Temporal is configured, this worker starter is a no-op unless
+workflows are restored.
 
 ## Shutdown (after yield)
 
@@ -169,7 +173,7 @@ Order is load-bearing so buffered `llm_call_records` are not lost:
 | Worker | Lifespan step | Gate | Must not start from |
 |---|---|---|---|
 | Sandbox Temporal (`SANDBOX_TASK_QUEUE`) | 4 | `UNIFIED_API_SANDBOX_TEMPORAL_WORKER` | `team_service`, provisioning container, package import |
-| Studio Temporal (`agent-studio-queue`) | 8 | `UNIFIED_API_AGENT_STUDIO_TEMPORAL_WORKER` + team enabled (no-op; workflows removed) | any other process |
+| Studio Temporal (`agent-studio-queue`) | 8 | `UNIFIED_API_AGENT_STUDIO_TEMPORAL_WORKER` + team enabled + Temporal configured (no-op; workflows removed) | any other process |
 | Console run pruner | 5 | none (log-and-continue) | n/a |
 | Cognition graph sync | 6 | `NEO4J_BOLT_URL` | n/a |
 | Cognition scheduler | 7 | self-disables without Postgres | n/a |
@@ -179,7 +183,9 @@ different in-memory `Lifecycle` than this API's status/list/metrics routes —
 the reaper can then tear down a sandbox it wrongly believes idle. The same
 process-affinity rule applies to Studio's in-flight authoring singletons.
 
-The Studio Temporal row is retained only because the lifespan hook is unchanged;
-the starter now returns `False` (the 1-activity authoring workflows were removed),
-so no worker actually polls `agent-studio-queue` and it is not a runtime
-dependency for authoring CRUD.
+The Studio Temporal row is retained because the lifespan hook can still call the
+worker starter when Temporal is configured; that starter now returns `False`
+regardless (the 1-activity authoring workflows were removed), so no worker
+actually polls `agent-studio-queue` and it is not a runtime dependency for
+authoring CRUD. When Temporal is not configured, the lifespan skips the call
+(and the import) entirely.
