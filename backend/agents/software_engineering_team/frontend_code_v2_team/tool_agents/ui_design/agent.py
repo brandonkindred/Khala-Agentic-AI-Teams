@@ -4,10 +4,13 @@ from __future__ import annotations
 
 from strands import Agent  # noqa: F401  (kept so tests can monkeypatch this module's Agent)
 
+from software_engineering_team.shared.prompt_utils import JSON_OUTPUT_INSTRUCTION
+
 from ...models import ToolAgentPhaseInput
 from .._plan_base import PlanGeneratorToolAgent
 
-UI_DESIGNER_PLAN_PROMPT = """You are a UI / Visual Designer Agent. Your job is to define the visual system, layout, typography, color, spacing, component states. You ensure it looks like the design, not "close enough, ship it."
+UI_DESIGNER_PLAN_PROMPT = (
+    """You are a UI / Visual Designer Agent. Your job is to define the visual system, layout, typography, color, spacing, component states. You ensure it looks like the design, not "close enough, ship it."
 
 **Your expertise:**
 - High-fidelity screens (describe in text; structure and layout)
@@ -35,8 +38,9 @@ Return a single JSON object with:
 - "motion_guidelines": string (when and how animation is used)
 - "high_fidelity_summary": string (visual layout and key screens)
 - "summary": string (2-3 sentence summary of key UI decisions)
-
-Respond with valid JSON only. No explanatory text outside JSON.
+"""
+    + JSON_OUTPUT_INSTRUCTION
+    + """
 
 ---
 
@@ -45,6 +49,7 @@ Respond with valid JSON only. No explanatory text outside JSON.
 **Spec (excerpt):**
 {spec_content}
 """
+)
 
 
 class UiDesignToolAgent(PlanGeneratorToolAgent):

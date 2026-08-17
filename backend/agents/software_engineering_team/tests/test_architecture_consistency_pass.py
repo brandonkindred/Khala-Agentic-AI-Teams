@@ -12,6 +12,7 @@ both the chunk-review call and this pass's call in an end-to-end
 
 from __future__ import annotations
 
+import json
 from typing import Any, Dict, Optional
 
 import pytest
@@ -27,7 +28,10 @@ from code_review_agent.architecture_consistency_pass import (
 from code_review_agent.coordinator import run_coordinator
 from code_review_agent.false_positive_filter import CodebaseIndex
 from code_review_agent.models import CodeReviewInput, CodeReviewIssue
-from tests.submission_pass_two_call_client import SubmissionPassTwoCallClient
+from tests.submission_pass_two_call_client import (
+    SubmissionPassTwoCallClient,
+    wire_run_agent_via_reasoning_with_raw,
+)
 
 from llm_service.clients.dummy import DummyLLMClient
 from shared.dev_models.models import ArchitectureComponent, SystemArchitecture
@@ -334,6 +338,44 @@ def test_finds_and_returns_new_findings_drops_hallucinated_line() -> None:
     )
     assert len(result) == 1
     assert result[0].line is None  # line 9999 doesn't exist in a 2-line file
+
+
+@pytest.mark.parametrize(
+    "wrap",
+    [
+        pytest.param("fenced", id="fenced"),
+        pytest.param("prose", id="prose-prefixed"),
+    ],
+)
+def test_recovers_fenced_and_prose_wrapped_reply(
+    monkeypatch: pytest.MonkeyPatch, wrap: str
+) -> None:
+    """A formatting reply wrapped in a ```json fence or prefixed with prose still
+    parses: the pass routes it through the canonical recovery ladder rather than
+    a bare ``json.loads`` that would raise on the fence/prose."""
+    import code_review_agent.submission_pass_runner as runner_mod
+
+    payload = {
+        "findings": [
+            {
+                "severity": "high",
+                "category": "architecture",
+                "file_path": "app/main.py",
+                "description": "bypasses the repository layer",
+                "suggestion": "use the repository",
+            }
+        ]
+    }
+    inner = json.dumps(payload)
+    raw = f"```json\n{inner}\n```" if wrap == "fenced" else f"Sure, here you go: {inner}"
+    wire_run_agent_via_reasoning_with_raw(monkeypatch, runner_mod, raw)
+
+    result = find_architecture_and_redundancy_issues(
+        DummyLLMClient(),
+        _input(files={"app/main.py": "def bar():\n    return 1\n"}, architecture=_arch()),
+    )
+    assert len(result) == 1
+    assert result[0].category == "architecture"
 
 
 # --------------------------------------------------------------------------- parsing
