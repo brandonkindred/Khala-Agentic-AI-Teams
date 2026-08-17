@@ -51,6 +51,97 @@ from shared.hitl.models import HumanReview as HumanReview  # noqa: F401 — re-e
 NonEmptyStr = Annotated[str, Field(min_length=1)]
 
 # ---------------------------------------------------------------------------
+# Cardinality constants — single source for list/dict length constraints
+# ---------------------------------------------------------------------------
+# Each constraint below is the SOLE source of truth for a cardinality that is
+# otherwise stated twice: once in a Pydantic ``Field(min_length=..., max_length=...)``
+# on an agent-output model in this file, and once in the corresponding prompt
+# prose in ``agents.py`` (e.g. "3-5 core values"). Both sites interpolate the
+# same constant, so a schema edit and a prompt edit can no longer silently
+# desync. Constraints that happen to share a value (several ``(3, 4)`` pairs)
+# still get their own named constant: they are independent limits that coincide
+# today, and changing one must not change the others.
+#
+# Fixed-count constraints where ``min == max`` (a list of exactly N items) use a
+# single ``*_COUNT`` constant fed to both ``min_length`` and ``max_length``.
+
+# Phase 1 — Strategic Core
+CORE_VALUES_MIN = 3
+CORE_VALUES_MAX = 5
+AUDIENCE_SEGMENTS_MIN = 1
+AUDIENCE_SEGMENTS_MAX = 3
+DIFFERENTIATION_PILLARS_MIN = 2
+DIFFERENTIATION_PILLARS_MAX = 4
+
+# Phase 2 — Narrative & Messaging
+BOILERPLATE_VARIANTS_COUNT = 3
+ELEVATOR_PITCHES_COUNT = 3
+BRAND_ARCHETYPES_MIN = 1
+BRAND_ARCHETYPES_MAX = 2
+MESSAGING_PILLARS_MIN = 3
+MESSAGING_PILLARS_MAX = 4
+PERSONA_PROFILES_MIN = 2
+PERSONA_PROFILES_MAX = 3
+VOICE_PRINCIPLES_MIN = 3
+VOICE_PRINCIPLES_MAX = 4
+STYLE_DOS_MIN = 3
+STYLE_DOS_MAX = 4
+STYLE_DONTS_MIN = 3
+STYLE_DONTS_MAX = 4
+EDITORIAL_QUALITY_BAR_MIN = 3
+EDITORIAL_QUALITY_BAR_MAX = 4
+
+# Phase 3 — Visual & Expressive Identity
+COLOR_PALETTE_MIN = 5
+COLOR_PALETTE_MAX = 7
+TYPOGRAPHY_SYSTEM_MIN = 3
+TYPOGRAPHY_SYSTEM_MAX = 4
+MOTION_PRINCIPLES_MIN = 3
+MOTION_PRINCIPLES_MAX = 4
+LANGUAGE_DOS_MIN = 4
+LANGUAGE_DOS_MAX = 5
+LANGUAGE_DONTS_MIN = 4
+LANGUAGE_DONTS_MAX = 5
+
+# Phase 4 — Experience & Channel Activation
+CHANNEL_DOS_MIN = 3
+CHANNEL_DOS_MAX = 4
+CHANNEL_DONTS_MIN = 3
+CHANNEL_DONTS_MAX = 4
+CHANNEL_CONTENT_TYPES_MIN = 3
+CHANNEL_CONTENT_TYPES_MAX = 5
+BRAND_EXPERIENCE_PRINCIPLES_MIN = 3
+BRAND_EXPERIENCE_PRINCIPLES_MAX = 5
+SIGNATURE_MOMENTS_MIN = 3
+SIGNATURE_MOMENTS_MAX = 5
+SENSORY_ELEMENTS_MIN = 2
+SENSORY_ELEMENTS_MAX = 4
+NAMING_CONVENTIONS_MIN = 3
+NAMING_CONVENTIONS_MAX = 5
+TERMINOLOGY_GLOSSARY_MIN = 5
+TERMINOLOGY_GLOSSARY_MAX = 10
+BRAND_IN_ACTION_MIN = 3
+BRAND_IN_ACTION_MAX = 5
+
+# Phase 5 — Governance & Evolution
+APPROVAL_WORKFLOWS_MIN = 3
+APPROVAL_WORKFLOWS_MAX = 5
+AGENCY_BRIEFING_PROTOCOLS_MIN = 3
+AGENCY_BRIEFING_PROTOCOLS_MAX = 5
+ASSET_MANAGEMENT_GUIDANCE_MIN = 3
+ASSET_MANAGEMENT_GUIDANCE_MAX = 5
+WIKI_BACKLOG_MIN = 4
+WIKI_BACKLOG_MAX = 6
+TRAINING_ONBOARDING_MIN = 4
+TRAINING_ONBOARDING_MAX = 6
+BRAND_HEALTH_KPIS_MIN = 4
+BRAND_HEALTH_KPIS_MAX = 6
+REVIEW_TRIGGER_POINTS_MIN = 3
+REVIEW_TRIGGER_POINTS_MAX = 5
+BRAND_GUIDELINES_MIN = 5
+BRAND_GUIDELINES_MAX = 8
+
+# ---------------------------------------------------------------------------
 # Strict/soft derived-subclass pattern (see module docstring)
 # ---------------------------------------------------------------------------
 # Nested item models use ``_derive_strict_variant`` immediately below the
@@ -398,15 +489,16 @@ class CoreValuesOutput(BaseModel):
     """A set of brand core values.
 
     Requires non-empty content so Strands retries blank structured_output.
-    ``min_length``/``max_length`` encode the prompt's stated "3-5 core values".
+    ``min_length``/``max_length`` are single-sourced from ``CORE_VALUES_MIN``/
+    ``CORE_VALUES_MAX`` (the same constants the prompt interpolates).
     Uses ``CoreValueOutput`` (not the soft ``CoreValue``) so each value's
     fields are individually required — a blank value must fail validation
     instead of silently passing.
     """
 
     core_values: List[CoreValueOutput] = Field(
-        min_length=3,
-        max_length=5,
+        min_length=CORE_VALUES_MIN,
+        max_length=CORE_VALUES_MAX,
         description=(
             "for each value provide: value (the value name), behavioral_definition (what this "
             "value means in practice), and observable_behaviors (2-3 concrete behaviors that "
@@ -419,15 +511,16 @@ class AudienceSegmentsOutput(BaseModel):
     """A set of target audience segments.
 
     Requires non-empty content so Strands retries blank structured_output.
-    ``min_length``/``max_length`` encode the prompt's stated "1-3 target audience segments".
+    ``min_length``/``max_length`` are single-sourced from ``AUDIENCE_SEGMENTS_MIN``/
+    ``AUDIENCE_SEGMENTS_MAX`` (the same constants the prompt interpolates).
     Uses ``AudienceSegmentOutput`` (not the soft ``AudienceSegment``) so each
     segment's fields are individually required — a blank-name segment must
     fail validation instead of silently passing.
     """
 
     target_audience_segments: List[AudienceSegmentOutput] = Field(
-        min_length=1,
-        max_length=3,
+        min_length=AUDIENCE_SEGMENTS_MIN,
+        max_length=AUDIENCE_SEGMENTS_MAX,
         description=(
             "for each segment provide: name, description, pain_points (2-3), goals (2-3), and "
             "decision_drivers (2-3)"
@@ -439,15 +532,16 @@ class DifferentiationPillarsOutput(BaseModel):
     """A set of competitive differentiation pillars.
 
     Requires non-empty content so Strands retries blank structured_output.
-    ``min_length``/``max_length`` encode the prompt's stated "2-4 differentiation pillars".
+    ``min_length``/``max_length`` are single-sourced from ``DIFFERENTIATION_PILLARS_MIN``/
+    ``DIFFERENTIATION_PILLARS_MAX`` (the same constants the prompt interpolates).
     Uses ``DifferentiationPillarOutput`` (not the soft ``DifferentiationPillar``)
     so each pillar's fields are individually required — a blank pillar must
     fail validation instead of silently passing.
     """
 
     differentiation_pillars: List[DifferentiationPillarOutput] = Field(
-        min_length=2,
-        max_length=4,
+        min_length=DIFFERENTIATION_PILLARS_MIN,
+        max_length=DIFFERENTIATION_PILLARS_MAX,
         description=(
             "for each pillar provide: pillar (the differentiator name), proof_points (2-3 "
             "evidence items), and competitive_context (how competitors fall short here)"
@@ -642,8 +736,9 @@ class BrandStoryOutput(BaseModel):
     """Agent-facing brand story schema.
 
     Requires non-empty content so Strands retries blank structured_output.
-    ``boilerplate_variants`` cardinality encodes the prompt's stated "3 versions
-    (short/medium/long)".
+    ``boilerplate_variants`` cardinality is single-sourced from
+    ``BOILERPLATE_VARIANTS_COUNT`` (the same constant the prompt interpolates)
+    and covers the prompt's short/medium/long versions.
     """
 
     brand_story: str = Field(
@@ -653,9 +748,9 @@ class BrandStoryOutput(BaseModel):
         min_length=1, description="a shorter, punchy version for hero sections"
     )
     boilerplate_variants: List[NonEmptyStr] = Field(
-        min_length=3,
-        max_length=3,
-        description="3 versions (short/medium/long) for press and bios",
+        min_length=BOILERPLATE_VARIANTS_COUNT,
+        max_length=BOILERPLATE_VARIANTS_COUNT,
+        description=f"{BOILERPLATE_VARIANTS_COUNT} versions (short/medium/long) for press and bios",
     )
 
 
@@ -671,20 +766,24 @@ class BrandArchetypesOutput(BrandStoryOutput):
     fail validation instead of silently passing.
     """
 
-    brand_archetypes: List[BrandArchetypeOutput] = Field(min_length=1, max_length=2)
+    brand_archetypes: List[BrandArchetypeOutput] = Field(
+        min_length=BRAND_ARCHETYPES_MIN, max_length=BRAND_ARCHETYPES_MAX
+    )
 
 
 class TaglineOutput(BrandArchetypesOutput):
     """Prior narrative carry-forward plus tagline / elevator pitches.
 
-    Uses ``ElevatorPitchOutput`` (not the soft ``ElevatorPitch``) so each
-    pitch's fields are individually required — three blank-tier/blank-pitch
-    entries must fail validation instead of silently passing.
+    Uses ``ElevatorPitchOutput`` (not the soft ``ElevatorPitch``) so each of
+    the ``ELEVATOR_PITCHES_COUNT`` pitch tiers is individually required — a
+    blank tier or blank pitch must fail validation instead of silently passing.
     """
 
     tagline: str = Field(min_length=1)
     tagline_rationale: str = Field(min_length=1)
-    elevator_pitches: List[ElevatorPitchOutput] = Field(min_length=3, max_length=3)
+    elevator_pitches: List[ElevatorPitchOutput] = Field(
+        min_length=ELEVATOR_PITCHES_COUNT, max_length=ELEVATOR_PITCHES_COUNT
+    )
 
 
 class MessagingFrameworkOutput(TaglineOutput):
@@ -696,7 +795,9 @@ class MessagingFrameworkOutput(TaglineOutput):
     validation instead of silently producing empty output.
     """
 
-    messaging_framework: List[MessagingPillarOutput] = Field(min_length=3, max_length=4)
+    messaging_framework: List[MessagingPillarOutput] = Field(
+        min_length=MESSAGING_PILLARS_MIN, max_length=MESSAGING_PILLARS_MAX
+    )
     audience_message_maps: List[AudienceMessageMapOutput] = Field(min_length=1)
 
 
@@ -708,25 +809,33 @@ class PersonaProfilesOutput(MessagingFrameworkOutput):
     fail validation instead of silently producing empty output.
     """
 
-    persona_profiles: List[PersonaProfileOutput] = Field(min_length=2, max_length=3)
+    persona_profiles: List[PersonaProfileOutput] = Field(
+        min_length=PERSONA_PROFILES_MIN, max_length=PERSONA_PROFILES_MAX
+    )
 
 
 class WritingGuidelinesBody(BaseModel):
     """Strict writing-guidelines body nested under ``writing_guidelines``.
 
     Field *names* match ``WritingGuidelines`` — kept separate (not collapsed)
-    because the *types* genuinely differ (``List[NonEmptyStr]`` with a required
-    ``min_length=3, max_length=4`` here vs. plain ``List[str]`` with empty
-    defaults there) and because collapsing would break
+    because the *types* genuinely differ (``List[NonEmptyStr]`` with required
+    length bounds here vs. plain ``List[str]`` with empty defaults there) and
+    because collapsing would break
     ``NarrativeMessagingOutput.writing_guidelines``'s no-argument default.
-    Cardinalities encode the prompt's stated "3-4" for each list. Story 3b
-    Step 1 finding: this pair is genuinely different, not safe to collapse.
+    Each list's cardinality is single-sourced from its own ``*_MIN``/``*_MAX``
+    constants (``VOICE_PRINCIPLES_*``, ``STYLE_DOS_*``, ``STYLE_DONTS_*``,
+    ``EDITORIAL_QUALITY_BAR_*``), the same constants the prompt interpolates.
+    Story 3b Step 1 finding: this pair is genuinely different, not safe to collapse.
     """
 
-    voice_principles: List[NonEmptyStr] = Field(min_length=3, max_length=4)
-    style_dos: List[NonEmptyStr] = Field(min_length=3, max_length=4)
-    style_donts: List[NonEmptyStr] = Field(min_length=3, max_length=4)
-    editorial_quality_bar: List[NonEmptyStr] = Field(min_length=3, max_length=4)
+    voice_principles: List[NonEmptyStr] = Field(
+        min_length=VOICE_PRINCIPLES_MIN, max_length=VOICE_PRINCIPLES_MAX
+    )
+    style_dos: List[NonEmptyStr] = Field(min_length=STYLE_DOS_MIN, max_length=STYLE_DOS_MAX)
+    style_donts: List[NonEmptyStr] = Field(min_length=STYLE_DONTS_MIN, max_length=STYLE_DONTS_MAX)
+    editorial_quality_bar: List[NonEmptyStr] = Field(
+        min_length=EDITORIAL_QUALITY_BAR_MIN, max_length=EDITORIAL_QUALITY_BAR_MAX
+    )
 
 
 class WritingGuidelinesOutput(PersonaProfilesOutput):
@@ -918,9 +1027,10 @@ class ChannelGuidelineOutput(BaseModel):
     """Agent-facing channel-guide schema for the six ``_make_channel_guide`` agents.
 
     Requires non-empty content so Strands retries blank structured_output.
-    ``min_length``/``max_length`` encode the prompt's stated cardinalities
-    ("3-4 best practices" / "3-4 things to avoid" / "3-5 recommended content
-    formats"). Field-for-field twin of ``ChannelGuideline``, which itself must
+    Each list's ``min_length``/``max_length`` is single-sourced from its own
+    ``CHANNEL_DOS_*`` / ``CHANNEL_DONTS_*`` / ``CHANNEL_CONTENT_TYPES_*``
+    constants (the same constants the prompt interpolates). Field-for-field
+    twin of ``ChannelGuideline``, which itself must
     stay soft (all-default) since ``test_orchestrator.py`` and
     ``ChannelActivationOutput.channel_guidelines`` construct/merge it with
     only a subset of fields populated.
@@ -928,9 +1038,11 @@ class ChannelGuidelineOutput(BaseModel):
 
     channel: str = Field(min_length=1)
     strategy: str = Field(min_length=1)
-    dos: List[NonEmptyStr] = Field(min_length=3, max_length=4)
-    donts: List[NonEmptyStr] = Field(min_length=3, max_length=4)
-    content_types: List[NonEmptyStr] = Field(min_length=3, max_length=5)
+    dos: List[NonEmptyStr] = Field(min_length=CHANNEL_DOS_MIN, max_length=CHANNEL_DOS_MAX)
+    donts: List[NonEmptyStr] = Field(min_length=CHANNEL_DONTS_MIN, max_length=CHANNEL_DONTS_MAX)
+    content_types: List[NonEmptyStr] = Field(
+        min_length=CHANNEL_CONTENT_TYPES_MIN, max_length=CHANNEL_CONTENT_TYPES_MAX
+    )
     frequency_guidance: str = Field(min_length=1)
 
 
@@ -1003,25 +1115,35 @@ class BrandExperiencePrinciplesOutput(BaseModel):
     """Agent-facing brand_experience_principler schema.
 
     Requires non-empty content so Strands retries blank structured_output.
-    ``min_length``/``max_length`` encode the prompt's stated cardinalities.
+    Each list's ``min_length``/``max_length`` and its ``Field(description=...)``
+    (rendered directly as this agent's prompt line, since this model is used
+    as ``AgentPromptSpec.structured_output``) are single-sourced from the
+    same ``*_MIN``/``*_MAX`` constant pair.
     """
 
     brand_experience_principles: List[NonEmptyStr] = Field(
-        min_length=3,
-        max_length=5,
-        description="3-5 principles that govern every brand touchpoint",
+        min_length=BRAND_EXPERIENCE_PRINCIPLES_MIN,
+        max_length=BRAND_EXPERIENCE_PRINCIPLES_MAX,
+        description=(
+            f"{BRAND_EXPERIENCE_PRINCIPLES_MIN}-{BRAND_EXPERIENCE_PRINCIPLES_MAX} principles "
+            "that govern every brand touchpoint"
+        ),
     )
     signature_moments: List[NonEmptyStr] = Field(
-        min_length=3,
-        max_length=5,
+        min_length=SIGNATURE_MOMENTS_MIN,
+        max_length=SIGNATURE_MOMENTS_MAX,
         description=(
-            "3-5 key moments in the customer journey that should feel distinctly on-brand"
+            f"{SIGNATURE_MOMENTS_MIN}-{SIGNATURE_MOMENTS_MAX} key moments in the customer "
+            "journey that should feel distinctly on-brand"
         ),
     )
     sensory_elements: List[NonEmptyStr] = Field(
-        min_length=2,
-        max_length=4,
-        description="2-4 sensory cues (sound, texture, scent, etc.) if applicable",
+        min_length=SENSORY_ELEMENTS_MIN,
+        max_length=SENSORY_ELEMENTS_MAX,
+        description=(
+            f"{SENSORY_ELEMENTS_MIN}-{SENSORY_ELEMENTS_MAX} sensory cues "
+            "(sound, texture, scent, etc.) if applicable"
+        ),
     )
 
 
@@ -1042,12 +1164,17 @@ class BrandArchitectureOutput(BaseModel):
         ),
     )
     naming_conventions: List[NonEmptyStr] = Field(
-        min_length=3, max_length=5, description="3-5 naming rules"
+        min_length=NAMING_CONVENTIONS_MIN,
+        max_length=NAMING_CONVENTIONS_MAX,
+        description=f"{NAMING_CONVENTIONS_MIN}-{NAMING_CONVENTIONS_MAX} naming rules",
     )
     terminology_glossary: Dict[NonEmptyStr, NonEmptyStr] = Field(
-        min_length=5,
-        max_length=10,
-        description="5-10 key terms with definitions (dict)",
+        min_length=TERMINOLOGY_GLOSSARY_MIN,
+        max_length=TERMINOLOGY_GLOSSARY_MAX,
+        description=(
+            f"{TERMINOLOGY_GLOSSARY_MIN}-{TERMINOLOGY_GLOSSARY_MAX} key terms with "
+            "definitions (dict)"
+        ),
     )
 
 
@@ -1055,15 +1182,16 @@ class BrandInActionOutput(BaseModel):
     """Agent-facing brand_in_action_illustrator schema.
 
     Requires non-empty content so Strands retries blank structured_output.
-    ``min_length``/``max_length`` encode the prompt's stated "3-5 applied examples".
+    ``min_length``/``max_length`` are single-sourced from ``BRAND_IN_ACTION_MIN``/
+    ``BRAND_IN_ACTION_MAX`` (the same constants the prompt interpolates).
     Uses ``BrandInActionExampleOutput`` (not the soft ``BrandInActionExample``)
     so each example's fields are individually required — a fully populated
     list of blank-field examples must fail validation.
     """
 
     brand_in_action: List[BrandInActionExampleOutput] = Field(
-        min_length=3,
-        max_length=5,
+        min_length=BRAND_IN_ACTION_MIN,
+        max_length=BRAND_IN_ACTION_MAX,
         description=(
             "each example has: context (where this applies, e.g. 'sales deck header'), "
             "correct_example (the on-brand version), incorrect_example (the off-brand "
@@ -1196,23 +1324,28 @@ class ApprovalWorkflowsOutput(BaseModel):
     """Agent-facing approval_workflow_designer schema.
 
     Requires non-empty content so Strands retries blank structured_output.
-    ``min_length``/``max_length`` encode the prompt's stated "3-5 workflows"
-    / "3-5 protocols". Uses ``ApprovalWorkflowOutput`` (not the soft
-    ``ApprovalWorkflow``) so each workflow's fields are individually
-    required.
+    Each list's ``min_length``/``max_length`` is single-sourced from its own
+    ``APPROVAL_WORKFLOWS_*`` / ``AGENCY_BRIEFING_PROTOCOLS_*`` constants (the
+    same constants the prompt interpolates). Uses ``ApprovalWorkflowOutput``
+    (not the soft ``ApprovalWorkflow``) so each workflow's fields are
+    individually required.
     """
 
     approval_workflows: List[ApprovalWorkflowOutput] = Field(
-        min_length=3,
-        max_length=5,
+        min_length=APPROVAL_WORKFLOWS_MIN,
+        max_length=APPROVAL_WORKFLOWS_MAX,
         description=(
-            "3-5 workflows, each with: asset_type, approvers (list), sla, escalation_path"
+            f"{APPROVAL_WORKFLOWS_MIN}-{APPROVAL_WORKFLOWS_MAX} workflows, each with: "
+            "asset_type, approvers (list), sla, escalation_path"
         ),
     )
     agency_briefing_protocols: List[NonEmptyStr] = Field(
-        min_length=3,
-        max_length=5,
-        description="3-5 protocols for briefing external agencies",
+        min_length=AGENCY_BRIEFING_PROTOCOLS_MIN,
+        max_length=AGENCY_BRIEFING_PROTOCOLS_MAX,
+        description=(
+            f"{AGENCY_BRIEFING_PROTOCOLS_MIN}-{AGENCY_BRIEFING_PROTOCOLS_MAX} protocols for "
+            "briefing external agencies"
+        ),
     )
 
 
@@ -1220,21 +1353,26 @@ class AssetWikiOutput(BaseModel):
     """Agent-facing asset_wiki_planner schema.
 
     Requires non-empty content so Strands retries blank structured_output.
-    ``min_length``/``max_length`` encode the prompt's stated "3-5 guidelines"
-    / "4-6 wiki entries". Uses ``WikiEntryOutput`` (not the soft
+    Each list's ``min_length``/``max_length`` is single-sourced from its own
+    ``ASSET_MANAGEMENT_GUIDANCE_*`` / ``WIKI_BACKLOG_*`` constants (the same
+    constants the prompt interpolates). Uses ``WikiEntryOutput`` (not the soft
     ``WikiEntry``) so each entry's fields are individually required.
     """
 
     asset_management_guidance: List[NonEmptyStr] = Field(
-        min_length=3,
-        max_length=5,
-        description="3-5 guidelines for managing brand assets",
+        min_length=ASSET_MANAGEMENT_GUIDANCE_MIN,
+        max_length=ASSET_MANAGEMENT_GUIDANCE_MAX,
+        description=(
+            f"{ASSET_MANAGEMENT_GUIDANCE_MIN}-{ASSET_MANAGEMENT_GUIDANCE_MAX} guidelines for "
+            "managing brand assets"
+        ),
     )
     wiki_backlog: List[WikiEntryOutput] = Field(
-        min_length=4,
-        max_length=6,
+        min_length=WIKI_BACKLOG_MIN,
+        max_length=WIKI_BACKLOG_MAX,
         description=(
-            "4-6 wiki entries, each with: title, summary, owners (list), "
+            f"{WIKI_BACKLOG_MIN}-{WIKI_BACKLOG_MAX} wiki entries, each with: title, summary, "
+            "owners (list), "
             "update_cadence. Cover: Brand North Star, Voice Playbook, Design System, Brand "
             "Review Intake, Channel Playbook, Governance Charter."
         ),
@@ -1245,15 +1383,16 @@ class TrainingOnboardingOutput(BaseModel):
     """Agent-facing training_planner schema.
 
     Requires non-empty content so Strands retries blank structured_output.
-    ``min_length``/``max_length`` encode the prompt's stated "4-6 training
-    initiatives".
+    ``min_length``/``max_length`` are single-sourced from ``TRAINING_ONBOARDING_MIN``/
+    ``TRAINING_ONBOARDING_MAX`` (the same constants the prompt interpolates).
     """
 
     training_onboarding_plan: List[NonEmptyStr] = Field(
-        min_length=4,
-        max_length=6,
+        min_length=TRAINING_ONBOARDING_MIN,
+        max_length=TRAINING_ONBOARDING_MAX,
         description=(
-            "4-6 training initiatives for onboarding new team members and maintaining "
+            f"{TRAINING_ONBOARDING_MIN}-{TRAINING_ONBOARDING_MAX} training initiatives for "
+            "onboarding new team members and maintaining "
             "brand literacy."
         ),
     )
@@ -1263,23 +1402,30 @@ class BrandHealthKPIsOutput(BaseModel):
     """Agent-facing kpi_designer schema.
 
     Requires non-empty content so Strands retries blank structured_output.
-    ``min_length``/``max_length`` encode the prompt's stated "4-6 KPIs" /
-    "3-5 events". Uses ``BrandHealthKPIOutput`` (not the soft
-    ``BrandHealthKPI``) so each KPI's fields are individually required.
+    Each list's ``min_length``/``max_length`` is single-sourced from its own
+    ``BRAND_HEALTH_KPIS_*`` / ``REVIEW_TRIGGER_POINTS_*`` constants (the same
+    constants the prompt interpolates). Uses ``BrandHealthKPIOutput`` (not the
+    soft ``BrandHealthKPI``) so each KPI's fields are individually required.
     """
 
     brand_health_kpis: List[BrandHealthKPIOutput] = Field(
-        min_length=4,
-        max_length=6,
-        description=("4-6 KPIs, each with: metric, measurement_method, target, review_frequency"),
+        min_length=BRAND_HEALTH_KPIS_MIN,
+        max_length=BRAND_HEALTH_KPIS_MAX,
+        description=(
+            f"{BRAND_HEALTH_KPIS_MIN}-{BRAND_HEALTH_KPIS_MAX} KPIs, each with: metric, "
+            "measurement_method, target, review_frequency"
+        ),
     )
     tracking_methodology: str = Field(
         min_length=1, description="paragraph describing the measurement approach"
     )
     review_trigger_points: List[NonEmptyStr] = Field(
-        min_length=3,
-        max_length=5,
-        description="3-5 events that should trigger a brand health review",
+        min_length=REVIEW_TRIGGER_POINTS_MIN,
+        max_length=REVIEW_TRIGGER_POINTS_MAX,
+        description=(
+            f"{REVIEW_TRIGGER_POINTS_MIN}-{REVIEW_TRIGGER_POINTS_MAX} events that should "
+            "trigger a brand health review"
+        ),
     )
 
 
@@ -1302,15 +1448,16 @@ class BrandGuidelinesOutput(BaseModel):
     """Agent-facing brand_rules_codifier schema.
 
     Requires non-empty content so Strands retries blank structured_output.
-    ``min_length``/``max_length`` encode the prompt's stated "5-8 governance
-    rules".
+    ``min_length``/``max_length`` are single-sourced from ``BRAND_GUIDELINES_MIN``/
+    ``BRAND_GUIDELINES_MAX`` (the same constants the prompt interpolates).
     """
 
     brand_guidelines: List[NonEmptyStr] = Field(
-        min_length=5,
-        max_length=8,
+        min_length=BRAND_GUIDELINES_MIN,
+        max_length=BRAND_GUIDELINES_MAX,
         description=(
-            "a list of 5-8 governance rules that everyone in the organisation must follow. "
+            f"a list of {BRAND_GUIDELINES_MIN}-{BRAND_GUIDELINES_MAX} governance rules that "
+            "everyone in the organisation must follow. "
             "Each rule is a single clear sentence."
         ),
     )
@@ -1516,12 +1663,13 @@ class ColorPaletteSystemOutput(BaseModel):
     """Agent-facing color_system_builder schema.
 
     Named to avoid colliding with mission ``ColorPalette``.
-    ``min_length``/``max_length`` encode the prompt's stated "5-7 colors".
+    ``min_length``/``max_length`` are single-sourced from ``COLOR_PALETTE_MIN``/
+    ``COLOR_PALETTE_MAX`` (the same constants the prompt interpolates).
     """
 
     color_palette: List[ColorEntryOutput] = Field(
-        min_length=5,
-        max_length=7,
+        min_length=COLOR_PALETTE_MIN,
+        max_length=COLOR_PALETTE_MAX,
         description=(
             "for each: name, hex_value, usage (where to use it), and "
             "psychological_rationale (why this color works for the brand)"
@@ -1532,12 +1680,13 @@ class ColorPaletteSystemOutput(BaseModel):
 class TypographySystemOutput(BaseModel):
     """Agent-facing typography_builder schema.
 
-    ``min_length``/``max_length`` encode the prompt's stated "3-4 type roles".
+    ``min_length``/``max_length`` are single-sourced from ``TYPOGRAPHY_SYSTEM_MIN``/
+    ``TYPOGRAPHY_SYSTEM_MAX`` (the same constants the prompt interpolates).
     """
 
     typography_system: List[TypographySpecOutput] = Field(
-        min_length=3,
-        max_length=4,
+        min_length=TYPOGRAPHY_SYSTEM_MIN,
+        max_length=TYPOGRAPHY_SYSTEM_MAX,
         description="role, font_family, weight_range, usage_notes",
     )
 
@@ -1558,7 +1707,8 @@ class IconographyOutput(BaseModel):
 class PhotographyVideoOutput(BaseModel):
     """Agent-facing photography_video_director schema.
 
-    ``motion_principles`` cardinality matches the prompt's stated "3-4 principles".
+    ``motion_principles`` cardinality is single-sourced from ``MOTION_PRINCIPLES_MIN``/
+    ``MOTION_PRINCIPLES_MAX`` (the same constants the prompt interpolates).
     """
 
     photography_direction: str = Field(
@@ -1568,16 +1718,21 @@ class PhotographyVideoOutput(BaseModel):
         min_length=1, description="pacing, tone, visual style for video content"
     )
     motion_principles: List[str] = Field(
-        min_length=3,
-        max_length=4,
-        description="3-4 principles for animation/motion design",
+        min_length=MOTION_PRINCIPLES_MIN,
+        max_length=MOTION_PRINCIPLES_MAX,
+        description=(
+            f"{MOTION_PRINCIPLES_MIN}-{MOTION_PRINCIPLES_MAX} principles for "
+            "animation/motion design"
+        ),
     )
 
 
 class VoiceToneOutput(BaseModel):
     """Agent-facing voice_tone_builder schema.
 
-    ``language_dos``/``language_donts`` match the prompt's stated "4-5" items.
+    ``language_dos``/``language_donts`` cardinalities are single-sourced from
+    ``LANGUAGE_DOS_*`` / ``LANGUAGE_DONTS_*`` (the same constants the prompt
+    interpolates).
     """
 
     voice_tone_spectrum: List[VoiceToneEntryOutput] = Field(
@@ -1588,10 +1743,14 @@ class VoiceToneOutput(BaseModel):
         ),
     )
     language_dos: List[str] = Field(
-        min_length=4, max_length=5, description="4-5 approved language patterns"
+        min_length=LANGUAGE_DOS_MIN,
+        max_length=LANGUAGE_DOS_MAX,
+        description=f"{LANGUAGE_DOS_MIN}-{LANGUAGE_DOS_MAX} approved language patterns",
     )
     language_donts: List[str] = Field(
-        min_length=4, max_length=5, description="4-5 language anti-patterns"
+        min_length=LANGUAGE_DONTS_MIN,
+        max_length=LANGUAGE_DONTS_MAX,
+        description=f"{LANGUAGE_DONTS_MIN}-{LANGUAGE_DONTS_MAX} language anti-patterns",
     )
 
 

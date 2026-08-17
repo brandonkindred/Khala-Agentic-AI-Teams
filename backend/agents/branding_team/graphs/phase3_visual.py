@@ -1,19 +1,24 @@
 """Phase 3 -- Visual & Expressive Identity (Graph).
 
-Three MoodBoardConceptualist variants fan out in parallel into a
-CreativeDirector collector, then an outer converge → specialist fan-out →
-compositor sequence finishes the visual identity.
+Three MoodBoardConceptualist variants fan out in parallel directly into
+converge_decider, then an outer converge → specialist fan-out → compositor
+sequence finishes the visual identity. The diverge fan-out no longer routes
+through an intermediate CreativeDirector collector agent: Strands' Graph
+engine assembles all three completed predecessors' outputs into
+converge_decider's input deterministically (in Python, no LLM call needed)
+once every entry-point node in the diverge batch has finished.
 
 This is intentionally a Graph rather than a Swarm. Agents built with
 ``structured_output=`` force Strands' structured-output tool and then
 stop the agent loop (``stop_loop=True``), so they never call
 ``handoff_to_agent``. The diverge step therefore uses the same
-fan-out/fan-in helper as Phase 1.
+fan-out/fan-in helper as Phase 1 -- also a direct multi-agent fan-in with
+no intermediate collector node.
 
 Pattern::
 
     MoodBoardConceptualist_Editorial ──┐
-    MoodBoardConceptualist_Minimalist ─┼──▶ CreativeDirector ──▶ converge_decider
+    MoodBoardConceptualist_Minimalist ─┼──▶ converge_decider
     MoodBoardConceptualist_Bold ───────┘         │
                                                  +--> logo_specifier ──────────┐
                                                  +--> color_system_builder ────┤
@@ -31,7 +36,6 @@ from strands.multiagent.graph import Graph, GraphBuilder
 from branding_team.agents import (
     make_color_system_builder,
     make_converge_decider,
-    make_creative_director,
     make_design_system_codifier,
     make_iconography_director,
     make_logo_specifier,
@@ -40,7 +44,7 @@ from branding_team.agents import (
     make_typography_builder,
     make_voice_tone_builder,
 )
-from branding_team.graphs.shared import build_agent, build_fan_out_fan_in
+from branding_team.graphs.shared import build_compositor, build_fan_out_fan_in
 from branding_team.models import VisualIdentityOutput
 
 _PHASE3_CONCEPTUALIST_VARIANTS: tuple[str, ...] = ("Editorial", "Minimalist", "Bold")
@@ -61,8 +65,9 @@ def build_phase3_graph() -> Graph:
     """Construct the Phase 3 Visual & Expressive Identity graph.
 
     Wires the module-level topology: three MoodBoardConceptualist variants fan out
-    into ``CreativeDirector``, then ``converge_decider`` fans out into the seven
-    visual specialists, which fan in to an inline ``visual_compositor`` join node.
+    directly into ``converge_decider`` (no intermediate collector node), which then
+    fans out into the seven visual specialists, which fan in to an inline
+    ``visual_compositor`` join node.
 
     Preconditions:
         None — the builder wires the fixed conceptualist variants and specialist
@@ -75,9 +80,14 @@ def build_phase3_graph() -> Graph:
     builder = GraphBuilder()
 
     # ------------------------------------------------------------------
-    # 1. Diverge fan-out → CreativeDirector collector
+    # 1. Diverge fan-out → converge_decider (direct fan-in, same shape as
+    #    Phase 1's five-specialist fan-in into positioning_synthesizer — no
+    #    intermediate collector node; Strands' Graph engine assembles every
+    #    completed predecessor's output into converge_decider's input once
+    #    the whole diverge batch (all three entry-point conceptualists)
+    #    finishes).
     # ------------------------------------------------------------------
-    creative_director = builder.add_node(make_creative_director(), node_id="CreativeDirector")
+    converge_node = builder.add_node(make_converge_decider(), node_id="converge_decider")
     build_fan_out_fan_in(
         builder,
         [
@@ -89,15 +99,12 @@ def build_phase3_graph() -> Graph:
             )
             for variant in _PHASE3_CONCEPTUALIST_VARIANTS
         ],
-        creative_director,
+        converge_node,
     )
 
     # ------------------------------------------------------------------
-    # 2. Converge + post-converge specialist fan-out
+    # 2. Post-converge specialist fan-out
     # ------------------------------------------------------------------
-    converge_node = builder.add_node(make_converge_decider(), node_id="converge_decider")
-    builder.add_edge(creative_director, converge_node)
-
     fan_out_nodes = [
         builder.add_node(factory(), node_id=node_id)
         for node_id, factory in _PHASE3_SPECIALIST_FACTORIES.items()
@@ -112,7 +119,7 @@ def build_phase3_graph() -> Graph:
     # it carries its own ``structured_output=`` so Strands forces a typed tool
     # call — the VisualIdentityOutput schema is the contract, not a prose
     # "output JSON" reminder.
-    compositor = build_agent(
+    compositor_agent = build_compositor(
         name="visual_compositor",
         description="Assembles all visual identity fragments into a unified VisualIdentityOutput.",
         system_prompt=(
@@ -120,12 +127,12 @@ def build_phase3_graph() -> Graph:
             "VisualIdentityOutput. Combine the moodboard candidates from the diverge phase, the creative "
             "refinement decision, logo suite, color palette, typography system, iconography style, "
             "illustration style, photography direction, video direction, motion principles, voice tone "
-            "spectrum, language dos/donts, and design system."
+            "spectrum, language dos/don'ts, and design system."
         ),
         structured_output=VisualIdentityOutput,
     )
-    compositor_node = builder.add_node(compositor, node_id="visual_compositor")
+    compositor = builder.add_node(compositor_agent, node_id="visual_compositor")
     for node in fan_out_nodes:
-        builder.add_edge(node, compositor_node)
+        builder.add_edge(node, compositor)
 
     return builder.build()
