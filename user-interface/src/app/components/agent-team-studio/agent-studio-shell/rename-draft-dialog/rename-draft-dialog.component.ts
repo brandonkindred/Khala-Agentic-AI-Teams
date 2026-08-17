@@ -8,8 +8,8 @@ import { MatFormFieldModule } from '@angular/material/form-field';
 import { MatIconModule } from '@angular/material/icon';
 import { MatInputModule } from '@angular/material/input';
 import { MatProgressSpinnerModule } from '@angular/material/progress-spinner';
-import { extractErrorDetail } from '../../../../core/error-handler.interceptor';
-import { AgentStudioApiService } from '../../../../services/agent-studio-api.service';
+import { extractErrorDetail } from '../../../../shared/extract-error-detail';
+import { AgentStudioFacade } from '../../../../services/agent-studio.facade';
 import type { AgentStudioDraftSummary } from '../../../../models/agent-studio.model';
 
 export interface RenameDraftDialogData {
@@ -42,7 +42,7 @@ export type RenameDraftDialogResult = AgentStudioDraftSummary;
   styleUrl: './rename-draft-dialog.component.scss',
 })
 export class RenameDraftDialogComponent {
-  private readonly api = inject(AgentStudioApiService);
+  private readonly facade = inject(AgentStudioFacade);
   private readonly destroyRef = inject(DestroyRef);
   readonly data = inject<RenameDraftDialogData>(MAT_DIALOG_DATA);
   readonly ref = inject<MatDialogRef<RenameDraftDialogComponent, RenameDraftDialogResult>>(
@@ -70,7 +70,7 @@ export class RenameDraftDialogComponent {
     }
     this.busy.set(true);
     this.serverError.set(null);
-    this.api
+    this.facade
       .renameDraft(this.data.draftId, trimmed)
       .pipe(takeUntilDestroyed(this.destroyRef))
       .subscribe({

@@ -4,11 +4,12 @@
   class="studio__draft-btn"
   [matMenuTriggerFor]="menu"
   [disabled]="busy"
+  (menuOpened)="onOpened()"
 >
   Load draft ▾
 </button>
 
-<mat-menu #menu="matMenu" (opened)="onOpened()" class="load-draft-menu__panel">
+<mat-menu #menu="matMenu" class="load-draft-menu__panel">
   @if (loading() && drafts().length === 0) {
     <div class="load-draft-menu__loading">
       <mat-spinner diameter="20" />
@@ -42,7 +43,7 @@
         </span>
       </button>
       <button
-        mat-icon-button
+        mat-menu-item
         type="button"
         class="load-draft-menu__options"
         aria-label="Draft options"
