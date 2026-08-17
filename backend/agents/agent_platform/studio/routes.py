@@ -9,14 +9,10 @@ CRUD:
     POST /api/agent-studio/agents                              — save + register a finished definition
 
 These handlers call :mod:`agent_platform.studio.temporal.dispatch`, which
-transparently picks the dispatch mode per call: a durable workflow → activity round
-trip via Temporal when it's configured, or a direct in-process call otherwise — both
-paths ultimately delegate to the process-wide
+delegates to the process-wide
 :class:`~agent_platform.studio.service.AgentStudioService` singleton
-(:func:`agent_platform.studio.runtime.get_studio_service`), so the routes
-below are unaware of which mode ran. When Temporal is enabled its worker runs
-in-process (started from the unified-API lifespan), so those activity threads share
-that singleton's conversation store with these handlers.
+(:func:`agent_platform.studio.runtime.get_studio_service`) in-process.
+Authoring CRUD does not start Temporal workflows.
 
 User-scoped Studio drafts are **sync store CRUD** (not Temporal) over
 :func:`agent_platform.studio.drafts_runtime.get_draft_store`. Bodies are an
@@ -32,11 +28,10 @@ opaque ``{name?, payload?}`` envelope; tenancy uses :func:`get_current_user_id`
 
 Tool discovery for the definition panel reuses the existing ``GET /api/llm-tools/``
 (no new route here). Handlers are synchronous ``def`` so FastAPI runs them in its
-threadpool (Temporal round-trips and store I/O stay off the event loop). Errors map
-cleanly: :class:`ValueError` → 400, :class:`LookupError` / missing draft → 404 — the
-dispatch layer surfaces those same native exceptions in both dispatch modes (re-raised
-from the workflow failure on the Temporal path, raised directly by the service on the
-direct path), so conversation/agent mapping here is unchanged either way.
+threadpool (store I/O stays off the event loop). Errors map cleanly:
+:class:`ValueError` → 400, :class:`LookupError` / missing draft → 404 — the
+dispatch layer lets the service's native exceptions propagate, so
+conversation/agent mapping here is unchanged.
 
 Auth: these routes carry no real authentication dependency, consistent with the
 other team routers on the Unified API. Authentication/authorization is expected to be
