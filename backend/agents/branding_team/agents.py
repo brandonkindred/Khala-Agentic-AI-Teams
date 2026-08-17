@@ -21,6 +21,38 @@ from strands import Agent
 
 from .graphs.shared import build_agent, phase_agent_key
 from .models import (
+    AUDIENCE_SEGMENTS_MAX,
+    AUDIENCE_SEGMENTS_MIN,
+    BRAND_ARCHETYPES_MAX,
+    BRAND_ARCHETYPES_MIN,
+    BRAND_IN_ACTION_MAX,
+    BRAND_IN_ACTION_MIN,
+    CHANNEL_CONTENT_TYPES_MAX,
+    CHANNEL_CONTENT_TYPES_MIN,
+    CHANNEL_DONTS_MAX,
+    CHANNEL_DONTS_MIN,
+    CHANNEL_DOS_MAX,
+    CHANNEL_DOS_MIN,
+    COLOR_PALETTE_MAX,
+    COLOR_PALETTE_MIN,
+    CORE_VALUES_MAX,
+    CORE_VALUES_MIN,
+    DIFFERENTIATION_PILLARS_MAX,
+    DIFFERENTIATION_PILLARS_MIN,
+    EDITORIAL_QUALITY_BAR_MAX,
+    EDITORIAL_QUALITY_BAR_MIN,
+    MESSAGING_PILLARS_MAX,
+    MESSAGING_PILLARS_MIN,
+    PERSONA_PROFILES_MAX,
+    PERSONA_PROFILES_MIN,
+    STYLE_DONTS_MAX,
+    STYLE_DONTS_MIN,
+    STYLE_DOS_MAX,
+    STYLE_DOS_MIN,
+    TYPOGRAPHY_SYSTEM_MAX,
+    TYPOGRAPHY_SYSTEM_MIN,
+    VOICE_PRINCIPLES_MAX,
+    VOICE_PRINCIPLES_MIN,
     ApprovalWorkflowsOutput,
     AssetWikiOutput,
     AudienceSegmentsOutput,
@@ -122,7 +154,7 @@ def make_purpose_vision_writer() -> Agent:
 _VALUES_ARTICULATOR_PROMPT = AgentPromptSpec(
     opening=(
         "You are a Values Articulator. Given a branding mission with optional seed values, "
-        "produce a list of 3-5 core values."
+        f"produce a list of {CORE_VALUES_MIN}-{CORE_VALUES_MAX} core values."
     ),
     structured_output=CoreValuesOutput,
 )
@@ -133,8 +165,9 @@ def make_values_articulator() -> Agent:
 
     Postconditions:
         Returns an ``Agent`` named ``values_articulator`` whose structured
-        output is a ``CoreValuesOutput`` listing 3-5 core values, each with
-        a behavioral definition and observable behaviors.
+        output is a ``CoreValuesOutput`` listing core values (count bounded by
+        ``CORE_VALUES_MIN``/``CORE_VALUES_MAX``), each with a behavioral
+        definition and observable behaviors.
     """
     return build_agent(
         name="values_articulator",
@@ -146,7 +179,10 @@ def make_values_articulator() -> Agent:
 
 
 _AUDIENCE_SEGMENTER_PROMPT = AgentPromptSpec(
-    opening="You are an Audience Segmenter. Given a branding mission, identify 1-3 target audience segments.",
+    opening=(
+        "You are an Audience Segmenter. Given a branding mission, identify "
+        f"{AUDIENCE_SEGMENTS_MIN}-{AUDIENCE_SEGMENTS_MAX} target audience segments."
+    ),
     structured_output=AudienceSegmentsOutput,
     closing="Ground your analysis in the company description and stated target audience.",
 )
@@ -157,8 +193,9 @@ def make_audience_segmenter() -> Agent:
 
     Postconditions:
         Returns an ``Agent`` named ``audience_segmenter`` whose structured
-        output is an ``AudienceSegmentsOutput`` describing 1-3 target
-        audience segments with pain points, goals, and decision drivers.
+        output is an ``AudienceSegmentsOutput`` describing target audience
+        segments (count bounded by ``AUDIENCE_SEGMENTS_MIN``/``AUDIENCE_SEGMENTS_MAX``)
+        with pain points, goals, and decision drivers.
     """
     return build_agent(
         name="audience_segmenter",
@@ -172,7 +209,8 @@ def make_audience_segmenter() -> Agent:
 _DIFFERENTIATION_MAPPER_PROMPT = AgentPromptSpec(
     opening=(
         "You are a Differentiation Mapper. Given a branding mission with optional "
-        "differentiators, produce 2-4 differentiation pillars."
+        f"differentiators, produce {DIFFERENTIATION_PILLARS_MIN}-{DIFFERENTIATION_PILLARS_MAX} "
+        "differentiation pillars."
     ),
     structured_output=DifferentiationPillarsOutput,
 )
@@ -184,7 +222,8 @@ def make_differentiation_mapper() -> Agent:
     Postconditions:
         Returns an ``Agent`` named ``differentiation_mapper`` whose
         structured output is a ``DifferentiationPillarsOutput`` listing
-        2-4 differentiation pillars with proof points and competitive
+        differentiation pillars (count bounded by ``DIFFERENTIATION_PILLARS_MIN``/
+        ``DIFFERENTIATION_PILLARS_MAX``) with proof points and competitive
         context.
     """
     return build_agent(
@@ -257,7 +296,8 @@ def make_storyteller() -> Agent:
 _ARCHETYPE_ANALYST_PROMPT = AgentPromptSpec(
     opening=(
         "You are a Brand Archetype Analyst. Review the brand story from Inputs from previous "
-        "nodes and the strategic core, then select 1-2 brand archetypes (e.g. The Sage, The "
+        f"nodes and the strategic core, then select {BRAND_ARCHETYPES_MIN}-{BRAND_ARCHETYPES_MAX} "
+        "brand archetypes (e.g. The Sage, The "
         "Creator, The Explorer). Carry forward brand_story, hero_narrative, and "
         "boilerplate_variants unchanged, and add:"
     ),
@@ -276,8 +316,9 @@ def make_archetype_analyst() -> Agent:
 
     Postconditions:
         Returns an ``Agent`` named ``ArchetypeAnalyst`` whose structured
-        output is a ``BrandArchetypesOutput`` selecting 1-2 brand
-        archetypes with rationale and personality traits, carrying
+        output is a ``BrandArchetypesOutput`` selecting brand archetypes
+        (count bounded by ``BRAND_ARCHETYPES_MIN``/``BRAND_ARCHETYPES_MAX``)
+        with rationale and personality traits, carrying
         forward the prior narrative fields unchanged.
     """
     return build_agent(
@@ -331,7 +372,8 @@ _MESSAGE_MAPPER_PROMPT = AgentPromptSpec(
     fields=(
         PromptFieldSpec(
             "messaging_framework",
-            "3-4 messaging pillars, each with: pillar, key_message, and proof_points",
+            f"{MESSAGING_PILLARS_MIN}-{MESSAGING_PILLARS_MAX} messaging pillars, each with: "
+            "pillar, key_message, and proof_points",
         ),
         PromptFieldSpec(
             "audience_message_maps",
@@ -368,7 +410,8 @@ _PERSONA_BUILDER_PROMPT = AgentPromptSpec(
     fields=(
         PromptFieldSpec(
             "persona_profiles",
-            "2-3 persona profiles, each with: name, role, demographics, psychographics, "
+            f"{PERSONA_PROFILES_MIN}-{PERSONA_PROFILES_MAX} persona profiles, each with: name, "
+            "role, demographics, psychographics, "
             "goals, frustrations, media_habits, jobs_to_be_done",
         ),
     ),
@@ -380,8 +423,9 @@ def make_persona_builder() -> Agent:
 
     Postconditions:
         Returns an ``Agent`` named ``PersonaBuilder`` whose structured
-        output is a ``PersonaProfilesOutput`` adding 2-3 persona profiles
-        to the prior narrative fields.
+        output is a ``PersonaProfilesOutput`` adding persona profiles (count
+        bounded by ``PERSONA_PROFILES_MIN``/``PERSONA_PROFILES_MAX``) to the
+        prior narrative fields.
     """
     return build_agent(
         name="PersonaBuilder",
@@ -399,10 +443,18 @@ _VOICE_PRINCIPLES_DRAFTER_PROMPT = AgentPromptSpec(
         "unchanged and produce writing_guidelines:"
     ),
     fields=(
-        PromptFieldSpec("voice_principles", "3-4 principles (e.g. 'Use a confident, human voice')"),
-        PromptFieldSpec("style_dos", "3-4 writing best practices"),
-        PromptFieldSpec("style_donts", "3-4 things to avoid"),
-        PromptFieldSpec("editorial_quality_bar", "3-4 quality standards every piece must meet"),
+        PromptFieldSpec(
+            "voice_principles",
+            f"{VOICE_PRINCIPLES_MIN}-{VOICE_PRINCIPLES_MAX} principles "
+            "(e.g. 'Use a confident, human voice')",
+        ),
+        PromptFieldSpec("style_dos", f"{STYLE_DOS_MIN}-{STYLE_DOS_MAX} writing best practices"),
+        PromptFieldSpec("style_donts", f"{STYLE_DONTS_MIN}-{STYLE_DONTS_MAX} things to avoid"),
+        PromptFieldSpec(
+            "editorial_quality_bar",
+            f"{EDITORIAL_QUALITY_BAR_MIN}-{EDITORIAL_QUALITY_BAR_MAX} quality standards every "
+            "piece must meet",
+        ),
     ),
     closing="\nThis is the final step in narrative development.",
 )
@@ -576,7 +628,8 @@ def make_logo_specifier() -> Agent:
 _COLOR_SYSTEM_BUILDER_PROMPT = AgentPromptSpec(
     opening=(
         "You are a Color System Builder. Based on the winning moodboard direction, define "
-        "5-7 colors. Include primary, secondary, accent, surface, and critical colors."
+        f"{COLOR_PALETTE_MIN}-{COLOR_PALETTE_MAX} colors. Include primary, secondary, accent, "
+        "surface, and critical colors."
     ),
     structured_output=ColorPaletteSystemOutput,
 )
@@ -587,8 +640,9 @@ def make_color_system_builder() -> Agent:
 
     Postconditions:
         Returns an ``Agent`` named ``color_system_builder`` whose output
-        defines 5-7 brand colors with hex values, usage, and
-        psychological rationale for the winning moodboard direction.
+        defines brand colors (count bounded by ``COLOR_PALETTE_MIN``/
+        ``COLOR_PALETTE_MAX``) with hex values, usage, and psychological
+        rationale for the winning moodboard direction.
     """
     return build_agent(
         name="color_system_builder",
@@ -602,7 +656,8 @@ def make_color_system_builder() -> Agent:
 _TYPOGRAPHY_BUILDER_PROMPT = AgentPromptSpec(
     opening=(
         "You are a Typography Builder. Based on the winning moodboard direction, define a "
-        "typography system with 3-4 type roles (display, body, caption, code). For each:"
+        f"typography system with {TYPOGRAPHY_SYSTEM_MIN}-{TYPOGRAPHY_SYSTEM_MAX} type roles "
+        "(display, body, caption, code). For each:"
     ),
     structured_output=TypographySystemOutput,
 )
@@ -613,8 +668,9 @@ def make_typography_builder() -> Agent:
 
     Postconditions:
         Returns an ``Agent`` named ``typography_builder`` whose output
-        defines a typography system of 3-4 type roles for the winning
-        moodboard direction.
+        defines a typography system for the winning moodboard direction; the
+        number of type roles is governed by ``TYPOGRAPHY_SYSTEM_MIN`` and
+        ``TYPOGRAPHY_SYSTEM_MAX``.
     """
     return build_agent(
         name="typography_builder",
@@ -775,9 +831,12 @@ def _channel_guide_prompt(channel: str, description: str) -> AgentPromptSpec:
         fields=(
             PromptFieldSpec("channel", f"'{channel}'"),
             PromptFieldSpec("strategy", "overall approach for this channel"),
-            PromptFieldSpec("dos", "3-4 best practices"),
-            PromptFieldSpec("donts", "3-4 things to avoid"),
-            PromptFieldSpec("content_types", "3-5 recommended content formats"),
+            PromptFieldSpec("dos", f"{CHANNEL_DOS_MIN}-{CHANNEL_DOS_MAX} best practices"),
+            PromptFieldSpec("donts", f"{CHANNEL_DONTS_MIN}-{CHANNEL_DONTS_MAX} things to avoid"),
+            PromptFieldSpec(
+                "content_types",
+                f"{CHANNEL_CONTENT_TYPES_MIN}-{CHANNEL_CONTENT_TYPES_MAX} recommended content formats",
+            ),
             PromptFieldSpec("frequency_guidance", "recommended cadence"),
         ),
         closing=f"Context: {description}",
@@ -915,8 +974,8 @@ def make_brand_architecture_builder() -> Agent:
 
 _BRAND_IN_ACTION_ILLUSTRATOR_PROMPT = AgentPromptSpec(
     opening=(
-        "You are a Brand-in-Action Illustrator. Create 3-5 applied examples showing correct "
-        "vs incorrect brand usage:"
+        f"You are a Brand-in-Action Illustrator. Create {BRAND_IN_ACTION_MIN}-{BRAND_IN_ACTION_MAX} "
+        "applied examples showing correct vs incorrect brand usage:"
     ),
     structured_output=BrandInActionOutput,
 )
@@ -927,7 +986,8 @@ def make_brand_in_action_illustrator() -> Agent:
 
     Postconditions:
         Returns an ``Agent`` named ``brand_in_action_illustrator`` whose
-        output produces 3-5 correct-vs-incorrect brand usage examples.
+        output produces correct-vs-incorrect brand usage examples (count
+        bounded by ``BRAND_IN_ACTION_MIN``/``BRAND_IN_ACTION_MAX``).
     """
     return build_agent(
         name="brand_in_action_illustrator",
@@ -1099,7 +1159,8 @@ def make_brand_rules_codifier() -> Agent:
 
     Postconditions:
         Returns an ``Agent`` named ``brand_rules_codifier`` whose output
-        codifies 5-8 top-level brand governance rules.
+        codifies top-level brand governance rules (count bounded by
+        ``BRAND_GUIDELINES_MIN``/``BRAND_GUIDELINES_MAX``).
     """
     return build_agent(
         name="brand_rules_codifier",

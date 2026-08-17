@@ -13,6 +13,7 @@ from typing import Any, Awaitable, Callable, Dict, Optional
 
 from shared.llm_recovery import extract_json_object
 
+from .cache_breakpoint import CacheBreakpoint
 from .interface import (
     LLMJsonParseError,
     LLMPermanentError,
@@ -29,7 +30,11 @@ def _flatten_system_prompt_content(system_prompt_content: Optional[list] = None)
 
     Shared by ``clients.dummy`` and ``strands_adapter`` — both accept Strands'
     structured system-prompt form (a list of content blocks, e.g.
-    ``[{"text": "..."}]``) alongside a plain ``system_prompt`` string.
+    ``[{"text": "..."}]``) alongside a plain ``system_prompt`` string. This is
+    the no-op path: a ``CacheBreakpoint`` marker (see
+    ``llm_service.cache_breakpoint``) is unwrapped to its plain ``.text`` like
+    any other block, so a client that doesn't understand cache breakpoints
+    (or a caller that doesn't need the structured form) sees ordinary text.
 
     Preconditions:
         - ``system_prompt_content`` is ``None`` or a list of content blocks.
@@ -41,7 +46,9 @@ def _flatten_system_prompt_content(system_prompt_content: Optional[list] = None)
         return ""
     parts: list = []
     for block in system_prompt_content:
-        if isinstance(block, dict):
+        if isinstance(block, CacheBreakpoint):
+            parts.append(block.text)
+        elif isinstance(block, dict):
             parts.append(str(block.get("text", "") or ""))
         else:
             parts.append(str(block))

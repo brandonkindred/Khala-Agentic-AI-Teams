@@ -16,6 +16,7 @@ function entry(over: Partial<LlmProviderEntry> = {}): LlmProviderEntry {
     model: 'claude-opus-4-8',
     base_url: '',
     sort_order: 0,
+    endpoint_id: '',
     api_key_configured: true,
     limit_exceeded: false,
     limit_type: '',
@@ -114,6 +115,20 @@ describe('LlmConfigDashboardComponent', () => {
     expect(component.providersLoading).toBe(false);
   });
 
+  it('shows the Endpoint ID field and hides Base URL for a RunPod add', () => {
+    component.startAdd();
+    fixture.detectChanges();
+    let el: HTMLElement = fixture.nativeElement;
+    expect(el.querySelector('[name="addEndpointId"]')).toBeNull();
+    expect(el.querySelector('[name="addBaseUrl"]')).not.toBeNull();
+
+    component.addForm!.provider = 'runpod';
+    fixture.detectChanges();
+    el = fixture.nativeElement;
+    expect(el.querySelector('[name="addEndpointId"]')).not.toBeNull();
+    expect(el.querySelector('[name="addBaseUrl"]')).toBeNull();
+  });
+
   it('adds a provider via the add form', () => {
     apiSpy.createProvider.mockReturnValue(of(listResponse([entry({ id: 5, label: 'New' })])));
     component.startAdd();
@@ -152,6 +167,42 @@ describe('LlmConfigDashboardComponent', () => {
     expect(component.providersError).toContain('API key is required');
   });
 
+  it('adds a RunPod provider with endpoint_id and api_key, sending an empty base_url', () => {
+    apiSpy.createProvider.mockReturnValue(of(listResponse([entry({ id: 6, provider: 'runpod' })])));
+    component.startAdd();
+    component.addForm!.label = 'RunPod';
+    component.addForm!.provider = 'runpod';
+    component.addForm!.api_key = 'sk-runpod';
+    component.addForm!.endpoint_id = 'abc123';
+    component.addForm!.base_url = 'http://should-be-dropped';
+    component.submitAdd();
+    expect(apiSpy.createProvider).toHaveBeenCalledWith(
+      expect.objectContaining({ provider: 'runpod', api_key: 'sk-runpod', endpoint_id: 'abc123', base_url: '' }),
+    );
+  });
+
+  it('blocks a RunPod add with no endpoint_id (required field)', () => {
+    component.startAdd();
+    component.addForm!.label = 'RunPod';
+    component.addForm!.provider = 'runpod';
+    component.addForm!.api_key = 'sk-runpod';
+    component.addForm!.endpoint_id = '   ';
+    component.submitAdd();
+    expect(apiSpy.createProvider).not.toHaveBeenCalled();
+    expect(component.providersError).toContain('endpoint ID is required');
+  });
+
+  it('blocks a RunPod add with no API key (required field, mirrors Claude)', () => {
+    component.startAdd();
+    component.addForm!.label = 'RunPod';
+    component.addForm!.provider = 'runpod';
+    component.addForm!.endpoint_id = 'abc123';
+    component.addForm!.api_key = '   ';
+    component.submitAdd();
+    expect(apiSpy.createProvider).not.toHaveBeenCalled();
+    expect(component.providersError).toContain('API key is required');
+  });
+
   it('allows an ollama add with no API key (key not required)', () => {
     apiSpy.createProvider.mockReturnValue(of(listResponse([])));
     component.startAdd();
@@ -175,6 +226,36 @@ describe('LlmConfigDashboardComponent', () => {
     component.startAdd();
     expect(component.hasUnsavedChanges()).toBe(false); // defaults to ollama
     component.addForm!.provider = 'claude';
+    expect(component.hasUnsavedChanges()).toBe(true);
+  });
+
+  it('reports unsaved changes when the add form has a typed endpoint_id', () => {
+    component.startAdd();
+    component.addForm!.provider = 'runpod';
+    expect(component.hasUnsavedChanges()).toBe(true); // provider switch alone already counts
+    component.cancelAdd();
+    component.startAdd();
+    component.addForm!.endpoint_id = 'abc123';
+    expect(component.hasUnsavedChanges()).toBe(true);
+  });
+
+  it('does not report unsaved changes for a pristine RunPod edit form', () => {
+    apiSpy.listProviders.mockReturnValue(
+      of(
+        listResponse([
+          entry({
+            id: 3,
+            provider: 'runpod',
+            base_url: 'https://api.runpod.ai/v2/abc123/openai/v1',
+            endpoint_id: 'abc123',
+          }),
+        ]),
+      ),
+    );
+    component.loadProviders();
+    component.startEdit(component.providers[0]);
+    expect(component.hasUnsavedChanges()).toBe(false);
+    component.editForm.endpoint_id = 'different';
     expect(component.hasUnsavedChanges()).toBe(true);
   });
 
@@ -212,6 +293,63 @@ describe('LlmConfigDashboardComponent', () => {
     component.editForm.label = 'Renamed';
     component.submitEdit();
     expect(apiSpy.updateProvider).toHaveBeenCalled();
+  });
+
+  it('pre-fills the endpoint ID when editing an existing RunPod entry', () => {
+    apiSpy.listProviders.mockReturnValue(
+      of(
+        listResponse([
+          entry({
+            id: 3,
+            provider: 'runpod',
+            base_url: 'https://api.runpod.ai/v2/abc123/openai/v1',
+            endpoint_id: 'abc123',
+            api_key_configured: true,
+          }),
+        ]),
+      ),
+    );
+    component.loadProviders();
+    component.startEdit(component.providers[0]);
+    expect(component.editForm.endpoint_id).toBe('abc123');
+  });
+
+  it('allows an edit that keeps an existing RunPod entry with endpoint_id left blank', () => {
+    apiSpy.listProviders.mockReturnValue(
+      of(
+        listResponse([
+          entry({
+            id: 3,
+            provider: 'runpod',
+            base_url: 'https://api.runpod.ai/v2/abc123/openai/v1',
+            endpoint_id: 'abc123',
+            api_key_configured: true,
+          }),
+        ]),
+      ),
+    );
+    component.loadProviders();
+    apiSpy.updateProvider.mockReturnValue(of(listResponse([entry({ id: 3, provider: 'runpod' })])));
+    component.startEdit(component.providers[0]);
+    expect(component.editForm.endpoint_id).toBe('abc123'); // pre-filled from entry.endpoint_id
+    component.editForm.label = 'Renamed';
+    component.editForm.endpoint_id = ''; // operator clears it without retyping
+    component.submitEdit();
+    expect(apiSpy.updateProvider).toHaveBeenCalledWith(3, expect.objectContaining({ endpoint_id: '' }));
+  });
+
+  it('blocks switching an existing entry to RunPod with no endpoint_id typed', () => {
+    apiSpy.listProviders.mockReturnValue(
+      of(listResponse([entry({ id: 3, provider: 'ollama', api_key_configured: false })])),
+    );
+    component.loadProviders();
+    component.startEdit(component.providers[0]);
+    component.editForm.provider = 'runpod';
+    component.editForm.api_key = 'sk-runpod';
+    component.editForm.endpoint_id = '';
+    component.submitEdit();
+    expect(apiSpy.updateProvider).not.toHaveBeenCalled();
+    expect(component.providersError).toContain('endpoint ID is required');
   });
 
   it('rejects an add with a blank label', () => {

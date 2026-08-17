@@ -191,6 +191,17 @@ def test_flatten_system_prompt_content_handles_absence_and_non_dict_blocks() -> 
     assert _flatten_system_prompt_content(["already-a-string"]) == "already-a-string"
 
 
+def test_flatten_system_prompt_content_unwraps_cache_breakpoint() -> None:
+    """A CacheBreakpoint reaching the no-op flatten path (e.g. a backing client
+    that doesn't support caching) contributes its plain ``.text`` — never the
+    dataclass's ``repr`` — so the flattened string is identical to what a plain
+    string segment would have produced."""
+    from llm_service.cache_breakpoint import CacheBreakpoint
+
+    assert _flatten_system_prompt_content([CacheBreakpoint("stable prefix")]) == "stable prefix"
+    assert _flatten_system_prompt_content([CacheBreakpoint("a"), {"text": "b"}, "c"]) == "abc"
+
+
 def test_flatten_skips_unknown_blocks() -> None:
     messages = [
         {
@@ -409,6 +420,86 @@ def test_stream_combines_system_prompt_and_system_prompt_content() -> None:
         "role": "system",
         "content": "You are a QA expert.\n\nFollow the house style.",
     }
+
+
+class _CachingRecordingClient(_RecordingClient):
+    """``_RecordingClient`` variant whose backing wire protocol supports
+    prompt caching — used to exercise the "preserve the CacheBreakpoint marker"
+    branch of ``stream()``, as opposed to the "flatten to plain text" default
+    every other test double takes."""
+
+    def supports_prompt_caching(self) -> bool:
+        return True
+
+
+def test_stream_preserves_cache_breakpoint_when_client_supports_caching() -> None:
+    """A CacheBreakpoint in system_prompt_content survives intact — not
+    flattened to text — as a segment in the system message's content list,
+    when the backing client opts into prompt caching."""
+    from llm_service.cache_breakpoint import CacheBreakpoint
+
+    client = _CachingRecordingClient({"ok": True})
+    model = LLMClientModel(client)
+    breakpoint_marker = CacheBreakpoint("stable spec excerpt")
+
+    _drain(
+        model.stream(
+            messages=[{"role": "user", "content": [{"text": "hi"}]}],
+            system_prompt="lead-in",
+            system_prompt_content=[breakpoint_marker, {"text": "trailer"}],
+        )
+    )
+
+    call = client.chat_calls[0]
+    assert call["messages"][0] == {
+        "role": "system",
+        "content": ["lead-in", breakpoint_marker, "trailer"],
+    }
+
+
+def test_stream_flattens_cache_breakpoint_when_client_lacks_caching() -> None:
+    """The same input as above, but through a client that does NOT support
+    prompt caching, must flatten to plain text exactly as it did before the
+    caching feature existed — no CacheBreakpoint object leaks onto the wire,
+    no error is raised (the documented no-op contract)."""
+    from llm_service.cache_breakpoint import CacheBreakpoint
+
+    client = _RecordingClient({"ok": True})
+    model = LLMClientModel(client)
+    assert model.supports_prompt_caching() is False
+
+    _drain(
+        model.stream(
+            messages=[{"role": "user", "content": [{"text": "hi"}]}],
+            system_prompt="lead-in",
+            system_prompt_content=[CacheBreakpoint("stable spec excerpt"), {"text": "trailer"}],
+        )
+    )
+
+    call = client.chat_calls[0]
+    assert call["messages"][0] == {
+        "role": "system",
+        "content": "lead-in\n\nstable spec excerpttrailer",
+    }
+
+
+def test_stream_with_no_breakpoint_is_unaffected_by_caching_capable_client() -> None:
+    """No CacheBreakpoint anywhere -> identical flattened-string output
+    regardless of the backing client's caching capability (the branch point is
+    marker presence, not client capability alone)."""
+    client = _CachingRecordingClient({"ok": True})
+    model = LLMClientModel(client)
+
+    _drain(
+        model.stream(
+            messages=[{"role": "user", "content": [{"text": "hi"}]}],
+            system_prompt="lead-in",
+            system_prompt_content=[{"text": "trailer"}],
+        )
+    )
+
+    call = client.chat_calls[0]
+    assert call["messages"][0] == {"role": "system", "content": "lead-in\n\ntrailer"}
 
 
 def test_stream_propagates_team_through_to_thread() -> None:
@@ -1170,6 +1261,23 @@ def test_llm_client_model_supports_structured_output_delegates_to_backing_client
     get_max_context_tokens delegation precedent above."""
     assert LLMClientModel(_StructuredOutputClient()).supports_structured_output() is True
     assert LLMClientModel(DummyLLMClient()).supports_structured_output() is False
+
+
+# ---------------------------------------------------------------------------
+# supports_prompt_caching delegation
+# ---------------------------------------------------------------------------
+
+
+class _PromptCachingClient(DummyLLMClient):
+    def supports_prompt_caching(self) -> bool:
+        return True
+
+
+def test_llm_client_model_supports_prompt_caching_delegates_to_backing_client() -> None:
+    """Same delegation precedent as supports_structured_output, for the new
+    prompt-caching capability flag."""
+    assert LLMClientModel(_PromptCachingClient()).supports_prompt_caching() is True
+    assert LLMClientModel(DummyLLMClient()).supports_prompt_caching() is False
 
 
 # ---------------------------------------------------------------------------

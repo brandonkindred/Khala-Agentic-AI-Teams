@@ -118,6 +118,40 @@ def test_build_prompt_mentions_search_repository_tool() -> None:
     assert "search_repository" in prompt
 
 
+def test_build_prompt_renders_replaced_content_section_when_present() -> None:
+    """A path with a ``replaced_content`` entry gets its before-image section."""
+    files = {"app/main.py": "def bar():\n    return 2\n"}
+    index = CodebaseIndex.from_input(_input(files=files))
+    prompt = _build_prompt(index, replaced_content={"app/main.py": "def bar():\n    return 1\n"})
+    assert "Replaced (pre-change) content" in prompt
+    assert "def bar():\n    return 1\n" in prompt
+
+
+def test_build_prompt_omits_replaced_content_section_for_path_without_one() -> None:
+    """A changed path absent from ``replaced_content`` renders no such section."""
+    files = {"a.py": "aaa", "b.py": "bbb"}
+    index = CodebaseIndex.from_input(_input(files=files))
+    prompt = _build_prompt(index, replaced_content={"a.py": "old-a"})
+    assert "Replaced (pre-change) content" in prompt
+    assert "old-a" in prompt
+    # b.py has no replaced_content entry: only one section should appear.
+    assert prompt.count("Replaced (pre-change) content") == 1
+
+
+def test_build_prompt_omits_replaced_content_section_when_absent() -> None:
+    """Default (``replaced_content=None``) renders exactly as today."""
+    index = CodebaseIndex.from_input(_input())
+    prompt = _build_prompt(index)
+    assert "Replaced (pre-change) content" not in prompt
+
+
+def test_build_prompt_ignores_empty_replaced_content_dict() -> None:
+    """An empty ``replaced_content`` mapping behaves like ``None``."""
+    index = CodebaseIndex.from_input(_input())
+    prompt = _build_prompt(index, replaced_content={})
+    assert "Replaced (pre-change) content" not in prompt
+
+
 # --------------------------------------------------------------------------- repo-wide search
 
 
