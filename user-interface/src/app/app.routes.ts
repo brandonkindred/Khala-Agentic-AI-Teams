@@ -158,13 +158,24 @@ export const routes: Routes = [
         ],
       },
       {
-        path: 'agent-console',
+        path: 'agent-studio/provisioning',
         loadComponent: () =>
-          import('./components/agent-team-studio/agent-console/agent-console.component').then((m) => m.AgentConsoleComponent),
-        title: 'Agent Console',
-        data: { breadcrumb: 'Agent Console' },
+          import(
+            './components/agent-team-studio/agent-provisioning-dashboard/agent-provisioning-dashboard.component'
+          ).then((m) => m.AgentProvisioningDashboardComponent),
+        title: 'Provisioning & Environments',
+        data: { breadcrumb: 'Provisioning' },
       },
-      { path: 'agent-provisioning', redirectTo: '/agent-console', pathMatch: 'full' },
+      {
+        path: 'agent-studio/metrics',
+        loadComponent: () =>
+          import('./components/agent-team-studio/metrics-tab/metrics-tab.component').then(
+            (m) => m.MetricsTabComponent,
+          ),
+        title: 'Metrics',
+        data: { breadcrumb: 'Metrics' },
+      },
+      { path: 'agent-provisioning', redirectTo: '/agent-studio/provisioning', pathMatch: 'full' },
       {
         path: 'product-delivery',
         loadComponent: () =>

@@ -18,6 +18,7 @@ findings in a single run.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -37,7 +38,10 @@ from code_review_agent.side_effect_impact_pass import (
     _validate_findings,
     find_side_effect_impact_issues,
 )
-from tests.submission_pass_two_call_client import SubmissionPassTwoCallClient
+from tests.submission_pass_two_call_client import (
+    SubmissionPassTwoCallClient,
+    wire_run_agent_via_reasoning_with_raw,
+)
 
 from llm_service import LLMJsonParseError
 from llm_service.clients.dummy import DummyLLMClient
@@ -751,6 +755,41 @@ def test_finds_and_returns_new_findings() -> None:
     assert len(result) == 1
     assert result[0].category == "side-effects"
     assert "app/caller.py" in result[0].description
+
+
+@pytest.mark.parametrize(
+    "wrap",
+    [
+        pytest.param("fenced", id="fenced"),
+        pytest.param("prose", id="prose-prefixed"),
+    ],
+)
+def test_recovers_fenced_and_prose_wrapped_reply(
+    monkeypatch: pytest.MonkeyPatch, wrap: str
+) -> None:
+    """A formatting reply wrapped in a ```json fence or prefixed with prose still
+    parses: the pass routes it through the canonical recovery ladder rather than
+    a bare ``json.loads`` that would raise on the fence/prose."""
+    import code_review_agent.submission_pass_runner as runner_mod
+
+    payload = {
+        "findings": [
+            {
+                "severity": "high",
+                "category": "side-effects",
+                "file_path": "app/main.py",
+                "description": "bar() behavior changed and app/caller.py would hang",
+                "suggestion": "update app/caller.py",
+            }
+        ]
+    }
+    inner = json.dumps(payload)
+    raw = f"```json\n{inner}\n```" if wrap == "fenced" else f"Sure, here you go: {inner}"
+    wire_run_agent_via_reasoning_with_raw(monkeypatch, runner_mod, raw)
+
+    result = find_side_effect_impact_issues(DummyLLMClient(), _input())
+    assert len(result) == 1
+    assert result[0].category == "side-effects"
 
 
 def test_finds_and_returns_new_findings_drops_hallucinated_line() -> None:

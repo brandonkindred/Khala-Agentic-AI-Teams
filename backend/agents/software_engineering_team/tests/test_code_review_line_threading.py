@@ -195,7 +195,11 @@ def test_split_segments_cite_absolute_prefixed_lines() -> None:
 
         def complete(self, prompt: str, **kwargs: Any) -> str:
             if CODE_TO_REVIEW_HEADER in prompt:
-                m = _re.search(r"^[ ]*(\d+)[:|] line", prompt, _re.M)
+                # This prompt is FileSegment.prompt_content (partial-segment
+                # rendering), which never carries a change-surface ``+``/``>``
+                # marker; the optional ``[+>]`` here only mirrors the
+                # production gutter parsers' tolerance and is not exercised.
+                m = _re.search(r"^[+>]?[ ]*(\d+)[:|] line", prompt, _re.M)
                 assert m is not None, "split segments must render prefixed lines"
                 self._tls.cited = int(m.group(1))
             return super().complete(prompt, **kwargs)

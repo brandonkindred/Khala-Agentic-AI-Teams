@@ -98,9 +98,10 @@ export const NAV_GROUPS: NavGroup[] = [
     key: 'agentic-ai',
     label: 'Agentic AI',
     items: [
-      { id: 'agent-studio', label: 'Agent Studio', icon: 'smart_toy', route: '/agent-studio', group: 'agentic-ai' },
+      { id: 'agent-studio', label: 'Agent Studio', icon: 'smart_toy', route: '/agent-studio', group: 'agentic-ai', exact: true },
+      { id: 'agent-studio-provisioning', label: 'Provisioning', icon: 'dns', route: '/agent-studio/provisioning', group: 'agentic-ai', nested: true },
+      { id: 'agent-studio-metrics', label: 'Metrics', icon: 'monitoring', route: '/agent-studio/metrics', group: 'agentic-ai', nested: true },
       { id: 'ai-systems', label: 'AI Systems', icon: 'psychology', route: '/ai-systems', group: 'agentic-ai' },
-      { id: 'agent-console', label: 'Agent Console', icon: 'hub', route: '/agent-console', group: 'agentic-ai' },
       { id: 'product-delivery', label: 'Product Delivery', icon: 'assignment_turned_in', route: '/product-delivery', group: 'agentic-ai' },
       { id: 'cognition', label: 'Cognition', icon: 'psychology', route: '/cognition', group: 'agentic-ai' },
       { id: 'agentic-teams', label: 'Agentic Teams', icon: 'groups', route: '/agentic-teams', group: 'agentic-ai' },

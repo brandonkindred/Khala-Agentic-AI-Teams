@@ -19,6 +19,12 @@ Four tables:
   sub-team), so the Code Review page can show every review run for a pull
   request — with its status and outcome — and have that history survive page
   reloads and restarts.
+- ``code_review_transcripts`` — one row per PR code review job, holding every
+  LLM call the review pipeline made (stage, target, prompt, response) as an
+  ordered JSONB array, so a completed review's full transcript can be
+  inspected after the fact. Rows are appended to incrementally as the review
+  runs (see ``review_history_store.append_review_transcript_entries``), keyed
+  1:1 with ``code_review_runs.job_id``.
 """
 
 from __future__ import annotations
@@ -112,8 +118,21 @@ SCHEMA = TeamSchema(
         # plain (owner, repo, …) index above can't serve a ``lower(owner) = lower(%s)`` predicate.
         """CREATE INDEX IF NOT EXISTS idx_code_review_runs_pr_ci
             ON code_review_runs(lower(owner), lower(repo), pr_number, created_at DESC)""",
+        # One row per review job; ``entries`` is appended to (never replaced) as
+        # the review runs — see ``append_review_transcript_entries``.
+        """CREATE TABLE IF NOT EXISTS code_review_transcripts (
+            job_id       TEXT PRIMARY KEY REFERENCES code_review_runs(job_id) ON DELETE CASCADE,
+            entries      JSONB NOT NULL DEFAULT '[]'::jsonb,
+            created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )""",
     ],
-    table_names=["se_agent_traces", "se_events", "se_learnings", "code_review_runs"],
+    table_names=[
+        "se_agent_traces",
+        "se_events",
+        "se_learnings",
+        "code_review_runs",
+        "code_review_transcripts",
+    ],
 )
 
 __all__ = ["SCHEMA"]

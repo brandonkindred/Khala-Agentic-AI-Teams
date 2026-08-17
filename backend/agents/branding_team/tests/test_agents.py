@@ -66,7 +66,7 @@ from branding_team.agents import (
 )
 from branding_team.graphs.shared import _branding_model, serialize_mission
 from branding_team.models import (
-    BrandDiscoveryAuditOutput,
+    BrandDiscoveryAudit,
     BrandStoryOutput,
     ChannelGuidelineOutput,
     IconographyOutput,
@@ -764,8 +764,106 @@ def test_agents_py_build_agent_calls_use_render_agent_prompt() -> None:
     assert build_agent_calls > 0
 
 
+# ---------------------------------------------------------------------------
+# Story 5a Step 2 — schema-derived field-path migration guard
+# ---------------------------------------------------------------------------
+
+_MIGRATED_SCHEMA_DERIVED_PROMPT_SPEC_NAMES: tuple[str, ...] = (
+    "_DISCOVERY_AUDITOR_PROMPT",
+    "_PURPOSE_VISION_PROMPT",
+    "_VALUES_ARTICULATOR_PROMPT",
+    "_AUDIENCE_SEGMENTER_PROMPT",
+    "_DIFFERENTIATION_MAPPER_PROMPT",
+    "_POSITIONING_SYNTHESIZER_PROMPT",
+    "_STORYTELLER_PROMPT",
+    "_CREATIVE_DIRECTOR_PROMPT",
+    "_CONVERGE_DECIDER_PROMPT",
+    "_LOGO_SPECIFIER_PROMPT",
+    "_COLOR_SYSTEM_BUILDER_PROMPT",
+    "_TYPOGRAPHY_BUILDER_PROMPT",
+    "_ICONOGRAPHY_PROMPT",
+    "_PHOTOGRAPHY_VIDEO_DIRECTOR_PROMPT",
+    "_VOICE_TONE_BUILDER_PROMPT",
+    "_DESIGN_SYSTEM_CODIFIER_PROMPT",
+    "_BRAND_EXPERIENCE_PRINCIPLER_PROMPT",
+    "_BRAND_ARCHITECTURE_BUILDER_PROMPT",
+    "_BRAND_IN_ACTION_ILLUSTRATOR_PROMPT",
+    "_OWNERSHIP_DEFINER_PROMPT",
+    "_APPROVAL_WORKFLOW_DESIGNER_PROMPT",
+    "_ASSET_WIKI_PLANNER_PROMPT",
+    "_TRAINING_PLANNER_PROMPT",
+    "_KPI_DESIGNER_PROMPT",
+    "_EVOLUTION_FRAMER_PROMPT",
+    "_BRAND_RULES_CODIFIER_PROMPT",
+)
+
+# Phase-2 cumulative-carry-forward chain: each bound model inherits every
+# upstream field via subclassing, so schema-derivation would emit lines for
+# fields the prompt intentionally omits (carried forward in prose instead).
+# Removing that inheritance is story 5b's job, not this one's — see the
+# ``AgentPromptSpec``/``models.py`` module docstrings.
+_STILL_FIELDS_BASED_PROMPT_SPEC_NAMES: tuple[str, ...] = (
+    "_ARCHETYPE_ANALYST_PROMPT",
+    "_TAGLINE_WRITER_PROMPT",
+    "_MESSAGE_MAPPER_PROMPT",
+    "_PERSONA_BUILDER_PROMPT",
+    "_VOICE_PRINCIPLES_DRAFTER_PROMPT",
+)
+
+
+def test_migrated_specs_are_schema_derived_not_hand_written() -> None:
+    """Each Step-2-migrated ``AgentPromptSpec`` binds ``structured_output``, not ``fields``.
+
+    Preconditions:
+        ``branding_agents`` exposes every name in
+        ``_MIGRATED_SCHEMA_DERIVED_PROMPT_SPEC_NAMES`` and
+        ``_STILL_FIELDS_BASED_PROMPT_SPEC_NAMES`` as a module-level
+        ``AgentPromptSpec``.
+    Postconditions:
+        Every migrated spec has an empty ``fields`` tuple and a non-None
+        ``structured_output``; every deliberately-unmigrated spec (the
+        Phase-2 cumulative-carry-forward chain, out of scope per story 5b)
+        keeps the opposite: a non-empty ``fields`` tuple and no
+        ``structured_output``. Guards against a migrated spec silently
+        regressing back onto hand-written ``PromptFieldSpec`` entries, or
+        the reverse.
+    """
+    for name in _MIGRATED_SCHEMA_DERIVED_PROMPT_SPEC_NAMES:
+        spec = getattr(branding_agents, name)
+        assert spec.fields == (), f"{name} should have no hand-written PromptFieldSpec entries"
+        assert spec.structured_output is not None, f"{name} should bind structured_output"
+    for name in _STILL_FIELDS_BASED_PROMPT_SPEC_NAMES:
+        spec = getattr(branding_agents, name)
+        assert spec.fields != (), f"{name} is expected to still use hand-written fields="
+        assert spec.structured_output is None, f"{name} should not bind structured_output"
+
+
+def test_moodboard_and_channel_guide_prompt_factories_migration_state() -> None:
+    """The two parameterized prompt-spec factories reflect their migration decisions.
+
+    Preconditions:
+        ``branding_agents._moodboard_conceptualist_prompt`` and
+        ``branding_agents._channel_guide_prompt`` are importable.
+    Postconditions:
+        ``_moodboard_conceptualist_prompt`` (migrated — its 5 field
+        descriptions are static) returns a spec bound to
+        ``structured_output`` with no hand-written fields.
+        ``_channel_guide_prompt`` (not migrated — its ``channel`` field
+        description is interpolated per call and can't be represented by a
+        single static ``Field(description=...)``) still returns a
+        hand-written ``fields=`` spec.
+    """
+    moodboard_spec = branding_agents._moodboard_conceptualist_prompt("Minimalist")
+    assert moodboard_spec.fields == ()
+    assert moodboard_spec.structured_output is not None
+
+    channel_spec = branding_agents._channel_guide_prompt("website", "Company website.")
+    assert channel_spec.fields != ()
+    assert channel_spec.structured_output is None
+
+
 _PHASE_SPOT_CHECKS: tuple[tuple[str, Callable[[], Agent], type], ...] = (
-    ("phase1_discovery_auditor", make_discovery_auditor, BrandDiscoveryAuditOutput),
+    ("phase1_discovery_auditor", make_discovery_auditor, BrandDiscoveryAudit),
     ("phase2_storyteller", make_storyteller, BrandStoryOutput),
     ("phase3_iconography_director", make_iconography_director, IconographyOutput),
     ("phase4_website_guide", make_website_guide, ChannelGuidelineOutput),

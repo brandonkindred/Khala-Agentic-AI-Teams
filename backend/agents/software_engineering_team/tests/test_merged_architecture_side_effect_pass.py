@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any, Dict, Optional
 
 import pytest
@@ -10,7 +11,10 @@ from code_review_agent.merged_architecture_side_effect_pass import (
 )
 from code_review_agent.models import CodeReviewInput
 from code_review_agent.profiles import ReviewProfile
-from tests.submission_pass_two_call_client import SubmissionPassTwoCallClient
+from tests.submission_pass_two_call_client import (
+    SubmissionPassTwoCallClient,
+    wire_run_agent_via_reasoning_with_raw,
+)
 
 from llm_service.clients.dummy import DummyLLMClient
 from shared.dev_models.models import SystemArchitecture
@@ -109,6 +113,53 @@ def test_splits_merged_response_into_two_finding_lists() -> None:
     assert len(side) == 1
     assert side[0].category == "side-effects"
     assert "other.py:3" in side[0].description
+
+
+@pytest.mark.parametrize(
+    "wrap",
+    [
+        pytest.param("fenced", id="fenced"),
+        pytest.param("prose", id="prose-prefixed"),
+    ],
+)
+def test_recovers_fenced_and_prose_wrapped_reply(
+    monkeypatch: pytest.MonkeyPatch, wrap: str
+) -> None:
+    """A merged-pass reply wrapped in a ```json fence or prefixed with prose still
+    parses both halves: the pass routes it through the canonical recovery ladder
+    rather than a bare ``json.loads`` that would raise on the fence/prose."""
+    import code_review_agent.submission_pass_runner as runner_mod
+
+    payload = {
+        "architecture_findings": [
+            {
+                "severity": "high",
+                "category": "architecture",
+                "file_path": "app/main.py",
+                "description": "bypasses the repository layer",
+                "suggestion": "use the repository",
+            }
+        ],
+        "side_effect_findings": [
+            {
+                "severity": "medium",
+                "category": "side-effects",
+                "file_path": "app/main.py",
+                "description": "caller at other.py:3 assumes ValueError",
+                "suggestion": "update the caller",
+                "pre_existing": False,
+            }
+        ],
+    }
+    inner = json.dumps(payload)
+    raw = f"```json\n{inner}\n```" if wrap == "fenced" else f"Sure, here you go: {inner}"
+    wire_run_agent_via_reasoning_with_raw(monkeypatch, runner_mod, raw)
+
+    arch, side = find_architecture_and_side_effect_issues(DummyLLMClient(), _input())
+    assert len(arch) == 1
+    assert arch[0].category == "architecture"
+    assert len(side) == 1
+    assert side[0].category == "side-effects"
 
 
 def test_architecture_finding_pre_existing_tag_survives_the_merged_pass() -> None:

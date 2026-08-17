@@ -31,5 +31,4 @@ Rules:
         "- gaps: list[{area, message, blocking}]\n"
         "- clarification_requests: list[string]"
     ),
-    trailer="Respond with JSON only.\n",
 )

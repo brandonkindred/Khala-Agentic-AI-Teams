@@ -26,11 +26,14 @@ instantiated. ``isinstance(CoreValueOutput(...), CoreValue)`` holds because
 the generated class is a real subclass of the soft base.
 
 This pattern does not apply to the Phase 2 cumulative-inheritance chain
-(``BrandStoryOutput`` → … → ``WritingGuidelinesOutput``) or to remaining
-hand-written sibling pairs that were never collapsed
-(``BrandDiscoveryAudit`` / ``BrandDiscoveryAuditOutput``,
-``ChannelGuideline`` / ``ChannelGuidelineOutput``, and the mood-board /
-design-system agent-output wrappers).
+(``BrandStoryOutput`` → … → ``WritingGuidelinesOutput``) or to the remaining
+hand-written sibling pair that was never collapsed (``ChannelGuideline`` /
+``ChannelGuidelineOutput``). ``BrandDiscoveryAudit``, ``MoodBoardConcept``,
+``CreativeRefinementDecision``, and ``DesignSystemDefinition`` were each
+fully collapsed to a single model (used both as their agent's
+``structured_output`` and as the corresponding phase output's
+``default_factory`` merge target) rather than split into this soft/strict
+pair, since a no-argument-constructible default is needed either way.
 """
 
 from __future__ import annotations
@@ -348,37 +351,28 @@ DifferentiationPillarOutput = _derive_strict_variant(
 class BrandDiscoveryAudit(BaseModel):
     """Brand discovery and audit findings.
 
-    Fields default to empty rather than being required: this model also
-    backs ``StrategicCoreOutput.brand_discovery``'s ``default_factory``, which
-    must construct successfully with no arguments. ``discovery_auditor``'s own
-    agent-facing schema is the stricter ``BrandDiscoveryAuditOutput`` below.
+    Fields default to empty rather than being required: this model backs
+    both ``discovery_auditor``'s agent-facing ``structured_output`` schema
+    and ``StrategicCoreOutput.brand_discovery``'s ``default_factory``, which
+    must construct successfully with no arguments.
     """
 
-    current_brand_perception: str = ""
-    market_position: str = ""
-    strengths: List[str] = Field(default_factory=list)
-    weaknesses: List[str] = Field(default_factory=list)
-    opportunities: List[str] = Field(default_factory=list)
-    threats: List[str] = Field(default_factory=list)
-    stakeholder_insights: List[str] = Field(default_factory=list)
-
-
-class BrandDiscoveryAuditOutput(BaseModel):
-    """Agent-facing brand discovery schema.
-
-    Requires non-empty content so Strands retries blank structured_output.
-    Field-for-field identical to ``BrandDiscoveryAudit`` — kept as a separate
-    model so this one can require real content without breaking
-    ``StrategicCoreOutput.brand_discovery``'s no-argument default construction.
-    """
-
-    current_brand_perception: str = Field(min_length=1)
-    market_position: str = Field(min_length=1)
-    strengths: List[NonEmptyStr] = Field(min_length=1)
-    weaknesses: List[NonEmptyStr] = Field(min_length=1)
-    opportunities: List[NonEmptyStr] = Field(min_length=1)
-    threats: List[NonEmptyStr] = Field(min_length=1)
-    stakeholder_insights: List[NonEmptyStr] = Field(min_length=1)
+    current_brand_perception: str = Field(
+        default="",
+        description="how the brand is currently perceived by its audience and market",
+    )
+    market_position: str = Field(
+        default="", description="where the brand sits relative to competitors today"
+    )
+    strengths: List[str] = Field(default_factory=list, description="the brand's key strengths")
+    weaknesses: List[str] = Field(default_factory=list, description="the brand's key weaknesses")
+    opportunities: List[str] = Field(
+        default_factory=list, description="opportunities the brand can pursue"
+    )
+    threats: List[str] = Field(default_factory=list, description="threats the brand faces")
+    stakeholder_insights: List[str] = Field(
+        default_factory=list, description="insights gathered from stakeholders"
+    )
 
 
 class PurposeVisionOutput(BaseModel):
@@ -391,9 +385,13 @@ class PurposeVisionOutput(BaseModel):
     trigger a retry rather than silently accepting a blank statement.
     """
 
-    brand_purpose: str = Field(min_length=1)
-    mission_statement: str = Field(min_length=1)
-    vision_statement: str = Field(min_length=1)
+    brand_purpose: str = Field(min_length=1, description="why the company exists (one sentence)")
+    mission_statement: str = Field(
+        min_length=1, description="what the company does for its audience (one sentence)"
+    )
+    vision_statement: str = Field(
+        min_length=1, description="the aspirational future state (one sentence)"
+    )
 
 
 class CoreValuesOutput(BaseModel):
@@ -406,7 +404,15 @@ class CoreValuesOutput(BaseModel):
     instead of silently passing.
     """
 
-    core_values: List[CoreValueOutput] = Field(min_length=3, max_length=5)
+    core_values: List[CoreValueOutput] = Field(
+        min_length=3,
+        max_length=5,
+        description=(
+            "for each value provide: value (the value name), behavioral_definition (what this "
+            "value means in practice), and observable_behaviors (2-3 concrete behaviors that "
+            "demonstrate this value)"
+        ),
+    )
 
 
 class AudienceSegmentsOutput(BaseModel):
@@ -419,7 +425,14 @@ class AudienceSegmentsOutput(BaseModel):
     fail validation instead of silently passing.
     """
 
-    target_audience_segments: List[AudienceSegmentOutput] = Field(min_length=1, max_length=3)
+    target_audience_segments: List[AudienceSegmentOutput] = Field(
+        min_length=1,
+        max_length=3,
+        description=(
+            "for each segment provide: name, description, pain_points (2-3), goals (2-3), and "
+            "decision_drivers (2-3)"
+        ),
+    )
 
 
 class DifferentiationPillarsOutput(BaseModel):
@@ -432,7 +445,14 @@ class DifferentiationPillarsOutput(BaseModel):
     fail validation instead of silently passing.
     """
 
-    differentiation_pillars: List[DifferentiationPillarOutput] = Field(min_length=2, max_length=4)
+    differentiation_pillars: List[DifferentiationPillarOutput] = Field(
+        min_length=2,
+        max_length=4,
+        description=(
+            "for each pillar provide: pillar (the differentiator name), proof_points (2-3 "
+            "evidence items), and competitive_context (how competitors fall short here)"
+        ),
+    )
 
 
 class PositioningOutput(BaseModel):
@@ -441,8 +461,16 @@ class PositioningOutput(BaseModel):
     Requires non-empty content so Strands retries blank structured_output.
     """
 
-    positioning_statement: str = Field(min_length=1)
-    brand_promise: str = Field(min_length=1)
+    positioning_statement: str = Field(
+        min_length=1,
+        description=(
+            "a single sentence following the format: 'For [audience] who need [need], "
+            "[company] is the [differentiator] that delivers [value] because [proof].'"
+        ),
+    )
+    brand_promise: str = Field(
+        min_length=1, description="a one-sentence commitment to the customer"
+    )
 
 
 class StrategicCoreOutput(BaseModel):
@@ -618,9 +646,17 @@ class BrandStoryOutput(BaseModel):
     (short/medium/long)".
     """
 
-    brand_story: str = Field(min_length=1)
-    hero_narrative: str = Field(min_length=1)
-    boilerplate_variants: List[NonEmptyStr] = Field(min_length=3, max_length=3)
+    brand_story: str = Field(
+        min_length=1, description="a compelling 2-3 paragraph origin/purpose story"
+    )
+    hero_narrative: str = Field(
+        min_length=1, description="a shorter, punchy version for hero sections"
+    )
+    boilerplate_variants: List[NonEmptyStr] = Field(
+        min_length=3,
+        max_length=3,
+        description="3 versions (short/medium/long) for press and bios",
+    )
 
 
 class BrandArchetypesOutput(BrandStoryOutput):
@@ -678,10 +714,13 @@ class PersonaProfilesOutput(MessagingFrameworkOutput):
 class WritingGuidelinesBody(BaseModel):
     """Strict writing-guidelines body nested under ``writing_guidelines``.
 
-    Field-for-field identical to ``WritingGuidelines`` — kept separate so this
-    one can require real content without breaking
+    Field *names* match ``WritingGuidelines`` — kept separate (not collapsed)
+    because the *types* genuinely differ (``List[NonEmptyStr]`` with a required
+    ``min_length=3, max_length=4`` here vs. plain ``List[str]`` with empty
+    defaults there) and because collapsing would break
     ``NarrativeMessagingOutput.writing_guidelines``'s no-argument default.
-    Cardinalities encode the prompt's stated "3-4" for each list.
+    Cardinalities encode the prompt's stated "3-4" for each list. Story 3b
+    Step 1 finding: this pair is genuinely different, not safe to collapse.
     """
 
     voice_principles: List[NonEmptyStr] = Field(min_length=3, max_length=4)
@@ -696,6 +735,12 @@ class WritingGuidelinesOutput(PersonaProfilesOutput):
     VoicePrinciplesDrafter is last in the linear Graph, so its payload must
     include every upstream fragment plus ``writing_guidelines`` in the shape
     ``NarrativeMessagingOutput`` expects (no nest-under remap needed).
+
+    Not a twin of ``WritingGuidelines`` despite the similar name — this class
+    inherits ten fields from ``PersonaProfilesOutput``'s cumulative carry-forward
+    chain on top of its own nested ``writing_guidelines`` field, a different
+    shape and purpose than the flat merge-target ``WritingGuidelines``. Story 3b
+    Step 1 finding: not comparable, not safe to collapse.
     """
 
     writing_guidelines: WritingGuidelinesBody
@@ -961,9 +1006,23 @@ class BrandExperiencePrinciplesOutput(BaseModel):
     ``min_length``/``max_length`` encode the prompt's stated cardinalities.
     """
 
-    brand_experience_principles: List[NonEmptyStr] = Field(min_length=3, max_length=5)
-    signature_moments: List[NonEmptyStr] = Field(min_length=3, max_length=5)
-    sensory_elements: List[NonEmptyStr] = Field(min_length=2, max_length=4)
+    brand_experience_principles: List[NonEmptyStr] = Field(
+        min_length=3,
+        max_length=5,
+        description="3-5 principles that govern every brand touchpoint",
+    )
+    signature_moments: List[NonEmptyStr] = Field(
+        min_length=3,
+        max_length=5,
+        description=(
+            "3-5 key moments in the customer journey that should feel distinctly on-brand"
+        ),
+    )
+    sensory_elements: List[NonEmptyStr] = Field(
+        min_length=2,
+        max_length=4,
+        description="2-4 sensory cues (sound, texture, scent, etc.) if applicable",
+    )
 
 
 class BrandArchitectureOutput(BaseModel):
@@ -975,9 +1034,21 @@ class BrandArchitectureOutput(BaseModel):
     ``brand_architecture`` list of blank-field rules must fail validation.
     """
 
-    brand_architecture: List[BrandArchitectureRuleOutput] = Field(min_length=1)
-    naming_conventions: List[NonEmptyStr] = Field(min_length=3, max_length=5)
-    terminology_glossary: Dict[NonEmptyStr, NonEmptyStr] = Field(min_length=5, max_length=10)
+    brand_architecture: List[BrandArchitectureRuleOutput] = Field(
+        min_length=1,
+        description=(
+            "rules for parent brand, sub-brands, product lines. Each with: entity, "
+            "relationship, naming_convention, visual_treatment"
+        ),
+    )
+    naming_conventions: List[NonEmptyStr] = Field(
+        min_length=3, max_length=5, description="3-5 naming rules"
+    )
+    terminology_glossary: Dict[NonEmptyStr, NonEmptyStr] = Field(
+        min_length=5,
+        max_length=10,
+        description="5-10 key terms with definitions (dict)",
+    )
 
 
 class BrandInActionOutput(BaseModel):
@@ -990,7 +1061,15 @@ class BrandInActionOutput(BaseModel):
     list of blank-field examples must fail validation.
     """
 
-    brand_in_action: List[BrandInActionExampleOutput] = Field(min_length=3, max_length=5)
+    brand_in_action: List[BrandInActionExampleOutput] = Field(
+        min_length=3,
+        max_length=5,
+        description=(
+            "each example has: context (where this applies, e.g. 'sales deck header'), "
+            "correct_example (the on-brand version), incorrect_example (the off-brand "
+            "version), rationale (why the correct version is better)"
+        ),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1103,8 +1182,14 @@ class OwnershipOutput(BaseModel):
     Requires non-empty content so Strands retries blank structured_output.
     """
 
-    ownership_model: str = Field(min_length=1)
-    decision_authority: Dict[NonEmptyStr, NonEmptyStr] = Field(min_length=1)
+    ownership_model: str = Field(min_length=1, description="who owns the brand (paragraph)")
+    decision_authority: Dict[NonEmptyStr, NonEmptyStr] = Field(
+        min_length=1,
+        description=(
+            "a dict mapping decision types to responsible roles "
+            "(e.g. 'logo_changes': 'Brand Director', 'campaign_messaging': 'Marketing Lead')"
+        ),
+    )
 
 
 class ApprovalWorkflowsOutput(BaseModel):
@@ -1117,8 +1202,18 @@ class ApprovalWorkflowsOutput(BaseModel):
     required.
     """
 
-    approval_workflows: List[ApprovalWorkflowOutput] = Field(min_length=3, max_length=5)
-    agency_briefing_protocols: List[NonEmptyStr] = Field(min_length=3, max_length=5)
+    approval_workflows: List[ApprovalWorkflowOutput] = Field(
+        min_length=3,
+        max_length=5,
+        description=(
+            "3-5 workflows, each with: asset_type, approvers (list), sla, escalation_path"
+        ),
+    )
+    agency_briefing_protocols: List[NonEmptyStr] = Field(
+        min_length=3,
+        max_length=5,
+        description="3-5 protocols for briefing external agencies",
+    )
 
 
 class AssetWikiOutput(BaseModel):
@@ -1130,8 +1225,20 @@ class AssetWikiOutput(BaseModel):
     ``WikiEntry``) so each entry's fields are individually required.
     """
 
-    asset_management_guidance: List[NonEmptyStr] = Field(min_length=3, max_length=5)
-    wiki_backlog: List[WikiEntryOutput] = Field(min_length=4, max_length=6)
+    asset_management_guidance: List[NonEmptyStr] = Field(
+        min_length=3,
+        max_length=5,
+        description="3-5 guidelines for managing brand assets",
+    )
+    wiki_backlog: List[WikiEntryOutput] = Field(
+        min_length=4,
+        max_length=6,
+        description=(
+            "4-6 wiki entries, each with: title, summary, owners (list), "
+            "update_cadence. Cover: Brand North Star, Voice Playbook, Design System, Brand "
+            "Review Intake, Channel Playbook, Governance Charter."
+        ),
+    )
 
 
 class TrainingOnboardingOutput(BaseModel):
@@ -1142,7 +1249,14 @@ class TrainingOnboardingOutput(BaseModel):
     initiatives".
     """
 
-    training_onboarding_plan: List[NonEmptyStr] = Field(min_length=4, max_length=6)
+    training_onboarding_plan: List[NonEmptyStr] = Field(
+        min_length=4,
+        max_length=6,
+        description=(
+            "4-6 training initiatives for onboarding new team members and maintaining "
+            "brand literacy."
+        ),
+    )
 
 
 class BrandHealthKPIsOutput(BaseModel):
@@ -1154,9 +1268,19 @@ class BrandHealthKPIsOutput(BaseModel):
     ``BrandHealthKPI``) so each KPI's fields are individually required.
     """
 
-    brand_health_kpis: List[BrandHealthKPIOutput] = Field(min_length=4, max_length=6)
-    tracking_methodology: str = Field(min_length=1)
-    review_trigger_points: List[NonEmptyStr] = Field(min_length=3, max_length=5)
+    brand_health_kpis: List[BrandHealthKPIOutput] = Field(
+        min_length=4,
+        max_length=6,
+        description=("4-6 KPIs, each with: metric, measurement_method, target, review_frequency"),
+    )
+    tracking_methodology: str = Field(
+        min_length=1, description="paragraph describing the measurement approach"
+    )
+    review_trigger_points: List[NonEmptyStr] = Field(
+        min_length=3,
+        max_length=5,
+        description="3-5 events that should trigger a brand health review",
+    )
 
 
 class EvolutionFrameworkOutput(BaseModel):
@@ -1165,8 +1289,13 @@ class EvolutionFrameworkOutput(BaseModel):
     Requires non-empty content so Strands retries blank structured_output.
     """
 
-    evolution_framework: str = Field(min_length=1)
-    version_control_cadence: str = Field(min_length=1)
+    evolution_framework: str = Field(
+        min_length=1, description="paragraph describing how the brand evolves over time"
+    )
+    version_control_cadence: str = Field(
+        min_length=1,
+        description="how often the brand system is formally reviewed and versioned",
+    )
 
 
 class BrandGuidelinesOutput(BaseModel):
@@ -1177,7 +1306,14 @@ class BrandGuidelinesOutput(BaseModel):
     rules".
     """
 
-    brand_guidelines: List[NonEmptyStr] = Field(min_length=5, max_length=8)
+    brand_guidelines: List[NonEmptyStr] = Field(
+        min_length=5,
+        max_length=8,
+        description=(
+            "a list of 5-8 governance rules that everyone in the organisation must follow. "
+            "Each rule is a single clear sentence."
+        ),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1245,28 +1381,64 @@ class BrandBook(BaseModel):
 
 
 class MoodBoardConcept(BaseModel):
-    """A single mood-board direction; merge target for ``MoodBoardConceptOutput``."""
+    """A single mood-board direction.
 
-    title: str
-    visual_direction: str
-    color_story: List[str] = Field(default_factory=list)
-    typography_direction: str
-    image_style: List[str] = Field(default_factory=list)
+    Collapsed twin (Story 3b Step 2): used directly both as
+    ``MoodBoardConceptualist_*``'s ``structured_output=`` (agents.py) and as
+    the nested item type for ``MoodBoardCandidatesOutput.mood_board_candidates``
+    and ``VisualIdentityOutput.mood_board_candidates``, following the same
+    single-model pattern as ``BrandDiscoveryAudit`` — see the module
+    docstring. The former strict ``MoodBoardConceptOutput`` twin (Step 1
+    finding: field/type identical, differing only in default/required
+    strictness) has been removed.
+    """
+
+    title: str = Field(description="a name for this direction")
+    visual_direction: str = Field(description="overall aesthetic description")
+    color_story: List[str] = Field(default_factory=list, description="3-4 color names/descriptions")
+    typography_direction: str = Field(description="font style recommendations")
+    image_style: List[str] = Field(default_factory=list, description="3-4 image style descriptions")
 
 
 class CreativeRefinementDecision(BaseModel):
-    """Phase 3 converge node output: which moodboard direction won and why."""
+    """Phase 3 converge node output: which moodboard direction won and why.
 
-    winning_candidate_title: str = ""
-    scoring_criteria: List[str] = Field(default_factory=list)
-    scores_by_candidate: Dict[str, float] = Field(default_factory=dict)
-    rationale: str = ""
-    workshop_prompts: List[str] = Field(default_factory=list)
-    decision_criteria: List[str] = Field(default_factory=list)
+    Collapsed twin (Story 3b Step 2): used directly both as
+    ``converge_decider``'s ``structured_output=`` (agents.py) and as
+    ``VisualIdentityOutput.creative_refinement``'s ``default_factory`` merge
+    target, following the same single-model pattern as ``BrandDiscoveryAudit``
+    — see the module docstring. The former strict
+    ``CreativeRefinementDecisionOutput`` twin (Step 1 finding: field/type
+    identical, differing only in default/required strictness) has been
+    removed.
+    """
+
+    winning_candidate_title: str = Field(default="", description="the selected candidate title")
+    scoring_criteria: List[str] = Field(
+        default_factory=list, description="the criteria used to score candidates"
+    )
+    scores_by_candidate: Dict[str, float] = Field(
+        default_factory=dict, description="dict of title→score"
+    )
+    rationale: str = Field(default="", description="why this candidate won")
+    workshop_prompts: List[str] = Field(
+        default_factory=list, description="3 questions for stakeholders"
+    )
+    decision_criteria: List[str] = Field(default_factory=list, description="decision criteria used")
 
 
 class WritingGuidelines(BaseModel):
-    """Voice/tone and editorial rules; merge target for ``WritingGuidelinesOutput``."""
+    """Voice/tone and editorial rules; merge target nested at
+    ``NarrativeMessagingOutput.writing_guidelines``.
+
+    Its real structural counterpart is ``WritingGuidelinesBody`` (not
+    ``WritingGuidelinesOutput``, which is a different, much larger construct —
+    see that class's docstring). Field *names* match ``WritingGuidelinesBody``,
+    but the *types* don't: this side is ``List[str]`` with no cardinality bound
+    and empty defaults, while ``WritingGuidelinesBody`` is ``List[NonEmptyStr]``
+    with a required ``min_length=3, max_length=4``. Genuinely different — not
+    safe to collapse (Story 3b Step 1 finding).
+    """
 
     voice_principles: List[str] = Field(default_factory=list)
     style_dos: List[str] = Field(default_factory=list)
@@ -1275,11 +1447,30 @@ class WritingGuidelines(BaseModel):
 
 
 class DesignSystemDefinition(BaseModel):
-    """Codified design system; merge target for ``DesignSystemDefinitionOutput``."""
+    """Codified design system.
 
-    design_principles: List[str] = Field(default_factory=list)
-    foundation_tokens: List[str] = Field(default_factory=list)
-    component_standards: List[str] = Field(default_factory=list)
+    Collapsed twin (Story 3b Step 2): used directly both as
+    ``design_system_codifier``'s ``structured_output=`` (agents.py) and as
+    ``VisualIdentityOutput.design_system``'s ``default_factory`` merge
+    target, following the same single-model pattern as ``BrandDiscoveryAudit``
+    — see the module docstring. The former strict
+    ``DesignSystemDefinitionOutput`` twin (Step 1 finding: field/type
+    identical, differing only in default/required strictness) has been
+    removed.
+    """
+
+    design_principles: List[str] = Field(
+        default_factory=list,
+        description="3-4 guiding principles (e.g. 'Clarity over decoration')",
+    )
+    foundation_tokens: List[str] = Field(
+        default_factory=list,
+        description="4-6 token categories (color, type, spacing, motion, etc.)",
+    )
+    component_standards: List[str] = Field(
+        default_factory=list,
+        description="3-5 component rules (buttons, cards, navigation, etc.)",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1289,38 +1480,23 @@ class DesignSystemDefinition(BaseModel):
 # Agent schemas below require content so Strands retries blank output.
 
 
-class MoodBoardConceptOutput(BaseModel):
-    """Agent-facing moodboard concept schema for MoodBoardConceptualist_*."""
-
-    title: str = Field(min_length=1)
-    visual_direction: str = Field(min_length=1)
-    color_story: List[str] = Field(min_length=1)
-    typography_direction: str = Field(min_length=1)
-    image_style: List[str] = Field(min_length=1)
-
-
 class MoodBoardCandidatesOutput(BaseModel):
     """Agent-facing CreativeDirector schema: collected moodboard candidates.
 
     ``min_length``/``max_length`` encode the diverge fan-out of 2–3 concepts.
-    Nested entries use ``MoodBoardConceptOutput`` so blank concepts fail validation.
+    Nested entries use ``MoodBoardConcept`` (the collapsed twin — see that
+    class's docstring), so this list's own cardinality bound is what guards
+    against a blank collection; individual concepts keep their defaults.
     """
 
-    mood_board_candidates: List[MoodBoardConceptOutput] = Field(min_length=2, max_length=3)
-
-
-class CreativeRefinementDecisionOutput(BaseModel):
-    """Agent-facing converge_decider schema.
-
-    Field-for-field twin of ``CreativeRefinementDecision`` with required content.
-    """
-
-    winning_candidate_title: str = Field(min_length=1)
-    scoring_criteria: List[str] = Field(min_length=1)
-    scores_by_candidate: Dict[str, float] = Field(min_length=1)
-    rationale: str = Field(min_length=1)
-    workshop_prompts: List[str] = Field(min_length=1)
-    decision_criteria: List[str] = Field(min_length=1)
+    mood_board_candidates: List[MoodBoardConcept] = Field(
+        min_length=2,
+        max_length=3,
+        description=(
+            "preserve each concept (title, visual_direction, color_story, "
+            "typography_direction, image_style)"
+        ),
+    )
 
 
 class LogoSuiteOutput(BaseModel):
@@ -1329,7 +1505,11 @@ class LogoSuiteOutput(BaseModel):
     ``min_length``/``max_length`` encode the prompt's four logo variants.
     """
 
-    logo_suite: List[LogoUsageRuleOutput] = Field(min_length=4, max_length=4)
+    logo_suite: List[LogoUsageRuleOutput] = Field(
+        min_length=4,
+        max_length=4,
+        description="variant, usage_context, minimum_size, clear_space",
+    )
 
 
 class ColorPaletteSystemOutput(BaseModel):
@@ -1339,7 +1519,14 @@ class ColorPaletteSystemOutput(BaseModel):
     ``min_length``/``max_length`` encode the prompt's stated "5-7 colors".
     """
 
-    color_palette: List[ColorEntryOutput] = Field(min_length=5, max_length=7)
+    color_palette: List[ColorEntryOutput] = Field(
+        min_length=5,
+        max_length=7,
+        description=(
+            "for each: name, hex_value, usage (where to use it), and "
+            "psychological_rationale (why this color works for the brand)"
+        ),
+    )
 
 
 class TypographySystemOutput(BaseModel):
@@ -1348,14 +1535,24 @@ class TypographySystemOutput(BaseModel):
     ``min_length``/``max_length`` encode the prompt's stated "3-4 type roles".
     """
 
-    typography_system: List[TypographySpecOutput] = Field(min_length=3, max_length=4)
+    typography_system: List[TypographySpecOutput] = Field(
+        min_length=3,
+        max_length=4,
+        description="role, font_family, weight_range, usage_notes",
+    )
 
 
 class IconographyOutput(BaseModel):
     """Agent-facing iconography_director schema."""
 
-    iconography_style: str = Field(min_length=1)
-    illustration_style: str = Field(min_length=1)
+    iconography_style: str = Field(
+        min_length=1,
+        description="describe the icon aesthetic (line weight, corner radius, fill)",
+    )
+    illustration_style: str = Field(
+        min_length=1,
+        description="describe the illustration approach (flat, isometric, etc.)",
+    )
 
 
 class PhotographyVideoOutput(BaseModel):
@@ -1364,9 +1561,17 @@ class PhotographyVideoOutput(BaseModel):
     ``motion_principles`` cardinality matches the prompt's stated "3-4 principles".
     """
 
-    photography_direction: str = Field(min_length=1)
-    video_direction: str = Field(min_length=1)
-    motion_principles: List[str] = Field(min_length=3, max_length=4)
+    photography_direction: str = Field(
+        min_length=1, description="shooting style, lighting, composition, subjects"
+    )
+    video_direction: str = Field(
+        min_length=1, description="pacing, tone, visual style for video content"
+    )
+    motion_principles: List[str] = Field(
+        min_length=3,
+        max_length=4,
+        description="3-4 principles for animation/motion design",
+    )
 
 
 class VoiceToneOutput(BaseModel):
@@ -1375,20 +1580,19 @@ class VoiceToneOutput(BaseModel):
     ``language_dos``/``language_donts`` match the prompt's stated "4-5" items.
     """
 
-    voice_tone_spectrum: List[VoiceToneEntryOutput] = Field(min_length=1)
-    language_dos: List[str] = Field(min_length=4, max_length=5)
-    language_donts: List[str] = Field(min_length=4, max_length=5)
-
-
-class DesignSystemDefinitionOutput(BaseModel):
-    """Agent-facing design_system_codifier schema.
-
-    Field-for-field twin of ``DesignSystemDefinition`` with required content.
-    """
-
-    design_principles: List[str] = Field(min_length=1)
-    foundation_tokens: List[str] = Field(min_length=1)
-    component_standards: List[str] = Field(min_length=1)
+    voice_tone_spectrum: List[VoiceToneEntryOutput] = Field(
+        min_length=1,
+        description=(
+            "for each context (marketing, support, legal, social, internal), specify the "
+            "tone and 2-3 examples"
+        ),
+    )
+    language_dos: List[str] = Field(
+        min_length=4, max_length=5, description="4-5 approved language patterns"
+    )
+    language_donts: List[str] = Field(
+        min_length=4, max_length=5, description="4-5 language anti-patterns"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1446,6 +1650,35 @@ class BrandVersionSummary(BaseModel):
     status: Optional[str] = None
 
 
+class BrandConsumerContext(BaseModel):
+    """Flattened, cross-team consumer view of a brand's Phase 1/2 outputs.
+
+    A stable, in-process shape other teams can consume without re-deriving the
+    extraction against the nested ``StrategicCoreOutput`` /
+    ``NarrativeMessagingOutput`` phase schemas they do not own. Produced by
+    :meth:`Brand.to_consumer_context`. Field names deliberately mirror the
+    social-marketing ``BrandContext`` adapter shape so a consumer can build one
+    from this via ``model_dump()`` without a remap.
+
+    Every field carries a default so an under-populated or degraded brand (no
+    ``latest_output``, or missing Phase 1/2 outputs) still yields a fully
+    constructed context. ``voice_and_tone`` defaults to the same fallback the
+    accessor applies when its sources are empty (``"professional, clear, and
+    human"``). ``brand_name`` defaults to the generic placeholder ``"Brand"``
+    for direct construction; the accessor itself does not use that placeholder —
+    it falls back to ``mission.company_name`` when a ``Brand`` has no name.
+    """
+
+    brand_name: str = "Brand"
+    target_audience: str = ""
+    voice_and_tone: str = "professional, clear, and human"
+    brand_guidelines: str = ""
+    brand_objectives: str = ""
+    messaging_pillars: List[str] = Field(default_factory=list)
+    brand_story: str = ""
+    tagline: str = ""
+
+
 class Brand(BaseModel):
     """A brand owned by a client; can be evolved over time."""
 
@@ -1461,3 +1694,107 @@ class Brand(BaseModel):
     history: List[BrandVersionSummary] = Field(default_factory=list)
     created_at: str = ""
     updated_at: str = ""
+
+    def to_consumer_context(self) -> BrandConsumerContext:
+        """Flatten this brand's Phase 1/2 outputs into a consumer-facing context.
+
+        Synthesizes audience, voice, guidelines, objectives, and messaging from
+        ``self.name``, ``self.mission``, and — when present — the strategic-core
+        (Phase 1) and narrative-messaging (Phase 2) outputs on
+        ``self.latest_output``. Mirrors the extraction the social-marketing
+        branding adapter hand-parses from the raw brand JSON, but operates on the
+        typed in-process models so any team holding a ``Brand`` can reuse it.
+
+        Preconditions:
+            - ``self`` is a valid ``Brand`` (in particular ``self.name`` is a
+              non-empty string and ``self.mission`` is a ``BrandingMission``).
+        Postconditions:
+            - Returns a ``BrandConsumerContext``; never raises for a missing or
+              ``None`` ``latest_output`` / ``strategic_core`` / ``narrative_messaging``.
+            - ``brand_name`` is ``self.name`` (falling back to
+              ``self.mission.company_name`` only if ``self.name`` is falsy).
+            - Phase-derived fields (``target_audience`` beyond the mission
+              audience, ``brand_guidelines``, ``brand_objectives``,
+              ``messaging_pillars``, ``brand_story``, ``tagline``) are empty when
+              their source phase output is absent.
+            - ``voice_and_tone`` is the mission voice plus any archetype traits,
+              falling back to ``"professional, clear, and human"`` only when both
+              are empty.
+        """
+        mission = self.mission
+        output = self.latest_output
+        strategic: Optional[StrategicCoreOutput] = output.strategic_core if output else None
+        narrative: Optional[NarrativeMessagingOutput] = (
+            output.narrative_messaging if output else None
+        )
+
+        brand_name = self.name or mission.company_name
+
+        # Target audience -- mission audience plus per-segment detail.
+        audience_parts = [mission.target_audience]
+        if strategic:
+            for seg in strategic.target_audience_segments:
+                if seg.name:
+                    audience_parts.append(
+                        f"{seg.name}: {seg.description}" if seg.description else seg.name
+                    )
+        target_audience = "; ".join(p for p in audience_parts if p)
+
+        # Voice and tone -- mission voice plus archetype personality traits.
+        voice_parts = [mission.desired_voice]
+        if narrative:
+            for archetype in narrative.brand_archetypes:
+                if archetype.personality_traits:
+                    voice_parts.append(", ".join(archetype.personality_traits[:5]))
+        voice_and_tone = "; ".join(p for p in voice_parts if p) or "professional, clear, and human"
+
+        # Brand guidelines -- synthesized from strategic core + narrative.
+        guideline_parts: List[str] = []
+        if strategic:
+            if strategic.positioning_statement:
+                guideline_parts.append(f"Positioning: {strategic.positioning_statement}")
+            for val in strategic.core_values:
+                if val.value:
+                    guideline_parts.append(f"Value -- {val.value}: {val.behavioral_definition}")
+            for pillar in strategic.differentiation_pillars:
+                if pillar.pillar:
+                    guideline_parts.append(
+                        f"Differentiator -- {pillar.pillar}: {pillar.competitive_context}"
+                    )
+        if narrative:
+            for aud_map in narrative.audience_message_maps:
+                if aud_map.tone_adjustments:
+                    guideline_parts.append(
+                        f"Tone for {aud_map.audience_segment or 'audience'}: "
+                        f"{aud_map.tone_adjustments}"
+                    )
+        brand_guidelines = "\n".join(guideline_parts)
+
+        # Brand objectives -- purpose/mission/vision/promise from strategic core.
+        objective_parts: List[str] = []
+        if strategic:
+            if strategic.brand_purpose:
+                objective_parts.append(f"Purpose: {strategic.brand_purpose}")
+            if strategic.mission_statement:
+                objective_parts.append(f"Mission: {strategic.mission_statement}")
+            if strategic.vision_statement:
+                objective_parts.append(f"Vision: {strategic.vision_statement}")
+            if strategic.brand_promise:
+                objective_parts.append(f"Promise: {strategic.brand_promise}")
+        brand_objectives = "\n".join(objective_parts)
+
+        # Messaging pillars -- pillar names from the narrative framework.
+        messaging_pillars: List[str] = []
+        if narrative:
+            messaging_pillars = [mp.pillar for mp in narrative.messaging_framework if mp.pillar]
+
+        return BrandConsumerContext(
+            brand_name=brand_name,
+            target_audience=target_audience,
+            voice_and_tone=voice_and_tone,
+            brand_guidelines=brand_guidelines,
+            brand_objectives=brand_objectives,
+            messaging_pillars=messaging_pillars,
+            brand_story=narrative.brand_story if narrative else "",
+            tagline=narrative.tagline if narrative else "",
+        )
