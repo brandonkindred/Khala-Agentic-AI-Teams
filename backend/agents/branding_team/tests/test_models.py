@@ -1495,11 +1495,29 @@ def test_to_consumer_context_voice_falls_back_when_mission_voice_blank() -> None
     assert ctx.voice_and_tone == "professional, clear, and human"
 
 
-def test_to_consumer_context_brand_name_falls_back_to_company_name() -> None:
-    """``brand_name`` prefers ``self.name`` but the accessor is written to fall back.
+def test_to_consumer_context_uses_brand_name() -> None:
+    """The accessor's ``brand_name`` is the brand's own ``name`` (the primary path).
 
-    ``Brand.name`` is required non-empty, so the fallback is asserted directly on the
-    accessor's contract via ``BrandConsumerContext`` field defaults / mission company name.
+    ``Brand.name`` is required non-empty, so the accessor's ``self.name or
+    mission.company_name`` fallback branch is unreachable via a valid ``Brand``; only the
+    primary ``self.name`` path is exercised here. The documented ``mission.company_name``
+    fallback and the ``"Brand"`` placeholder are covered separately (see
+    ``test_brand_consumer_context_direct_construction_defaults``).
     """
-    brand = _make_brand(name="Acme Co", mission=make_mission(company_name="Acme Co"))
+    brand = _make_brand(name="Acme Co", mission=make_mission(company_name="Northstar Labs"))
     assert brand.to_consumer_context().brand_name == "Acme Co"
+
+
+def test_brand_consumer_context_direct_construction_defaults() -> None:
+    """Direct construction (no accessor) uses the documented placeholder defaults.
+
+    Confirms the model-level defaults a consumer sees when building a
+    ``BrandConsumerContext`` by hand: ``brand_name`` is the generic ``"Brand"`` placeholder
+    (distinct from the accessor's ``mission.company_name`` fallback) and ``voice_and_tone``
+    is the accessor's shared fallback string.
+    """
+    ctx = BrandConsumerContext()
+    assert ctx.brand_name == "Brand"
+    assert ctx.voice_and_tone == "professional, clear, and human"
+    assert ctx.target_audience == ""
+    assert ctx.messaging_pillars == []

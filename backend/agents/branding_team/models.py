@@ -1458,8 +1458,11 @@ class BrandConsumerContext(BaseModel):
 
     Every field carries a default so an under-populated or degraded brand (no
     ``latest_output``, or missing Phase 1/2 outputs) still yields a fully
-    constructed context. ``brand_name`` and ``voice_and_tone`` default to the
-    same fallbacks the accessor applies when their sources are empty.
+    constructed context. ``voice_and_tone`` defaults to the same fallback the
+    accessor applies when its sources are empty (``"professional, clear, and
+    human"``). ``brand_name`` defaults to the generic placeholder ``"Brand"``
+    for direct construction; the accessor itself does not use that placeholder —
+    it falls back to ``mission.company_name`` when a ``Brand`` has no name.
     """
 
     brand_name: str = "Brand"
