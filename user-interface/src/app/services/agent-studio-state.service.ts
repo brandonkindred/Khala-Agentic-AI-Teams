@@ -27,7 +27,10 @@ function handoffHasAnyId(h: AgentStudioHandoffState): boolean {
   );
 }
 
-function handoffEquals(a: AgentStudioHandoffState, b: AgentStudioHandoffState): boolean {
+/** Whether two handoff snapshots carry the same five ids. Shared with the
+ *  Studio shell's load-conflict guard so handoff-field changes can't drift
+ *  between two copies of the same comparison. */
+export function handoffEquals(a: AgentStudioHandoffState, b: AgentStudioHandoffState): boolean {
   return (
     a.registryAgentId === b.registryAgentId &&
     a.teamId === b.teamId &&
@@ -67,8 +70,8 @@ export class AgentStudioStateService {
   // ── Server draft binding (spec §3.5) ───────────────────────────────────────
   /**
    * Server draft id this session is bound to; `null` until the first
-   * successful save. Re-saving with this set issues a PUT (update-in-place)
-   * instead of a POST (create) — see `AgentStudioApiService`.
+   * successful save or load. Re-saving with this set issues a PUT
+   * (update-in-place) instead of a POST (create) — see `AgentStudioApiService`.
    */
   readonly currentDraftId = signal<string | null>(null);
   /** Server draft name from the last successful save — pre-fills the

@@ -50,6 +50,14 @@ describe('RenameDraftDialogComponent', () => {
     expect(ref.close).toHaveBeenCalledWith(summary('d-1', 'Renamed'));
   });
 
+  it('trims whitespace before sending the new name', () => {
+    const renameDraft = vi.fn().mockReturnValue(of(summary('d-1', 'Renamed')));
+    const { fixture } = configure({ draftId: 'd-1', initialName: 'Old' }, renameDraft);
+    fixture.componentInstance.name.set('  Renamed  ');
+    fixture.componentInstance.submit();
+    expect(renameDraft).toHaveBeenCalledWith('d-1', 'Renamed');
+  });
+
   it('a blank name sets a server error and does not call the API', () => {
     const { fixture, ref, api } = configure({ draftId: 'd-1', initialName: 'Old' });
     fixture.componentInstance.name.set('   ');
