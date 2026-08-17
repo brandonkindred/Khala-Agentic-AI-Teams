@@ -53,6 +53,17 @@ _authoring_pool_lock = threading.Lock()
 T = TypeVar("T")
 
 
+def studio_temporal_enabled() -> bool:
+    """True when Temporal is configured for Studio's remaining Temporal-backed flows.
+
+    Postconditions:
+        * Returns ``is_temporal_enabled()`` — never raises.
+    """
+    from shared.temporal.client import is_temporal_enabled
+
+    return is_temporal_enabled()
+
+
 class _DaemonAuthoringPool:
     """Fixed-size daemon-worker pool whose workers do not atexit-join the interpreter.
 
