@@ -74,6 +74,8 @@ class LLMCallRecord:
     total_tokens: int
     latency_ms: int
     status: str  # "success", "error", "rate_limited", "truncated"
+    cache_read_tokens: int = 0
+    cache_creation_tokens: int = 0
     error_type: Optional[str] = None
     job_id: Optional[str] = None
     objective: str = ""
@@ -100,6 +102,8 @@ class LLMCallRecord:
             "status": self.status,
             "cost_usd": self.cost_usd,
             "outcome": self.outcome,
+            "cache_read_tokens": self.cache_read_tokens,
+            "cache_creation_tokens": self.cache_creation_tokens,
         }
         if self.error_type:
             d["error_type"] = self.error_type
@@ -190,6 +194,8 @@ def record_llm_call(
     prompt_tokens: int = 0,
     completion_tokens: int = 0,
     total_tokens: int = 0,
+    cache_read_tokens: int = 0,
+    cache_creation_tokens: int = 0,
     latency_ms: int = 0,
     status: str = "success",
     error_type: Optional[str] = None,
@@ -246,6 +252,8 @@ def record_llm_call(
         total_tokens=total_tokens,
         latency_ms=latency_ms,
         status=status,
+        cache_read_tokens=cache_read_tokens,
+        cache_creation_tokens=cache_creation_tokens,
         error_type=error_type,
         job_id=job_id,
         objective=objective,
@@ -363,6 +371,8 @@ def _emit_otel_llm_span(record: LLMCallRecord) -> None:
             "llm.usage.prompt_tokens": record.prompt_tokens,
             "llm.usage.completion_tokens": record.completion_tokens,
             "llm.usage.total_tokens": record.total_tokens,
+            "llm.usage.cache_read_tokens": record.cache_read_tokens,
+            "llm.usage.cache_creation_tokens": record.cache_creation_tokens,
             # Issue-named aliases for the input/output token counts.
             "llm.input_tokens": record.prompt_tokens,
             "llm.output_tokens": record.completion_tokens,
@@ -442,6 +452,8 @@ class UsageSummary:
     total_prompt_tokens: int = 0
     total_completion_tokens: int = 0
     total_tokens: int = 0
+    total_cache_read_tokens: int = 0
+    total_cache_creation_tokens: int = 0
     avg_latency_ms: float = 0.0
     error_count: int = 0
     by_agent: Dict[str, Dict[str, int]] = field(default_factory=dict)
@@ -455,6 +467,8 @@ class UsageSummary:
             "total_prompt_tokens": self.total_prompt_tokens,
             "total_completion_tokens": self.total_completion_tokens,
             "total_tokens": self.total_tokens,
+            "total_cache_read_tokens": self.total_cache_read_tokens,
+            "total_cache_creation_tokens": self.total_cache_creation_tokens,
             "avg_latency_ms": round(self.avg_latency_ms, 1),
             "error_count": self.error_count,
             "by_agent": self.by_agent,
@@ -493,6 +507,8 @@ def get_usage_summary(
         summary.total_prompt_tokens += r.prompt_tokens
         summary.total_completion_tokens += r.completion_tokens
         summary.total_tokens += r.total_tokens
+        summary.total_cache_read_tokens += r.cache_read_tokens
+        summary.total_cache_creation_tokens += r.cache_creation_tokens
         total_latency += r.latency_ms
         if r.status != "success":
             summary.error_count += 1
