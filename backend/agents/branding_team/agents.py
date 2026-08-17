@@ -19,7 +19,9 @@ from typing import List
 from pydantic import BaseModel
 from strands import Agent
 
-from .graphs.shared import build_agent, phase_agent_key
+from shared.graph import build_agent
+
+from .graphs.shared import phase_agent_key
 from .models import (
     AUDIENCE_SEGMENTS_MAX,
     AUDIENCE_SEGMENTS_MIN,

@@ -24,7 +24,6 @@ from branding_team.graphs.shared import (
     COMPOSITOR_AGENT_KEY,
     PHASE_ORDER,
     PHASE_TITLES,
-    build_agent,
     build_compositor,
     phase_agent_key,
     phase_index,
@@ -38,7 +37,6 @@ from branding_team.graphs.top_level import (
     build_branding_graph,
 )
 from branding_team.models import (
-    BrandingMission,
     BrandPhase,
     VisualIdentityOutput,
 )
@@ -330,41 +328,9 @@ def test_build_branding_graph_for_each_target_phase(target_phase) -> None:
 
 
 # ---------------------------------------------------------------------------
-# build_agent helper (graphs/shared)
+# build_compositor helper (graphs/shared) — the generic factory itself
+# (shared.graph.build_agent) is tested in shared/graph/tests/test_agent_factory.py
 # ---------------------------------------------------------------------------
-
-
-def test_build_agent_json_mode() -> None:
-    agent = build_agent(name="a1", system_prompt="do x", output_mode="json")
-    assert isinstance(agent, Agent)
-    assert agent.name == "a1"
-
-
-def test_build_agent_text_mode_with_description_and_tools() -> None:
-    agent = build_agent(
-        name="a2",
-        system_prompt="do y",
-        output_mode="text",
-        description="a helper",
-        tools=[],
-    )
-    assert isinstance(agent, Agent)
-
-
-def test_build_agent_structured_output() -> None:
-    agent = build_agent(name="a3", system_prompt="do z", structured_output=BrandingMission)
-    assert isinstance(agent, Agent)
-
-
-def test_build_agent_rejects_bad_output_mode() -> None:
-    with pytest.raises(ValueError, match="output_mode must be"):
-        build_agent(name="bad", system_prompt="x", output_mode="xml")  # type: ignore[arg-type]
-
-
-def test_build_agent_with_agent_key_override() -> None:
-    agent = build_agent(name="a4", system_prompt="do w", agent_key="branding_assistant")
-    assert isinstance(agent, Agent)
-    assert agent.name == "a4"
 
 
 def _resolved_agent_key(agent: Agent) -> str:
@@ -379,18 +345,6 @@ def _resolved_agent_key(agent: Agent) -> str:
     also be caught.
     """
     return agent.model.get_config()["agent_key"]
-
-
-def test_build_agent_forwards_agent_key_to_model_config() -> None:
-    """``build_agent``'s ``agent_key`` reaches ``get_strands_model`` (not just accepted)."""
-    agent = build_agent(name="a5", system_prompt="do v", agent_key="branding_strategic_core")
-    assert _resolved_agent_key(agent) == "branding_strategic_core"
-
-
-def test_build_agent_default_agent_key_is_branding() -> None:
-    """Omitting ``agent_key`` still resolves the historical "branding" default."""
-    agent = build_agent(name="a6", system_prompt="do u")
-    assert _resolved_agent_key(agent) == "branding"
 
 
 def test_build_compositor_pins_compositor_agent_key() -> None:

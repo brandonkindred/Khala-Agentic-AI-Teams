@@ -38,7 +38,7 @@ import pytest
 
 from branding_team import agents as branding_agents
 from branding_team.graphs.phase3_visual import _PHASE3_CONCEPTUALIST_VARIANTS
-from branding_team.graphs.shared import build_agent, serialize_mission
+from branding_team.graphs.shared import serialize_mission
 from branding_team.models import (
     ApprovalWorkflowsOutput,
     AssetWikiOutput,
@@ -76,6 +76,7 @@ from branding_team.models import (
 )
 from branding_team.tests.conftest import make_mission
 from llm_service.clients.dummy import DummyLLMClient
+from shared.graph import build_agent
 
 # A system prompt with none of the branding routing anchors, used to prove the
 # dummy's agent-specific branches — not a permissive schema — are what make the

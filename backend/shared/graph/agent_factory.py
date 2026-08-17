@@ -18,6 +18,7 @@ def build_agent(
     name: str,
     system_prompt: str,
     agent_key: str | None = None,
+    response_format: str = "json",
     structured_output: Any | None = None,
     tools: list | None = None,
     description: str = "",
@@ -34,6 +35,16 @@ def build_agent(
     agent_key:
         Key for per-agent model resolution via ``llm_service``.
         Falls back to ``LLM_MODEL`` env var when ``None``.
+    response_format:
+        Declarative shape of this agent's output, kept co-located with the
+        system prompt that produces it. ``"json"`` (default) forces
+        ``response_format=json_object`` on the wire — use when the downstream
+        consumer ``json.loads`` / ``model_validate_json`` the assistant
+        content. ``"text"`` uses prose mode — use for conversational replies
+        or template-based outputs where the consumer extracts structured
+        data from prose itself. Ignored when ``structured_output`` is set —
+        Strands routes that flow through ``complete_json`` regardless of
+        mode.
     structured_output:
         Optional Pydantic ``BaseModel`` subclass for typed output.
     tools:
@@ -43,10 +54,12 @@ def build_agent(
     callback_handler:
         Optional callback handler for streaming events.
     """
+    if response_format not in ("json", "text"):
+        raise ValueError(f"response_format must be 'json' or 'text', got {response_format!r}")
     kwargs: dict[str, Any] = {
         "name": name,
         "system_prompt": system_prompt,
-        "model": get_strands_model(agent_key),
+        "model": get_strands_model(agent_key, response_format=response_format),
         "callback_handler": callback_handler,
     }
     if structured_output is not None:
