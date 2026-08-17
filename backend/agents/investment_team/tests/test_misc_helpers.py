@@ -1385,7 +1385,18 @@ def test_get_strands_model_bedrock_branch(monkeypatch: pytest.MonkeyPatch) -> No
     assert result.boto_client_config.read_timeout == 77.0
 
 
-def test_get_strands_model_ollama_cloud_without_key_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_get_strands_model_ollama_cloud_without_env_key_does_not_raise(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A keyless-looking env is NOT a fail-fast trigger: Ollama Cloud auth is
+    resolved by ``llm_service.factory.get_client`` from the Postgres-backed
+    provider list (each entry carries its own key, with no environment
+    fallback), so ``get_strands_model`` must not reject this configuration by
+    checking ``OLLAMA_API_KEY``/``LLM_OLLAMA_API_KEY`` against
+    ``resolve_base_url()`` — that would diverge from ``get_client``'s actual
+    resolution and misfire against a correctly configured deployment (the
+    provider-list entry's key lives in Postgres, never in these env vars)."""
+    import llm_service.strands_adapter as adapter
     from investment_team.strategy_lab.agents import model_factory
 
     monkeypatch.setattr(model_factory, "resolve_provider", lambda: "ollama")
@@ -1394,9 +1405,11 @@ def test_get_strands_model_ollama_cloud_without_key_raises(monkeypatch: pytest.M
     monkeypatch.delenv("OLLAMA_API_KEY", raising=False)
     monkeypatch.delenv("LLM_OLLAMA_API_KEY", raising=False)
     monkeypatch.delenv("OLLAMA_HOST", raising=False)
-    with pytest.raises(ValueError) as exc:
-        model_factory.get_strands_model("x")
-    assert "Cloud requires an API key" in str(exc.value)
+
+    sentinel = object()
+    monkeypatch.setattr(adapter, "_get_strands_model", lambda **_kw: sentinel)
+
+    assert model_factory.get_strands_model("x") is sentinel
 
 
 def _patch_ollama_llm_service(monkeypatch: pytest.MonkeyPatch):
