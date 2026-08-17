@@ -27,10 +27,6 @@ is what keeps the primary assertion honest about catching it — for the
 text-routed classes only; the six Phase 2 classes moved to
 ``test_model_routed_payload_validates_regardless_of_prompt_text`` since an
 unrouted prompt no longer breaks them, which is the point of their fix.
-
-``governance_compositor`` (Phase 5's fan-in node) is not a ``make_*`` factory in
-this module — it's built inline in ``graphs/phase5_governance.py`` — so it never
-appears in ``dir(branding_agents)`` and needs no entry here.
 """
 
 from __future__ import annotations

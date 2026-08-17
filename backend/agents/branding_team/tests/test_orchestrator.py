@@ -21,6 +21,9 @@ from branding_team import (
     WorkflowStatus,
 )
 from branding_team.models import (
+    ApprovalWorkflowOutput,
+    ApprovalWorkflowsOutput,
+    AssetWikiOutput,
     AudienceMessageMapOutput,
     AudienceSegmentOutput,
     AudienceSegmentsOutput,
@@ -32,7 +35,10 @@ from branding_team.models import (
     BrandCheckRequest,
     BrandDiscoveryAudit,
     BrandExperiencePrinciplesOutput,
+    BrandGuidelinesOutput,
     BrandHealthKPI,
+    BrandHealthKPIOutput,
+    BrandHealthKPIsOutput,
     BrandInActionExampleOutput,
     BrandInActionOutput,
     BrandStatus,
@@ -50,25 +56,29 @@ from branding_team.models import (
     DifferentiationPillarOutput,
     DifferentiationPillarsOutput,
     ElevatorPitchOutput,
+    EvolutionFrameworkOutput,
     GovernanceOutput,
     MessagingFrameworkOutput,
     MessagingPillarOutput,
     MoodBoardConcept,
     NarrativeMessagingOutput,
+    OwnershipOutput,
     PersonaProfileOutput,
     PersonaProfilesOutput,
     PositioningOutput,
     PurposeVisionOutput,
     StrategicCoreOutput,
     TaglineOutput,
+    TrainingOnboardingOutput,
     TypographySpec,
     VisualIdentityOutput,
     WikiEntry,
+    WikiEntryOutput,
     WritingGuidelines,
     WritingGuidelinesBody,
     WritingGuidelinesOutput,
 )
-from branding_team.orchestrator import _merge_phase4_fragments
+from branding_team.orchestrator import _merge_phase4_fragments, _merge_phase5_fragments
 from branding_team.store import BrandVersionAppendConflict
 from branding_team.tests.conftest import make_mission
 
@@ -826,21 +836,22 @@ def test_extract_phase_output_uses_structured_output_when_present() -> None:
     "node_id,full_output,model_cls",
     [
         ("phase3_visual", _full_visual_identity(), VisualIdentityOutput),
-        ("phase5_governance", _full_governance(), GovernanceOutput),
     ],
-    ids=["phase3_visual", "phase5_governance"],
+    ids=["phase3_visual"],
 )
 def test_extract_compositor_output_uses_structured_output_not_text_parse(
     node_id, full_output, model_cls
 ) -> None:
-    """The Phase 3/5 compositors pass ``structured_output=``, so their typed
+    """The Phase 3 compositor passes ``structured_output=``, so its typed
     payload lands on ``AgentResult.structured_output`` and extraction
     consumes it via the structured path — ``_parse_model_from_text`` is never
     reached. The empty ``message`` proves the result is taken from the
-    structured field, not recovered from any text block. Phase 4 has no
-    compositor (``check_structured_output=False``), so it's excluded here —
-    see ``test_extract_phase_output_merges_every_phase4_fragment`` and
-    ``test_extract_phase_output_rejects_incomplete_phase4_fragments``.
+    structured field, not recovered from any text block. Phase 4 and Phase 5
+    have no compositor (``check_structured_output=False``), so they're
+    excluded here — see ``test_extract_phase_output_merges_every_phase4_fragment``/
+    ``test_extract_phase_output_rejects_incomplete_phase4_fragments`` and
+    ``test_extract_phase_output_merges_every_phase5_fragment``/
+    ``test_extract_phase_output_rejects_incomplete_phase5_fragments``.
     """
     agent_result = MagicMock()
     agent_result.message = {"content": []}
@@ -1622,6 +1633,315 @@ def test_extract_phase_output_rejects_incomplete_phase4_fragments() -> None:
 
     assert degraded is True
     assert output == ChannelActivationOutput()
+
+
+def _phase5_specialist_fragments() -> dict[str, BaseModel]:
+    """The seven Phase-5 specialists' typed fragments, keyed by node id.
+
+    Every fragment's fields map 1:1 onto a disjoint set of GovernanceOutput
+    field names (see models.py), so — unlike Phase 4's six *_guide
+    specialists — none of these need to share a nest-under key.
+    """
+    return {
+        "ownership_definer": OwnershipOutput(
+            ownership_model="Brand Director owns the system end to end.",
+            decision_authority={
+                "logo_changes": "Brand Director",
+                "campaign_messaging": "Marketing Lead",
+            },
+        ),
+        "approval_workflow_designer": ApprovalWorkflowsOutput(
+            approval_workflows=[
+                ApprovalWorkflowOutput(
+                    asset_type="campaign creative",
+                    approvers=["Brand Director"],
+                    sla="2 business days",
+                    escalation_path="VP Marketing",
+                ),
+                ApprovalWorkflowOutput(
+                    asset_type="website copy",
+                    approvers=["Brand Director", "Legal"],
+                    sla="3 business days",
+                    escalation_path="VP Marketing",
+                ),
+                ApprovalWorkflowOutput(
+                    asset_type="paid media",
+                    approvers=["Marketing Lead"],
+                    sla="1 business day",
+                    escalation_path="Brand Director",
+                ),
+            ],
+            agency_briefing_protocols=[
+                "Always include the brand book",
+                "Share the current campaign brief",
+                "Confirm approvers before kickoff",
+            ],
+        ),
+        "asset_wiki_planner": AssetWikiOutput(
+            asset_management_guidance=[
+                "Store all assets in the central DAM",
+                "Tag assets with campaign and channel",
+                "Archive superseded assets quarterly",
+            ],
+            wiki_backlog=[
+                WikiEntryOutput(
+                    title="Brand North Star",
+                    summary="Source of truth for positioning.",
+                    owners=["Brand Strategy"],
+                    update_cadence="quarterly",
+                ),
+                WikiEntryOutput(
+                    title="Voice Playbook",
+                    summary="Tone and language guidance.",
+                    owners=["Brand Strategy"],
+                    update_cadence="quarterly",
+                ),
+                WikiEntryOutput(
+                    title="Design System",
+                    summary="Component and token reference.",
+                    owners=["Design"],
+                    update_cadence="monthly",
+                ),
+                WikiEntryOutput(
+                    title="Governance Charter",
+                    summary="Ownership and approval rules.",
+                    owners=["Brand Strategy"],
+                    update_cadence="annually",
+                ),
+            ],
+        ),
+        "training_planner": TrainingOnboardingOutput(
+            training_onboarding_plan=[
+                "Brand 101 for new hires",
+                "Quarterly brand refresher workshop",
+                "Self-serve brand portal walkthrough",
+                "Manager-led brand values session",
+            ],
+        ),
+        "kpi_designer": BrandHealthKPIsOutput(
+            brand_health_kpis=[
+                BrandHealthKPIOutput(
+                    metric="NPS",
+                    measurement_method="Quarterly survey",
+                    target=">50",
+                    review_frequency="quarterly",
+                ),
+                BrandHealthKPIOutput(
+                    metric="Brand recall",
+                    measurement_method="Annual brand study",
+                    target=">40%",
+                    review_frequency="annually",
+                ),
+                BrandHealthKPIOutput(
+                    metric="Message consistency",
+                    measurement_method="Channel audit",
+                    target=">90%",
+                    review_frequency="quarterly",
+                ),
+                BrandHealthKPIOutput(
+                    metric="Employee brand literacy",
+                    measurement_method="Internal survey",
+                    target=">80%",
+                    review_frequency="annually",
+                ),
+            ],
+            tracking_methodology=(
+                "Quarterly brand health surveys triangulated with channel audits."
+            ),
+            review_trigger_points=[
+                "Major campaign launch",
+                "Leadership change",
+                "Category repositioning",
+            ],
+        ),
+        "evolution_framer": EvolutionFrameworkOutput(
+            evolution_framework=(
+                "The brand evolves through an annual refresh cycle informed by health KPIs."
+            ),
+            version_control_cadence="Bi-annual version bumps, reviewed by the Brand Director.",
+        ),
+        "brand_rules_codifier": BrandGuidelinesOutput(
+            brand_guidelines=[
+                "Positioning: use the approved positioning statement.",
+                "Promise: lead with the brand promise.",
+                "Identity: follow logo spacing rules.",
+                "Messaging: promise -> pillar -> proof -> CTA.",
+                "Governance: route major campaigns through brand review.",
+            ],
+        ),
+    }
+
+
+def _phase5_nested_node_result(*, omit: str = "") -> MagicMock:
+    """A mock NodeResult wrapping the Phase-5 specialists' fragments, shaped
+    like the real nested MultiAgentResult.results Strands returns.
+
+    ``omit`` drops one node id from the set (used to build an incomplete
+    specialist set for the rejection tests below).
+    """
+    nested_results = {
+        node_id: _phase1_leaf_node(fragment)
+        for node_id, fragment in _phase5_specialist_fragments().items()
+        if node_id != omit
+    }
+
+    inner_multi_result = MagicMock()
+    inner_multi_result.results = nested_results
+
+    node_result = MagicMock()
+    node_result.result = inner_multi_result
+    node_result.get_agent_results.return_value = [
+        node.get_agent_results.return_value[0] for node in nested_results.values()
+    ]
+    return node_result
+
+
+def test_extract_phase_output_merges_every_phase5_fragment() -> None:
+    """Phase 5 wraps seven fan-out agents as one top-level node; each
+    specialist's fragment maps 1:1 onto disjoint GovernanceOutput fields, so
+    all seven must survive the merge with none overwriting another."""
+    node_result = _phase5_nested_node_result()
+
+    mock_result = MagicMock()
+    mock_result.result = {"phase5_governance": node_result}
+
+    output, degraded = BrandingTeamOrchestrator._extract_phase_output(
+        mock_result, "phase5_governance", GovernanceOutput
+    )
+
+    assert degraded is False
+    assert isinstance(output, GovernanceOutput)
+    assert output.ownership_model == "Brand Director owns the system end to end."
+    assert output.decision_authority["logo_changes"] == "Brand Director"
+    assert len(output.approval_workflows) == 3
+    assert output.agency_briefing_protocols[0] == "Always include the brand book"
+    assert output.asset_management_guidance[0] == "Store all assets in the central DAM"
+    assert [w.title for w in output.wiki_backlog] == [
+        "Brand North Star",
+        "Voice Playbook",
+        "Design System",
+        "Governance Charter",
+    ]
+    assert output.training_onboarding_plan[0] == "Brand 101 for new hires"
+    assert [k.metric for k in output.brand_health_kpis] == [
+        "NPS",
+        "Brand recall",
+        "Message consistency",
+        "Employee brand literacy",
+    ]
+    assert (
+        output.tracking_methodology
+        == "Quarterly brand health surveys triangulated with channel audits."
+    )
+    assert output.review_trigger_points[0] == "Major campaign launch"
+    assert output.evolution_framework == (
+        "The brand evolves through an annual refresh cycle informed by health KPIs."
+    )
+    assert output.version_control_cadence == (
+        "Bi-annual version bumps, reviewed by the Brand Director."
+    )
+    assert output.brand_guidelines[0] == "Positioning: use the approved positioning statement."
+
+
+def test_phase5_fragments_collectively_populate_every_output_field() -> None:
+    """Schema-coverage guard: the seven Phase-5 specialists' fragments must
+    collectively populate every field on GovernanceOutput, checked
+    generically against the model's own field list (not a hardcoded field
+    enumeration) so a field added later without a producing specialist fails
+    this test instead of silently shipping empty."""
+    mock_result = MagicMock()
+    mock_result.result = {"phase5_governance": _phase5_nested_node_result()}
+
+    output, degraded = BrandingTeamOrchestrator._extract_phase_output(
+        mock_result, "phase5_governance", GovernanceOutput
+    )
+
+    assert degraded is False
+    assert isinstance(output, GovernanceOutput)
+    _assert_every_field_populated(output)
+
+
+def test_full_run_phase5_not_degraded_with_seven_fragments() -> None:
+    """Phase 5's real runtime shape is seven separate specialist fragments,
+    not the single flat block _mock_graph_result's default gives every
+    phase (which never actually exercises _merge_phase5_fragments, since it
+    bails out unless node_result.result.results is a dict). Wire that real
+    shape through orchestrator.run() end-to-end and confirm the Python merge
+    keeps Phase 5 out of degraded_phases and fully populates its output."""
+    mock_result = _mock_graph_result(ALL_PHASES)
+    mock_result.result["phase5_governance"] = _phase5_nested_node_result()
+
+    async def mock_invoke_async(task, **kwargs):
+        return mock_result
+
+    with patch(
+        "branding_team.orchestrator.build_branding_graph",
+        return_value=MagicMock(invoke_async=AsyncMock(side_effect=mock_invoke_async)),
+    ):
+        orchestrator = BrandingTeamOrchestrator()
+        result = orchestrator.run(
+            mission=make_mission(
+                company_description="A strategic studio helping product teams ship cohesive digital experiences",
+                values=["clarity", "trust", "momentum"],
+            ),
+            human_review=HumanReview(approved=True),
+        )
+
+    assert result.degraded_phases == []
+    assert isinstance(result.governance, GovernanceOutput)
+    _assert_every_field_populated(result.governance)
+
+
+def test_merge_phase5_fragments_rejects_incomplete_specialist_set() -> None:
+    """A Phase 5 run missing one of the seven specialists (e.g.
+    evolution_framer never completed) must not validate as a complete
+    GovernanceOutput via field defaults — every field on it defaults to
+    empty/absent, so a partial merge would otherwise pass validation
+    silently.
+
+    Tested directly against ``_merge_phase5_fragments`` (require_all=True) as
+    a focused unit test of the merge function in isolation. See
+    ``test_extract_phase_output_rejects_incomplete_phase5_fragments`` for the
+    end-to-end path through ``_extract_phase_output``.
+    """
+    node_result = _phase5_nested_node_result(omit="evolution_framer")
+
+    merged = _merge_phase5_fragments(node_result, GovernanceOutput)
+
+    assert merged is None
+
+
+def test_extract_phase_output_rejects_incomplete_phase5_fragments() -> None:
+    """Without governance_compositor, a partial Phase 5 run (merge_fn returns
+    None) must degrade to defaults, not accept one specialist's own fragment
+    as the complete GovernanceOutput (``check_structured_output`` is False for
+    Phase 5, same guard Phase 2 and Phase 4 already rely on)."""
+    node_result = MagicMock()
+    single_fragment = {
+        "ownership_definer": _phase1_leaf_node(
+            OwnershipOutput(
+                ownership_model="Brand Director owns the system end to end.",
+                decision_authority={"logo_changes": "Brand Director"},
+            )
+        ),
+    }
+    inner_multi_result = MagicMock()
+    inner_multi_result.results = single_fragment
+
+    node_result.result = inner_multi_result
+    node_result.get_agent_results.return_value = [
+        single_fragment["ownership_definer"].get_agent_results.return_value[0]
+    ]
+
+    mock_result = MagicMock()
+    mock_result.result = {"phase5_governance": node_result}
+
+    output, degraded = BrandingTeamOrchestrator._extract_phase_output(
+        mock_result, "phase5_governance", GovernanceOutput
+    )
+
+    assert degraded is True
+    assert output == GovernanceOutput()
 
 
 def _text_node_result(text: str) -> MagicMock:
