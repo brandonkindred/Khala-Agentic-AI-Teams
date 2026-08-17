@@ -54,7 +54,9 @@ logger = logging.getLogger(__name__)
 
 _ARCH_ENV = "CODE_REVIEW_ARCHITECTURE_CONSISTENCY_PASS"
 _SIDE_ENV = "CODE_REVIEW_SIDE_EFFECT_IMPACT_PASS"
-_MUTATION_ENV = "CODE_REVIEW_MUTATION_ANALYSIS"
+# Single source of truth for this env-var name is ``side_pass.MUTATION_ANALYSIS_ENV``
+# (also imported by ``mapping._submission_fingerprint``), so it can never drift
+# between the three call sites.
 
 
 def find_architecture_and_side_effect_issues(
@@ -172,7 +174,7 @@ def _run_pass(
     if not index.files:
         return [], []
 
-    mutation_on = env_flag_enabled(_MUTATION_ENV)
+    mutation_on = env_flag_enabled(side_pass.MUTATION_ANALYSIS_ENV)
     reasoning_system_prompt = build_merged_architecture_side_effect_reasoning_system_prompt(
         arch_on=arch_on, side_on=side_on, mutation_on=mutation_on
     )

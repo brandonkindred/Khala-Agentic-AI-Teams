@@ -91,8 +91,11 @@ _PASS_ENV = "CODE_REVIEW_SIDE_EFFECT_IMPACT_PASS"
 
 # Default-on toggle for the mutation-vs-replaced-code contract sub-check within this
 # pass: an explicit ``CODE_REVIEW_MUTATION_ANALYSIS=false``/``0``/``no`` disables it
-# (see docs/ENV_VARS.md). Any other value (or unset) leaves it enabled.
-_MUTATION_ENV = "CODE_REVIEW_MUTATION_ANALYSIS"
+# (see docs/ENV_VARS.md). Any other value (or unset) leaves it enabled. Public (not
+# ``_``-prefixed) because it is also imported by ``merged_architecture_side_effect_pass``
+# and ``mapping._submission_fingerprint`` -- a single source of truth for the env-var
+# name so it can never drift between the three call sites.
+MUTATION_ANALYSIS_ENV = "CODE_REVIEW_MUTATION_ANALYSIS"
 
 _ALLOWED_CATEGORIES = frozenset({"side-effects", "documentation"})
 _ALLOWED_SEVERITIES = frozenset({"critical", "high", "medium", "low", "info"})
@@ -699,7 +702,7 @@ def _run_pass(
 
     pre_numbered = _effective_pre_numbered(input_data, index)
     tools = _build_side_effect_tools(index)
-    mutation_on = env_flag_enabled(_MUTATION_ENV)
+    mutation_on = env_flag_enabled(MUTATION_ANALYSIS_ENV)
 
     def _build_prompt_for_batch(batch: FileBatch) -> str:
         return _build_prompt(

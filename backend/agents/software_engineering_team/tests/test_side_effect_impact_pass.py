@@ -628,10 +628,13 @@ def test_returns_empty_when_disabled_via_env(monkeypatch: pytest.MonkeyPatch) ->
     assert result == []
 
 
-def test_replaced_content_reaches_prompt_when_mutation_analysis_enabled() -> None:
+def test_replaced_content_reaches_prompt_when_mutation_analysis_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Default (``CODE_REVIEW_MUTATION_ANALYSIS`` unset): a before-image supplied
     on ``CodeReviewInput.replaced_content`` reaches the user prompt as a
-    "Replaced (pre-change) content" section, per story 4c's rendering."""
+    "Replaced (pre-change) content" section."""
+    monkeypatch.delenv("CODE_REVIEW_MUTATION_ANALYSIS", raising=False)
 
     class _Capture(SubmissionPassTwoCallClient):
         def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
@@ -688,6 +691,7 @@ def test_reasoning_system_prompt_reflects_mutation_toggle(monkeypatch: pytest.Mo
 
     monkeypatch.setattr(pass_mod, "run_submission_pass", _fake_run_submission_pass)
 
+    monkeypatch.delenv("CODE_REVIEW_MUTATION_ANALYSIS", raising=False)
     find_side_effect_impact_issues(DummyLLMClient(), _input())
     assert "mutation-vs-replaced-code" in captured["reasoning_system_prompt"]
 

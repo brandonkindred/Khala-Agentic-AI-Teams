@@ -1207,25 +1207,32 @@ enabled).
 Default-on toggle for the mutation-vs-replaced-code contract sub-check inside
 the side-effect / blast-radius pass above (both the standalone Temporal
 activity and the in-process merged pass). When a file has a before-image on
-`CodeReviewInput.replaced_content` (see story 4c's "Replaced (pre-change)
-content" prompt section), this sub-check compares the file's current content
-against that shown before-image for data/variable-mutation differences (a
-different return value/type, a different mutation of shared/passed-in state,
-a different exception, a different ordering/timing guarantee), assesses
-whether the difference changed the enclosing function/class's observable
-contract, and — only when the contract changed — uses `find_references`
-(falling back to `search_repository`) and `read_file`/`read_function`/
-`read_lines` to inspect real callers and decide, in Design-by-Contract terms,
-whether the new code or its callers are the defect. This is the *only* case
-in which the pass's general "never assume a prior version" guard is relaxed,
-and only for the specific file whose before-image is actually shown — a file
-with no `replaced_content` entry gets none of it, and the guard stays
-absolute for every other file regardless of this toggle. Findings still ride
-the pass's existing `side-effects` category/schema; there is no new category
-and no schema change. When disabled, `replaced_content` is never shown to the
-model at all (not merely ignored), so the pass's prompt and behavior are
-identical to before this sub-check existed. Set to `false`/`0`/`no` to
-disable (any other value, or unset, leaves it enabled).
+`CodeReviewInput.replaced_content` (rendered as a per-path "Replaced
+(pre-change) content" prompt section), this sub-check compares the file's
+current content against that shown before-image for data/variable-mutation
+differences (a different return value/type, a different mutation of
+shared/passed-in state, a different exception, a different ordering/timing
+guarantee), assesses whether the difference changed the enclosing
+function/class's observable contract, and — only when the contract changed —
+uses `find_references` (falling back to `search_repository`) and
+`read_file`/`read_function`/`read_lines` to inspect real callers and decide,
+in Design-by-Contract terms, whether the new code or its callers are the
+defect. This is the *only* case in which the pass's general "never assume a
+prior version" guard is relaxed, and only for the specific file whose
+before-image is actually shown — a file with no `replaced_content` entry gets
+none of it, and the guard stays absolute for every other file regardless of
+this toggle. Findings still ride the pass's existing `side-effects`
+category/schema; there is no new category and no schema change. When
+disabled, `replaced_content` is never shown to the model at all (not merely
+ignored), so the pass's prompt and behavior are identical to before this
+sub-check existed. Output-affecting, so it participates in
+`mapping._submission_fingerprint` (the `__mutation_analysis__` payload entry,
+alongside `__side_effect_consolidation__` and
+`__spec_compliance_single_pass__`) — flipping this toggle invalidates the
+in-process coordinator's submission-level short-circuit cache, so a verdict
+computed under one toggle state is never served to a run under the other. Set
+to `false`/`0`/`no` to disable (any other value, or unset, leaves it
+enabled).
 
 ### CODE_REVIEW_SIDE_EFFECT_CONSOLIDATION
 Default-on toggle for consolidating related `side-effects` findings from the

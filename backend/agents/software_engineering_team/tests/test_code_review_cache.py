@@ -288,6 +288,30 @@ def test_identical_replaced_content_matches_submission_fingerprint() -> None:
     ) != mapping._submission_fingerprint(other, "model-A", False)
 
 
+def test_mutation_analysis_toggle_changes_submission_fingerprint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``CODE_REVIEW_MUTATION_ANALYSIS`` is output-affecting (it decides whether a
+    replaced-content before-image is shown to the model and whether the
+    mutation-vs-replaced-code sub-check runs), so it must flip the submission
+    fingerprint like the other output-affecting toggles -- otherwise the
+    coordinator's short-circuit cache could serve a verdict computed under one
+    toggle state to a run under the other."""
+    input_data = _one_file_input(replaced_content={"app/a.py": "def f():\n    return 0\n"})
+
+    monkeypatch.delenv("CODE_REVIEW_MUTATION_ANALYSIS", raising=False)
+    fp_default_on = mapping._submission_fingerprint(input_data, "model-A", False)
+
+    monkeypatch.setenv("CODE_REVIEW_MUTATION_ANALYSIS", "false")
+    fp_off = mapping._submission_fingerprint(input_data, "model-A", False)
+
+    monkeypatch.setenv("CODE_REVIEW_MUTATION_ANALYSIS", "true")
+    fp_explicit_on = mapping._submission_fingerprint(input_data, "model-A", False)
+
+    assert fp_default_on != fp_off
+    assert fp_explicit_on == fp_default_on
+
+
 def test_cache_hit_reproduces_findings_without_consulting_model() -> None:
     """A hit reuses the stored findings even if the model would now differ."""
     high_issue = {

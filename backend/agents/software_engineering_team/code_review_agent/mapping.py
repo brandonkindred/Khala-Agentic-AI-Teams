@@ -104,6 +104,7 @@ from .models import (
     notify_review_progress,
 )
 from .side_effect_consolidation import SIDE_EFFECT_CONSOLIDATION_ENV
+from .side_effect_impact_pass import MUTATION_ANALYSIS_ENV
 
 logger = logging.getLogger(__name__)
 
@@ -1027,18 +1028,22 @@ def _submission_fingerprint(
     Postconditions:
         - Returns a hex digest that changes whenever **any** input field (or the
           resolved model) changes, and also whenever an output-affecting toggle —
-          ``CODE_REVIEW_SIDE_EFFECT_CONSOLIDATION`` or the caller's resolved
-          ``spec_compliance_single_pass`` decision — flips. It is derived from
-          ``input_data.model_dump()`` plus those toggles, so it keys on the whole
-          input (not a hand-picked subset) plus consolidation and
-          spec-compliance-pass identity: a new ``CodeReviewInput`` field is hashed
-          automatically and can never be silently dropped. Two submissions
-          collide only when their full inputs and toggle settings are identical,
-          so a hit means the review would be the same work — in particular, an
-          identical ``CODE_REVIEW``-profile submission approved with
-          ``CODE_REVIEW_SPEC_COMPLIANCE_PASS`` off can never be served from cache
-          once the flag is on, since that would silently skip the post-dedupe
-          ``synthesize_spec_compliance`` pass the flag adds. (Every current field
+          ``CODE_REVIEW_SIDE_EFFECT_CONSOLIDATION``, ``CODE_REVIEW_MUTATION_ANALYSIS``,
+          or the caller's resolved ``spec_compliance_single_pass`` decision — flips.
+          It is derived from ``input_data.model_dump()`` plus those toggles, so it
+          keys on the whole input (not a hand-picked subset) plus consolidation,
+          mutation-analysis, and spec-compliance-pass identity: a new
+          ``CodeReviewInput`` field is hashed automatically and can never be
+          silently dropped. Two submissions collide only when their full inputs
+          and toggle settings are identical, so a hit means the review would be
+          the same work — in particular, an identical ``CODE_REVIEW``-profile
+          submission approved with ``CODE_REVIEW_SPEC_COMPLIANCE_PASS`` off can
+          never be served from cache once the flag is on, since that would
+          silently skip the post-dedupe ``synthesize_spec_compliance`` pass the
+          flag adds; likewise a submission whose ``replaced_content`` was reviewed
+          with ``CODE_REVIEW_MUTATION_ANALYSIS`` off (before-image hidden from the
+          model, no mutation-vs-replaced-code sub-check) can never be served from
+          cache to a run with the toggle on, and vice versa. (Every current field
           is verdict-affecting, so this is exactly the submission identity; a
           future non-verdict field would only cause extra misses — full
           re-reviews — never a stale hit.)
@@ -1062,6 +1067,7 @@ def _submission_fingerprint(
     payload["__side_effect_consolidation__"] = env_flag_enabled(SIDE_EFFECT_CONSOLIDATION_ENV)
     payload["__combine_similarity_threshold__"] = resolve_combine_similarity_threshold()
     payload["__spec_compliance_single_pass__"] = spec_compliance_single_pass
+    payload["__mutation_analysis__"] = env_flag_enabled(MUTATION_ANALYSIS_ENV)
     return _stable_json_digest(payload)
 
 

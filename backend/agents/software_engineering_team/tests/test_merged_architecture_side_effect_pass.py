@@ -706,10 +706,13 @@ def test_build_prompt_omits_replaced_content_when_absent() -> None:
 # --------------------------------------------------------------------------- CODE_REVIEW_MUTATION_ANALYSIS
 
 
-def test_replaced_content_reaches_prompt_when_mutation_analysis_enabled() -> None:
+def test_replaced_content_reaches_prompt_when_mutation_analysis_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Default (``CODE_REVIEW_MUTATION_ANALYSIS`` unset): a before-image supplied
     on ``CodeReviewInput.replaced_content`` reaches the merged pass's user
     prompt as a "Replaced (pre-change) content" section."""
+    monkeypatch.delenv("CODE_REVIEW_MUTATION_ANALYSIS", raising=False)
 
     class _Capture(SubmissionPassTwoCallClient):
         def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
@@ -762,6 +765,7 @@ def test_reasoning_system_prompt_reflects_mutation_toggle(monkeypatch: pytest.Mo
 
     monkeypatch.setattr(pass_mod, "run_submission_pass", _fake_run_submission_pass)
 
+    monkeypatch.delenv("CODE_REVIEW_MUTATION_ANALYSIS", raising=False)
     find_architecture_and_side_effect_issues(DummyLLMClient(), _input())
     assert "mutation-vs-replaced-code" in captured["reasoning_system_prompt"]
     assert "Side-Effect / Blast-Radius Impact" in captured["reasoning_system_prompt"]
