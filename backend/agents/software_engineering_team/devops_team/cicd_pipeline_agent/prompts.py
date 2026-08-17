@@ -40,5 +40,4 @@ including any frontend workflow file.
         "- summary: string\n"
         "- risks: list[string]"
     ),
-    trailer="Return JSON only.\n",
 )
