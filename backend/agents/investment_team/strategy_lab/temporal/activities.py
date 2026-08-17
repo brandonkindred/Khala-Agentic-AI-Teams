@@ -101,6 +101,52 @@ a missing ``run_id`` from the activity's own Temporal ``workflow_id``
 (``_infer_run_id_from_activity_context``) rather than skipping fencing
 outright — a pre-upgrade in-flight activity's *payload* predates ``run_id``,
 but the workflow_id it's executing under does not.
+
+Checkpoint resume and no double-charged budget (``ADR-012``): on a valid
+checkpoint, Phase 1 (design + review) is skipped entirely and
+``drift_collector``/``cumulative_gate_results``/the LLM budget are seeded
+from the checkpoint's boundary-time state instead of computed. The budget
+is seeded from the checkpoint's ``budget_calls`` (the count *as of the
+boundary*), never from ``params["budget_calls"]`` (the count as of the
+*start* of this attempt) — so a resume can't double-charge, because the
+design phase's calls simply never re-execute, and it can't silently reopen
+budget headroom for calls that already happened either.
+
+More honest edges, this time on the checkpoint itself:
+``load_design_attempt_checkpoint`` deliberately fails OPEN on a lookup/read
+failure — unlike ``get_run_generation_strict``'s fail-CLOSED contract two
+paragraphs up — because a checkpoint read is a pure optimization on a path
+where nothing has mutated yet; the worst case of treating a read failure as
+"no checkpoint" is one unnecessary Phase-1 re-run, never a correctness
+violation. ``persist_design_attempt_checkpoint``'s write is the mirror
+image: it re-raises ONLY when the failure is a non-retryable
+``ApplicationError`` (genuine stale fencing); a transient write failure is
+logged and swallowed rather than failing the whole already-expensive
+activity purely to persist an optimization.
+
+Checkpoint cleanup (``delete_design_attempt_checkpoint``) fires on every
+terminal outcome of its attempt — ``"record"``, ``"reentry"``,
+``"skipped"``, or a non-retryable mapped error — but never on
+``CancelledError`` or a *retryable* mapped error, since Temporal will retry
+the same attempt in both of those cases and the checkpoint is exactly what
+that retry needs to resume past Phase 1. Cleanup is unconditionally
+best-effort: a delete failure is logged and swallowed, never allowed to
+turn an already-decided terminal outcome into an activity failure. A crash
+between assembling that terminal outcome and issuing the delete leaves one
+orphaned checkpoint behind, keyed to a ``design_attempt`` index the
+workflow will never revisit — inert clutter, not a correctness hazard,
+with no reaper/TTL to reclaim it.
+
+Only the design phase is ever recovered by this checkpoint: a crash during
+synthesis, refinement, alignment, verification, or analysis still discards
+that entire portion of the (possibly already-resumed) attempt.
+``_ACTIVITY_RETRY.maximum_attempts=2`` is unchanged by any of this — a
+checkpoint makes the one retry Temporal already grants cheaper to use, it
+does not grant additional retries. See ``ADR-012`` for the full contract
+(identity/scope, persisted fields, resumability semantics) and
+``strategy_lab/RETRY_STATE_ISOLATION.md``'s "Intra-attempt checkpointing"
+section for how this composes with — rather than weakens — the existing
+attempt-to-attempt copy-on-entry/commit-on-completion guarantee.
 """
 
 from __future__ import annotations
