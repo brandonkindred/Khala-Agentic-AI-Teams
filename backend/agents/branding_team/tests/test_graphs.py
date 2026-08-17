@@ -78,10 +78,13 @@ def test_build_phase3_graph_is_a_graph() -> None:
 
 
 def test_build_phase3_graph_wires_diverge_and_fan_out() -> None:
-    """Phase 3 diverge is a Graph fan-out into CreativeDirector (not a Swarm).
+    """Phase 3 diverge is a Graph fan-out directly into converge_decider (not a Swarm).
 
     ``structured_output=`` stops the agent loop, so handoff-based Swarm
-    sequencing cannot drive the moodboard conceptualists.
+    sequencing cannot drive the moodboard conceptualists. There is no
+    intermediate CreativeDirector collector node — the three conceptualists
+    fan directly into converge_decider, the same shape as Phase 1's fan-in
+    into positioning_synthesizer.
     """
     from branding_team.graphs.phase3_visual import (
         _PHASE3_CONCEPTUALIST_VARIANTS,
@@ -93,6 +96,7 @@ def test_build_phase3_graph_wires_diverge_and_fan_out() -> None:
     node_ids = set(graph.nodes.keys())
 
     assert "diverge_swarm" not in node_ids
+    assert "CreativeDirector" not in node_ids
 
     conceptualists = {
         f"MoodBoardConceptualist_{variant}" for variant in _PHASE3_CONCEPTUALIST_VARIANTS
@@ -100,8 +104,7 @@ def test_build_phase3_graph_wires_diverge_and_fan_out() -> None:
     assert {n.node_id for n in graph.entry_points} == conceptualists
 
     for conceptualist in conceptualists:
-        assert (conceptualist, "CreativeDirector") in edges
-    assert ("CreativeDirector", "converge_decider") in edges
+        assert (conceptualist, "converge_decider") in edges
 
     for specialist in _PHASE3_SPECIALIST_FACTORIES:
         assert ("converge_decider", specialist) in edges
