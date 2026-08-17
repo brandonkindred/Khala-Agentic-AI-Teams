@@ -22,7 +22,8 @@ export type RenameDraftDialogResult = AgentStudioDraftSummary;
 /**
  * Name-only rename dialog. Owns its PATCH call and stays open on failure.
  *
- * Invariants: never writes the draft payload; `busy()` true means cancel is a no-op.
+ * Invariants: never writes the draft payload; `busy()` true means both submit()
+ * and cancel() are no-ops until the in-flight request settles.
  */
 @Component({
   selector: 'app-rename-draft-dialog',
@@ -59,10 +60,13 @@ export class RenameDraftDialogComponent {
 
   /**
    * Preconditions: none — a blank/whitespace name is ordinary invalid user input.
-   * Postconditions: on success, `ref.close(summary)`. On failure, `busy() === false`,
-   *   `serverError()` is non-empty, dialog stays open.
+   * Postconditions: no-op while `busy()` is already true — a second in-flight
+   *   request would race the first and finish `busy()` while the first is
+   *   still pending. Otherwise, on success, `ref.close(summary)`. On failure,
+   *   `busy() === false`, `serverError()` is non-empty, dialog stays open.
    */
   submit(): void {
+    if (this.busy()) return;
     const trimmed = this.name().trim();
     if (!trimmed) {
       this.serverError.set('Name is required.');
