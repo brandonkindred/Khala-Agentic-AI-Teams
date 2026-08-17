@@ -58,7 +58,7 @@ from llm_service.interface import LLMClient
 from shared.concurrency import parallel_map
 from software_engineering_team.shared.context_sizing import parse_env_int
 
-from .false_positive_filter import _cap_context_field, _render_finding_block
+from ._prompt_utils import _cap_context_field, _render_finding_block
 from .models import CodeReviewInput, CodeReviewIssue
 from .scope_filter import _is_unscripted_dummy
 

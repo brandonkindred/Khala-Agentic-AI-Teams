@@ -52,7 +52,6 @@ from __future__ import annotations
 import ast
 import logging
 import os
-import re
 import time
 from collections import OrderedDict
 from dataclasses import dataclass
@@ -69,6 +68,7 @@ from shared.env import env_flag_enabled
 from software_engineering_team.shared.context_sizing import parse_env_int
 from software_engineering_team.shared.llm import extract_json_from_response
 
+from ._prompt_utils import _cap_context_field, _render_finding_block
 from .function_boundaries import (
     EnclosingConstruct,
     enclosing_construct,
@@ -133,15 +133,6 @@ _EXCERPT_WINDOW_LINES = 12
 # read_file(), so nothing is actually inaccessible -- only the inline listing
 # is bounded.
 _MANIFEST_LIMIT = 300
-
-# Cap on the task description / each acceptance criterion inlined into the
-# verification prompt. Unlike the cited file (never inlined at all -- see
-# _build_group_prompt, which only names it and directs the model to
-# read_file/read_lines), there is no tool the model can call to read the rest
-# of an oversized task field, so an unbounded field has no fallback path at
-# all if it blows the prompt past context.
-_CONTEXT_FIELD_CHARS = 4_000
-_CONTEXT_FIELD_TRUNCATION_MARKER = "\n... (truncated)"
 
 # Default per-group verification call timeout (seconds); see
 # ``_verify_timeout_seconds`` below.
@@ -1677,73 +1668,6 @@ def code_fence_for(content: str) -> str:
     private helper names.
     """
     return _code_fence_for(content)
-
-
-def _sanitize_finding_field(text: str) -> str:
-    """Collapse whitespace and neutralize prompt-structure metacharacters.
-
-    Finding ``description`` / ``suggestion`` text is untrusted reviewer output.
-    Runs of three or more backticks can mimic a CommonMark fence; runs of three
-    or more hyphens can mimic the ``--- Finding index i ---`` separators this
-    module emits. Breaking those runs with U+200B keeps the text readable while
-    preventing structural corruption of the verifier prompt.
-
-    Preconditions:
-        - ``text`` is a string (may be empty).
-
-    Postconditions:
-        - Returns a single line (all whitespace collapsed to spaces).
-        - Contains no run of three or more consecutive backticks or hyphens.
-        - Never raises.
-    """
-    collapsed = " ".join(text.split())
-
-    def _break_runs(match: re.Match[str]) -> str:
-        return "\u200b".join(match.group())
-
-    collapsed = re.sub(r"`{3,}", _break_runs, collapsed)
-    collapsed = re.sub(r"-{3,}", _break_runs, collapsed)
-    return collapsed
-
-
-def _render_finding_block(i: int, issue: CodeReviewIssue) -> List[str]:
-    """Render one indexed finding block (anchor line + metadata) for the prompt.
-
-    Postconditions:
-        - Returns the lines for finding ``i``: an ``--- Finding index i ---``
-          anchor the verdict contract refers back to, a severity/category/
-          location line, the description, and the suggestion when present.
-        - ``description`` and ``suggestion`` are whitespace-normalized and
-          sanitized via ``_sanitize_finding_field`` so multi-line or oddly
-          spaced text collapses to a single prompt line and backtick / ``---``
-          runs cannot corrupt the surrounding prompt structure. The structural
-          finding-index anchor is built here and is not passed through the
-          sanitizer.
-    """
-    location = issue.file_path or "(file unknown)"
-    if issue.line is not None:
-        location = f"{location}:{issue.line}"
-    block = [
-        f"--- Finding index {i} ---",
-        f"severity: {issue.severity} | category: {issue.category} | location: {location}",
-        f"description: {_sanitize_finding_field(issue.description)}",
-    ]
-    if issue.suggestion:
-        block.append(f"suggestion: {_sanitize_finding_field(issue.suggestion)}")
-    return block
-
-
-def _cap_context_field(text: str) -> str:
-    """Truncate an inlined task/AC field to ``_CONTEXT_FIELD_CHARS``.
-
-    Preconditions: ``text`` is a non-None string (may be empty).
-    Postconditions: returns ``text`` unchanged when within the cap; otherwise
-        a prefix of length ``_CONTEXT_FIELD_CHARS`` plus
-        ``_CONTEXT_FIELD_TRUNCATION_MARKER``. Never raises.
-    """
-    if len(text) <= _CONTEXT_FIELD_CHARS:
-        return text
-    return text[:_CONTEXT_FIELD_CHARS] + _CONTEXT_FIELD_TRUNCATION_MARKER
 
 
 def _build_group_prompt(

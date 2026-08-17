@@ -27,12 +27,11 @@ from software_engineering_team.github_source.pr_review_mapping import (
 )
 from software_engineering_team.shared.llm import extract_json_from_response
 
+from ._prompt_utils import _cap_context_field, _render_finding_block
 from .false_positive_filter import (
     CodebaseIndex,
     _agent_read_the_cited_file,
     _build_tools,
-    _cap_context_field,
-    _render_finding_block,
 )
 from .model_resolution import resolve_code_review_verify_model
 from .models import CodeReviewInput, CodeReviewIssue, coerce_line
