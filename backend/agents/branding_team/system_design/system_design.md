@@ -15,6 +15,13 @@ backend/agents/branding_team/
 ├── orchestrator.py          # BrandingTeamOrchestrator (run / run_phase / brand book builder)
 ├── models.py                # All Pydantic models (mission, phase outputs, TeamOutput, Client, Brand)
 ├── store.py                 # BrandingStore — Postgres-backed client/brand CRUD with version history
+├── shared/
+│   ├── __init__.py
+│   ├── coro_runner.py        # run_coroutine — runs a coroutine from sync code (orchestrator, market_research adapter)
+│   ├── job_store.py          # Team's JobServiceClient singleton + guarded RUNNING/COMPLETED/FAILED transition helpers
+│   ├── json_recovery.py      # recover_json_object — tolerant JSON recovery; wired into orchestrator.py + assistant/agent.py
+│   ├── memoization.py        # phase_input_hash — deterministic per-phase input hash (pure, not yet wired)
+│   └── phase_output_cache.py # PhaseOutputCache — in-memory phase-output cache (pure, not yet wired)
 ├── api/
 │   ├── main.py              # FastAPI app-assembly hub + re-exports
 │   ├── models.py            # Request/response models
@@ -44,7 +51,10 @@ backend/agents/branding_team/
     ├── test_api.py
     ├── test_assistant.py
     ├── test_conversation_store.py
+    ├── test_memoization.py
+    ├── test_memoization_isolation.py
     ├── test_orchestrator.py
+    ├── test_phase_output_cache.py
     ├── test_session_store.py
     └── test_store.py
 ```
@@ -297,6 +307,55 @@ the row. Reads go through `store.py:125` (`list_clients`) and friends.
 (`shared/app/factory.py`), whose `_lifespan` hook calls
 `register_team_schemas` on it at startup — a no-op when `POSTGRES_HOST`
 is not set.
+
+## Memoization primitives
+
+`shared/memoization.py` and `shared/phase_output_cache.py` are a pair of
+pure, side-effect-free primitives for detecting when a pipeline phase's
+inputs are unchanged from a prior run. Neither is called from
+`orchestrator.run()` or the conversation layer today — they exist as
+independently-testable building blocks for a future caller.
+
+### phase_input_hash
+
+`shared/memoization.py:23` — `phase_input_hash(phase, mission,
+upstream_outputs) -> str` computes a deterministic SHA-256 digest over a
+canonical JSON serialization (`sort_keys=True`) of the phase name, the
+full `mission`, and the completed `upstream_outputs`. It hashes the
+*entire* mission rather than a per-phase field subset, because
+`orchestrator._phase_task` seeds every phase's task with the full
+serialized mission unconditionally — there is no per-phase mission-field
+subsetting elsewhere in the codebase to mirror. Equal inputs (including
+equal-but-distinct instances and different `upstream_outputs` insertion
+order) always hash identically; any changed mission field, changed
+upstream output field, or added/removed upstream entry changes the
+digest. `phase` must be one of the five runnable phases in
+`graphs/shared.py:145-151` (`PHASE_ORDER`); `BrandPhase.COMPLETE` raises
+`ValueError`.
+
+### PhaseOutputCache
+
+`shared/phase_output_cache.py:23` — a dict-backed cache holding at most
+one `(input_hash, output)` entry per `BrandPhase`. `get(phase,
+input_hash)` returns the stored output only when an entry exists for
+`phase` and its stored hash matches `input_hash` (a hit); otherwise it
+returns `None` (a miss), never raising for a mismatched hash. `put(phase,
+input_hash, output)` replaces any existing entry for `phase`. Like
+`phase_input_hash`, both methods reject `BrandPhase.COMPLETE` with
+`ValueError`. The cache performs no LLM or I/O side effects — state lives
+only in the instance's lifetime.
+
+### Wiring status
+
+Both modules are unwired: nothing in `orchestrator.py` or the
+conversation layer (`api/conversation.py`, `api/routes/conversations.py`,
+`assistant/agent.py`, `assistant/store.py`, `assistant/prompts.py`)
+imports or references `phase_input_hash` or `PhaseOutputCache`.
+`tests/test_memoization_isolation.py` enforces this structurally — it
+parses each of those six files' source with `ast` and fails if either
+symbol appears, so a future change that wires the cache into the
+orchestrator or the conversation layer must update this test
+deliberately rather than regress it silently.
 
 ## LLM integration
 
