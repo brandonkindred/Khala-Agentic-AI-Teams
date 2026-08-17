@@ -26,6 +26,8 @@ from typing import Any, Dict, Iterable, List, Optional
 import pytest
 from code_review_agent.coordinator import run_coordinator
 from code_review_agent.false_positive_filter import (
+    _MAX_DUPLICATE_TOOL_CALLS,
+    _MAX_TOTAL_TOOL_CALLS,
     _READ_LINES_MAX_SPAN,
     DEFAULT_VERIFY_MAX_FINDINGS_PER_GROUP,
     DEFAULT_VERIFY_TIMEOUT_SECONDS,
@@ -1503,6 +1505,73 @@ def test_read_lines_tool_enforces_max_span() -> None:
     msg = read_lines("big.py", 1, _READ_LINES_MAX_SPAN + 1)
     assert msg.startswith("Error:")
     assert f"maximum is {_READ_LINES_MAX_SPAN}" in msg
+
+
+# --------------------------------------------------------------------------- duplicate/budget guard
+
+
+def test_repeated_identical_tool_call_gets_a_stop_note() -> None:
+    """A tool called with the exact same arguments more than
+    ``_MAX_DUPLICATE_TOOL_CALLS`` times still returns its real result, but with a
+    note telling the model it already has this information -- the defense
+    against a verifier that keeps re-asking the same question instead of
+    converging on a verdict."""
+    idx = CodebaseIndex(files={"app/main.py": "def foo(): pass\n"})
+    _, _, _, _, search_codebase, _, _ = _build_tools(idx)
+    for _ in range(_MAX_DUPLICATE_TOOL_CALLS):
+        result = search_codebase("foo")
+        assert "app/main.py:1: def foo(): pass" in result
+        assert "already called" not in result
+    # One more call than the duplicate budget allows.
+    result = search_codebase("foo")
+    assert "app/main.py:1: def foo(): pass" in result
+    assert "already called search_codebase" in result
+    assert "answer now" in result
+
+
+def test_repeated_calls_with_different_args_are_not_duplicates() -> None:
+    """Interleaved calls to the same tool with different arguments track
+    independent counters -- calling it with one query never counts toward the
+    duplicate budget for a different query, up to each signature's own
+    duplicate budget."""
+    idx = CodebaseIndex(files={"app/main.py": "def foo(): pass\ndef bar(): pass\n"})
+    _, _, _, _, search_codebase, _, _ = _build_tools(idx)
+    for _ in range(_MAX_DUPLICATE_TOOL_CALLS):
+        assert "already called" not in search_codebase("foo")
+        assert "already called" not in search_codebase("bar")
+
+
+def test_tool_call_budget_short_circuits_after_total_exhausted() -> None:
+    """Once total tool calls across every tool exceed ``_MAX_TOTAL_TOOL_CALLS``,
+    every further call -- even a fresh, never-before-seen one -- skips its real
+    lookup and returns a stop directive, bounding the cost of a verifier that
+    never converges."""
+    idx = CodebaseIndex(files={"app/main.py": "def foo(): pass\n"})
+    read_file, _, _, list_files, search_codebase, _, _ = _build_tools(idx)
+    for i in range(_MAX_TOTAL_TOOL_CALLS):
+        # Vary the query so none of these trip the duplicate-call path first.
+        search_codebase(f"needle-{i}")
+    # The budget is now exhausted: a brand-new call to a different tool is
+    # short-circuited too, not just repeats of what was already called.
+    result = list_files()
+    assert "tool call budget" in result
+    assert "exhausted" in result
+    assert "app/main.py" not in result
+    read_result = read_file("app/main.py")
+    assert read_result["status"] == "error"
+    assert "tool call budget" in read_result["content"][0]["text"]
+
+
+def test_tool_call_guard_tolerates_unhashable_arguments() -> None:
+    """A malformed model-supplied argument (e.g. a list where a string was
+    expected) must not crash the duplicate/budget tracker -- tools built here
+    never raise on bad input, and the tracker keys on ``repr(args)`` precisely
+    so an unhashable argument stays trackable instead of raising."""
+    idx = CodebaseIndex(files={"app/mod.py": "def f():\n    return 1\n"})
+    _, _, read_function, _, _, _, _ = _build_tools(idx)
+    for _ in range(_MAX_DUPLICATE_TOOL_CALLS + 1):
+        msg = read_function("app/mod.py", ["f"])
+        assert isinstance(msg, str)
 
 
 # --------------------------------------------------------------------------- find_function_at_line

@@ -1321,6 +1321,21 @@ def _truncate_for_log(text: Optional[str], max_len: int = 400) -> str:
     return text[:max_len] + "..."
 
 
+# Cap on identical (tool, arguments) calls a single verification run may
+# repeat before every further repeat gets a note telling the model it
+# already has this information appended to the (still-real) result. Guards
+# against a verifier that keeps re-asking the same question -- e.g. after
+# its conversation manager evicts the earlier tool result under context
+# pressure -- instead of converging on a verdict.
+_MAX_DUPLICATE_TOOL_CALLS = 2
+
+# Hard cap on total tool calls (of any kind) a single verification run may
+# make before every further call skips its real lookup entirely and returns
+# a stop directive instead, bounding the cost of a verifier that never
+# converges regardless of how varied its calls are.
+_MAX_TOTAL_TOOL_CALLS = 40
+
+
 def _build_tools(index: CodebaseIndex) -> List[Callable[..., Any]]:
     """Build strands tools bound to ``index`` for one verification agent.
 
@@ -1340,7 +1355,50 @@ def _build_tools(index: CodebaseIndex) -> List[Callable[..., Any]]:
           be told apart from a genuine read failure reported as an
           "Error: ..." string (see ``_agent_read_the_cited_file`` for why
           that distinction matters).
+        - Every call is tracked by exact ``(tool name, arguments)``. Once a
+          signature repeats more than ``_MAX_DUPLICATE_TOOL_CALLS`` times, its
+          (still-real) result gets a note appended telling the model it
+          already has this information. Once the run's total tool calls
+          exceed ``_MAX_TOTAL_TOOL_CALLS``, every further call short-circuits
+          -- skipping its real lookup -- and returns a stop directive telling
+          the model to finalize its verdict now.
     """
+    call_counts: Dict[str, int] = {}
+    total_calls = 0
+
+    def _track_call(tool_name: str, *args: Any) -> Tuple[bool, Optional[str]]:
+        """Record one tool call.
+
+        Postconditions:
+            Returns ``(True, directive)`` once total calls this run exceed
+            ``_MAX_TOTAL_TOOL_CALLS`` -- callers must return ``directive``
+            as-is instead of doing any real work. Otherwise returns
+            ``(False, note)``: ``note`` is a string to append to the tool's
+            normal result once this ``(tool_name, args)`` signature has been
+            called more than ``_MAX_DUPLICATE_TOOL_CALLS`` times, else
+            ``None``. The signature is keyed on ``repr(args)`` rather than
+            ``args`` itself so an unhashable model-supplied argument (e.g. a
+            list where a string was expected) still tracks correctly instead
+            of raising -- tools built here must never raise on bad input.
+        """
+        nonlocal total_calls
+        total_calls += 1
+        if total_calls > _MAX_TOTAL_TOOL_CALLS:
+            return True, (
+                f"Error: tool call budget ({_MAX_TOTAL_TOOL_CALLS} calls) exhausted "
+                "for this verification pass. Stop investigating and respond now with "
+                "your final verdict, using only what you have already found."
+            )
+        key = f"{tool_name}:{args!r}"
+        count = call_counts.get(key, 0) + 1
+        call_counts[key] = count
+        if count > _MAX_DUPLICATE_TOOL_CALLS:
+            return False, (
+                f"[You have already called {tool_name} with these exact arguments "
+                f"{count - 1} time(s) in this session -- repeating it will not reveal "
+                "new information. Use what you already found and answer now.]"
+            )
+        return False, None
 
     @tool
     def read_file(path: str) -> Dict[str, Any]:
@@ -1362,6 +1420,9 @@ def _build_tools(index: CodebaseIndex) -> List[Callable[..., Any]]:
             bad path a self-correcting tool message rather than an error that
             aborts the agent loop).
         """
+        skip, note = _track_call("read_file", path)
+        if skip:
+            return {"status": "error", "content": [{"text": note}]}
         try:
             content, error = index._read(path)
         except Exception as exc:
@@ -1372,8 +1433,10 @@ def _build_tools(index: CodebaseIndex) -> List[Callable[..., Any]]:
                 ],
             }
         if content is not None:
-            return {"status": "success", "content": [{"text": content}]}
-        return {"status": "error", "content": [{"text": error}]}
+            text = f"{content}\n\n{note}" if note else content
+            return {"status": "success", "content": [{"text": text}]}
+        text = f"{error}\n\n{note}" if note else error
+        return {"status": "error", "content": [{"text": text}]}
 
     @tool
     def read_lines(path: str, start: int, end: int) -> str:
@@ -1394,12 +1457,16 @@ def _build_tools(index: CodebaseIndex) -> List[Callable[..., Any]]:
         Returns:
             A header plus ``N| content`` lines, or an ``Error: ...`` message.
         """
+        skip, note = _track_call("read_lines", path, start, end)
+        if skip:
+            return note
         try:
-            return index.read_lines(path, start, end)
+            result = index.read_lines(path, start, end)
         except Exception as exc:
-            return (
+            result = (
                 f"Error: could not read_lines {path!r} [{start}:{end}]: {type(exc).__name__}: {exc}"
             )
+        return f"{result}\n\n{note}" if note else result
 
     @tool
     def read_function(path: str, name_or_line) -> str:
@@ -1418,7 +1485,11 @@ def _build_tools(index: CodebaseIndex) -> List[Callable[..., Any]]:
         Returns:
             Header plus ``N| content`` lines, or an ``Error: ...`` message.
         """
-        try:
+        skip, note = _track_call("read_function", path, name_or_line)
+        if skip:
+            return note
+
+        def _compute() -> str:
             if isinstance(name_or_line, bool):
                 return f"Error: name_or_line must be a line number or name, got {name_or_line!r}."
             if isinstance(name_or_line, int):
@@ -1428,11 +1499,15 @@ def _build_tools(index: CodebaseIndex) -> List[Callable[..., Any]]:
             if isinstance(name_or_line, str):
                 return index.read_function_by_name(path, name_or_line)
             return f"Error: name_or_line must be a line number or name, got {name_or_line!r}."
+
+        try:
+            result = _compute()
         except Exception as exc:
-            return (
+            result = (
                 f"Error: could not read_function {path!r} ({name_or_line!r}): "
                 f"{type(exc).__name__}: {exc}"
             )
+        return f"{result}\n\n{note}" if note else result
 
     @tool
     def list_files() -> str:
@@ -1441,11 +1516,15 @@ def _build_tools(index: CodebaseIndex) -> List[Callable[..., Any]]:
         Returns:
             One path per line. Read any of them with read_file(path).
         """
+        skip, note = _track_call("list_files")
+        if skip:
+            return note
         try:
             paths = index.list_files()
-            return "\n".join(paths) if paths else "(no files available)"
+            result = "\n".join(paths) if paths else "(no files available)"
         except Exception as exc:
-            return f"Error: could not list files: {type(exc).__name__}: {exc}"
+            result = f"Error: could not list files: {type(exc).__name__}: {exc}"
+        return f"{result}\n\n{note}" if note else result
 
     @tool
     def search_codebase(query: str) -> str:
@@ -1467,13 +1546,18 @@ def _build_tools(index: CodebaseIndex) -> List[Callable[..., Any]]:
         Returns:
             Matching "path:line: text" lines, or a message that nothing matched.
         """
+        skip, note = _track_call("search_codebase", query)
+        if skip:
+            return note
         try:
             matches = index.search(query)
             if not matches:
-                return f"No matches for {query!r}."
-            return "\n".join(f"{path}:{lineno}: {text}" for path, lineno, text in matches)
+                result = f"No matches for {query!r}."
+            else:
+                result = "\n".join(f"{path}:{lineno}: {text}" for path, lineno, text in matches)
         except Exception as exc:
-            return f"Error: could not search for {query!r}: {type(exc).__name__}: {exc}"
+            result = f"Error: could not search for {query!r}: {type(exc).__name__}: {exc}"
+        return f"{result}\n\n{note}" if note else result
 
     @tool
     def find_function_at_line(path: str, line_number: int) -> str:
@@ -1493,7 +1577,11 @@ def _build_tools(index: CodebaseIndex) -> List[Callable[..., Any]]:
             construct (all other languages). Returns an error string if the path
             is not readable; never raises.
         """
-        try:
+        skip, note = _track_call("find_function_at_line", path, line_number)
+        if skip:
+            return note
+
+        def _compute() -> str:
             if not isinstance(line_number, int) or isinstance(line_number, bool) or line_number < 1:
                 return f"Error: line_number must be a positive integer, got {line_number!r}."
             resolved = index.resolve_path(path)
@@ -1519,8 +1607,12 @@ def _build_tools(index: CodebaseIndex) -> List[Callable[..., Any]]:
             return _find_heuristic_function_at_line(
                 stripped, physical, display_path, display_line=line_number, line_mapper=mapper
             )
+
+        try:
+            result = _compute()
         except Exception as exc:
-            return f"Error: could not inspect {path!r} at line {line_number}: {type(exc).__name__}: {exc}"
+            result = f"Error: could not inspect {path!r} at line {line_number}: {type(exc).__name__}: {exc}"
+        return f"{result}\n\n{note}" if note else result
 
     @tool
     def find_references(symbol: str) -> str:
@@ -1538,10 +1630,14 @@ def _build_tools(index: CodebaseIndex) -> List[Callable[..., Any]]:
             Newline-separated reference blocks with excerpts, or a message
             that nothing matched / access is limited to this submission.
         """
+        skip, note = _track_call("find_references", symbol)
+        if skip:
+            return note
         try:
-            return index.find_references(symbol)
+            result = index.find_references(symbol)
         except Exception as exc:
-            return f"Error: could not find references for {symbol!r}: {type(exc).__name__}: {exc}"
+            result = f"Error: could not find references for {symbol!r}: {type(exc).__name__}: {exc}"
+        return f"{result}\n\n{note}" if note else result
 
     return [
         read_file,
