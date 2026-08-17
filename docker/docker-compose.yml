@@ -58,6 +58,15 @@ x-team-env-base: &team-env-base
   TEAM_TEMPORAL_WORKER_FUNC: start_se_temporal_worker_thread
   SE_WORKSPACE_DIR: /data/agents/software_engineering_team/workspaces
 
+# Per-phase branding LLM overrides. Blank means fall through to LLM_MODEL.
+# Names match branding_team.graphs.shared.phase_agent_key.
+x-branding-llm-tiers: &branding-llm-tiers
+  LLM_MODEL_branding_strategic_core: ${LLM_MODEL_branding_strategic_core:-}
+  LLM_MODEL_branding_narrative_messaging: ${LLM_MODEL_branding_narrative_messaging:-}
+  LLM_MODEL_branding_visual_identity: ${LLM_MODEL_branding_visual_identity:-}
+  LLM_MODEL_branding_channel_activation: ${LLM_MODEL_branding_channel_activation:-}
+  LLM_MODEL_branding_governance: ${LLM_MODEL_branding_governance:-}
+
 # Shared.cache Redis wiring for SE only (code-review + SE compaction). Kept off
 # *team-env-base so other team containers do not receive Redis credentials and
 # cannot write `cr:*` / `llm:compact:*` namespaces (review-cache poisoning).
@@ -525,7 +534,7 @@ services:
       temporal: { condition: service_started }
       job-service: { condition: service_healthy }
     environment:
-      <<: [*team-env-base, *team-otel-export]
+      <<: [*team-env-base, *team-otel-export, *branding-llm-tiers]
       TEAM_MODULE: branding_team.api.main
       TEAM_NAME: branding_team
       TEAM_PORT: "8096"
