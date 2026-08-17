@@ -45,10 +45,15 @@ def build_phase4_graph() -> Graph:
     assembles their typed ``structured_output`` fragments into a single
     ``ChannelActivationOutput`` deterministically in Python.
 
-    Returns
-    -------
-    Graph
-        A callable ``Graph`` instance.
+    Preconditions:
+        None — the builder wires a fixed nine-agent factory set and takes no
+        arguments.
+    Postconditions:
+        Returns a built ``Graph`` whose nine specialist nodes are all both entry
+        points and terminal nodes, running in parallel with no edges between them.
+        There is no fan-in node; the orchestrator's Phase-4 ``merge_fn``
+        (``_merge_phase4_fragments``) assembles their typed ``structured_output``
+        fragments into a single ``ChannelActivationOutput`` outside the graph.
     """
     builder = GraphBuilder()
 
