@@ -23,11 +23,16 @@ def is_unscripted_dummy(llm: Any) -> bool:
     Postconditions: ``True`` iff ``llm`` or ``llm.client`` is exactly
         ``DummyLLMClient`` (not a subclass used as a test stub), so the no-LLM
         harness short-circuits while scripted stubs still run the real path.
-        Pure; never raises.
+        Pure; never raises — a caller object whose ``.client`` descriptor itself
+        raises (e.g. a ``@property`` raising ``ValueError``) degrades to
+        ``False`` rather than propagating.
     """
     from llm_service.clients.dummy import DummyLLMClient
 
     if type(llm) is DummyLLMClient:
         return True
-    inner = getattr(llm, "client", None)
+    try:
+        inner = getattr(llm, "client", None)
+    except Exception:  # noqa: BLE001 — a misbehaving .client must not break the never-raises contract
+        return False
     return type(inner) is DummyLLMClient
