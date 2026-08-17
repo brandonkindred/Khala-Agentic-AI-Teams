@@ -1,7 +1,7 @@
 import { TestBed } from '@angular/core/testing';
 import { MatDialog } from '@angular/material/dialog';
 import { NoopAnimationsModule } from '@angular/platform-browser/animations';
-import { Subject, of, throwError } from 'rxjs';
+import { NEVER, Subject, of, throwError } from 'rxjs';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { LoadDraftMenuComponent } from './load-draft-menu.component';
 import { AgentStudioFacade } from '../../../../services/agent-studio.facade';
@@ -62,7 +62,7 @@ describe('LoadDraftMenuComponent', () => {
 
   it('loadMore is a no-op while loading', () => {
     // A call that never emits keeps loading() true, simulating an in-flight request.
-    const listDrafts = vi.fn().mockReturnValue({ subscribe: () => undefined });
+    const listDrafts = vi.fn().mockReturnValue(NEVER);
     const { fixture, facade } = configure(listDrafts);
     fixture.componentInstance.onOpened();
     expect(fixture.componentInstance.loading()).toBe(true);

@@ -708,7 +708,7 @@ describe('AgentStudioShellComponent', () => {
       expect(config.closeOnNavigation).toBe(false);
     });
 
-    it('rename success updates the bound name without markClean', () => {
+    it('rename success updates the bound name and leaves the session clean', () => {
       component.state.setRegistryAgentId('reg-1');
       component.state.markClean();
       component.state.setCurrentDraft('d-1', 'Old');
