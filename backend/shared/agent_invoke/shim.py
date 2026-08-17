@@ -219,7 +219,7 @@ def mount_invoke_shim(app: FastAPI) -> None:
 async def _invoke_and_drive(
     entrypoint: str,
     body: Any,
-    agent_id: str,
+    agent_id: str | None,
     source_run_id: str,
     cognition: dict[str, Any] | None,
     deadline: float | None,
@@ -236,7 +236,7 @@ async def _invoke_and_drive(
     can outlive a cancelled await, so the broker stops dispatching past it.
     ``audit`` is the caller-owned accumulator the shim can snapshot on timeout.
     """
-    result = await invoke_entrypoint(entrypoint, body)
+    result = await invoke_entrypoint(entrypoint, body, agent_id=agent_id)
     return await asyncio.to_thread(
         maybe_drive_tool_loop,
         result,
