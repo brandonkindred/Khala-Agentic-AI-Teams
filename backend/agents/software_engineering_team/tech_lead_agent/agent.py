@@ -7,13 +7,14 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from typing import Any, Callable, Collection, Dict, List, Optional
 
 from strands import Agent
 
-from llm_service import call_llm_with_retries
+from llm_service import LLMJsonParseError, call_llm_with_retries, extract_json_from_response
 from shared.env import parse_int
-from shared.llm_recovery import agent_call_json
+from shared.llm_recovery import extract_json_object
 from software_engineering_team.hitl import (
     normalize_open_questions as _normalize_open_questions,
 )
@@ -146,13 +147,59 @@ def _agent_call_json(
           so a usage/format echo that lacks the anchor cannot be mistaken for the
           answer.
     Postconditions:
-        - Returns the parsed object. Strict ``json.loads`` is tried first (after
-          stripping a single leading/trailing ```` ``` ```` fence); on failure the
-          shared salvage recovery extracts a JSON object from prose- or
-          think-block-wrapped output, anchored on ``required_keys``. Raises
-          ``json.JSONDecodeError`` only when no object can be recovered.
+        - Returns the parsed object via a three-tier ladder, each tier only tried
+          after the previous one fails:
+          1. Strict ``json.loads`` (after stripping a single leading/trailing
+             ```` ``` ```` fence) for well-formed replies.
+          2. The shared, non-blogging-aware ``extract_json_object`` salvage engine
+             (``shared.llm_recovery`` — the same engine ``agent_call_json`` used),
+             anchored on ``required_keys`` with correct last-candidate-wins
+             handling of an echoed format example. This tier recovers the vast
+             majority of prose-/fence-wrapped replies without ever reaching tier 3.
+          3. The canonical ``extract_json_from_response`` as a final fallback, so
+             this call site still benefits from any recovery capability unique to
+             it. Tiers 1-2 exist specifically so well-formed or salvageable JSON
+             never reaches tier 3's own pre-parse heuristics (e.g. its
+             ``---DRAFT---`` shortcut, which scans raw text for that literal
+             substring — including inside a JSON string value, such as a
+             code-review reason quoting this repo's blog draft marker — and its
+             first-fenced-block fast path, which does not honor ``required_keys``)
+             on input that a safer engine could already handle correctly. Unlike
+             tier 2, several of tier 3's own recovery paths neither guarantee a
+             ``dict`` result (a fenced array-with-prose reply can come back as a
+             bare ``list``) nor honor ``required_keys`` (an anchor-less object can
+             win before its own key-anchored stage ever runs) — so tier 3's result
+             is validated against both before being accepted; a result that fails
+             either check is treated the same as "nothing recovered."
+          Raises ``json.JSONDecodeError`` only when no object can be recovered by
+          any tier — ``LLMJsonParseError`` from tier 3, and a tier-3 result that
+          fails validation, are both raised as ``json.JSONDecodeError`` so callers
+          keep retrying JSON-parse failures exactly as before (``LLMJsonParseError``
+          is otherwise non-retryable in ``call_llm_with_retries``).
     """
-    return agent_call_json(agent, prompt, required_keys)
+    raw = str(agent(prompt)).strip()
+    fenced = re.sub(r"^```(?:json)?\s*", "", raw)
+    fenced = re.sub(r"\s*```$", "", fenced)
+    try:
+        return json.loads(fenced)
+    except json.JSONDecodeError:
+        pass
+    recovered = extract_json_object(raw, required_keys=required_keys)
+    if recovered is not None:
+        return recovered
+    expected_keys = frozenset(required_keys) if required_keys is not None else None
+    try:
+        fallback = extract_json_from_response(raw, expected_keys=expected_keys)
+    except LLMJsonParseError as e:
+        raise json.JSONDecodeError(str(e), raw, 0) from e
+    if not isinstance(fallback, dict) or (expected_keys and not (expected_keys & fallback.keys())):
+        raise json.JSONDecodeError(
+            "extract_json_from_response fallback returned an object that fails "
+            "this call site's dict/required_keys contract",
+            raw,
+            0,
+        )
+    return fallback
 
 
 _JSON_ONLY_INSTRUCTION = "\n\nRespond with valid JSON only, no markdown fences."
@@ -205,6 +252,25 @@ def _call_json(
         return default
 
 
+def _fallback_stack_specs() -> List[Dict[str, Any]]:
+    """Canonical v2 roster used when planning can't determine real stacks.
+
+    Neither failure mode (LLM call failed outright, or returned no usable stacks) carries any
+    signal about which specialty is needed, so this returns both frontend_v2 and backend_v2
+    rather than guessing one.
+    """
+    return [
+        {
+            "name": "frontend_v2",
+            "tools_services": ["Angular", "TypeScript", "React", "CSS", "HTML"],
+        },
+        {
+            "name": "backend_v2",
+            "tools_services": ["Java", "Python", "Node.js", "Databases", "APIs", "DevOps"],
+        },
+    ]
+
+
 class TechLeadAgent:
     """Tech Lead: given plan, produce tasks + stacks; groom tasks; suggest assignments; code review.
 
@@ -248,8 +314,8 @@ class TechLeadAgent:
         Orchestrator will add tasks to Task Graph and create v2 implementation workers from stacks. A non-empty
         ``open_questions`` means the Tech Lead needs a product/design decision it must not make
         itself; the orchestrator pauses the job for the user rather than building tasks.
-        If ``target_team`` is missing from a task, legacy routing fields are
-        checked in order: ``team``, ``stack``, then ``assignee_stack``.
+        ``target_team`` is read verbatim from each task; a task with no ``target_team`` gets
+        ``""`` (swarm_assignment treats that as no team constraint, not a hard failure).
 
         Preconditions:
             - ``plan`` is a ``CodingTeamPlanInput`` carrying the plan/spec/architecture text the
@@ -270,7 +336,7 @@ class TechLeadAgent:
             required_keys=("tasks", "stacks", "open_questions", "already_complete"),
             default={
                 "tasks": [],
-                "stacks": [{"name": "default", "tools_services": []}],
+                "stacks": _fallback_stack_specs(),
                 "open_questions": [],
                 "already_complete": False,
                 "completion_evidence": "",
@@ -288,13 +354,7 @@ class TechLeadAgent:
                         "title": t.get("title", t["id"]),
                         "description": t.get("description", ""),
                         "dependencies": list(t.get("dependencies") or []),
-                        "target_team": str(
-                            t.get("target_team")
-                            or t.get("team")
-                            or t.get("stack")
-                            or t.get("assignee_stack")
-                            or ""
-                        ).strip(),
+                        "target_team": str(t.get("target_team") or "").strip(),
                     }
                 )
         stacks = []
@@ -306,7 +366,7 @@ class TechLeadAgent:
                     tools = []
                 stacks.append({"name": name, "tools_services": [str(x) for x in tools]})
         if not stacks:
-            stacks = [{"name": "default", "tools_services": []}]
+            stacks = _fallback_stack_specs()
         # already_complete only counts when the model also returned no tasks: a true flag alongside
         # a non-empty task list is contradictory, so the tasks win (we never silently drop work).
         # Use strict boolean coercion — the STRING "false" must not read as truthy (bool("false") is

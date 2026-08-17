@@ -29,7 +29,6 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 from strands import Agent
 
 from llm_service.interface import LLMSemanticExhaustionError
-from shared.env_config import env_int
 
 from ...models import StrategyLabRecord
 from ...signal_intelligence_agent import brief_to_prompt_block
@@ -39,6 +38,7 @@ from ...strategy_lab_context import (
     format_prior_attribution,
     format_prior_results,
 )
+from ..budget_config import StrategyLabBudgetConfig
 from ..exceptions import StrategyLabLLMError
 from ..market_regime import RegimeSummary, regime_to_prompt_block
 from . import _structured_output as so
@@ -49,7 +49,6 @@ from ._parse_helpers import (
     StrategySpecParseError,
     build_json_correction_prompt,
     extract_json_object,
-    parse_retry_budget,
     validate_structured_rules,
 )
 from ._response_schemas import CRITIQUE_SCHEMA, DESIGN_SPEC_SCHEMA
@@ -117,38 +116,60 @@ def _get_stop_order_semantics() -> str:
     return text
 
 
+# Shared sizing/drawdown risk-framing reference (deployed size IS the
+# per-trade loss cap; no max-drawdown constraint exists). Appended to the
+# designer's system prompt so the canonical wording lives in one place
+# instead of drifting inline copies.
+@functools.lru_cache(maxsize=None)
+def _get_sizing_risk_framing() -> str:
+    """Load and cache shared sizing/drawdown risk-framing markdown.
+
+    Preconditions: ``_PROMPT_DIR / "_sizing_risk_framing.md"`` exists and is
+    readable UTF-8 text when first invoked.
+    Postconditions: returns a non-empty ``str``; subsequent calls return the
+    same cached value without re-reading the file.
+    Invariants: module import does not invoke this helper.
+    """
+    text = (_PROMPT_DIR / "_sizing_risk_framing.md").read_text(encoding="utf-8")
+    if not text:
+        raise ValueError("_sizing_risk_framing.md must be non-empty")
+    return text
+
+
 @functools.lru_cache(maxsize=None)
 def _get_design_system_prompt() -> str:
-    """Build and cache the designer system prompt (body + stop-order block).
+    """Build and cache the designer system prompt (body + shared reference blocks).
 
-    Preconditions: ``design_system.md`` and stop-order semantics file exist
-    when first invoked.
-    Postconditions: returned string contains both the design system body and
-    the stop-order semantics text, separated by a blank line; subsequent calls
-    return the same cached composed prompt without re-reading either file.
+    Preconditions: ``design_system.md``, stop-order semantics, and sizing/risk
+    framing files exist when first invoked.
+    Postconditions: returned string contains the design system body followed
+    by the stop-order semantics text and the sizing/risk framing text, each
+    separated by a blank line; subsequent calls return the same cached
+    composed prompt without re-reading any file.
     Invariants: module import does not invoke this helper.
     """
     body = (_PROMPT_DIR / "design_system.md").read_text(encoding="utf-8")
     if not body:
         raise ValueError("design_system.md must be non-empty")
-    return body + "\n\n" + _get_stop_order_semantics()
+    return body + "\n\n" + _get_stop_order_semantics() + "\n\n" + _get_sizing_risk_framing()
 
 
 @functools.lru_cache(maxsize=None)
 def _get_self_review_system_prompt() -> str:
-    """Build and cache the self-review system prompt (body + stop-order block).
+    """Build and cache the self-review system prompt (body + shared reference blocks).
 
-    Preconditions: ``design_self_review_system.md`` and stop-order file exist
-    when first invoked.
-    Postconditions: returned string contains both the self-review body and
-    the stop-order semantics text, separated by a blank line; subsequent calls
-    return the same cached composed prompt without re-reading either file.
+    Preconditions: ``design_self_review_system.md``, stop-order semantics, and
+    sizing/risk framing files exist when first invoked.
+    Postconditions: returned string contains the self-review body followed by
+    the stop-order semantics text and the sizing/risk framing text, each
+    separated by a blank line; subsequent calls return the same cached
+    composed prompt without re-reading any file.
     Invariants: module import does not invoke this helper.
     """
     body = (_PROMPT_DIR / "design_self_review_system.md").read_text(encoding="utf-8")
     if not body:
         raise ValueError("design_self_review_system.md must be non-empty")
-    return body + "\n\n" + _get_stop_order_semantics()
+    return body + "\n\n" + _get_stop_order_semantics() + "\n\n" + _get_sizing_risk_framing()
 
 
 # The JSON Schema the LLM response must conform to, rendered once for
@@ -580,7 +601,7 @@ class DesignAgent:
         instead of re-deriving cleanly from ``user_prompt``, as this loop
         has always done.
         """
-        retries = parse_retry_budget("STRATEGY_LAB_DESIGN_PARSE_RETRIES")
+        retries = StrategyLabBudgetConfig.from_env().design_parse_retries
         # ``run_json_with_parse_retry`` only returns the validated dict; the
         # rationale is smuggled out via this mutable box because ``_validate``
         # must still return a plain ``Dict`` to match the driver's callback
@@ -858,7 +879,7 @@ def _design_self_revision_rounds() -> int:
     Pre: none.
     Post: returns an ``int >= 0``.
     """
-    return env_int("STRATEGY_LAB_DESIGN_SELF_REVISION_ROUNDS", 1, floor=0)
+    return StrategyLabBudgetConfig.from_env().design_self_revision_rounds
 
 
 _CORRECTION_PREAMBLE = """\

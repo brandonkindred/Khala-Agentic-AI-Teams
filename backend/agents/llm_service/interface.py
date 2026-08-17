@@ -8,8 +8,11 @@ construct provider-specific clients directly.
 from __future__ import annotations
 
 import json
+import time
 from abc import ABC, abstractmethod
-from typing import Any, Dict, Optional
+from contextlib import contextmanager
+from contextvars import ContextVar
+from typing import Any, Dict, Iterator, Optional
 
 from pydantic import BaseModel
 
@@ -167,7 +170,20 @@ class LLMNotConfiguredError(LLMPermanentError):
 
 
 class LLMJsonParseError(LLMPermanentError):
-    """Raised when LLM returned a 200 response but the content is not valid JSON."""
+    """Raised when LLM returned a 200 response but the content is not valid JSON.
+
+    ``response_preview`` is a truncated, log-safe slice (corrective prompts and
+    logs). ``raw_response`` is the full untruncated reply when the raise site
+    still has it; an empty ``raw_response`` falls back to ``response_preview``
+    so callers that only pass a preview still expose a usable body to observers.
+
+    Preconditions:
+        - ``message``, ``response_preview``, and ``raw_response`` are strs.
+    Postconditions:
+        - ``self.response_preview`` is the truncated preview unchanged.
+        - ``self.raw_response`` is ``raw_response`` when non-empty, else
+          ``response_preview``.
+    """
 
     def __init__(
         self,
@@ -175,11 +191,13 @@ class LLMJsonParseError(LLMPermanentError):
         *,
         error_kind: str = "json_parse",
         response_preview: str = "",
+        raw_response: str = "",
         correction_attempts_used: int = 0,
     ):
         super().__init__(message)
         self.error_kind = error_kind
         self.response_preview = response_preview
+        self.raw_response = raw_response if raw_response else response_preview
         self.correction_attempts_used = correction_attempts_used
 
 
@@ -230,6 +248,168 @@ class LLMTruncatedError(LLMError):
         self.think_used = think_used
 
 
+_complete_json_raw_var: ContextVar[str | None] = ContextVar("complete_json_raw", default=None)
+"""Per-call raw JSON text from the most recent ``complete_json`` on this context.
+
+Shared ``LLMClient`` instances are reused across concurrent code-review chunk
+and tail-pass calls. Storing the last raw response on the client object would
+let one call overwrite another's text before the observer reads it. A
+``ContextVar`` is isolated per asyncio task and per thread, matching
+``llm_service.attribution``.
+"""
+
+
+def record_complete_json_raw(text: str) -> None:
+    """Store the raw JSON response for the current call on this context.
+
+    Preconditions:
+        - ``text`` is the provider's response body before JSON parse (may be empty).
+    Postconditions:
+        - ``take_complete_json_raw`` on the same context returns ``text`` until
+          it is taken or overwritten by a later ``record_complete_json_raw``.
+    """
+    _complete_json_raw_var.set(text)
+
+
+def take_complete_json_raw() -> str:
+    """Return and clear the raw JSON recorded on this context.
+
+    Preconditions:
+        - none; missing or empty recordings are treated as no raw text.
+    Postconditions:
+        - returns the last recorded string, or ``""`` when none was recorded.
+        - this context's slot is cleared so a later sequential call on the
+          same thread cannot reuse a previous call's raw text.
+    """
+    raw = _complete_json_raw_var.get()
+    _complete_json_raw_var.set(None)
+    if not raw:
+        return ""
+    return raw
+
+
+_complete_json_turns_var: ContextVar[list[tuple[str, str, float]] | None] = ContextVar(
+    "complete_json_turns", default=None
+)
+"""Per-call ``(prompt, response, started_monotonic)`` turns for a provider
+call that continued.
+
+Ollama's truncation path issues extra HTTP requests with continuation prompts
+for both ``complete_json`` and text ``complete``. Those inner turns never
+return to ``complete_validated`` as separate calls, so the provider records
+them here and the observer drains them with :func:`take_complete_json_turns`.
+``started_monotonic`` is ``time.monotonic()`` captured immediately before
+that turn's HTTP request began.
+"""
+
+_observer_turn_started_var: ContextVar[float | None] = ContextVar(
+    "complete_json_observer_turn_started", default=None
+)
+
+
+def record_complete_json_turn(
+    prompt: str,
+    response: str,
+    *,
+    started_monotonic: float | None = None,
+) -> None:
+    """Append one inner HTTP turn on this context.
+
+    Preconditions:
+        - ``prompt`` is the text that identifies this HTTP turn: the original
+          user prompt for the truncated first reply, or a serialization of the
+          full ``messages`` conversation sent on a continuation request.
+        - ``response`` is that turn's model text (may be a partial fragment).
+        - ``started_monotonic``, when given, is ``time.monotonic()`` from
+          immediately before this turn's provider request; omitted recordings
+          stamp ``time.monotonic()`` at record time.
+    Postconditions:
+        - :func:`take_complete_json_turns` on the same context includes this
+          triple after any previously recorded turns, in record order.
+    """
+    turns = list(_complete_json_turns_var.get() or [])
+    turns.append(
+        (prompt, response, time.monotonic() if started_monotonic is None else started_monotonic)
+    )
+    _complete_json_turns_var.set(turns)
+
+
+def take_complete_json_turns() -> list[tuple[str, str, float]]:
+    """Return and clear inner HTTP turns recorded on this context.
+
+    Preconditions:
+        - none; missing recordings are treated as no inner turns.
+    Postconditions:
+        - returns a new list of ``(prompt, response, started_monotonic)``
+          triples in record order, or ``[]`` when none were recorded.
+        - this context's slot is cleared so a later sequential call cannot
+          reuse a previous call's turns.
+    """
+    turns = _complete_json_turns_var.get()
+    _complete_json_turns_var.set(None)
+    if not turns:
+        return []
+    return list(turns)
+
+
+def complete_json_turn_count() -> int:
+    """How many inner HTTP turns are currently recorded on this context.
+
+    Preconditions:
+        none.
+    Postconditions:
+        Returns ``0`` when none are recorded; does not clear the slot.
+    """
+    turns = _complete_json_turns_var.get()
+    return 0 if not turns else len(turns)
+
+
+@contextmanager
+def observer_turn_started(started_monotonic: float | None) -> Iterator[None]:
+    """Bind this continuation turn's start time for transcript writers.
+
+    Preconditions:
+        ``started_monotonic`` is the provider-stamped start, or ``None``.
+    Postconditions:
+        :func:`observer_turn_started_monotonic` returns that value inside the
+        ``with`` block and restores the previous binding on exit.
+    """
+    token = _observer_turn_started_var.set(started_monotonic)
+    try:
+        yield
+    finally:
+        _observer_turn_started_var.reset(token)
+
+
+def observer_turn_started_monotonic() -> float | None:
+    """Return the start time bound for the in-flight observer callback.
+
+    Preconditions:
+        none.
+    Postconditions:
+        The monotonic timestamp from :func:`observer_turn_started`, or
+        ``None`` when the observer is not inside a recorded inner turn
+        (a single outer call with no continuation).
+    """
+    return _observer_turn_started_var.get()
+
+
+def reset_complete_json_observer_state() -> None:
+    """Drop any raw JSON or continuation turns left on this context.
+
+    Preconditions:
+        - none.
+    Postconditions:
+        - ``take_complete_json_raw`` and ``take_complete_json_turns`` return
+          empty until a later ``record_*`` on this context. Call at the start
+          of every ``complete_json`` / ``complete`` so a previous call that
+          raised after recording a turn cannot leak that turn into the next
+          observer.
+    """
+    _complete_json_raw_var.set(None)
+    _complete_json_turns_var.set(None)
+
+
 # Message used when Ollama 429 indicates weekly usage limit exceeded (for logging and job state)
 OLLAMA_WEEKLY_LIMIT_MESSAGE = "Ollama LLM usage limit exceeded for week"
 
@@ -258,6 +438,8 @@ class LLMClient(ABC):
         tools: Optional[list] = None,
         think: "bool | str | None" = None,
         schema: "Optional[dict | type[BaseModel]]" = None,
+        structured_output_model: "Optional[type[BaseModel]]" = None,
+        max_tokens: Optional[int] = None,
         **kwargs: Any,
     ) -> Dict[str, Any]:
         """
@@ -287,7 +469,29 @@ class LLMClient(ABC):
         omitted). Mutually exclusive with ``tools`` on clients that honor it
         (see ``OllamaLLMClient``).
 
-        Preconditions: ``objective`` is a non-empty string.
+        ``structured_output_model`` (optional): the exact ``type[BaseModel]``
+        subclass passed as ``structured_output=`` to ``build_agent``/Strands,
+        forwarded here only when the call originates from Strands'
+        ``Model.structured_output()`` bridge. This is deliberately distinct
+        from ``schema``: implementations MAY use its presence to select a
+        response deterministically (e.g. a stub/test client routing by class
+        identity instead of prompt text), but MUST NOT let it alter
+        wire-protocol behavior toward a real provider — ``schema`` is the
+        parameter for that. Absent (``None``) on any call that doesn't
+        originate from that bridge. Unsupporting clients silently ignore it
+        via ``**kwargs``.
+
+        ``max_tokens`` (optional): a cap on generated output tokens, forwarded
+        by implementations that honor a token limit (e.g. ``OllamaLLMClient``,
+        ``ClaudeLLMClient``). ``None`` (default) means no caller-supplied cap
+        — the implementation falls back to its own default/resolution logic.
+
+        Preconditions: ``objective`` is a non-empty string. ``DummyLLMClient``
+        is a documented exception: it defaults ``objective`` to ``"dummy"``
+        on ``complete``/``complete_json``/``chat`` because it makes no real
+        LLM call and performs no attribution, so test stubs are not required
+        to declare one. Real providers (``OllamaLLMClient``,
+        ``ClaudeLLMClient``) enforce the non-empty precondition.
         """
         ...
 
@@ -328,11 +532,14 @@ class LLMClient(ABC):
         ``objective`` (required) — see :meth:`complete_json`.
 
         ``think`` controls chain-of-thought / reasoning mode (see ``complete_json``).
+
+        ``max_tokens`` is forwarded to ``complete_json()`` — see its docstring.
         """
         result = self.complete_json(
             prompt,
             objective=objective,
             temperature=temperature,
+            max_tokens=max_tokens,
             system_prompt=system_prompt,
             tools=tools,
             think=think,

@@ -75,6 +75,29 @@ justification, matching the existing pragma markers in both modules.
 ### STRATEGY_LAB_MARKET_DATA_*
 Strategy Lab market-data cache/timeout/provider tuning.
 
+### STRATEGY_LAB_BATCH_INDICATOR_CACHE_ENABLED
+Master toggle for the batch-scoped, cross-strategy `BatchIndicatorCache` (default `true` after
+the cache's bake-in/validation period; accepted truthy values `true`/`1`/`yes`/`on`,
+case-insensitive; anything else — including an explicit `false`/`0`/`no`/`off` — disables). A
+batch backtest commonly evaluates many strategy candidates against the same asset-class
+universe/timeframe/date range, so structurally identical indicator computations (e.g. `SMA(50)`
+on the same symbol/timeframe) recur across candidates. When enabled, the batch/wave Temporal
+workflow constructs one cache per batch and shares it across that batch's strategies, so each
+distinct indicator series is computed once instead of once per strategy, cutting batch
+wall-clock time proportional to indicator-parameter overlap in the design space. The cache key
+is fully determined by the indicator spec + symbol + timeframe + a content fingerprint of the
+bars, so a hit only changes *how* a value is produced, never *what* value is returned (key
+composition and the invalidation contract: `system_design/adr/ADR-012-batch-indicator-cache-key-and-invalidation.md`).
+Consultation is additionally gated: `IndicatorRegistry` consults the cache only when it was
+constructed with a real cache instance **and** a non-empty timeframe, and the bars carry a
+`symbol` and a `date` — the batch workflow supplies all of these per batch, while an ordinary
+`IndicatorRegistry()` (no cache passed) falls straight through regardless of the flag. Note this
+flag is read by a stdlib-only reimplementation in
+`strategy_lab/indicators/streaming.py` (that module is copied verbatim into the flat execution
+sandbox, which has no `shared` package), so its truthy set additionally accepts `on` versus the
+`shared.env_config.env_bool`-backed toggles elsewhere on this page. Set it to a falsy value to
+opt an environment back out.
+
 ## TradingView MCP data source
 
 The Strategy Lab can pull OHLCV price data from a **TradingView MCP server** in preference to the
@@ -318,7 +341,7 @@ cycle. Disable to restore the pre-change context-free designer prompt.
 ### Ollama LLM transport (routed through `llm_service`)
 For the default **Ollama** provider, `get_strands_model` (`strategy_lab/agents/model_factory.py`)
 routes every Strategy Lab LLM call through the platform's hardened `llm_service` client (via
-`llm_service.strands_adapter.get_strands_model`) instead of constructing strands' native
+`llm_service.strands_adapter._get_strands_model`) instead of constructing strands' native
 `OllamaModel`. This closes the failure class where a thinking-enabled model returns an empty /
 thinking-only / prose-only turn on a long code-emitting generation: the strands-native path returned
 that as a "successful" empty string, which the parser then rejected with
@@ -404,9 +427,18 @@ Per-cycle hard cap on the total number of LLM calls the design phase may make wi
 before every design/review LLM call (generation, each parse-retry, the self-review verdict, each
 self-revision, and each `DesignReviewAgent` round); when it trips the cycle short-circuits with
 `status="failed: budget_exhausted"` (distinct from `failed: design_not_ready`) before runaway cloud
-spend. **Worst-case sizing:** at default settings one design round can cost up to ~9 LLM calls —
-`revise` is up to 8 (3 parse-retries + 1 self-review verdict + 3 self-revision parse-retries + 1
-re-audit verdict) plus 1 `DesignReviewAgent` round — so the uncapped worst case is
-`~9 calls × STRATEGY_LAB_DESIGN_REVIEW_ROUNDS (20) × 3 attempts ≈ 540` calls per design phase; this
-budget ceilings that. Raise it for genuinely hard-but-converging specs; lower it to tighten the
+spend. **Worst-case sizing** is not maintained here as independent prose — it is computed by
+`StrategyLabBudgetConfig.worst_case_design_llm_calls()` (`budget_config.py`), the same enforced
+config object every design-phase knob on this page resolves from, so the number below cannot drift
+out of sync with the code that produces it. One design round costs at most
+`(design_parse_retries + 1) * (1 + design_self_revision_rounds) + 2` revise-path calls (parse-retries
+on the initial generate/revise, the self-review verdict, parse-retries across self-revision, and the
+re-audit verdict) plus 1 `DesignReviewAgent` round; that per-round cost repeats for up to
+`design_review_rounds` rounds, across up to `MAX_DESIGN_REENTRIES + 1` design attempts. At the
+dataclass defaults (`design_parse_retries=2`, `design_self_revision_rounds=1`,
+`design_review_rounds=20`) this evaluates to 9 calls/round × 20 rounds × 3 attempts = **540** calls
+per design phase — `StrategyLabBudgetConfig.from_env()` logs the value actually resolved for the
+running environment's env-var overrides at `INFO` on every resolution, so the current worst case is
+always visible at runtime rather than only in this doc. `STRATEGY_LAB_DESIGN_MAX_LLM_CALLS` ceilings
+that uncapped worst case. Raise it for genuinely hard-but-converging specs; lower it to tighten the
 cost/quota ceiling.

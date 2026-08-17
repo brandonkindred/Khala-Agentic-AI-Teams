@@ -1,0 +1,9 @@
+[run]
+omit =
+    */tests/*
+    */__pycache__/*
+
+[report]
+show_missing = true
+omit =
+    */tests/*

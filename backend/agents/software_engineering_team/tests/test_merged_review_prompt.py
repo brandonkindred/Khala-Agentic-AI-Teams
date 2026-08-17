@@ -20,10 +20,17 @@ from code_review_agent.models import (
 from code_review_agent.prompts import (
     _ARCHITECTURE_CONSISTENCY_BODY,
     _SIDE_EFFECT_IMPACT_BODY,
+    ARCHITECTURE_CONSISTENCY_FORMATTING_INSTRUCTIONS,
     ARCHITECTURE_CONSISTENCY_PROMPT,
+    ARCHITECTURE_CONSISTENCY_REASONING_SYSTEM_PROMPT,
     JSON_OUTPUT_INSTRUCTION,
+    MERGED_ARCHITECTURE_SIDE_EFFECT_FORMATTING_INSTRUCTIONS,
     MERGED_ARCHITECTURE_SIDE_EFFECT_PROMPT,
+    MERGED_ARCHITECTURE_SIDE_EFFECT_REASONING_SYSTEM_PROMPT,
+    SIDE_EFFECT_IMPACT_FORMATTING_INSTRUCTIONS,
     SIDE_EFFECT_IMPACT_PROMPT,
+    SIDE_EFFECT_IMPACT_REASONING_SYSTEM_PROMPT,
+    build_merged_architecture_side_effect_prompt,
 )
 from pydantic import ValidationError
 
@@ -36,6 +43,7 @@ def test_individual_prompts_still_contain_their_own_body_and_output_format():
     assert ARCHITECTURE_CONSISTENCY_PROMPT.startswith(_ARCHITECTURE_CONSISTENCY_BODY)
     assert ARCHITECTURE_CONSISTENCY_PROMPT.endswith(JSON_OUTPUT_INSTRUCTION)
     assert '"category": "architecture" | "refactor"' in ARCHITECTURE_CONSISTENCY_PROMPT
+    assert '"pre_existing": boolean' in ARCHITECTURE_CONSISTENCY_PROMPT
 
     assert SIDE_EFFECT_IMPACT_PROMPT.startswith(_SIDE_EFFECT_IMPACT_BODY)
     assert SIDE_EFFECT_IMPACT_PROMPT.endswith(JSON_OUTPUT_INSTRUCTION)
@@ -63,6 +71,28 @@ def test_merged_prompt_output_format_describes_two_separate_keys():
     assert MERGED_ARCHITECTURE_SIDE_EFFECT_PROMPT.endswith(JSON_OUTPUT_INSTRUCTION)
 
 
+def test_submission_pass_prompts_split_reasoning_and_formatting() -> None:
+    assert ARCHITECTURE_CONSISTENCY_PROMPT == (
+        ARCHITECTURE_CONSISTENCY_REASONING_SYSTEM_PROMPT
+        + ARCHITECTURE_CONSISTENCY_FORMATTING_INSTRUCTIONS
+    )
+    assert _ARCHITECTURE_CONSISTENCY_BODY in ARCHITECTURE_CONSISTENCY_REASONING_SYSTEM_PROMPT
+    assert "Return a single JSON object" in ARCHITECTURE_CONSISTENCY_FORMATTING_INSTRUCTIONS
+    assert "Answer in structured prose" in ARCHITECTURE_CONSISTENCY_REASONING_SYSTEM_PROMPT
+
+    assert SIDE_EFFECT_IMPACT_PROMPT == (
+        SIDE_EFFECT_IMPACT_REASONING_SYSTEM_PROMPT + SIDE_EFFECT_IMPACT_FORMATTING_INSTRUCTIONS
+    )
+
+    assert MERGED_ARCHITECTURE_SIDE_EFFECT_PROMPT == (
+        MERGED_ARCHITECTURE_SIDE_EFFECT_REASONING_SYSTEM_PROMPT
+        + MERGED_ARCHITECTURE_SIDE_EFFECT_FORMATTING_INSTRUCTIONS
+    )
+    assert build_merged_architecture_side_effect_prompt(arch_on=True, side_on=False).startswith(
+        "You are running ONLY the architecture-consistency"
+    )
+
+
 def test_merged_schema_round_trips_both_finding_types():
     payload = {
         "architecture_findings": [
@@ -73,6 +103,7 @@ def test_merged_schema_round_trips_both_finding_types():
                 "line": 10,
                 "description": "Bypasses the stated data-access layer.",
                 "suggestion": "Use the repository module instead.",
+                "pre_existing": False,
             }
         ],
         "side_effect_findings": [
@@ -92,6 +123,24 @@ def test_merged_schema_round_trips_both_finding_types():
     assert len(parsed.side_effect_findings) == 1
     assert isinstance(parsed.architecture_findings[0], ArchitectureConsistencyFindingLLM)
     assert isinstance(parsed.side_effect_findings[0], SideEffectImpactFindingLLM)
+
+
+def test_architecture_finding_schema_pre_existing_defaults_false():
+    """``pre_existing`` is optional on an architecture/refactor finding (like
+    its side-effect counterpart), defaulting False when the model omits it."""
+    finding = ArchitectureConsistencyFindingLLM.model_validate(
+        {"category": "architecture", "description": "Bypasses the stated data-access layer."}
+    )
+    assert finding.pre_existing is False
+
+    tagged = ArchitectureConsistencyFindingLLM.model_validate(
+        {
+            "category": "refactor",
+            "description": "Duplicates an existing helper untouched by this change.",
+            "pre_existing": True,
+        }
+    )
+    assert tagged.pre_existing is True
 
 
 def test_merged_schema_accepts_explicit_empty_lists_but_requires_both_keys():
@@ -159,3 +208,44 @@ def test_architecture_body_allows_review_without_formal_document():
     assert "no formal" in body or "without a formal" in body or "when none is provided" in body
     assert "repository" in body
     assert "pattern" in body or "boundaries" in body
+
+
+def test_architecture_body_documents_pre_existing_tagging() -> None:
+    """Regression test: Part 1 (architecture-consistency / cross-codebase
+    redundancy) must instruct the model to tag pre_existing, the same as
+    Part 2 (side-effect impact) already does -- otherwise every architecture/
+    refactor finding about code this submission never touched defaults to
+    pre_existing=False and gets posted as a blocking PR comment instead of
+    routed to a human-review proposal."""
+    assert "pre_existing" in _ARCHITECTURE_CONSISTENCY_BODY
+    assert "Tagging" in _ARCHITECTURE_CONSISTENCY_BODY
+
+
+def test_architecture_body_prefers_scoped_reads_over_whole_file_first() -> None:
+    """The architecture-consistency body must document find_references and the
+    scoped construct readers as the default path, and must no longer instruct
+    "you MUST use list_files()/read_file()" as the way to confirm a duplicate
+    exists elsewhere in the repository."""
+    assert "find_references" in _ARCHITECTURE_CONSISTENCY_BODY
+    assert "read_lines" in _ARCHITECTURE_CONSISTENCY_BODY
+    assert "read_function" in _ARCHITECTURE_CONSISTENCY_BODY
+    assert (
+        "you MUST use `list_files()`/`read_file()` to confirm" not in _ARCHITECTURE_CONSISTENCY_BODY
+    )
+    assert "default path" in _ARCHITECTURE_CONSISTENCY_BODY.lower()
+
+
+def test_side_effect_body_prefers_scoped_reads_over_whole_file_first() -> None:
+    """The side-effect-impact body must document find_references and the
+    scoped construct readers as the default path for finding callers, and
+    must mark read_file/list_files as the non-default fallback rather than
+    the primary way to find every caller of a changed function."""
+    assert "find_references" in _SIDE_EFFECT_IMPACT_BODY
+    assert "read_lines" in _SIDE_EFFECT_IMPACT_BODY
+    assert "read_function" in _SIDE_EFFECT_IMPACT_BODY
+    assert "default path" in _SIDE_EFFECT_IMPACT_BODY.lower()
+    assert "non-default" in _SIDE_EFFECT_IMPACT_BODY.lower()
+    assert (
+        "Use `search_codebase`/`search_repository`/`list_files`/`read_file` to find every caller"
+        not in _SIDE_EFFECT_IMPACT_BODY
+    )

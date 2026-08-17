@@ -4,7 +4,7 @@ from typing import Dict, List, Optional
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-from software_engineering_team.shared.models import SystemArchitecture
+from shared.dev_models.models import SystemArchitecture
 
 
 class BugReport(BaseModel):
@@ -86,8 +86,11 @@ class QAOutput(BaseModel):
           ``validation_evidence``) are only populated in ``acceptance_evidence``
           mode; in every other mode they keep their empty defaults.
         - ``quality_gates`` values are unconstrained strings here (no dependency
-          on the DevOps ``GateStatus`` literal); the DevOps shim validates them
-          into ``GateStatus`` at its own boundary.
+          on the DevOps ``GateStatus`` literal); the DevOps quality-gate phase
+          coerces them into ``GateStatus`` at its own boundary.
+        - ``validation_evidence`` is retained for backward compatibility but is
+          not consumed by the DevOps quality-gate phase, which reads
+          ``quality_gates`` and ``acceptance_trace`` directly.
     """
 
     bugs_found: List[BugReport] = Field(

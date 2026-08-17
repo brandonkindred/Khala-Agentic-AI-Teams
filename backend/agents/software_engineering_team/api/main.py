@@ -78,7 +78,6 @@ from software_engineering_team.api.state import (  # noqa: F401
     RESTARTABLE_STATUSES,
     RESUMABLE_STATUSES,
     SUPERVISOR_LOG_DIR,
-    _active_orchestrator_threads,
     _coerce_current_activity,
     _coerce_progress,
     _get_projects_root,
@@ -173,6 +172,9 @@ from software_engineering_team.api.routes import (  # noqa: E402
     github as coding_team_github,
 )
 from software_engineering_team.api.routes import (  # noqa: E402
+    issue_grooming as coding_team_issue_grooming,
+)
+from software_engineering_team.api.routes import (  # noqa: E402
     reviews as coding_team_reviews,
 )
 from software_engineering_team.api.routes._common import (  # noqa: E402
@@ -193,4 +195,5 @@ app.include_router(status.router)
 app.include_router(coding_team_jobs.router)
 app.include_router(coding_team_hitl.router)
 app.include_router(coding_team_github.router)
+app.include_router(coding_team_issue_grooming.router)
 app.include_router(coding_team_reviews.router)

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 
 def _be_microtask():
+    """Build a minimal backend Microtask fixture for tool-agent tests."""
     from software_engineering_team.backend_code_v2_team.models import (
         Microtask,
         ToolAgentKind,
@@ -21,6 +22,7 @@ def _be_microtask():
 
 
 def _be_phase_input(**kwargs):
+    """Build a backend ToolAgentPhaseInput fixture, overriding fields via kwargs."""
     from software_engineering_team.backend_code_v2_team.models import (
         Phase,
         ToolAgentPhaseInput,
@@ -40,6 +42,7 @@ def _be_phase_input(**kwargs):
 
 
 def _be_review_issue(**kwargs):
+    """Build a backend ReviewIssue fixture, overriding fields via kwargs."""
     from software_engineering_team.backend_code_v2_team.models import ReviewIssue
 
     base = dict(source="documentation", severity="medium", description="d", file_path="", recommendation="")
@@ -48,6 +51,7 @@ def _be_review_issue(**kwargs):
 
 
 def _be_tool_input():
+    """Build a minimal backend ToolAgentInput fixture for execute()/run() tests."""
     from software_engineering_team.backend_code_v2_team.models import ToolAgentInput
 
     return ToolAgentInput(microtask=_be_microtask(), repo_path="/tmp", existing_code="", language="python")
@@ -59,6 +63,7 @@ def _be_tool_input():
 
 
 def _fe_microtask():
+    """Build a minimal frontend Microtask fixture for tool-agent tests."""
     from software_engineering_team.frontend_code_v2_team.models import (
         Microtask,
         ToolAgentKind,
@@ -68,6 +73,7 @@ def _fe_microtask():
 
 
 def _fe_phase_input(**kwargs):
+    """Build a frontend ToolAgentPhaseInput fixture, overriding fields via kwargs."""
     from software_engineering_team.frontend_code_v2_team.models import (
         Phase,
         ToolAgentPhaseInput,
@@ -87,6 +93,7 @@ def _fe_phase_input(**kwargs):
 
 
 def _fe_review_issue(**kwargs):
+    """Build a frontend ReviewIssue fixture, overriding fields via kwargs."""
     from software_engineering_team.frontend_code_v2_team.models import ReviewIssue
 
     base = dict(source="documentation", severity="medium", description="d", file_path="", recommendation="")
@@ -103,11 +110,13 @@ class _StubStrandsAgent:
     """Callable that mimics a strands Agent.__call__ returning canned text."""
 
     def __init__(self, response="## SUMMARY ##\nok\n## END SUMMARY ##\n", raise_exc=None):
+        """Configure the canned response (or exception) this stub will produce."""
         self.response = response
         self.raise_exc = raise_exc
         self.calls = []
 
     def __call__(self, prompt):
+        """Record the prompt and return the canned response, or raise raise_exc."""
         self.calls.append(prompt)
         if self.raise_exc:
             raise self.raise_exc
@@ -115,6 +124,7 @@ class _StubStrandsAgent:
 
 
 def _patch_strands(monkeypatch, mod, response="", raise_exc=None):
+    """Patch ``mod.Agent`` with a `_StubStrandsAgent` and return the stub."""
     stub = _StubStrandsAgent(response=response, raise_exc=raise_exc)
     monkeypatch.setattr(mod, "Agent", lambda *a, **kw: stub)
     return stub
@@ -124,6 +134,7 @@ class TestBackendDocumentation:
     """Backend DocumentationToolAgent: document_microtask, review, and problem_solve."""
 
     def _agent(self):
+        """Build a bare DocumentationToolAgent instance with no LLM configured."""
         from software_engineering_team.backend_code_v2_team.tool_agents.documentation import (
             agent as mod,
         )
@@ -309,6 +320,7 @@ class TestBackendDocumentation:
 
 
 def test_be_extract_doc_files():
+    """_extract_doc_files keeps README/docs/CONTRIBUTING files and excludes source files."""
     from software_engineering_team.backend_code_v2_team.tool_agents.documentation.agent import (
         _extract_doc_files,
     )
@@ -328,6 +340,7 @@ def test_be_extract_doc_files():
 
 
 def test_be_relevant_code_for_issue_with_file():
+    """Returns the code for the issue's own file when it exists in current_files."""
     from software_engineering_team.backend_code_v2_team.models import ReviewIssue
     from software_engineering_team.backend_code_v2_team.tool_agents.documentation.agent import (
         _relevant_code_for_issue,
@@ -339,6 +352,7 @@ def test_be_relevant_code_for_issue_with_file():
 
 
 def test_be_relevant_code_for_issue_with_large_file():
+    """Truncates a single oversized file's code to MAX_RELEVANT_CODE_CHARS."""
     from software_engineering_team.backend_code_v2_team.models import ReviewIssue
     from software_engineering_team.backend_code_v2_team.tool_agents.documentation.agent import (
         MAX_RELEVANT_CODE_CHARS,
@@ -367,6 +381,7 @@ def test_be_relevant_code_for_issue_no_file():
 
 
 def test_be_relevant_code_for_issue_empty_files():
+    """Returns the "(no code)" placeholder when current_files is empty."""
     from software_engineering_team.backend_code_v2_team.models import ReviewIssue
     from software_engineering_team.backend_code_v2_team.tool_agents.documentation.agent import (
         _relevant_code_for_issue,
@@ -378,6 +393,7 @@ def test_be_relevant_code_for_issue_empty_files():
 
 
 def test_be_relevant_code_bounds_multifile_context():
+    """Truncates the combined multi-file context once it exceeds the char bound."""
     from software_engineering_team.backend_code_v2_team.models import ReviewIssue
     from software_engineering_team.backend_code_v2_team.tool_agents.documentation.agent import (
         _relevant_code_for_issue,
@@ -400,6 +416,7 @@ class TestBackendSecurity:
     """Backend SecurityToolAgent: review-only; no problem_solve self-fix."""
 
     def _agent(self):
+        """Build a bare SecurityToolAgent instance with no LLM configured."""
         from software_engineering_team.backend_code_v2_team.tool_agents.security import (
             agent as mod,
         )
@@ -485,6 +502,7 @@ class TestBackendTestingQA:
     """Backend TestingQAToolAgent: review-only; no problem_solve self-fix."""
 
     def _agent(self):
+        """Build a bare TestingQAToolAgent instance with no LLM configured."""
         from software_engineering_team.backend_code_v2_team.tool_agents.testing_qa import (
             agent as mod,
         )
@@ -567,6 +585,7 @@ class TestFrontendDocumentation:
     """Frontend DocumentationToolAgent: TypeScript-specific plan, review, and problem_solve."""
 
     def _agent(self):
+        """Build a bare DocumentationToolAgent instance with no LLM configured."""
         from software_engineering_team.frontend_code_v2_team.tool_agents.documentation import (
             agent as mod,
         )
@@ -654,6 +673,7 @@ class TestFrontendSecurity:
     """Frontend SecurityToolAgent: review-only; no problem_solve self-fix."""
 
     def _agent(self):
+        """Build a bare SecurityToolAgent instance with no LLM configured."""
         from software_engineering_team.frontend_code_v2_team.tool_agents.security import (
             agent as mod,
         )

@@ -32,7 +32,12 @@ from branding_team.graphs.top_level import (
     DEFAULT_NODE_TIMEOUT_SECONDS,
     build_branding_graph,
 )
-from branding_team.models import BrandingMission, BrandPhase
+from branding_team.models import (
+    BrandingMission,
+    BrandPhase,
+    GovernanceOutput,
+    VisualIdentityOutput,
+)
 from branding_team.tests.conftest import make_mission
 
 # ---------------------------------------------------------------------------
@@ -118,6 +123,30 @@ def test_build_phase4_graph_is_a_graph() -> None:
     assert isinstance(build_phase4_graph(), Graph)
 
 
+def test_build_phase4_graph_wires_pure_fan_out() -> None:
+    """Phase 4 has no compositor: all nine specialists are both entry points
+    and terminal nodes, with no edges between them. Their typed fragments are
+    merged into ``ChannelActivationOutput`` in Python by the orchestrator's
+    Phase-4 ``merge_fn``, not by an LLM fan-in node.
+    """
+    graph = build_phase4_graph()
+    expected = {
+        "brand_experience_principler",
+        "website_guide",
+        "social_guide",
+        "email_guide",
+        "events_guide",
+        "partnerships_guide",
+        "internal_guide",
+        "brand_architecture_builder",
+        "brand_in_action_illustrator",
+    }
+    assert set(graph.nodes.keys()) == expected
+    assert {n.node_id for n in graph.entry_points} == expected
+    assert len(graph.edges) == 0
+    assert "channel_compositor" not in graph.nodes
+
+
 def test_make_channel_guide_rejects_blank_channel_or_description() -> None:
     """Documented channel/description preconditions are enforced before construction."""
     from branding_team.agents import _make_channel_guide
@@ -177,6 +206,72 @@ def test_phase4_prompts_drop_redundant_json_reminder() -> None:
 
 def test_build_phase5_graph_is_a_graph() -> None:
     assert isinstance(build_phase5_graph(), Graph)
+
+
+def test_phase5_prompts_drop_redundant_json_reminder() -> None:
+    """The Pydantic structured-output schema is the contract; the redundant
+    "Output valid JSON" sentence is no longer needed for any of the 7 Phase 5
+    factories migrated to ``build_agent(structured_output=...)``.
+    """
+    from branding_team.agents import (
+        make_approval_workflow_designer,
+        make_asset_wiki_planner,
+        make_brand_rules_codifier,
+        make_evolution_framer,
+        make_kpi_designer,
+        make_ownership_definer,
+        make_training_planner,
+    )
+
+    for factory in (
+        make_ownership_definer,
+        make_approval_workflow_designer,
+        make_asset_wiki_planner,
+        make_training_planner,
+        make_kpi_designer,
+        make_evolution_framer,
+        make_brand_rules_codifier,
+    ):
+        agent = factory()
+        assert "Output valid JSON" not in agent.system_prompt, factory.__name__
+
+
+# ---------------------------------------------------------------------------
+# Compositor (fan-in join) nodes — migrated to structured_output=
+# ---------------------------------------------------------------------------
+
+# The remaining phase-3/5 compositors are inline ``build_agent()`` calls in the
+# graph files (not ``agents.py`` factories), so they are reached through the
+# built graph's node executor rather than a factory. Each now carries its own
+# ``structured_output=`` model instead of a prose "output valid JSON" reminder,
+# which forces Strands' typed tool call and removes the compositors' reliance on
+# the free-text ``_parse_model_from_text`` recovery path. Phase 4 no longer has
+# a compositor (see ``test_build_phase4_graph_wires_pure_fan_out``).
+_COMPOSITOR_CASES = [
+    (build_phase3_graph, "visual_compositor", VisualIdentityOutput),
+    (build_phase5_graph, "governance_compositor", GovernanceOutput),
+]
+
+
+@pytest.mark.parametrize(
+    "build_graph,node_id,output_model",
+    _COMPOSITOR_CASES,
+    ids=[node_id for _build, node_id, _model in _COMPOSITOR_CASES],
+)
+def test_compositor_uses_structured_output_and_drops_json_reminder(
+    build_graph, node_id, output_model
+) -> None:
+    """Each fan-in compositor passes ``structured_output=`` and no longer names
+    a raw-JSON output format in its prose — the Pydantic schema is the contract.
+    """
+    graph = build_graph()
+    executor = graph.nodes[node_id].executor
+
+    # The Pydantic schema is wired as the agent's structured-output model
+    # (Strands stores the ``structured_output_model=`` ctor arg here)...
+    assert getattr(executor, "_default_structured_output_model", None) is output_model
+    # ...and the redundant "output valid JSON" prose instruction is gone.
+    assert "valid JSON" not in executor.system_prompt, node_id
 
 
 # ---------------------------------------------------------------------------

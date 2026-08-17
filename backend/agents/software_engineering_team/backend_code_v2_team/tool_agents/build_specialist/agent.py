@@ -25,9 +25,6 @@ from ..base import BackendReviewToolAgent
 
 logger = logging.getLogger(__name__)
 
-# Back-compat alias: the runner historically lived in this module.
-_run_backend_build_and_parse = run_backend_build_and_parse
-
 __all__ = ["BuildSpecialistAdapterAgent", "MAX_RELEVANT_CODE_CHARS"]
 
 

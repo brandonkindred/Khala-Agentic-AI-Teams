@@ -32,11 +32,59 @@ describe('App routes', () => {
     expect(await loadedComponent('llm-config')).toBe(LlmConfigDashboardComponent);
   });
 
+  it('lazily loads LlmUsageDashboardComponent for llm-usage', async () => {
+    const { LlmUsageDashboardComponent } = await import(
+      './components/llm-usage-dashboard/llm-usage-dashboard.component'
+    );
+    expect(await loadedComponent('llm-usage')).toBe(LlmUsageDashboardComponent);
+  });
+
   it('lazily loads JobMatchingDashboardComponent for job-matching', async () => {
     const { JobMatchingDashboardComponent } = await import(
       './components/job-matching-dashboard/job-matching-dashboard.component'
     );
     expect(await loadedComponent('job-matching')).toBe(JobMatchingDashboardComponent);
+  });
+
+  it('lazily loads ProductDeliveryPageComponent for product-delivery', async () => {
+    const { ProductDeliveryPageComponent } = await import(
+      './components/product-delivery-page/product-delivery-page.component'
+    );
+    expect(await loadedComponent('product-delivery')).toBe(ProductDeliveryPageComponent);
+  });
+
+  it('lazily loads CognitionPageComponent for cognition', async () => {
+    const { CognitionPageComponent } = await import(
+      './components/cognition-page/cognition-page.component'
+    );
+    expect(await loadedComponent('cognition')).toBe(CognitionPageComponent);
+  });
+
+  it('lazily loads AgentProvisioningDashboardComponent for agent-studio/provisioning', async () => {
+    const { AgentProvisioningDashboardComponent } = await import(
+      './components/agent-team-studio/agent-provisioning-dashboard/agent-provisioning-dashboard.component'
+    );
+    expect(await loadedComponent('agent-studio/provisioning')).toBe(AgentProvisioningDashboardComponent);
+  });
+
+  it('lazily loads MetricsTabComponent for agent-studio/metrics', async () => {
+    const { MetricsTabComponent } = await import(
+      './components/agent-team-studio/metrics-tab/metrics-tab.component'
+    );
+    expect(await loadedComponent('agent-studio/metrics')).toBe(MetricsTabComponent);
+  });
+
+  it('no longer registers the retired agent-console route', () => {
+    const shell = routes[0];
+    const children = (shell?.children ?? []) as Route[];
+    expect(children.some((r) => r.path === 'agent-console')).toBe(false);
+  });
+
+  it('redirects legacy agent-provisioning to /agent-studio/provisioning', () => {
+    const shell = routes[0];
+    const children = (shell?.children ?? []) as { path?: string; redirectTo?: string }[];
+    const redirect = children.find((r) => r.path === 'agent-provisioning');
+    expect(redirect?.redirectTo).toBe('/agent-studio/provisioning');
   });
 
   it('redirects empty path to /dashboard', () => {

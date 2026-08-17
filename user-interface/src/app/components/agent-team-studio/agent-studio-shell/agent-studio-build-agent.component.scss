@@ -1,0 +1,177 @@
+:host {
+  display: block;
+  height: 100%;
+}
+
+.studio-build {
+  display: flex;
+  flex-direction: column;
+  gap: var(--kh-space-4);
+  height: 100%;
+
+  // ── Stage-1 sub-stepper (1.1 Start → 1.2 Define → 1.3 Configure) ──────────
+  // Structurally mirrors the main shell's `.studio__stepper`, at a smaller scale.
+  &__substepper {
+    display: flex;
+    align-items: center;
+    gap: var(--kh-space-2);
+    flex-wrap: wrap;
+    padding: var(--kh-space-2) var(--kh-space-3);
+    background: var(--kh-surface-1);
+    border: 1px solid var(--kh-border-subtle);
+    border-radius: var(--kh-radius-full);
+    align-self: flex-start;
+  }
+
+  &__substep {
+    display: flex;
+    align-items: center;
+    gap: var(--kh-space-2);
+    padding: var(--kh-space-1) var(--kh-space-2);
+    border-radius: var(--kh-radius-full);
+    color: var(--kh-text-muted);
+
+    &.is-done {
+      color: var(--kh-text-secondary);
+    }
+
+    &.is-active {
+      background: var(--kh-accent-muted);
+      color: var(--kh-accent-text);
+    }
+  }
+
+  &__substep-num {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 18px;
+    height: 18px;
+    border-radius: var(--kh-radius-full);
+    background: var(--kh-surface-3);
+    color: var(--kh-text-secondary);
+    font-size: 0.6875rem;
+    font-weight: 700;
+
+    mat-icon {
+      width: 14px;
+      height: 14px;
+      font-size: 14px;
+    }
+
+    .is-active & {
+      background: var(--kh-accent);
+      color: #000;
+    }
+
+    .is-done & {
+      background: var(--kh-success);
+      color: #000;
+    }
+  }
+
+  &__substep-label {
+    font-size: 0.75rem;
+    font-weight: 600;
+  }
+
+  &__substep-conn {
+    flex: 0 0 14px;
+    height: 2px;
+    background: var(--kh-border);
+  }
+
+  &__substage-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: var(--kh-space-2);
+  }
+
+  &__continue-sub,
+  &__save-sub {
+    --mdc-filled-button-container-color: var(--kh-accent);
+    --mdc-filled-button-label-text-color: #000;
+  }
+
+  // Top bar: selection state + the provisioning entry point.
+  &__bar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--kh-space-4);
+    flex-wrap: wrap;
+  }
+
+  &__selected {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--kh-space-2);
+    font-size: var(--kh-text-sm);
+    color: var(--kh-text-secondary);
+
+    mat-icon {
+      width: 18px;
+      height: 18px;
+      font-size: 18px;
+      color: var(--kh-success);
+    }
+  }
+
+  &__hint {
+    font-size: var(--kh-text-sm);
+    color: var(--kh-text-muted);
+  }
+
+  // ── Provisioning slide-out ─────────────────────────────────────────────────
+  // The modal must sit above everything that can be visible behind it — notably
+  // the catalog's own detail drawer (z-index: 50) which stays mounted in this
+  // stage, plus app chrome (z-index: 1000). Use a modal-layer value above both.
+  &__scrim {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.4);
+    z-index: 1100;
+  }
+
+  &__provision-panel {
+    position: fixed;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 1101; // one above the scrim; both above the catalog drawer + chrome
+    width: min(560px, 92vw);
+    display: flex;
+    flex-direction: column;
+    background: var(--kh-surface-1);
+    border-left: 1px solid var(--kh-border-subtle);
+    box-shadow: -8px 0 24px rgba(0, 0, 0, 0.25);
+  }
+
+  &__provision-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--kh-space-4);
+    padding: var(--kh-space-4) var(--kh-space-5);
+    border-bottom: 1px solid var(--kh-border-subtle);
+
+    h2 {
+      margin: 0;
+      font-size: var(--kh-text-md);
+      font-weight: 600;
+      color: var(--kh-text-primary);
+    }
+  }
+
+  &__provision-body {
+    flex: 1 1 auto;
+    overflow: auto;
+    padding: var(--kh-space-4) var(--kh-space-5);
+  }
+}
+
+.error-text {
+  color: var(--kh-error);
+  font-size: var(--kh-text-sm);
+  margin: 0;
+}

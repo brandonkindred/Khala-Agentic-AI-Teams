@@ -1,0 +1,35 @@
+<!-- Always in the DOM, empty until a job exists — a live region inserted
+     already-populated is commonly not announced by screen readers. -->
+<p class="visually-hidden" role="status" aria-live="polite">{{ statusAnnouncement() }}</p>
+
+<app-team-assistant-chat
+  [teamApiUrl]="'/api/agent-provisioning/assistant'"
+  [teamName]="'Agent Provisioning'"
+  [teamDescription]="'Provision agent environments with infrastructure'"
+  [fields]="[
+    {key: 'agent_id', label: 'Agent ID', placeholder: 'Identifier of the agent to provision', required: true},
+    {key: 'manifest_path', label: 'Manifest path', placeholder: 'Path to provisioning manifest'}
+  ]"
+  (workflowLaunched)="onAssistantLaunched($event)"
+/>
+
+@if (jobId(); as id) {
+  <section class="provisioning-panel__status">
+    <h3 class="provisioning-panel__status-title">
+      <mat-icon aria-hidden="true">cloud_sync</mat-icon>
+      Provisioning job
+    </h3>
+    <dl class="provisioning-panel__status-grid">
+      <dt>Job ID</dt>
+      <dd>{{ id }}</dd>
+      <dt>Status</dt>
+      <dd>{{ jobStatus()?.status ?? 'starting…' }}</dd>
+    </dl>
+    @if (jobStatus()?.error; as err) {
+      <p class="provisioning-panel__status-error">
+        <mat-icon aria-hidden="true">error_outline</mat-icon>
+        {{ err }}
+      </p>
+    }
+  </section>
+}

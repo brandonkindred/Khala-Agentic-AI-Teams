@@ -6,16 +6,119 @@ Implements a 5-phase brand development framework:
   Phase 3 — Visual & Expressive Identity
   Phase 4 — Experience & Channel Activation
   Phase 5 — Governance & Evolution
+
+Collapsed nested-item pattern
+-----------------------------
+Nested item models (canonical pair: ``CoreValue`` / ``CoreValueOutput``) are a
+soft merge-target base plus a ``_derive_strict_variant``-generated strict
+subclass that redeclares only the fields that must be required/non-empty.
+Field lists are not duplicated. The soft base is the merge target for partial
+per-agent fragments, ``default_factory`` construction, and permissive
+fixtures. The strict subclass is the Strands ``structured_output=`` schema so
+a blank or incomplete LLM payload fails validation and retries instead of
+silently producing empty content.
+
+``model_validate(..., context={"strict": True})`` is not used: Strands
+constructs structured-output instances itself and does not thread a
+``context=`` kwarg through any call site this package controls. A derived
+subclass enforces constraints at the type level regardless of how it is
+instantiated. ``isinstance(CoreValueOutput(...), CoreValue)`` holds because
+the generated class is a real subclass of the soft base.
+
+This pattern does not apply to the Phase 2 cumulative-inheritance chain
+(``BrandStoryOutput`` → … → ``WritingGuidelinesOutput``) or to the remaining
+hand-written sibling pair that was never collapsed (``ChannelGuideline`` /
+``ChannelGuidelineOutput``). ``BrandDiscoveryAudit``, ``MoodBoardConcept``,
+``CreativeRefinementDecision``, and ``DesignSystemDefinition`` were each
+fully collapsed to a single model (used both as their agent's
+``structured_output`` and as the corresponding phase output's
+``default_factory`` merge target) rather than split into this soft/strict
+pair, since a no-argument-constructible default is needed either way.
 """
 
 from __future__ import annotations
 
 from enum import Enum
-from typing import Any, Dict, List, Optional
+from typing import Annotated, Any, Dict, List, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, create_model
 
 from shared.hitl.models import HumanReview as HumanReview  # noqa: F401 — re-export
+
+# Individual list/dict items, not just container length, must be non-empty —
+# a fully populated ``List[str] = Field(min_length=N)`` still accepts N blank
+# strings, undermining every "requires non-empty content" docstring below.
+NonEmptyStr = Annotated[str, Field(min_length=1)]
+
+# ---------------------------------------------------------------------------
+# Strict/soft derived-subclass pattern (see module docstring)
+# ---------------------------------------------------------------------------
+# Nested item models use ``_derive_strict_variant`` immediately below the
+# soft class they derive from. See ``CoreValue``/``CoreValueOutput``.
+
+
+def _derive_strict_variant(
+    name: str,
+    base: type[BaseModel],
+    /,
+    *,
+    doc: str,
+    **field_overrides: Any,
+) -> type[BaseModel]:
+    """Derive a strict agent-output twin from a soft merge-target model.
+
+    Generates ``name`` as a real ``pydantic.BaseModel`` subclass of ``base``
+    via ``pydantic.create_model``, re-declaring only the fields named in
+    ``field_overrides`` with stricter annotations/constraints; every other
+    field is inherited unchanged from ``base``. Used instead of a
+    ``context=``-gated ``field_validator`` because the strict twin's
+    primary caller — the Strands SDK's own ``structured_output`` parsing
+    of the LLM's tool-call JSON — constructs instances directly and does
+    not thread any ``context=`` kwarg through call sites we control; a
+    derived-subclass twin enforces its constraints independent of how or
+    where it is instantiated. Note the returned class is a genuine
+    subclass of ``base`` (``issubclass`` / ``isinstance`` against ``base``
+    hold), not an independent sibling type. ``name``/``base`` are
+    positional-only so a field literally named ``name`` or ``base`` (e.g.
+    ``AudienceSegment.name``, ``PersonaProfile.name``) can still be passed
+    as a ``field_overrides`` keyword without colliding with these
+    parameters.
+
+    Preconditions:
+        - ``base`` is a concrete ``pydantic.BaseModel`` subclass whose own
+          fields are all constructible with defaults (this file's soft
+          merge-target contract).
+        - Each value in ``field_overrides`` is a ``(annotation, FieldInfo)``
+          pair, keyed by a field name that already exists on ``base``;
+          this function only redeclares existing fields, it does not add
+          new ones.
+    Postconditions:
+        - Returns a new class, named ``name``, that is a subclass of both
+          ``base`` and ``pydantic.BaseModel`` — usable anywhere a
+          ``BaseModel`` subclass is expected, including direct
+          construction (``ClassName(**kwargs)``), ``.model_validate``,
+          ``List[<returned class>]`` field annotations elsewhere in this
+          module, and ``.model_json_schema()``.
+        - Every field named in ``field_overrides`` enforces the given
+          stricter annotation/constraints (a field with a default on
+          ``base`` may become required with no default on the returned
+          class); every other field keeps ``base``'s original annotation,
+          default, and constraints.
+        - Does not mutate ``base``; ``base`` keeps accepting its original,
+          more permissive field values.
+    """
+    return create_model(
+        name, __base__=base, __module__=base.__module__, __doc__=doc, **field_overrides
+    )
+
+
+# Common closing sentence for every strict-twin ``doc=`` below — factored out
+# so the 17 call sites don't each hand-duplicate the same boilerplate tail.
+_STRICT_TWIN_DOC_SUFFIX = (
+    "Generated via ``_derive_strict_variant`` — see that helper's docstring "
+    "for the shared strict/soft twin pattern this file uses."
+)
+
 
 # ---------------------------------------------------------------------------
 # Shared models
@@ -162,6 +265,27 @@ class CoreValue(BaseModel):
     observable_behaviors: List[str] = Field(default_factory=list)
 
 
+CoreValueOutput = _derive_strict_variant(
+    "CoreValueOutput",
+    CoreValue,
+    doc=(
+        "Agent-facing core value; requires non-empty fields.\n\n"
+        "Field-for-field twin of ``CoreValue`` with required content, matching "
+        "the Phase 3 nested-output-model pattern (``LogoUsageRuleOutput``, "
+        "``ColorEntryOutput``, ``TypographySpecOutput``, ``VoiceToneEntryOutput``, "
+        "``BrandArchitectureRuleOutput``, ``PersonaProfileOutput``, "
+        "``MessagingPillarOutput``, ``ElevatorPitchOutput``, ``BrandArchetypeOutput``, "
+        "``DifferentiationPillarOutput``) — ``CoreValue`` itself must stay soft "
+        "(only ``value`` required) since it also backs "
+        "``StrategicCoreOutput.core_values``'s merge target. "
+    )
+    + _STRICT_TWIN_DOC_SUFFIX,
+    value=(str, Field(min_length=1)),
+    behavioral_definition=(str, Field(min_length=1)),
+    observable_behaviors=(List[NonEmptyStr], Field(min_length=1)),
+)
+
+
 class AudienceSegment(BaseModel):
     """A target audience segment with psychographic detail."""
 
@@ -172,6 +296,29 @@ class AudienceSegment(BaseModel):
     decision_drivers: List[str] = Field(default_factory=list)
 
 
+AudienceSegmentOutput = _derive_strict_variant(
+    "AudienceSegmentOutput",
+    AudienceSegment,
+    doc=(
+        "Agent-facing audience segment; requires non-empty fields.\n\n"
+        "Field-for-field twin of ``AudienceSegment`` with required content, "
+        "matching the Phase 3 nested-output-model pattern (``LogoUsageRuleOutput``, "
+        "``ColorEntryOutput``, ``TypographySpecOutput``, ``VoiceToneEntryOutput``, "
+        "``BrandArchitectureRuleOutput``, ``PersonaProfileOutput``, "
+        "``MessagingPillarOutput``, ``ElevatorPitchOutput``, ``BrandArchetypeOutput``, "
+        "``DifferentiationPillarOutput``) — ``AudienceSegment`` itself must stay "
+        "soft (only ``name`` required) since it also backs "
+        "``StrategicCoreOutput.target_audience_segments``'s merge target. "
+    )
+    + _STRICT_TWIN_DOC_SUFFIX,
+    name=(str, Field(min_length=1)),
+    description=(str, Field(min_length=1)),
+    pain_points=(List[NonEmptyStr], Field(min_length=1)),
+    goals=(List[NonEmptyStr], Field(min_length=1)),
+    decision_drivers=(List[NonEmptyStr], Field(min_length=1)),
+)
+
+
 class DifferentiationPillar(BaseModel):
     """Competitive differentiation pillar with proof points."""
 
@@ -180,13 +327,34 @@ class DifferentiationPillar(BaseModel):
     competitive_context: str = ""
 
 
+DifferentiationPillarOutput = _derive_strict_variant(
+    "DifferentiationPillarOutput",
+    DifferentiationPillar,
+    doc=(
+        "Agent-facing differentiation pillar; requires non-empty fields.\n\n"
+        "Field-for-field twin of ``DifferentiationPillar`` with required content, "
+        "matching the Phase 3 nested-output-model pattern (``LogoUsageRuleOutput``, "
+        "``ColorEntryOutput``, ``TypographySpecOutput``, ``VoiceToneEntryOutput``, "
+        "``BrandArchitectureRuleOutput``, ``PersonaProfileOutput``, "
+        "``MessagingPillarOutput``, ``ElevatorPitchOutput``, ``BrandArchetypeOutput``, "
+        "``AudienceSegmentOutput``) — ``DifferentiationPillar`` itself must stay "
+        "soft (only ``pillar`` required) since it also backs "
+        "``StrategicCoreOutput.differentiation_pillars``'s merge target. "
+    )
+    + _STRICT_TWIN_DOC_SUFFIX,
+    pillar=(str, Field(min_length=1)),
+    proof_points=(List[NonEmptyStr], Field(min_length=1)),
+    competitive_context=(str, Field(min_length=1)),
+)
+
+
 class BrandDiscoveryAudit(BaseModel):
     """Brand discovery and audit findings.
 
-    Fields default to empty rather than being required: this model also
-    backs ``StrategicCoreOutput.brand_discovery``'s ``default_factory``, which
-    must construct successfully with no arguments. ``discovery_auditor``'s own
-    agent-facing schema is the stricter ``BrandDiscoveryAuditOutput`` below.
+    Fields default to empty rather than being required: this model backs
+    both ``discovery_auditor``'s agent-facing ``structured_output`` schema
+    and ``StrategicCoreOutput.brand_discovery``'s ``default_factory``, which
+    must construct successfully with no arguments.
     """
 
     current_brand_perception: str = ""
@@ -196,24 +364,6 @@ class BrandDiscoveryAudit(BaseModel):
     opportunities: List[str] = Field(default_factory=list)
     threats: List[str] = Field(default_factory=list)
     stakeholder_insights: List[str] = Field(default_factory=list)
-
-
-class BrandDiscoveryAuditOutput(BaseModel):
-    """Agent-facing brand discovery schema.
-
-    Requires non-empty content so Strands retries blank structured_output.
-    Field-for-field identical to ``BrandDiscoveryAudit`` — kept as a separate
-    model so this one can require real content without breaking
-    ``StrategicCoreOutput.brand_discovery``'s no-argument default construction.
-    """
-
-    current_brand_perception: str = Field(min_length=1)
-    market_position: str = Field(min_length=1)
-    strengths: List[str] = Field(min_length=1)
-    weaknesses: List[str] = Field(min_length=1)
-    opportunities: List[str] = Field(min_length=1)
-    threats: List[str] = Field(min_length=1)
-    stakeholder_insights: List[str] = Field(min_length=1)
 
 
 class PurposeVisionOutput(BaseModel):
@@ -236,9 +386,12 @@ class CoreValuesOutput(BaseModel):
 
     Requires non-empty content so Strands retries blank structured_output.
     ``min_length``/``max_length`` encode the prompt's stated "3-5 core values".
+    Uses ``CoreValueOutput`` (not the soft ``CoreValue``) so each value's
+    fields are individually required — a blank value must fail validation
+    instead of silently passing.
     """
 
-    core_values: List[CoreValue] = Field(min_length=3, max_length=5)
+    core_values: List[CoreValueOutput] = Field(min_length=3, max_length=5)
 
 
 class AudienceSegmentsOutput(BaseModel):
@@ -246,9 +399,12 @@ class AudienceSegmentsOutput(BaseModel):
 
     Requires non-empty content so Strands retries blank structured_output.
     ``min_length``/``max_length`` encode the prompt's stated "1-3 target audience segments".
+    Uses ``AudienceSegmentOutput`` (not the soft ``AudienceSegment``) so each
+    segment's fields are individually required — a blank-name segment must
+    fail validation instead of silently passing.
     """
 
-    target_audience_segments: List[AudienceSegment] = Field(min_length=1, max_length=3)
+    target_audience_segments: List[AudienceSegmentOutput] = Field(min_length=1, max_length=3)
 
 
 class DifferentiationPillarsOutput(BaseModel):
@@ -256,9 +412,12 @@ class DifferentiationPillarsOutput(BaseModel):
 
     Requires non-empty content so Strands retries blank structured_output.
     ``min_length``/``max_length`` encode the prompt's stated "2-4 differentiation pillars".
+    Uses ``DifferentiationPillarOutput`` (not the soft ``DifferentiationPillar``)
+    so each pillar's fields are individually required — a blank pillar must
+    fail validation instead of silently passing.
     """
 
-    differentiation_pillars: List[DifferentiationPillar] = Field(min_length=2, max_length=4)
+    differentiation_pillars: List[DifferentiationPillarOutput] = Field(min_length=2, max_length=4)
 
 
 class PositioningOutput(BaseModel):
@@ -298,12 +457,52 @@ class BrandArchetype(BaseModel):
     personality_traits: List[str] = Field(default_factory=list)
 
 
+BrandArchetypeOutput = _derive_strict_variant(
+    "BrandArchetypeOutput",
+    BrandArchetype,
+    doc=(
+        "Agent-facing brand archetype; requires non-empty fields.\n\n"
+        "Field-for-field twin of ``BrandArchetype`` with required content, "
+        "matching the Phase 3 nested-output-model pattern (``LogoUsageRuleOutput``, "
+        "``ColorEntryOutput``, ``TypographySpecOutput``, ``VoiceToneEntryOutput``, "
+        "``BrandArchitectureRuleOutput``, ``PersonaProfileOutput``, "
+        "``MessagingPillarOutput``, ``ElevatorPitchOutput``) — ``BrandArchetype`` "
+        "itself must stay soft (only ``archetype`` required) since it also backs "
+        "``NarrativeMessagingOutput.brand_archetypes``'s merge target. "
+    )
+    + _STRICT_TWIN_DOC_SUFFIX,
+    archetype=(str, Field(min_length=1)),
+    rationale=(str, Field(min_length=1)),
+    personality_traits=(List[NonEmptyStr], Field(min_length=1)),
+)
+
+
 class MessagingPillar(BaseModel):
     """A messaging pillar with proof points."""
 
     pillar: str
     key_message: str = ""
     proof_points: List[str] = Field(default_factory=list)
+
+
+MessagingPillarOutput = _derive_strict_variant(
+    "MessagingPillarOutput",
+    MessagingPillar,
+    doc=(
+        "Agent-facing messaging pillar; requires non-empty fields.\n\n"
+        "Field-for-field twin of ``MessagingPillar`` with required content, "
+        "matching the Phase 3 nested-output-model pattern (``LogoUsageRuleOutput``, "
+        "``ColorEntryOutput``, ``TypographySpecOutput``, ``VoiceToneEntryOutput``, "
+        "``BrandArchitectureRuleOutput``, ``PersonaProfileOutput``) — "
+        "``MessagingPillar`` itself must stay soft (only ``pillar`` required) since "
+        "it also backs ``NarrativeMessagingOutput.messaging_framework``'s merge "
+        "target. "
+    )
+    + _STRICT_TWIN_DOC_SUFFIX,
+    pillar=(str, Field(min_length=1)),
+    key_message=(str, Field(min_length=1)),
+    proof_points=(List[NonEmptyStr], Field(min_length=1)),
+)
 
 
 class AudienceMessageMap(BaseModel):
@@ -315,11 +514,48 @@ class AudienceMessageMap(BaseModel):
     tone_adjustments: str = ""
 
 
+AudienceMessageMapOutput = _derive_strict_variant(
+    "AudienceMessageMapOutput",
+    AudienceMessageMap,
+    doc=(
+        "Agent-facing audience message map; requires non-empty fields.\n\n"
+        "Field-for-field twin of ``AudienceMessageMap`` with required content, "
+        "matching this file's other Phase 2/3 strict-twin pairs — "
+        "``AudienceMessageMap`` itself must stay soft (only ``audience_segment`` "
+        "required) since it also backs "
+        "``NarrativeMessagingOutput.audience_message_maps``'s merge target. "
+    )
+    + _STRICT_TWIN_DOC_SUFFIX,
+    audience_segment=(str, Field(min_length=1)),
+    primary_message=(str, Field(min_length=1)),
+    supporting_messages=(List[NonEmptyStr], Field(min_length=1)),
+    tone_adjustments=(str, Field(min_length=1)),
+)
+
+
 class ElevatorPitch(BaseModel):
     """Tiered elevator pitch."""
 
     tier: str = ""  # e.g., "5-second", "30-second", "2-minute"
     pitch: str = ""
+
+
+ElevatorPitchOutput = _derive_strict_variant(
+    "ElevatorPitchOutput",
+    ElevatorPitch,
+    doc=(
+        "Agent-facing elevator pitch; requires non-empty fields.\n\n"
+        "Field-for-field twin of ``ElevatorPitch`` with required content, "
+        "matching the Phase 3 nested-output-model pattern (``LogoUsageRuleOutput``, "
+        "``ColorEntryOutput``, ``TypographySpecOutput``, ``VoiceToneEntryOutput``, "
+        "``BrandArchitectureRuleOutput``, ``PersonaProfileOutput``) — "
+        "``ElevatorPitch`` itself must stay soft (all-default) since it also backs "
+        "``NarrativeMessagingOutput.elevator_pitches``'s merge target. "
+    )
+    + _STRICT_TWIN_DOC_SUFFIX,
+    tier=(str, Field(min_length=1)),
+    pitch=(str, Field(min_length=1)),
+)
 
 
 class PersonaProfile(BaseModel):
@@ -335,6 +571,30 @@ class PersonaProfile(BaseModel):
     jobs_to_be_done: List[str] = Field(default_factory=list)
 
 
+PersonaProfileOutput = _derive_strict_variant(
+    "PersonaProfileOutput",
+    PersonaProfile,
+    doc=(
+        "Agent-facing persona profile; requires non-empty fields.\n\n"
+        "Field-for-field twin of ``PersonaProfile`` with required content, "
+        "matching the Phase 3 nested-output-model pattern (``LogoUsageRuleOutput``, "
+        "``ColorEntryOutput``, ``TypographySpecOutput``, ``VoiceToneEntryOutput``, "
+        "``BrandArchitectureRuleOutput``) — ``PersonaProfile`` itself must stay soft "
+        "(all-default except ``name``) since it also backs "
+        "``NarrativeMessagingOutput.persona_profiles``'s merge target. "
+    )
+    + _STRICT_TWIN_DOC_SUFFIX,
+    name=(str, Field(min_length=1)),
+    role=(str, Field(min_length=1)),
+    demographics=(str, Field(min_length=1)),
+    psychographics=(str, Field(min_length=1)),
+    goals=(List[NonEmptyStr], Field(min_length=1)),
+    frustrations=(List[NonEmptyStr], Field(min_length=1)),
+    media_habits=(List[NonEmptyStr], Field(min_length=1)),
+    jobs_to_be_done=(List[NonEmptyStr], Field(min_length=1)),
+)
+
+
 class BrandStoryOutput(BaseModel):
     """Agent-facing brand story schema.
 
@@ -345,7 +605,7 @@ class BrandStoryOutput(BaseModel):
 
     brand_story: str = Field(min_length=1)
     hero_narrative: str = Field(min_length=1)
-    boilerplate_variants: List[str] = Field(min_length=3, max_length=3)
+    boilerplate_variants: List[NonEmptyStr] = Field(min_length=3, max_length=3)
 
 
 class BrandArchetypesOutput(BrandStoryOutput):
@@ -355,45 +615,67 @@ class BrandArchetypesOutput(BrandStoryOutput):
     ``structured_output`` already exposes the brand story to TaglineWriter
     (Strands Graph node inputs only include direct dependency results, and
     multi-in edges use OR-ready semantics so cumulative fan-in is unsafe).
+    Uses ``BrandArchetypeOutput`` (not the soft ``BrandArchetype``) so each
+    archetype's fields are individually required — a blank archetype must
+    fail validation instead of silently passing.
     """
 
-    brand_archetypes: List[BrandArchetype] = Field(min_length=1, max_length=2)
+    brand_archetypes: List[BrandArchetypeOutput] = Field(min_length=1, max_length=2)
 
 
 class TaglineOutput(BrandArchetypesOutput):
-    """Prior narrative carry-forward plus tagline / elevator pitches."""
+    """Prior narrative carry-forward plus tagline / elevator pitches.
+
+    Uses ``ElevatorPitchOutput`` (not the soft ``ElevatorPitch``) so each
+    pitch's fields are individually required — three blank-tier/blank-pitch
+    entries must fail validation instead of silently passing.
+    """
 
     tagline: str = Field(min_length=1)
     tagline_rationale: str = Field(min_length=1)
-    elevator_pitches: List[ElevatorPitch] = Field(min_length=3, max_length=3)
+    elevator_pitches: List[ElevatorPitchOutput] = Field(min_length=3, max_length=3)
 
 
 class MessagingFrameworkOutput(TaglineOutput):
-    """Prior narrative carry-forward plus messaging framework / audience maps."""
+    """Prior narrative carry-forward plus messaging framework / audience maps.
 
-    messaging_framework: List[MessagingPillar] = Field(min_length=3, max_length=4)
-    audience_message_maps: List[AudienceMessageMap] = Field(min_length=1)
+    Uses ``MessagingPillarOutput``/``AudienceMessageMapOutput`` (not the soft
+    ``MessagingPillar``/``AudienceMessageMap``) so each nested item's fields
+    are individually required — a blank pillar or audience segment must fail
+    validation instead of silently producing empty output.
+    """
+
+    messaging_framework: List[MessagingPillarOutput] = Field(min_length=3, max_length=4)
+    audience_message_maps: List[AudienceMessageMapOutput] = Field(min_length=1)
 
 
 class PersonaProfilesOutput(MessagingFrameworkOutput):
-    """Prior narrative carry-forward plus persona profiles."""
+    """Prior narrative carry-forward plus persona profiles.
 
-    persona_profiles: List[PersonaProfile] = Field(min_length=2, max_length=3)
+    Uses ``PersonaProfileOutput`` (not the soft ``PersonaProfile``) so each
+    persona's fields are individually required — a blank-name persona must
+    fail validation instead of silently producing empty output.
+    """
+
+    persona_profiles: List[PersonaProfileOutput] = Field(min_length=2, max_length=3)
 
 
 class WritingGuidelinesBody(BaseModel):
     """Strict writing-guidelines body nested under ``writing_guidelines``.
 
-    Field-for-field identical to ``WritingGuidelines`` — kept separate so this
-    one can require real content without breaking
+    Field *names* match ``WritingGuidelines`` — kept separate (not collapsed)
+    because the *types* genuinely differ (``List[NonEmptyStr]`` with a required
+    ``min_length=3, max_length=4`` here vs. plain ``List[str]`` with empty
+    defaults there) and because collapsing would break
     ``NarrativeMessagingOutput.writing_guidelines``'s no-argument default.
-    Cardinalities encode the prompt's stated "3-4" for each list.
+    Cardinalities encode the prompt's stated "3-4" for each list. Story 3b
+    Step 1 finding: this pair is genuinely different, not safe to collapse.
     """
 
-    voice_principles: List[str] = Field(min_length=3, max_length=4)
-    style_dos: List[str] = Field(min_length=3, max_length=4)
-    style_donts: List[str] = Field(min_length=3, max_length=4)
-    editorial_quality_bar: List[str] = Field(min_length=3, max_length=4)
+    voice_principles: List[NonEmptyStr] = Field(min_length=3, max_length=4)
+    style_dos: List[NonEmptyStr] = Field(min_length=3, max_length=4)
+    style_donts: List[NonEmptyStr] = Field(min_length=3, max_length=4)
+    editorial_quality_bar: List[NonEmptyStr] = Field(min_length=3, max_length=4)
 
 
 class WritingGuidelinesOutput(PersonaProfilesOutput):
@@ -402,6 +684,12 @@ class WritingGuidelinesOutput(PersonaProfilesOutput):
     VoicePrinciplesDrafter is last in the linear Graph, so its payload must
     include every upstream fragment plus ``writing_guidelines`` in the shape
     ``NarrativeMessagingOutput`` expects (no nest-under remap needed).
+
+    Not a twin of ``WritingGuidelines`` despite the similar name — this class
+    inherits ten fields from ``PersonaProfilesOutput``'s cumulative carry-forward
+    chain on top of its own nested ``writing_guidelines`` field, a different
+    shape and purpose than the flat merge-target ``WritingGuidelines``. Story 3b
+    Step 1 finding: not comparable, not safe to collapse.
     """
 
     writing_guidelines: WritingGuidelinesBody
@@ -438,6 +726,23 @@ class ColorEntry(BaseModel):
     psychological_rationale: str = ""
 
 
+ColorEntryOutput = _derive_strict_variant(
+    "ColorEntryOutput",
+    ColorEntry,
+    doc=(
+        "Agent-facing color entry; requires non-empty fields.\n\n"
+        "Field-for-field twin of ``ColorEntry`` with required content — "
+        "``ColorEntry`` itself must stay soft (only ``name`` required) since "
+        "it also backs ``VisualIdentityOutput.color_palette``'s merge target. "
+    )
+    + _STRICT_TWIN_DOC_SUFFIX,
+    name=(str, Field(min_length=1)),
+    hex_value=(str, Field(min_length=1)),
+    usage=(str, Field(min_length=1)),
+    psychological_rationale=(str, Field(min_length=1)),
+)
+
+
 class TypographySpec(BaseModel):
     """Typography system specification."""
 
@@ -445,6 +750,23 @@ class TypographySpec(BaseModel):
     font_family: str = ""
     weight_range: str = ""
     usage_notes: str = ""
+
+
+TypographySpecOutput = _derive_strict_variant(
+    "TypographySpecOutput",
+    TypographySpec,
+    doc=(
+        "Agent-facing typography spec; requires non-empty fields.\n\n"
+        "Field-for-field twin of ``TypographySpec`` with required content — "
+        "``TypographySpec`` itself must stay soft (all-default) since it also "
+        "backs ``VisualIdentityOutput.typography_system``'s merge target. "
+    )
+    + _STRICT_TWIN_DOC_SUFFIX,
+    role=(str, Field(min_length=1)),
+    font_family=(str, Field(min_length=1)),
+    weight_range=(str, Field(min_length=1)),
+    usage_notes=(str, Field(min_length=1)),
+)
 
 
 class LogoUsageRule(BaseModel):
@@ -456,12 +778,45 @@ class LogoUsageRule(BaseModel):
     clear_space: str = ""
 
 
+LogoUsageRuleOutput = _derive_strict_variant(
+    "LogoUsageRuleOutput",
+    LogoUsageRule,
+    doc=(
+        "Agent-facing logo usage rule; requires non-empty fields.\n\n"
+        "Field-for-field twin of ``LogoUsageRule`` with required content — "
+        "``LogoUsageRule`` itself must stay soft (all-default) since it also "
+        "backs ``VisualIdentityOutput.logo_suite``'s merge target. "
+    )
+    + _STRICT_TWIN_DOC_SUFFIX,
+    variant=(str, Field(min_length=1)),
+    usage_context=(str, Field(min_length=1)),
+    minimum_size=(str, Field(min_length=1)),
+    clear_space=(str, Field(min_length=1)),
+)
+
+
 class VoiceToneEntry(BaseModel):
     """Voice and tone spectrum entry."""
 
     context: str = ""  # e.g., "marketing", "support", "legal"
     tone: str = ""
     examples: List[str] = Field(default_factory=list)
+
+
+VoiceToneEntryOutput = _derive_strict_variant(
+    "VoiceToneEntryOutput",
+    VoiceToneEntry,
+    doc=(
+        "Agent-facing voice/tone entry; requires non-empty fields.\n\n"
+        "Field-for-field twin of ``VoiceToneEntry`` with required content — "
+        "``VoiceToneEntry`` itself must stay soft (all-default) since it also "
+        "backs ``VisualIdentityOutput.voice_tone_spectrum``'s merge target. "
+    )
+    + _STRICT_TWIN_DOC_SUFFIX,
+    context=(str, Field(min_length=1)),
+    tone=(str, Field(min_length=1)),
+    examples=(List[str], Field(min_length=1)),
+)
 
 
 class VisualIdentityOutput(BaseModel):
@@ -522,9 +877,9 @@ class ChannelGuidelineOutput(BaseModel):
 
     channel: str = Field(min_length=1)
     strategy: str = Field(min_length=1)
-    dos: List[str] = Field(min_length=3, max_length=4)
-    donts: List[str] = Field(min_length=3, max_length=4)
-    content_types: List[str] = Field(min_length=3, max_length=5)
+    dos: List[NonEmptyStr] = Field(min_length=3, max_length=4)
+    donts: List[NonEmptyStr] = Field(min_length=3, max_length=4)
+    content_types: List[NonEmptyStr] = Field(min_length=3, max_length=5)
     frequency_guidance: str = Field(min_length=1)
 
 
@@ -537,6 +892,23 @@ class BrandArchitectureRule(BaseModel):
     visual_treatment: str = ""
 
 
+BrandArchitectureRuleOutput = _derive_strict_variant(
+    "BrandArchitectureRuleOutput",
+    BrandArchitectureRule,
+    doc=(
+        "Agent-facing brand architecture rule; requires non-empty fields.\n\n"
+        "Field-for-field twin of ``BrandArchitectureRule`` with required content — "
+        "``BrandArchitectureRule`` itself must stay soft (all-default) since "
+        "it also backs ``ChannelActivationOutput.brand_architecture``'s merge target. "
+    )
+    + _STRICT_TWIN_DOC_SUFFIX,
+    entity=(str, Field(min_length=1)),
+    relationship=(str, Field(min_length=1)),
+    naming_convention=(str, Field(min_length=1)),
+    visual_treatment=(str, Field(min_length=1)),
+)
+
+
 class BrandInActionExample(BaseModel):
     """Applied mockup or do/don't example."""
 
@@ -546,18 +918,21 @@ class BrandInActionExample(BaseModel):
     rationale: str = ""
 
 
-class BrandInActionExampleOutput(BaseModel):
-    """Agent-facing brand-in-action example; requires non-empty fields.
-
-    Field-for-field twin of ``BrandInActionExample`` with required content,
-    matching the Phase 3 nested-output-model pattern (``LogoUsageRuleOutput``,
-    ``ColorEntryOutput``, ``TypographySpecOutput``, ``VoiceToneEntryOutput``).
-    """
-
-    context: str = Field(min_length=1)
-    correct_example: str = Field(min_length=1)
-    incorrect_example: str = Field(min_length=1)
-    rationale: str = Field(min_length=1)
+BrandInActionExampleOutput = _derive_strict_variant(
+    "BrandInActionExampleOutput",
+    BrandInActionExample,
+    doc=(
+        "Agent-facing brand-in-action example; requires non-empty fields.\n\n"
+        "Field-for-field twin of ``BrandInActionExample`` with required content — "
+        "``BrandInActionExample`` itself must stay soft (all-default) since "
+        "it also backs ``ChannelActivationOutput.brand_in_action``'s merge target. "
+    )
+    + _STRICT_TWIN_DOC_SUFFIX,
+    context=(str, Field(min_length=1)),
+    correct_example=(str, Field(min_length=1)),
+    incorrect_example=(str, Field(min_length=1)),
+    rationale=(str, Field(min_length=1)),
+)
 
 
 class ChannelActivationOutput(BaseModel):
@@ -580,26 +955,9 @@ class BrandExperiencePrinciplesOutput(BaseModel):
     ``min_length``/``max_length`` encode the prompt's stated cardinalities.
     """
 
-    brand_experience_principles: List[str] = Field(min_length=3, max_length=5)
-    signature_moments: List[str] = Field(min_length=3, max_length=5)
-    sensory_elements: List[str] = Field(min_length=2, max_length=4)
-
-
-class BrandArchitectureRuleOutput(BaseModel):
-    """Agent-facing brand architecture rule; requires non-empty fields.
-
-    Field-for-field twin of ``BrandArchitectureRule`` with required content,
-    matching the Phase 3 nested-output-model pattern (``LogoUsageRuleOutput``,
-    ``ColorEntryOutput``, ``TypographySpecOutput``, ``VoiceToneEntryOutput``)
-    and this file's own ``BrandInActionExampleOutput``/``BrandInActionExample``
-    split — ``BrandArchitectureRule`` itself must stay soft (all-default) since
-    it also backs ``ChannelActivationOutput.brand_architecture``'s merge target.
-    """
-
-    entity: str = Field(min_length=1)
-    relationship: str = Field(min_length=1)
-    naming_convention: str = Field(min_length=1)
-    visual_treatment: str = Field(min_length=1)
+    brand_experience_principles: List[NonEmptyStr] = Field(min_length=3, max_length=5)
+    signature_moments: List[NonEmptyStr] = Field(min_length=3, max_length=5)
+    sensory_elements: List[NonEmptyStr] = Field(min_length=2, max_length=4)
 
 
 class BrandArchitectureOutput(BaseModel):
@@ -612,8 +970,8 @@ class BrandArchitectureOutput(BaseModel):
     """
 
     brand_architecture: List[BrandArchitectureRuleOutput] = Field(min_length=1)
-    naming_conventions: List[str] = Field(min_length=3, max_length=5)
-    terminology_glossary: Dict[str, str] = Field(min_length=5, max_length=10)
+    naming_conventions: List[NonEmptyStr] = Field(min_length=3, max_length=5)
+    terminology_glossary: Dict[NonEmptyStr, NonEmptyStr] = Field(min_length=5, max_length=10)
 
 
 class BrandInActionOutput(BaseModel):
@@ -643,6 +1001,23 @@ class ApprovalWorkflow(BaseModel):
     escalation_path: str = ""
 
 
+ApprovalWorkflowOutput = _derive_strict_variant(
+    "ApprovalWorkflowOutput",
+    ApprovalWorkflow,
+    doc=(
+        "Agent-facing approval workflow; requires non-empty fields.\n\n"
+        "Field-for-field twin of ``ApprovalWorkflow`` with required content — "
+        "``ApprovalWorkflow`` itself must stay soft (all-default) since it also "
+        "backs ``GovernanceOutput.approval_workflows``'s merge target. "
+    )
+    + _STRICT_TWIN_DOC_SUFFIX,
+    asset_type=(str, Field(min_length=1)),
+    approvers=(List[NonEmptyStr], Field(min_length=1)),
+    sla=(str, Field(min_length=1)),
+    escalation_path=(str, Field(min_length=1)),
+)
+
+
 class BrandHealthKPI(BaseModel):
     """Brand health tracking metric."""
 
@@ -650,6 +1025,50 @@ class BrandHealthKPI(BaseModel):
     measurement_method: str = ""
     target: str = ""
     review_frequency: str = ""
+
+
+BrandHealthKPIOutput = _derive_strict_variant(
+    "BrandHealthKPIOutput",
+    BrandHealthKPI,
+    doc=(
+        "Agent-facing brand health KPI; requires non-empty fields.\n\n"
+        "Field-for-field twin of ``BrandHealthKPI`` with required content — "
+        "``BrandHealthKPI`` itself must stay soft (all-default) since it also "
+        "backs ``GovernanceOutput.brand_health_kpis``'s merge target. "
+    )
+    + _STRICT_TWIN_DOC_SUFFIX,
+    metric=(str, Field(min_length=1)),
+    measurement_method=(str, Field(min_length=1)),
+    target=(str, Field(min_length=1)),
+    review_frequency=(str, Field(min_length=1)),
+)
+
+
+class WikiEntry(BaseModel):
+    """A single entry in the brand's living wiki/knowledge base."""
+
+    title: str
+    summary: str
+    owners: List[str] = Field(default_factory=list)
+    update_cadence: str = "monthly"
+
+
+WikiEntryOutput = _derive_strict_variant(
+    "WikiEntryOutput",
+    WikiEntry,
+    doc=(
+        "Agent-facing wiki entry; requires non-empty fields.\n\n"
+        "Field-for-field twin of ``WikiEntry`` with required content — "
+        "``WikiEntry`` itself must stay soft (``title``/``summary`` unconstrained, "
+        "``owners``/``update_cadence`` defaulted) since it also backs "
+        "``GovernanceOutput.wiki_backlog``'s merge target. "
+    )
+    + _STRICT_TWIN_DOC_SUFFIX,
+    title=(str, Field(min_length=1)),
+    summary=(str, Field(min_length=1)),
+    owners=(List[NonEmptyStr], Field(min_length=1)),
+    update_cadence=(str, Field(min_length=1)),
+)
 
 
 class GovernanceOutput(BaseModel):
@@ -669,7 +1088,90 @@ class GovernanceOutput(BaseModel):
     # Brand governance rules (from brand_rules_codifier)
     brand_guidelines: List[str] = Field(default_factory=list)
     # Knowledge-base backlog (from asset_wiki_planner)
-    wiki_backlog: List["WikiEntry"] = Field(default_factory=list)
+    wiki_backlog: List[WikiEntry] = Field(default_factory=list)
+
+
+class OwnershipOutput(BaseModel):
+    """Agent-facing ownership_definer schema.
+
+    Requires non-empty content so Strands retries blank structured_output.
+    """
+
+    ownership_model: str = Field(min_length=1)
+    decision_authority: Dict[NonEmptyStr, NonEmptyStr] = Field(min_length=1)
+
+
+class ApprovalWorkflowsOutput(BaseModel):
+    """Agent-facing approval_workflow_designer schema.
+
+    Requires non-empty content so Strands retries blank structured_output.
+    ``min_length``/``max_length`` encode the prompt's stated "3-5 workflows"
+    / "3-5 protocols". Uses ``ApprovalWorkflowOutput`` (not the soft
+    ``ApprovalWorkflow``) so each workflow's fields are individually
+    required.
+    """
+
+    approval_workflows: List[ApprovalWorkflowOutput] = Field(min_length=3, max_length=5)
+    agency_briefing_protocols: List[NonEmptyStr] = Field(min_length=3, max_length=5)
+
+
+class AssetWikiOutput(BaseModel):
+    """Agent-facing asset_wiki_planner schema.
+
+    Requires non-empty content so Strands retries blank structured_output.
+    ``min_length``/``max_length`` encode the prompt's stated "3-5 guidelines"
+    / "4-6 wiki entries". Uses ``WikiEntryOutput`` (not the soft
+    ``WikiEntry``) so each entry's fields are individually required.
+    """
+
+    asset_management_guidance: List[NonEmptyStr] = Field(min_length=3, max_length=5)
+    wiki_backlog: List[WikiEntryOutput] = Field(min_length=4, max_length=6)
+
+
+class TrainingOnboardingOutput(BaseModel):
+    """Agent-facing training_planner schema.
+
+    Requires non-empty content so Strands retries blank structured_output.
+    ``min_length``/``max_length`` encode the prompt's stated "4-6 training
+    initiatives".
+    """
+
+    training_onboarding_plan: List[NonEmptyStr] = Field(min_length=4, max_length=6)
+
+
+class BrandHealthKPIsOutput(BaseModel):
+    """Agent-facing kpi_designer schema.
+
+    Requires non-empty content so Strands retries blank structured_output.
+    ``min_length``/``max_length`` encode the prompt's stated "4-6 KPIs" /
+    "3-5 events". Uses ``BrandHealthKPIOutput`` (not the soft
+    ``BrandHealthKPI``) so each KPI's fields are individually required.
+    """
+
+    brand_health_kpis: List[BrandHealthKPIOutput] = Field(min_length=4, max_length=6)
+    tracking_methodology: str = Field(min_length=1)
+    review_trigger_points: List[NonEmptyStr] = Field(min_length=3, max_length=5)
+
+
+class EvolutionFrameworkOutput(BaseModel):
+    """Agent-facing evolution_framer schema.
+
+    Requires non-empty content so Strands retries blank structured_output.
+    """
+
+    evolution_framework: str = Field(min_length=1)
+    version_control_cadence: str = Field(min_length=1)
+
+
+class BrandGuidelinesOutput(BaseModel):
+    """Agent-facing brand_rules_codifier schema.
+
+    Requires non-empty content so Strands retries blank structured_output.
+    ``min_length``/``max_length`` encode the prompt's stated "5-8 governance
+    rules".
+    """
+
+    brand_guidelines: List[NonEmptyStr] = Field(min_length=5, max_length=8)
 
 
 # ---------------------------------------------------------------------------
@@ -737,7 +1239,17 @@ class BrandBook(BaseModel):
 
 
 class MoodBoardConcept(BaseModel):
-    """A single mood-board direction; merge target for ``MoodBoardConceptOutput``."""
+    """A single mood-board direction.
+
+    Collapsed twin (Story 3b Step 2): used directly both as
+    ``MoodBoardConceptualist_*``'s ``structured_output=`` (agents.py) and as
+    the nested item type for ``MoodBoardCandidatesOutput.mood_board_candidates``
+    and ``VisualIdentityOutput.mood_board_candidates``, following the same
+    single-model pattern as ``BrandDiscoveryAudit`` — see the module
+    docstring. The former strict ``MoodBoardConceptOutput`` twin (Step 1
+    finding: field/type identical, differing only in default/required
+    strictness) has been removed.
+    """
 
     title: str
     visual_direction: str
@@ -747,7 +1259,17 @@ class MoodBoardConcept(BaseModel):
 
 
 class CreativeRefinementDecision(BaseModel):
-    """Phase 3 converge node output: which moodboard direction won and why."""
+    """Phase 3 converge node output: which moodboard direction won and why.
+
+    Collapsed twin (Story 3b Step 2): used directly both as
+    ``converge_decider``'s ``structured_output=`` (agents.py) and as
+    ``VisualIdentityOutput.creative_refinement``'s ``default_factory`` merge
+    target, following the same single-model pattern as ``BrandDiscoveryAudit``
+    — see the module docstring. The former strict
+    ``CreativeRefinementDecisionOutput`` twin (Step 1 finding: field/type
+    identical, differing only in default/required strictness) has been
+    removed.
+    """
 
     winning_candidate_title: str = ""
     scoring_criteria: List[str] = Field(default_factory=list)
@@ -758,7 +1280,17 @@ class CreativeRefinementDecision(BaseModel):
 
 
 class WritingGuidelines(BaseModel):
-    """Voice/tone and editorial rules; merge target for ``WritingGuidelinesOutput``."""
+    """Voice/tone and editorial rules; merge target nested at
+    ``NarrativeMessagingOutput.writing_guidelines``.
+
+    Its real structural counterpart is ``WritingGuidelinesBody`` (not
+    ``WritingGuidelinesOutput``, which is a different, much larger construct —
+    see that class's docstring). Field *names* match ``WritingGuidelinesBody``,
+    but the *types* don't: this side is ``List[str]`` with no cardinality bound
+    and empty defaults, while ``WritingGuidelinesBody`` is ``List[NonEmptyStr]``
+    with a required ``min_length=3, max_length=4``. Genuinely different — not
+    safe to collapse (Story 3b Step 1 finding).
+    """
 
     voice_principles: List[str] = Field(default_factory=list)
     style_dos: List[str] = Field(default_factory=list)
@@ -767,7 +1299,17 @@ class WritingGuidelines(BaseModel):
 
 
 class DesignSystemDefinition(BaseModel):
-    """Codified design system; merge target for ``DesignSystemDefinitionOutput``."""
+    """Codified design system.
+
+    Collapsed twin (Story 3b Step 2): used directly both as
+    ``design_system_codifier``'s ``structured_output=`` (agents.py) and as
+    ``VisualIdentityOutput.design_system``'s ``default_factory`` merge
+    target, following the same single-model pattern as ``BrandDiscoveryAudit``
+    — see the module docstring. The former strict
+    ``DesignSystemDefinitionOutput`` twin (Step 1 finding: field/type
+    identical, differing only in default/required strictness) has been
+    removed.
+    """
 
     design_principles: List[str] = Field(default_factory=list)
     foundation_tokens: List[str] = Field(default_factory=list)
@@ -781,47 +1323,16 @@ class DesignSystemDefinition(BaseModel):
 # Agent schemas below require content so Strands retries blank output.
 
 
-class MoodBoardConceptOutput(BaseModel):
-    """Agent-facing moodboard concept schema for MoodBoardConceptualist_*."""
-
-    title: str = Field(min_length=1)
-    visual_direction: str = Field(min_length=1)
-    color_story: List[str] = Field(min_length=1)
-    typography_direction: str = Field(min_length=1)
-    image_style: List[str] = Field(min_length=1)
-
-
 class MoodBoardCandidatesOutput(BaseModel):
     """Agent-facing CreativeDirector schema: collected moodboard candidates.
 
     ``min_length``/``max_length`` encode the diverge fan-out of 2–3 concepts.
-    Nested entries use ``MoodBoardConceptOutput`` so blank concepts fail validation.
+    Nested entries use ``MoodBoardConcept`` (the collapsed twin — see that
+    class's docstring), so this list's own cardinality bound is what guards
+    against a blank collection; individual concepts keep their defaults.
     """
 
-    mood_board_candidates: List[MoodBoardConceptOutput] = Field(min_length=2, max_length=3)
-
-
-class CreativeRefinementDecisionOutput(BaseModel):
-    """Agent-facing converge_decider schema.
-
-    Field-for-field twin of ``CreativeRefinementDecision`` with required content.
-    """
-
-    winning_candidate_title: str = Field(min_length=1)
-    scoring_criteria: List[str] = Field(min_length=1)
-    scores_by_candidate: Dict[str, float] = Field(min_length=1)
-    rationale: str = Field(min_length=1)
-    workshop_prompts: List[str] = Field(min_length=1)
-    decision_criteria: List[str] = Field(min_length=1)
-
-
-class LogoUsageRuleOutput(BaseModel):
-    """Agent-facing logo usage rule; requires non-empty fields."""
-
-    variant: str = Field(min_length=1)
-    usage_context: str = Field(min_length=1)
-    minimum_size: str = Field(min_length=1)
-    clear_space: str = Field(min_length=1)
+    mood_board_candidates: List[MoodBoardConcept] = Field(min_length=2, max_length=3)
 
 
 class LogoSuiteOutput(BaseModel):
@@ -833,15 +1344,6 @@ class LogoSuiteOutput(BaseModel):
     logo_suite: List[LogoUsageRuleOutput] = Field(min_length=4, max_length=4)
 
 
-class ColorEntryOutput(BaseModel):
-    """Agent-facing color entry; requires non-empty fields."""
-
-    name: str = Field(min_length=1)
-    hex_value: str = Field(min_length=1)
-    usage: str = Field(min_length=1)
-    psychological_rationale: str = Field(min_length=1)
-
-
 class ColorPaletteSystemOutput(BaseModel):
     """Agent-facing color_system_builder schema.
 
@@ -850,15 +1352,6 @@ class ColorPaletteSystemOutput(BaseModel):
     """
 
     color_palette: List[ColorEntryOutput] = Field(min_length=5, max_length=7)
-
-
-class TypographySpecOutput(BaseModel):
-    """Agent-facing typography spec; requires non-empty fields."""
-
-    role: str = Field(min_length=1)
-    font_family: str = Field(min_length=1)
-    weight_range: str = Field(min_length=1)
-    usage_notes: str = Field(min_length=1)
 
 
 class TypographySystemOutput(BaseModel):
@@ -888,14 +1381,6 @@ class PhotographyVideoOutput(BaseModel):
     motion_principles: List[str] = Field(min_length=3, max_length=4)
 
 
-class VoiceToneEntryOutput(BaseModel):
-    """Agent-facing voice/tone entry; requires non-empty fields."""
-
-    context: str = Field(min_length=1)
-    tone: str = Field(min_length=1)
-    examples: List[str] = Field(min_length=1)
-
-
 class VoiceToneOutput(BaseModel):
     """Agent-facing voice_tone_builder schema.
 
@@ -905,26 +1390,6 @@ class VoiceToneOutput(BaseModel):
     voice_tone_spectrum: List[VoiceToneEntryOutput] = Field(min_length=1)
     language_dos: List[str] = Field(min_length=4, max_length=5)
     language_donts: List[str] = Field(min_length=4, max_length=5)
-
-
-class DesignSystemDefinitionOutput(BaseModel):
-    """Agent-facing design_system_codifier schema.
-
-    Field-for-field twin of ``DesignSystemDefinition`` with required content.
-    """
-
-    design_principles: List[str] = Field(min_length=1)
-    foundation_tokens: List[str] = Field(min_length=1)
-    component_standards: List[str] = Field(min_length=1)
-
-
-class WikiEntry(BaseModel):
-    """A single entry in the brand's living wiki/knowledge base."""
-
-    title: str
-    summary: str
-    owners: List[str] = Field(default_factory=list)
-    update_cadence: str = "monthly"
 
 
 # ---------------------------------------------------------------------------

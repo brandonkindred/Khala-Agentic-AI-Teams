@@ -33,7 +33,7 @@ from __future__ import annotations
 
 import contextlib
 import os
-from typing import Any, Dict, NoReturn
+from typing import Any, Dict, NoReturn, Optional
 
 import pytest
 from code_review_agent import CodeReviewAgent
@@ -47,10 +47,12 @@ from code_review_agent.temporal import phase_models as pm
 from llm_service.clients.dummy import DummyLLMClient
 
 
-def _input(
-    code: str = "### app/main.py ###\ndef foo():\n    return 1", **overrides: Any
-) -> CodeReviewInput:
-    base: Dict[str, Any] = {"code": code, "task_description": "Add foo()", "language": "python"}
+def _input(files: Optional[Dict[str, str]] = None, **overrides: Any) -> CodeReviewInput:
+    base: Dict[str, Any] = {
+        "files": files if files is not None else {"app/main.py": "def foo():\n    return 1"},
+        "task_description": "Add foo()",
+        "language": "python",
+    }
     base.update(overrides)
     return CodeReviewInput(**base)  # type: ignore[arg-type]
 
@@ -73,7 +75,7 @@ def _error_chain_text(exc: BaseException) -> str:
 
 
 def _clear_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    for var in ("TEMPORAL_ADDRESS", "LLM_PROVIDER", "CODE_REVIEW_TEMPORAL_FORCE"):
+    for var in ("TEMPORAL_ADDRESS", "LLM_PROVIDER"):
         monkeypatch.delenv(var, raising=False)
 
 
@@ -98,30 +100,29 @@ def test_disable_sentinels_resolve_to_none(monkeypatch: pytest.MonkeyPatch, sent
     assert cfg.resolve_code_review_temporal_address() is None
 
 
-def test_enabled_is_false_under_pytest_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
-    # The suite runs under pytest, so the guard keeps reviews in-process.
+def test_enabled_is_true_under_pytest_when_env_cleared(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Pytest alone must not disable Temporal; with env cleared the default
+    # address resolves and the gate returns True.
     _clear_env(monkeypatch)
-    assert cfg.code_review_temporal_enabled() is False
-
-
-def test_force_flag_enables_under_pytest(monkeypatch: pytest.MonkeyPatch) -> None:
-    _clear_env(monkeypatch)
-    monkeypatch.setenv("CODE_REVIEW_TEMPORAL_FORCE", "1")
     assert cfg.code_review_temporal_enabled() is True
 
 
-def test_force_flag_still_requires_an_address(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_enabled_is_false_when_address_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
     _clear_env(monkeypatch)
-    monkeypatch.setenv("CODE_REVIEW_TEMPORAL_FORCE", "yes")
     monkeypatch.setenv("TEMPORAL_ADDRESS", "none")
     assert cfg.code_review_temporal_enabled() is False
 
 
-def test_dummy_harness_disables(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_dummy_provider_does_not_disable_temporal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # LLM_PROVIDER=dummy selects the no-LLM harness only; it must not force
+    # the code-review Temporal gate off when an address resolves.
     _clear_env(monkeypatch)
     monkeypatch.setenv("LLM_PROVIDER", "dummy")
-    monkeypatch.setenv("CODE_REVIEW_TEMPORAL_FORCE", "")  # not forced
-    assert cfg.code_review_temporal_enabled() is False
+    assert cfg.code_review_temporal_enabled() is True
 
 
 @pytest.mark.parametrize(
@@ -290,9 +291,9 @@ def test_activity_pipeline_matches_coordinator_verdict_multi_chunk() -> None:
     # multi-file/multi-chunk path: multiple ``review_chunk_activity`` fan-outs, the
     # dedupe/reconcile reduce, and the >1-summary synthesis branch. The durable
     # pipeline's verdict must still match ``run_coordinator``'s for the same input.
-    big_1 = "### app/main.py ###\n" + ("a" * 25_000)
-    big_2 = "### app/util.py ###\n" + ("b" * 25_000)
-    review_input = _input(code=big_1 + "\n\n" + big_2)
+    big_main = "a" * 25_000
+    big_util = "b" * 25_000
+    review_input = _input(files={"app/main.py": big_main, "app/util.py": big_util})
 
     # Confirm the input really does split into more than one chunk (otherwise the
     # test would silently degrade to the single-chunk path it means to complement).
@@ -313,7 +314,7 @@ def test_activity_pipeline_matches_coordinator_verdict_multi_chunk() -> None:
 def test_prepare_activity_reports_no_code_for_empty_files() -> None:
     from code_review_agent.temporal import activities as A
 
-    prep = A.prepare_review_activity(_input(code="").model_dump(mode="json"))
+    prep = A.prepare_review_activity(_input(files={"app/main.py": ""}).model_dump(mode="json"))
     assert prep["no_code"] is True
 
 
@@ -331,7 +332,7 @@ def test_prepare_activity_single_chunk_fanout_width_is_one(
 def test_prepare_activity_compacts_architecture_overview() -> None:
     from code_review_agent.temporal import activities as A
 
-    from software_engineering_team.shared.models import SystemArchitecture
+    from shared.dev_models.models import SystemArchitecture
 
     arch = SystemArchitecture(
         overview="A small service that does one thing.",
@@ -711,7 +712,7 @@ def test_consolidation_activity_enabled_merges_same_function_issues(
     from code_review_agent.temporal import activities as A
 
     content = "def foo():\n    x = 1\n    return x\n"
-    inp = _input(code=f"### a.py ###\n{content}")
+    inp = _input(files={"a.py": content})
     payload = inp.model_dump(mode="json")
     issues = [
         {
@@ -749,6 +750,79 @@ def test_consolidation_activity_enabled_merges_same_function_issues(
     assert "foo return type changed" in side_effects[0]["description"]
     assert len(doc_issues) == 1, "non-side-effects pass through unchanged"
     assert doc_issues[0]["description"] == "stale docstring"
+
+
+def test_combine_findings_activity_merges_same_construct_near_duplicates() -> None:
+    """The pure combine activity merges co-located near-duplicate findings.
+
+    Two same-category findings anchored in the same enclosing Python construct,
+    with similar descriptions, collapse into a single representative (severity =
+    group max), while an unrelated finding in a different category passes through
+    untouched -- the durable counterpart of the thread-mode combine step.
+    """
+    from code_review_agent.temporal import activities as A
+
+    content = "def foo():\n    x = 1\n    return x\n"
+    payload = _input(files={"a.py": content}).model_dump(mode="json")
+    issues = [
+        {
+            "severity": "medium",
+            "category": "bug",
+            "file_path": "a.py",
+            "line": 2,
+            "description": "foo assigns unused local variable",
+            "suggestion": "",
+        },
+        {
+            "severity": "high",
+            "category": "bug",
+            "file_path": "a.py",
+            "line": 3,
+            "description": "foo assigns unused local variable here",
+            "suggestion": "",
+        },
+        {
+            "severity": "low",
+            "category": "documentation",
+            "file_path": "a.py",
+            "line": 1,
+            "description": "stale docstring",
+            "suggestion": "",
+        },
+    ]
+
+    result = A.combine_findings_activity(payload, issues)
+    bugs = [i for i in result if i["category"] == "bug"]
+    docs = [i for i in result if i["category"] == "documentation"]
+    assert len(bugs) == 1, "two similar same-construct findings should merge into one"
+    assert bugs[0]["severity"] == "high", "merged severity is the group max"
+    assert len(docs) == 1, "an unrelated category passes through unchanged"
+    assert docs[0]["description"] == "stale docstring"
+
+
+def test_combine_findings_activity_is_fail_safe_on_index_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An index/combination failure returns the original issues unchanged."""
+    from code_review_agent.temporal import activities as A
+
+    issues = [
+        {
+            "severity": "high",
+            "category": "bug",
+            "file_path": "a.py",
+            "line": 1,
+            "description": "boom",
+            "suggestion": "",
+        }
+    ]
+    payload = _input().model_dump(mode="json")
+
+    def _boom(*_a: Any, **_k: Any) -> NoReturn:
+        raise RuntimeError("index boom")
+
+    monkeypatch.setattr("code_review_agent.false_positive_filter.CodebaseIndex.from_input", _boom)
+    assert A.combine_findings_activity(payload, issues) == issues
 
 
 def test_finalize_activity_reconciles_minor_only_to_approved() -> None:
@@ -903,10 +977,32 @@ def test_run_reraises_unrelated_workflow_failure(monkeypatch: pytest.MonkeyPatch
 # ---------------------------------------------------------------------------
 
 
-def test_run_uses_coordinator_when_temporal_disabled() -> None:
-    # Under pytest the gate is off, so run() must go through the coordinator.
+def test_run_uses_coordinator_when_force_in_process() -> None:
+    # force_in_process bypasses Temporal even when the gate would enable it.
+    out = CodeReviewAgent(llm_client=DummyLLMClient(), force_in_process=True).run(_input())
+    assert isinstance(out, CodeReviewOutput)
+    assert out.approved is True
+
+
+def test_run_uses_coordinator_when_address_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A disable-sentinel TEMPORAL_ADDRESS turns the gate off so run() takes the
+    # in-process coordinator path without force_in_process.
+    monkeypatch.setenv("TEMPORAL_ADDRESS", "none")
     assert _code_review_temporal_enabled() is False
+    temporal_calls: list[Any] = []
+
+    def _must_not_dispatch(payload, **kw):  # noqa: ANN001
+        temporal_calls.append(payload)
+        raise AssertionError("Temporal dispatch must not run when address is disabled")
+
+    monkeypatch.setattr(
+        "code_review_agent.temporal.start_workflow.execute_code_review_workflow_sync",
+        _must_not_dispatch,
+    )
     out = CodeReviewAgent(llm_client=DummyLLMClient()).run(_input())
+    assert temporal_calls == []
     assert isinstance(out, CodeReviewOutput)
     assert out.approved is True
 
@@ -926,7 +1022,9 @@ def test_run_rebuilds_reader_from_repo_root_when_no_live_reader(
         return CodeReviewOutput(approved=True)
 
     monkeypatch.setattr("code_review_agent.agent.run_coordinator", _capture)
-    CodeReviewAgent(llm_client=DummyLLMClient()).run(_input(repo_root=str(tmp_path)))
+    CodeReviewAgent(llm_client=DummyLLMClient(), force_in_process=True).run(
+        _input(repo_root=str(tmp_path))
+    )
     assert isinstance(captured["repo_reader"], DiskRepoReader)
 
 
@@ -942,7 +1040,7 @@ def test_run_prefers_live_reader_over_repo_root(
         return CodeReviewOutput(approved=True)
 
     monkeypatch.setattr("code_review_agent.agent.run_coordinator", _capture)
-    CodeReviewAgent(llm_client=DummyLLMClient()).run(
+    CodeReviewAgent(llm_client=DummyLLMClient(), force_in_process=True).run(
         _input(repo_root=str(tmp_path)),
         repo_reader=sentinel,  # type: ignore[arg-type]
     )
@@ -958,7 +1056,7 @@ def test_run_passes_none_reader_without_repo_root(monkeypatch: pytest.MonkeyPatc
         return CodeReviewOutput(approved=True)
 
     monkeypatch.setattr("code_review_agent.agent.run_coordinator", _capture)
-    CodeReviewAgent(llm_client=DummyLLMClient()).run(_input())
+    CodeReviewAgent(llm_client=DummyLLMClient(), force_in_process=True).run(_input())
     assert captured["repo_reader"] is None
 
 
@@ -1289,11 +1387,12 @@ def test_workflow_and_activities_are_registered() -> None:
     present in the Temporal worker's ``WORKFLOWS``/``ACTIVITIES`` tables.
     """
     assert CodeReviewWorkflow in WORKFLOWS
-    # 9 = the pre-existing 8 plus find_architecture_and_side_effect_activity.
+    # 10 = the pre-existing 8, plus find_architecture_and_side_effect_activity,
+    # plus the pure combine_findings_activity.
     # find_architecture_and_redundancy_activity / find_side_effect_impact_activity
     # stay registered (not replaced) so a worker can still replay/execute them
     # for workflow histories recorded before the merged pass existed.
-    assert len(ACTIVITIES) == 9
+    assert len(ACTIVITIES) == 10
     names = {getattr(a, "__name__", "") for a in ACTIVITIES}
     assert "review_chunk_activity" in names
     assert "prepare_review_activity" in names
@@ -1302,6 +1401,7 @@ def test_workflow_and_activities_are_registered() -> None:
     assert "find_side_effect_impact_activity" in names
     assert "find_architecture_and_side_effect_activity" in names
     assert "consolidate_side_effect_issues_activity" in names
+    assert "combine_findings_activity" in names
 
 
 # ---------------------------------------------------------------------------
@@ -2032,6 +2132,7 @@ async def test_workflow_raises_cleanly_when_a_later_tail_pass_fails(
         ACTIVITIES,
         TASK_QUEUE,
         CodeReviewWorkflow,
+        combine_findings_activity,
         consolidate_side_effect_issues_activity,
         filter_false_positives_activity,
         finalize_review_activity,
@@ -2052,6 +2153,7 @@ async def test_workflow_raises_cleanly_when_a_later_tail_pass_fails(
         filter_false_positives_activity,
         _raising_merged_activity,
         consolidate_side_effect_issues_activity,
+        combine_findings_activity,
         finalize_review_activity,
         synthesize_findings_activity,
     ]
@@ -2098,6 +2200,7 @@ async def test_workflow_fails_on_map_chunk_failure_without_abandoning_siblings()
         ACTIVITIES,
         TASK_QUEUE,
         CodeReviewWorkflow,
+        combine_findings_activity,
         consolidate_side_effect_issues_activity,
         filter_false_positives_activity,
         finalize_review_activity,
@@ -2110,9 +2213,9 @@ async def test_workflow_fails_on_map_chunk_failure_without_abandoning_siblings()
     from temporalio import activity as activity_module
     from temporalio.client import WorkflowFailureError
 
-    big_1 = "### app/main.py ###\n" + ("a" * 25_000)
-    big_2 = "### app/util.py ###\n" + ("b" * 25_000)
-    review_input = _input(code=big_1 + "\n\n" + big_2)
+    big_main = "a" * 25_000
+    big_util = "b" * 25_000
+    review_input = _input(files={"app/main.py": big_main, "app/util.py": big_util})
     prep = A.prepare_review_activity(review_input.model_dump(mode="json"))
     assert len(prep["chunks"]) > 1, "expected a multi-chunk submission"
 
@@ -2143,6 +2246,7 @@ async def test_workflow_fails_on_map_chunk_failure_without_abandoning_siblings()
         filter_false_positives_activity,
         find_architecture_and_side_effect_activity,
         consolidate_side_effect_issues_activity,
+        combine_findings_activity,
         finalize_review_activity,
         synthesize_findings_activity,
     ]

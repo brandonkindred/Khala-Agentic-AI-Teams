@@ -17,10 +17,15 @@ This module persists per-key state across calls so the hot path is
   single recurrence step on each subsequent bar.
 * ``macd_line`` is cached as a bounded :class:`deque`; new bars only
   append one element rather than rebuilding the full history.
-* The signal-line EMA, which historically reseeded from
-  ``macd_line[0]`` on every call (sliding-window-EMA semantics tied to
-  the bounded ``history_depth``), is recomputed against the live deque
-  but the deque itself is maintained incrementally.
+* The signal-line EMA reseeds from whatever is currently
+  ``macd_line[0]`` (sliding-window-EMA semantics tied to the bounded
+  ``history_depth``). On an ``expand`` step the reseed point never
+  moves, so it is single-stepped in O(1) — bit-identical to a full
+  walk, not an approximation. On a ``slide`` step the reseed point
+  itself shifts, so it is still recomputed by walking the live deque;
+  that walk is bounded by the caller's window depth (not by total bars
+  seen), so it stays a bounded cost rather than the unbounded one
+  ``expand`` had.
 
 Semantics are preserved bit-for-bit against the legacy templates —
 every indicator returns the same windowed-EMA value at the trailing
@@ -30,10 +35,45 @@ bar — so the engine's golden snapshots are unchanged.
 from __future__ import annotations
 
 import math
+import os
 from collections import deque
-from typing import Any, Deque, Dict, Optional, Sequence, Tuple
+from typing import TYPE_CHECKING, Any, Deque, Dict, Optional, Sequence, Tuple
+
+if TYPE_CHECKING:
+    # Deferred: ``..batch_indicator_cache`` transitively imports
+    # ``..market_data_service`` -> ``.models`` -> ``.strategy_lab.spec_dsl`` ->
+    # ``.indicators.registry_metadata`` -> this module, so importing it eagerly
+    # at module scope here would be a circular import. Only the type hints
+    # below need the name; ``from __future__ import annotations`` (above)
+    # already makes every annotation in this file a lazily-evaluated string,
+    # so no runtime import is required.
+    from ..batch_indicator_cache import BatchIndicatorCache
 
 NAN = float("nan")
+
+# Feature flag gating whether a registry constructed with a ``batch_cache``
+# actually consults it (see :class:`IndicatorRegistry`). Defaults to ON after
+# the cache's bake-in/validation period: a batch caller that passes a real
+# cache/timeframe now shares indicator values across strategies by default.
+# Set the env var to a falsy value to opt back out.
+_BATCH_CACHE_ENV_VAR = "STRATEGY_LAB_BATCH_INDICATOR_CACHE_ENABLED"
+_TRUE_ENV_VALUES = frozenset({"true", "1", "yes", "on"})
+
+
+def _batch_cache_flag_enabled() -> bool:
+    """Read ``_BATCH_CACHE_ENV_VAR`` without importing ``shared.env_config``.
+
+    This module is copied verbatim (unmodified, stdlib-only) into the
+    flat-sandbox subprocess ``StreamingHarness`` builds for strategy
+    execution (``trading_service/strategy/streaming_harness.py``), which has
+    no ``shared`` package on its path — importing ``shared.env_config`` here
+    would crash every sandboxed strategy at import time. This reimplements
+    just the boolean-truthiness slice of ``shared.env_config.env_bool``
+    (case-insensitive ``true``/``1``/``yes``/``on``; anything else disables)
+    rather than depending on it. The default is ``true``: unset therefore
+    resolves to enabled, and only an explicit falsy value turns the cache off.
+    """
+    return os.environ.get(_BATCH_CACHE_ENV_VAR, "true").strip().lower() in _TRUE_ENV_VALUES
 
 
 # ---------------------------------------------------------------------------
@@ -362,10 +402,45 @@ class IndicatorRegistry:
     stream isolated. Bars without a ``symbol`` attribute share one cache
     slot under ``symbol=None``; safe for a single such stream, unsafe
     across multiple unrelated symbol-less streams.
+
+    Batch indicator cache (optional): a registry may also be given a
+    :class:`~..batch_indicator_cache.BatchIndicatorCache` reference so that
+    ``resolve_indicator`` (the single dispatch point every caller routes
+    through) can check a batch-scoped, cross-strategy cache before falling
+    back to this instance's own per-bar streaming computation — see
+    :func:`resolve_indicator`. This is purely additive and off by default;
+    see :meth:`__init__`.
     """
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        batch_cache: Optional[BatchIndicatorCache] = None,
+        timeframe: str = "",
+    ) -> None:
+        """Construct a registry, optionally able to consult a batch cache.
+
+        Preconditions:
+          - ``timeframe`` is a plain string (empty is valid and means "no
+            timeframe known" — see postconditions).
+        Postconditions:
+          - ``self._batch_cache`` is ``batch_cache`` when the
+            ``STRATEGY_LAB_BATCH_INDICATOR_CACHE_ENABLED`` env var (read via
+            :func:`_batch_cache_flag_enabled`, default on) is truthy, and
+            ``None`` otherwise — regardless of what was passed. Every
+            existing zero-arg ``IndicatorRegistry()`` call site still gets
+            ``self._batch_cache is None`` (nothing was passed to keep), and a
+            deployment that sets the flag to a falsy value opts back out so
+            even a passed cache is discarded and nothing is consulted.
+          - ``self._timeframe`` is stored verbatim; :func:`resolve_indicator`
+            only consults the batch cache when both a cache is present and
+            this is non-empty (bars carry no timeframe of their own).
+        """
         self._state: Dict[Tuple, Dict[str, Any]] = {}
+        self._batch_cache: Optional[BatchIndicatorCache] = (
+            batch_cache if _batch_cache_flag_enabled() else None
+        )
+        self._timeframe = timeframe
 
     # ----- key/fingerprint helpers --------------------------------------
 
@@ -809,8 +884,8 @@ class IndicatorRegistry:
 
         # Attempt warm-path advance.
         warm = False
-        bars_dq: Deque[Tuple[float, float, float]]
-        k_dq: Deque[float]
+        bars_dq: Deque[Tuple[float, float, float]] = deque()
+        k_dq: Deque[float] = deque()
         if state is not None and "bars_dq" in state:
             kind = self._advance_kind(state, bars, fp)
             if kind in ("expand", "slide"):
@@ -997,9 +1072,14 @@ class IndicatorRegistry:
             return state["value"].get(select)
 
         kind = self._advance_kind(state, bars, fp) if state is not None else "none"
-        macd_line: Deque[float]
+        macd_line: Deque[float] = deque()
+        # Set only on an ``expand`` step that has a previous cached signal
+        # value to step from — see the ``expand`` branch below for why this
+        # is bit-identical to (not an approximation of) the full walk.
+        stepped_sig_val: Optional[float] = None
         if kind in ("expand", "slide"):
             macd_line = state["macd_line"]
+            prev_sig_val = state["value"]["signal"]
             # Compute-then-mutate: finish every fallible operation (the
             # EMA recurrences) BEFORE touching the cached deque, so a
             # raise anywhere above leaves the cache untouched and the
@@ -1014,7 +1094,37 @@ class IndicatorRegistry:
                 # Without this, the deque grows past the legacy bound and
                 # the signal-EMA seeds from a bar that legacy would no
                 # longer see — silent semantic divergence on every slide.
+                #
+                # The signal-EMA is deliberately NOT single-stepped here.
+                # It reseeds from whatever is currently ``macd_line[0]``
+                # (see the full-walk block below), and slide moves that
+                # reseed point — a closed-form correction exists but
+                # reorders the floating-point arithmetic relative to a
+                # from-scratch walk, and
+                # ``test_macd_sliding_window_matches_legacy`` asserts
+                # bit-exact (``==``) equality against exactly that walk on
+                # every slide step, which the reordered arithmetic fails
+                # by a few ULPs. ``macd_line`` is already bounded by the
+                # caller's window depth here (pop-front keeps its length
+                # constant), so this walk is O(window) per call — not the
+                # unbounded O(len(bars)) cost the ``expand`` case has — so
+                # it is left as a full re-walk rather than risk drifting
+                # off a pinned exact-equality test for no asymptotic win.
                 macd_line.popleft()
+            elif prev_sig_val is not None:
+                # ``kind == "expand"``: bars only grew, so ``macd_line[0]``
+                # — the signal-EMA's reseed point — is untouched by this
+                # call. Appending one value to the tail is therefore
+                # exactly the next term of the same recurrence the full
+                # walk below computes: not an approximation, bit-identical
+                # to it, and O(1) instead of re-walking the whole deque on
+                # every call over an unboundedly-growing history. Only
+                # valid once a previous call already produced a cached
+                # signal value to step from — the first call that crosses
+                # the ``len(macd_line) >= signal`` threshold has no prior
+                # term and falls through to the full walk below instead.
+                alpha_g = 2.0 / (signal + 1.0)
+                stepped_sig_val = alpha_g * new_val + (1.0 - alpha_g) * prev_sig_val
             macd_line.append(new_val)
         else:
             # Cold-start: replay the legacy outer loop so the macd_line
@@ -1030,7 +1140,13 @@ class IndicatorRegistry:
         macd_val = macd_line[-1]
         sig_val: Optional[float] = None
         hist_val: Optional[float] = None
-        if len(macd_line) >= signal:
+        if stepped_sig_val is not None:
+            sig_val = stepped_sig_val
+            hist_val = macd_val - sig_val
+        elif len(macd_line) >= signal:
+            # Full walk: cold-start, every ``slide`` step (see note above),
+            # or the one-time ``expand`` step that first crosses the
+            # ``len(macd_line) >= signal`` threshold.
             alpha_g = 2.0 / (signal + 1.0)
             # Iterator-based walk avoids ``deque.__getitem__(i)``'s
             # ``O(min(i, n-i))`` indexing cost — random-access on a
@@ -1456,7 +1572,7 @@ class IndicatorRegistry:
 # ---------------------------------------------------------------------------
 
 
-def resolve_indicator(
+def _dispatch_indicator(
     reg: "IndicatorRegistry",
     name: str,
     bars: Sequence[Any],
@@ -1472,7 +1588,9 @@ def resolve_indicator(
     ``strategy_indicators``' validated ``**params`` both already carry them).
     Postconditions: returns the registry's trailing-bar value for ``bars``,
     or ``None`` during warm-up — identical to calling the registry method
-    directly with the same arguments.
+    directly with the same arguments. Always walks ``reg``'s own per-bar
+    streaming state; never consults a batch cache (that's
+    :func:`resolve_indicator`'s job, which this function is the fallback for).
     """
     if name == "sma":
         return reg.sma(bars, period=int(params["period"]), source=source)
@@ -1531,3 +1649,87 @@ def resolve_indicator(
     if name == "williams_r":
         return reg.williams_r(bars, period=int(params["period"]))
     raise ValueError(f"unknown indicator name: {name!r}")
+
+
+def resolve_indicator(
+    reg: "IndicatorRegistry",
+    name: str,
+    bars: Sequence[Any],
+    *,
+    source: str = "close",
+    **params: Any,
+) -> Optional[float]:
+    """Dispatch DSL indicator ``name``, consulting ``reg``'s batch cache first.
+
+    Preconditions: same as :func:`_dispatch_indicator` — ``name`` is a known
+    DSL indicator name; ``params`` carries every param that indicator's
+    registry method requires.
+    Postconditions: returns the same value :func:`_dispatch_indicator` would
+    for ``(reg, name, bars, source, params)`` — batch-cache consultation only
+    ever changes *how* that value is produced (a cache hit skips walking
+    ``reg``'s own streaming state), never *what* value is returned, since the
+    cache's key is fully determined by these same inputs plus ``bars``'
+    content. On a cache hit, ``reg._state`` is cleared: fingerprints only
+    identify the trailing bar, so leaving prior streaming state in place
+    would let a later one-bar append classify as ``expand`` against a
+    different prefix.
+
+    The batch cache (``reg._batch_cache``, set only when a ``batch_cache`` was
+    passed *and* ``STRATEGY_LAB_BATCH_INDICATOR_CACHE_ENABLED`` was truthy at
+    ``reg``'s construction — the flag defaults on, see
+    :meth:`IndicatorRegistry.__init__`) is consulted only when all of the
+    following hold, so that a registry built the ordinary way (no
+    ``batch_cache``/``timeframe`` args) always falls straight through to
+    :func:`_dispatch_indicator` unchanged:
+      - ``reg._batch_cache`` is not ``None``.
+      - ``bars`` is non-empty and ``reg._timeframe`` is non-empty (bars carry
+        no timeframe of their own; it must come from the registry).
+      - ``bars[-1]`` carries a non-empty string ``symbol`` attribute (per
+        :class:`~..batch_indicator_cache.BatchIndicatorCache`'s precondition
+        that ``symbol`` be a non-empty string).
+      - ``bars[-1]`` carries a ``date`` attribute (checked on the trailing
+        bar only, mirroring the ``symbol`` check above — not a scan of every
+        bar). ``BatchIndicatorCache._data_fingerprint`` hashes OHLCV in the
+        supplied sequence and reads each bar's ``bar.date`` as part of that
+        record — the shape of ``market_data_service.OHLCVBar``, not
+        ``trading_service.strategy.contract.Bar`` (the streaming engine's
+        actual bar type, which carries ``timestamp``/no ``date``). Until the
+        cache's fingerprint helper (or its bar inputs) is extended to cover
+        ``timestamp``-only bars, consulting it with ``contract.Bar``-shaped
+        streams would key on empty dates and could collide unrelated
+        series. Guarding on ``hasattr(bars[-1], "date")`` here keeps that gap
+        non-fatal for the common, homogeneous-bar-type case: it declines to
+        consult (falls through to :func:`_dispatch_indicator`) rather than
+        crashing, for exactly the bar shapes the cache cannot key today. A
+        caller that mixes bar types within a single ``bars`` sequence (some
+        with ``date``, some without) is not guarded against here — that
+        would need a scan of every bar, which this trailing-bar check
+        deliberately avoids, matching the cost profile of the ``symbol``
+        check beside it.
+    """
+
+    def _compute() -> Optional[float]:
+        return _dispatch_indicator(reg, name, bars, source=source, **params)
+
+    cache = reg._batch_cache
+    timeframe = reg._timeframe
+    if cache is not None and bars and timeframe and hasattr(bars[-1], "date"):
+        symbol = _safe_getattr(bars[-1], "symbol")
+        if isinstance(symbol, str) and symbol:
+            cache_params: Dict[str, Any] = dict(params)
+            # BatchIndicatorCache treats `params` as the complete parameter
+            # identity — `source` steers the math for source-sensitive
+            # indicators but isn't itself in `params`, so it must be folded
+            # in here (see BatchIndicatorCache.get_or_compute's docstring).
+            cache_params["source"] = source
+            value, hit = cache.get_or_compute(name, cache_params, symbol, timeframe, bars, _compute)
+            if hit:
+                # A hit skipped ``_compute``, so ``reg._state`` still
+                # describes whatever history this registry last walked —
+                # which may share this trailing bar while differing in
+                # prefix. ``_advance_kind`` would then treat the next
+                # one-bar extension as ``expand`` and step incremental
+                # indicators (MACD, RSI, …) from the stale prefix.
+                reg._state.clear()
+            return value
+    return _compute()

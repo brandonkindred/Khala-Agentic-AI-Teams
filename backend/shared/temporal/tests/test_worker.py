@@ -35,5 +35,9 @@ def test_workflow_runner_passes_through_boto3_strands_and_httpx():
         "botocore",
         "urllib3",
         "httpx",
+        "numpy",
+        "pandas",
+        "investment_team.market_data_service",
+        "investment_team.strategy_lab.budget_config",
     ):
         assert module in passthrough, f"{module!r} must be a sandbox passthrough module"

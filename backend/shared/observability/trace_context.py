@@ -14,7 +14,7 @@ inside every worker — the same mechanism that already carries
 ``llm_service``'s attribution / request-id contextvars.
 
 The pattern mirrors ``llm_service/attribution.py``'s ``request_id`` contextvar
-(itself documented as mirroring ``agent_provisioning_team/shared/logging_context.py``).
+(itself documented as mirroring ``agent_team_studio/agent_provisioning_team/shared/logging_context.py``).
 
 Usage::
 

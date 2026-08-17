@@ -5,7 +5,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 from typing import Any, Dict, List
 
-from software_engineering_team.shared.models import Task, TaskType
+from shared.dev_models.models import Task, TaskType
 from software_engineering_team.shared.v2_models import ReviewIssue
 
 
@@ -319,8 +319,8 @@ def test_run_code_review_phase_impl_runs_code_review_step_standalone():
     clean code-review result passes with no issues — build/lint no longer gate this phase."""
     from pathlib import Path
 
-    from software_engineering_team.shared.llm_review import LlmReviewOutput
     from software_engineering_team.shared.phases.review import run_code_review_phase_impl
+    from software_engineering_team.shared.v2_review import LlmReviewOutput
 
     messages: List[str] = []
 
@@ -348,8 +348,8 @@ def test_run_code_review_phase_impl_fails_on_code_review_issue():
     ``_code_review_step``'s output, with no build/lint step involved."""
     from pathlib import Path
 
-    from software_engineering_team.shared.llm_review import LlmReviewOutput
     from software_engineering_team.shared.phases.review import run_code_review_phase_impl
+    from software_engineering_team.shared.v2_review import LlmReviewOutput
 
     cr_issue = ReviewIssue(
         source="code_review",

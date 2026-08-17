@@ -1,8 +1,14 @@
 """Bootstrap tests for the ``strategy_lab.temporal`` Pattern-A package.
 
-Covers the package exports, the worker boot helper, and the sync dispatch helper
-— all thin wrappers with lazy imports, mocked at the ``shared.temporal`` /
-``api.main`` boundary so no live Temporal server or job service is needed.
+Covers the package exports, the worker boot helper, and the sync dispatch
+helper — all thin wrappers with lazy imports. Worker-boot tests mock at the
+``shared.temporal`` boundary (``start_team_worker``/``is_temporal_enabled``);
+the sync dispatch (``build_strategy_lab_batch_input``) tests additionally
+mock the ``investment_team.strategy_lab`` internals it reads from
+(``config.clamp_max_parallel``, ``run_state.rehydrate_active_run_offset``/
+``get_resume_seed_counters``/``active_runs``/``get_run_state_strict``,
+``strategy_lab_context.excluded_for_allowed``) and ``shared.temporal.start_workflow_sync``
+for the final submit — so no live Temporal server or job service is needed.
 """
 
 from __future__ import annotations
@@ -145,8 +151,9 @@ def test_build_batch_input_maps_request(monkeypatch):
     }
     monkeypatch.setattr(run_state, "get_resume_seed_counters", lambda run_id: seed_counters)
 
-    bi = build_strategy_lab_batch_input("run-9", _FakeRequest())
+    bi = build_strategy_lab_batch_input("run-9", _FakeRequest(), 3)
     assert bi["run_id"] == "run-9"
+    assert bi["generation"] == 3  # passed through verbatim, not re-derived
     assert bi["batch_size"] == 3
     assert bi["batch_count"] == 2
     assert bi["max_parallel"] == 4  # clamped
@@ -179,9 +186,12 @@ def test_build_batch_input_defaults_seed_counters_for_fresh_run(monkeypatch):
     monkeypatch.setattr(config, "clamp_max_parallel", lambda n: n)
     monkeypatch.setattr(run_state, "rehydrate_active_run_offset", lambda run_id: 0)
     monkeypatch.setattr(run_state, "active_runs", {})
-    monkeypatch.setattr(run_state, "load_run_from_job_service", lambda rid: None)
+    # get_resume_seed_counters reads via get_run_state_strict (not the
+    # lenient get_run_state/load_run_from_job_service) -- see its own
+    # docstring for why a durable-read failure must propagate here.
+    monkeypatch.setattr(run_state, "get_run_state_strict", lambda rid: None)
 
-    bi = build_strategy_lab_batch_input("run-fresh", _FakeRequest())
+    bi = build_strategy_lab_batch_input("run-fresh", _FakeRequest(), 1)
 
     assert bi["skipped_cycles"] == 0
     assert bi["errored_cycles"] == 0
@@ -199,6 +209,10 @@ def test_build_batch_input_translates_allowed_asset_classes(monkeypatch):
 
     monkeypatch.setattr(config, "clamp_max_parallel", lambda n: n)
     monkeypatch.setattr(run_state, "rehydrate_active_run_offset", lambda run_id: 0)
+    # get_resume_seed_counters reads via get_run_state_strict; stub it so this
+    # test's unrelated durable read can't hit a real job-service call now
+    # that a lookup failure propagates instead of being swallowed.
+    monkeypatch.setattr(run_state, "get_run_state_strict", lambda rid: None)
     # ``excluded_for_allowed`` is imported from its home module, not laundered
     # through api.main, so patch it at the source.
     monkeypatch.setattr(
@@ -207,7 +221,7 @@ def test_build_batch_input_translates_allowed_asset_classes(monkeypatch):
 
     req = _FakeRequest()
     req.allowed_asset_classes = ["stocks"]
-    bi = build_strategy_lab_batch_input("run-1", req)
+    bi = build_strategy_lab_batch_input("run-1", req, 1)
     assert bi["exclude_asset_classes"] == ["crypto", "forex"]
 
 
@@ -227,10 +241,12 @@ def test_start_batch_workflow_dispatches(monkeypatch):
 
     monkeypatch.setattr(shared.temporal, "start_workflow_sync", _fake_start_sync)
     monkeypatch.setattr(
-        sw, "build_strategy_lab_batch_input", lambda run_id, request: {"rid": run_id}
+        sw,
+        "build_strategy_lab_batch_input",
+        lambda run_id, request, generation: {"rid": run_id, "generation": generation},
     )
 
-    sw.start_strategy_lab_batch_workflow("run-7", _FakeRequest())
+    sw.start_strategy_lab_batch_workflow("run-7", _FakeRequest(), 5)
     assert captured["workflow_id"] == "strategy-lab-run-7"
     assert captured["task_queue"] == "strategy-lab-queue"
-    assert captured["batch_input"] == {"rid": "run-7"}
+    assert captured["batch_input"] == {"rid": "run-7", "generation": 5}

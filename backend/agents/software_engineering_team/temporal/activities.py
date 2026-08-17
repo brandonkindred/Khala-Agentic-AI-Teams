@@ -16,6 +16,7 @@ from temporalio import activity
 
 from shared.concurrency import BackgroundHeartbeat
 from shared.observability import bind_trace_id, current_trace_id, new_trace_id
+from shared.temporal.activity_utils import is_last_attempt
 from software_engineering_team.shared.job_store import (
     JOB_STATUS_FAILED,
     JOB_STATUS_RUNNING,
@@ -24,49 +25,8 @@ from software_engineering_team.shared.job_store import (
 
 logger = logging.getLogger(__name__)
 
-# Default long timeout for run_orchestrator (e.g. 48 hours)
-RUN_ORCHESTRATOR_SCHEDULE_TO_CLOSE_SECONDS = 48 * 3600
 RETRY_FAILED_SCHEDULE_TO_CLOSE_SECONDS = 24 * 3600
 STANDALONE_SCHEDULE_TO_CLOSE_SECONDS = 12 * 3600
-
-
-@activity.defn(name="run_orchestrator")
-def run_orchestrator_activity(
-    job_id: str,
-    repo_path: str,
-    spec_content_override: Optional[str] = None,
-    resolved_questions_override: Optional[List[Dict[str, Any]]] = None,
-    planning_only: bool = False,
-    trace_id: str = "",
-    sprint_id: Optional[str] = None,
-) -> None:
-    """Execute the main Tech Lead orchestrator (run_orchestrator).
-
-    Postconditions:
-        On failure the job is marked FAILED and the exception is re-raised so
-        Temporal can retry (per the workflow retry policy) and fail the workflow.
-        ``trace_id`` (workflow-supplied, or freshly generated when blank) is
-        forwarded to ``run_orchestrator``, which binds it for the whole 4-phase run.
-        ``sprint_id``, when set, is forwarded to ``run_orchestrator`` so it pulls
-        planned scope from that Product Delivery sprint instead of parsing a spec.
-    """
-    resolved_trace_id = trace_id or new_trace_id()
-    try:
-        from software_engineering_team.orchestrator import run_orchestrator
-
-        run_orchestrator(
-            job_id,
-            Path(repo_path),
-            spec_content_override=spec_content_override,
-            resolved_questions_override=resolved_questions_override,
-            planning_only=planning_only,
-            sprint_id=sprint_id,
-            trace_id=resolved_trace_id,
-        )
-    except Exception as e:
-        logger.exception("Orchestrator activity failed", extra={"trace_id": resolved_trace_id})
-        update_job(job_id, error=str(e), status=JOB_STATUS_FAILED)
-        raise
 
 
 @activity.defn(name="retry_failed")
@@ -74,10 +34,13 @@ def retry_failed_activity(job_id: str, trace_id: str = "") -> None:
     """Re-run failed tasks for a job (run_failed_tasks).
 
     Postconditions:
-        On failure the job is marked FAILED and the exception is re-raised so
-        Temporal can retry (per the workflow retry policy) and fail the workflow.
-        ``trace_id`` (workflow-supplied, or freshly generated when blank) is
-        forwarded to ``run_failed_tasks``, which binds it for the retry.
+        On the final Temporal attempt, the job is marked FAILED; on a non-final
+        attempt the FAILED write is skipped so a retry that later succeeds never
+        leaves a transient FAILED status behind. The exception is always
+        re-raised so Temporal can retry (per the workflow retry policy) and fail
+        the workflow once attempts are exhausted. ``trace_id`` (workflow-supplied,
+        or freshly generated when blank) is forwarded to ``run_failed_tasks``,
+        which binds it for the retry.
     """
     resolved_trace_id = trace_id or new_trace_id()
     try:
@@ -86,7 +49,8 @@ def retry_failed_activity(job_id: str, trace_id: str = "") -> None:
         run_failed_tasks(job_id, trace_id=resolved_trace_id)
     except Exception as e:
         logger.exception("Retry failed activity failed", extra={"trace_id": resolved_trace_id})
-        update_job(job_id, error=str(e), status=JOB_STATUS_FAILED)
+        if is_last_attempt():
+            update_job(job_id, error=str(e), status=JOB_STATUS_FAILED)
         raise
 
 
@@ -109,7 +73,7 @@ def _run_code_v2_impl(
     """
     import uuid as _uuid
 
-    from software_engineering_team.shared.models import (
+    from shared.dev_models.models import (
         SystemArchitecture,
         Task,
         TaskStatus,
@@ -178,8 +142,8 @@ def _run_frontend_code_v2_impl(
 ) -> None:
     """Same logic as _run_frontend_code_v2_background without starting a thread."""
     from llm_service import get_client
+    from shared.dev_models.models import TaskType
     from software_engineering_team.frontend_code_v2_team import FrontendCodeV2TeamLead
-    from software_engineering_team.shared.models import TaskType
 
     _run_code_v2_impl(
         job_id,
@@ -203,14 +167,18 @@ def run_frontend_code_v2_activity(
     """Execute frontend-code-v2 workflow.
 
     Postconditions:
-        On failure the job is marked FAILED and the exception is re-raised so
-        Temporal can retry (per the workflow retry policy) and fail the workflow.
+        On the final Temporal attempt, the job is marked FAILED; on a non-final
+        attempt the FAILED write is skipped so a retry that later succeeds never
+        leaves a transient FAILED status behind. The exception is always
+        re-raised so Temporal can retry (per the workflow retry policy) and fail
+        the workflow once attempts are exhausted.
     """
     try:
         _run_frontend_code_v2_impl(job_id, repo_path, task_dict, architecture_overview)
     except Exception as e:
         logger.exception("Frontend-code-v2 activity failed", extra={"trace_id": current_trace_id()})
-        update_job(job_id, error=str(e), status=JOB_STATUS_FAILED)
+        if is_last_attempt():
+            update_job(job_id, error=str(e), status=JOB_STATUS_FAILED)
         raise
 
 
@@ -222,8 +190,8 @@ def _run_backend_code_v2_impl(
 ) -> None:
     """Same logic as _run_backend_code_v2_background without starting a thread."""
     from llm_service import get_client
+    from shared.dev_models.models import TaskType
     from software_engineering_team.backend_code_v2_team import BackendCodeV2TeamLead
-    from software_engineering_team.shared.models import TaskType
 
     _run_code_v2_impl(
         job_id,
@@ -247,14 +215,18 @@ def run_backend_code_v2_activity(
     """Execute backend-code-v2 workflow.
 
     Postconditions:
-        On failure the job is marked FAILED and the exception is re-raised so
-        Temporal can retry (per the workflow retry policy) and fail the workflow.
+        On the final Temporal attempt, the job is marked FAILED; on a non-final
+        attempt the FAILED write is skipped so a retry that later succeeds never
+        leaves a transient FAILED status behind. The exception is always
+        re-raised so Temporal can retry (per the workflow retry policy) and fail
+        the workflow once attempts are exhausted.
     """
     try:
         _run_backend_code_v2_impl(job_id, repo_path, task_dict, architecture_overview)
     except Exception as e:
         logger.exception("Backend-code-v2 activity failed", extra={"trace_id": current_trace_id()})
-        update_job(job_id, error=str(e), status=JOB_STATUS_FAILED)
+        if is_last_attempt():
+            update_job(job_id, error=str(e), status=JOB_STATUS_FAILED)
         raise
 
 
@@ -319,14 +291,18 @@ def run_product_analysis_activity(
     """Execute product-analysis workflow.
 
     Postconditions:
-        On failure the job is marked FAILED and the exception is re-raised so
-        Temporal can retry (per the workflow retry policy) and fail the workflow.
+        On the final Temporal attempt, the job is marked FAILED; on a non-final
+        attempt the FAILED write is skipped so a retry that later succeeds never
+        leaves a transient FAILED status behind. The exception is always
+        re-raised so Temporal can retry (per the workflow retry policy) and fail
+        the workflow once attempts are exhausted.
     """
     try:
         _run_product_analysis_impl(job_id, repo_path, spec_content, initial_spec_path)
     except Exception as e:
         logger.exception("Product analysis activity failed", extra={"trace_id": current_trace_id()})
-        update_job(job_id, error=str(e), status=JOB_STATUS_FAILED)
+        if is_last_attempt():
+            update_job(job_id, error=str(e), status=JOB_STATUS_FAILED)
         raise
 
 
@@ -371,8 +347,11 @@ def _parse_spec_activity_body(
 
     Preconditions: a trace id is already bound (callers must go through
         :func:`parse_spec_activity`).
-    Postconditions: returns a ``SpecParseResult`` dict; on failure the job is marked
-        FAILED and the exception propagates to the activity wrapper.
+    Postconditions: returns a ``SpecParseResult`` dict; on the final Temporal
+        attempt the job is marked FAILED, while a non-final attempt skips the
+        FAILED write so a retry that later succeeds never leaves a transient
+        FAILED status behind. Either way, the exception propagates to the
+        activity wrapper.
     """
     from software_engineering_team.temporal.phase_models import SpecParseResult
 
@@ -492,7 +471,8 @@ def _parse_spec_activity_body(
             job_id,
             extra={"trace_id": current_trace_id()},
         )
-        update_job(job_id, error=str(e), status=JOB_STATUS_FAILED)
+        if is_last_attempt():
+            update_job(job_id, error=str(e), status=JOB_STATUS_FAILED)
         raise
 
 
@@ -523,8 +503,10 @@ def _plan_project_activity_body(
 
     Preconditions: a trace id is already bound (callers must go through
         :func:`plan_project_activity`); ``spec_parse_result`` validates as a ``SpecParseResult``.
-    Postconditions: returns a ``PlanResult`` dict; on failure the job is marked FAILED and
-        the exception propagates to the activity wrapper. Uses ``spec_data.requirements_title``
+    Postconditions: returns a ``PlanResult`` dict; on the final Temporal attempt the job is
+        marked FAILED, while a non-final attempt skips the FAILED write so a retry that
+        later succeeds never leaves a transient FAILED status behind. Either way, the
+        exception propagates to the activity wrapper. Uses ``spec_data.requirements_title``
         (set by Phase 1) as the adapter's spec title rather than re-parsing
         ``spec_data.spec_content`` via the LLM — avoids a second, nondeterministic parse and
         an unnecessary spec-intake LLM dependency; required for the sprint path, where
@@ -604,7 +586,8 @@ def _plan_project_activity_body(
             job_id,
             extra={"trace_id": current_trace_id()},
         )
-        update_job(job_id, error=str(e), status=JOB_STATUS_FAILED)
+        if is_last_attempt():
+            update_job(job_id, error=str(e), status=JOB_STATUS_FAILED)
         raise
 
 

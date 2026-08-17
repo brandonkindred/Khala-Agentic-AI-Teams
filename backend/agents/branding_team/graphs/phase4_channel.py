@@ -1,8 +1,10 @@
-"""Phase 4 — Channel Activation graph (fan-out / fan-in).
+"""Phase 4 — Channel Activation graph (pure fan-out).
 
 Nine specialist agents produce channel-specific guidelines and brand
-experience artefacts in parallel; a compositor node assembles them into a
-unified ``ChannelActivationOutput``.
+experience artefacts in parallel. Each is a terminal node — there is no
+compositor; the orchestrator's Phase-4 ``merge_fn``
+(``_merge_phase4_fragments``) assembles their typed fragments into a
+unified ``ChannelActivationOutput`` in Python.
 """
 
 from __future__ import annotations
@@ -20,27 +22,28 @@ from branding_team.agents import (
     make_social_guide,
     make_website_guide,
 )
-from branding_team.graphs.shared import build_agent, build_fan_out_fan_in
 
 
 def build_phase4_graph() -> Graph:
-    """Build the Phase 4 Channel Activation fan-out/fan-in graph.
+    """Build the Phase 4 Channel Activation pure fan-out graph.
 
     Topology::
 
-        brand_experience_principler ──┐
-        website_guide ────────────────┤
-        social_guide ─────────────────┤
-        email_guide ──────────────────┤
-        events_guide ─────────────────┼──▶ channel_compositor
-        partnerships_guide ───────────┤
-        internal_guide ───────────────┤
-        brand_architecture_builder ───┤
-        brand_in_action_illustrator ──┘
+        brand_experience_principler
+        website_guide
+        social_guide
+        email_guide
+        events_guide
+        partnerships_guide
+        internal_guide
+        brand_architecture_builder
+        brand_in_action_illustrator
 
-    All nine entry nodes execute in parallel.  ``channel_compositor`` runs
-    once every entry node has completed and merges their outputs into a
-    single unified channel-activation deliverable.
+    All nine nodes are both entry points and terminal nodes — they run in
+    parallel and have no edges between them. There is no fan-in node: the
+    orchestrator's Phase-4 ``merge_fn`` (``_merge_phase4_fragments``)
+    assembles their typed ``structured_output`` fragments into a single
+    ``ChannelActivationOutput`` deterministically in Python.
 
     Returns
     -------
@@ -49,44 +52,19 @@ def build_phase4_graph() -> Graph:
     """
     builder = GraphBuilder()
 
-    # --- fan-in: compositor assembles all channel outputs ---
-    compositor = builder.add_node(
-        build_agent(
-            name="channel_compositor",
-            description="Assembles all channel and experience outputs into a unified deliverable.",
-            system_prompt=(
-                "You are a Channel Activation Compositor. You receive outputs from nine specialist "
-                "agents: brand experience principles, website guidelines, social media guidelines, "
-                "email guidelines, events guidelines, partnerships guidelines, internal communications "
-                "guidelines, brand architecture definitions, and brand-in-action examples.\n\n"
-                "Your job is to assemble all of these into a single unified ChannelActivationOutput. "
-                "Ensure consistency across channels, resolve any contradictions, and produce a "
-                "coherent document that covers:\n"
-                "- brand_experience_principles\n"
-                "- channel_guidelines (list of per-channel guideline objects)\n"
-                "- brand_architecture\n"
-                "- brand_in_action_examples\n\n"
-                "Output valid JSON matching the ChannelActivationOutput schema."
-            ),
-        ),
-        node_id="channel_compositor",
-    )
-
-    # --- fan-out: independent channel / experience nodes, wired into compositor ---
-    build_fan_out_fan_in(
-        builder,
-        [
-            ("brand_experience_principler", make_brand_experience_principler),
-            ("website_guide", make_website_guide),
-            ("social_guide", make_social_guide),
-            ("email_guide", make_email_guide),
-            ("events_guide", make_events_guide),
-            ("partnerships_guide", make_partnerships_guide),
-            ("internal_guide", make_internal_guide),
-            ("brand_architecture_builder", make_brand_architecture_builder),
-            ("brand_in_action_illustrator", make_brand_in_action_illustrator),
-        ],
-        compositor,
-    )
+    factories = {
+        "brand_experience_principler": make_brand_experience_principler,
+        "website_guide": make_website_guide,
+        "social_guide": make_social_guide,
+        "email_guide": make_email_guide,
+        "events_guide": make_events_guide,
+        "partnerships_guide": make_partnerships_guide,
+        "internal_guide": make_internal_guide,
+        "brand_architecture_builder": make_brand_architecture_builder,
+        "brand_in_action_illustrator": make_brand_in_action_illustrator,
+    }
+    for node_id, factory in factories.items():
+        builder.add_node(factory(), node_id=node_id)
+        builder.set_entry_point(node_id)
 
     return builder.build()

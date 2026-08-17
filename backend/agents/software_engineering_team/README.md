@@ -46,11 +46,27 @@ New agents needing a typed/structured LLM response should default to
 which also documents the v2 marker-template format as the one justified
 exception.
 
+`architect_agents`' Enterprise Orchestrator (`agents/orchestrator.py` and
+its specialist modules) deliberately does not use `BaseTeamLead` — it's an
+LLM-driven Agents-as-Tools `strands.Agent`, a different delegation model
+than `BaseTeamLead`'s hand-authored phase/gate sequencing; see
+[`docs/ARCHITECT_AGENTS_FRAMEWORK_DECISION.md`](docs/ARCHITECT_AGENTS_FRAMEWORK_DECISION.md)
+for the full rationale.
+
 Prompt modules should reuse the shared builders in
 `backend/shared/prompts/templates.py` rather than hand-writing JSON-output or
 context-formatting scaffolding; see
 [`docs/PROMPT_TEMPLATE_MIGRATION_METRICS.md`](docs/PROMPT_TEMPLATE_MIGRATION_METRICS.md)
 for the before/after line-count report from that migration.
+
+Legacy stack-alias repair and legacy free-text HITL reason parsing have
+been removed from routing, the Tech Lead, and `swarm_review`. Resuming a
+job whose persisted state still carries one of those old shapes (a legacy
+stack alias, a task missing `target_team`, or a `user_decision` entry
+without structured `decisions`) now fails fast with a field-identifying
+error instead of being silently repaired or migrated — see
+[`docs/LEGACY_STACK_RESUME_POLICY_DECISION.md`](docs/LEGACY_STACK_RESUME_POLICY_DECISION.md)
+for the decision and pre-deploy audit.
 
 ## Sub-teams and SDLC
 
@@ -218,7 +234,7 @@ Defaults (`AGENT_DEFAULT_MODELS` in `llm_service/config.py`) when no overrides a
 | Model | Agents |
 |-------|--------|
 | `kimi-k2.7-code:cloud` | backend, frontend, code_review |
-| `glm-5.2:cloud` | code_review_verify |
+| `deepseek-v4-flash:cloud` | code_review_verify |
 | `deepseek-v4-pro:cloud` | repair, devops, dbc_comments, tech_lead, architecture, spec_intake, spec_clarification, product_analysis, project_planning, integration, api_contract, data_architecture, ui_ux, frontend_architecture, infrastructure, devops_planning, qa_test_strategy, security_planning, observability, acceptance_verifier, documentation, qa, security, accessibility (also the fallback for any agent key not listed above) |
 
 Example: `export LLM_MODEL_tech_lead=<model-id>` overrides only the Tech Lead; other agents use their defaults or `LLM_MODEL`.
@@ -230,11 +246,11 @@ export LLM_MODEL=kimi-k2.7-code:cloud
 python -m agent_implementations.run_api_server
 ```
 
-Ensure Ollama is running with the model (e.g. `ollama run kimi-k2.7-code:cloud`). If you use a different API (OpenRouter, Together, etc.) or get a "model not found" error, set `LLM_MODEL` to a model your API supports (e.g. `export LLM_MODEL=llama3.2` for Ollama, or your provider's model id). Note this only takes effect when the Postgres provider list is empty or the matching entry's model field is blank — otherwise the provider list value wins.
+Ensure Ollama is running with the model (e.g. `ollama run kimi-k2.7-code:cloud`). If you use a different API (OpenRouter, Together, etc.) or get a "model not found" error, set `LLM_MODEL` to a model your API supports (e.g. `export LLM_MODEL=deepseek-v4-flash:cloud` for Ollama, or your provider's model id). Note this only takes effect when the Postgres provider list is empty or the matching entry's model field is blank — otherwise the provider list value wins.
 
 **Per-phase retry limits:** each per-microtask review gate (Code Review, QA, Security, Documentation) has a hardcoded retry cap of `3` fix attempts (`max_retries`/`code_review_max_retries`/`qa_max_retries`/`security_max_retries`/`documentation_max_retries` on `MicrotaskReviewConfig`/`BaseMicrotaskReviewConfig` in `backend_code_v2_team/models.py`, `frontend_code_v2_team/models.py`, and `shared/v2_models.py`). These are not environment-configurable.
 
-**Coding-team concurrency (environment variables, `progress_config.py`):** lowering these can reduce parallel LLM load but slows runs.
+**Coding-team and code-v2 execution concurrency (environment variables):** lowering these can reduce parallel LLM load but slows runs.
 
 | Variable | Description | Default |
 |----------|-------------|---------|
@@ -242,8 +258,11 @@ Ensure Ollama is running with the model (e.g. `ollama run kimi-k2.7-code:cloud`)
 | `CODING_TEAM_REVIEW_CONCURRENCY` | Max Tech Lead review LLM calls dispatched concurrently | `4` |
 | `CODING_TEAM_GROOM_CONCURRENCY` | Max Tech Lead task-grooming LLM calls dispatched concurrently | `4` |
 | `CODING_TEAM_IMPLEMENTATION_CONCURRENCY` | Max implementation workers dispatched concurrently in one round | `4` |
+| `SE_EXECUTION_WAVE_CONCURRENCY` | Max concurrent microtask workers in one independent code-v2 execution wave | `4` |
 
 **Faster runs:** Set `SW_SKIP_PLANNING_AGENTS=observability,performance_doc` to skip specific planning agents, or `SW_MINIMAL_PLANNING=1` to skip all domain planning (spec → Tech Lead ↔ Architecture → consolidation → execution).
+
+**GitHub issue grooming — Fibonacci scoring mode (`github_source/issue_scorer.py`):** `ISSUE_GROOMING_SCORING_MODE` selects how Phase A scores an issue's complexity — default `auto` tries the LLM scorer (`issue_llm_scorer.score_issue_via_llm`) first and falls back to the heuristic scorer (`issue_heuristic_scorer.score_issue_heuristically`) on any `LLMError` (no provider configured, a client/provider failure, or a response that fails to parse/validate); `heuristic_only` never calls the LLM scorer. An explicit `mode=` argument to `score_issue(...)` overrides the environment variable.
 
 ### Faster runs summary
 
@@ -364,7 +383,7 @@ software_engineering_team/
 │                          # the coding-team engine's own app-assembly hub + routers
 ├── agent_implementations/
 │   └── run_api_server.py  # HTTP API entry point (uvicorn)
-├── shared/                # LLM client, models, coding_standards, git_utils, plan_dir,
+├── shared/                # LLM client, coding_standards, plan_dir,
 │                          # phases/, deliver_utils, logging_config, ...
 │
 │  # --- Design / setup ---
@@ -406,7 +425,6 @@ software_engineering_team/
 │   ├── cicd_pipeline_agent/        # CI/CD workflows
 │   ├── deployment_strategy_agent/  # Rollout and rollback
 │   ├── devsecops_review_agent/     # Security review
-│   ├── test_validation_agent/      # Gate aggregation
 │   ├── change_review_agent/        # Senior DevOps review
 │   ├── doc_runbook_agent/          # Runbooks and handoff
 │   ├── infra_debug_agent/          # Diagnoses infrastructure/deploy failures
@@ -463,6 +481,29 @@ Leaf agents (direct children of `software_engineering_team/`, e.g. `qa_agent/`, 
 
 Sub-team orchestrators (`backend_code_v2_team/`, `frontend_code_v2_team/`, `devops_team/`, `ai_agent_development_team/`, etc.) instead use `orchestrator.py`, `phases/`, and `tool_agents/`.
 
+## Caching (shared.cache / Redis)
+
+`shared/cache/` (`get_shared_cache(namespace: str)` in `shared/cache/factory.py`) is a small Redis-backed caching abstraction with an automatic in-process fallback. In this team it backs:
+
+- **Code review agent** (`code_review_agent/mapping.py`, `coordinator.py`): the per-chunk review-outcome cache and the whole-submission short-circuit cache.
+- **LLM service compaction** (`llm_service/compaction.py`): `compact_text` memoization.
+
+**Backend selection:** if `REDIS_URL` or `REDIS_HOST` is set (non-blank), `shared.cache` attempts to build a `RedisBackend`; otherwise it uses an in-process `MemoryBackend` directly, without ever trying Redis. Any failure building or talking to Redis (bad config, missing `redis` package, connection/runtime error) is logged (messages contain `shared.cache`) and the cache **fails open** — the operation falls back to memory / a cache miss / local recompute. A Redis outage can only reduce cache hit rate; it never fails a code review or a compaction call.
+
+**Redis configuration (environment variables):**
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `REDIS_URL` | Full Redis connection URL; wins over host/port/password when set | none |
+| `REDIS_HOST` | Redis hostname (bare host, no port); with `REDIS_URL` blank, enables the Redis backend | none |
+| `REDIS_PORT` | Redis port | `6379` |
+| `REDIS_PASSWORD` | Redis auth password | none |
+| `REDIS_DB` | Redis logical DB index | `0` |
+| `REDIS_CACHE_TTL_S` | TTL (seconds) for cached values | `3600` |
+| `REDIS_KEY_PREFIX` | Prefix for all `shared.cache` Redis keys | `khala` |
+
+See [docs/ENV_VARS.md](../../../docs/ENV_VARS.md) for the complete reference, including `KHALA_CACHE_BUILD_ID` / `KHALA_BUILD_ID` (build-id namespace suffixing), single-flight lock/waiter timing (`REDIS_LOCK_TTL_S`, `REDIS_WAITER_POLL_S`, `REDIS_WAITER_TIMEOUT_S`, `REDIS_RESULT_TTL_S`), and connection/socket tuning.
+
 ## DevOps Engineering Team (`devops_team/`)
 
 The `devops_team/` package is the contract-first, multi-agent DevOps engineering team modeled after the code-v2 teams (`frontend_code_v2_team/`), and is the sole DevOps path (superseding an earlier monolithic DevOps agent). It implements the **MVP fleet** (9 core agents + 5 tool agents) with hard gates, environment-aware safety, and structured completion packages.
@@ -485,9 +526,10 @@ The `devops_team/` package is the contract-first, multi-agent DevOps engineering
 | **CICDPipelineAgent** | Creates CI/CD workflows with required gates and OIDC auth preference |
 | **DeploymentStrategyAgent** | Defines rollout strategy, rollback plan, health checks, and timeouts |
 | **DevSecOpsReviewAgent** | Reviews IAM, secrets, network exposure, artifact integrity; blocks on high-risk findings |
-| **DevOpsTestValidationAgent** | Aggregates tool results and maps evidence to acceptance criteria |
 | **ChangeReviewAgent** | Independent senior DevOps review for maintainability and architecture fit |
 | **DocumentationRunbookAgent** | Produces runbooks, rollback docs, and operational handoff artifacts |
+
+Acceptance/release validation (mapping tool results to acceptance criteria and producing quality gates) is not a DevOps-local agent — the orchestrator calls the cross-cutting `QAExpertAgent` (see `qa_agent/` above) directly in its `acceptance_evidence` mode.
 
 ### Tool Agents (stateless, no LLM)
 
@@ -592,9 +634,16 @@ notes:
   - "OIDC used for GitHub Actions to AWS, no long-lived deploy keys"
 ```
 
-### Backward Compatibility
+### Entry Points
 
-The `DevOpsTeamLeadAgent` provides a `run_workflow()` method that accepts the same parameters as the earlier DevOps agent's `run_workflow()`. When called by the Tech Lead's `trigger_devops_for_backend/frontend`, it constructs a `DevOpsTaskSpec` internally (adding defaults for rollback, security, approval gates) and runs the full pipeline.
+`DevOpsTeamLeadAgent` exposes two structured entry points, both funneling through the same 5-phase pipeline; the free-text `run_workflow(...)`/`_build_legacy_spec` adapter has been removed:
+
+- **`run(spec: DevOpsTaskSpec) -> DevOpsCompletionPackage`** — model-only: runs the pipeline with `write_changes=False`, so it never commits or merges (Phase 4.5 validation tools like `terraform init`/`helm lint` may still write under the working directory as side effects).
+- **`run_task(spec: DevOpsTaskSpec, *, repo_path, merge_to_development=True, ...) -> DevOpsTeamResult`** — the structured, write-capable entry point: writes artifacts to a real repo on a feature branch. `merge_to_development=True` (the default) merges and deletes the branch; `merge_to_development=False` commits the branch and leaves it for external review instead — the mode the coding-team handoff below uses.
+
+### Coding-Team Handoff (`CODING_TEAM_DEVOPS_ROUTING`)
+
+Opt-in (default off; see `CODING_TEAM_DEVOPS_ROUTING` in `docs/ENV_VARS.md`). When enabled, a coding-team Task Graph task with `target_team="devops"` — genuinely infrastructure-only work: a CI/CD pipeline definition, IaC provisioning, or deployment/container-orchestration configuration — is dispatched to a `DevOpsTeamWorker` (`software_engineering_team/devops_team_worker.py`) instead of being aliased to `backend_v2`. The worker builds a `DevOpsTaskSpec` from the coding-team `Task`, calls `DevOpsTeamLeadAgent.run_task(spec, repo_path=..., merge_to_development=False)`, and returns the resulting feature branch for the normal Tech Lead code-review/merge step — the coding team's generic build/lint gate is skipped for these tasks since DevOps already runs its own internal gates (`DEVOPS_REQUIRED_GATE_NAMES`). With the flag off, `target_team="devops"`/`"dev_ops"`/`"infra"`/`"infrastructure"`/`"ci"`/`"ci_cd"`/`"cicd"` continue to alias to `backend_v2` as before.
 
 ### Expanded Team (Phase 2, not yet implemented)
 

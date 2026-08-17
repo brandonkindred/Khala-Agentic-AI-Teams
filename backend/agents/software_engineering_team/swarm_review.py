@@ -139,13 +139,16 @@ class _ReviewMixin:
         Preconditions:
             - Entries in ``self.resolved_questions`` and ``task.revision_feedback`` are dicts;
               non-dict entries and records with no renderable content are skipped.
+            - Every ``user_decision`` entry in ``task.revision_feedback`` carries a structured
+              ``decisions`` field (possibly empty); an entry predating that field (a pre-upgrade
+              resume) violates this and is a fail-fast error, not a supported input shape.
         Postconditions:
             - Returns human-readable lines (``"{question} → {answer}"``, or the bare answer for an
               answer-only record) deduplicated as described, in first-seen order (a superseding
               answer updates the existing line in place). Empty when no decision exists.
-            - A ``user_decision`` entry predating the structured ``decisions`` field (one resumed
-              across an upgrade) contributes its rendered ``reason`` bullets, so its decisions are
-              still surfaced to the reviewer rather than dropped.
+            - Raises ``ValueError`` if a ``user_decision`` entry lacks a ``decisions`` field —
+              resume of that legacy shape is unsupported; the caller (``_compute_review``) turns
+              this into a clean per-task review failure rather than silently parsing ``reason``.
         """
         order: List[str] = []
         line_by_key: Dict[str, str] = {}
@@ -166,32 +169,22 @@ class _ReviewMixin:
             question, _answer = hitl.decision_qa(rec)
             _put(hitl.normalize_key(question) if question else hitl.normalize_key(line), line)
 
-        def _add_legacy_reason(reason: str) -> None:
-            # Pre-"decisions" entry: ``reason`` is a multi-line block (preamble + "- q → a" bullets).
-            # Extract just the bullets so legacy decisions render as clean individual lines and
-            # de-duplicate like structured ones; a bullet-less reason is surfaced whole.
-            bullets = [
-                ln.strip()[2:].strip()
-                for ln in str(reason).splitlines()
-                if ln.strip().startswith("- ")
-            ]
-            for line in bullets or [str(reason).strip()]:
-                if line:
-                    _put(hitl.normalize_key(line), line)
-
         for rec in self.resolved_questions or []:
             _add_record(rec)
         for entry in task.revision_feedback or []:
             if not (isinstance(entry, dict) and entry.get("source") == "user_decision"):
                 continue
-            # Gate on field presence, not truthiness: a new entry always carries "decisions" (an
-            # empty list contributes nothing); only a legacy entry that predates the field falls
-            # back to its rendered reason.
-            if "decisions" in entry:
-                for rec in entry.get("decisions") or []:
-                    _add_record(rec)
-            elif entry.get("reason"):
-                _add_legacy_reason(str(entry["reason"]))
+            # Gate on field presence, not truthiness: every current entry carries "decisions" (an
+            # empty list contributes nothing); an entry missing the field entirely predates it and
+            # is an unsupported resume shape — fail fast rather than guess at its content.
+            if "decisions" not in entry:
+                raise ValueError(
+                    f"Task {task.id}: user_decision revision_feedback entry has no structured "
+                    "'decisions' field (pre-decisions legacy shape); resume is not supported for "
+                    "this entry shape."
+                )
+            for rec in entry.get("decisions") or []:
+                _add_record(rec)
         return [line_by_key[key] for key in order]
 
     def _compute_review(

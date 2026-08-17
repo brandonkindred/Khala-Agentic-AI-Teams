@@ -1,4 +1,4 @@
-"""Mocked-operation tests for ``software_engineering_team.shared.git_utils``.
+"""Mocked-operation tests for ``shared.git.git_utils``.
 
 Patches ``_run_git`` and ``subprocess.run`` to avoid touching real repos.
 """
@@ -20,7 +20,7 @@ def _fake_git_repo(tmp_path: Path) -> Path:
 def test_run_git_returns_output(monkeypatch, tmp_path) -> None:
     import subprocess
 
-    from software_engineering_team.shared import git_utils
+    from shared.git import git_utils
 
     class _R:
         returncode = 0
@@ -38,7 +38,7 @@ def test_run_git_stderr_suppressed_on_success_but_kept_on_failure(monkeypatch, t
     surfaces stderr so the failure cause is never lost from the diagnostic."""
     import subprocess
 
-    from software_engineering_team.shared import git_utils
+    from shared.git import git_utils
 
     class _Ok:
         returncode = 0
@@ -64,7 +64,7 @@ def test_run_git_stderr_suppressed_on_success_but_kept_on_failure(monkeypatch, t
 def test_run_git_timeout(monkeypatch, tmp_path) -> None:
     import subprocess
 
-    from software_engineering_team.shared import git_utils
+    from shared.git import git_utils
 
     def boom(*a, **kw):
         raise subprocess.TimeoutExpired(cmd="git", timeout=1)
@@ -78,7 +78,7 @@ def test_run_git_timeout(monkeypatch, tmp_path) -> None:
 def test_run_git_generic_exception(monkeypatch, tmp_path) -> None:
     import subprocess
 
-    from software_engineering_team.shared import git_utils
+    from shared.git import git_utils
 
     def boom(*a, **kw):
         raise OSError("no git")
@@ -90,7 +90,7 @@ def test_run_git_generic_exception(monkeypatch, tmp_path) -> None:
 
 
 def test_create_feature_branch_not_a_git_repo(tmp_path: Path) -> None:
-    from software_engineering_team.shared.git_utils import create_feature_branch
+    from shared.git.git_utils import create_feature_branch
 
     ok, msg = create_feature_branch(tmp_path, "main", "t1-x")
     assert ok is False
@@ -98,7 +98,7 @@ def test_create_feature_branch_not_a_git_repo(tmp_path: Path) -> None:
 
 
 def test_create_feature_branch_happy_path(monkeypatch, _fake_git_repo) -> None:
-    from software_engineering_team.shared import git_utils
+    from shared.git import git_utils
 
     state = {"i": 0}
 
@@ -115,7 +115,7 @@ def test_create_feature_branch_happy_path(monkeypatch, _fake_git_repo) -> None:
 
 
 def test_create_feature_branch_dirty_tree_commits_first(monkeypatch, _fake_git_repo) -> None:
-    from software_engineering_team.shared import git_utils
+    from shared.git import git_utils
 
     calls = []
 
@@ -132,7 +132,7 @@ def test_create_feature_branch_dirty_tree_commits_first(monkeypatch, _fake_git_r
 
 
 def test_create_feature_branch_already_exists_recreates(monkeypatch, _fake_git_repo) -> None:
-    from software_engineering_team.shared import git_utils
+    from shared.git import git_utils
 
     state = {"i": 0}
 
@@ -152,7 +152,7 @@ def test_create_feature_branch_already_exists_recreates(monkeypatch, _fake_git_r
 
 
 def test_create_feature_branch_stash_path(monkeypatch, _fake_git_repo) -> None:
-    from software_engineering_team.shared import git_utils
+    from shared.git import git_utils
 
     state = {"i": 0}
 
@@ -176,7 +176,7 @@ def test_create_feature_branch_stash_path(monkeypatch, _fake_git_repo) -> None:
 
 
 def test_create_feature_branch_unknown_failure(monkeypatch, _fake_git_repo) -> None:
-    from software_engineering_team.shared import git_utils
+    from shared.git import git_utils
 
     def fake_git(path, cmd, timeout=30):
         if cmd[:2] == ["git", "status"]:
@@ -192,7 +192,7 @@ def test_create_feature_branch_unknown_failure(monkeypatch, _fake_git_repo) -> N
 
 
 def test_checkout_branch_not_a_repo(tmp_path) -> None:
-    from software_engineering_team.shared.git_utils import checkout_branch
+    from shared.git.git_utils import checkout_branch
 
     ok, msg = checkout_branch(tmp_path, "main")
     assert ok is False
@@ -200,7 +200,7 @@ def test_checkout_branch_not_a_repo(tmp_path) -> None:
 
 
 def test_checkout_branch_success(monkeypatch, _fake_git_repo) -> None:
-    from software_engineering_team.shared import git_utils
+    from shared.git import git_utils
 
     monkeypatch.setattr(git_utils, "_run_git", lambda *a, **kw: (0, ""))
     ok, msg = git_utils.checkout_branch(_fake_git_repo, "main")
@@ -208,7 +208,7 @@ def test_checkout_branch_success(monkeypatch, _fake_git_repo) -> None:
 
 
 def test_checkout_branch_failure(monkeypatch, _fake_git_repo) -> None:
-    from software_engineering_team.shared import git_utils
+    from shared.git import git_utils
 
     monkeypatch.setattr(git_utils, "_run_git", lambda *a, **kw: (1, "no branch"))
     monkeypatch.setattr(git_utils, "_clear_disposable_files_if_blocking", lambda *_: False)
@@ -217,14 +217,14 @@ def test_checkout_branch_failure(monkeypatch, _fake_git_repo) -> None:
 
 
 def test_write_files_and_commit_not_a_repo(tmp_path) -> None:
-    from software_engineering_team.shared.git_utils import write_files_and_commit
+    from shared.git.git_utils import write_files_and_commit
 
     ok, msg = write_files_and_commit(tmp_path, {"a.py": "x"}, "msg")
     assert ok is False
 
 
 def test_write_files_and_commit_no_changes(monkeypatch, _fake_git_repo) -> None:
-    from software_engineering_team.shared import git_utils
+    from shared.git import git_utils
 
     def fake_git(path, cmd, timeout=30):
         if cmd[:2] == ["git", "status"]:
@@ -238,7 +238,7 @@ def test_write_files_and_commit_no_changes(monkeypatch, _fake_git_repo) -> None:
 
 
 def test_write_files_and_commit_full_flow(monkeypatch, _fake_git_repo) -> None:
-    from software_engineering_team.shared import git_utils
+    from shared.git import git_utils
 
     def fake_git(path, cmd, timeout=30):
         if cmd[:2] == ["git", "status"]:
@@ -252,7 +252,7 @@ def test_write_files_and_commit_full_flow(monkeypatch, _fake_git_repo) -> None:
 
 
 def test_write_files_and_commit_add_failure(monkeypatch, _fake_git_repo) -> None:
-    from software_engineering_team.shared import git_utils
+    from shared.git import git_utils
 
     def fake_git(path, cmd, timeout=30):
         if cmd[:3] == ["git", "add", "-A"]:
@@ -266,14 +266,14 @@ def test_write_files_and_commit_add_failure(monkeypatch, _fake_git_repo) -> None
 
 
 def test_commit_working_tree_not_a_repo(tmp_path) -> None:
-    from software_engineering_team.shared.git_utils import commit_working_tree
+    from shared.git.git_utils import commit_working_tree
 
     ok, msg = commit_working_tree(tmp_path, "m")
     assert ok is False
 
 
 def test_commit_working_tree_no_changes(monkeypatch, _fake_git_repo) -> None:
-    from software_engineering_team.shared import git_utils
+    from shared.git import git_utils
 
     def fake_git(path, cmd, timeout=30):
         return 0, ""
@@ -285,7 +285,7 @@ def test_commit_working_tree_no_changes(monkeypatch, _fake_git_repo) -> None:
 
 
 def test_commit_working_tree_commit_fails(monkeypatch, _fake_git_repo) -> None:
-    from software_engineering_team.shared import git_utils
+    from shared.git import git_utils
 
     def fake_git(path, cmd, timeout=30):
         if cmd[:2] == ["git", "status"]:
@@ -300,27 +300,27 @@ def test_commit_working_tree_commit_fails(monkeypatch, _fake_git_repo) -> None:
 
 
 def test_branch_has_commits_ahead_of_not_a_repo(tmp_path) -> None:
-    from software_engineering_team.shared.git_utils import branch_has_commits_ahead_of
+    from shared.git.git_utils import branch_has_commits_ahead_of
 
     assert branch_has_commits_ahead_of(tmp_path, "feature/x", "main") is False
 
 
 def test_branch_has_commits_ahead_of_true(monkeypatch, _fake_git_repo) -> None:
-    from software_engineering_team.shared import git_utils
+    from shared.git import git_utils
 
     monkeypatch.setattr(git_utils, "_run_git", lambda *a, **kw: (0, "abc commit\n"))
     assert git_utils.branch_has_commits_ahead_of(_fake_git_repo, "feature/x", "main") is True
 
 
 def test_branch_has_commits_ahead_of_false(monkeypatch, _fake_git_repo) -> None:
-    from software_engineering_team.shared import git_utils
+    from shared.git import git_utils
 
     monkeypatch.setattr(git_utils, "_run_git", lambda *a, **kw: (0, ""))
     assert git_utils.branch_has_commits_ahead_of(_fake_git_repo, "feature/x", "main") is False
 
 
 def test_merge_branch_success(monkeypatch, _fake_git_repo) -> None:
-    from software_engineering_team.shared import git_utils
+    from shared.git import git_utils
 
     monkeypatch.setattr(git_utils, "_run_git", lambda *a, **kw: (0, ""))
     ok, _ = git_utils.merge_branch(_fake_git_repo, "feature/x", "main")
@@ -328,14 +328,14 @@ def test_merge_branch_success(monkeypatch, _fake_git_repo) -> None:
 
 
 def test_merge_branch_not_a_repo(tmp_path) -> None:
-    from software_engineering_team.shared.git_utils import merge_branch
+    from shared.git.git_utils import merge_branch
 
     ok, msg = merge_branch(tmp_path, "feature/x", "main")
     assert ok is False
 
 
 def test_merge_branch_checkout_fail(monkeypatch, _fake_git_repo) -> None:
-    from software_engineering_team.shared import git_utils
+    from shared.git import git_utils
 
     def fake_git(path, cmd, timeout=30):
         if cmd[:2] == ["git", "checkout"]:
@@ -348,7 +348,7 @@ def test_merge_branch_checkout_fail(monkeypatch, _fake_git_repo) -> None:
 
 
 def test_merge_branch_merge_fail(monkeypatch, _fake_git_repo) -> None:
-    from software_engineering_team.shared import git_utils
+    from shared.git import git_utils
 
     def fake_git(path, cmd, timeout=30):
         if cmd[:2] == ["git", "merge"]:
@@ -361,7 +361,7 @@ def test_merge_branch_merge_fail(monkeypatch, _fake_git_repo) -> None:
 
 
 def test_abort_merge_success(monkeypatch, _fake_git_repo) -> None:
-    from software_engineering_team.shared import git_utils
+    from shared.git import git_utils
 
     monkeypatch.setattr(git_utils, "_run_git", lambda *a, **kw: (0, ""))
     ok, _ = git_utils.abort_merge(_fake_git_repo)
@@ -369,14 +369,14 @@ def test_abort_merge_success(monkeypatch, _fake_git_repo) -> None:
 
 
 def test_abort_merge_not_a_repo(tmp_path) -> None:
-    from software_engineering_team.shared.git_utils import abort_merge
+    from shared.git.git_utils import abort_merge
 
     ok, _ = abort_merge(tmp_path)
     assert ok is False
 
 
 def test_delete_branch_success(monkeypatch, _fake_git_repo) -> None:
-    from software_engineering_team.shared import git_utils
+    from shared.git import git_utils
 
     monkeypatch.setattr(git_utils, "_run_git", lambda *a, **kw: (0, ""))
     ok, _ = git_utils.delete_branch(_fake_git_repo, "feature/x")
@@ -384,7 +384,7 @@ def test_delete_branch_success(monkeypatch, _fake_git_repo) -> None:
 
 
 def test_delete_branch_failure(monkeypatch, _fake_git_repo) -> None:
-    from software_engineering_team.shared import git_utils
+    from shared.git import git_utils
 
     monkeypatch.setattr(git_utils, "_run_git", lambda *a, **kw: (1, "no such branch"))
     ok, msg = git_utils.delete_branch(_fake_git_repo, "feature/x")
@@ -392,14 +392,14 @@ def test_delete_branch_failure(monkeypatch, _fake_git_repo) -> None:
 
 
 def test_delete_branch_not_a_repo(tmp_path) -> None:
-    from software_engineering_team.shared.git_utils import delete_branch
+    from shared.git.git_utils import delete_branch
 
     ok, _ = delete_branch(tmp_path, "feature/x")
     assert ok is False
 
 
 def test_ensure_development_branch_not_a_repo(tmp_path) -> None:
-    from software_engineering_team.shared.git_utils import ensure_development_branch
+    from shared.git.git_utils import ensure_development_branch
 
     ok, _ = ensure_development_branch(tmp_path)
     assert ok is False
@@ -407,7 +407,7 @@ def test_ensure_development_branch_not_a_repo(tmp_path) -> None:
 
 def test_ensure_development_branch_already_exists(monkeypatch, _fake_git_repo) -> None:
     """Existing development branch returns success after checkout."""
-    from software_engineering_team.shared import git_utils
+    from shared.git import git_utils
 
     def fake_git(path, cmd, timeout=30, **kwargs):
         if cmd[:2] == ["git", "show-ref"]:
@@ -423,7 +423,7 @@ def test_ensure_development_branch_already_exists(monkeypatch, _fake_git_repo) -
 
 
 def test_ensure_development_branch_creates(monkeypatch, _fake_git_repo) -> None:
-    from software_engineering_team.shared import git_utils
+    from shared.git import git_utils
 
     def fake_git(path, cmd, timeout=30, **kwargs):
         if cmd[:2] == ["git", "show-ref"]:
@@ -439,7 +439,7 @@ def test_ensure_development_branch_creates(monkeypatch, _fake_git_repo) -> None:
 
 
 def test_ensure_development_branch_no_base(monkeypatch, _fake_git_repo) -> None:
-    from software_engineering_team.shared import git_utils
+    from shared.git import git_utils
 
     def fake_git(path, cmd, timeout=30, **kwargs):
         if cmd[:2] == ["git", "show-ref"]:
@@ -455,7 +455,7 @@ def test_ensure_development_branch_no_base(monkeypatch, _fake_git_repo) -> None:
 
 
 def test_initialize_new_repo_already_a_repo(monkeypatch, _fake_git_repo) -> None:
-    from software_engineering_team.shared import git_utils
+    from shared.git import git_utils
 
     monkeypatch.setattr(git_utils, "ensure_development_branch", lambda p: (True, "Created"))
     ok, msg = git_utils.initialize_new_repo(_fake_git_repo)
@@ -464,7 +464,7 @@ def test_initialize_new_repo_already_a_repo(monkeypatch, _fake_git_repo) -> None
 
 
 def test_initialize_new_repo_fresh(monkeypatch, tmp_path) -> None:
-    from software_engineering_team.shared import git_utils
+    from shared.git import git_utils
 
     def fake_git(path, cmd, timeout=30):
         if cmd == ["git", "branch", "--show-current"]:
@@ -480,7 +480,7 @@ def test_initialize_new_repo_fresh(monkeypatch, tmp_path) -> None:
 
 
 def test_initialize_new_repo_init_fails(monkeypatch, tmp_path) -> None:
-    from software_engineering_team.shared import git_utils
+    from shared.git import git_utils
 
     def fake_git(path, cmd, timeout=30):
         if cmd == ["git", "init"]:

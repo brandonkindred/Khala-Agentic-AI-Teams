@@ -224,16 +224,19 @@ describe('PaperTradingPanelComponent', () => {
       expect(skipped.textContent).toContain('realism_failed');
     });
 
-    it('shows the RUNNING badge and progress message while a session is in flight', () => {
-      component.record = makeRecord();
-      component.paperSession = makeSession({ status: 'running', verdict: undefined, comparison: undefined });
-      fixture.detectChanges();
+    it.each(['running', 'opening', 'warming_up', 'live'] as const)(
+      'shows the RUNNING badge and progress message while a session is in flight (status=%s)',
+      (status) => {
+        component.record = makeRecord();
+        component.paperSession = makeSession({ status, verdict: undefined, comparison: undefined });
+        fixture.detectChanges();
 
-      const badge: HTMLElement = fixture.nativeElement.querySelector('.paper-verdict-badge');
-      expect(badge.classList.contains('verdict-running')).toBe(true);
-      expect(badge.textContent).toContain('RUNNING');
-      expect(fixture.nativeElement.querySelector('.comparison-table')).toBeNull();
-    });
+        const badge: HTMLElement = fixture.nativeElement.querySelector('.paper-verdict-badge');
+        expect(badge.classList.contains('verdict-running')).toBe(true);
+        expect(badge.textContent).toContain('RUNNING');
+        expect(fixture.nativeElement.querySelector('.comparison-table')).toBeNull();
+      },
+    );
 
     it('shows the verdict badge, trade count, date range, and comparison table for a completed session', () => {
       component.record = makeRecord({ is_publishable: true });

@@ -25,10 +25,13 @@ from .code_boundaries import node_end_line, node_start_line
 _HEURISTIC_SKIP = ("}", ")", "]", "*/", "/*", "//", "#", "*", "...")
 
 # The ``render_annotated_hunks`` path (coding-team PR review) prefixes each hunk
-# line with its original file line number: ``4242: const x = 1;``. This pattern
-# detects and strips those prefixes so the boundary helpers below receive plain
-# code and a physical (1-based) line index.
-_LINE_NUMBER_PREFIX_RE = re.compile(r"^(\d+): ")
+# line with its original file line number: ``4242| const x = 1;`` (legacy
+# fixtures still use ``4242: const x = 1;``). A pipe gutter is the live format
+# so the prefix cannot be mistaken for Python ``def``/dict syntax. Leading
+# spaces before the digits are width-padding (``  9| ``), never source indent.
+# Indented dict keys (``    1: value``) do not match: they use ``: `` and sit
+# at a 4-space indent, whereas a padded ``| `` gutter never uses ``: ``.
+_LINE_NUMBER_PREFIX_RE = re.compile(r"^(?:(\d+): |[ ]*(\d+)\| )")
 
 # Bare inter-hunk gap marker emitted by ``render_annotated_hunks`` between
 # non-contiguous hunks. Joining across it would attach a later hunk's indented
@@ -49,6 +52,9 @@ class EnclosingConstruct:
           is ``"function"`` and the function's AST span is nested inside a
           class body (a direct method, or a helper function defined inside a
           method); otherwise it is the bare name.
+        - Property setters/deleters append ``.setter`` / ``.deleter`` so
+          ``@x.setter`` / ``@x.deleter`` do not collide with the ``@property``
+          getter under the same ``Class.x`` base name.
     """
 
     start_line: int
@@ -60,10 +66,10 @@ class EnclosingConstruct:
 def strip_numbered_prefixes(
     content: str, line_number: int
 ) -> Tuple[str, int, Optional[Callable[[int], int]]]:
-    """Strip ``N: `` line-number prefixes from pre-numbered hunk content.
+    """Strip ``N| `` / legacy ``N: `` line-number prefixes from pre-numbered hunk content.
 
     The coding-team PR-review path calls ``render_annotated_hunks`` which
-    prepends each line with its new-file line number: ``4242: const x = 1;``.
+    prepends each line with its new-file line number: ``4242| const x = 1;``.
     This content reaches the verifier's ``CodebaseIndex`` verbatim, so the
     boundary-lookup functions below must strip those prefixes before scanning.
 
@@ -72,13 +78,13 @@ def strip_numbered_prefixes(
         - ``line_number`` is a positive int (not a bool).
 
     Postconditions:
-        - If the first non-blank line does NOT match ``r'^\\d+: '``, the
-          content is not pre-numbered; returns ``(content, line_number, None)``
-          unchanged — no remap is needed.
+        - If the first non-blank line does NOT match ``r'^(\\d+): '`` or
+          ``r'^[ ]*(\\d+)\\| '``, the content is not pre-numbered; returns
+          ``(content, line_number, None)`` unchanged — no remap is needed.
         - Otherwise returns ``(stripped_content, physical_index, line_mapper)``
           where:
-          - ``stripped_content`` is the content with all ``N: `` prefixes
-            removed. Bare ``...`` hunk-gap markers from
+          - ``stripped_content`` is the content with all ``N| `` / legacy
+            ``N: `` prefixes removed. Bare ``...`` hunk-gap markers from
             ``render_annotated_hunks`` are kept as-is so
             :func:`enclosing_construct` can resolve each hunk independently
             without joining them into one AST (joining would attach a later
@@ -115,7 +121,7 @@ def strip_numbered_prefixes(
     for i, line in enumerate(lines, start=1):
         m = _LINE_NUMBER_PREFIX_RE.match(line)
         if m:
-            orig = int(m.group(1))
+            orig = int(m.group(1) or m.group(2))
             phys_to_orig[i] = orig
             stripped.append(line[m.end() :])
             if orig == line_number and not exact_match:
@@ -164,6 +170,61 @@ def _hunk_segments(lines: List[str]) -> List[Tuple[int, int, List[str]]]:
     return segments
 
 
+def _property_accessor_suffix(node: ast.AST) -> str:
+    """Return ``.setter`` / ``.deleter`` when ``node`` is a property accessor.
+
+    Preconditions:
+        - ``node`` is any AST node (non-function nodes yield ``""``).
+
+    Postconditions:
+        - Returns ``".setter"`` or ``".deleter"`` when a decorator Attribute
+          with that ``attr`` is present; otherwise ``""`` (including plain
+          ``@property`` getters, which keep the base ``Class.x`` name).
+        - Never raises.
+    """
+    if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        return ""
+    for dec in node.decorator_list:
+        if isinstance(dec, ast.Attribute) and dec.attr in ("setter", "deleter"):
+            return f".{dec.attr}"
+    return ""
+
+
+def _qualify_construct_name(
+    name: str,
+    kind: str,
+    start_line: int,
+    end_line: int,
+    peers: List[Tuple[int, int, str, str]],
+    *,
+    accessor_suffix: str = "",
+) -> str:
+    """Build the display/lookup name for a function or class construct.
+
+    Preconditions:
+        - ``peers`` entries are ``(start, end, bare_name, kind)`` spans from the
+          same contiguous snippet (may include ``self``).
+        - ``accessor_suffix`` is ``""``, ``".setter"``, or ``".deleter"``.
+
+    Postconditions:
+        - Class constructs return ``name`` unchanged.
+        - Functions nested in a class become ``ClassName.name`` (+ optional
+          accessor suffix); otherwise ``name`` (+ optional accessor suffix).
+    """
+    if kind != "function":
+        return name
+    enclosing_classes = [
+        (cend - cstart, cname)
+        for cstart, cend, cname, ckind in peers
+        if ckind == "class" and cstart <= start_line and cend >= end_line
+    ]
+    qualified = name
+    if enclosing_classes:
+        _, class_name = min(enclosing_classes)
+        qualified = f"{class_name}.{name}"
+    return f"{qualified}{accessor_suffix}"
+
+
 def _enclosing_construct_ast(content: str, line_number: int) -> Optional[EnclosingConstruct]:
     """AST-based enclosing-construct lookup over a single contiguous snippet."""
     try:
@@ -171,7 +232,8 @@ def _enclosing_construct_ast(content: str, line_number: int) -> Optional[Enclosi
     except Exception:
         return None
 
-    candidates: List[Tuple[int, int, int, str, str]] = []
+    # (span, start, end, bare_name, kind, accessor_suffix)
+    candidates: List[Tuple[int, int, int, str, str, str]] = []
     for node in ast.walk(tree):
         if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
             continue
@@ -179,28 +241,109 @@ def _enclosing_construct_ast(content: str, line_number: int) -> Optional[Enclosi
         end_line = node_end_line(node)
         if start_line <= line_number <= end_line:
             kind = "class" if isinstance(node, ast.ClassDef) else "function"
-            candidates.append((end_line - start_line, start_line, end_line, node.name, kind))
+            candidates.append(
+                (
+                    end_line - start_line,
+                    start_line,
+                    end_line,
+                    node.name,
+                    kind,
+                    _property_accessor_suffix(node),
+                )
+            )
 
     if not candidates:
         return None
 
     # Smallest span → innermost enclosing construct.
-    _, func_start, func_end, name, kind = min(candidates)
-
-    qualified_name = name
-    if kind == "function":
-        enclosing_classes = [
-            (span, cname)
-            for span, cstart, cend, cname, ckind in candidates
-            if ckind == "class" and cstart <= func_start and cend >= func_end
-        ]
-        if enclosing_classes:
-            _, class_name = min(enclosing_classes)
-            qualified_name = f"{class_name}.{name}"
+    _, func_start, func_end, name, kind, accessor_suffix = min(candidates)
+    peers = [(s, e, n, k) for _, s, e, n, k, _ in candidates]
+    qualified_name = _qualify_construct_name(
+        name, kind, func_start, func_end, peers, accessor_suffix=accessor_suffix
+    )
 
     return EnclosingConstruct(
         start_line=func_start, end_line=func_end, name=qualified_name, kind=kind
     )
+
+
+def _iter_constructs_ast(content: str) -> List[EnclosingConstruct]:
+    """List every function/method/class in a single contiguous Python snippet.
+
+    Postconditions:
+        - Returns ``[]`` when ``content`` fails to parse. Never raises.
+        - Otherwise one ``EnclosingConstruct`` per def/class with method names
+          qualified as ``ClassName.method`` when nested in a class body;
+          property setters/deleters append ``.setter`` / ``.deleter``.
+    """
+    try:
+        tree = ast.parse(content)
+    except Exception:
+        return []
+
+    # (start, end, bare_name, kind, accessor_suffix)
+    nodes: List[Tuple[int, int, str, str, str]] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            continue
+        start_line = node_start_line(node)
+        end_line = node_end_line(node)
+        kind = "class" if isinstance(node, ast.ClassDef) else "function"
+        nodes.append((start_line, end_line, node.name, kind, _property_accessor_suffix(node)))
+
+    peers = [(s, e, n, k) for s, e, n, k, _ in nodes]
+    results: List[EnclosingConstruct] = []
+    for start_line, end_line, name, kind, accessor_suffix in nodes:
+        qualified = _qualify_construct_name(
+            name, kind, start_line, end_line, peers, accessor_suffix=accessor_suffix
+        )
+        results.append(
+            EnclosingConstruct(start_line=start_line, end_line=end_line, name=qualified, kind=kind)
+        )
+    return results
+
+
+def iter_constructs(content: str, *, annotated_hunks: bool = False) -> List[EnclosingConstruct]:
+    """Return every function/method/class construct in ``content``.
+
+    When ``annotated_hunks`` is True (content produced by stripping
+    ``render_annotated_hunks`` output), bare column-0 ``...`` gap markers
+    split the excerpt into independently parsed hunks — the same rule as
+    :func:`enclosing_construct`. An unparseable sibling hunk is skipped so
+    constructs in other hunks remain discoverable by name.
+
+    When ``annotated_hunks`` is False (ordinary full-file source), ``...`` is
+    left alone (valid Ellipsis) and the whole content is parsed once.
+
+    Preconditions:
+        - ``content`` is a string (may be empty).
+
+    Postconditions:
+        - Returns ``[]`` when nothing parses. Never raises.
+        - Otherwise returns one ``EnclosingConstruct`` per discoverable
+          ``FunctionDef`` / ``AsyncFunctionDef`` / ``ClassDef``, with method
+          names qualified as ``ClassName.method`` when nested in a class body.
+          Ranges use ``node_start_line`` / ``node_end_line`` expressed in the
+          parent ``content``'s 1-based coordinates.
+    """
+    if annotated_hunks:
+        lines = content.splitlines()
+        if any(line == _HUNK_SEPARATOR for line in lines):
+            results: List[EnclosingConstruct] = []
+            for seg_start, _seg_end, seg_lines in _hunk_segments(lines):
+                local = _iter_constructs_ast("\n".join(seg_lines))
+                for c in local:
+                    results.append(
+                        EnclosingConstruct(
+                            start_line=c.start_line + seg_start - 1,
+                            end_line=c.end_line + seg_start - 1,
+                            name=c.name,
+                            kind=c.kind,
+                        )
+                    )
+            return results
+
+    return _iter_constructs_ast(content)
 
 
 def enclosing_construct(
@@ -302,6 +445,38 @@ def segment_containing_line(
                     return "\n".join(seg_lines)
             return None
     return content
+
+
+def hunk_segment_bounds(
+    content: str, line_number: int, *, annotated_hunks: bool = False
+) -> Optional[Tuple[int, int]]:
+    """1-based ``(start, end)`` bounds of the gap-bounded segment containing ``line_number``.
+
+    The bounds counterpart of :func:`segment_containing_line`: same gap-scan
+    over :func:`_hunk_segments`, but returns the segment's endpoints instead
+    of its joined text, for callers that need to clip a range rather than
+    re-parse a snippet.
+
+    Preconditions:
+        - ``content`` is a string (may be empty).
+        - ``line_number`` >= 1.
+
+    Postconditions:
+        - When ``annotated_hunks`` is False, or ``content`` has no bare
+          ``...`` gap markers, returns ``(1, len(lines))`` where ``lines`` is
+          ``content.splitlines()``, or ``None`` when ``content`` is empty.
+        - When ``annotated_hunks`` is True and gap markers are present,
+          returns the 1-based ``(start, end)`` of the single hunk segment
+          containing ``line_number``, or ``None`` when no segment contains it.
+        - Never raises.
+    """
+    lines = content.splitlines()
+    if annotated_hunks and any(line == _HUNK_SEPARATOR for line in lines):
+        for seg_start, seg_end, _seg_lines in _hunk_segments(lines):
+            if seg_start <= line_number <= seg_end:
+                return (seg_start, seg_end)
+        return None
+    return (1, len(lines)) if lines else None
 
 
 def enclosing_construct_start_heuristic(content: str, line_number: int) -> Optional[int]:

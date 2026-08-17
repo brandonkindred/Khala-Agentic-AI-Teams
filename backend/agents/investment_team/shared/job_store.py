@@ -31,7 +31,9 @@ __all__ = [
     "get_job",
     "is_job_cancelled",
     "list_jobs",
+    "mark_all_running_jobs_failed",
     "update_job",
+    "update_job_if_not_cancelled",
 ]
 
 _client_instance: Optional[JobServiceClient] = None
@@ -50,7 +52,9 @@ _store = make_status_job_store(lambda: _client())
 create_job = _store.create_job
 get_job = _store.get_job
 update_job = _store.update_job
+update_job_if_not_cancelled = _store.update_job_if_not_cancelled
 list_jobs = _store.list_jobs
 cancel_job = _store.cancel_job
 is_job_cancelled = _store.is_job_cancelled
 delete_job = _store.delete_job
+mark_all_running_jobs_failed = _store.mark_all_running_jobs_failed

@@ -43,6 +43,20 @@ TTL (seconds, default `30`) for the cross-container runtime config cache backing
 supply entry defaults (model/base URL). Each team container caches resolved defaults for this window.
 Garbage → default; negative floors to `0` (read-through every call). No effect when Postgres is unset.
 
+### LLM_USAGE_BUFFER_MAX
+Maximum number of LLM-usage rows held in memory before the oldest is dropped
+(default `1000`; floor `1`). Overflow drops the oldest row and logs a WARNING
+once per burst. Used by `llm_service.usage_flusher`. No-op when Postgres is unset.
+
+### LLM_USAGE_FLUSH_INTERVAL_S
+Seconds between background drains of the in-memory usage buffer to
+`llm_call_records` (default `2`; garbage → `2`, negatives clamped to `0` which
+floors the loop at `0.1s` so it never busy-loops). The observer does zero DB I/O
+on the LLM call path. A final drain runs at process shutdown (team-app
+lifespan, Unified API lifespan, or team-service ``atexit``) before the
+Postgres pool closes. The observer registry is process-local, so every
+LLM-calling process registers its own flusher.
+
 ### LLM_NUM_CTX_FALLBACK_TTL_S
 TTL (seconds, default `300`) for the Ollama client's provisional `num_ctx` fallback. When a model's
 context size is not in `KNOWN_MODEL_CONTEXT` / `LLM_CONTEXT_SIZE` and `/api/show` fails, the client
@@ -157,7 +171,7 @@ Ollama Cloud 429 bodies are classified into `session` / `weekly` / `rate` from p
 
 | Kind | Env | Default | Notes |
 |---|---|---|---|
-| `session` | `LLM_FAILOVER_SESSION_WINDOW_S` | `18000` (5h) | Fixed from error time; **ignores** `Retry-After` |
+| `session` | `LLM_FAILOVER_SESSION_WINDOW_S` | `3900` (65m) | Fixed from error time; **ignores** `Retry-After` |
 | `weekly` | `LLM_FAILOVER_WEEKLY_WINDOW_S` | `86400` (24h) | Fixed from error time; **ignores** `Retry-After` (Cloud weekly bodies omit a reset timestamp) |
 | `rate` | `LLM_FAILOVER_RATE_WINDOW_S` | `300` (5m) | Used only when the 429 carries no `Retry-After`; otherwise `Retry-After` wins |
 
@@ -179,13 +193,15 @@ this interval. Floored at `0.1`s internally to avoid busy-looping; garbage/missi
 the default. `mark_exhausted` (the write on an actual 429) is unaffected and stays synchronous.
 
 ### LLM_COMPACTION_CACHE_SIZE
-Capacity of the process-global memoization cache for `compact_text` (`llm_service/compaction.py`),
-default **256**. `compact_text` compacts oversized text (spec, architecture overview, existing
-codebase, etc.) with an LLM; the result is deterministic given `(model, budget, content)`, so it is
-cached in a bounded LRU keyed on that triple and reused on repeated identical calls — most notably
-the code review agent's review→fix→re-review loop, which hands the same shared context to every task
-and every cycle. Only genuine full compactions are cached; every fallback path (LLM failure, empty
-result, or a chunked run with any degraded chunk) is retried rather than frozen. Set to `0` to
+Capacity of the `compact_text` memoization store (`llm_service/compaction.py`),
+default **256**. Backed by `shared.cache`: Redis when `REDIS_URL`/`REDIS_HOST` is
+set (value TTL via `REDIS_CACHE_TTL_S`; this size still caps how many keys the
+Redis LRU ZSET retains per namespace), otherwise an in-process bounded LRU of this
+capacity. `compact_text` results are keyed on the `(model, budget, content_description, content)`
+tuple and reused on identical calls — most notably the code review agent's
+review→fix→re-review loop. Only genuine full compactions are cached; every fallback
+path (LLM failure, empty result, or a chunked run with any degraded chunk) is
+retried rather than frozen. Set to `0` to
 disable the cache (pure passthrough); a value below 0 is floored to 0, and unparseable values fall
 back to the default.
 
@@ -201,6 +217,10 @@ Temporal namespace.
 
 ### TEMPORAL_TASK_QUEUE
 Temporal task queue name.
+
+### SE_WORKFLOW_V2
+Removed. `/run-team` always starts `RunTeamWorkflowV2`; this variable no
+longer has any effect and may be safely unset from any environment.
 
 ### Investment team Temporal queues
 The investment team runs three Temporal queues, all booted from
@@ -297,15 +317,10 @@ app's own deployed Temporal container). There is intentionally no code-review-on
 address override: the worker connects through the process-wide shared Temporal
 client, which reads only `TEMPORAL_ADDRESS`, so `TEMPORAL_ADDRESS` is the single
 override for where reviews run. Setting `TEMPORAL_ADDRESS` to an empty /
-`disabled` / `none` / `off` / `0` / `false` / `no` value, selecting
-`LLM_PROVIDER=dummy`, or running under `pytest` falls back to thread mode. Only the
+`disabled` / `none` / `off` / `0` / `false` / `no` value falls back to
+thread mode. Only the
 code review agent's *default* is flipped on; every other team's thread-default
 dispatch decision is unchanged.
-
-### CODE_REVIEW_TEMPORAL_FORCE
-Test-only escape hatch (truthy: `1`/`true`/`yes`/`on`) that re-enables code-review
-Temporal mode despite the `pytest`/`dummy` guards, provided an address still
-resolves. Not load-bearing outside integration tests.
 
 ### TEMPORAL_PAYLOAD_COMPRESSION
 Boolean (default `false` — opt-in). The shared Temporal client
@@ -339,13 +354,21 @@ and small payloads are nowhere near the warning threshold anyway).
 ### SECURITY_GATEWAY_ENABLED
 Security gateway toggle (default: true).
 
+Unified-API lifespan worker/route registration (which step boots which worker,
+which routers mount at import time vs inside `lifespan()`) is catalogued in
+[`UNIFIED_API_LIFESPAN.md`](UNIFIED_API_LIFESPAN.md). The toggles below are the
+gates for those steps.
+
 ### UNIFIED_API_SANDBOX_TEMPORAL_WORKER
-Agent Console sandbox reaper/worker toggle (default: true). When true, the
-unified-api `lifespan` starts the Agent Console sandbox idle reaper — a
+Platform sandbox reaper/worker toggle (default: true). When true, the
+unified-api `lifespan` starts the platform sandbox idle reaper — a
 durable `SandboxReaperWorkflow` served by this process's own sandbox-only
-Temporal worker thread when Temporal is enabled, or an in-process asyncio
-task otherwise. Set to `false`/`0`/`no` to run unified-api without starting
-the sandbox reaper or its Temporal worker thread at all.
+Temporal worker thread (`start_agent_platform_sandbox_temporal_worker_thread`
+in `agent_platform.sandbox.temporal.worker`) when Temporal is enabled, or
+an in-process asyncio task otherwise. This lifespan is the sole boot site
+for that worker; the standalone agent-provisioning team container must not
+poll `SANDBOX_TASK_QUEUE`. Set to `false`/`0`/`no` to run unified-api
+without starting the sandbox reaper or its Temporal worker thread at all.
 
 ### UNIFIED_API_TEAM_ASSISTANTS_ENABLED
 Team-assistant conversational sub-app mount toggle (default: true). When
@@ -358,11 +381,18 @@ registration entirely (no assistant sub-app is ever mounted, regardless of
 traffic) — team proxy routes and health checks are unaffected.
 
 ### UNIFIED_API_AGENT_STUDIO_TEMPORAL_WORKER
-Agent Studio Temporal worker toggle (default: true). When true, the
-unified-api `lifespan` starts the in-process Agent Studio Temporal worker
-thread (Agent Studio is Temporal-only; the team's requests fail without it).
-Set to `false`/`0`/`no` to run unified-api without booting this worker
-thread, e.g. when Agent Studio is unused.
+Agent Studio Temporal worker toggle (default: true). This governs **only** the
+Studio authoring worker — the sole poller of `agent-studio-queue` — not Temporal
+itself. When true, the unified-api `lifespan` starts the in-process Agent Studio
+Temporal worker thread. Authoring CRUD (conversations / clone / save) works whether
+or not that worker is booted: `agent_platform.studio.temporal.dispatch` runs the
+Studio workflows when the worker is connected and falls back to the in-process
+`AgentStudioService` singleton otherwise, so this toggle only selects which dispatch
+path authoring takes. Set to `false`/`0`/`no` to skip booting the worker; other
+teams' Temporal workers are unaffected. This does not make Temporal optional for the
+platform — the durable subsystems (provisioning, sandbox lifecycle, pipeline runs,
+persona founder) still require a running Temporal cluster; only Studio authoring's
+workflow wrappers have been demoted to optional.
 
 ### ENABLE_LOG_API
 Exposes HTTP log endpoint.
@@ -499,6 +529,12 @@ Retention window (by `last_seen`) for `se_learnings` rows used by
 diagnostics and a memory watchdog; `team_service/entrypoint.py` controls how many
 workers run. See `backend/shared/observability/process_health.py`.
 
+The `khala` (unified-api) service is not a `team_service` worker and is sized
+separately — its container `mem_limit`/`mem_reservation` in `docker-compose.yml`,
+the RSS-measurement tooling and methodology, and the current findings (a
+reasoned estimate pending a live measurement) are documented in
+[`docker/README.md`](../docker/README.md)'s "Memory / RSS Measurement" section.
+
 ### TEAM_WORKERS
 uvicorn worker processes per team service (default 2; parsed defensively, clamped
 to `[1, 16]`). Each worker is a full Python interpreter loading the whole app, so
@@ -570,7 +606,7 @@ blocking all provisioning/deprovisioning traffic on a visibility-RPC hiccup.
 ## Agentic Team Provisioning
 
 WAIT-state reliability for Agent Studio pipeline test runs
-(`agentic_team_provisioning/runtime/pipeline_runner.py`). All three parse
+(`agent_team_studio/agentic_team_provisioning/runtime/pipeline_runner.py`). All three parse
 defensively (garbage → default) and are read once when the `PipelineRunner`
 singleton is constructed.
 
@@ -692,15 +728,19 @@ single budget, not two. Default `16`, floor `1` (`1` runs both phases' calls
 sequentially). Results merge in deterministic order regardless of completion
 order.
 
-The value actually used is `min(CODE_REVIEW_MAP_PARALLELISM, LLM_MAX_CONCURRENCY,
-chunk_count)` (see `LLM_MAX_CONCURRENCY` above) -- an adaptive fan-out width
-rather than a flat one: small reviews (few chunks) never request more workers
-than they have chunks, and raising this ceiling for large reviews can never
-push the map phase past the process-wide `LLM_MAX_CONCURRENCY` gate, no matter
-what else is concurrently in flight. With both vars at their defaults (`16`
-and `4`), the effective width is unchanged from the previous fixed-`4`
-behavior; raise `LLM_MAX_CONCURRENCY` (and this var, if a higher value is
-desired) together to let large-PR reviews fan out wider.
+The map phase's outer fan-out width is `min(_map_parallelism(), chunk_count)`,
+i.e. `min(CODE_REVIEW_MAP_PARALLELISM, LLM_MAX_CONCURRENCY, chunk_count)` (see
+`LLM_MAX_CONCURRENCY` above) -- an adaptive fan-out width rather than a flat
+one: small reviews (few chunks) never request more workers than they have
+chunks, and raising this ceiling for large reviews can never push the map
+phase past the process-wide `LLM_MAX_CONCURRENCY` gate, no matter what else is
+concurrently in flight. With both vars at their defaults (`16` and `4`), the
+effective width is unchanged from the previous fixed-`4` behavior; raise
+`LLM_MAX_CONCURRENCY` (and this var, if a higher value is desired) together to
+let large-PR reviews fan out wider. This outer, chunk-count-clamped width is
+distinct from the run-wide `reviewer.run()` semaphore ceiling described below,
+which uses `_map_parallelism()` directly and is intentionally **not** clamped
+to `chunk_count`.
 
 The map-phase fan-out governed by this knob **applies only to the in-process
 thread-mode fallback** (`coordinator.run_coordinator`, via `mapping.py`'s
@@ -725,14 +765,14 @@ calls are also `reviewer.run()` calls, so this knob's enforcement contract
 covers them too, but the two dispatch modes differ in *how* it is enforced:
 
 - **Thread-mode fallback** (in-process `run_coordinator`): a single
-  `threading.Semaphore`, sized to `_map_parallelism()` (`min(CODE_REVIEW_MAP_PARALLELISM,
+  `threading.Semaphore`, sized to `chunking._map_parallelism()` (`min(CODE_REVIEW_MAP_PARALLELISM,
   LLM_MAX_CONCURRENCY)`, floored at 1) and created once per review run, is
   threaded through the whole map phase — `_map_chunks` → `_cached_review_chunk`
   → `_review_chunk_with_recovery` — and acquired around every actual
   `reviewer.run()` call: the top-level chunk review, any same-input retry, the
   thinking-off retry, and both bisection halves. Unlike the outer map-phase fan-out
   width, this size is **not** further clamped to `chunk_count`: a review with a
-  single top-level chunk that bisects can still issue up to `_map_parallelism()`
+  single top-level chunk that bisects can still issue up to that same budget of
   concurrent `reviewer.run()` calls (e.g. both halves at once), not artificially
   limited to 1. This makes `CODE_REVIEW_MAP_PARALLELISM` a true **run-wide**
   ceiling: the total number of concurrent chunk-review LLM calls for one run —
@@ -780,6 +820,26 @@ logged — rather than blocking the rest of the phase indefinitely. Unlike
 calls via an in-process `ThreadPoolExecutor`, even under the default Temporal
 dispatch mode, where it executes inside the single
 `code_review_verify_false_positives` activity.
+
+### CODE_REVIEW_VERIFY_MAX_FINDINGS_PER_GROUP
+Int (default `40`, floor `1`). Cap on how many findings the false-positive
+verification phase inlines into a single per-file LLM call
+(`_build_group_prompt`/`_verify_group`). A cited file whose genuine findings
+exceed this cap is split into multiple same-sized batches — each its own
+verification call, fanned out the same way calls for additional files are
+(subject to `CODE_REVIEW_MAP_PARALLELISM` and
+`CODE_REVIEW_VERIFY_TIMEOUT_SECONDS`, above) — instead of growing one
+prompt/agent turn without bound as a single file's finding count grows.
+Verdicts from every batch are merged back onto the *original* finding list
+via the batch's own slice of original indices, so which batch (and which
+within-batch index) confirmed a false positive does not change which finding
+gets dropped. Lowering this cap increases the number of verification LLM
+calls (and therefore cost/latency) for files with many findings; raising it
+trades that against a larger prompt per call. This is a cap on how many
+*findings* share one verification call — it has no counterpart for the cited
+*file*'s content, because that content is never inlined into the prompt at
+all (see `CODE_REVIEW_FALSE_POSITIVE_FILTER` below): the model always fetches
+it via the unbounded `read_file` tool, so there is nothing to cap.
 
 ### CODE_REVIEW_MAX_CONCURRENT_ACTIVITIES
 Int (default `8`, floor `1`). Two things, both governed by this one knob (see
@@ -845,17 +905,23 @@ waiting on is reclaimed (freeing its worker slots) at essentially the same
 moment, rather than running unbounded server-side.
 
 ### CODE_REVIEW_MIN_SPLIT_SEGMENT_CHARS
-A failing chunk smaller than twice this is retried once as-is instead of being
-bisected. Default `8000`, floor `1000`.
+Int (default `8000`, floor `1000`). A failing chunk smaller than twice this is
+retried once as-is instead of being bisected. Parsed via the shared `env_int`
+(unset/garbage → default; a parsed value below the floor is clamped up to it,
+not reset to the default).
 
 ### CODE_REVIEW_MAX_BISECT_DEPTH
-Max bisect-and-retry recursion depth for a failing review chunk before the chunk
-is treated as unreviewable and degraded (see `CODE_REVIEW_BLOCK_ON_UNREVIEWED`:
-by default its range is recorded non-blockingly in `not_reviewed_ranges`; with
-the opt-out on it becomes a blocking `high` finding). The whole run only raises
-`CodeReviewUnavailableError` when *no* chunk could be reviewed at all. Default
-`3`, floor `0` (`0` disables bisection; a chunk then gets only the single
-same-input retry, then the thinking-off retry, before degrading).
+Int (default `3`, floor `0`). Max bisect-and-retry recursion depth for a
+failing review chunk before the chunk is treated as unreviewable and degraded
+(see `CODE_REVIEW_BLOCK_ON_UNREVIEWED`: by default its range is recorded
+non-blockingly in `not_reviewed_ranges`; with the opt-out on it becomes a
+blocking `high` finding). The whole run only raises
+`CodeReviewUnavailableError` when *no* chunk could be reviewed at all. `0`
+disables bisection; a chunk then gets only the single same-input retry, then
+the thinking-off retry, before degrading. Parsed via the shared `env_int`
+(unset/garbage → default; a parsed value below `0` is clamped up to the floor
+of `0`, not reset to the default, with a warning logged only for the
+set-but-unparseable case).
 
 ### CODE_REVIEW_THINKING_OFF_RETRY
 Default-on last-resort retry for a chunk whose review could not be recovered by
@@ -887,6 +953,39 @@ and rejects the merged review (so unreviewed code cannot pass the gate as
 approved). Either way, the **total-failure** guard is unchanged: when *no* chunk
 could be reviewed at all the run still raises `CodeReviewUnavailableError`.
 
+### CODE_REVIEW_CHUNK_OUTCOME_CACHE_SIZE
+Max entries in the shared map-phase chunk-outcome cache (`shared.cache`; owned by
+`mapping._cached_review_chunk`). Applies to both backends: the in-process LRU and
+the Redis ZSET trim on write. Redis keys also expire via `REDIS_CACHE_TTL_S`, and
+compose Redis is further bounded by `maxmemory`/`noeviction` (app trim + TTLs;
+avoids LRU-evicting idle single-flight locks). Hits are shared
+across workers when `REDIS_URL`/`REDIS_HOST` is configured; otherwise each process
+keeps an in-process store. Backend failures fail open to a miss/recompute.
+The review→fix→re-review loop re-invokes the whole coordinator after every batch fix,
+but a fix only mutates the files that had issues — so most chunks are byte-identical
+to the previous cycle. The cache reuses the prior map-phase result for any chunk
+whose exact LLM input (rendered `### path ###` content + segment notes) and context
+fingerprint (task/spec/architecture/acceptance/profile inputs plus the resolved
+review model) are unchanged, so only the chunks the fix actually touched go back
+through the LLM. The same knob also gates **single-flight de-duplication**: within
+one submission the map phase reviews chunks in parallel, so two byte-identical
+chunks could otherwise miss the cache at the same moment and each fire the LLM
+before either result is stored. Instead the first worker reviews while the rest
+block and reuse its outcome, so concurrent duplicates trigger a single review.
+Default `512`, floor `0` (`0` disables the cache **and** the single-flight
+de-duplication entirely — every chunk is reviewed from scratch). Only
+fully-reviewed chunk outcomes are cached;
+degraded "not reviewed" outcomes are never stored, so a transient failure is
+retried for real next cycle. The cache covers the **map phase only** — the
+false-positive verification pass always re-runs against the current whole
+submission, so no coverage or fail-safe guarantee is weakened, and a changed
+profile, task context, or model invalidates the key. Each chunk reviewer is also
+given the *sibling surface* (the top-level symbols the other changed files
+define/export), which is folded into the chunk's cache key: a sibling's
+surface change (a renamed/removed export) re-runs the dependent chunk so the
+reviewer can flag the now-broken cross-file reference, while a body-only sibling
+edit leaves the surface — and the cached chunk — unchanged.
+
 ### PR_REVIEW_POST_OUTAGE_NOTICE
 Default-on toggle for the `/review-pr` flow. When an automated PR review cannot
 complete (the review engine is unavailable, a chunk's review could not be
@@ -901,7 +1000,7 @@ abort, which remains a loud operator-facing comment.
 
 ### PR_REVIEW_DUPLICATE_THRESHOLD_WITH_LOCATION / PR_REVIEW_DUPLICATE_THRESHOLD_NO_LOCATION
 Similarity-ratio overrides (0.0–1.0) for the `/review-pr` flow's duplicate-issue
-check: before a pre-existing finding is offered to a human as a "file a new
+check: before a finding is offered to a human as a "file a new
 GitHub issue?" candidate, the reviewed repository's open issues are checked for
 one that already tracks the same bug (`difflib.SequenceMatcher` ratio between the
 finding's description headline and a candidate issue's title, casefolded). A
@@ -951,33 +1050,6 @@ enhancement (skipping a redundant "file a new issue?" offer) — this trades rec
 latency. Parses defensively: a missing, blank, unparsable, or non-positive value
 falls back to the default rather than raising or disabling the cap.
 
-### CODE_REVIEW_CHUNK_OUTCOME_CACHE_SIZE
-Max entries in the coordinator's process-global map-phase outcome cache. The
-review→fix→re-review loop re-invokes the whole coordinator after every batch fix,
-but a fix only mutates the files that had issues — so most chunks are byte-identical
-to the previous cycle. The cache reuses the prior map-phase result for any chunk
-whose exact LLM input (rendered `### path ###` content + segment notes) and context
-fingerprint (task/spec/architecture/acceptance/profile inputs plus the resolved
-review model) are unchanged, so only the chunks the fix actually touched go back
-through the LLM. The same knob also gates **single-flight de-duplication**: within
-one submission the map phase reviews chunks in parallel, so two byte-identical
-chunks could otherwise miss the cache at the same moment and each fire the LLM
-before either result is stored. Instead the first worker reviews while the rest
-block and reuse its outcome, so concurrent duplicates trigger a single review.
-Default `512`, floor `0` (`0` disables the cache **and** the single-flight
-de-duplication entirely — every chunk is reviewed from scratch). Only
-fully-reviewed chunk outcomes are cached;
-degraded "not reviewed" outcomes are never stored, so a transient failure is
-retried for real next cycle. The cache covers the **map phase only** — the
-false-positive verification pass always re-runs against the current whole
-submission, so no coverage or fail-safe guarantee is weakened, and a changed
-profile, task context, or model invalidates the key. Each chunk reviewer is also
-given the *sibling surface* (the top-level symbols the other changed files
-define/export), which is folded into the chunk's cache key: a sibling's
-surface change (a renamed/removed export) re-runs the dependent chunk so the
-reviewer can flag the now-broken cross-file reference, while a body-only sibling
-edit leaves the surface — and the cached chunk — unchanged.
-
 ### CODE_REVIEW_FALSE_POSITIVE_FILTER
 Default-on toggle for the false-positive verification pass. After the map-reduce
 review merges its findings, each genuine finding is re-checked against the
@@ -990,6 +1062,35 @@ verdict; any ambiguity or verifier error keeps the finding, and the not-reviewed
 coverage findings are never removed. Set to `false`/`0`/`no` to disable the pass
 (any other value, or unset, leaves it enabled).
 
+The verification prompt (`_build_group_prompt`) never inlines the cited
+file's content — it only names the file and directs the model to fetch it via
+`read_file`. This keeps the per-call prompt size independent of the cited
+file's size with no cap or truncation involved: the model always sees the
+file's full, current content on demand instead of a possibly-stale or
+size-limited inline copy. Because nothing is inlined, `_verify_group` also
+enforces that the run made a *successful* `read_file` call for that exact
+cited file before honoring any false-positive verdict from it
+(`_agent_read_the_cited_file`) — since every finding in one verification call
+cites the same file, this is a per-batch bar, restoring the guarantee the
+original inlined design had (the whole cited file was visible before any
+drop in that batch was accepted). A narrow `read_lines`/`read_function`
+slice, a successful read of only a *related* file, calling only
+`list_files()` (no code content), or a `read_file` call that errors
+(unknown/ambiguous path), does not count as grounded. The verification
+`Agent` is also constructed with
+`SlidingWindowConversationManager(should_truncate_results=False)`, so
+Strands' own default conversation manager can never silently truncate an
+oversized `read_file` result in place (keeping only the first/last 200
+chars) while still marking it `status="success"` on a context-window
+overflow — that recovery path is disabled outright rather than trying to
+detect its output after the fact, since any text-based detection risks
+either missing a real truncation or misfiring on legitimate content that
+happens to share its shape. On overflow the conversation is trimmed instead;
+if the cited file's read survives, its content is always the complete
+original, and if it doesn't survive, the grounding check simply finds no
+matching read and fails safe. A false-positive verdict from a run that never
+met this bar is discarded (the finding is kept) rather than trusted.
+
 When the review is invoked with a repository reader (the GitHub PR-review path
 fetches whole files at the PR head and supplies a reader; the software-engineering
 pipeline supplies one rooted at the job workspace), the verifier can additionally
@@ -997,6 +1098,19 @@ read existing repository files *outside* the diff. This lets it confirm that a
 file/module a finding claims is missing ("add X" / "X does not exist") already
 exists, and drop that false positive. The reader is read-only, bounded, and
 fail-safe (a read failure only ever keeps a finding).
+
+### CODE_REVIEW_SCOPE_FILTER
+Default-on toggle for the scope-verification pass that runs after the reviewer
+returns findings and before PR comments are posted. A tool-using verifier
+sees the PR's added/modified line map and classifies each genuine finding as
+in-scope (including required omissions), out-of-scope / pre-existing, or
+unsure. Findings that are not confidently in-scope are tagged `pre_existing`
+so they become pending issue proposals instead of PR comments. Posting is
+fail-closed (unsure does not comment). An ungrounded out-of-scope verdict is
+ignored so it cannot hide a real in-scope finding. Coverage/safety findings
+never enter this pass. The unscripted dummy LLM harness is a no-op so tests
+that do not stub the verifier keep their existing posting behavior. Set to
+`false`/`0`/`no` to disable (any other value, or unset, leaves it enabled).
 
 ### CODE_REVIEW_ARCHITECTURE_CONSISTENCY_PASS
 Default-on toggle for the architecture-consistency / cross-codebase-redundancy
@@ -1105,9 +1219,94 @@ matches a finding keyed as `app/foo.py`. Set to `false`/`0`/`no` to
 disable consolidation (any other value, or unset, leaves it enabled) — this
 only turns off merging, the underlying findings are unaffected.
 
+In the in-process thread-mode coordinator this consolidation is now performed
+as the `side-effects` special case of the generalized finding-combination step
+(see `CODE_REVIEW_COMBINE_SIMILARITY_THRESHOLD` below), which runs after the
+merged architecture/side-effect pass and before the false-positive filter;
+setting this flag to `false` disables that `side-effects`-specific merging
+(the merge-regardless-of-wording construct rule and the citation link) while
+the generic same-construct-plus-similar and same-anchor de-duplication still
+apply. The durable Temporal path continues to run the standalone consolidation
+activity gated by this same flag.
+
 Any setup failure is fail-safe: it is logged and the original `side-effects`
 findings pass through unchanged, so a broken consolidation step never blocks
 or changes the rest of the review.
+
+### CODE_REVIEW_COMBINE_SIMILARITY_THRESHOLD
+Jaccard word-set similarity floor (default `0.6`, clamped to `[0, 1]`; garbage
+→ default) used by the thread-mode coordinator's finding-combination step to
+decide when two findings describe the same underlying issue. Combination runs
+once over the whole finding stream — the map-phase findings plus the merged
+architecture/side-effect pass's additive findings — after that pass and
+**before** the false-positive filter, so the filter verifies a smaller, deduped
+set (fewer tokens). Two same-category findings are combined when they are
+anchored in the same enclosing Python construct and are either `side-effects`
+(see `CODE_REVIEW_SIDE_EFFECT_CONSOLIDATION` above) or have description Jaccard
+`>= threshold`; or when they are the same-anchor near-duplicate (same file, same
+line or one unanchored, Jaccard `>= threshold`). Raising the threshold merges
+less (more separate findings, more filter calls); lowering it merges more. It is
+included in the submission-cache fingerprint, so changing it invalidates a
+stored verdict. Separate occurrences on different lines are never merged; that
+cross-line theming is left to the review narrative / systemic synthesis. This
+step subsumes the exact-match dedupe and the standalone side-effect
+consolidation on the in-process path; it is fail-safe (any error degrades to the
+uncombined findings). The durable Temporal path does not yet run it.
+
+### CODE_REVIEW_SPEC_COMPLIANCE_PASS
+Default-**off** toggle (`env_bool`, unlike the default-on tail passes above)
+for moving spec/acceptance-criteria compliance checking out of every chunk's
+prompt and into one dedicated post-merge pass. Design decision recorded in
+`system_design/adr/ADR-010-code-review-spec-compliance-single-pass.md`
+(see that ADR's Amendment section for how the implementation below deviates
+from its original Decision).
+
+When unset or any value other than `true`/`1`/`yes`/`on`, behavior is
+unchanged from today: `acceptance_criteria` and `spec_excerpt` are rendered
+into every chunk's review prompt, and per-chunk `spec_compliance_notes` are
+synthesized into the final narrative exactly as they are now. When enabled
+**and** the review profile is `CODE_REVIEW`, the per-chunk prompt omits the
+acceptance-criteria/spec-excerpt blocks (architecture overview and
+sibling-surface context are unaffected — out of scope for this toggle), and
+`synthesize_spec_compliance` (`code_review_agent/synthesis.py`) runs once,
+after the final issue list is deduped, over the full spec/acceptance-criteria
+text plus the deduped findings list — **no source code is inlined into this
+pass**, unlike the sibling architecture/side-effect tail pass. It runs in the
+reduce phase (alongside `synthesize_review_findings`), not inside the
+concurrent tail-pass set with the false-positive filter/architecture pass,
+since it needs the final, post-dedupe issue list. Its note feeds into the
+existing narrative synthesis step in place of the per-chunk notes. Any setup
+or LLM failure is fail-safe: it is logged and yields an empty compliance
+note, never blocking or changing the rest of the review.
+
+**Measured token/cost delta.** Measured directly against the production
+prompt-construction code (`ChunkReviewAgent.run` for the per-chunk prompts,
+`synthesis._build_spec_compliance_framing`/`build_findings_digest` for the
+single dedicated pass) on a representative fixture: a ~15,880-character spec
+excerpt, 6 acceptance criteria, and an 8-issue post-dedupe finding list —
+close to ADR-010's own "~14K chars, 15 chunks" illustrative example. Prompt
+character counts (a ~4-chars/token rule of thumb converts these to an
+approximate token figure; the *relative* delta between modes is what
+matters, not the exact tokenizer):
+
+| Chunks | Per-chunk mode (chars) | Single-pass mode (chars) | Delta |
+|---|---|---|---|
+| 1  | 18,143  | 19,279 | single-pass sends **6.3% more** |
+| 2  | 36,286  | 20,968 | single-pass sends 42.2% less |
+| 5  | 90,715  | 26,035 | single-pass sends 71.3% less |
+| 15 | 272,160 | 42,940 | single-pass sends 84.2% less |
+| 30 | 544,350 | 68,320 | single-pass sends 87.4% less |
+
+The dedicated single-pass prompt has a fixed overhead (~17,590 chars in this
+fixture, independent of chunk count) from carrying the full spec/AC text plus
+the findings digest in one call. Below that fixed cost, single-pass mode
+*loses* — this refines ADR-010's Risks section, which estimated savings as
+merely "close to zero" on 1-2 chunk submissions; measured, a single-chunk
+submission is a small net loss, and the crossover to a real win happens
+between 1 and 2 chunks. Every submission with 2+ chunks measured here shows a
+net reduction, growing toward the fixed-overhead floor as chunk count rises.
+This is descriptive data for a future decision on the default, not a
+recommendation to flip it (deliberately out of scope here).
 
 ---
 
@@ -1271,6 +1470,15 @@ Default per-agent execution timeout (`asyncio.wait_for`) inside the sandbox; ove
 with `timeout_hit: true` (default `60`). Per-agent override via `invoke.timeout_seconds` in the
 manifest.
 
+### AGENT_REGISTRY_TOMBSTONE_TTL_S
+How long (seconds) a worker's own `unregister()` of a dynamic agent id masks that id from `get()`
+on the same worker, closing the window where a failed best-effort Postgres delete would otherwise
+resurrect the stale row (default `5.0`; clamped to `>= 0.0`).
+
+### AGENT_REGISTRY_TOMBSTONE_MAX_ENTRIES
+Max number of tombstoned ids `AgentRegistry` retains per worker; oldest entries are evicted first
+once the cap is exceeded (default `1000`; clamped to `>= 1`).
+
 ---
 
 ## Agent Cognition and Knowledge Graph
@@ -1310,15 +1518,111 @@ the default). The summary half of the digest is bounded separately by the caller
 
 ### NEO4J_BOLT_URL
 Bolt URL of the Neo4j server backing the Graphiti knowledge-graph layer over Agent Cognition (e.g.
-`bolt://neo4j:7687`). This is the per-process **enablement gate** (`shared.neo4j.is_neo4j_enabled()`).
-Neo4j itself is required stack infrastructure for agents (Graphiti runs on top of it), but processes
-that do not need Graphiti — notably the unified API (`khala`) reverse proxy — leave this unset so
-they skip Graphiti client construction and the background graph sync worker (lifespan no-ops cleanly).
-Compose defaults `khala`'s `NEO4J_BOLT_URL` empty; set `NEO4J_BOLT_URL=bolt://neo4j:7687` to opt that
-process into graph sync (extra memory/CPU for the driver + worker). An unset value is also how the
-unit-test suite runs against a faked Graphiti without a live database. When enabled, the graph
-ingests agent memories as temporal episodes partitioned per agent (`group_id = agent_id`) and serves
-recency-ranked related knowledge back for request context and rule-proposal grounding.
+`bolt://neo4j:7687`). This is the per-process **enablement gate** (`shared.neo4j.is_neo4j_enabled()`),
+and it is opt-in at zero cost when unset: `unified_api.main`'s lifespan checks `is_neo4j_enabled()`
+before even importing `agent_cognition.graph.sync_worker`, and `shared.neo4j.client.get_graphiti()`
+defers its `graphiti_core` imports to first real use — so leaving `NEO4J_BOLT_URL` unset keeps the
+`graphiti_core` dependency (and its Neo4j driver) out of `sys.modules` entirely, with no import-time
+or memory cost. Neo4j itself is required stack infrastructure for agents (Graphiti runs on top of it),
+but processes that do not need Graphiti — notably the unified API (`khala`) reverse proxy — leave this
+unset for exactly that reason. Compose defaults `khala`'s `NEO4J_BOLT_URL` empty; set
+`NEO4J_BOLT_URL=bolt://neo4j:7687` to opt that process into graph sync (extra memory/CPU for the
+driver + worker). An unset value is also how the unit-test suite runs against a faked Graphiti without
+a live database. When enabled, the graph ingests agent memories as temporal episodes partitioned per
+agent (`group_id = agent_id`) and serves recency-ranked related knowledge back for request context and
+rule-proposal grounding.
+
+### REDIS_URL / REDIS_HOST / REDIS_PORT / REDIS_PASSWORD / REDIS_DB
+Redis endpoint for `shared.cache` — the shared backend behind the code-review chunk-outcome cache,
+submission short-circuit cache, and `compact_text` memoization. When `REDIS_URL` (or `REDIS_HOST`) is
+set, those caches persist across worker processes and restarts; when unset, each process keeps an
+in-memory LRU (today's single-process behavior). Compose wires Redis **only on `se-service`** via
+`*se-redis-env` (not every team container): default `REDIS_HOST=redis` + `REDIS_PASSWORD` (local
+placeholder `please-change-me`, same as Neo4j) with blank `REDIS_URL`, so Python builds
+`redis://[:quoted-password@]host:port/db` and percent-encodes the password. Do **not** embed an
+unquoted password in a compose `REDIS_URL` default — characters like `@` / `:` / `/` break URL
+userinfo parsing. For in-process memory on SE, set `REDIS_HOST=` (empty) and leave `REDIS_URL`
+blank — compose uses `${REDIS_HOST-redis}` (no `:`) so an empty value is preserved rather than
+re-defaulting to `redis`. `REDIS_URL` wins over host/port/password when non-blank. `REDIS_HOST`
+must be a bare hostname or bare IPv6 literal (no embedded port — use `REDIS_PORT`; no zone-ID /
+scoped addresses — use `REDIS_URL` for those). Backend unavailability fails open to a cache miss
+(recompute),
+never a review failure. When Redis is unreachable (or the `redis` wheel is missing),
+`shared.cache` logs a warning that includes the exception class and falls back to the
+in-process LRU / a local recompute — reviews continue without raising. Operators can
+distinguish an outage from a genuine cold cache by those warning lines (and by Redis
+client/healthcheck failures); there is no separate metric today. Optional
+`REDIS_SOCKET_CONNECT_TIMEOUT_S` (default `1.0`) and `REDIS_SOCKET_TIMEOUT_S`
+(default `1.0`) tune redis-py's connect and per-command socket timeouts. Command
+timeout must stay finite so a Redis that accepts TCP but stalls on GET/SET/EVAL
+fails open to miss/recompute instead of hanging the review thread forever.
+`REDIS_MAX_CONNECTIONS` (default `50`) caps the redis-py connection pool so high
+map parallelism cannot open unbounded sockets from one process.
+
+**Local compose vs production auth.** The in-repo `docker-compose.yml` Redis service enables
+`requirepass` from `REDIS_PASSWORD` (default `please-change-me`), written into a generated
+config file so the password is not on the `redis-server` process argv (healthcheck still uses
+`REDISCLI_AUTH`). Compose hex-encodes every password byte as redis.conf `\xHH`
+escapes via `docker/redis/escape_requirepass.sh` (BusyBox-safe `od`/`sed`) so
+backslash, quote, embedded newlines, and trailing newlines round-trip under
+Alpine Redis. Redis credentials are injected only into `se-service`, so other
+team containers on `stack` cannot read/write review or compaction namespaces
+without credentials. Host publish is IPv4 loopback only (`127.0.0.1:6379`) —
+from the host use `127.0.0.1:6379`, not `localhost` / `::1`. Production
+deployments must use a strong secret, ACL/`requirepass`, and keep Redis off
+public interfaces. Compose Redis is intentionally ephemeral (no volume) — a
+restart is a cold cache; durable state lives elsewhere. Memory policy is
+`noeviction` with `maxmemory 512mb` (app ZSET trim + 1h value TTLs bound
+capacity; avoids LRU-evicting idle single-flight lock keys mid-compute).
+`se-service` depends on Redis with `condition: service_started` (not
+`service_healthy`) so SE still boots when Redis is unhealthy or when
+`REDIS_HOST=` opts into in-process memory — per-op fail-open covers mid-run
+outages.
+
+### KHALA_CACHE_BUILD_ID / KHALA_BUILD_ID
+Optional deploy/build suffix appended to `shared.cache` namespaces used by
+code-review (`cr:chunk:v2`, `cr:sub:v1`) and LLM compaction (`llm:compact:v1`).
+`KHALA_CACHE_BUILD_ID` wins when both are set. When unset/blank, namespaces stay
+at their static stems (local-dev default). When set to a safe token
+(`[A-Za-z0-9._@+/-]+`, no `:`), the effective namespace becomes
+`{stem}:{build_id}` so a deploy that changes the id is inherently a cold cache
+— prompt/logic changes cannot keep serving pre-deploy verdicts until TTL expiry.
+An unsafe non-blank value is ignored (namespaces stay at the stem) and
+`shared.cache` logs a warning so operators are not left thinking cold-cache is
+active. Compose wires both onto `se-service` from the host env (blank by
+default). CI / image builds should set `KHALA_BUILD_ID` (e.g. git SHA) for
+production-like stacks.
+
+### REDIS_CACHE_TTL_S / REDIS_LOCK_TTL_S / REDIS_WAITER_POLL_S / REDIS_WAITER_TIMEOUT_S / REDIS_RESULT_TTL_S
+Redis backend tuning for `shared.cache`: value-key TTL (default `3600` s — short enough that a
+full `noeviction` Redis recovers via natural expiry instead of wedging for a day), single-flight
+lock TTL (default `3600` s — sized for long code-review computes so the lock is unlikely to
+expire mid-flight), waiter poll interval (default `0.05` s), waiter timeout before recomputing
+(default `300` s, **independent** of lock TTL so a crashed leader cannot stall waiters for up to
+an hour), and short-lived single-flight result/error-marker TTL (`REDIS_RESULT_TTL_S`, defaults
+to the effective lock TTL when unset; the Redis backend still hard-caps markers at 60 s so
+abandoned publishes cannot linger past leadership).
+
+**Long reviews vs waiter timeout:** lock TTL can be an hour, but waiters bail at 300 s by default
+and recompute in parallel if the leader is still running. That is intentional crash-recovery
+trade-off. If code-review map/compute steps routinely exceed five minutes and you need
+cross-worker dedup for the whole flight, raise `REDIS_WAITER_TIMEOUT_S` (up to the lock TTL)
+or both knobs together — otherwise this PR's single-flight benefit is limited to shorter keys.
+
+Trim-then-retry after OOM only reclaims **this namespace's** LRU ZSET; memory held by other
+namespaces is not freed, and the write/lock then fail-opens.
+
+Successful `get` touches the LRU ZSET (write-on-read) so eviction order stays accurate under
+multi-worker load. Published error markers reconstruct allow-listed `Exception` subclasses with
+best-effort stringified `args` — match on type/message, not arg identity. All parse defensively
+with floors: TTL / lock / waiter-timeout / result-TTL floored at `1` s; poll-interval floored at
+`0.01` s.
+
+### REDIS_KEY_PREFIX
+Optional prefix for all `shared.cache` Redis keys (default `khala`). Blank falls back to the
+default. Must not contain `:` — the backend appends `:{namespace}:` itself. An invalid prefix
+(or other RedisBackend construction error) fails open: `get_shared_cache` logs and uses the
+in-process memory backend instead of raising on first cache touch.
 
 ### NEO4J_USER / NEO4J_PASSWORD / NEO4J_DATABASE
 Neo4j credentials/database for the knowledge-graph layer (defaults `neo4j` / empty / `neo4j`). Change
@@ -1341,7 +1645,9 @@ agent since a watermark (`agent_cognition_graph_watermarks`). Events keyset on `
 are added as `event:<id>` episodes; summaries keyset on `(updated_at, id)` (the content-write time
 advanced by each accepted `upsert_summary`) and are added as `summary:<id>:<version>` episodes, so a
 recomputed summary — whose `version` advanced — is re-ingested as a fresh per-version episode rather
-than overwriting the prior one. The worker is a no-op when `NEO4J_BOLT_URL`/`POSTGRES_HOST` are unset.
+than overwriting the prior one. Unified-api's lifespan skips importing this worker's module at all when
+`NEO4J_BOLT_URL` is unset; once started (i.e. `NEO4J_BOLT_URL` is set), the worker itself is a further
+no-op when `POSTGRES_HOST` is unset.
 
 ### NEO4J_SLOW_OP_MS
 Slow-call log threshold (ms, default `1000`) for `shared.neo4j.timed_graph_op`.
@@ -1367,7 +1673,7 @@ retry conflict; once the lease expires the row is reclaimed in place (its `reque
 re-executed. Distinct from `AGENT_COGNITION_RUN_TTL_S`, which bounds *terminal* rows for replay.
 
 ### AGENT_COGNITION_WRITEBACK_MAX_BYTES
-Byte cap on the cognition `cognition_writeback` half of an invoke envelope
+Byte cap on the `cognition_writeback` half of an invoke envelope
 (`shared/agent_invoke/limits.py`, default `1048576` = 1 MiB). The user `output` field has its
 own bound (`AGENT_INVOKE_MAX_OUTPUT_BYTES`), so control/memory data never competes with user output;
 an over-cap writeback is truncated and flagged rather than dropping the response.
@@ -1433,6 +1739,14 @@ with the issues it depends on so the UI can flag blocked issues; the lookups fan
 semaphore of this width (default `8`). A failed/absent lookup degrades to no dependencies for that
 issue and never fails the list.
 
+### SE_EXECUTION_WAVE_CONCURRENCY
+Maximum number of microtask workers the code-v2 execution loops
+(`run_execution_impl` / `run_gated_execution_impl`) dispatch concurrently within
+one independent wave (default `4`; garbage/empty → default; floored at `1`).
+`parallel_map` sizes the pool at `min(this, wave size)`, so a large planner
+wave cannot spawn one thread per microtask. Cycle-flush batches with intra-batch
+edges still run sequentially.
+
 ### CODING_TEAM_REVIEW_RETRIES
 Number of times the coding-team Tech Lead `run_code_review` LLM call is retried (with jittered
 exponential backoff) on a transient failure (rate limit / timeout / provider outage) before the
@@ -1476,13 +1790,34 @@ timeout the job fails closed (`failed`) rather than proceeding on a guessed deci
 orchestrator thread (e.g. server restart) is recovered via
 `POST /api/coding-team/run/{job_id}/resume`.
 
+### CODING_TEAM_DEVOPS_ROUTING
+Opt-in (**default OFF**) gate for dispatching `target_team="devops"`/`"infra"`/`"infrastructure"`/
+`"ci"`/`"ci_cd"`/`"cicd"`/`"dev_ops"` coding-team tasks to a dedicated DevOps worker
+(`DevOpsTeamWorker`, backed by `DevOpsTeamLeadAgent.run_task`) instead of the pre-existing behavior
+of aliasing them to the `backend_v2` worker. Unlike this file's other boolean toggles (which build on
+`shared.env.env_flag_enabled`'s default-**on** contract), this one uses `shared.env.env_flag_opt_in`:
+only an explicit `1`/`true`/`yes`/`on` (case-insensitive, whitespace-tolerant) enables it — unset,
+blank, or any other value (including `false`/`0`/`off`) leaves it disabled. With the flag off, devops-
+labeled tasks route exactly as before: aliased to `backend_v2` and implemented by an ordinary v2
+worker. With it on, such tasks are routed to a devops worker that builds a structured
+`DevOpsTaskSpec`, runs the full DevOps pipeline (including its own internal IaC/CI/CD/security/change-
+review gates — the coding team's generic build/lint gate is skipped for these tasks), and hands the
+resulting feature branch back for the normal Tech Lead review/merge step, the same as a v2 team's
+output. The devops worker's `DevOpsTaskSpec.environment` is *derived* from the task's own title,
+description, and acceptance criteria (via the same inference `run_workflow`'s free-text callers
+already use) — `"production"` when the task text carries an explicit production signal, `"staging"`
+otherwise. A genuinely production-scoped task therefore keeps the DevOps pipeline's own production
+policy and approval-gate checks (`required_approvals`/`prod_approval_required` on the completion
+package); if its text carries no explicit approval-gate language it fails Phase 1's environment-policy
+gate rather than silently proceeding, the same trade-off `run_workflow` callers already accept.
+
 ---
 
 ## SE CI Gate and Git Identity
 
 ### GIT_COMMIT_USER_NAME
 Author/committer name for every git commit platform code makes (SE pipeline, coding team, agent git
-tools — all routed through `software_engineering_team/shared/git_utils.py`). Default `Khala`. Blank
+tools — all routed through `backend/shared/git/git_utils.py`). Default `Khala`. Blank
 values fall back to the default; natively-exported `GIT_AUTHOR_*`/`GIT_COMMITTER_*` env vars win over
 this setting.
 

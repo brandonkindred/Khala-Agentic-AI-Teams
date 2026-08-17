@@ -52,6 +52,8 @@ from ..interface import (
     LLMRateLimitError,
     LLMTemporaryError,
     LLMTruncatedError,
+    record_complete_json_raw,
+    reset_complete_json_observer_state,
 )
 from ..telemetry import record_llm_call
 from ..util import extract_json_from_response
@@ -692,6 +694,8 @@ class ClaudeLLMClient(LLMClient):
         """
         _require_text("objective", objective)
         _require_text("prompt", prompt)
+        reset_complete_json_observer_state()
+        think = llm_config.resolve_think_for_model(self.model, think, response_format="json")
         team = current_attribution().team or _caller_team()
         with bind_request_id(new_request_id()), llm_attribution(objective=objective, team=team):
             caller = _caller_tag()
@@ -713,6 +717,7 @@ class ClaudeLLMClient(LLMClient):
                     status="success", message=message, latency_ms=latency_ms, caller=caller
                 )
                 return value
+            record_complete_json_raw(value)
             try:
                 result = extract_json_from_response(value)
             except LLMJsonParseError:
@@ -821,6 +826,9 @@ class ClaudeLLMClient(LLMClient):
         _require_text("objective", objective)
         if response_format not in ("json", "text"):
             raise ValueError(f"response_format must be 'json' or 'text', got {response_format!r}")
+        think = llm_config.resolve_think_for_model(
+            self.model, think, response_format=response_format
+        )
         team = current_attribution().team or _caller_team()
         with bind_request_id(new_request_id()), llm_attribution(objective=objective, team=team):
             caller = _caller_tag()

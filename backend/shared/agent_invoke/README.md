@@ -6,7 +6,7 @@ single specialist agent loaded by the sandbox runtime to the Agent Console
 
 The shim does **not** run inside production team services; it lives only
 inside the sandbox container started by
-`backend/agents/agent_provisioning_team/sandbox/`. The sandbox's
+`backend/agents/agent_platform/sandbox/`. The sandbox's
 `agent_sandbox_runtime/entrypoint.py` mounts it and adds a per-container
 middleware that restricts dispatch to the one agent id bound via
 `SANDBOX_AGENT_ID`.
@@ -72,7 +72,7 @@ python3 -m pytest shared/agent_invoke/tests/ --asyncio-mode=auto
 1. Add a manifest under `backend/agents/<team>/agent_console/manifests/` with
    a valid `source.entrypoint` (and optional `sandbox.env` / `sandbox.extra_pip`).
 2. Generate a golden sample with
-   `python3 -m agent_registry.scripts.generate_sample_skeletons`.
+   `python3 -m agent_platform.registry.scripts.generate_sample_skeletons`.
 
 No per-team wiring is needed — the sandbox image is team-agnostic and the
 unified API resolves the agent via its manifest at invoke time.

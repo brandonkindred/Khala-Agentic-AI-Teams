@@ -5,16 +5,27 @@ pydantic>=2.12,<3.0
 pyyaml>=6.0,<7.0
 httpx>=0.28,<1.0
 beautifulsoup4>=4.14,<5.0
-# <0.137: FastAPI 0.137 added _IncludedRouter route nodes that prometheus-fastapi-instrumentator (<8) can't resolve (route.path)
-fastapi>=0.135,<0.137
+fastapi>=0.137,<1.0
+# Explicit direct pin (not just transitive via fastapi): CVE-2026-48710 ("BadHost")
+# is a Host-header auth bypass affecting Starlette 0.8.3-1.0.0, fixed in 1.0.1.
+starlette>=1.0.1,<2.0
 uvicorn[standard]>=0.44,<1.0
-cryptography>=46.0,<47.0
+cryptography>=50.0,<51.0
+# agent_provisioning_team's PostgresProvisionerTool uses psycopg v3 + psycopg_pool
+# (same driver generation as shared.postgres) — no separate psycopg2 needed.
 psycopg[binary]>=3.3,<4.0
 psycopg_pool>=3.3,<4.0
 temporalio>=1.25,<2.0
 strands-agents>=1.35,<2.0
 strands-agents-tools>=0.4,<1.0
-ollama>=0.6,<1.0
+# agent_provisioning_team's RedisProvisionerTool provisions a Redis instance
+# for every new sandboxed agent by default (manifests/default.yaml) — this is
+# the container that actually runs agent_provisioning_team.temporal.worker.
+# Also required by shared.cache's Redis backend (code-review / compaction
+# caches) — without this wheel, that factory falls open to MemoryBackend and
+# silently loses cross-worker sharing even when REDIS_URL is set. Keep in
+# lockstep with agents/requirements.txt.
+redis>=7.4,<8.0
 # Tolerant JSON repair for LLM output. Its consumers import it lazily and
 # swallow ImportError by design (salvage must never crash), so a missing wheel
 # silently disables repair in production instead of failing loudly:
@@ -34,10 +45,13 @@ pyarrow>=15.0,<22.0
 # Strategy Lab sandbox subprocess (strategy_lab/executor/indicators.py) imports
 # numpy + pandas at module load. Currently transitive via yfinance; pin
 # explicitly so strategy execution doesn't depend on yfinance's dep tree.
-numpy>=1.26,<3.0
-pandas>=2.2,<3.0
+# Range matches backend/requirements.txt and backend/agents/requirements.txt —
+# keep all three in lockstep (they must, since the same investment_team code
+# runs under whichever of these files installed it).
+numpy>=2.4,<3.0
+pandas>=3.0,<4.0
 # Observability: team services auto-expose /metrics via team_service/entrypoint.py
-prometheus-fastapi-instrumentator>=7.1,<8.0
+prometheus-fastapi-instrumentator>=8.1,<9.0
 # OpenTelemetry: every team container runs shared.observability.init_otel at startup
 opentelemetry-api>=1.41,<2.0
 opentelemetry-sdk>=1.41,<2.0

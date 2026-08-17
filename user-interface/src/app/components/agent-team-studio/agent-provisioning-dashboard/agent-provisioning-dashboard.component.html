@@ -1,0 +1,19 @@
+<app-dashboard-shell
+  title="Agent Provisioning"
+  subtitle="Stands up the sandbox — database, git, docker — so a new agent can actually run."
+  icon="cloud_queue"
+  [healthCheck]="healthCheck"
+  healthLabel="Agent Provisioning API"
+>
+  <mat-tab-group animationDuration="200ms" class="dashboard-tabs" (selectedIndexChange)="onTabChange($event)" [selectedIndex]="selectedTabIndex">
+    <mat-tab>
+      <ng-template mat-tab-label>
+        <mat-icon class="tab-icon">cloud_queue</mat-icon>
+        Provision
+      </ng-template>
+      <div class="tab-content">
+        <app-agent-provisioning-panel />
+      </div>
+    </mat-tab>
+  </mat-tab-group>
+</app-dashboard-shell>

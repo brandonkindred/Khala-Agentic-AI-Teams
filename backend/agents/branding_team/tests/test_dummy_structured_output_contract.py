@@ -2,10 +2,13 @@
 
 Every branding agent built with ``structured_output=`` hands Strands a Pydantic
 model that the provider response *must* validate against. Under
-``LLM_PROVIDER=dummy`` that response comes from ``DummyLLMClient.complete_json``,
-which routes on substrings of the agent's system prompt. Nothing else in the
-suite drives those two halves against each other, so three independent edits can
-silently break the no-LLM harness:
+``LLM_PROVIDER=dummy`` that response comes from ``DummyLLMClient.complete_json``
+(via ``chat()``/``stream()``/``structured_output()``), which routes the six
+Phase 2 "Narrative & Messaging" classes deterministically by the
+``structured_output_model``'s class name and routes every other class by
+scanning the agent's system prompt for field-name substrings. Nothing else in
+the suite drives those two halves against each other, so three independent
+edits can silently break the no-LLM harness:
 
 1. tightening a model in ``branding_team.models`` (adding a field, a ``Literal``,
    an enum, or a length bound) past what the dummy stub supplies;
@@ -13,16 +16,21 @@ silently break the no-LLM harness:
    satisfies its model;
 3. rewording an agent's system prompt in ``branding_team.agents`` so it stops
    matching its dummy routing branch and falls through to the generic
-   ``{"status": ..., "output": ...}`` fallback.
+   ``{"status": ..., "output": ...}`` fallback — this applies only to the
+   text-routed classes; the six Phase 2 classes route on class name and are
+   unaffected by prompt wording.
 
 All three surface here as a failure naming the offending agent. Case (3) is the
-one that needed follow-up commits when Phases 3 and 4 migrated to
+one that needed follow-up commits when Phases 3, 4, and 5 migrated to
 ``structured_output=``, and ``test_generic_prompt_payload_is_rejected_by_every_schema``
-is what keeps the primary assertion honest about catching it.
+is what keeps the primary assertion honest about catching it — for the
+text-routed classes only; the six Phase 2 classes moved to
+``test_model_routed_payload_validates_regardless_of_prompt_text`` since an
+unrouted prompt no longer breaks them, which is the point of their fix.
 
-The seven Phase 5 governance factories are listed in
-``_FACTORIES_WITHOUT_STRUCTURED_OUTPUT`` rather than covered here: they still use
-prose ``output_mode`` and have no schema to bind.
+``governance_compositor`` (Phase 5's fan-in node) is not a ``make_*`` factory in
+this module — it's built inline in ``graphs/phase5_governance.py`` — so it never
+appears in ``dir(branding_agents)`` and needs no entry here.
 """
 
 from __future__ import annotations
@@ -34,31 +42,38 @@ import pytest
 
 from branding_team import agents as branding_agents
 from branding_team.graphs.phase3_visual import _PHASE3_CONCEPTUALIST_VARIANTS
-from branding_team.graphs.shared import serialize_mission
+from branding_team.graphs.shared import build_agent, serialize_mission
 from branding_team.models import (
+    ApprovalWorkflowsOutput,
+    AssetWikiOutput,
     AudienceSegmentsOutput,
     BrandArchetypesOutput,
     BrandArchitectureOutput,
-    BrandDiscoveryAuditOutput,
+    BrandDiscoveryAudit,
     BrandExperiencePrinciplesOutput,
+    BrandGuidelinesOutput,
+    BrandHealthKPIsOutput,
     BrandInActionOutput,
     BrandStoryOutput,
     ChannelGuidelineOutput,
     ColorPaletteSystemOutput,
     CoreValuesOutput,
-    CreativeRefinementDecisionOutput,
-    DesignSystemDefinitionOutput,
+    CreativeRefinementDecision,
+    DesignSystemDefinition,
     DifferentiationPillarsOutput,
+    EvolutionFrameworkOutput,
     IconographyOutput,
     LogoSuiteOutput,
     MessagingFrameworkOutput,
     MoodBoardCandidatesOutput,
-    MoodBoardConceptOutput,
+    MoodBoardConcept,
+    OwnershipOutput,
     PersonaProfilesOutput,
     PhotographyVideoOutput,
     PositioningOutput,
     PurposeVisionOutput,
     TaglineOutput,
+    TrainingOnboardingOutput,
     TypographySystemOutput,
     VoiceToneOutput,
     WritingGuidelinesOutput,
@@ -78,7 +93,7 @@ _UNROUTED_SYSTEM_PROMPT = "You are a helpful assistant."
 
 _CASES: tuple[tuple[str, Callable[[], Any], type], ...] = (
     # Phase 1 — Strategic Core
-    ("discovery_auditor", branding_agents.make_discovery_auditor, BrandDiscoveryAuditOutput),
+    ("discovery_auditor", branding_agents.make_discovery_auditor, BrandDiscoveryAudit),
     ("purpose_vision_writer", branding_agents.make_purpose_vision_writer, PurposeVisionOutput),
     ("values_articulator", branding_agents.make_values_articulator, CoreValuesOutput),
     ("audience_segmenter", branding_agents.make_audience_segmenter, AudienceSegmentsOutput),
@@ -107,11 +122,11 @@ _CASES: tuple[tuple[str, Callable[[], Any], type], ...] = (
             # Bind the variant in a default arg so each lambda closes over its
             # own value rather than the loop's last one.
             (lambda v=variant: branding_agents.make_moodboard_conceptualist(v)),
-            MoodBoardConceptOutput,
+            MoodBoardConcept,
         )
         for variant in _PHASE3_CONCEPTUALIST_VARIANTS
     ),
-    ("converge_decider", branding_agents.make_converge_decider, CreativeRefinementDecisionOutput),
+    ("converge_decider", branding_agents.make_converge_decider, CreativeRefinementDecision),
     ("logo_specifier", branding_agents.make_logo_specifier, LogoSuiteOutput),
     ("color_system_builder", branding_agents.make_color_system_builder, ColorPaletteSystemOutput),
     ("typography_builder", branding_agents.make_typography_builder, TypographySystemOutput),
@@ -126,7 +141,7 @@ _CASES: tuple[tuple[str, Callable[[], Any], type], ...] = (
     (
         "design_system_codifier",
         branding_agents.make_design_system_codifier,
-        DesignSystemDefinitionOutput,
+        DesignSystemDefinition,
     ),
     (
         "brand_experience_principler",
@@ -149,9 +164,87 @@ _CASES: tuple[tuple[str, Callable[[], Any], type], ...] = (
         branding_agents.make_brand_in_action_illustrator,
         BrandInActionOutput,
     ),
+    # Phase 5 — Governance & Evolution
+    ("ownership_definer", branding_agents.make_ownership_definer, OwnershipOutput),
+    (
+        "approval_workflow_designer",
+        branding_agents.make_approval_workflow_designer,
+        ApprovalWorkflowsOutput,
+    ),
+    ("asset_wiki_planner", branding_agents.make_asset_wiki_planner, AssetWikiOutput),
+    ("training_planner", branding_agents.make_training_planner, TrainingOnboardingOutput),
+    ("kpi_designer", branding_agents.make_kpi_designer, BrandHealthKPIsOutput),
+    ("evolution_framer", branding_agents.make_evolution_framer, EvolutionFrameworkOutput),
+    ("brand_rules_codifier", branding_agents.make_brand_rules_codifier, BrandGuidelinesOutput),
 )
 
 _CASE_IDS: tuple[str, ...] = tuple(case_id for case_id, _factory, _model in _CASES)
+
+# Model classes DummyLLMClient.complete_json routes by structured_output_model
+# class name (see _branding_structured_output_stub_by_model_name in
+# llm_service.clients.dummy) rather than by scanning system-prompt text.
+# Phase 2, 4, and 5 output models use this path; for them, an unrouted or
+# misleading prompt no longer prevents a valid payload — that is the point of
+# issue #4252's fix, and is asserted separately in
+# test_model_routed_payload_validates_regardless_of_prompt_text below instead
+# of test_generic_prompt_payload_is_rejected_by_every_schema.
+_MODEL_ROUTED_CLASS_NAMES: frozenset[str] = frozenset(
+    {
+        # Phase 2 — Narrative & Messaging
+        "BrandStoryOutput",
+        "BrandArchetypesOutput",
+        "TaglineOutput",
+        "MessagingFrameworkOutput",
+        "PersonaProfilesOutput",
+        "WritingGuidelinesOutput",
+        # Phase 4 — Experience & Channel Activation
+        "BrandExperiencePrinciplesOutput",
+        "ChannelGuidelineOutput",
+        "BrandArchitectureOutput",
+        "BrandInActionOutput",
+        # Phase 5 — Governance & Evolution
+        "OwnershipOutput",
+        "ApprovalWorkflowsOutput",
+        "AssetWikiOutput",
+        "TrainingOnboardingOutput",
+        "BrandHealthKPIsOutput",
+        "EvolutionFrameworkOutput",
+        "BrandGuidelinesOutput",
+    }
+)
+# Structured-output models with every field optional/default-constructible —
+# BrandDiscoveryAudit, CreativeRefinementDecision, and DesignSystemDefinition,
+# each collapsed (Story 3b) to a single soft model used both as its agent's
+# structured_output and as the corresponding phase output's default_factory
+# merge target, rather than split into a strict agent-facing twin. The
+# dummy's generic unrouted fallback payload validates against these just as
+# happily as a routed one, so they can't serve as routing evidence for
+# test_generic_prompt_payload_is_rejected_by_every_schema either — excluded
+# here for an analogous reason to the model-routed classes above, via a
+# different mechanism (schema permissiveness, not routing).
+_PERMISSIVE_CLASS_NAMES: frozenset[str] = frozenset(
+    {"BrandDiscoveryAudit", "CreativeRefinementDecision", "DesignSystemDefinition"}
+)
+
+_TEXT_ROUTED_CASES: tuple[tuple[str, Callable[[], Any], type], ...] = tuple(
+    case
+    for case in _CASES
+    if case[2].__name__ not in _MODEL_ROUTED_CLASS_NAMES
+    and case[2].__name__ not in _PERMISSIVE_CLASS_NAMES
+)
+_TEXT_ROUTED_CASE_IDS: tuple[str, ...] = tuple(
+    case_id for case_id, _factory, _model in _TEXT_ROUTED_CASES
+)
+_MODEL_ROUTED_CASES: tuple[tuple[str, Callable[[], Any], type], ...] = tuple(
+    case for case in _CASES if case[2].__name__ in _MODEL_ROUTED_CLASS_NAMES
+)
+_MODEL_ROUTED_CASE_IDS: tuple[str, ...] = tuple(
+    case_id for case_id, _factory, _model in _MODEL_ROUTED_CASES
+)
+_MODEL_ROUTED_CLASSES: tuple[type, ...] = tuple(
+    model for _case_id, _factory, model in _MODEL_ROUTED_CASES
+)
+_MODEL_ROUTED_CLASS_NAME_IDS: tuple[str, ...] = tuple(cls.__name__ for cls in _MODEL_ROUTED_CLASSES)
 
 # Factory names covered by ``_CASES``. Parameterized factories appear once here
 # and expand to several table rows, so this is not derivable from ``_CASE_IDS``.
@@ -188,14 +281,6 @@ _FACTORIES_WITH_STRUCTURED_OUTPUT: frozenset[str] = frozenset(
         "make_internal_guide",
         "make_brand_architecture_builder",
         "make_brand_in_action_illustrator",
-    }
-)
-
-# Phase 5 — Governance. Still prose ``output_mode``, so there is no schema to
-# bind. Move a name out of this set and into the table above when its agent
-# migrates to ``structured_output=``.
-_FACTORIES_WITHOUT_STRUCTURED_OUTPUT: frozenset[str] = frozenset(
-    {
         "make_ownership_definer",
         "make_approval_workflow_designer",
         "make_asset_wiki_planner",
@@ -205,6 +290,13 @@ _FACTORIES_WITHOUT_STRUCTURED_OUTPUT: frozenset[str] = frozenset(
         "make_brand_rules_codifier",
     }
 )
+
+# All branding agent factories now use ``structured_output=`` (Phases 1-5).
+# Kept as an explicit (currently empty) set — rather than removing it and the
+# union check below — so a future phase or team addition that ships without a
+# schema has an obvious place to be listed instead of silently expanding
+# ``_FACTORIES_WITH_STRUCTURED_OUTPUT``'s assumptions.
+_FACTORIES_WITHOUT_STRUCTURED_OUTPUT: frozenset[str] = frozenset()
 
 
 # ---------------------------------------------------------------------------
@@ -269,18 +361,44 @@ def test_dummy_payload_validates_against_agent_schema(
     assert isinstance(output, output_model)
 
 
-@pytest.mark.parametrize(("_case_id", "_factory", "output_model"), _CASES, ids=_CASE_IDS)
+@pytest.mark.parametrize(
+    ("_case_id", "_factory", "output_model"), _TEXT_ROUTED_CASES, ids=_TEXT_ROUTED_CASE_IDS
+)
 def test_generic_prompt_payload_is_rejected_by_every_schema(
     _case_id: str, _factory: Callable[[], Any], output_model: type
 ) -> None:
-    """The dummy's unrouted fallback satisfies none of the branding schemas.
+    """The dummy's unrouted fallback satisfies none of the still-text-routed schemas.
 
     Without this, ``test_dummy_payload_validates_against_agent_schema`` would
     pass just as happily if an agent's prompt stopped matching its dummy branch
     and fell through — this is what makes that assertion evidence of routing.
+
+    Excludes the six Phase 2 classes in ``_MODEL_ROUTED_CLASS_NAMES``: see
+    ``test_model_routed_payload_validates_regardless_of_prompt_text`` for why
+    an unrouted prompt is no longer the right probe for those.
     """
     with pytest.raises(ValueError, match="failed to parse into"):
         _drive_structured_output(output_model, _UNROUTED_SYSTEM_PROMPT)
+
+
+@pytest.mark.parametrize(
+    ("_case_id", "_factory", "output_model"), _MODEL_ROUTED_CASES, ids=_MODEL_ROUTED_CASE_IDS
+)
+def test_model_routed_payload_validates_regardless_of_prompt_text(
+    _case_id: str, _factory: Callable[[], Any], output_model: type
+) -> None:
+    """Phase 2 dummy routing keys off the structured_output model class, not text.
+
+    Proves issue #4252's fix: ``DummyLLMClient.structured_output`` forwards the
+    real ``output_model`` class into ``complete_json``, which routes these six
+    classes deterministically by class identity (see
+    ``_branding_phase2_structured_output_stub``). So even
+    ``_UNROUTED_SYSTEM_PROMPT`` — carrying none of the legacy text anchors —
+    still yields a schema-valid payload, unlike the remaining classes covered
+    by ``test_generic_prompt_payload_is_rejected_by_every_schema``.
+    """
+    output = _drive_structured_output(output_model, _UNROUTED_SYSTEM_PROMPT)
+    assert isinstance(output, output_model)
 
 
 def test_archetype_stub_matches_the_form_its_prompt_asks_for() -> None:
@@ -297,6 +415,40 @@ def test_archetype_stub_matches_the_form_its_prompt_asks_for() -> None:
 
     output = _drive_structured_output(BrandArchetypesOutput, agent.system_prompt)
     assert [a.archetype for a in output.brand_archetypes] == ["The Creator"]
+
+
+@pytest.mark.parametrize("output_model", _MODEL_ROUTED_CLASSES, ids=_MODEL_ROUTED_CLASS_NAME_IDS)
+def test_real_agent_event_loop_routes_deterministically_despite_misleading_prompt(
+    output_model: type,
+) -> None:
+    """The actual production path — a real Strands event loop, not
+    ``DummyLLMClient.structured_output()`` called directly — must also route
+    deterministically, for every Phase 2 class the dispatcher covers.
+
+    Every other test in this module drives ``DummyLLMClient.structured_output()``
+    directly via ``_drive_structured_output``. That method is only reachable
+    through Strands' deprecated ``Agent.structured_output()``/
+    ``structured_output_async()``, which nothing in this repo calls. The
+    current API (``structured_output_model=``, what ``build_agent`` uses)
+    drives agents through the tool-calling event loop instead — Strands
+    registers a ``StructuredOutputTool`` and the loop calls
+    ``Model.stream()``, which for a real ``Agent`` always lands on
+    ``LLMClientModel.stream()`` -> ``chat()``, never on ``.structured_output()``.
+    So a passing suite of ``_drive_structured_output``-based tests does not by
+    itself prove the real path routes correctly — this test does, by actually
+    running the event loop with a system prompt that carries none of the
+    legacy text anchors. Parametrized over all six routed classes rather than
+    just ``TaglineOutput``: the dispatcher is a flat name lookup shared by all
+    six, but a class-specific edge case on the event-loop path would
+    otherwise regress silently for the other five.
+    """
+    agent = build_agent(
+        name="RealEventLoopProbe",
+        system_prompt=_UNROUTED_SYSTEM_PROMPT,
+        structured_output=output_model,
+    )
+    result = agent("Please respond.")
+    assert isinstance(result.structured_output, output_model)
 
 
 def test_every_agent_factory_is_either_covered_or_explicitly_excluded() -> None:

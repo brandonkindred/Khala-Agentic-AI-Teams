@@ -14,8 +14,8 @@ from typing import TYPE_CHECKING, Any
 # Every submodule here reaches ``strands``/``llm_service``/``httpx``/``boto3``
 # one way or another — directly (``agent``, ``chunk_reviewer``,
 # ``false_positive_filter`` import ``strands``/``llm_service`` at module scope)
-# or transitively (``models``/``profiles`` import
-# ``software_engineering_team.shared.models``/``coding_standards``, and
+# or transitively (``profiles`` imports ``coding_standards``/``prompt_utils``/
+# ``prompts.requirement_citation`` from ``software_engineering_team.shared``, and
 # importing ANY submodule of ``software_engineering_team.shared`` first
 # executes ``shared/__init__.py``, which eagerly imports ``.llm`` — itself a
 # top-level ``from strands import Agent``). Since importing ``code_review_agent``
@@ -47,6 +47,12 @@ if TYPE_CHECKING:  # pragma: no cover - for type checkers only
         CodeReviewUnavailableError,
     )
     from .profiles import ReviewProfile, build_review_system_prompt  # noqa: F401
+    from .scope_filter import (  # noqa: F401
+        ScopeVerdict,
+        apply_scope_verdicts,
+        apply_scope_verification,
+        finding_overlaps_changed_lines,
+    )
     from .side_effect_impact_pass import (  # noqa: F401
         find_side_effect_impact_issues,
     )
@@ -66,6 +72,10 @@ _LAZY_EXPORTS = {
     "CodeReviewUnavailableError": "models",
     "ReviewProfile": "profiles",
     "build_review_system_prompt": "profiles",
+    "apply_scope_verification": "scope_filter",
+    "apply_scope_verdicts": "scope_filter",
+    "finding_overlaps_changed_lines": "scope_filter",
+    "ScopeVerdict": "scope_filter",
 }
 
 
@@ -91,9 +101,13 @@ __all__ = [
     "CodeReviewUnavailableError",
     "CodebaseIndex",
     "ReviewProfile",
+    "ScopeVerdict",
+    "apply_scope_verdicts",
+    "apply_scope_verification",
     "build_review_system_prompt",
     "filter_false_positives",
     "find_architecture_and_redundancy_issues",
     "find_side_effect_impact_issues",
     "find_architecture_and_side_effect_issues",
+    "finding_overlaps_changed_lines",
 ]

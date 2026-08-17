@@ -46,3 +46,42 @@ def test_start_coding_team_workflow_requires_repo_path(monkeypatch):
     monkeypatch.setattr(sw, "start_workflow_sync", lambda *a, **k: None)
     with pytest.raises(AssertionError, match="non-empty repo_path"):
         sw.start_coding_team_workflow("job-7", "", {"objective": "x"})
+
+
+def test_start_coding_team_workflow_includes_github_block(monkeypatch):
+    captured: dict = {}
+
+    def _fake_start_workflow_sync(workflow_run, *args, workflow_id, task_queue):
+        captured["args"] = args
+
+    monkeypatch.setattr(sw, "start_workflow_sync", _fake_start_workflow_sync)
+
+    github = {
+        "owner": "acme",
+        "repo": "widgets",
+        "issue_number": 9,
+        "issue_title": "Fix it",
+        "remote": "origin",
+        "base": "main",
+        "integration_branch": "khala/issue-9",
+        "cleanup_checkout_on_success": False,
+    }
+    sw.start_coding_team_workflow("job-7", "/repo", {"objective": "x"}, github=github)
+
+    (payload,) = captured["args"]
+    assert payload["github"] == github
+    assert "token" not in payload
+    assert "token" not in payload["github"]
+
+
+def test_start_coding_team_workflow_omits_github_when_none(monkeypatch):
+    captured: dict = {}
+
+    def _fake_start_workflow_sync(workflow_run, *args, workflow_id, task_queue):
+        captured["args"] = args
+
+    monkeypatch.setattr(sw, "start_workflow_sync", _fake_start_workflow_sync)
+
+    sw.start_coding_team_workflow("job-7", "/repo", {"objective": "x"}, github=None)
+    (payload,) = captured["args"]
+    assert "github" not in payload

@@ -2,22 +2,22 @@
 
 from __future__ import annotations
 
-import inspect
 import subprocess
 import tempfile
+import time
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 from unittest.mock import MagicMock
 
 import pytest
 from pydantic import ValidationError
 
 from llm_service.clients.dummy import DummyLLMClient
+from shared.git.git_utils import initialize_new_repo
 from software_engineering_team.devops_team import (
     DevOpsTaskSpec,
     DevOpsTeamLeadAgent,
-    DevOpsTeamResult,
     tool_dispatch,
 )
 from software_engineering_team.devops_team.iac_agent import (
@@ -36,8 +36,11 @@ from software_engineering_team.devops_team.models import (
 from software_engineering_team.devops_team.orchestrator import (
     DEVOPS_REQUIRED_GATE_NAMES,
     ENV_POLICY,
-    MAX_LEGACY_TITLE_LENGTH,
     criterion_traces_from_phase4,
+)
+from software_engineering_team.devops_team.phases.quality_gate import (
+    _describe_task_with_exclusions,
+    run_phase4_quality_gate,
 )
 from software_engineering_team.devops_team.task_clarifier import (
     DevOpsTaskClarifierAgent,
@@ -67,7 +70,6 @@ from software_engineering_team.devops_team.tool_agents import (
     TerraformExecutionOutput,
     TerraformExecutionToolAgent,
 )
-from software_engineering_team.shared.git_utils import initialize_new_repo
 from software_engineering_team.tests.conftest import (
     _patch_fenced_response,
     _strands_model_double,
@@ -102,10 +104,16 @@ class _ScriptedClient(DummyLLMClient):
     ``complete_json`` call. Replaces the Wave 1/2/3 pre-migration pattern of
     ``mock.complete_json.side_effect = [...]`` for scripted DevOps pipelines."""
 
-    def __init__(self, responses: List[Dict[str, Any]]) -> None:
+    def __init__(
+        self,
+        responses: List[Dict[str, Any]],
+        *,
+        default_factory: Optional[Callable[[], Dict[str, Any]]] = None,
+    ) -> None:
         super().__init__()
         self._responses = list(responses)
         self._idx = 0
+        self._default_factory = default_factory
 
     def complete_json(
         self,
@@ -121,14 +129,53 @@ class _ScriptedClient(DummyLLMClient):
             resp = self._responses[self._idx]
             self._idx += 1
             return resp
-        # After the scripted list is exhausted, fall back to the last entry
-        # so extra pipeline steps don't crash the test.
+        # After the scripted list is exhausted, use the caller-supplied
+        # neutral default when given (so drift onto this fallback is an
+        # obviously-generic response, not a real step's payload silently
+        # overloaded with extra fields); otherwise fall back to the last
+        # entry so extra pipeline steps don't crash the test.
+        if self._default_factory is not None:
+            return self._default_factory()
         return self._responses[-1] if self._responses else {}
+
+    @property
+    def responses(self) -> List[Dict[str, Any]]:
+        """Copy of the scripted response list (safe to mutate by callers)."""
+        return list(self._responses)
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+# Shared prefix for the security-blocking pipeline script: task_clarifier →
+# iac → cicd → deployment → devsecops (blocked). Tests that need this
+# five-step blocked-by-security-review sequence append their own differing
+# tail entries rather than re-inlining the prefix.
+_SECURITY_BLOCKING_SCRIPT_PREFIX: List[Dict[str, Any]] = [
+    {"approved_for_execution": True},
+    {"artifacts": {}, "summary": "iac"},
+    {"artifacts": {}, "summary": "cicd", "required_gates_present": True},
+    {
+        "artifacts": {},
+        "summary": "deploy",
+        "strategy": "rolling",
+        "rollback_plan": ["rb"],
+    },
+    {
+        "approved": False,
+        "findings": [
+            {
+                "finding_id": "F1",
+                "severity": "high",
+                "blocking": True,
+                "issue": "bad iam",
+            }
+        ],
+        "summary": "blocked",
+    },
+]
 
 
 def _base_task_spec(**overrides) -> DevOpsTaskSpec:
@@ -172,7 +219,7 @@ def _base_task_spec(**overrides) -> DevOpsTaskSpec:
 def _scripted_llm_for_happy_path(*, alerting_configured: bool = True) -> _ScriptedClient:
     """Script a full DevOps pipeline run: one response per sub-agent call in
     orchestrator order (task_clarifier, iac, cicd, deployment, infra_debug,
-    devsecops, change_review, test_validation, doc_runbook).
+    devsecops, change_review, qa_agent, doc_runbook).
 
     ``alerting_configured`` is set only on the deployment-strategy response.
     The doc_runbook LLM payload intentionally omits it — the doc agent uses a
@@ -219,7 +266,17 @@ def _scripted_llm_for_happy_path(*, alerting_configured: bool = True) -> _Script
                 "summary": "validation ok",
             },
             {"files": {"docs/runbook.md": "# Runbook"}, "summary": "doc ok"},
-        ]
+        ],
+        # Once the scripted list is exhausted, any further call (e.g. an
+        # unrelated upstream corrective retry -- a chunk-review bisection,
+        # say -- consuming an extra slot and shifting a later named step
+        # onto an overrun call) gets this DevSecOps-shaped clean-approval
+        # fallback instead of the real (and now schema-validated)
+        # doc_runbook payload silently overloaded with extra fields. This
+        # keeps DevSecOpsReviewAgent from crashing the test on such drift
+        # while still making non-DevSecOps drift landing here fail schema
+        # validation loudly, rather than masking every step's drift equally.
+        default_factory=lambda: {"approved": True, "findings": [], "summary": "fallback"},
     )
 
 
@@ -354,32 +411,42 @@ class TestNestedModels:
 
 
 class TestEnvPolicy:
+    """Verify ENV_POLICY defines the expected auto-deploy, approval, and rollback rules per environment."""
+
     def test_dev_allows_auto_deploy(self) -> None:
+        """Dev allows auto-deploy and does not require approval."""
         assert ENV_POLICY["dev"]["auto_deploy_allowed"] is True
         assert ENV_POLICY["dev"]["approval_required"] is False
 
     def test_staging_requires_rollback_test(self) -> None:
+        """Staging requires a rollback test before deploy."""
         assert ENV_POLICY["staging"]["rollback_test_required"] is True
 
     def test_production_requires_approval(self) -> None:
+        """Production requires approval and disallows auto-deploy."""
         assert ENV_POLICY["production"]["approval_required"] is True
         assert ENV_POLICY["production"]["auto_deploy_allowed"] is False
 
 
 class TestEnforceEnvPolicy:
+    """Verify DevOpsTeamLeadAgent._enforce_env_policy blocks task specs that violate ENV_POLICY."""
+
     def test_blocks_prod_without_approval(self) -> None:
+        """A production-scope spec without an approval step is blocked with an approval-related reason."""
         spec = _base_task_spec(scope={"included": ["build"], "excluded": []})
         reason = DevOpsTeamLeadAgent._enforce_env_policy(spec)
         assert reason is not None
         assert "approval" in reason.lower()
 
     def test_blocks_prod_without_rollback(self) -> None:
+        """A production-scope spec without rollback requirements is blocked with a rollback-related reason."""
         spec = _base_task_spec(rollback_requirements=[])
         reason = DevOpsTeamLeadAgent._enforce_env_policy(spec)
         assert reason is not None
         assert "rollback" in reason.lower()
 
     def test_allows_dev_only(self) -> None:
+        """A dev-only spec with no rollback requirements passes the policy check."""
         spec = _base_task_spec(
             platform_scope={"environments": ["dev"]},
             rollback_requirements=[],
@@ -388,9 +455,62 @@ class TestEnforceEnvPolicy:
         assert reason is None
 
     def test_allows_full_spec(self) -> None:
+        """A fully-specified spec satisfying all environment policies passes the check."""
         spec = _base_task_spec()
         reason = DevOpsTeamLeadAgent._enforce_env_policy(spec)
         assert reason is None
+
+    def test_rejects_plain_string_included(self) -> None:
+        """``scope.included`` as a single string (not an iterable of strings) is rejected."""
+        task_spec = SimpleNamespace(
+            platform_scope=SimpleNamespace(environments=["production"]),
+            scope=SimpleNamespace(included="approval gate"),
+            rollback_requirements=["Rollback"],
+        )
+        with pytest.raises(AssertionError, match="not a single string"):
+            DevOpsTeamLeadAgent._enforce_env_policy(task_spec)  # type: ignore[arg-type]
+
+    def test_rejects_negated_approval_mention(self) -> None:
+        """A negated approval mention ("no approval required") does not satisfy the approval gate."""
+        spec = _base_task_spec(
+            platform_scope={"environments": ["production"]},
+            scope={"included": ["no approval required"], "excluded": []},
+            rollback_requirements=["Rollback"],
+        )
+        reason = DevOpsTeamLeadAgent._enforce_env_policy(spec)
+        assert reason is not None
+        assert "approval" in reason.lower()
+
+    def test_rejects_intervening_negated_approval(self) -> None:
+        """A negation separated from "approval" by an intervening filler word still counts as negated."""
+        spec = _base_task_spec(
+            platform_scope={"environments": ["production"]},
+            scope={"included": ["no formal approval"], "excluded": []},
+            rollback_requirements=["Rollback"],
+        )
+        reason = DevOpsTeamLeadAgent._enforce_env_policy(spec)
+        assert reason is not None
+        assert "approval" in reason.lower()
+
+    def test_rejects_string_environments(self) -> None:
+        """``platform_scope.environments`` as a single string (not an iterable of strings) is rejected."""
+        task_spec = SimpleNamespace(
+            platform_scope=SimpleNamespace(environments="production"),
+            scope=SimpleNamespace(included=["prod approval"]),
+            rollback_requirements=["Rollback"],
+        )
+        with pytest.raises(AssertionError, match="not a string"):
+            DevOpsTeamLeadAgent._enforce_env_policy(task_spec)  # type: ignore[arg-type]
+
+    def test_rejects_non_string_included(self) -> None:
+        """A non-string element in ``scope.included`` is rejected."""
+        task_spec = SimpleNamespace(
+            platform_scope=SimpleNamespace(environments=["production"]),
+            scope=SimpleNamespace(included=[None]),
+            rollback_requirements=["Rollback"],
+        )
+        with pytest.raises(AssertionError, match="scope.included"):
+            DevOpsTeamLeadAgent._enforce_env_policy(task_spec)  # type: ignore[arg-type]
 
 
 # ===========================================================================
@@ -582,7 +702,10 @@ class TestRepoNavigatorToolAgent:
 
 
 class TestIaCValidationToolAgent:
+    """Verify IaCValidationToolAgent skips Terraform checks when no .tf files exist."""
+
     def test_skipped_when_no_tf_files(self) -> None:
+        """When the repo contains no Terraform files, both iac_validate and iac_validate_fmt are skipped."""
         with tempfile.TemporaryDirectory() as tmp:
             out = IaCValidationToolAgent().run(IaCValidationInput(repo_path=tmp))
             assert out.checks["iac_validate"] == "skipped"
@@ -591,7 +714,10 @@ class TestIaCValidationToolAgent:
 
 
 class TestPolicyAsCodeToolAgent:
+    """Verify PolicyAsCodeToolAgent skips policy-as-code checks when checkov is unavailable."""
+
     def test_skipped_when_checkov_missing(self) -> None:
+        """When checkov is not installed, the policy_checks gate is reported as skipped."""
         with tempfile.TemporaryDirectory() as tmp:
             out = PolicyAsCodeToolAgent().run(PolicyAsCodeInput(repo_path=tmp))
             assert out.checks["policy_checks"] == "skipped"
@@ -599,7 +725,11 @@ class TestPolicyAsCodeToolAgent:
 
 
 class TestCICDLintToolAgent:
+    """Verify CICDLintPipelineValidationToolAgent lints GitHub Actions workflows for
+    structure and production-deploy safeguards."""
+
     def test_pass_valid_workflow(self) -> None:
+        """A workflow with a valid job definition passes the pipeline_lint gate."""
         with tempfile.TemporaryDirectory() as tmp:
             wf_dir = Path(tmp) / ".github" / "workflows"
             wf_dir.mkdir(parents=True)
@@ -611,6 +741,7 @@ class TestCICDLintToolAgent:
             assert out.success is True
 
     def test_fail_missing_jobs(self) -> None:
+        """A workflow missing a jobs section fails the pipeline_lint gate."""
         with tempfile.TemporaryDirectory() as tmp:
             wf_dir = Path(tmp) / ".github" / "workflows"
             wf_dir.mkdir(parents=True)
@@ -620,6 +751,7 @@ class TestCICDLintToolAgent:
             assert out.success is False
 
     def test_fail_prod_deploy_without_approval(self) -> None:
+        """A workflow that deploys to production without an approval step fails the pipeline_gate_check gate."""
         with tempfile.TemporaryDirectory() as tmp:
             wf_dir = Path(tmp) / ".github" / "workflows"
             wf_dir.mkdir(parents=True)
@@ -631,6 +763,7 @@ class TestCICDLintToolAgent:
             assert out.success is False
 
     def test_skipped_no_workflows(self) -> None:
+        """When no workflow files exist, the pipeline_lint gate is reported as skipped."""
         with tempfile.TemporaryDirectory() as tmp:
             out = CICDLintPipelineValidationToolAgent().run(CICDLintInput(repo_path=tmp))
             assert out.checks["pipeline_lint"] == "skipped"
@@ -638,11 +771,31 @@ class TestCICDLintToolAgent:
 
 
 class TestDeploymentDryRunToolAgent:
+    """Verify DeploymentDryRunPlanToolAgent skips the dry-run gate when no Helm chart is present."""
+
     def test_skipped_no_chart(self) -> None:
+        """When the repo contains no Helm chart, the deployment_dry_run gate is reported as skipped."""
         with tempfile.TemporaryDirectory() as tmp:
             out = DeploymentDryRunPlanToolAgent().run(DeploymentDryRunInput(repo_path=tmp))
             assert out.checks["deployment_dry_run"] == "skipped"
             assert out.success is True
+
+
+def test_devops_env_policy_and_tool_agent_test_classes_have_docstrings() -> None:
+    """Docstring-coverage guard for the DevOps env-policy and tool-agent test classes."""
+    target_classes = [
+        TestEnvPolicy,
+        TestEnforceEnvPolicy,
+        TestIaCValidationToolAgent,
+        TestPolicyAsCodeToolAgent,
+        TestCICDLintToolAgent,
+        TestDeploymentDryRunToolAgent,
+    ]
+    for cls in target_classes:
+        assert cls.__doc__, f"{cls.__name__} is missing a class docstring"
+        for name, member in vars(cls).items():
+            if name.startswith("test_"):
+                assert member.__doc__, f"{cls.__name__}.{name} is missing a docstring"
 
 
 # ===========================================================================
@@ -736,6 +889,20 @@ class TestCICDPipelineAgent:
         assert "source map" in lowered
         assert "frontend.yml" in lowered
 
+    def test_build_context_surfaces_scope_exclusions(self) -> None:
+        """This agent never reads task_spec.scope directly (only
+        InfrastructureAsCodeAgent does), so an explicit exclusion must reach it
+        through the prompt context instead, or a generated pipeline could
+        violate it with the agent never having been told about it."""
+        from software_engineering_team.devops_team.cicd_pipeline_agent import (
+            CICDPipelineAgent,
+            CICDPipelineAgentInput,
+        )
+
+        agent = CICDPipelineAgent(_StubClient({}))
+        context = agent.build_context(CICDPipelineAgentInput(task_spec=_base_task_spec()))
+        assert "cluster provisioning" in context
+
 
 class TestDeploymentStrategyAgent:
     def test_run_returns_strategy(self) -> None:
@@ -827,6 +994,21 @@ class TestDeploymentStrategyAgent:
         )
         assert out.alerting_configured is True
 
+    def test_build_context_surfaces_scope_exclusions(self) -> None:
+        """This agent never reads task_spec.scope directly (only
+        InfrastructureAsCodeAgent does) and doesn't even read title, so an
+        explicit exclusion must reach it through the prompt context instead,
+        or a chosen rollout strategy could violate it with the agent never
+        having been told about it."""
+        from software_engineering_team.devops_team.deployment_strategy_agent import (
+            DeploymentStrategyAgent,
+            DeploymentStrategyAgentInput,
+        )
+
+        agent = DeploymentStrategyAgent(_StubClient({}))
+        context = agent.build_context(DeploymentStrategyAgentInput(task_spec=_base_task_spec()))
+        assert "cluster provisioning" in context
+
 
 class TestDevSecOpsReviewAgent:
     def test_blocks_on_high_severity(self) -> None:
@@ -893,178 +1075,79 @@ class TestDevSecOpsReviewAgent:
         out = agent.run(DevSecOpsReviewInput(task_description="test", artifacts={}))
         assert out.approved
 
-
-class TestDevOpsTestValidationAgent:
-    def test_aggregates_gates(self) -> None:
-        from software_engineering_team.devops_team.test_validation_agent import (
-            DevOpsTestValidationAgent,
-            DevOpsTestValidationInput,
+    def test_recovers_from_malformed_first_response(self) -> None:
+        """A schema-invalid first reply (missing the required ``summary``
+        key) drives ``run_single_shot_review``'s corrective retry; a valid
+        second reply is used instead of falling back."""
+        from software_engineering_team.devops_team.devsecops_review_agent import (
+            DevSecOpsReviewAgent,
+            DevSecOpsReviewInput,
         )
 
-        client = _StubClient(
-            {
-                "approved": True,
-                "quality_gates": {"iac_validate": "pass", "pipeline_lint": "pass"},
-                "acceptance_trace": [],
-                "summary": "ok",
-            }
+        client = _ScriptedClient(
+            [
+                {"findings": []},  # missing required "summary" -- schema-invalid
+                {"approved": True, "findings": [], "summary": "recovered on retry"},
+            ]
         )
-        agent = DevOpsTestValidationAgent(client)
-        out = agent.run(
-            DevOpsTestValidationInput(
-                acceptance_criteria=["test"],
-                tool_results={"iac": {"iac_validate": "pass"}},
-            )
-        )
-        assert out.approved
-        assert out.quality_gates["iac_validate"] == "pass"
+        agent = DevSecOpsReviewAgent(client)
+        out = agent.run(DevSecOpsReviewInput(task_description="test", artifacts={}))
+        assert out.approved is True
+        assert out.summary == "recovered on retry"
+        assert client._idx == 2
 
-    def test_rejects_on_fail_gate(self) -> None:
-        from software_engineering_team.devops_team.test_validation_agent import (
-            DevOpsTestValidationAgent,
-            DevOpsTestValidationInput,
+    def test_recovers_from_malformed_finding(self) -> None:
+        """A finding dict missing its required ``finding_id`` used to crash
+        ``run()`` via a bare ``ReviewFinding(**f)`` call -- it now fails
+        schema validation and drives a corrective retry instead."""
+        from software_engineering_team.devops_team.devsecops_review_agent import (
+            DevSecOpsReviewAgent,
+            DevSecOpsReviewInput,
         )
 
-        client = _StubClient(
-            {
-                "approved": True,
-                "quality_gates": {"iac_validate": "fail"},
-                "summary": "failed",
-            }
+        client = _ScriptedClient(
+            [
+                {
+                    "approved": False,
+                    "findings": [{"severity": "high", "issue": "no finding_id here"}],
+                    "summary": "malformed finding",
+                },
+                {"approved": True, "findings": [], "summary": "clean on retry"},
+            ]
         )
-        agent = DevOpsTestValidationAgent(client)
-        out = agent.run(DevOpsTestValidationInput(acceptance_criteria=[], tool_results={}))
-        assert not out.approved
+        agent = DevSecOpsReviewAgent(client)
+        out = agent.run(DevSecOpsReviewInput(task_description="test", artifacts={}))
+        assert out.approved is True
+        assert out.findings == []
+        assert out.summary == "clean on retry"
+        assert client._idx == 2
 
-    def test_delegates_to_unified_qa_agent(self) -> None:
-        from software_engineering_team.devops_team.test_validation_agent import (
-            DevOpsTestValidationAgent,
-        )
-        from software_engineering_team.qa_agent import QAExpertAgent
-
-        agent = DevOpsTestValidationAgent(_StubClient({"approved": True}))
-        assert isinstance(agent._qa, QAExpertAgent)
-
-    def test_preserves_devops_model_routing_key(self, monkeypatch) -> None:
-        """A non-Strands client resolves the model under the 'devops' routing
-        key (the pre-refactor key), not the QA agent's default 'qa'."""
-        from software_engineering_team.devops_team.test_validation_agent import (
-            DevOpsTestValidationAgent,
-        )
-        from software_engineering_team.devops_team.test_validation_agent import agent as agent_mod
-
-        captured: Dict[str, Any] = {}
-
-        def _fake_get_strands_model(key: str, **_kwargs: Any) -> Any:
-            captured["key"] = key
-            return DummyLLMClient()  # a Strands Model — used directly downstream
-
-        monkeypatch.setattr(agent_mod, "get_strands_model", _fake_get_strands_model)
-        DevOpsTestValidationAgent(object())  # non-None, non-Strands -> resolves via key
-        assert captured["key"] == "devops"
-
-    def test_qa_delegation_exception_fails_closed(self) -> None:
-        """If the delegated QA agent raises, the shim returns a fail-closed
-        result instead of propagating the exception to the orchestrator."""
-        from software_engineering_team.devops_team.test_validation_agent import (
-            DevOpsTestValidationAgent,
-            DevOpsTestValidationInput,
+    def test_falls_back_when_retries_exhausted(self) -> None:
+        """A reply that stays schema-invalid across the corrective retry
+        still yields the safe fallback -- never raises out of ``run()``."""
+        from software_engineering_team.devops_team.devsecops_review_agent import (
+            DevSecOpsReviewAgent,
+            DevSecOpsReviewInput,
         )
 
-        agent = DevOpsTestValidationAgent(_StubClient({"approved": True}))
-
-        def _boom(_inp: Any) -> Any:
-            raise RuntimeError("LLM unavailable")
-
-        agent._qa.run = _boom  # type: ignore[assignment]
-        out = agent.run(DevOpsTestValidationInput(acceptance_criteria=["c1"], tool_results={}))
+        client = _StubClient({"findings": []})  # missing required "summary" every call
+        agent = DevSecOpsReviewAgent(client)
+        out = agent.run(DevSecOpsReviewInput(task_description="test", artifacts={}))
         assert out.approved is False
-        assert out.quality_gates.get("test_validation") == "fail"
-        assert "LLM unavailable" in out.summary
+        assert out.findings == []
+        assert "DevSecOps review failed" in out.summary
 
-    def test_maps_evidence_and_trace_through(self) -> None:
-        from software_engineering_team.devops_team.test_validation_agent import (
-            DevOpsTestValidationAgent,
-            DevOpsTestValidationInput,
-        )
 
-        client = _StubClient(
-            {
-                "approved": True,
-                "quality_gates": {"unit_tests": "pass"},
-                "acceptance_trace": [
-                    {"criterion": "c1", "implementation_refs": ["app.py"], "tests": []}
-                ],
-                "validation_evidence": [
-                    {"gate": "unit_tests", "status": "pass", "detail": "12 passed"}
-                ],
-                "summary": "ok",
-            }
-        )
-        out = DevOpsTestValidationAgent(client).run(
-            DevOpsTestValidationInput(acceptance_criteria=["c1"], tool_results={})
-        )
-        assert out.acceptance_trace and out.acceptance_trace[0]["criterion"] == "c1"
-        assert out.evidence and out.evidence[0].gate == "unit_tests"
-        assert out.evidence[0].status == "pass"
-
+class TestGateStatusCoercion:
     def test_unknown_gate_status_coerced_to_not_run(self) -> None:
-        from software_engineering_team.devops_team.test_validation_agent import (
-            DevOpsTestValidationAgent,
-            DevOpsTestValidationInput,
-        )
+        from software_engineering_team.devops_team.models import coerce_gate_status
 
-        client = _StubClient(
-            {
-                "approved": True,
-                "quality_gates": {"unit_tests": "flaky"},  # not a valid GateStatus
-                "summary": "ok",
-            }
-        )
-        out = DevOpsTestValidationAgent(client).run(
-            DevOpsTestValidationInput(acceptance_criteria=[], tool_results={})
-        )
-        assert out.quality_gates["unit_tests"] == "not_run"
+        assert coerce_gate_status("flaky") == "not_run"
 
-    def test_unapproved_without_fail_gate_fails_closed(self) -> None:
-        """An unapproved validation with no failing gate must synthesize one so
-        the gate-only DevOps pipeline still blocks (fail closed)."""
-        from software_engineering_team.devops_team.test_validation_agent import (
-            DevOpsTestValidationAgent,
-            DevOpsTestValidationInput,
-        )
+    def test_known_gate_status_passes_through_after_normalization(self) -> None:
+        from software_engineering_team.devops_team.models import coerce_gate_status
 
-        client = _StubClient(
-            {
-                "approved": False,  # unapproved but no "fail" gate present
-                "quality_gates": {"unit_tests": "not_run"},
-                "summary": "could not validate",
-            }
-        )
-        out = DevOpsTestValidationAgent(client).run(
-            DevOpsTestValidationInput(acceptance_criteria=["c1"], tool_results={})
-        )
-        assert not out.approved
-        assert any(v == "fail" for v in out.quality_gates.values())
-
-    def test_approved_does_not_synthesize_fail_gate(self) -> None:
-        from software_engineering_team.devops_team.test_validation_agent import (
-            DevOpsTestValidationAgent,
-            DevOpsTestValidationInput,
-        )
-
-        client = _StubClient(
-            {
-                "approved": True,
-                "quality_gates": {"unit_tests": "pass"},
-                "summary": "ok",
-            }
-        )
-        out = DevOpsTestValidationAgent(client).run(
-            DevOpsTestValidationInput(acceptance_criteria=["c1"], tool_results={})
-        )
-        assert out.approved
-        assert "test_validation" not in out.quality_gates
+        assert coerce_gate_status(" FAIL ") == "fail"
 
 
 class TestChangeReviewAgent:
@@ -1375,26 +1458,79 @@ class TestCriterionTracesFromPhase4:
         assert {"validation": "pass"} not in traces[0].tests
 
 
+class TestDevOpsTeamLeadAgentModelRouting:
+    def test_qa_agent_preserves_devops_model_routing_key(self, monkeypatch) -> None:
+        """A non-Strands client resolves the DevOps-facing QA agent's model
+        under the 'devops' routing key, not QAExpertAgent's own default 'qa'."""
+        from software_engineering_team.devops_team import orchestrator as orchestrator_mod
+
+        captured: Dict[str, Any] = {}
+
+        def _fake_get_strands_model(key: str, **_kwargs: Any) -> Any:
+            captured["key"] = key
+            return DummyLLMClient()  # a Strands Model — used directly downstream
+
+        monkeypatch.setattr(orchestrator_mod, "get_strands_model", _fake_get_strands_model)
+        DevOpsTeamLeadAgent(object())  # non-None, non-Strands -> resolves via key
+        assert captured["key"] == "devops"
+
+
+# ===========================================================================
+# UNIT TESTS -- PHASE 4 REVIEW-INPUT SCOPE EXCLUSIONS
+# ===========================================================================
+
+
+class TestDescribeTaskWithExclusions:
+    """Unit tests for the Phase 4 devsecops/change-review exclusion propagation.
+
+    Neither DevSecOpsReviewInput.requirements (task_spec.goal.summary) nor
+    ChangeReviewInput.task_description (task_spec.title) otherwise carries
+    task_spec.scope.excluded, so an explicit exclusion could be violated by
+    generated artifacts with neither reviewer ever having been told about it.
+    """
+
+    def test_appends_exclusions_when_present(self) -> None:
+        spec = _base_task_spec(
+            scope={"included": ["build"], "excluded": ["legacy Jenkins pipeline"]}
+        )
+        result = _describe_task_with_exclusions(spec, "base text")
+        assert "base text" in result
+        assert "legacy Jenkins pipeline" in result
+
+    def test_returns_base_unchanged_when_no_exclusions(self) -> None:
+        spec = _base_task_spec(scope={"included": ["build"], "excluded": []})
+        result = _describe_task_with_exclusions(spec, "base text")
+        assert result == "base text"
+
+    def test_joins_multiple_exclusions(self) -> None:
+        spec = _base_task_spec(
+            scope={
+                "included": ["build"],
+                "excluded": ["legacy Jenkins pipeline", "blue-green rollout"],
+            }
+        )
+        result = _describe_task_with_exclusions(spec, "base text")
+        assert "legacy Jenkins pipeline" in result
+        assert "blue-green rollout" in result
+
+
 # ===========================================================================
 # INTEGRATION TESTS -- ORCHESTRATOR
 # ===========================================================================
 
 
 class TestDevOpsTeamLeadAgentIntegration:
-    def test_happy_path_run_workflow(self) -> None:
+    def test_happy_path_run_task(self) -> None:
         mock_llm = _scripted_llm_for_happy_path()
         agent = DevOpsTeamLeadAgent(mock_llm)
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp)
             init_ok, _ = initialize_new_repo(path)
             assert init_ok
-            result = agent.run_workflow(
+            result = agent.run_task(
+                _base_task_spec(task_id="devops-backend"),
                 repo_path=path,
-                task_description="Add backend deployment automation",
-                requirements="Include prod approval gate and rollback plan",
-                target_repo="backend",
                 build_verifier=MagicMock(return_value=(True, "")),
-                task_id="devops-backend",
             )
             rev = subprocess.run(
                 ["git", "rev-parse", "development"],
@@ -1445,9 +1581,10 @@ class TestDevOpsTeamLeadAgentIntegration:
         # Without this, hosts with a working terraform CLI skip debug and consume
         # 8 LLM calls while hosts without it consume 9 — which desynchronizes a
         # chained two-run script. Use the full 9-response happy-path script twice.
-        per_run = list(_scripted_llm_for_happy_path()._responses)
+        happy_path = _scripted_llm_for_happy_path()
+        per_run = list(happy_path.responses)
         assert len(per_run) == 9
-        chained = _ScriptedClient(per_run + per_run)
+        chained = _ScriptedClient(per_run + per_run, default_factory=happy_path._default_factory)
         agent = DevOpsTeamLeadAgent(chained)
 
         def _failing_exec(_repo: str, _artifacts: dict) -> list:
@@ -1491,39 +1628,17 @@ class TestDevOpsTeamLeadAgentIntegration:
 
     def test_blocked_by_security_review(self) -> None:
         mock_llm = _ScriptedClient(
-            [
-                {"approved_for_execution": True},
-                {"artifacts": {}, "summary": "iac"},
-                {"artifacts": {}, "summary": "cicd", "required_gates_present": True},
-                {
-                    "artifacts": {},
-                    "summary": "deploy",
-                    "strategy": "rolling",
-                    "rollback_plan": ["rb"],
-                },
-                {
-                    "approved": False,
-                    "findings": [
-                        {
-                            "finding_id": "F1",
-                            "severity": "high",
-                            "blocking": True,
-                            "issue": "bad iam",
-                        }
-                    ],
-                    "summary": "blocked",
-                },
+            _SECURITY_BLOCKING_SCRIPT_PREFIX
+            + [
                 {"approved": True, "findings": [], "summary": "ok"},
                 {"approved": True, "quality_gates": {"iac_validate": "pass"}, "summary": "ok"},
             ]
         )
         agent = DevOpsTeamLeadAgent(mock_llm)
         with tempfile.TemporaryDirectory() as tmp:
-            result = agent.run_workflow(
+            result = agent.run_task(
+                _base_task_spec(task_id="devops-sec-block"),
                 repo_path=Path(tmp),
-                task_description="Deploy service",
-                requirements="Include prod approval gate and rollback plan",
-                task_id="devops-sec-block",
             )
         assert not result.success
         assert "Quality gates failed" in (result.failure_reason or "")
@@ -1535,28 +1650,8 @@ class TestDevOpsTeamLeadAgentIntegration:
         a blocking DevSecOps review: the gate is force-assigned from the
         DevSecOps + policy result, not preserved via setdefault."""
         mock_llm = _ScriptedClient(
-            [
-                {"approved_for_execution": True},
-                {"artifacts": {}, "summary": "iac"},
-                {"artifacts": {}, "summary": "cicd", "required_gates_present": True},
-                {
-                    "artifacts": {},
-                    "summary": "deploy",
-                    "strategy": "rolling",
-                    "rollback_plan": ["rb"],
-                },
-                {
-                    "approved": False,
-                    "findings": [
-                        {
-                            "finding_id": "F1",
-                            "severity": "high",
-                            "blocking": True,
-                            "issue": "bad iam",
-                        }
-                    ],
-                    "summary": "blocked",
-                },
+            _SECURITY_BLOCKING_SCRIPT_PREFIX
+            + [
                 {"approved": True, "findings": [], "summary": "ok"},
                 # Validation agent wrongly reports the security gate as passing.
                 {
@@ -1568,20 +1663,16 @@ class TestDevOpsTeamLeadAgentIntegration:
         )
         agent = DevOpsTeamLeadAgent(mock_llm)
         with tempfile.TemporaryDirectory() as tmp:
-            result = agent.run_workflow(
+            result = agent.run_task(
+                _base_task_spec(task_id="devops-sec-mask"),
                 repo_path=Path(tmp),
-                task_description="Deploy service",
-                requirements="Include prod approval gate and rollback plan",
-                task_id="devops-sec-mask",
             )
         assert not result.success
         assert result.completion_package is not None
         assert result.completion_package.quality_gates["security_review"] == "fail"
 
     def test_completion_package_has_acceptance_trace(self) -> None:
-        from software_engineering_team.devops_team.test_validation_agent.models import (
-            DevOpsTestValidationOutput,
-        )
+        from software_engineering_team.qa_agent.models import QAOutput
 
         mock_llm = _scripted_llm_for_happy_path()
         agent = DevOpsTeamLeadAgent(mock_llm)
@@ -1591,8 +1682,8 @@ class TestDevOpsTeamLeadAgentIntegration:
         # QA acceptance_evidence call, so a scripted ``acceptance_trace`` on the
         # LLM client does not reach the orchestrator. This test targets Phase 5
         # wiring, not that adapter quirk.
-        agent.test_validation_agent.run = (  # type: ignore[method-assign]
-            lambda _inp: DevOpsTestValidationOutput(
+        agent.qa_agent.run = (  # type: ignore[method-assign]
+            lambda _inp: QAOutput(
                 approved=True,
                 quality_gates={"iac_validate": "pass", "policy_checks": "pass"},
                 acceptance_trace=[
@@ -1657,10 +1748,7 @@ class TestDevOpsTeamLeadAgentIntegration:
         spec = _base_task_spec()
         pkg = agent.run(spec)
         assert len(pkg.files_changed) > 0
-        assert any(
-            path.endswith((".tf", ".yml", ".yaml", ".md")) or "/" in path
-            for path in pkg.files_changed
-        )
+        assert any(path.endswith((".tf", ".yml", ".yaml", ".md")) for path in pkg.files_changed)
 
     def test_quality_gates_in_completion(self) -> None:
         mock_llm = _scripted_llm_for_happy_path()
@@ -1676,18 +1764,16 @@ class TestDevOpsTeamLeadAgentIntegration:
         with tempfile.TemporaryDirectory() as tmp:
             init_ok, _ = initialize_new_repo(Path(tmp))
             assert init_ok
-            result = agent.run_workflow(
+            result = agent.run_task(
+                _base_task_spec(task_id="devops-bv-fail"),
                 repo_path=Path(tmp),
-                task_description="Deploy",
-                requirements="Include prod approval and rollback plan",
                 build_verifier=MagicMock(return_value=(False, "Docker build failed")),
-                task_id="devops-bv-fail",
             )
         assert not result.success
         assert result.failure_reason == "Docker build failed"
 
     def test_completion_package_git_operations_real_merge(self) -> None:
-        """A real ``run_workflow`` delivers the artifacts by cutting a feature
+        """A real ``run_task`` delivers the artifacts by cutting a feature
         branch, merging it into development, and deleting it — the reported
         metadata reflects the actual git state (real SHA equal to development's
         HEAD), not fabricated placeholders."""
@@ -1697,12 +1783,10 @@ class TestDevOpsTeamLeadAgentIntegration:
             path = Path(tmp)
             init_ok, _ = initialize_new_repo(path)
             assert init_ok
-            result = agent.run_workflow(
+            result = agent.run_task(
+                _base_task_spec(task_id="devops-real-merge"),
                 repo_path=path,
-                task_description="Add backend deployment automation",
-                requirements="Include prod approval gate and rollback plan",
                 build_verifier=MagicMock(return_value=(True, "")),
-                task_id="devops-real-merge",
             )
             branches = subprocess.run(
                 ["git", "branch"], cwd=path, capture_output=True, text=True, check=True
@@ -1738,12 +1822,10 @@ class TestDevOpsTeamLeadAgentIntegration:
         with tempfile.TemporaryDirectory() as tmp:
             init_ok, _ = initialize_new_repo(Path(tmp))
             assert init_ok
-            result = agent.run_workflow(
+            result = agent.run_task(
+                _base_task_spec(task_id="devops-head-sha-unknown"),
                 repo_path=Path(tmp),
-                task_description="Add backend deployment automation",
-                requirements="Include prod approval gate and rollback plan",
                 build_verifier=MagicMock(return_value=(True, "")),
-                task_id="devops-head-sha-unknown",
             )
         assert result.success
         gitops = result.completion_package.git_operations
@@ -1764,12 +1846,10 @@ class TestDevOpsTeamLeadAgentIntegration:
         with tempfile.TemporaryDirectory() as tmp:
             init_ok, _ = initialize_new_repo(Path(tmp))
             assert init_ok
-            result = agent.run_workflow(
+            result = agent.run_task(
+                _base_task_spec(task_id="devops-merge-fail"),
                 repo_path=Path(tmp),
-                task_description="Add backend deployment automation",
-                requirements="Include prod approval gate and rollback plan",
                 build_verifier=MagicMock(return_value=(True, "")),
-                task_id="devops-merge-fail",
             )
         assert not result.success
         assert "merge" in (result.failure_reason or "").lower()
@@ -1789,12 +1869,10 @@ class TestDevOpsTeamLeadAgentIntegration:
         with tempfile.TemporaryDirectory() as tmp:
             init_ok, _ = initialize_new_repo(Path(tmp))
             assert init_ok
-            result = agent.run_workflow(
+            result = agent.run_task(
+                _base_task_spec(task_id="devops-dev-branch-fail"),
                 repo_path=Path(tmp),
-                task_description="Add backend deployment automation",
-                requirements="Include prod approval gate and rollback plan",
                 build_verifier=MagicMock(return_value=(True, "")),
-                task_id="devops-dev-branch-fail",
             )
         assert not result.success
         assert "development" in (result.failure_reason or "")
@@ -1810,15 +1888,257 @@ class TestDevOpsTeamLeadAgentIntegration:
         with tempfile.TemporaryDirectory() as tmp:
             init_ok, _ = initialize_new_repo(Path(tmp))
             assert init_ok
-            result = agent.run_workflow(
+            result = agent.run_task(
+                _base_task_spec(task_id="devops-feat-branch-fail"),
                 repo_path=Path(tmp),
-                task_description="Add backend deployment automation",
-                requirements="Include prod approval gate and rollback plan",
                 build_verifier=MagicMock(return_value=(True, "")),
-                task_id="devops-feat-branch-fail",
             )
         assert not result.success
         assert "feature branch" in (result.failure_reason or "")
+
+
+# ===========================================================================
+# STRUCTURED, WRITE-CAPABLE ENTRY POINT -- run_task
+# ===========================================================================
+
+
+class TestRunTaskStructuredEntrypoint:
+    """``run_task`` is the structured, write-capable entry point the
+    coding-team's devops worker adapter uses."""
+
+    def test_run_task_accepts_structured_spec_and_merges(self) -> None:
+        """Default ``merge_to_development=True`` cuts a feature branch,
+        merges it into development, and deletes it."""
+        mock_llm = _scripted_llm_for_happy_path()
+        agent = DevOpsTeamLeadAgent(mock_llm)
+        spec = _base_task_spec(task_id="devops-run-task-merge")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp)
+            init_ok, _ = initialize_new_repo(path)
+            assert init_ok
+            result = agent.run_task(
+                spec, repo_path=path, build_verifier=MagicMock(return_value=(True, ""))
+            )
+            branches = subprocess.run(
+                ["git", "branch"], cwd=path, capture_output=True, text=True, check=True
+            ).stdout
+            rev = subprocess.run(
+                ["git", "rev-parse", "development"],
+                cwd=path,
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            dev_head = rev.stdout.strip()
+        assert result.success
+        assert result.completion_package is not None
+        assert result.completion_package.status == "completed"
+        gitops = result.completion_package.git_operations
+        assert gitops.branch_created.startswith("feature/")
+        assert gitops.merge is not None
+        assert gitops.merge.status == "merged"
+        assert gitops.merge.merge_commit_hash == dev_head
+        assert "feature/" not in branches
+
+    def test_run_task_handoff_mode_leaves_branch_unmerged(self) -> None:
+        """``merge_to_development=False`` commits the feature branch and
+        leaves it in place — the mode the coding-team worker uses — instead
+        of merging/deleting it."""
+        mock_llm = _scripted_llm_for_happy_path()
+        agent = DevOpsTeamLeadAgent(mock_llm)
+        spec = _base_task_spec(task_id="devops-run-task-handoff")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp)
+            init_ok, _ = initialize_new_repo(path)
+            assert init_ok
+            rev_before = subprocess.run(
+                ["git", "rev-parse", "development"],
+                cwd=path,
+                capture_output=True,
+                text=True,
+                check=True,
+            ).stdout.strip()
+            result = agent.run_task(spec, repo_path=path, merge_to_development=False)
+            branches = subprocess.run(
+                ["git", "branch"], cwd=path, capture_output=True, text=True, check=True
+            ).stdout
+            rev_after = subprocess.run(
+                ["git", "rev-parse", "development"],
+                cwd=path,
+                capture_output=True,
+                text=True,
+                check=True,
+            ).stdout.strip()
+        assert result.success
+        assert result.completion_package is not None
+        assert result.completion_package.status == "completed"
+        gitops = result.completion_package.git_operations
+        assert gitops.branch_created.startswith("feature/")
+        assert gitops.merge is None
+        assert len(result.completion_package.files_changed) > 0
+        # The branch is still there, and development never advanced.
+        assert gitops.branch_created in branches
+        assert rev_after == rev_before
+
+    def test_run_task_handoff_branch_matches_make_branch_suffix(self) -> None:
+        """The branch name the pipeline actually cuts must match what a
+        caller (the coding-team devops worker) independently computes via
+        ``make_branch_suffix`` — otherwise the Tech Lead review diffs the
+        wrong branch."""
+        from shared.git.branch_utils import make_branch_suffix
+
+        mock_llm = _scripted_llm_for_happy_path()
+        agent = DevOpsTeamLeadAgent(mock_llm)
+        spec = _base_task_spec(task_id="devops-branch-name", title="Add deploy workflow")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp)
+            init_ok, _ = initialize_new_repo(path)
+            assert init_ok
+            result = agent.run_task(spec, repo_path=path, merge_to_development=False)
+        expected = f"feature/{make_branch_suffix(spec.task_id, spec.title)}"
+        assert result.completion_package.git_operations.branch_created == expected
+
+    def test_run_task_reports_delivery_failure_in_handoff_mode(self, monkeypatch) -> None:
+        """A commit failure in handoff mode still reports a blocked package
+        with ``merge=None`` (no merge was even attempted)."""
+        import software_engineering_team.devops_team.orchestrator as orch
+
+        monkeypatch.setattr(orch, "commit_working_tree", lambda *a, **k: (False, "boom"))
+        mock_llm = _scripted_llm_for_happy_path()
+        agent = DevOpsTeamLeadAgent(mock_llm)
+        spec = _base_task_spec(task_id="devops-handoff-fail")
+        with tempfile.TemporaryDirectory() as tmp:
+            init_ok, _ = initialize_new_repo(Path(tmp))
+            assert init_ok
+            result = agent.run_task(spec, repo_path=Path(tmp), merge_to_development=False)
+        assert not result.success
+        assert result.completion_package is not None
+        assert result.completion_package.status == "blocked"
+        assert result.completion_package.git_operations.merge is None
+
+    def test_run_task_rejects_missing_repo_path(self) -> None:
+        mock_llm = _scripted_llm_for_happy_path()
+        agent = DevOpsTeamLeadAgent(mock_llm)
+        spec = _base_task_spec(task_id="devops-missing-repo")
+        with pytest.raises(AssertionError):
+            agent.run_task(spec, repo_path=Path("/nonexistent/does/not/exist"))
+
+    def test_run_task_requires_task_spec(self) -> None:
+        mock_llm = _scripted_llm_for_happy_path()
+        agent = DevOpsTeamLeadAgent(mock_llm)
+        with tempfile.TemporaryDirectory() as tmp:
+            with pytest.raises(AssertionError):
+                agent.run_task(None, repo_path=Path(tmp))
+
+    def test_run_task_cleans_untracked_validation_leftovers_before_delivering(
+        self, monkeypatch
+    ) -> None:
+        """A Phase 4/4.5 validation tool (e.g. `terraform init` leaving
+        `.terraform.lock.hcl`) can leave untracked files in the working tree
+        AFTER Phase 3 has already written+committed the generated artifacts.
+        deliver_inline_merge/prepare_handoff_branch both commit via `git add
+        -A`, which would otherwise sweep those files into the delivered
+        commit even though they were never part of the generated artifact
+        map. Simulate that leftover as a Phase 4 validation-tool side effect
+        (planting it before Phase 3 runs would just get it committed by
+        Phase 3's own git-add-A, which doesn't exercise this fix) and prove
+        it never reaches the delivered branch."""
+        import software_engineering_team.devops_team.tool_dispatch as tool_dispatch_mod
+
+        real_run_validation_tools = tool_dispatch_mod.run_validation_tools
+
+        def _run_validation_tools_with_leftover(agent, repo_path):
+            (Path(repo_path) / "untracked.leftover").write_text(
+                "validation tool side effect", encoding="utf-8"
+            )
+            return real_run_validation_tools(agent, repo_path)
+
+        monkeypatch.setattr(
+            tool_dispatch_mod, "run_validation_tools", _run_validation_tools_with_leftover
+        )
+        mock_llm = _scripted_llm_for_happy_path()
+        agent = DevOpsTeamLeadAgent(mock_llm)
+        spec = _base_task_spec(task_id="devops-clean-untracked")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp)
+            init_ok, _ = initialize_new_repo(path)
+            assert init_ok
+
+            result = agent.run_task(spec, repo_path=path, merge_to_development=False)
+
+            assert not (path / "untracked.leftover").exists()
+        assert result.success
+        assert "untracked.leftover" not in result.completion_package.files_changed
+
+    def test_run_task_blocks_delivery_when_untracked_cleanup_fails(self, monkeypatch) -> None:
+        """If the pre-delivery reset_hard_to(repo_path, "HEAD") itself fails (e.g. a
+        permissions error), delivery must block rather than merely warn and proceed:
+        continuing into deliver_inline_merge/prepare_handoff_branch would let exactly
+        the leftover this reset exists to catch slip into the commit via git add -A
+        unreviewed."""
+        import software_engineering_team.devops_team.phases.deliver_merge as deliver_merge_mod
+
+        monkeypatch.setattr(
+            deliver_merge_mod,
+            "reset_hard_to",
+            lambda repo_path, ref: (False, "permission denied"),
+        )
+        mock_llm = _scripted_llm_for_happy_path()
+        agent = DevOpsTeamLeadAgent(mock_llm)
+        spec = _base_task_spec(task_id="devops-cleanup-fail")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp)
+            init_ok, _ = initialize_new_repo(path)
+            assert init_ok
+            result = agent.run_task(spec, repo_path=path, merge_to_development=False)
+
+        assert not result.success
+        assert result.completion_package is not None
+        assert result.completion_package.status == "blocked"
+        assert "reset" in (result.failure_reason or "").lower()
+
+    def test_run_task_reverts_tracked_validation_side_effects_before_delivering(
+        self, monkeypatch
+    ) -> None:
+        """A validator can MODIFY an already-tracked file (e.g. terraform init
+        updating a committed .terraform.lock.hcl after provider constraints change)
+        -- git clean alone would not touch that, only reset_hard_to would. Simulate
+        that as a Phase 4 validation-tool side effect and confirm the modification
+        never reaches the delivered branch."""
+        import software_engineering_team.devops_team.tool_dispatch as tool_dispatch_mod
+
+        real_run_validation_tools = tool_dispatch_mod.run_validation_tools
+
+        def _run_validation_tools_with_tracked_mutation(agent, repo_path):
+            tracked = Path(repo_path) / "tracked.lock"
+            if tracked.exists():
+                tracked.write_text("mutated by a validation tool", encoding="utf-8")
+            return real_run_validation_tools(agent, repo_path)
+
+        monkeypatch.setattr(
+            tool_dispatch_mod, "run_validation_tools", _run_validation_tools_with_tracked_mutation
+        )
+        mock_llm = _scripted_llm_for_happy_path()
+        agent = DevOpsTeamLeadAgent(mock_llm)
+        spec = _base_task_spec(task_id="devops-revert-tracked")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp)
+            init_ok, _ = initialize_new_repo(path)
+            assert init_ok
+            (path / "tracked.lock").write_text("committed content", encoding="utf-8")
+            subprocess.run(["git", "add", "-A"], cwd=path, capture_output=True, check=True)
+            subprocess.run(
+                ["git", "commit", "-m", "seed tracked.lock"],
+                cwd=path,
+                capture_output=True,
+                check=True,
+            )
+
+            result = agent.run_task(spec, repo_path=path, merge_to_development=False)
+
+            assert (path / "tracked.lock").read_text(encoding="utf-8") == "committed content"
+        assert result.success
+        assert "tracked.lock" not in result.completion_package.files_changed
 
 
 # ===========================================================================
@@ -1826,424 +2146,10 @@ class TestDevOpsTeamLeadAgentIntegration:
 # ===========================================================================
 
 
-class TestBackwardCompatibility:
-    def test_run_workflow_accepts_legacy_args(self) -> None:
-        mock_llm = _scripted_llm_for_happy_path()
-        agent = DevOpsTeamLeadAgent(mock_llm)
-        with tempfile.TemporaryDirectory() as tmp:
-            init_ok, _ = initialize_new_repo(Path(tmp))
-            assert init_ok
-            result = agent.run_workflow(
-                repo_path=Path(tmp),
-                task_description="Add CI/CD",
-                requirements="Include prod approval gate and rollback plan",
-                target_repo=None,
-                build_verifier=MagicMock(return_value=(True, "")),
-                task_id="devops-legacy",
-                subdir="",
-            )
-        assert isinstance(result, DevOpsTeamResult)
-        assert result.success
-
-    def test_run_workflow_signature_excludes_unused_kwargs(self) -> None:
-        params = inspect.signature(DevOpsTeamLeadAgent.run_workflow).parameters
-        for name in (
-            "architecture",
-            "existing_pipeline",
-            "tech_stack",
-            "max_iterations",
-            "devops_review_agent",
-        ):
-            assert name not in params
-
-    @pytest.mark.parametrize(
-        "removed_kwarg",
-        [
-            "architecture",
-            "existing_pipeline",
-            "tech_stack",
-            "max_iterations",
-            "devops_review_agent",
-        ],
-    )
-    def test_run_workflow_rejects_removed_kwargs(self, removed_kwarg: str) -> None:
-        agent = DevOpsTeamLeadAgent(MagicMock())
-        with pytest.raises(TypeError):
-            agent.run_workflow(
-                repo_path=Path("/tmp"),
-                task_description="Add CI/CD",
-                requirements="staging",
-                **{removed_kwarg: "value"},
-            )
-
-    def test_build_legacy_spec_prod_detection(self) -> None:
-        spec = DevOpsTeamLeadAgent._build_legacy_spec(
-            task_id="devops-1",
-            task_description="Deploy to production",
-            requirements="Prod pipeline needed",
-        )
-        assert spec.environment == "production"
-        assert "production" in spec.platform_scope.environments
-
-    def test_build_legacy_spec_staging_default(self) -> None:
-        spec = DevOpsTeamLeadAgent._build_legacy_spec(
-            task_id="devops-2",
-            task_description="Set up CI",
-            requirements="Run tests on push",
-        )
-        assert spec.environment == "staging"
-
-    def test_build_legacy_spec_does_not_match_produce_as_prod(self) -> None:
-        spec = DevOpsTeamLeadAgent._build_legacy_spec(
-            task_id="devops-2b",
-            task_description="Produce a Dockerfile and CI/CD",
-            requirements="Build and deploy to staging",
-        )
-        assert spec.environment == "staging"
-
-    def test_build_legacy_spec_produce_alone_is_not_production(self) -> None:
-        spec = DevOpsTeamLeadAgent._build_legacy_spec(
-            task_id="devops-produce-alone",
-            task_description="Produce a deployment artifact",
-            requirements="Build and package",
-        )
-        assert spec.environment == "staging"
-
-    @pytest.mark.parametrize(
-        "description",
-        [
-            "Target NON-PRODUCTION only",
-            "Do NOT PROD deploy",
-            "NO PRODUCTION traffic",
-        ],
-    )
-    def test_build_legacy_spec_ignores_case_variants_of_negation(self, description: str) -> None:
-        spec = DevOpsTeamLeadAgent._build_legacy_spec(
-            task_id="devops-neg-case",
-            task_description=description,
-            requirements="Keep staging",
-        )
-        assert spec.environment == "staging"
-
-    def test_build_legacy_spec_ignores_non_production(self) -> None:
-        spec = DevOpsTeamLeadAgent._build_legacy_spec(
-            task_id="devops-neg-1",
-            task_description="Target non-production only",
-            requirements="Keep staging",
-        )
-        assert spec.environment == "staging"
-
-    def test_build_legacy_spec_ignores_not_prod(self) -> None:
-        spec = DevOpsTeamLeadAgent._build_legacy_spec(
-            task_id="devops-neg-2",
-            task_description="Do not prod deploy",
-            requirements="not prod",
-        )
-        assert spec.environment == "staging"
-
-    def test_build_legacy_spec_ignores_no_production(self) -> None:
-        spec = DevOpsTeamLeadAgent._build_legacy_spec(
-            task_id="devops-neg-3",
-            task_description="no production traffic",
-            requirements="staging only",
-        )
-        assert spec.environment == "staging"
-
-    def test_build_legacy_spec_ignores_do_not_deploy_to_production(self) -> None:
-        spec = DevOpsTeamLeadAgent._build_legacy_spec(
-            task_id="devops-neg-phrase-1",
-            task_description="Do not deploy to production",
-            requirements="staging only",
-        )
-        assert spec.environment == "staging"
-
-    def test_build_legacy_spec_ignores_not_for_production(self) -> None:
-        spec = DevOpsTeamLeadAgent._build_legacy_spec(
-            task_id="devops-neg-phrase-2",
-            task_description="Build artifacts not for production",
-            requirements="Use staging environments",
-        )
-        assert spec.environment == "staging"
-
-    def test_build_legacy_spec_ignores_not_in_production(self) -> None:
-        spec = DevOpsTeamLeadAgent._build_legacy_spec(
-            task_id="devops-neg-phrase-4",
-            task_description="Not in production",
-            requirements="Staging only",
-        )
-        assert spec.environment == "staging"
-
-    def test_build_legacy_spec_ignores_not_at_production(self) -> None:
-        spec = DevOpsTeamLeadAgent._build_legacy_spec(
-            task_id="devops-neg-phrase-5",
-            task_description="Not at production",
-            requirements="Staging only",
-        )
-        assert spec.environment == "staging"
-
-    def test_build_legacy_spec_ignores_no_production_access_allowed(self) -> None:
-        spec = DevOpsTeamLeadAgent._build_legacy_spec(
-            task_id="devops-neg-phrase-3",
-            task_description="No production access is allowed; staging only",
-            requirements="Keep all traffic in staging",
-        )
-        assert spec.environment == "staging"
-
-    def test_build_legacy_spec_clause_boundary_no_then_deploy_production(self) -> None:
-        spec = DevOpsTeamLeadAgent._build_legacy_spec(
-            task_id="devops-clause-1",
-            task_description="No. Deploy to production instead",
-            requirements="Include approval gate",
-        )
-        assert spec.environment == "production"
-
-    def test_build_legacy_spec_no_production_downtime_still_production(self) -> None:
-        spec = DevOpsTeamLeadAgent._build_legacy_spec(
-            task_id="devops-attr-1",
-            task_description="No production downtime is acceptable",
-            requirements="Zero-downtime rollout",
-        )
-        assert spec.environment == "production"
-
-    def test_build_legacy_spec_no_production_traffic_interruption_still_production(
-        self,
-    ) -> None:
-        spec = DevOpsTeamLeadAgent._build_legacy_spec(
-            task_id="devops-attr-2",
-            task_description="No production traffic interruption during the rollout",
-            requirements="Keep service available",
-        )
-        assert spec.environment == "production"
-
-    def test_build_legacy_spec_do_not_deploy_until_approved_still_production(self) -> None:
-        spec = DevOpsTeamLeadAgent._build_legacy_spec(
-            task_id="devops-cond-1",
-            task_description="Do not deploy to production until approved",
-            requirements="Gate the prod deploy on approval",
-        )
-        assert spec.environment == "production"
-
-    def test_build_legacy_spec_without_authorization_still_production(self) -> None:
-        spec = DevOpsTeamLeadAgent._build_legacy_spec(
-            task_id="devops-cond-2",
-            task_description="Do not deploy to production without authorization",
-            requirements="Require sign-off before prod",
-        )
-        assert spec.environment == "production"
-
-    def test_build_legacy_spec_pending_authorization_still_production(self) -> None:
-        spec = DevOpsTeamLeadAgent._build_legacy_spec(
-            task_id="devops-cond-3",
-            task_description="Hold production deploy pending authorization",
-            requirements="Wait for approval",
-        )
-        assert spec.environment == "production"
-
-    def test_build_legacy_spec_production_is_not_allowed_is_staging(self) -> None:
-        spec = DevOpsTeamLeadAgent._build_legacy_spec(
-            task_id="devops-post-1",
-            task_description="Production is not allowed; use staging",
-            requirements="Keep all traffic in staging",
-        )
-        assert spec.environment == "staging"
-
-    def test_build_legacy_spec_production_is_prohibited_is_staging(self) -> None:
-        spec = DevOpsTeamLeadAgent._build_legacy_spec(
-            task_id="devops-post-2",
-            task_description="Production is prohibited",
-            requirements="Staging only",
-        )
-        assert spec.environment == "staging"
-
-    def test_build_legacy_spec_production_is_allowed_still_production(self) -> None:
-        spec = DevOpsTeamLeadAgent._build_legacy_spec(
-            task_id="devops-post-3",
-            task_description="Production is allowed",
-            requirements="Approval gate required",
-        )
-        assert spec.environment == "production"
-
-    def test_build_legacy_spec_production_is_allowed_not_required_still_production(
-        self,
-    ) -> None:
-        spec = DevOpsTeamLeadAgent._build_legacy_spec(
-            task_id="devops-post-3b",
-            task_description="Production is allowed, not required",
-            requirements="Approval gate required",
-        )
-        assert spec.environment == "production"
-
-    def test_build_legacy_spec_production_is_permitted_still_production(self) -> None:
-        spec = DevOpsTeamLeadAgent._build_legacy_spec(
-            task_id="devops-post-4",
-            task_description="Production is permitted",
-            requirements="Approval gate required",
-        )
-        assert spec.environment == "production"
-
-    def test_build_legacy_spec_production_is_forbidden_is_staging(self) -> None:
-        spec = DevOpsTeamLeadAgent._build_legacy_spec(
-            task_id="devops-post-5",
-            task_description="Production is forbidden",
-            requirements="Staging only",
-        )
-        assert spec.environment == "staging"
-
-    def test_build_legacy_spec_missing_production_approval_still_production(self) -> None:
-        spec = DevOpsTeamLeadAgent._build_legacy_spec(
-            task_id="devops-neg-safeguard",
-            task_description="No production approval gate is configured; add one",
-            requirements="Add the missing gate and document rollback",
-        )
-        assert spec.environment == "production"
-
-    def test_build_legacy_spec_recognizes_parenthesized_production(self) -> None:
-        spec = DevOpsTeamLeadAgent._build_legacy_spec(
-            task_id="devops-wrap-1",
-            task_description="Deploy to (production)",
-            requirements="Approval gate required",
-        )
-        assert spec.environment == "production"
-
-    def test_build_legacy_spec_recognizes_quoted_prod(self) -> None:
-        spec = DevOpsTeamLeadAgent._build_legacy_spec(
-            task_id="devops-wrap-2",
-            task_description='Target "prod"',
-            requirements="Rollback plan",
-        )
-        assert spec.environment == "production"
-
-    def test_build_legacy_spec_recognizes_backtick_production(self) -> None:
-        spec = DevOpsTeamLeadAgent._build_legacy_spec(
-            task_id="devops-wrap-3",
-            task_description="Deploy to `production`",
-            requirements="Approval gate required",
-        )
-        assert spec.environment == "production"
-
-    def test_build_legacy_spec_recognizes_production_slash_suffix(self) -> None:
-        spec = DevOpsTeamLeadAgent._build_legacy_spec(
-            task_id="devops-sep-1",
-            task_description="Deploy production/blue",
-            requirements="Approval gate required",
-        )
-        assert spec.environment == "production"
-
-    def test_build_legacy_spec_recognizes_markdown_link_production(self) -> None:
-        spec = DevOpsTeamLeadAgent._build_legacy_spec(
-            task_id="devops-sep-2",
-            task_description="Deploy [production](https://example.com)",
-            requirements="Approval gate required",
-        )
-        assert spec.environment == "production"
-
-    def test_build_legacy_spec_recognizes_emdash_production(self) -> None:
-        spec = DevOpsTeamLeadAgent._build_legacy_spec(
-            task_id="devops-sep-3",
-            task_description="production—canary rollout",
-            requirements="Approval gate required",
-        )
-        assert spec.environment == "production"
-
-    def test_build_legacy_spec_always_has_rollback(self) -> None:
-        spec = DevOpsTeamLeadAgent._build_legacy_spec(
-            task_id="devops-3",
-            task_description="Deploy",
-            requirements="Ship it",
-        )
-        assert len(spec.rollback_requirements) > 0
-
-    def test_build_legacy_spec_always_has_acceptance(self) -> None:
-        spec = DevOpsTeamLeadAgent._build_legacy_spec(
-            task_id="devops-4",
-            task_description="Deploy",
-            requirements="Ship it",
-        )
-        assert len(spec.acceptance_criteria) > 0
-
-    def test_build_legacy_spec_truncates_title_to_constant(self) -> None:
-        long_desc = "x" * (MAX_LEGACY_TITLE_LENGTH + 40)
-        spec = DevOpsTeamLeadAgent._build_legacy_spec(
-            task_id="devops-title",
-            task_description=long_desc,
-            requirements="staging",
-        )
-        assert len(spec.title) == MAX_LEGACY_TITLE_LENGTH
-        assert spec.title == long_desc[:MAX_LEGACY_TITLE_LENGTH]
-        assert long_desc.startswith(spec.title)
-
-    def test_build_legacy_spec_whitespace_title_falls_back_to_task_id(self) -> None:
-        spec = DevOpsTeamLeadAgent._build_legacy_spec(
-            task_id="devops-ws-title",
-            task_description="   ",
-            requirements="staging",
-        )
-        assert spec.title == "devops-ws-title"
-
-    def test_enforce_env_policy_rejects_plain_string_included(self) -> None:
-        task_spec = SimpleNamespace(
-            platform_scope=SimpleNamespace(environments=["production"]),
-            scope=SimpleNamespace(included="approval gate"),
-            rollback_requirements=["Rollback"],
-        )
-        with pytest.raises(AssertionError, match="not a single string"):
-            DevOpsTeamLeadAgent._enforce_env_policy(task_spec)  # type: ignore[arg-type]
-
-    def test_enforce_env_policy_rejects_negated_approval_mention(self) -> None:
-        spec = _base_task_spec(
-            platform_scope={"environments": ["production"]},
-            scope={"included": ["no approval required"], "excluded": []},
-            rollback_requirements=["Rollback"],
-        )
-        reason = DevOpsTeamLeadAgent._enforce_env_policy(spec)
-        assert reason is not None
-        assert "approval" in reason.lower()
-
-    def test_enforce_env_policy_rejects_intervening_negated_approval(self) -> None:
-        spec = _base_task_spec(
-            platform_scope={"environments": ["production"]},
-            scope={"included": ["no formal approval"], "excluded": []},
-            rollback_requirements=["Rollback"],
-        )
-        reason = DevOpsTeamLeadAgent._enforce_env_policy(spec)
-        assert reason is not None
-        assert "approval" in reason.lower()
-
-    def test_enforce_env_policy_rejects_string_environments(self) -> None:
-        task_spec = SimpleNamespace(
-            platform_scope=SimpleNamespace(environments="production"),
-            scope=SimpleNamespace(included=["prod approval"]),
-            rollback_requirements=["Rollback"],
-        )
-        with pytest.raises(AssertionError, match="not a string"):
-            DevOpsTeamLeadAgent._enforce_env_policy(task_spec)  # type: ignore[arg-type]
-
-    def test_build_legacy_spec_title_exact_boundary(self) -> None:
-        exact = "y" * MAX_LEGACY_TITLE_LENGTH
-        spec = DevOpsTeamLeadAgent._build_legacy_spec(
-            task_id="devops-title-exact",
-            task_description=exact,
-            requirements="staging",
-        )
-        assert spec.title == exact
-        assert len(spec.title) == MAX_LEGACY_TITLE_LENGTH
-
-    def test_enforce_env_policy_rejects_non_string_included(self) -> None:
-        task_spec = SimpleNamespace(
-            platform_scope=SimpleNamespace(environments=["production"]),
-            scope=SimpleNamespace(included=[None]),
-            rollback_requirements=["Rollback"],
-        )
-        with pytest.raises(AssertionError, match="scope.included"):
-            DevOpsTeamLeadAgent._enforce_env_policy(task_spec)  # type: ignore[arg-type]
-
+class TestRunPipelineCompletionGuard:
     def test_run_pipeline_raises_if_completion_not_assigned(self, monkeypatch) -> None:
         agent = DevOpsTeamLeadAgent(MagicMock())
-        spec = DevOpsTeamLeadAgent._build_legacy_spec(
-            task_id="completion-guard",
-            task_description="deploy",
-            requirements="staging",
-        )
+        spec = _base_task_spec(task_id="completion-guard")
         monkeypatch.setattr(agent, "_run_gated_phases", lambda phases: None)
         with pytest.raises(RuntimeError, match="Phase 5 did not assign a completion package"):
             agent._run_pipeline(
@@ -2430,6 +2336,160 @@ class TestToolDispatchRunValidationTools:
         (call_arg,) = agent.policy_tool.run.call_args.args
         assert call_arg == PolicyAsCodeInput(repo_path=str(repo_path))
 
+    def test_run_validation_tools_executes_the_four_tool_calls_concurrently(self) -> None:
+        """Perf-guard: proves the 4 tool calls run concurrently, not sequentially.
+
+        Each call sleeps ~0.12s (simulating subprocess/I-O-bound work).
+        Sequential execution would take >= 4 * 0.12s == 0.48s; concurrent
+        execution across 4 workers should take roughly one sleep interval.
+        The 2x-one-interval bound sits well below the sequential floor and
+        well above the concurrent expectation, so it isn't flaky under
+        ordinary CI scheduling noise while still failing hard if the four
+        calls ever became sequential again.
+        """
+        sleep_s = 0.12
+
+        def _slow(output: Any) -> Callable[[Any], Any]:
+            def _run(_input: Any) -> Any:
+                time.sleep(sleep_s)
+                return output
+
+            return _run
+
+        agent = MagicMock()
+        agent.iac_validation_tool.run.side_effect = _slow(
+            IaCValidationOutput(success=True, checks={"iac_validate": "pass"})
+        )
+        agent.policy_tool.run.side_effect = _slow(
+            PolicyAsCodeOutput(success=True, checks={"policy_checks": "pass"})
+        )
+        agent.cicd_lint_tool.run.side_effect = _slow(
+            CICDLintOutput(success=True, checks={"pipeline_lint": "pass"})
+        )
+        agent.deploy_dry_run_tool.run.side_effect = _slow(
+            DeploymentDryRunOutput(success=True, checks={"deployment_dry_run": "pass"})
+        )
+
+        start = time.perf_counter()
+        vt = tool_dispatch.run_validation_tools(agent, Path("/tmp/x"))
+        elapsed = time.perf_counter() - start
+
+        assert vt.tool_gate_map == {
+            "iac_validate": "pass",
+            "policy_checks": "pass",
+            "pipeline_lint": "pass",
+            "deployment_dry_run": "pass",
+        }
+        assert elapsed < 2 * sleep_s, (
+            f"run_validation_tools took {elapsed:.3f}s, expected well under "
+            f"{2 * sleep_s:.3f}s if the 4 tool calls run concurrently"
+        )
+
+
+class TestPhase4QualityGateReviewCallsConcurrency:
+    """Perf-guard for the parallel_map refactor of run_phase4_quality_gate's 3 review calls."""
+
+    def _mock_agent(self) -> MagicMock:
+        agent = MagicMock()
+        agent.llm = object()  # not a DummyLLMClient -> takes the parallel_map branch
+        agent.iac_validation_tool.run.return_value = IaCValidationOutput(success=True, checks={})
+        agent.policy_tool.run.return_value = PolicyAsCodeOutput(success=True, checks={})
+        agent.cicd_lint_tool.run.return_value = CICDLintOutput(success=True, checks={})
+        agent.deploy_dry_run_tool.run.return_value = DeploymentDryRunOutput(success=True, checks={})
+        agent._run_execution_tools.return_value = []
+        return agent
+
+    def test_run_phase4_quality_gate_executes_the_three_review_calls_concurrently(self) -> None:
+        """Each review call sleeps ~0.12s; sequential would take >= 3 * 0.12s == 0.36s.
+
+        Concurrent execution across 3 workers should take roughly one sleep
+        interval, so a 2x-one-interval bound is unreachable under sequential
+        execution while staying well above ordinary CI scheduling noise.
+        """
+        from software_engineering_team.devops_team.change_review_agent import ChangeReviewOutput
+        from software_engineering_team.devops_team.devsecops_review_agent import (
+            DevSecOpsReviewOutput,
+        )
+        from software_engineering_team.qa_agent.models import QAOutput
+
+        sleep_s = 0.12
+
+        def _slow(output: Any) -> Callable[[Any], Any]:
+            def _run(_input: Any) -> Any:
+                time.sleep(sleep_s)
+                return output
+
+            return _run
+
+        agent = self._mock_agent()
+        agent.devsecops_review_agent.run.side_effect = _slow(DevSecOpsReviewOutput())
+        agent.change_review_agent.run.side_effect = _slow(ChangeReviewOutput())
+        agent.qa_agent.run.side_effect = _slow(
+            QAOutput(approved=True, quality_gates={"acceptance_evidence": "pass"}, summary="ok")
+        )
+
+        spec = _base_task_spec()
+        start = time.perf_counter()
+        result = run_phase4_quality_gate(
+            agent,
+            task_spec=spec,
+            repo_path=Path("/tmp/x"),
+            aggregated_artifacts={},
+            write_changes=False,
+            subdir="",
+            build_verifier=None,
+        )
+        elapsed = time.perf_counter() - start
+
+        assert result.blocked_result is None
+        assert result.quality_gates["security_review"] == "pass"
+        assert result.quality_gates["change_review"] == "pass"
+        assert elapsed < 2 * sleep_s, (
+            f"run_phase4_quality_gate took {elapsed:.3f}s, expected well under "
+            f"{2 * sleep_s:.3f}s if the 3 review calls run concurrently"
+        )
+
+    def test_run_phase4_quality_gate_runs_sequentially_for_dummy_llm_client(self) -> None:
+        """A DummyLLMClient double (matching _ScriptedClient's isinstance check) takes the
+        sequential branch, so scripted integration tests keep their deterministic call order.
+        """
+        agent = self._mock_agent()
+        agent.llm = DummyLLMClient()
+
+        from software_engineering_team.devops_team.change_review_agent import ChangeReviewOutput
+        from software_engineering_team.devops_team.devsecops_review_agent import (
+            DevSecOpsReviewOutput,
+        )
+        from software_engineering_team.qa_agent.models import QAOutput
+
+        call_order: List[str] = []
+
+        def _record(name: str, output: Any) -> Callable[[Any], Any]:
+            def _run(_input: Any) -> Any:
+                call_order.append(name)
+                return output
+
+            return _run
+
+        agent.devsecops_review_agent.run.side_effect = _record("devsec", DevSecOpsReviewOutput())
+        agent.change_review_agent.run.side_effect = _record("change_review", ChangeReviewOutput())
+        agent.qa_agent.run.side_effect = _record(
+            "qa",
+            QAOutput(approved=True, quality_gates={"acceptance_evidence": "pass"}, summary="ok"),
+        )
+
+        run_phase4_quality_gate(
+            agent,
+            task_spec=_base_task_spec(),
+            repo_path=Path("/tmp/x"),
+            aggregated_artifacts={},
+            write_changes=False,
+            subdir="",
+            build_verifier=None,
+        )
+
+        assert call_order == ["devsec", "change_review", "qa"]
+
 
 class TestMainOrchestratorRegistration:
     def test_devops_team_lead_registered(self) -> None:
@@ -2452,11 +2512,19 @@ class TestMainOrchestratorRegistration:
 # ===========================================================================
 # FENCE-RECOVERY REGRESSION TESTS
 #
-# Each of these 8 agents now routes its raw LLM completion through
+# Each of these 7 agents now routes its raw LLM completion through
 # complete_json_with_continuation() instead of a bare json.loads(). These
 # tests exercise the real recovery path (llm_mod.Agent is mocked at the
 # shared/llm.py level, not at complete_json_with_continuation itself) to
 # prove a markdown-fenced response no longer crashes the agent.
+#
+# devsecops_review is deliberately absent here: it was retrofitted onto
+# software_engineering_team.shared.single_shot_review.run_single_shot_review
+# (a raw LLMClient.complete_json call), which no longer goes through a
+# Strands Agent or complete_json_with_continuation at all, so this
+# fence-recovery mechanism doesn't apply to it. Fenced/markdown-wrapped
+# replies are the underlying LLMClient implementation's responsibility now,
+# same as every other complete_json-based caller (e.g. code_review_agent).
 # ===========================================================================
 
 
@@ -2554,18 +2622,6 @@ def _fenced_infra_patch_case():
     )
 
 
-def _fenced_devsecops_case():
-    from software_engineering_team.devops_team.devsecops_review_agent import (
-        DevSecOpsReviewAgent,
-        DevSecOpsReviewInput,
-    )
-
-    return (
-        DevSecOpsReviewAgent(_strands_model_double()),
-        DevSecOpsReviewInput(task_description="test", artifacts={}),
-    )
-
-
 def _fenced_task_clarifier_case():
     return (
         DevOpsTaskClarifierAgent(_strands_model_double()),
@@ -2599,14 +2655,17 @@ def _check_fenced_infra_patch(out) -> None:
     assert "main.tf" in out.patched_artifacts
 
 
-def _check_fenced_devsecops(out) -> None:
-    assert out.approved is True
-
-
 def _check_fenced_task_clarifier(out) -> None:
     assert out.approved_for_execution is True
 
 
+# DevSecOpsReviewAgent is deliberately absent from this list: it no longer
+# builds a Strands Agent or calls complete_json_with_continuation (see
+# devsecops_review_agent/agent.py), so this Strands-Agent-double-based
+# fenced-markdown-recovery harness no longer applies to it. Fenced-JSON
+# recovery for its new run_single_shot_review/complete_json call path is
+# each concrete LLMClient's own extract_json_from_response usage, already
+# covered by llm_service's own tests -- not a per-agent concern here.
 _FENCED_RECOVERY_CASES = [
     (
         "iac",
@@ -2673,12 +2732,6 @@ _FENCED_RECOVERY_CASES = [
         _check_fenced_infra_patch,
     ),
     (
-        "devsecops_review",
-        _fenced_devsecops_case,
-        {"approved": True, "findings": [], "summary": "fenced sec ok"},
-        _check_fenced_devsecops,
-    ),
-    (
         "task_clarifier",
         _fenced_task_clarifier_case,
         {
@@ -2693,7 +2746,8 @@ _FENCED_RECOVERY_CASES = [
 
 
 class TestDevOpsAgentsRecoverFencedJson:
-    """Markdown-fenced LLM JSON must recover for every DevOps LLM agent."""
+    """Markdown-fenced LLM JSON must recover for each DevOps LLM agent that
+    still uses ``complete_json_with_continuation``."""
 
     @pytest.mark.parametrize(
         "build,payload,check",
@@ -2701,7 +2755,7 @@ class TestDevOpsAgentsRecoverFencedJson:
         ids=[case[0] for case in _FENCED_RECOVERY_CASES],
     )
     def test_recovers_fenced_json(self, monkeypatch, build, payload, check) -> None:
-        """Each DevOps LLM agent recovers markdown-fenced JSON via complete_json_with_continuation."""
+        """Each remaining DevOps LLM agent recovers markdown-fenced JSON via complete_json_with_continuation."""
         _patch_fenced_response(monkeypatch, payload)
         agent, inp = build()
         check(agent.run(inp))

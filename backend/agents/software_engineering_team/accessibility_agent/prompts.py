@@ -1,6 +1,7 @@
 """Prompts for the Accessibility Expert agent."""
 
 from software_engineering_team.shared.coding_standards import CODING_STANDARDS
+from software_engineering_team.shared.prompt_utils import JSON_OUTPUT_INSTRUCTION
 
 ACCESSIBILITY_PROMPT = (
     """You are an expert Accessibility Engineer specializing in WCAG 2.2 compliance. Your job is to review frontend code and produce a list of well-defined accessibility issues for the coding agent to fix. You do NOT write fixes yourself – the coding agent implements them.
@@ -40,6 +41,6 @@ Return a single JSON object with:
 **Approval rule:** Code is approved when there are no critical or high severity issues. Medium/low issues may be acceptable for merge but should still be listed.
 
 If no issues are found, return empty issues list. Be thorough. Each recommendation must be actionable – the coding agent should know exactly what to implement.
-
-Respond with valid JSON only. No explanatory text outside JSON."""
+"""
+    + JSON_OUTPUT_INSTRUCTION
 )

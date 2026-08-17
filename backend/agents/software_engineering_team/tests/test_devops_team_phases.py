@@ -14,6 +14,7 @@ from software_engineering_team.devops_team.deployment_strategy_agent.models impo
 )
 from software_engineering_team.devops_team.iac_agent.models import IaCAgentOutput
 from software_engineering_team.devops_team.models import DevOpsTaskSpec, SubtaskContract
+from software_engineering_team.devops_team.phase2_graph import run_phase2_parallel
 from software_engineering_team.devops_team.phases import (
     Phase1ClarifyResult,
     Phase2DesignResult,
@@ -191,3 +192,74 @@ class TestRunPhase2DesignFanout:
 
         iac_call_input = iac_agent.run.call_args[0][0]
         assert iac_call_input.repo_summary == "repo summary text"
+
+
+class TestRunPhase2ParallelFailurePolicy:
+    """``run_phase2_parallel``'s ``parallel=True`` path now runs through
+    ``shared.concurrency.parallel_map``; these tests pin the documented
+    silent-default failure policy so the migration didn't quietly turn it
+    into fast-fail."""
+
+    def test_one_agent_failure_degrades_to_default_others_unaffected(self) -> None:
+        spec = _base_task_spec()
+        iac_agent = MagicMock()
+        iac_agent.run.side_effect = RuntimeError("boom")
+        cicd_agent = MagicMock()
+        cicd_agent.run.return_value = CICDPipelineAgentOutput(
+            artifacts={".github/workflows/ci.yml": "on: push"}, summary="cicd ok"
+        )
+        deployment_agent = MagicMock()
+        deployment_agent.run.return_value = DeploymentStrategyAgentOutput(
+            artifacts={"deploy/values.yaml": "replicas: 2"}, summary="deploy ok"
+        )
+
+        result = run_phase2_parallel(
+            iac_agent,
+            cicd_agent,
+            deployment_agent,
+            spec,
+            repo_summary="a small repo",
+            parallel=True,
+        )
+
+        assert result["iac_result"].summary == "IaC agent failed during Phase 2"
+        assert result["iac_result"].artifacts == {}
+        assert result["cicd_result"].summary == "cicd ok"
+        assert result["deploy_result"].summary == "deploy ok"
+        assert result["aggregated_artifacts"] == {
+            ".github/workflows/ci.yml": "on: push",
+            "deploy/values.yaml": "replicas: 2",
+        }
+
+    def test_all_agents_succeed(self) -> None:
+        spec = _base_task_spec()
+        iac_agent = MagicMock()
+        iac_agent.run.return_value = IaCAgentOutput(
+            artifacts={"infra/main.tf": "resource {}"}, summary="iac ok"
+        )
+        cicd_agent = MagicMock()
+        cicd_agent.run.return_value = CICDPipelineAgentOutput(
+            artifacts={".github/workflows/ci.yml": "on: push"}, summary="cicd ok"
+        )
+        deployment_agent = MagicMock()
+        deployment_agent.run.return_value = DeploymentStrategyAgentOutput(
+            artifacts={"deploy/values.yaml": "replicas: 2"}, summary="deploy ok"
+        )
+
+        result = run_phase2_parallel(
+            iac_agent,
+            cicd_agent,
+            deployment_agent,
+            spec,
+            repo_summary="a small repo",
+            parallel=True,
+        )
+
+        assert result["iac_result"].summary == "iac ok"
+        assert result["cicd_result"].summary == "cicd ok"
+        assert result["deploy_result"].summary == "deploy ok"
+        assert result["aggregated_artifacts"] == {
+            "infra/main.tf": "resource {}",
+            ".github/workflows/ci.yml": "on: push",
+            "deploy/values.yaml": "replicas: 2",
+        }

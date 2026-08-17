@@ -21,8 +21,8 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from agent_registry import loader
-from agent_registry.loader import AgentRegistry
+from agent_platform.registry import loader
+from agent_platform.registry.loader import AgentRegistry
 from unified_api.routes.agents import router as agents_router
 
 
@@ -38,7 +38,7 @@ def _no_dynamic_store(monkeypatch: pytest.MonkeyPatch) -> None:
 
     They build isolated registries from tmp manifests and assert exact catalog
     contents, so the registry must behave as the Postgres-less path regardless of
-    a dev ``POSTGRES_HOST``. The overlay is covered by the agent_registry suites.
+    a dev ``POSTGRES_HOST``. The overlay is covered by the agent_platform.registry suites.
     """
     monkeypatch.setattr(AgentRegistry, "_dynamic_store", lambda self: None)
 
@@ -61,7 +61,7 @@ def client(tmp_path: Path) -> TestClient:
         summary: Plans posts
         tags: [planning]
         inputs:
-          schema_ref: agent_registry.models:AgentSummary
+          schema_ref: agent_platform.registry.models:AgentSummary
         source:
           entrypoint: x:y
         """,
@@ -135,6 +135,15 @@ def test_list_teams(client: TestClient) -> None:
     assert teams == {"blogging": 1, "branding": 1}
 
 
+def test_list_teams_has_dbc_docstring() -> None:
+    from unified_api.routes.agents import list_teams
+
+    doc = list_teams.__doc__
+    assert doc
+    assert "Preconditions:" in doc
+    assert "Postconditions:" in doc
+
+
 def test_get_agent_detail(client: TestClient) -> None:
     resp = client.get("/api/agents/blogging.planner")
     assert resp.status_code == 200
@@ -170,12 +179,12 @@ def test_schema_endpoints_return_inline_schema_when_present(monkeypatch: pytest.
     """An agent authored with inline JSON schemas (no dotted ref) serves them
     verbatim from the schema-resolution endpoints (P2)."""
     import unified_api.routes.agents as agents_route_mod
-    from agent_registry.models import AgentManifest, IOSchema, SourceInfo
+    from agent_platform.registry.models import AgentManifest, IOSchema, SourceInfo
 
     in_schema = {"type": "object", "properties": {"q": {"type": "string"}}}
     out_schema = {"type": "string"}
     manifest = AgentManifest(
-        id="agent_studio.inline-1",
+        id="agent_team_studio.agent_studio.inline-1",
         team="agent_studio",
         name="Inline",
         summary="s",
@@ -190,9 +199,9 @@ def test_schema_endpoints_return_inline_schema_when_present(monkeypatch: pytest.
     app.include_router(agents_router)
     c = TestClient(app)
 
-    r_in = c.get("/api/agents/agent_studio.inline-1/schema/input")
+    r_in = c.get("/api/agents/agent_team_studio.agent_studio.inline-1/schema/input")
     assert r_in.status_code == 200 and r_in.json() == in_schema
-    r_out = c.get("/api/agents/agent_studio.inline-1/schema/output")
+    r_out = c.get("/api/agents/agent_team_studio.agent_studio.inline-1/schema/output")
     assert r_out.status_code == 200 and r_out.json() == out_schema
 
 
@@ -224,8 +233,8 @@ def test_invoke_resolves_dynamically_registered_agent_via_offloaded_get(
     Postgres-backed dynamic lookup never blocks the event loop; confirm a
     dynamically-registered (non-static) agent still resolves through the offload."""
     import unified_api.routes.agents as agents_route_mod
-    from agent_registry.loader import get_registry
-    from agent_registry.models import AgentManifest, SourceInfo
+    from agent_platform.registry.loader import get_registry
+    from agent_platform.registry.models import AgentManifest, SourceInfo
 
     async def _fail_acquire(agent_id: str):  # pragma: no cover — must not run
         raise AssertionError(f"acquire({agent_id!r}) must not be called on oversized body")
@@ -235,7 +244,7 @@ def test_invoke_resolves_dynamically_registered_agent_via_offloaded_get(
 
     get_registry().register(
         AgentManifest(
-            id="agent_studio.dynamic-invoke-1",
+            id="agent_team_studio.agent_studio.dynamic-invoke-1",
             team="agent_studio",
             name="Dynamic",
             summary="s",
@@ -243,7 +252,7 @@ def test_invoke_resolves_dynamically_registered_agent_via_offloaded_get(
         )
     )
     resp = client.post(
-        "/api/agents/agent_studio.dynamic-invoke-1/invoke",
+        "/api/agents/agent_team_studio.agent_studio.dynamic-invoke-1/invoke",
         content="x" * 4096,
         headers={"Content-Type": "application/json"},
     )
@@ -272,7 +281,7 @@ def _install_upstream(
     import types
 
     import unified_api.routes.agents as agents_route_mod
-    from agent_provisioning_team.sandbox import SandboxStatus
+    from agent_platform.sandbox import SandboxStatus
 
     handle = types.SimpleNamespace(status=SandboxStatus.WARM, url="http://sandbox.local", error=None, boot_ms=1)
     body_bytes = (
@@ -495,7 +504,7 @@ def _install_warming_sandbox(monkeypatch: pytest.MonkeyPatch) -> None:
     import types
 
     import unified_api.routes.agents as agents_route_mod
-    from agent_provisioning_team.sandbox import SandboxStatus
+    from agent_platform.sandbox import SandboxStatus
 
     handle = types.SimpleNamespace(status=SandboxStatus.WARMING, url=None, error=None, boot_ms=None)
 

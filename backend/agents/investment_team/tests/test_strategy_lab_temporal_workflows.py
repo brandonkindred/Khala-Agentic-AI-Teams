@@ -10,7 +10,7 @@ gate-result / tracker threading across re-entries, and short-circuit assembly â€
 with every activity mocked.
 
 Pattern mirrors the codebase's other workflow tests
-(``agentic_team_provisioning/tests/test_temporal_activity.py``): monkeypatch
+(``agent_team_studio/agentic_team_provisioning/tests/test_temporal_activity.py``): monkeypatch
 ``temporalio.workflow.execute_activity`` to dispatch by activity-function name
 to canned responses and drive ``run()`` directly with ``asyncio.run`` â€” no live
 Temporal server or sandbox needed. The dedicated real-sandbox regression guard
@@ -184,6 +184,52 @@ def test_run_skips_config_resolution_when_already_supplied():
     assert "resolve_workflow_config_activity" not in calls
 
 
+def test_run_forwards_batch_cache_key_to_the_attempt_activity():
+    """The cycle workflow threads the parent's ``batch_cache_key`` into every
+    ``run_design_attempt_activity`` call so the worker can resolve the batch's
+    shared cache."""
+    seen: Dict[str, Any] = {}
+
+    def _attempt(args):
+        seen["batch_cache_key"] = args[0].get("batch_cache_key")
+        return _record_outcome()
+
+    handlers = {"run_design_attempt_activity": _attempt}
+    with _patch_execute(handlers):
+        _run(
+            {
+                "prior_records": [],
+                "config": _config_dict(),
+                "convergence_tracker_state": {},
+                "workflow_config": _WF_CONFIG,
+                "batch_cache_key": "run-1-b3",
+            }
+        )
+    assert seen["batch_cache_key"] == "run-1-b3"
+
+
+def test_run_tolerates_missing_batch_cache_key():
+    """Old-shaped/resumed cycle inputs predating the key still run; the forwarded
+    value is simply ``None``."""
+    seen: Dict[str, Any] = {}
+
+    def _attempt(args):
+        seen["batch_cache_key"] = args[0].get("batch_cache_key", "MISSING")
+        return _record_outcome()
+
+    handlers = {"run_design_attempt_activity": _attempt}
+    with _patch_execute(handlers):
+        _run(
+            {
+                "prior_records": [],
+                "config": _config_dict(),
+                "convergence_tracker_state": {},
+                "workflow_config": _WF_CONFIG,
+            }
+        )
+    assert seen["batch_cache_key"] is None
+
+
 def test_run_fetches_regime_summary_when_enabled_and_passes_it_down():
     seen: Dict[str, Any] = {}
 
@@ -205,6 +251,63 @@ def test_run_fetches_regime_summary_when_enabled_and_passes_it_down():
             }
         )
     assert seen["regime_summary"] == {"trend": "up"}
+
+
+def test_run_threads_run_id_and_generation_into_design_attempt_params():
+    """``cycle_input``'s ``run_id``/``generation`` (ADR-012) must reach
+    ``run_design_attempt_activity``'s params verbatim -- this is what lets
+    that activity look up and write a design-attempt checkpoint at all."""
+    seen: Dict[str, Any] = {}
+
+    def _attempt(args):
+        seen["run_id"] = args[0]["run_id"]
+        seen["generation"] = args[0]["generation"]
+        return _record_outcome()
+
+    handlers = {
+        "resolve_workflow_config_activity": lambda a: _WF_CONFIG,
+        "run_design_attempt_activity": _attempt,
+    }
+    with _patch_execute(handlers):
+        _run(
+            {
+                "run_id": "run-1",
+                "generation": 3,
+                "prior_records": [],
+                "config": _config_dict(),
+                "convergence_tracker_state": {},
+            }
+        )
+    assert seen["run_id"] == "run-1"
+    assert seen["generation"] == 3
+
+
+def test_run_defaults_run_id_and_generation_when_cycle_input_predates_them():
+    """A ``cycle_input`` from a workflow-history replay predating these
+    fields (pre-ADR-012) must still run -- run_id defaults to None
+    (disabling checkpointing) and generation defaults to
+    ``_DEFAULT_FENCING_GENERATION``."""
+    seen: Dict[str, Any] = {}
+
+    def _attempt(args):
+        seen["run_id"] = args[0]["run_id"]
+        seen["generation"] = args[0]["generation"]
+        return _record_outcome()
+
+    handlers = {
+        "resolve_workflow_config_activity": lambda a: _WF_CONFIG,
+        "run_design_attempt_activity": _attempt,
+    }
+    with _patch_execute(handlers):
+        _run(
+            {
+                "prior_records": [],
+                "config": _config_dict(),
+                "convergence_tracker_state": {},
+            }
+        )
+    assert seen["run_id"] is None
+    assert seen["generation"] == wf._DEFAULT_FENCING_GENERATION
 
 
 # ---------------------------------------------------------------------------
@@ -321,7 +424,7 @@ def test_run_threads_directives_budget_and_gate_results_across_reentries():
 
 
 def test_run_increments_trial_count_on_each_phase_back():
-    """Every phase-back advances the DSR trial counter by one (run_cycle:1057)."""
+    """Every phase-back advances the DSR trial counter by one, per run_cycle's re-entry handling."""
 
     def _attempt(args):
         # Echo back the tracker state we were handed, unchanged, so the only
@@ -349,6 +452,10 @@ def test_run_increments_trial_count_on_each_phase_back():
 
 
 def test_run_merges_child_drift_into_short_circuit_record():
+    """Drift collected across the reentry attempts (spec/code history, gate
+    timeline) is merged into the drift_collector passed to the
+    short-circuit record builder, not dropped when the run short-circuits."""
+
     def _attempt(args):
         return _reentry_outcome(
             drift={
@@ -387,6 +494,9 @@ def test_run_merges_child_drift_into_short_circuit_record():
 
 
 def test_run_seeds_failure_directives_from_tracker_state():
+    """A convergence tracker whose failure_modes shows a gate failing at or
+    above the seeding threshold (here AcceptanceGate x4) yields a failure
+    directive naming that gate in the first design attempt's directives."""
     seen: Dict[str, Any] = {}
 
     def _attempt(args):
@@ -422,8 +532,21 @@ def test_run_seeds_failure_directives_from_tracker_state():
 
 
 def test_module_exports_workflow_and_activities():
+    """The temporal workflows module exports the expected workflow classes,
+    task queue name, and activity list -- the Pattern-A contract every
+    other team's temporal package registration depends on."""
     from investment_team.strategy_lab.temporal import activities as act
 
     assert wf.WORKFLOWS == [wf.StrategyLabCycleWorkflow, wf.StrategyLabBatchWorkflow]
     assert wf.TASK_QUEUE == "strategy-lab-queue"
     assert wf.ACTIVITIES == act.ACTIVITIES
+
+
+def test_default_fencing_generation_matches_run_state():
+    """wf._DEFAULT_FENCING_GENERATION is duplicated (not imported) from
+    run_state.DEFAULT_FENCING_GENERATION because this module runs inside the
+    temporalio workflow sandbox, which can't tolerate run_state's module-level
+    threading.Lock() side effect. Guard against the two silently drifting."""
+    from investment_team.strategy_lab import run_state
+
+    assert wf._DEFAULT_FENCING_GENERATION == run_state.DEFAULT_FENCING_GENERATION

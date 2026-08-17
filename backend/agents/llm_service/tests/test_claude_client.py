@@ -283,10 +283,28 @@ def test_complete_json_json_parse_error_propagates():
 # ---------------------------------------------------------------------------
 
 
-def test_thinking_default_is_adaptive(monkeypatch):
+def test_thinking_default_is_off_for_json_mode(monkeypatch):
+    """complete_json is always JSON mode; with no explicit think and no agent
+    pin, extended thinking competes with strict JSON decoding for the content
+    channel, so the default omits the thinking kwarg entirely."""
     monkeypatch.delenv("LLM_ENABLE_THINKING", raising=False)
     client, capture = _make_client(_text_message("{}"))
     client.complete_json("q", objective="t")
+    assert "thinking" not in capture
+    assert "output_config" not in capture
+
+
+def test_thinking_default_is_adaptive_for_text_mode(monkeypatch):
+    monkeypatch.delenv("LLM_ENABLE_THINKING", raising=False)
+    client, capture = _make_client(_text_message("hello"))
+    client.complete("q", objective="t")
+    assert capture["thinking"] == {"type": "adaptive"}
+    assert "output_config" not in capture
+
+
+def test_thinking_explicit_true_is_adaptive_even_in_json_mode():
+    client, capture = _make_client(_text_message("{}"))
+    client.complete_json("q", objective="t", think=True)
     assert capture["thinking"] == {"type": "adaptive"}
     assert "output_config" not in capture
 

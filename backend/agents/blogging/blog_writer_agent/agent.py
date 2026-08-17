@@ -1157,10 +1157,10 @@ class BlogWriterAgent(_BlogAgentBase):
             ]
         )
         prefixes: list[str] = []
-        if revise_input.tone_or_purpose:  # pragma: no cover - prompt-assembly branch when tone_or_purpose is supplied; covered by integration tests.
-            prefixes.append(f"Tone/Purpose: {revise_input.tone_or_purpose}\n")
-        if revise_input.audience:  # pragma: no cover - prompt-assembly branch when audience is supplied; covered by integration tests.
-            prefixes.append(f"Audience: {revise_input.audience}\n")
+        if revise_input.tone_or_purpose:
+            prefixes.append(f"Tone/Purpose: {revise_input.tone_or_purpose}")
+        if revise_input.audience:
+            prefixes.append(f"Audience: {revise_input.audience}")
         if prefixes:
             prompt_parts = prefixes + prompt_parts
         if revise_input.selected_title:  # pragma: no cover - prompt-assembly branch when selected_title is supplied; covered by integration tests.

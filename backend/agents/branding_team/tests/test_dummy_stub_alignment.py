@@ -35,7 +35,7 @@ from branding_team.agents import (
 from branding_team.models import (
     AudienceSegmentsOutput,
     BrandArchetypesOutput,
-    BrandDiscoveryAuditOutput,
+    BrandDiscoveryAudit,
     BrandStoryOutput,
     CoreValuesOutput,
     DifferentiationPillarsOutput,
@@ -53,7 +53,7 @@ from llm_service import DummyLLMClient
 # in each factory's ``build_agent(..., structured_output=...)`` call in
 # ``agents.py``.
 _PHASE1_AND_PHASE2_CASES: list[tuple[Callable[[], Agent], type[BaseModel]]] = [
-    (make_discovery_auditor, BrandDiscoveryAuditOutput),
+    (make_discovery_auditor, BrandDiscoveryAudit),
     (make_purpose_vision_writer, PurposeVisionOutput),
     (make_values_articulator, CoreValuesOutput),
     (make_audience_segmenter, AudienceSegmentsOutput),
@@ -79,7 +79,11 @@ def test_dummy_stub_matches_agent_output_model(
     agent = factory()
     prompt = make_mission().model_dump_json(indent=2)
 
-    result = DummyLLMClient().complete_json(prompt, system_prompt=agent.system_prompt)
+    result = DummyLLMClient().complete_json(
+        prompt,
+        system_prompt=agent.system_prompt,
+        structured_output_model=output_model,
+    )
 
     assert isinstance(result, dict)
     output_model.model_validate(result)

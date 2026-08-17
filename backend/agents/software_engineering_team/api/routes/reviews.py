@@ -15,8 +15,11 @@ from software_engineering_team.api.coding_team_models import (
     ReviewPrRequest,
     ReviewPrResponse,
     ReviewRunItem,
+    TranscriptEntry,
+    TranscriptResponse,
 )
 from software_engineering_team.api.routes._common import resolve_github_token
+from software_engineering_team.code_review_agent import transcript
 from software_engineering_team.github_source import (
     GitHubAPIError,
 )
@@ -107,6 +110,53 @@ def get_reviews(
     """
     rows = _main.list_reviews(owner, repo, pr_number, limit=limit)
     return [ReviewRunItem.model_validate(row) for row in rows]
+
+
+@router.get("/reviews/{job_id}/transcript", response_model=TranscriptResponse)
+def fetch_review_transcript(
+    job_id: str,
+    owner: Optional[str] = None,
+    repo: Optional[str] = None,
+) -> TranscriptResponse:
+    """Return one review's full durable transcript (every LLM call it made).
+
+    Preconditions:
+        - ``job_id`` names a review that was started via ``POST /review-pr``.
+        - ``owner``/``repo``, when both supplied, are checked (case-insensitively)
+          against the stored review's repository — the same repo-mismatch guard
+          ``POST /reviews/{job_id}/issues`` applies — so a job id belonging to a
+          different (PAT-accessible) repository is refused rather than leaking
+          its transcript.
+    Postconditions:
+        - Returns the transcript's entries in call order. Returns 404 only
+          when ``job_id`` names no known review; 409 on an ``owner``/``repo``
+          mismatch. A known review with no ``code_review_transcripts`` row
+          (never started, predates this feature, or — the review-level cache
+          short-circuit, which excludes ``job_id`` from its key so an
+          identical resubmission can hit it — made no LLM call at all) still
+          returns 200 with an empty ``entries`` list rather than 404, so the
+          UI's "View Transcript" action (shown for any terminal review) never
+          errors on a review that legitimately has nothing to show. Entries
+          still sitting in this process's in-memory buffer (a final ``drain()``
+          that requeued after a Postgres blip) are included, so the one-shot
+          dialog is not empty while the heartbeat retries. The durable read
+          runs while holding the drain lock so an in-flight flush cannot
+          clear the buffer after this query but before the snapshot, or
+          commit after this query has already returned a stale list.
+    """
+    review = _main.get_review(job_id)
+    if review is None:
+        raise HTTPException(status_code=404, detail=f"no review found for job {job_id}")
+    if owner is not None and repo is not None:
+        if review["owner"].lower() != owner.lower() or review["repo"].lower() != repo.lower():
+            raise HTTPException(
+                status_code=409,
+                detail="The requested repository does not match the reviewed repository.",
+            )
+    entries = transcript.merge_unflushed(job_id, lambda: _main.get_review_transcript(job_id) or [])
+    return TranscriptResponse(
+        job_id=job_id, entries=[TranscriptEntry.model_validate(e) for e in entries]
+    )
 
 
 @router.post("/reviews/{job_id}/issues", response_model=CreateReviewIssuesResponse)

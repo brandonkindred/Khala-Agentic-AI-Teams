@@ -12,8 +12,8 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Optional, Tuple
 
 from llm_service import LLMClient
-from software_engineering_team.shared.git_utils import checkout_branch
-from software_engineering_team.shared.models import SystemArchitecture, Task
+from shared.dev_models.models import SystemArchitecture, Task
+from shared.git.git_utils import checkout_branch
 from software_engineering_team.shared.phases.deliver import make_run_deliver
 from software_engineering_team.shared.repo_context_cache import RepoContextCache
 from software_engineering_team.shared.team_lead_base import BaseTeamLead

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 
 import pytest
@@ -14,7 +15,6 @@ from software_engineering_team.shared.llm_tool_agent_base import LlmToolAgentBas
 from software_engineering_team.shared.tool_agent_base import (
     DEFAULT_MAX_RELEVANT_CODE_CHARS,
     BaseReviewToolAgent,
-    ReviewToolAgent,
     SingleIssueProblemSolveMixin,
     _strands_llm_call_errors,
     fill_review_prompt,
@@ -96,9 +96,7 @@ def test_lenient_json_non_object_returns_empty():
     ``{}`` so callers can rely on the dict postcondition."""
     for raw in ("[1, 2]", '"str"', "3", "true", "null"):
         assert (
-            lenient_json_object(
-                raw, logger=logging.getLogger("t"), context="ctx", on_fail_msg="x"
-            )
+            lenient_json_object(raw, logger=logging.getLogger("t"), context="ctx", on_fail_msg="x")
             == {}
         )
 
@@ -113,13 +111,18 @@ def test_lenient_json_extracts_object_from_prose():
 
 def test_lenient_json_no_object_returns_empty(caplog):
     """Text containing no JSON object at all logs a warning naming the context
-    and returns an empty dict rather than raising."""
+    and returns an empty dict rather than raising.
+
+    Since delegation collapses the historical no-object / didn't-parse branches
+    into the single ``LLMJsonParseError`` failure path, the warning is now the
+    unified "did not parse as JSON" message."""
     with caplog.at_level(logging.WARNING):
         data = lenient_json_object(
             "no json here", logger=logging.getLogger("t"), context="Review", on_fail_msg="zero."
         )
     assert data == {}
-    assert "contained no JSON object" in caplog.text
+    assert "did not parse as JSON" in caplog.text
+    assert "Review" in caplog.text
 
 
 def test_lenient_json_malformed_inner_returns_empty(caplog):
@@ -134,6 +137,41 @@ def test_lenient_json_malformed_inner_returns_empty(caplog):
         )
     assert data == {}
     assert "did not parse as JSON" in caplog.text
+
+
+def test_lenient_json_fenced_payload_with_prose_braces():
+    """A fenced JSON payload followed by prose containing braces is recovered.
+
+    Regression: the historical first-``{``/last-``}`` slice extended
+    ``rfind("}")`` to the ``}`` of the trailing prose ``{x}``, slicing a
+    non-JSON fragment and returning ``{}``. Delegating to the canonical ladder
+    strips the fence and parses the real object."""
+    raw = '```json\n{"a": 1}\n```\nNote: the set {x} matters here.'
+    # The old slice would have mis-sliced past the payload's closing brace.
+    naive_slice = raw[raw.find("{") : raw.rfind("}") + 1]
+    with pytest.raises(json.JSONDecodeError):
+        json.loads(naive_slice)
+    data = lenient_json_object(raw, logger=logging.getLogger("t"), context="ctx", on_fail_msg="x")
+    assert data == {"a": 1}
+
+
+def test_lenient_json_recovers_fenced_and_trailing_comma():
+    """The canonical ladder recovers plain fenced payloads and trailing-comma
+    defects that the historical slice left unrepaired."""
+    fenced = lenient_json_object(
+        '```json\n{"a": 1, "b": 2}\n```',
+        logger=logging.getLogger("t"),
+        context="ctx",
+        on_fail_msg="x",
+    )
+    assert fenced == {"a": 1, "b": 2}
+    trailing_comma = lenient_json_object(
+        '{"a": 1, "b": 2,}',
+        logger=logging.getLogger("t"),
+        context="ctx",
+        on_fail_msg="x",
+    )
+    assert trailing_comma == {"a": 1, "b": 2}
 
 
 # ---------------------------------------------------------------------------
@@ -389,6 +427,70 @@ def test_review_task_description_with_placeholder_tokens_not_corrupted(monkeypat
     assert "1 issue(s) found." in out.summary
     assert seen[0].count(code) == 1
     assert task in seen[0]
+
+
+def test_review_oversized_task_description_passed_through_intact(monkeypatch):
+    """``task_description`` reaching ``review()`` must never be truncated, no
+    matter how large — the one-shot review path has no character cap on this
+    field (unlike ``relevant_code_for_issue``'s single-issue fix budget)."""
+    seen: list[str] = []
+    oversized_task = ("D" * 200_000) + "TASK_TAIL_MARKER"
+
+    class _Capture:
+        def __call__(self, prompt):
+            seen.append(prompt)
+            return "raw-review"
+
+    agent = _DemoAgent.__new__(_DemoAgent)
+    agent._model = object()
+    agent.llm = None
+    _patch_agent(monkeypatch, lambda *a, **k: _Capture())
+    out = agent.review(_Input(current_files={"a.ts": "code"}, task_description=oversized_task))
+    assert "1 issue(s) found." in out.summary
+    assert len(seen) == 1
+    assert oversized_task in seen[0]
+    assert "TASK_TAIL_MARKER" in seen[0]
+
+
+def test_review_oversized_code_text_passed_through_intact(monkeypatch):
+    """Code content built from ``current_files`` must never be truncated on
+    the one-shot review path, however large — unlike the single-issue fix
+    path's ``DEFAULT_MAX_RELEVANT_CODE_CHARS`` budget, ``review()`` imposes
+    no cap on ``_build_code_text``'s output."""
+    seen: list[str] = []
+    oversized_a = ("A" * 120_000) + "FILE_A_TAIL_MARKER"
+    oversized_b = ("B" * 120_000) + "FILE_B_TAIL_MARKER"
+
+    class _Capture:
+        def __call__(self, prompt):
+            seen.append(prompt)
+            return "raw-review"
+
+    agent = _DemoAgent.__new__(_DemoAgent)
+    agent._model = object()
+    agent.llm = None
+    _patch_agent(monkeypatch, lambda *a, **k: _Capture())
+    out = agent.review(_Input(current_files={"a.ts": oversized_a, "b.ts": oversized_b}))
+    assert "1 issue(s) found." in out.summary
+    assert len(seen) == 1
+    assert oversized_a in seen[0]
+    assert oversized_b in seen[0]
+    assert "FILE_A_TAIL_MARKER" in seen[0]
+    assert "FILE_B_TAIL_MARKER" in seen[0]
+
+
+def test_fill_review_prompt_oversized_values_not_truncated():
+    """The substitution primitive itself must pass oversized values through
+    at full length, independent of any agent plumbing."""
+    oversized_task = ("T" * 250_000) + "TASK_TAIL_MARKER"
+    oversized_code = ("C" * 250_000) + "CODE_TAIL_MARKER"
+    out = fill_review_prompt(
+        "TASK={task_description}\nCODE={code}",
+        task_description=oversized_task,
+        code=oversized_code,
+    )
+    assert out == f"TASK={oversized_task}\nCODE={oversized_code}"
+    assert len(out) == len("TASK=\nCODE=") + len(oversized_task) + len(oversized_code)
 
 
 def test_review_no_prompt_raises():
@@ -885,9 +987,7 @@ def test_constructor_resolves_text_model(monkeypatch):
         seen.append(response_format)
         return object()
 
-    monkeypatch.setattr(
-        "software_engineering_team.shared.strands_model.resolve_strands_model", _record
-    )
+    monkeypatch.setattr("llm_service.strands_model.resolve_strands_model", _record)
     agent = _DemoAgent(llm=None)
     assert agent._model is not None
     assert seen == ["text"]  # uses_json_model defaults False
@@ -906,9 +1006,7 @@ def test_constructor_resolves_json_model_when_enabled(monkeypatch):
         seen.append(response_format)
         return object()
 
-    monkeypatch.setattr(
-        "software_engineering_team.shared.strands_model.resolve_strands_model", _record
-    )
+    monkeypatch.setattr("llm_service.strands_model.resolve_strands_model", _record)
     agent = _JsonDemoAgent(llm=None)
     assert agent._model is not None and agent._model_json is not None
     assert "text" in seen and "json" in seen
@@ -940,8 +1038,6 @@ def test_review_json_mode(monkeypatch):
 
 def test_review_tool_agent_is_llm_tool_agent_base_subclass():
     assert issubclass(BaseReviewToolAgent, LlmToolAgentBase)
-    assert issubclass(ReviewToolAgent, LlmToolAgentBase)
-    assert ReviewToolAgent is BaseReviewToolAgent
 
 
 def test_review_tool_agent_selects_review_recipe_attrs():

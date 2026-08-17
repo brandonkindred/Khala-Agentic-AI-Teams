@@ -12,8 +12,8 @@ from pathlib import Path
 import pytest
 import yaml
 
-from agent_registry.models import AgentManifest
-from agent_registry.schema_resolver import resolve_schema
+from agent_platform.registry.models import AgentManifest
+from agent_platform.registry.schema_resolver import resolve_schema
 
 MANIFESTS_DIR = Path(__file__).resolve().parent.parent / "agent_console" / "manifests"
 EXPECTED_COUNT = 2

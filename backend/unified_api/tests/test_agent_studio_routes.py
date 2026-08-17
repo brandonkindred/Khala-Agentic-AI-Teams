@@ -1,15 +1,22 @@
 """Hermetic route-level tests for the Agent Studio Stage-1 endpoints.
 
-Agent Studio is Temporal-only: each handler dispatches its operation as a workflow →
-activity. These tests exercise the full router → dispatch → activity → service →
-response path **in-process, without a Temporal cluster**, by:
+``dispatch`` picks Temporal vs. direct in-process dispatch per call
+(``dispatch._temporal_enabled()``); this file pins the Temporal branch so it keeps
+exercising the full router → dispatch → workflow → activity → service → response
+path **in-process, without a Temporal cluster**, by:
 
-  * patching ``agent_studio.runtime.get_studio_service`` so the activities delegate to
+  * forcing ``agent_platform.studio.temporal.dispatch._temporal_enabled`` to
+    ``True`` regardless of whether ``TEMPORAL_ADDRESS`` happens to be set in the
+    environment running the suite,
+  * patching ``agent_platform.studio.runtime.get_studio_service`` so the activities delegate to
     a scripted assistant + fake registry (no live LLM / Postgres), and
-  * patching ``agent_studio.temporal.dispatch.execute_workflow_sync`` with an inline
+  * patching ``agent_platform.studio.temporal.dispatch.execute_workflow_sync`` with an inline
     stand-in that runs the workflow's single activity directly and reproduces
     Temporal's exception wrapping, so the dispatch layer's ``ValueError`` → 400 /
     ``LookupError`` → 404 translation is genuinely exercised.
+
+The direct in-process dispatch branch is covered in ``test_agent_studio_direct_routes.py``
+(same ``AgentStudioService``, reached without a workflow round-trip).
 
 ``backend/conftest.py`` already puts ``agents/`` on ``sys.path``.
 """
@@ -25,11 +32,12 @@ from fastapi.testclient import TestClient
 from temporalio.client import WorkflowFailureError
 from temporalio.exceptions import ApplicationError
 
-import agent_studio.temporal.dispatch as dispatch_mod
-from agent_studio.assistant import AgentDesignerAgent
-from agent_studio.service import AgentStudioService
-from agent_studio.store import AgentStudioConversationStore
-from agent_studio.temporal.workflows import (
+import agent_platform.studio.temporal.dispatch as dispatch_mod
+from agent_platform.studio import router
+from agent_platform.studio.assistant import AgentDesignerAgent
+from agent_platform.studio.service import AgentStudioService
+from agent_platform.studio.store import AgentStudioConversationStore
+from agent_platform.studio.temporal.workflows import (
     CloneFromRegistryWorkflow,
     SaveAgentWorkflow,
     SendMessageWorkflow,
@@ -39,8 +47,7 @@ from agent_studio.temporal.workflows import (
     send_message_activity,
     start_conversation_activity,
 )
-from agent_studio.testing import FakeRegistry, seed_manifest
-from unified_api.routes.agent_studio import router
+from agent_platform.studio.testing import FakeRegistry, seed_manifest
 
 _DRAFT_REPLY = """\
 Drafted it.
@@ -102,13 +109,14 @@ def registry() -> FakeRegistry:
 def make_client(monkeypatch: pytest.MonkeyPatch):
     """Factory: a TestClient whose Temporal dispatch runs activities in-process.
 
-    Installs the two patches (runtime singleton + inline execute) via ``monkeypatch``
-    so they auto-revert after the test. Each call builds a fresh app so there is no
-    cross-test router leakage.
+    Installs the three patches (forced Temporal branch, runtime singleton, inline
+    execute) via ``monkeypatch`` so they auto-revert after the test. Each call builds
+    a fresh app so there is no cross-test router leakage.
     """
 
     def _factory(service: object, *, raise_server_exceptions: bool = True) -> TestClient:
-        monkeypatch.setattr("agent_studio.runtime.get_studio_service", lambda: service)
+        monkeypatch.setattr(dispatch_mod, "_temporal_enabled", lambda: True)
+        monkeypatch.setattr("agent_platform.studio.runtime.get_studio_service", lambda: service)
         monkeypatch.setattr(dispatch_mod, "execute_workflow_sync", _inline_execute)
         app = FastAPI()
         app.include_router(router)
@@ -265,6 +273,18 @@ def test_clone_from_registry_unknown_is_404(client: TestClient) -> None:
     """Cloning an unknown agent id is a 404."""
     resp = client.post("/api/agent-studio/agents/from-registry/missing")
     assert resp.status_code == 404
+
+
+def test_clone_from_registry_persists_no_second_identity(client: TestClient, registry: FakeRegistry) -> None:
+    """Regression for #5896: cloning must never register anything on the registry.
+
+    The endpoint only projects the source manifest into a draft — it must leave
+    `registry.registered` untouched, so no second persisted identity is created
+    as a side effect of a clone.
+    """
+    resp = client.post("/api/agent-studio/agents/from-registry/blogging.planner")
+    assert resp.status_code == 200
+    assert registry.registered == {}
 
 
 def test_save_agent_registers(client: TestClient, registry: FakeRegistry) -> None:

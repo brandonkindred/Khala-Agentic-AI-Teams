@@ -6,7 +6,7 @@ Split out of ``orchestrator.py``. ``run_phase4_quality_gate`` takes the owning
 live access to several agent-owned collaborators invoked multiple times
 (``agent._run_execution_tools``, ``agent._debug_patch_once``,
 ``agent._run_bounded_retry_loop``, ``agent._report_status``, plus the
-DevSecOps/change-review/test-validation agents).
+DevSecOps/change-review/QA agents).
 """
 
 from __future__ import annotations
@@ -14,25 +14,70 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
+from shared.concurrency import parallel_map
+from software_engineering_team.qa_agent import QAInput
 from software_engineering_team.shared.security_service import infra_gate_passed
 
 from .. import tool_dispatch
 from ..change_review_agent import ChangeReviewInput
 from ..debug_patch import MAX_INFRA_FIX_ITERATIONS, _DebugPatchState
 from ..devsecops_review_agent import DevSecOpsReviewInput
-from ..models import DevOpsCompletionPackage, DevOpsTaskSpec, DevOpsTeamResult
-from ..test_validation_agent import DevOpsTestValidationInput
+from ..models import (
+    DevOpsCompletionPackage,
+    DevOpsTaskSpec,
+    DevOpsTeamResult,
+    GateStatus,
+    coerce_gate_status,
+)
 
 logger = logging.getLogger(__name__)
+
+
+def _describe_task_with_exclusions(task_spec: DevOpsTaskSpec, base: str) -> str:
+    """Append ``task_spec.scope.excluded`` to ``base`` for the security/change-review inputs.
+
+    Neither ``DevSecOpsReviewInput.requirements`` (built from
+    ``task_spec.goal.summary``) nor ``ChangeReviewInput.task_description``
+    (built from ``task_spec.title``) otherwise carries ``scope.excluded``, so
+    an explicit exclusion (e.g. "do not touch the legacy Jenkins pipeline")
+    could be violated by generated artifacts with neither reviewer ever having
+    been told about it -- only ``InfrastructureAsCodeAgent.build_context``
+    reads ``scope`` directly.
+
+    Postconditions: returns ``base`` unchanged when ``scope.excluded`` is
+    empty; otherwise returns ``base`` with an "EXCLUDED:" line appended.
+    """
+    if not task_spec.scope.excluded:
+        return base
+    return f"{base}\n\nEXCLUDED: {'; '.join(task_spec.scope.excluded)}"
+
+
+def _review_calls_run_sequentially(llm: Any) -> bool:
+    """True when Phase 4's DevSecOps/change-review/QA fan-out must run one call at a time.
+
+    Scripted ``DummyLLMClient`` doubles use a shared non-thread-safe response index,
+    so they are not safe under concurrent fan-out. Mirrors
+    ``devops_team.orchestrator``'s Phase 2 ``use_parallel`` guard,
+    ``shared.v2_review._review_steps_run_sequentially``, and
+    ``code_review_agent.coordinator._tail_passes_run_sequentially``; all four
+    delegate to the shared ``is_dummy_llm_client_wrapped`` helper so the
+    detection logic lives in one place.
+
+    Preconditions: ``llm`` is the LLM client backing the review agents.
+    Postconditions: returns ``True`` iff ``llm`` is (or wraps) a ``DummyLLMClient``. Pure.
+    """
+    from llm_service.clients.dummy import is_dummy_llm_client_wrapped
+
+    return is_dummy_llm_client_wrapped(llm)
 
 
 @dataclass(frozen=True)
 class Phase4QualityGateResult:
     """Outcome of Phase 4 (tool validation, reviews, quality-gate assembly)."""
 
-    quality_gates: Dict[str, str] = field(default_factory=dict)
+    quality_gates: Dict[str, GateStatus] = field(default_factory=dict)
     acceptance_trace: List[Dict[str, object]] = field(default_factory=list)
     tool_gate_map: Dict[str, str] = field(default_factory=dict)
     infra_fix_iterations: int = 1
@@ -55,12 +100,16 @@ def run_phase4_quality_gate(
       be empty); ``agent`` provides ``_report_status``,
       ``_run_execution_tools``, ``_debug_patch_once``,
       ``_run_bounded_retry_loop``, ``devsecops_review_agent``,
-      ``change_review_agent``, and ``test_validation_agent``.
+      ``change_review_agent``, ``qa_agent``, and ``llm``.
     Postconditions: runs tool validation, execution verification, the
-      debug-patch loop, and independent reviews, returning the assembled
-      ``quality_gates``, ``acceptance_trace``, ``tool_gate_map``, and
-      ``infra_fix_iterations`` (Phase 4.6 attempts consumed; stays 1 when no
-      retry was needed). ``blocked_result`` is set to a failed
+      debug-patch loop, and independent reviews (fanned out via ``parallel_map``
+      unless ``agent.llm`` is a scripted ``DummyLLMClient`` double, per
+      ``_review_calls_run_sequentially``), returning the assembled
+      ``quality_gates`` (``agent.qa_agent.run(..., request_mode="acceptance_evidence")``'s
+      ``quality_gates`` coerced to ``GateStatus`` via ``coerce_gate_status``, then
+      augmented with ``security_review`` and ``change_review``), ``acceptance_trace``,
+      ``tool_gate_map``, and ``infra_fix_iterations`` (Phase 4.6 attempts consumed;
+      stays 1 when no retry was needed). ``blocked_result`` is set to a failed
       ``DevOpsTeamResult`` when any quality gate fails or the injected
       ``build_verifier`` rejects the repo; otherwise ``None`` so Phase 5 runs.
     """
@@ -125,31 +174,43 @@ def run_phase4_quality_gate(
 
     tool_gate_map.update(state.exec_gate_map)
 
-    devsec = agent.devsecops_review_agent.run(
-        DevSecOpsReviewInput(
-            task_description=task_spec.title,
-            requirements=task_spec.goal.summary,
-            artifacts=aggregated_artifacts,
+    review_calls: List[Callable[[], Any]] = [
+        lambda: agent.devsecops_review_agent.run(
+            DevSecOpsReviewInput(
+                task_description=task_spec.title,
+                requirements=_describe_task_with_exclusions(task_spec, task_spec.goal.summary),
+                artifacts=aggregated_artifacts,
+            )
+        ),
+        lambda: agent.change_review_agent.run(
+            ChangeReviewInput(
+                task_description=_describe_task_with_exclusions(task_spec, task_spec.title),
+                artifacts=aggregated_artifacts,
+            )
+        ),
+        lambda: agent.qa_agent.run(
+            QAInput(
+                code="",
+                request_mode="acceptance_evidence",
+                acceptance_criteria=task_spec.acceptance_criteria,
+                tool_results={
+                    "iac": iac_checks.checks,
+                    "policy": policy_checks.checks,
+                    "cicd": cicd_checks.checks,
+                    "deploy_dry_run": dry_run_checks.checks,
+                },
+            )
+        ),
+    ]
+    if _review_calls_run_sequentially(agent.llm):
+        devsec, change_review, qa_val = [fn() for fn in review_calls]
+    else:
+        devsec, change_review, qa_val = parallel_map(
+            review_calls, lambda fn: fn(), max_workers=len(review_calls), skip_none=False
         )
-    )
-    change_review = agent.change_review_agent.run(
-        ChangeReviewInput(task_description=task_spec.title, artifacts=aggregated_artifacts)
-    )
+    acceptance_trace = list(qa_val.acceptance_trace)
 
-    val = agent.test_validation_agent.run(
-        DevOpsTestValidationInput(
-            acceptance_criteria=task_spec.acceptance_criteria,
-            tool_results={
-                "iac": iac_checks.checks,
-                "policy": policy_checks.checks,
-                "cicd": cicd_checks.checks,
-                "deploy_dry_run": dry_run_checks.checks,
-            },
-        )
-    )
-    acceptance_trace = list(val.acceptance_trace)
-
-    quality_gates = dict(val.quality_gates)
+    quality_gates = {k: coerce_gate_status(v) for k, v in qa_val.quality_gates.items()}
     # The infra security gate routes both the DevSecOps LLM review and the
     # policy-as-code (checkov) scan through the unified infra decision. This
     # is force-assigned (not setdefault) so the authoritative DevSecOps +
@@ -174,7 +235,7 @@ def run_phase4_quality_gate(
                     status="blocked",
                     files_changed=sorted(aggregated_artifacts.keys()),
                     quality_gates=quality_gates,
-                    notes=[devsec.summary, change_review.summary, val.summary],
+                    notes=[devsec.summary, change_review.summary, qa_val.summary],
                     risks_remaining=[f.issue for f in devsec.findings if f.blocking],
                 ),
             ),

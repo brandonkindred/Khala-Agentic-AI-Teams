@@ -67,6 +67,15 @@ from investment_team.strategy_lab.temporal.dto import (
 # fallback is used only if the config activity somehow omits the value.
 _MAX_DESIGN_REENTRIES_FALLBACK = 2
 
+# Mirrors ``strategy_lab.run_state.DEFAULT_FENCING_GENERATION`` -- duplicated
+# rather than imported for the same reason as ``_MAX_DESIGN_REENTRIES_FALLBACK``
+# above: ``run_state`` isn't imported anywhere else in this module (even
+# ``activities.py``, which runs unsandboxed, only imports it locally inside
+# function bodies), and this module's own top-level code runs inside the
+# temporalio workflow sandbox, where a module-level import's side effects
+# (e.g. ``run_state``'s ``threading.Lock()``) are best avoided.
+_DEFAULT_FENCING_GENERATION = 1
+
 # Bounded retry backstop. The design-attempt activity's in-body LLM envelope
 # already owns its own retry/backoff for LLM transients, so a Temporal-level
 # retry only recovers a genuine worker crash mid-activity; keep it small since
@@ -82,6 +91,14 @@ _ACTIVITY_TIMEOUT = timedelta(minutes=10)
 # ``STRATEGY_LAB_DESIGN_MAX_LLM_CALLS`` model round-trips plus backtests), so it
 # needs a far wider ceiling than a single LLM/gate/persist activity.
 _DESIGN_ATTEMPT_TIMEOUT = timedelta(hours=2)
+# Server-enforced liveness deadline for the design-attempt activity's
+# heartbeat (activities.py wraps the attempt in a fixed-interval
+# BackgroundHeartbeat, decoupled from ``emit`` checkpoint cadence -- see
+# ``_DESIGN_ATTEMPT_HEARTBEAT_INTERVAL_S`` there). Sized generously relative
+# to that fixed interval (not to the pipeline's own uneven cadence) so a
+# missed heartbeat window is a real liveness problem, not a slow-but-healthy
+# attempt: missing it fails/retries the WHOLE up-to-2-hour attempt.
+_DESIGN_ATTEMPT_HEARTBEAT_TIMEOUT = timedelta(seconds=90)
 
 # A cycle child workflow is expensive and its own activities already retry
 # internally, so a failed cycle is not re-run at the child level — it surfaces
@@ -106,6 +123,7 @@ async def _exec(
     *,
     params: Optional[Dict[str, Any]] = None,
     timeout: timedelta = _ACTIVITY_TIMEOUT,
+    heartbeat_timeout: Optional[timedelta] = None,
 ) -> Any:
     """Thin ``workflow.execute_activity`` wrapper.
 
@@ -117,6 +135,9 @@ async def _exec(
         ``fn`` is an ``@activity.defn``-decorated function from the
         ``activities`` module. ``params`` is the single positional dict the
         activity expects, or ``None`` for a no-argument activity.
+        ``heartbeat_timeout`` is ``None`` (the default -- no heartbeat
+        deadline, matching every non-heartbeating activity) unless ``fn``
+        heartbeats itself (currently only ``run_design_attempt_activity``).
     Postconditions:
         Returns the activity's result, retried per ``_ACTIVITY_RETRY``.
     """
@@ -125,6 +146,7 @@ async def _exec(
         fn,
         args=args,
         start_to_close_timeout=timeout,
+        heartbeat_timeout=heartbeat_timeout,
         retry_policy=_ACTIVITY_RETRY,
     )
 
@@ -152,7 +174,14 @@ class StrategyLabCycleWorkflow:
         tracker), and optionally ``workflow_config`` (a
         ``resolve_workflow_config_activity`` result; resolved via an activity
         call when absent — its ``regime_summary_enabled`` flag and
-        ``max_design_reentries`` value are read here).
+        ``max_design_reentries`` value are read here), ``run_id`` (the owning
+        run's id -- absent/``None`` disables design-attempt checkpointing for
+        every attempt in this cycle, see ``ADR-012``), and ``generation``
+        (int, default ``_DEFAULT_FENCING_GENERATION`` -- the fencing
+        generation this cycle's incarnation was dispatched with). Both are
+        ``.get(...)``-guarded so a ``cycle_input`` from a workflow-history
+        replay predating these fields still runs (with checkpointing simply
+        disabled).
     Postconditions:
         Returns ``{"record": StrategyLabRecord dump, "convergence_tracker_state":
         <updated dto wire dict>}`` on a terminal record, mirroring ``run_cycle``'s
@@ -165,7 +194,11 @@ class StrategyLabCycleWorkflow:
         Exactly one ``run_design_attempt_activity`` call happens per design
         attempt; the LLM-call budget, gate-result accumulation, and tracker
         state are threaded attempt→attempt so their ceilings/history span the
-        whole cycle, never resetting per attempt.
+        whole cycle, never resetting per attempt. The re-entry loop bound
+        (``max_reentries``) is resolved once, from ``wf_config``'s
+        ``max_design_reentries`` (falling back to
+        ``_MAX_DESIGN_REENTRIES_FALLBACK`` when absent), and stays constant
+        for every attempt in the cycle.
     """
 
     @workflow.run
@@ -175,6 +208,13 @@ class StrategyLabCycleWorkflow:
         signal_brief = cycle_input.get("signal_brief")
         exclude_asset_classes = cycle_input.get("exclude_asset_classes")
         tracker_state = cycle_input.get("convergence_tracker_state") or {}
+        run_id = cycle_input.get("run_id")
+        generation = int(cycle_input.get("generation", _DEFAULT_FENCING_GENERATION))
+        # Per-batch cache key threaded from the parent batch workflow; forwarded
+        # verbatim to run_design_attempt_activity so the worker can resolve the
+        # one shared BatchIndicatorCache for this batch (when the flag is on).
+        # ``.get`` tolerates old-shaped/resumed inputs that predate this field.
+        batch_cache_key = cycle_input.get("batch_cache_key")
 
         # Gather convergence directives once from the batch-level tracker
         # (pure counter/set reads — safe in the sandbox), appended to on each
@@ -223,6 +263,8 @@ class StrategyLabCycleWorkflow:
             outcome = await _exec(
                 act.run_design_attempt_activity,
                 params={
+                    "run_id": run_id,
+                    "generation": generation,
                     "prior_records": prior_records,
                     "config": config_dict,
                     "signal_brief": signal_brief,
@@ -236,8 +278,10 @@ class StrategyLabCycleWorkflow:
                     "budget_calls": budget_calls,
                     "regime_summary": regime_summary,
                     "convergence_tracker_state": tracker_state,
+                    "batch_cache_key": batch_cache_key,
                 },
                 timeout=_DESIGN_ATTEMPT_TIMEOUT,
+                heartbeat_timeout=_DESIGN_ATTEMPT_HEARTBEAT_TIMEOUT,
             )
             # Thread the whole-cycle accumulators forward regardless of outcome.
             tracker_state = outcome["convergence_tracker_state"]
@@ -359,6 +403,13 @@ class StrategyLabBatchWorkflow:
         ``batch_input`` (the sole ``run()`` argument) is a JSON-shaped dict:
           - ``run_id``: str run identifier (used for child-workflow ids, run-state
             persistence, and the cancellation check).
+          - ``generation`` (int, default 1): the fencing generation this
+            workflow incarnation was dispatched with. Minted fresh by
+            ``restart_strategy_lab_run``, carried forward unchanged by
+            ``resume_strategy_lab_run``, and defaulting to ``1`` for a fresh
+            run. Threaded into every ``persist_run_state_activity`` and
+            ``finalize_cycle_record_activity`` call so a write from an
+            activity belonging to a superseded incarnation is rejected.
           - ``config``: ``BacktestConfig`` JSON dump, shared by every cycle.
           - ``batch_size`` / ``batch_count`` / ``max_parallel``: ints.
           - ``benchmark_symbol``: str, for the per-batch signal brief.
@@ -431,6 +482,12 @@ class StrategyLabBatchWorkflow:
         paper_trading_enabled = batch_input.get("paper_trading_enabled", True)
         paper_trading_lookback_days = batch_input.get("paper_trading_lookback_days", 365)
         start_cycle_offset = int(batch_input.get("start_cycle_offset", 0))
+        # Fencing generation for this incarnation (minted by restart_strategy_lab_run
+        # on a restart, carried forward unchanged by resume, defaulting to 1 for a
+        # fresh run) — threaded into every persist/finalize activity call below so a
+        # stale activity from a since-superseded incarnation is rejected instead of
+        # silently committing (shared.fencing.check_fencing_token).
+        generation = int(batch_input.get("generation", _DEFAULT_FENCING_GENERATION))
 
         wf_config = batch_input.get("workflow_config")
         if wf_config is None:
@@ -459,7 +516,7 @@ class StrategyLabBatchWorkflow:
         for batch_idx in range(start_batch_idx, batch_count):
             within_start = start_within_batch if batch_idx == start_batch_idx else 0
 
-            await self._persist_state(run_id, {"current_batch": batch_idx + 1})
+            await self._persist_state(run_id, {"current_batch": batch_idx + 1}, generation)
 
             # ── Per-batch signal-brief refresh (batch N sees batches 1..N-1) ──
             brief = await _exec(
@@ -487,12 +544,21 @@ class StrategyLabBatchWorkflow:
                 handles: List[tuple[int, Any]] = []
                 for cycle_index in wave_indices:
                     cycle_input = {
+                        "run_id": run_id,
+                        "generation": generation,
                         "prior_records": prior_records,
                         "config": config_dict,
                         "signal_brief": signal_brief,
                         "exclude_asset_classes": exclude_asset_classes,
                         "convergence_tracker_state": _snapshot_tracker_wire(primary_tracker_state),
                         "workflow_config": wf_config,
+                        # Deterministic per-batch key (a string — safe to build in
+                        # the workflow sandbox). Every cycle of this batch carries
+                        # the same key, so when the batch-indicator-cache flag is
+                        # on the worker resolves one shared BatchIndicatorCache per
+                        # batch from it (see run_design_attempt_activity). Inert
+                        # payload when the flag is off.
+                        "batch_cache_key": f"{run_id}-b{batch_idx}",
                     }
                     handle = await workflow.start_child_workflow(
                         StrategyLabCycleWorkflow.run,
@@ -570,6 +636,8 @@ class StrategyLabBatchWorkflow:
                     finalized = await _exec(
                         act.finalize_cycle_record_activity,
                         params={
+                            "run_id": run_id,
+                            "generation": generation,
                             "record": result["record"],
                             "signal_brief_storage": signal_brief_storage,
                             "paper_trading_enabled": paper_trading_enabled,
@@ -615,6 +683,7 @@ class StrategyLabBatchWorkflow:
                         "errored_details": errored_details,
                         "tracker_merge_error_count": tracker_merge_errors,
                     },
+                    generation,
                 )
 
                 # External stop is checked only between waves, mirroring thread
@@ -628,12 +697,10 @@ class StrategyLabBatchWorkflow:
 
             if external_terminal_status is not None:
                 break
-            await self._persist_state(run_id, {"completed_batches": batch_idx + 1})
+            await self._persist_state(run_id, {"completed_batches": batch_idx + 1}, generation)
 
-        status = external_terminal_status or (
-            "completed_with_errors" if errored else "completed"
-        )
-        await self._persist_state(run_id, {"status": status})
+        status = external_terminal_status or ("completed_with_errors" if errored else "completed")
+        await self._persist_state(run_id, {"status": status}, generation)
         return {
             "run_id": run_id,
             "status": status,
@@ -645,17 +712,36 @@ class StrategyLabBatchWorkflow:
             "convergence_tracker_state": primary_tracker_state,
         }
 
-    async def _persist_state(self, run_id: str, state: Dict[str, Any]) -> None:
+    async def _persist_state(self, run_id: str, state: Dict[str, Any], generation: int) -> None:
         """Persist a run-state delta via ``persist_run_state_activity``.
 
-        ``persist_run_state_activity`` takes ``(run_id, state, create)`` — three
-        positional args — so it can't go through :func:`_exec` (single-``params``);
+        ``persist_run_state_activity`` takes ``(run_id, state, create, generation)`` —
+        four positional args — so it can't go through :func:`_exec` (single-``params``);
         call ``workflow.execute_activity`` directly with the same retry/timeout.
-        Never raises (the underlying helper swallows job-service failures).
+
+        Preconditions:
+            - ``run_id`` is a non-empty string identifying an existing run.
+            - ``state`` is a JSON-serializable dict of run-state deltas.
+            - ``generation`` is a non-negative int (this workflow's fencing token).
+
+        Raises when ``persist_run_state_activity`` rejects ``generation`` as stale
+        (a non-retryable ``ApplicationError`` — a fenced write means this incarnation
+        has been superseded by a restart and this workflow should stop, so letting the
+        error propagate and fail the workflow is correct, not a bug to swallow). Apart
+        from that stale-generation case, the underlying helper no longer swallows
+        job-service failures either: a transient error is retried per
+        ``_ACTIVITY_RETRY`` (2 attempts), and if that's exhausted this call — and
+        thus the workflow — fails rather than silently continuing with a run
+        state that never durably persisted. ``workflow.execute_activity`` can
+        also propagate infrastructure-level failures (retry-policy exhaustion,
+        worker unavailability, cancellation) unrelated to the activity's own
+        business logic; those still propagate per Temporal's normal
+        retry/timeout handling too.
         """
+        create = False  # this call always updates an existing run's state, never creates one
         await workflow.execute_activity(
             act.persist_run_state_activity,
-            args=[run_id, state, False],
+            args=[run_id, state, create, generation],
             start_to_close_timeout=_ACTIVITY_TIMEOUT,
             retry_policy=_ACTIVITY_RETRY,
         )

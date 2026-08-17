@@ -20,9 +20,11 @@ from code_review_agent.models import CodeReviewInput, CodeReviewOutput, CodeRevi
 from llm_service.clients.dummy import DummyLLMClient
 
 
-def _input(code: str = "### app/main.py ###\ndef foo(): pass", **overrides: Any) -> CodeReviewInput:
+def _input(files: Optional[Dict[str, str]] = None, **overrides: Any) -> CodeReviewInput:
+    if files is None:
+        files = {"app/main.py": "def foo(): pass"}
     base = {
-        "code": code,
+        "files": files,
         "task_description": "Add foo() helper",
         "language": "python",
     }
@@ -36,7 +38,7 @@ def _input(code: str = "### app/main.py ###\ndef foo(): pass", **overrides: Any)
 
 
 def test_small_code_returns_code_review_output() -> None:
-    agent = CodeReviewAgent(llm_client=DummyLLMClient())
+    agent = CodeReviewAgent(llm_client=DummyLLMClient(), force_in_process=True)
     result = agent.run(_input())
     assert isinstance(result, CodeReviewOutput)
     # Dummy stub returns no issues + approved=True via the "senior code reviewer" branch.
@@ -44,10 +46,66 @@ def test_small_code_returns_code_review_output() -> None:
     assert result.issues == []
 
 
+def test_run_flushes_transcript_synchronously_when_job_id_bound(monkeypatch) -> None:
+    """When the caller supplied a job_id, the in-process run must synchronously
+    drain the transcript buffer before returning, rather than leaving it to the
+    background heartbeat -- otherwise a caller that immediately marks the review
+    terminal (making the UI's "View Transcript" action appear) could show an
+    incomplete transcript for up to a full flush interval."""
+    from code_review_agent import agent as agent_mod
+
+    calls = []
+    monkeypatch.setattr(agent_mod.transcript, "drain", lambda: calls.append(1))
+
+    reviewer = CodeReviewAgent(llm_client=DummyLLMClient(), force_in_process=True)
+    reviewer.run(_input(job_id="job-1"))
+
+    assert calls == [1]
+
+
+def test_run_flushes_transcript_even_when_coordinator_raises(monkeypatch) -> None:
+    """A review that fails partway through (e.g. one chunk raised
+    CodeReviewUnavailableError after an earlier chunk already buffered a
+    transcript entry) must still flush before propagating the failure — the
+    caller marks the review FAILED as soon as run() returns control, so a
+    drain reachable only on the success path would leave that entry stranded
+    until the next background heartbeat."""
+    from code_review_agent import agent as agent_mod
+
+    from llm_service import LLMRateLimitError
+
+    calls = []
+    monkeypatch.setattr(agent_mod.transcript, "drain", lambda: calls.append(1))
+
+    class _AlwaysRateLimited(DummyLLMClient):
+        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+            raise LLMRateLimitError("429")
+
+    reviewer = CodeReviewAgent(llm_client=_AlwaysRateLimited(), force_in_process=True)
+    with pytest.raises(CodeReviewUnavailableError):
+        reviewer.run(_input(job_id="job-1"))
+
+    assert calls == [1]
+
+
+def test_run_does_not_flush_transcript_without_a_job_id(monkeypatch) -> None:
+    """No caller-tracked job means nothing was buffered to flush; skip the
+    synchronous drain call entirely rather than paying for a pointless one."""
+    from code_review_agent import agent as agent_mod
+
+    calls = []
+    monkeypatch.setattr(agent_mod.transcript, "drain", lambda: calls.append(1))
+
+    reviewer = CodeReviewAgent(llm_client=DummyLLMClient(), force_in_process=True)
+    reviewer.run(_input())  # job_id defaults to ""
+
+    assert calls == []
+
+
 def test_small_code_with_all_optional_fields_does_not_crash() -> None:
     """spec_content, task_requirements, acceptance_criteria, architecture,
     existing_codebase all plumbed through the builder."""
-    from software_engineering_team.shared.models import SystemArchitecture
+    from shared.dev_models.models import SystemArchitecture
 
     arch = SystemArchitecture(
         overview="Tiny service",
@@ -56,7 +114,7 @@ def test_small_code_with_all_optional_fields_does_not_crash() -> None:
         decisions=[],
         diagrams={},
     )
-    agent = CodeReviewAgent(llm_client=DummyLLMClient())
+    agent = CodeReviewAgent(llm_client=DummyLLMClient(), force_in_process=True)
     result = agent.run(
         _input(
             task_requirements="Must support unicode",
@@ -79,12 +137,10 @@ def test_large_code_routes_through_coordinator() -> None:
     """Code larger than one map chunk is reviewed untruncated across multiple
     chunks. End-to-end with DummyLLMClient, the coordinator reviews each chunk
     and merges their output into one CodeReviewOutput."""
-    big_file_1 = "### app/main.py ###\n" + ("a" * 25_000)
-    big_file_2 = "### app/util.py ###\n" + ("b" * 25_000)
-    code = big_file_1 + "\n\n" + big_file_2
+    files = {"app/main.py": "a" * 25_000, "app/util.py": "b" * 25_000}
 
-    agent = CodeReviewAgent(llm_client=DummyLLMClient())
-    result = agent.run(_input(code=code))
+    agent = CodeReviewAgent(llm_client=DummyLLMClient(), force_in_process=True)
+    result = agent.run(_input(files=files))
     assert isinstance(result, CodeReviewOutput)
     assert result.approved is True
     # Dummy returns "Code review passed (dummy)." per chunk; coordinator
@@ -144,7 +200,8 @@ def test_reconcile_low_only_reject_now_fails_schema_validation() -> None:
                 "summary": "One nit",
                 "spec_compliance_notes": "",
             }
-        )
+        ),
+        force_in_process=True,
     )
     with pytest.raises(CodeReviewUnavailableError):
         agent.run(_input())
@@ -169,7 +226,8 @@ def test_reconcile_zero_issue_reject_with_summary_now_fails_schema_validation() 
                 "summary": "Code lacks error handling around DB calls",
                 "spec_compliance_notes": "",
             }
-        )
+        ),
+        force_in_process=True,
     )
     with pytest.raises(CodeReviewUnavailableError):
         agent.run(_input())
@@ -189,7 +247,8 @@ def test_reconcile_zero_issue_zero_summary_reject_now_fails_schema_validation() 
     agent = CodeReviewAgent(
         llm_client=_StubClient(
             {"approved": False, "issues": [], "summary": "", "spec_compliance_notes": ""}
-        )
+        ),
+        force_in_process=True,
     )
     with pytest.raises(CodeReviewUnavailableError):
         agent.run(_input())
@@ -202,9 +261,9 @@ def test_multiple_run_calls_on_same_instance_succeed() -> None:
     ``LLMClient``, so no persistent state from a previous review (message
     history, cached model, etc.) can leak into the next one.
     """
-    agent = CodeReviewAgent(llm_client=DummyLLMClient())
+    agent = CodeReviewAgent(llm_client=DummyLLMClient(), force_in_process=True)
     for i in range(4):
-        result = agent.run(_input(code=f"### app/m{i}.py ###\ndef f{i}(): pass"))
+        result = agent.run(_input(files={f"app/m{i}.py": f"def f{i}(): pass"}))
         assert isinstance(result, CodeReviewOutput)
         assert result.approved is True, f"run {i} failed: {result.summary}"
 
@@ -216,21 +275,26 @@ def test_small_code_routes_through_coordinator_chunk_path() -> None:
     class _Recorder(DummyLLMClient):
         def __init__(self) -> None:
             super().__init__()
-            self.prompts: list[str] = []
+            self.reasoning_prompts: list[str] = []
+            self.format_prompts: list[str] = []
+
+        def complete(self, prompt: str, **kwargs: Any) -> str:
+            self.reasoning_prompts.append(prompt)
+            return super().complete(prompt, **kwargs)
 
         def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
-            self.prompts.append(prompt)
+            self.format_prompts.append(prompt)
             return super().complete_json(prompt, **kwargs)
 
     client = _Recorder()
-    agent = CodeReviewAgent(llm_client=client)
+    agent = CodeReviewAgent(llm_client=client, force_in_process=True)
     result = agent.run(_input())
     assert result.approved is True
-    # 1 chunk-review call + 1 side-effect/blast-radius pass call (additive,
-    # runs once per submission regardless of chunk count).
-    assert len(client.prompts) == 2
-    # CHUNK_REVIEW_NOTE marker proves the coordinator's map path was used.
-    assert "one chunk of the full codebase" in client.prompts[0]
+    # CHUNK_REVIEW_NOTE lives on the reasoning pass, not the JSON format wrap.
+    assert any("one chunk of the full codebase" in p for p in client.reasoning_prompts)
+    # Map format call plus at least one tail-pass format call (side-effect
+    # and/or architecture, depending on which additive passes are enabled).
+    assert len(client.format_prompts) >= 2
 
 
 def test_single_chunk_propagates_notes_through_agent() -> None:
@@ -242,7 +306,8 @@ def test_single_chunk_propagates_notes_through_agent() -> None:
                 "summary": "Looks good.",
                 "spec_compliance_notes": "Meets the acceptance criteria.",
             }
-        )
+        ),
+        force_in_process=True,
     )
     result = agent.run(_input())
     assert result.approved is True
@@ -250,7 +315,7 @@ def test_single_chunk_propagates_notes_through_agent() -> None:
 
 
 def test_agent_accepts_files_dict_input() -> None:
-    agent = CodeReviewAgent(llm_client=DummyLLMClient())
+    agent = CodeReviewAgent(llm_client=DummyLLMClient(), force_in_process=True)
     result = agent.run(
         CodeReviewInput(
             files={"app/main.py": "def foo(): pass"},
@@ -276,6 +341,30 @@ def test_repo_root_defaults_none_and_round_trips_through_json() -> None:
     assert restored.files == {"a.py": "x = 1\n"}
 
 
+def test_replaced_content_defaults_none_and_round_trips_through_json() -> None:
+    """``replaced_content`` (the before-image analogue of ``full_content``)
+    defaults to None, is JSON-native so it survives the Temporal boundary, and
+    its presence does not disturb the ``files`` validator."""
+    default = CodeReviewInput(files={"a.py": "x = 2\n"})
+    assert default.replaced_content is None
+
+    before = {"a.py": "x = 1\n"}
+    with_before = CodeReviewInput(files={"a.py": "x = 2\n"}, replaced_content=before)
+    dumped = with_before.model_dump(mode="json")
+    assert dumped["replaced_content"] == before
+    restored = CodeReviewInput.model_validate(dumped)
+    assert restored.replaced_content == before
+    assert restored.files == {"a.py": "x = 2\n"}
+
+
+def test_replaced_content_does_not_satisfy_files_requirement() -> None:
+    """``replaced_content`` is a before-image, not a code source: an input with
+    only ``replaced_content`` and no ``files`` still fails the non-empty-files
+    validator (absent/None must behave exactly as today)."""
+    with pytest.raises(ValueError):
+        CodeReviewInput(replaced_content={"a.py": "x = 1\n"})
+
+
 def test_repo_root_does_not_satisfy_code_or_files_requirement() -> None:
     """``repo_root`` is not a code source: an input with only ``repo_root`` and no
     files/code still fails the ``_require_code_or_files`` validator."""
@@ -294,7 +383,7 @@ def test_run_raises_unavailable_when_review_cannot_complete() -> None:
         def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
             raise LLMRateLimitError("429")
 
-    agent = CodeReviewAgent(llm_client=_AlwaysRateLimited())
+    agent = CodeReviewAgent(llm_client=_AlwaysRateLimited(), force_in_process=True)
     with pytest.raises(CodeReviewUnavailableError):
         agent.run(_input())
 
@@ -326,7 +415,8 @@ def test_reconcile_approved_true_with_critical_issue_now_fails_schema_validation
                 "summary": "LGTM",
                 "spec_compliance_notes": "",
             }
-        )
+        ),
+        force_in_process=True,
     )
     with pytest.raises(CodeReviewUnavailableError):
         agent.run(_input())
@@ -351,7 +441,7 @@ def test_run_reports_progress_steps_in_order() -> None:
     reviewing (per chunk) → finalizing → done with non-decreasing fractions
     ending at 1.0."""
     calls: list = []
-    agent = CodeReviewAgent(llm_client=DummyLLMClient())
+    agent = CodeReviewAgent(llm_client=DummyLLMClient(), force_in_process=True)
     result = agent.run(_input(), progress_callback=_recording_callback(calls))
     assert result.approved is True
     steps = [c[0] for c in calls]
@@ -367,7 +457,7 @@ def test_run_reports_progress_steps_in_order() -> None:
 
 def test_no_callback_behaves_identically() -> None:
     """progress_callback=None (the default) must not change the review result."""
-    agent = CodeReviewAgent(llm_client=DummyLLMClient())
+    agent = CodeReviewAgent(llm_client=DummyLLMClient(), force_in_process=True)
     with_cb_calls: list = []
     result_no_cb = agent.run(_input())
     result_with_cb = agent.run(_input(), progress_callback=_recording_callback(with_cb_calls))
@@ -378,13 +468,11 @@ def test_no_callback_behaves_identically() -> None:
 def test_large_code_forwards_callback_to_coordinator() -> None:
     """Oversized code routes to the coordinator, which must keep reporting —
     including per-chunk 'chunk i/N' details."""
-    big_file_1 = "### app/main.py ###\n" + ("a" * 25_000)
-    big_file_2 = "### app/util.py ###\n" + ("b" * 25_000)
-    code = big_file_1 + "\n\n" + big_file_2
+    files = {"app/main.py": "a" * 25_000, "app/util.py": "b" * 25_000}
 
     calls: list = []
-    agent = CodeReviewAgent(llm_client=DummyLLMClient())
-    result = agent.run(_input(code=code), progress_callback=_recording_callback(calls))
+    agent = CodeReviewAgent(llm_client=DummyLLMClient(), force_in_process=True)
+    result = agent.run(_input(files=files), progress_callback=_recording_callback(calls))
     assert isinstance(result, CodeReviewOutput)
     details = [c[1] for c in calls]
     assert any("chunk 1/" in d for d in details), f"expected per-chunk reports, got {details}"
@@ -419,7 +507,7 @@ def test_raising_callback_is_swallowed_and_never_changes_the_review(caplog):
     def _boom(step: str, detail: str, fraction: float) -> None:
         raise RuntimeError("store down")
 
-    agent = CodeReviewAgent(llm_client=DummyLLMClient())
+    agent = CodeReviewAgent(llm_client=DummyLLMClient(), force_in_process=True)
     baseline = agent.run(_input())
     with caplog.at_level(logging.WARNING):
         result = agent.run(_input(), progress_callback=_boom)

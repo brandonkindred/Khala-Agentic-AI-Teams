@@ -12,6 +12,7 @@ both the chunk-review call and this pass's call in an end-to-end
 
 from __future__ import annotations
 
+import json
 from typing import Any, Dict, Optional
 
 import pytest
@@ -27,18 +28,24 @@ from code_review_agent.architecture_consistency_pass import (
 from code_review_agent.coordinator import run_coordinator
 from code_review_agent.false_positive_filter import CodebaseIndex
 from code_review_agent.models import CodeReviewInput, CodeReviewIssue
+from tests.submission_pass_two_call_client import (
+    SubmissionPassTwoCallClient,
+    wire_run_agent_via_reasoning_with_raw,
+)
 
 from llm_service.clients.dummy import DummyLLMClient
-from software_engineering_team.shared.models import ArchitectureComponent, SystemArchitecture
+from shared.dev_models.models import ArchitectureComponent, SystemArchitecture
+
+pytest_plugins = ["tests.submission_pass_two_call_client"]
 
 # Unique anchor in this pass's user prompt (never the system prompt -- a
 # DummyLLMClient subclass must branch on the user prompt only, matching the
 # false-positive filter's established rationale for avoiding system-prompt
 # scanning cross-contamination).
-_ARCH_PASS_ANCHOR = '"findings" array as instructed'
-_MERGED_PASS_ANCHOR = '"architecture_findings"/"side_effect_findings"'
+_ARCH_PASS_ANCHOR = "Summarize architecture-consistency findings in structured prose"
+_MERGED_PASS_ANCHOR = "Merged submission pass:"
 
-_SIDE_EFFECT_PASS_ANCHOR = '"side-effects"/"documentation" findings array'
+_SIDE_EFFECT_PASS_ANCHOR = "Summarize side-effect-impact findings in structured prose"
 
 
 def _arch(
@@ -67,7 +74,7 @@ def test_build_prompt_includes_architecture_document_and_changed_files() -> None
     changed file's content."""
     arch = _arch(architecture_document="# Arch\nAll writes MUST go through the repository layer.")
     index = CodebaseIndex.from_input(_input(architecture=arch))
-    prompt = _build_prompt(index, arch, max_inline_chars=100_000)
+    prompt = _build_prompt(index, arch)
     assert "All writes MUST go through the repository layer." in prompt
     assert "app/main.py" in prompt
     assert "def bar():" in prompt
@@ -77,7 +84,7 @@ def test_build_prompt_falls_back_to_overview_with_no_document() -> None:
     """With no ``architecture_document``, the overview is inlined instead."""
     arch = _arch(overview="Overview-only architecture.", architecture_document="")
     index = CodebaseIndex.from_input(_input(architecture=arch))
-    prompt = _build_prompt(index, arch, max_inline_chars=100_000)
+    prompt = _build_prompt(index, arch)
     assert "Overview-only architecture." in prompt
 
 
@@ -100,7 +107,7 @@ def test_build_prompt_includes_components_and_decisions_alongside_document() -> 
         ],
     )
     index = CodebaseIndex.from_input(_input(architecture=arch))
-    prompt = _build_prompt(index, arch, max_inline_chars=100_000)
+    prompt = _build_prompt(index, arch)
     assert "General overview doc." in prompt
     assert "billing-service" in prompt
     assert "Owns all billing writes." in prompt
@@ -117,45 +124,31 @@ def test_build_prompt_includes_components_and_decisions_with_no_document() -> No
         components=[ArchitectureComponent(name="auth-service", type="backend")],
     )
     index = CodebaseIndex.from_input(_input(architecture=arch))
-    prompt = _build_prompt(index, arch, max_inline_chars=100_000)
+    prompt = _build_prompt(index, arch)
     assert "auth-service" in prompt
 
 
-def test_build_prompt_includes_architecture_document_in_full() -> None:
-    """The architecture document is never truncated -- no tool exposes it, so
-    unlike the changed files it is always inlined in its entirety."""
-    arch = _arch(architecture_document="X" * 10_000)
+def test_build_prompt_inlines_full_architecture_document() -> None:
+    """The architecture document is always inlined in full — no character cap."""
+    arch = _arch(overview="", architecture_document="X" * 10_000)
     index = CodebaseIndex.from_input(_input(architecture=arch))
-    prompt = _build_prompt(index, arch, max_inline_chars=100_000)
+    prompt = _build_prompt(index, arch)
     assert "X" * 10_000 in prompt
-    assert "are shown above" not in prompt
-    assert "was not available to this pass" not in prompt
+    assert "the remainder was omitted" not in prompt
 
 
-def test_build_prompt_omits_files_beyond_inline_budget() -> None:
-    """Changed files beyond the inline budget are named as tool-reachable, not dropped."""
+def test_build_prompt_inlines_all_changed_files_in_full() -> None:
+    """Every changed file's full content reaches the prompt."""
     arch = _arch()
     file_a_content = "x" * 50
-    files = {"a.py": file_a_content, "b.py": "y" * 50}
+    file_b_content = "y" * 50
+    files = {"a.py": file_a_content, "b.py": file_b_content}
     index = CodebaseIndex.from_input(_input(files=files, architecture=arch))
-    # Budget computed from the first file's own size (not an independent magic
-    # number that happens to match it) so the second file is fully omitted
-    # rather than partially truncated -- see test_build_prompt_notes_mid_file_truncation
-    # for that other branch.
-    prompt = _build_prompt(index, arch, max_inline_chars=len(file_a_content))
-    assert file_a_content in prompt  # inlined in full (fits the budget exactly)
-    assert "more changed file(s) not shown above" in prompt
-    assert "list_files()" in prompt
-
-
-def test_build_prompt_notes_mid_file_truncation() -> None:
-    """A file whose content is cut off mid-way by the shared inline budget gets
-    its own truncation notice, not just wholly-omitted files."""
-    arch = _arch()
-    files = {"a.py": "x" * 100}
-    index = CodebaseIndex.from_input(_input(files=files, architecture=arch))
-    prompt = _build_prompt(index, arch, max_inline_chars=30)
-    assert "Only the first 30 characters of `a.py` are shown above" in prompt
+    prompt = _build_prompt(index, arch)
+    assert file_a_content in prompt
+    assert file_b_content in prompt
+    assert "more changed file(s) not shown above" not in prompt
+    assert "Only the first" not in prompt
 
 
 # --------------------------------------------------------------------------- line bounds
@@ -322,9 +315,9 @@ def test_finds_and_returns_new_findings_drops_hallucinated_line() -> None:
     """End-to-end: a finding citing a line beyond the real file's length has its
     line anchor nulled rather than trusted verbatim."""
 
-    class _FindingsClient(DummyLLMClient):
+    class _FindingsClient(SubmissionPassTwoCallClient):
         def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
-            if _ARCH_PASS_ANCHOR in prompt:
+            if _ARCH_PASS_ANCHOR in self.latest_reasoning_prompt():
                 return {
                     "findings": [
                         {
@@ -345,6 +338,44 @@ def test_finds_and_returns_new_findings_drops_hallucinated_line() -> None:
     )
     assert len(result) == 1
     assert result[0].line is None  # line 9999 doesn't exist in a 2-line file
+
+
+@pytest.mark.parametrize(
+    "wrap",
+    [
+        pytest.param("fenced", id="fenced"),
+        pytest.param("prose", id="prose-prefixed"),
+    ],
+)
+def test_recovers_fenced_and_prose_wrapped_reply(
+    monkeypatch: pytest.MonkeyPatch, wrap: str
+) -> None:
+    """A formatting reply wrapped in a ```json fence or prefixed with prose still
+    parses: the pass routes it through the canonical recovery ladder rather than
+    a bare ``json.loads`` that would raise on the fence/prose."""
+    import code_review_agent.submission_pass_runner as runner_mod
+
+    payload = {
+        "findings": [
+            {
+                "severity": "high",
+                "category": "architecture",
+                "file_path": "app/main.py",
+                "description": "bypasses the repository layer",
+                "suggestion": "use the repository",
+            }
+        ]
+    }
+    inner = json.dumps(payload)
+    raw = f"```json\n{inner}\n```" if wrap == "fenced" else f"Sure, here you go: {inner}"
+    wire_run_agent_via_reasoning_with_raw(monkeypatch, runner_mod, raw)
+
+    result = find_architecture_and_redundancy_issues(
+        DummyLLMClient(),
+        _input(files={"app/main.py": "def bar():\n    return 1\n"}, architecture=_arch()),
+    )
+    assert len(result) == 1
+    assert result[0].category == "architecture"
 
 
 # --------------------------------------------------------------------------- parsing
@@ -398,6 +429,31 @@ def test_coerce_finding_rejects_invalid_items(item: object) -> None:
     assert _coerce_finding(item) is None
 
 
+def test_coerce_finding_carries_through_pre_existing_tag() -> None:
+    """The model's optional pre_existing tag (used by the PR-review whole-file
+    path to route an architecture/refactor finding about a field, function, or
+    class this submission did NOT add or modify to a human-review proposal
+    instead of a blocking PR comment) survives conversion, tolerates string
+    encodings, and defaults False when absent -- mirrors
+    side_effect_impact_pass._coerce_finding's identical convention."""
+    tagged_true = _coerce_finding(
+        {"category": "architecture", "description": "d1", "pre_existing": True}
+    )
+    tagged_str = _coerce_finding(
+        {"category": "architecture", "description": "d2", "pre_existing": "true"}
+    )
+    tagged_false_str = _coerce_finding(
+        {"category": "refactor", "description": "d3", "pre_existing": "false"}
+    )
+    untagged = _coerce_finding({"category": "refactor", "description": "d4"})
+    assert [f.pre_existing for f in (tagged_true, tagged_str, tagged_false_str, untagged)] == [
+        True,
+        True,
+        False,
+        False,
+    ]
+
+
 def test_coerce_finding_coerces_line_and_unknown_severity() -> None:
     finding = _coerce_finding(
         {
@@ -446,10 +502,10 @@ def test_runs_when_no_architecture_document_or_overview() -> None:
     arch = SystemArchitecture(overview="", architecture_document="")
     prompts: list = []
 
-    class _EmptyFindings(DummyLLMClient):
+    class _EmptyFindings(SubmissionPassTwoCallClient):
         def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
-            if _ARCH_PASS_ANCHOR in prompt:
-                prompts.append(prompt)
+            if _ARCH_PASS_ANCHOR in self.latest_reasoning_prompt():
+                prompts.append(self.latest_reasoning_prompt())
                 return {"findings": []}
             return {"approved": True, "issues": [], "summary": "ok", "spec_compliance_notes": ""}
 
@@ -478,10 +534,10 @@ def test_runs_when_only_components_present_with_no_overview_or_document() -> Non
     )
     prompts: list = []
 
-    class _FindingsClient(DummyLLMClient):
+    class _FindingsClient(SubmissionPassTwoCallClient):
         def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
-            if _ARCH_PASS_ANCHOR in prompt:
-                prompts.append(prompt)
+            if _ARCH_PASS_ANCHOR in self.latest_reasoning_prompt():
+                prompts.append(self.latest_reasoning_prompt())
                 return {"findings": []}
             return {"approved": True, "issues": [], "summary": "ok", "spec_compliance_notes": ""}
 
@@ -494,10 +550,10 @@ def test_runs_when_only_components_present_with_no_overview_or_document() -> Non
 def test_runs_when_no_architecture_at_all() -> None:
     prompts: list = []
 
-    class _EmptyFindings(DummyLLMClient):
+    class _EmptyFindings(SubmissionPassTwoCallClient):
         def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
-            if _ARCH_PASS_ANCHOR in prompt:
-                prompts.append(prompt)
+            if _ARCH_PASS_ANCHOR in self.latest_reasoning_prompt():
+                prompts.append(self.latest_reasoning_prompt())
                 return {"findings": []}
             return {"approved": True, "issues": [], "summary": "ok", "spec_compliance_notes": ""}
 
@@ -520,9 +576,9 @@ def test_skips_when_no_architecture_evidence() -> None:
     """Without a document, repo_reader, or existing_codebase, tools only see
     the changed submission — do not ask the model to invent architecture rules."""
 
-    class _FailIfAsked(DummyLLMClient):
+    class _FailIfAsked(SubmissionPassTwoCallClient):
         def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
-            assert _ARCH_PASS_ANCHOR not in prompt, "architecture pass should not run"
+            assert _ARCH_PASS_ANCHOR not in self.latest_reasoning_prompt(), "architecture pass should not run"
             return {"approved": True, "issues": [], "summary": "ok", "spec_compliance_notes": ""}
 
     result = find_architecture_and_redundancy_issues(_FailIfAsked(), _input(architecture=None))
@@ -539,7 +595,7 @@ def test_returns_empty_when_submission_has_no_readable_files() -> None:
 def test_fails_safe_on_llm_error(monkeypatch: pytest.MonkeyPatch) -> None:
     """Any LLM/setup failure is swallowed -- this pass must never break the review."""
 
-    class _Raiser(DummyLLMClient):
+    class _Raiser(SubmissionPassTwoCallClient):
         def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
             raise RuntimeError("boom")
 
@@ -548,7 +604,7 @@ def test_fails_safe_on_llm_error(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_fails_safe_on_unparsable_reply() -> None:
-    class _Gibberish(DummyLLMClient):
+    class _Gibberish(SubmissionPassTwoCallClient):
         def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
             return "not even a dict-shaped reply"  # type: ignore[return-value]
 
@@ -566,9 +622,9 @@ def test_returns_empty_for_non_code_review_profile() -> None:
     from code_review_agent.models import CodeReviewInput
     from code_review_agent.profiles import ReviewProfile
 
-    class _FailIfAskedClient(DummyLLMClient):
+    class _FailIfAskedClient(SubmissionPassTwoCallClient):
         def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
-            assert _ARCH_PASS_ANCHOR not in prompt, "architecture pass should not run"
+            assert _ARCH_PASS_ANCHOR not in self.latest_reasoning_prompt(), "architecture pass should not run"
             return {"approved": True, "issues": [], "summary": "ok", "spec_compliance_notes": ""}
 
     result = find_architecture_and_redundancy_issues(
@@ -587,9 +643,9 @@ def test_returns_empty_for_non_code_review_profile() -> None:
 
 
 def test_finds_and_returns_new_findings() -> None:
-    class _FindingsClient(DummyLLMClient):
+    class _FindingsClient(SubmissionPassTwoCallClient):
         def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
-            if _ARCH_PASS_ANCHOR in prompt:
+            if _ARCH_PASS_ANCHOR in self.latest_reasoning_prompt():
                 return {
                     "findings": [
                         {
@@ -611,6 +667,38 @@ def test_finds_and_returns_new_findings() -> None:
     assert result[0].description == "bypasses the repository layer"
 
 
+def test_finds_and_returns_new_findings_tags_pre_existing() -> None:
+    """End-to-end: a finding the model tags pre_existing=true (e.g. an
+    architecture/refactor complaint about a field that already existed before
+    this submission, in a file the submission also touched elsewhere) carries
+    that tag all the way through to the returned CodeReviewIssue, so the
+    PR-review whole-file path can route it to a human-review proposal instead
+    of posting it as a blocking PR comment."""
+
+    class _FindingsClient(SubmissionPassTwoCallClient):
+        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+            if _ARCH_PASS_ANCHOR in self.latest_reasoning_prompt():
+                return {
+                    "findings": [
+                        {
+                            "severity": "medium",
+                            "category": "refactor",
+                            "file_path": "app/main.py",
+                            "description": "duplicates an existing field untouched by this change",
+                            "suggestion": "reuse the existing field",
+                            "pre_existing": True,
+                        }
+                    ]
+                }
+            return {"approved": True, "issues": [], "summary": "ok", "spec_compliance_notes": ""}
+
+    result = find_architecture_and_redundancy_issues(
+        _FindingsClient(), _input(architecture=_arch())
+    )
+    assert len(result) == 1
+    assert result[0].pre_existing is True
+
+
 def test_finds_and_returns_new_findings_with_pre_numbered_input() -> None:
     """End-to-end: a finding citing a line far past the shown hunk's physical
     length survives under ``pre_numbered=True`` (PR hunk review mode), proving
@@ -618,9 +706,9 @@ def test_finds_and_returns_new_findings_with_pre_numbered_input() -> None:
     along the way."""
     from code_review_agent.models import CodeReviewInput
 
-    class _FindingsClient(DummyLLMClient):
+    class _FindingsClient(SubmissionPassTwoCallClient):
         def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
-            if _ARCH_PASS_ANCHOR in prompt:
+            if _ARCH_PASS_ANCHOR in self.latest_reasoning_prompt():
                 return {
                     "findings": [
                         {
@@ -647,6 +735,112 @@ def test_finds_and_returns_new_findings_with_pre_numbered_input() -> None:
     assert result[0].line == 4242  # not nulled by the 2-physical-line hunk's length
 
 
+def test_finds_and_returns_new_findings_bounds_checks_when_full_content_supplied() -> None:
+    """When ``full_content`` covers the pre-numbered submission, the citation
+    IS bounds-checked against the real full body (not trusted as-is): the
+    same out-of-range line that survives under bare ``pre_numbered=True`` is
+    now nulled, proving the effective flag (``pre_numbered and not
+    full_content_complete``), not the raw ``input_data.pre_numbered``, reaches
+    ``_run_pass``/``_validate_findings`` here too -- matching the fix already
+    applied to the side-effect and merged passes."""
+
+    class _FindingsClient(SubmissionPassTwoCallClient):
+        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+            if _ARCH_PASS_ANCHOR in self.latest_reasoning_prompt():
+                return {
+                    "findings": [
+                        {
+                            "severity": "high",
+                            "category": "architecture",
+                            "file_path": "app/main.py",
+                            "line": 4242,
+                            "description": "bypasses the repository layer",
+                        }
+                    ]
+                }
+            return {"approved": True, "issues": [], "summary": "ok", "spec_compliance_notes": ""}
+
+    result = find_architecture_and_redundancy_issues(
+        _FindingsClient(),
+        CodeReviewInput(
+            files={"app/main.py": "4242: def bar():\n4243:     return 1\n"},
+            task_description="wire up bar",
+            architecture=_arch(),
+            pre_numbered=True,
+            full_content={"app/main.py": "def bar():\n    return 1\n"},
+        ),
+    )
+    assert len(result) == 1
+    assert result[0].line is None  # nulled: real file is 2 lines, 4242 is out of range
+
+
+# --------------------------------------------------------------------------- batching / reactive recovery
+
+
+def test_single_call_for_multi_file_submission() -> None:
+    """Several small files are reviewed in one LLM call when no overflow occurs."""
+    prompts: list = []
+
+    class _Client(SubmissionPassTwoCallClient):
+        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+            if _ARCH_PASS_ANCHOR in self.latest_reasoning_prompt():
+                prompts.append(self.latest_reasoning_prompt())
+                return {"findings": []}
+            return {"approved": True, "issues": [], "summary": "ok", "spec_compliance_notes": ""}
+
+    files = {
+        "a.py": "def a():\n    return 1\n",
+        "b.py": "def b():\n    return 2\n",
+        "c.py": "def c():\n    return 3\n",
+    }
+    find_architecture_and_redundancy_issues(_Client(), _input(files=files, architecture=_arch()))
+    assert len(prompts) == 1
+    for path in files:
+        assert f"### {path} ###" in prompts[0]
+
+
+def test_reactive_recovery_bisects_overflowing_batch_through_public_entry_point() -> None:
+    """The pass benefits from the shared runner's reactive bisect recovery: a
+    combined call that overflows mid-turn is retried as two single-file calls."""
+    from strands.types.exceptions import ContextWindowOverflowException
+
+    call_count = {"n": 0}
+
+    class _Client(SubmissionPassTwoCallClient):
+        def complete(self, prompt: str, **kwargs: Any) -> str:
+            if _ARCH_PASS_ANCHOR in prompt:
+                call_count["n"] += 1
+                if "### a.py ###" in prompt and "### b.py ###" in prompt:
+                    raise ContextWindowOverflowException("combined batch too large")
+            return super().complete(prompt, **kwargs)
+
+        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+            if _ARCH_PASS_ANCHOR in self.latest_reasoning_prompt():
+                for path in ("a.py", "b.py"):
+                    if f"### {path} ###" in self.latest_reasoning_prompt():
+                        return {
+                            "findings": [
+                                {
+                                    "severity": "medium",
+                                    "category": "architecture",
+                                    "file_path": path,
+                                    "description": f"finding for {path}",
+                                    "suggestion": "n/a",
+                                }
+                            ]
+                        }
+                return {"findings": []}
+            return {"approved": True, "issues": [], "summary": "ok", "spec_compliance_notes": ""}
+
+    files = {"a.py": "x = 1\n", "b.py": "y = 2\n"}
+    result = find_architecture_and_redundancy_issues(
+        _Client(), _input(files=files, architecture=_arch())
+    )
+
+    assert {f.description for f in result} == {"finding for a.py", "finding for b.py"}
+    assert call_count["n"] > 1
+
+
 # --------------------------------------------------------------------------- coordinator integration
 
 
@@ -654,15 +848,15 @@ def test_coordinator_runs_pass_once_per_submission_not_per_chunk() -> None:
     """The merged pass runs once per submission; standalone tail passes are not invoked."""
     calls = {"merged_pass": 0, "arch_pass": 0, "side_effect_pass": 0, "chunk_review": 0}
 
-    class _CountingClient(DummyLLMClient):
+    class _CountingClient(SubmissionPassTwoCallClient):
         def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
-            if _MERGED_PASS_ANCHOR in prompt:
+            if _MERGED_PASS_ANCHOR in self.latest_reasoning_prompt():
                 calls["merged_pass"] += 1
                 return {"architecture_findings": [], "side_effect_findings": []}
-            if _ARCH_PASS_ANCHOR in prompt:
+            if _ARCH_PASS_ANCHOR in self.latest_reasoning_prompt():
                 calls["arch_pass"] += 1
                 return {"findings": []}
-            if _SIDE_EFFECT_PASS_ANCHOR in prompt:
+            if _SIDE_EFFECT_PASS_ANCHOR in self.latest_reasoning_prompt():
                 calls["side_effect_pass"] += 1
                 return {"findings": []}
             calls["chunk_review"] += 1
@@ -683,9 +877,9 @@ def test_coordinator_merges_architecture_findings_into_final_output() -> None:
     dedupes/sizes alongside chunk findings, and does not spuriously block approval
     (default severity keeps it out of the critical/high gate)."""
 
-    class _FindingsClient(DummyLLMClient):
+    class _FindingsClient(SubmissionPassTwoCallClient):
         def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
-            if _MERGED_PASS_ANCHOR in prompt:
+            if _MERGED_PASS_ANCHOR in self.latest_reasoning_prompt():
                 return {
                     "architecture_findings": [
                         {
@@ -714,9 +908,9 @@ def test_coordinator_merges_side_effect_findings_into_final_output() -> None:
     """A side-effect finding emitted by the merged pass is split into
     the coordinator's final issues list."""
 
-    class _FindingsClient(DummyLLMClient):
+    class _FindingsClient(SubmissionPassTwoCallClient):
         def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
-            if _MERGED_PASS_ANCHOR in prompt:
+            if _MERGED_PASS_ANCHOR in self.latest_reasoning_prompt():
                 return {
                     "architecture_findings": [],
                     "side_effect_findings": [
@@ -743,14 +937,14 @@ def test_coordinator_merges_side_effect_findings_into_final_output() -> None:
 def test_coordinator_runs_pass_with_no_architecture() -> None:
     """No architecture on the input -> the merged additive pass still runs
     (document is optional); it must not be short-circuited before the LLM call.
-    Uses ``files=`` (not ``code=``) so ``CodebaseIndex`` has readable submission
-    files — the same shape production reviews use for this pass."""
+    Uses ``files=`` so ``CodebaseIndex`` has readable submission files — the
+    same shape production reviews use for this pass."""
     prompts: list = []
 
-    class _CountingClient(DummyLLMClient):
+    class _CountingClient(SubmissionPassTwoCallClient):
         def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
-            if _MERGED_PASS_ANCHOR in prompt:
-                prompts.append(prompt)
+            if _MERGED_PASS_ANCHOR in self.latest_reasoning_prompt():
+                prompts.append(self.latest_reasoning_prompt())
                 return {"architecture_findings": [], "side_effect_findings": []}
             return {"approved": True, "issues": [], "summary": "ok", "spec_compliance_notes": ""}
 
@@ -762,32 +956,33 @@ def test_coordinator_runs_pass_with_no_architecture() -> None:
     assert len(prompts) == 1
 
 
-def test_run_pass_inlines_full_arch_doc_without_shrinking_code_budget(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The architecture document reaches ``_build_prompt`` in full regardless of
-    its size, and the inline code budget is exactly
-    ``compute_code_review_map_chunk_chars`` -- never reduced by an
-    architecture-document reserve."""
+def test_run_pass_wires_scoped_tools_into_runner(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The architecture-consistency pass hands the shared runner the full
+    shared tool set, including the scoped read_lines/read_function/
+    find_references tools the module docstring previously omitted."""
     import code_review_agent.architecture_consistency_pass as pass_mod
 
     captured: Dict[str, Any] = {}
-    original_build_prompt = pass_mod._build_prompt
+    original_run_submission_pass = pass_mod.run_submission_pass
 
-    def _spy(index, architecture, max_inline_chars):
-        captured["max_inline_chars"] = max_inline_chars
-        return original_build_prompt(index, architecture, max_inline_chars)
+    def _spy(llm, **kwargs):
+        captured["tool_names"] = {t.tool_name for t in kwargs["tools"]}
+        return original_run_submission_pass(llm, **kwargs)
 
-    monkeypatch.setattr(pass_mod, "_build_prompt", _spy)
-    monkeypatch.setattr(pass_mod, "compute_code_review_map_chunk_chars", lambda llm: 20_000)
+    monkeypatch.setattr(pass_mod, "run_submission_pass", _spy)
 
-    arch = _arch(architecture_document="X" * 100_000)
-
-    class _EmptyClient(DummyLLMClient):
+    class _EmptyClient(SubmissionPassTwoCallClient):
         def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
-            assert "X" * 100_000 in prompt
             return {"findings": []}
 
-    find_architecture_and_redundancy_issues(_EmptyClient(), _input(architecture=arch))
+    find_architecture_and_redundancy_issues(_EmptyClient(), _input(architecture=_arch()))
 
-    assert captured["max_inline_chars"] == 20_000
+    assert captured["tool_names"] == {
+        "read_file",
+        "read_lines",
+        "read_function",
+        "list_files",
+        "search_codebase",
+        "find_function_at_line",
+        "find_references",
+    }

@@ -80,7 +80,6 @@ class SECodeEngineProvider:
     def run_pr_code_review(
         self,
         *,
-        code: str = "",
         pre_numbered: bool = False,
         task_description: str,
         task_requirements: str,
@@ -89,16 +88,22 @@ class SECodeEngineProvider:
         files: Any = None,
         existing_codebase: Any = None,
         repo_reader: Any = None,
+        job_id: str = "",
     ) -> Any:
         """Run the PR code-review agent over a pull request's changes.
 
         Preconditions:
-            - Exactly one code source is supplied: ``files`` (the preferred
-              ``{path: content}`` whole-file mapping) OR ``code`` (the legacy
-              diff-hunk blob). ``pre_numbered`` describes ``code`` only.
+            - ``files`` is a non-empty ``{path: content}`` mapping. ``pre_numbered``
+              describes whether its content already carries ``N| `` line-number
+              prefixes (diff-hunk submissions) or is whole-file content.
             - ``repo_reader`` is None or a duck-typed ``RepoReader`` (``list_files``
               /``read_file``) giving the false-positive verifier read access to
               existing repository files outside the diff.
+            - ``job_id``, when non-blank, is the caller's persisted review job id
+              (e.g. a ``code_review_runs`` row) — forwarded so the reviewer's LLM
+              calls can record into that job's durable transcript. ``""`` (the
+              default) means no caller-tracked job; transcript recording is then
+              a no-op.
 
         Postconditions: returns the reviewer's output (carries an ``issues`` list).
         """
@@ -107,12 +112,12 @@ class SECodeEngineProvider:
 
         review_input = build_code_review_input(
             files=files,
-            code=None if files is not None else code,
             pre_numbered=pre_numbered,
             task_description=task_description,
             task_requirements=task_requirements,
             language=language,
             existing_codebase=existing_codebase,
+            job_id=job_id,
         )
         run_kwargs: dict = {"progress_callback": progress_callback}
         # Forward the reader only when present: passing ``repo_reader=None`` is a

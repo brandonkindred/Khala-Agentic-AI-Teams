@@ -2,9 +2,10 @@
 
 Owns the per-chunk review call and everything around it: failure classification
 (infrastructure vs recoverable content vs unexpected defect), retry/bisection
-recovery, the degraded "not reviewed" fallback, the process-global map-phase
+recovery, the degraded "not reviewed" fallback, the shared map-phase
 outcome cache (keyed on the chunk's exact LLM input + a context/model
-fingerprint + the sibling surface), single-flight de-duplication of concurrent
+fingerprint + the sibling surface; backed by ``shared.cache`` so hits survive
+worker restarts when Redis is configured), single-flight de-duplication of concurrent
 identical chunks, the cross-file sibling-surface extraction, and the parallel
 fan-out ``_map_chunks``.
 
@@ -14,16 +15,25 @@ and ``_review_model_fingerprint`` plus the ``_context_fingerprint`` (map-phase) 
 on them — so the hashing primitive stays internal to the one module that owns the
 cache-key machinery; the coordinator imports the fingerprints it needs.
 
-Safety contract (see ``coordinator`` module docstring for the whole pipeline):
+Safety contract (see ``coordinator`` module docstring for the whole pipeline).
+This is the canonical statement of the degrade/cache rationale — per-function
+docstrings below state only their own contract and cross-reference this:
 - Infrastructure failures raise ``CodeReviewUnavailableError`` immediately.
 - Known content failures bisect/retry (and, for reasoning-only exhaustion or
   truncation, get one last-resort thinking-off retry), then degrade to a "not
-  reviewed" coverage finding rather than aborting the run. By default that range
-  is surfaced non-blockingly (``CodeReviewOutput.not_reviewed_ranges``) — never
-  posted, never blocking; under ``CODE_REVIEW_BLOCK_ON_UNREVIEWED`` it becomes a
-  blocking ``high`` finding instead.
+  reviewed" coverage finding (``_degraded_outcome``) rather than aborting the
+  run. By default that range is surfaced non-blockingly
+  (``CodeReviewOutput.not_reviewed_ranges``) — never posted, never blocking;
+  under ``CODE_REVIEW_BLOCK_ON_UNREVIEWED`` it becomes a blocking ``high``
+  finding instead. The finding text names only the failure *class*
+  (``type(exc).__name__``), never ``str(exc)``: parse/schema errors embed raw
+  model output, and under the opt-out this text is published verbatim. Degraded
+  findings live in ``_ChunkOutcome.not_reviewed_issues``, never ``issues``, so
+  the false-positive filter — which only re-checks ``issues`` — can never drop
+  a coverage/safety finding.
 - Unexpected defects propagate unchanged (fail closed).
-- Only fully-reviewed outcomes are cached; degraded outcomes never are. A cache
+- Only an outcome from the exact full-chunk LLM input is cached (see
+  ``_cached_review_chunk`` for exactly which outcomes qualify and why); a cache
   hit reproduces identical findings/verdicts (deep clone on store and retrieve),
   and a miss simply recomputes, so correctness never depends on a hit.
 - Concurrent reviews of the *same* chunk key are de-duplicated to a single real
@@ -49,8 +59,6 @@ import json
 import logging
 import re
 import threading
-from collections import OrderedDict
-from concurrent.futures import Future
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
 
@@ -64,6 +72,7 @@ from llm_service import (
     LLMTruncatedError,
     LLMUnreachableAfterRetriesError,
 )
+from shared.cache import get_shared_cache
 from shared.concurrency import parallel_map
 from shared.env import env_flag_enabled
 from shared.env_config import env_bool
@@ -98,87 +107,88 @@ from .side_effect_consolidation import SIDE_EFFECT_CONSOLIDATION_ENV
 
 logger = logging.getLogger(__name__)
 
-# Process-global map-phase outcome cache (see module docstring). Bounded LRU
-# keyed on a content+context+model hash; guarded by a lock because the map phase
-# fans chunks out across worker threads. ``0`` disables it (pure passthrough).
+# Shared map-phase outcome cache (see module docstring). Bounded LRU keyed on a
+# content+context+model hash. Backed by ``shared.cache`` (Redis when configured,
+# else in-process memory). ``0`` disables it (pure passthrough).
 DEFAULT_CHUNK_OUTCOME_CACHE_SIZE = 512  # CODE_REVIEW_CHUNK_OUTCOME_CACHE_SIZE, floor 0
-
-_CHUNK_OUTCOME_CACHE: "OrderedDict[str, _ChunkOutcome]" = OrderedDict()
-_CHUNK_OUTCOME_CACHE_LOCK = threading.Lock()
-
-# In-flight reviews, keyed by the same chunk cache key. A miss registers a
-# pending ``Future`` here so concurrent workers asking for the identical chunk
-# become waiters on the leader's ``future.result()`` rather than each firing the
-# LLM (single-flight). The leader always resolves the future (result or
-# exception) and releases the slot on every exit path. Guarded by
-# ``_CHUNK_OUTCOME_CACHE_LOCK`` — every access is a bare dict get/set/del, never
-# the review itself, so hold times stay tiny.
-_CHUNK_INFLIGHT: "Dict[str, Future]" = {}
+# Base stem; ``_chunk_cache_namespace()`` appends ``KHALA_CACHE_BUILD_ID`` /
+# ``KHALA_BUILD_ID`` when set so a deploy is a cold cache under Redis.
+_CHUNK_CACHE_NAMESPACE = "cr:chunk:v2"
 
 
-def _release_inflight(key: str, fut: "Future") -> None:
-    """Drop this leader's in-flight slot, but only if it still holds ``fut``.
+def _chunk_cache_namespace() -> str:
+    """Shared-cache namespace for map-phase chunk outcomes (includes build id)."""
+    from shared.cache import with_cache_build_id  # noqa: PLC0415
 
-    Postconditions:
-        - Removes ``key`` from ``_CHUNK_INFLIGHT`` iff its value is still this
-          leader's future. The identity guard means a mid-flight cache clear that
-          replaced the slot can never make one leader delete another's live
-          registration. Idempotent: a no-op if the slot was already released.
-    """
-    with _CHUNK_OUTCOME_CACHE_LOCK:
-        if _CHUNK_INFLIGHT.get(key) is fut:
-            del _CHUNK_INFLIGHT[key]
+    return with_cache_build_id(_CHUNK_CACHE_NAMESPACE)
 
 
 def _chunk_outcome_cache_size() -> int:
+    """Return the configured size of the process-global chunk outcome cache.
+
+    Reads ``CODE_REVIEW_CHUNK_OUTCOME_CACHE_SIZE`` from the environment,
+    defaulting to ``DEFAULT_CHUNK_OUTCOME_CACHE_SIZE`` (512) and clamping
+    any negative value to 0.
+
+    Postconditions:
+        - Returns a non-negative int. A return value of 0 means caching is
+          disabled and the map phase becomes a pure passthrough.
+    """
     return parse_env_int(
         "CODE_REVIEW_CHUNK_OUTCOME_CACHE_SIZE", DEFAULT_CHUNK_OUTCOME_CACHE_SIZE, 0
     )
 
 
 def clear_chunk_outcome_cache() -> None:
-    """Drop every cached map-phase outcome and any in-flight registration.
+    """Drop every cached map-phase outcome (and in-flight registrations).
 
     Postconditions:
-        - The process-global cache is empty when this function returns. The next
-          review of a chunk is a guaranteed miss only when no review of that
-          chunk is currently in flight; a leader already in flight when this is
-          called holds no lock across its LLM call (see ``_CHUNK_INFLIGHT``
-          above) and can still write its outcome to the cache after this
-          returns. Callers that must force a cold review should ensure no
-          review is in flight (or await in-flight completion) before relying on
-          a miss. Intended for tests (the cache persists across
-          ``run_coordinator`` calls by design) and for callers that must force a
-          cold review.
-        - The in-flight registry is cleared too. In production it is empty
-          whenever no review is running (a leader always pops its own slot); this
-          keeps a test that clears mid-flight from stranding a stale record.
+        - This process's view of the shared chunk-outcome namespace is empty when
+          this function returns (best-effort across Redis). The next review of a
+          chunk is a miss only when no review of that chunk is currently in
+          flight and no concurrent worker re-populates the key; a leader already
+          in flight when this is called can still publish its outcome after this
+          returns. Callers that must force a cold review should ensure no review
+          is in flight (or await in-flight completion) before relying on a miss.
+          Intended for tests (the cache persists across ``run_coordinator``
+          calls by design) and for callers that must force a cold review.
     """
-    with _CHUNK_OUTCOME_CACHE_LOCK:
-        _CHUNK_OUTCOME_CACHE.clear()
-        # A leader already in flight (see _CHUNK_INFLIGHT) holds no lock across
-        # its LLM call, so it can still write its outcome to the cache below
-        # after this clear returns — see the postcondition above.
-        _CHUNK_INFLIGHT.clear()
+    get_shared_cache(_chunk_cache_namespace()).clear()
+
+
+def _chunk_outcome_to_bytes(outcome: "_ChunkOutcome") -> bytes:
+    """Serialize a chunk outcome for the shared cache.
+
+    Postconditions:
+        - Returns UTF-8 JSON bytes round-trippable via ``_chunk_outcome_from_bytes``.
+    """
+    from .temporal.phase_models import ChunkOutcomeDTO  # noqa: PLC0415
+
+    return ChunkOutcomeDTO.from_outcome(outcome).model_dump_json().encode("utf-8")
+
+
+def _chunk_outcome_from_bytes(raw: bytes) -> "_ChunkOutcome":
+    """Deserialize a chunk outcome from the shared cache.
+
+    Postconditions:
+        - Returns a fresh ``_ChunkOutcome`` with no shared mutable state with
+          any other caller (safe to mutate).
+    """
+    from .temporal.phase_models import ChunkOutcomeDTO  # noqa: PLC0415
+
+    return ChunkOutcomeDTO.model_validate_json(raw).to_outcome()
 
 
 @dataclass
 class _ChunkOutcome:
     """Accumulated result of reviewing one chunk (possibly via bisection).
 
-    Invariants:
-        - ``approved_flags`` holds one entry per successful LLM sub-review. A
-          chunk that could not be reviewed (a known content failure surviving
-          recovery) contributes a degraded outcome — a "not reviewed" coverage
-          finding and no ``approved_flags`` entry — rather than aborting the run,
-          so the range is recorded (surfaced as ``not_reviewed_ranges``, or as a
-          blocking finding under ``CODE_REVIEW_BLOCK_ON_UNREVIEWED``), never
-          silently scored.
-        - ``issues`` holds only genuine reviewer findings; the degraded "not
-          reviewed" coverage findings live in ``not_reviewed_issues``. Keeping
-          them apart lets the false-positive filter re-check the genuine
-          findings without ever being able to drop a coverage/safety finding, and
-          lets the coordinator surface them non-blockingly by default.
+    Invariants (see module docstring's safety contract for the full rationale):
+        - ``approved_flags`` holds one entry per successful LLM sub-review; a
+          degraded outcome contributes no entry — the range is never silently
+          scored.
+        - ``issues`` holds only genuine reviewer findings; degraded "not
+          reviewed" coverage findings live in ``not_reviewed_issues`` instead.
     """
 
     issues: List[CodeReviewIssue] = field(default_factory=list)
@@ -186,11 +196,9 @@ class _ChunkOutcome:
     summaries: List[str] = field(default_factory=list)
     spec_notes: List[str] = field(default_factory=list)
     approved_flags: List[bool] = field(default_factory=list)
-    # True when this outcome came from a reduced-fidelity recovery (a thinking-off
-    # retry of a chunk whose default-thinking review exhausted). Like a bisected
-    # recovery it must not be frozen under the full-chunk cache key — the next
-    # identical cycle should re-attempt at full fidelity — so ``_cached_review_chunk``
-    # excludes it from the LRU.
+    # True when this outcome came from a reduced-fidelity thinking-off retry (see
+    # ``_cached_review_chunk``'s ``cacheable`` check for why this and a bisected
+    # recovery are excluded from the cache).
     degraded_recovery: bool = False
 
     def absorb(self, other: "_ChunkOutcome") -> None:
@@ -254,9 +262,7 @@ def _is_infra_failure(exc: BaseException) -> bool:
     succeed on a smaller or repeated input.
 
     Postconditions:
-        - Walks the ``__cause__``/``__context__`` chain (the client or caller
-          code may wrap the originating error) up to a bounded depth; never
-          raises.
+        - Walks the exception chain via ``_exception_chain``; never raises.
     """
     for current in _exception_chain(exc):
         if isinstance(current, (LLMJsonParseError, LLMSchemaValidationError)):
@@ -297,24 +303,14 @@ def _is_content_failure(exc: BaseException) -> bool:
     """Classify a chunk-review failure as a known, recoverable LLM content error.
 
     Postconditions:
-        - Returns True only when the chain contains a known model-content
-          failure (``LLMJsonParseError``, ``LLMSchemaValidationError``,
-          ``LLMSemanticExhaustionError``, ``LLMTruncatedError`` — a
-          finish_reason=length token-limit truncation — or a raw
-          ``json.JSONDecodeError``) — the failures a smaller or repeated input
-          might fix, or that a human can be asked to review manually.
-          ``json.JSONDecodeError`` is retained defensively: no current call path
-          raises it directly (the chunk reviewer now routes through
-          ``llm_service.complete_validated``, which raises
-          ``LLMJsonParseError``/``LLMSchemaValidationError`` instead), but any
-          future bare ``json.loads`` reachable from this call chain would
-          still classify correctly here.
+        - Returns True only when the chain contains one of
+          ``_CONTENT_FAILURE_TYPES`` (see that tuple's comment for why each
+          member is included) — the failures a smaller or repeated input might
+          fix, or that a human can be asked to review manually.
         - Returns False for everything else (e.g. ``KeyError``/``TypeError`` from
           a bug in the reviewer code), so unexpected defects fail closed instead
           of being masked as a not-reviewed finding.
-        - Walks the ``__cause__``/``__context__`` chain (the client or caller
-          code may wrap the originating error) up to a bounded depth; never
-          raises.
+        - Walks the exception chain via ``_exception_chain``; never raises.
     """
     return any(isinstance(c, _CONTENT_FAILURE_TYPES) for c in _exception_chain(exc))
 
@@ -331,9 +327,8 @@ def _semantic_exhaustion_in_chain(exc: BaseException) -> "Optional[LLMSemanticEx
     stochastic empty that a same-input retry may still recover.
 
     Postconditions:
-        - Returns the first ``LLMSemanticExhaustionError`` on the
-          ``__cause__``/``__context__`` chain (strands may wrap it), else None.
-          Never raises.
+        - Returns the first ``LLMSemanticExhaustionError`` found via
+          ``_exception_chain``, else None. Never raises.
     """
     for current in _exception_chain(exc):
         if isinstance(current, LLMSemanticExhaustionError):
@@ -408,18 +403,17 @@ def _outcome_from_output(chunk: ReviewChunk, output: ChunkReviewOutput) -> _Chun
     )
 
 
+# Stable substring used in degraded "not reviewed" finding descriptions. Tests
+# and callers that need to recognize these findings should import this marker
+# rather than hardcoding the wording.
+NOT_REVIEWED_FINDING_MARKER = "could not be reviewed"
+
+
 def _degraded_outcome(chunk: ReviewChunk, exc: BaseException) -> _ChunkOutcome:
     """Build a degraded outcome for a chunk that survived recovery unreviewed.
 
-    A known LLM content failure that survives retry, bisection, and the
-    thinking-off retry does not abort the whole run: the chunk's code is recorded
-    as a "not reviewed" coverage finding while sibling chunks that succeeded still
-    contribute their own verdicts. By default (``CODE_REVIEW_BLOCK_ON_UNREVIEWED``
-    off) the coordinator surfaces that range non-blockingly via
-    ``CodeReviewOutput.not_reviewed_ranges`` — it is neither posted as a PR
-    comment nor allowed to block, because a reviewer-side hiccup is not a code
-    defect. With the opt-out on, the coordinator instead keeps the finding as a
-    blocking ``high`` issue so unreviewed code cannot pass the gate as approved.
+    See the module docstring's safety contract for why this exists and how
+    ``CODE_REVIEW_BLOCK_ON_UNREVIEWED`` changes its handling.
 
     Preconditions:
         - The failure was already classified a known content failure
@@ -430,27 +424,18 @@ def _degraded_outcome(chunk: ReviewChunk, exc: BaseException) -> _ChunkOutcome:
 
     Postconditions:
         - Returns one ``high``/``general`` finding per segment in the outcome's
-          ``not_reviewed_issues`` (never ``issues``), so the false-positive
-          filter — which only re-checks genuine ``issues`` — can never drop a
-          coverage finding. Each finding spans the segment's original-file range
-          via the model's multi-line convention (``start_line`` = first line,
-          ``line`` = last line — there is no ``end_line`` field) and names the
-          range in its description, so no covered line is silently dropped and
-          downstream tools can highlight the full extent. Whether these findings
-          block or are merely recorded is decided by the coordinator; the chunk
-          casts no LLM approve/reject vote (``approved_flags`` is empty).
+          ``not_reviewed_issues`` (never ``issues``). Each finding spans the
+          segment's original-file range via the model's multi-line convention
+          (``start_line`` = first line, ``line`` = last line — there is no
+          ``end_line`` field) and names the range in its description, so no
+          covered line is silently dropped and downstream tools can highlight
+          the full extent. The chunk casts no LLM approve/reject vote
+          (``approved_flags`` is empty).
         - No ``summaries`` entry is produced, so the "not reviewed" condition
           never leaks into the merged review summary/PR body and never forces an
           extra synthesis LLM call on a partial run.
-        - The finding text names only the failure *class*, never ``str(exc)``,
-          so raw model output carried by parse/schema errors is never published
-          downstream even under the ``CODE_REVIEW_BLOCK_ON_UNREVIEWED`` opt-out.
     """
-    # Name only the failure *class*, never ``str(exc)``: parse/schema errors
-    # embed raw model output (e.g. ``LLMJsonParseError`` carries a 500-char
-    # response preview). Under ``CODE_REVIEW_BLOCK_ON_UNREVIEWED`` this finding is
-    # published verbatim by the ``/review-pr`` flow, so interpolating the message
-    # would leak arbitrary model output / code excerpts into PR comments.
+    # Class name only, never str(exc) — see module docstring's safety contract.
     reason = type(exc).__name__
     issues = []
     for seg in chunk.segments:
@@ -463,18 +448,14 @@ def _degraded_outcome(chunk: ReviewChunk, exc: BaseException) -> _ChunkOutcome:
                 start_line=start,
                 line=end,
                 description=(
-                    f"This code could not be reviewed automatically ({reason}); "
+                    f"This code {NOT_REVIEWED_FINDING_MARKER} automatically ({reason}); "
                     f"{_segment_range_label(seg)} was not reviewed. Blocking review "
                     "so unreviewed code is not approved."
                 ),
                 suggestion="Review this section manually; the automated reviewer could not process it.",
             )
         )
-    # No ``summaries`` entry: the "not reviewed" condition is carried by
-    # ``not_reviewed_issues`` (and surfaced non-blockingly as
-    # ``CodeReviewOutput.not_reviewed_ranges``), never by the merged review
-    # summary. Emitting a summary here would leak "Not reviewed: ..." text into
-    # the posted PR body and, on a partial run, force an extra synthesis LLM call.
+    # See the "No summaries entry" postcondition above.
     return _ChunkOutcome(not_reviewed_issues=issues)
 
 
@@ -584,22 +565,15 @@ def _review_chunk_with_recovery(
           ``_ChunkOutcome.absorb()`` in a fixed halves[0]-then-halves[1] order,
           independent of which half's call actually finishes first. Any chunk
           that cannot bisect further — the original or a bisected child — gets
-          exactly one same-input retry, EXCEPT a ladder-spent reasoning-loop
-          semantic exhaustion (``finish_reason != "length"`` with
-          ``retry_thinking_level`` set): that skips both the line-split and the
-          same-input retry (re-running the model's already spent downgrade ladder
-          is futile). A multi-file reasoning-loop chunk is still split by file, and
-          a reasoning-loop exhaustion where NO ladder ran keeps its one same-input
-          retry. If the terminal failure is a reasoning-only exhaustion or an
-          output truncation, one further thinking-off retry is attempted
-          (env-gated, production path only) to turn it into a real review. A
-          terminal content failure that survives all of that degrades via
-          ``_degraded_outcome`` rather than aborting the whole run: by default the
-          range is surfaced non-blockingly (it becomes
-          ``CodeReviewOutput.not_reviewed_ranges``, not a posted finding and not a
-          block); under ``CODE_REVIEW_BLOCK_ON_UNREVIEWED`` the coordinator turns
-          it into a blocking ``high`` finding. A one-off transient error in a
-          terminal child therefore never costs even that child's review.
+          one same-input retry, except a ladder-spent reasoning-loop exhaustion,
+          which skips both (see the bisect-vs-retry decision comment in the
+          recovery section below for the reasoning-loop vs. truncation
+          distinction). A reasoning-only or truncated terminal failure gets one
+          further thinking-off retry (env-gated, production path only). A
+          failure that survives all of that degrades via ``_degraded_outcome``
+          rather than aborting the whole run (see module docstring's safety
+          contract). A one-off transient error in a terminal child therefore
+          never costs even that child's review.
         - Recovery (bisection / retry) is dispatched OUTSIDE the ``except`` block
           so a child failure is never implicitly context-chained to this chunk's
           exception (which ``_semantic_exhaustion_in_chain`` would otherwise
@@ -786,21 +760,22 @@ def _review_chunk_with_recovery(
             # key (see ``_ChunkOutcome.degraded_recovery``).
             outcome.degraded_recovery = True
             return outcome
-    # Known content failure that cannot bisect further and survived its retry (and the
-    # thinking-off retry, if any): degrade instead of aborting the whole run. By
-    # default the chunk's range is surfaced non-blockingly via
+    # Terminal content failure that cannot bisect further and survived its retry
+    # (and the thinking-off retry, if any): degrade instead of aborting the whole
+    # run. By default the chunk's range is surfaced non-blockingly via
     # ``CodeReviewOutput.not_reviewed_ranges`` (no posted finding, no block); under
     # ``CODE_REVIEW_BLOCK_ON_UNREVIEWED`` it becomes a blocking ``high`` "not reviewed"
     # finding instead. Chunks that did succeed still contribute their verdicts. (A run
     # in which *no* chunk succeeds is caught by ``run_coordinator``'s total-failure
     # guard, which still raises.) Stable, greppable telemetry so operators can count
     # how often the reviewer gives up on a chunk (the condition the user wants to be
-    # rare). ``exc`` is logged, never posted — the degraded finding names only the class.
+    # rare). Log only the exception class — never ``str(exc)`` — so model
+    # output / source snippets that may appear in content-failure messages
+    # do not land in application logs.
     logger.warning(
-        "CodeReview degrade: failure_class=%s ranges=%s detail=%s",
+        "CodeReview degrade: failure_class=%s ranges=%s",
         type(exc).__name__,
         _chunk_ranges(chunk),
-        exc,
     )
     return _degraded_outcome(chunk, exc)
 
@@ -850,25 +825,49 @@ def _review_model_fingerprint(llm: LLMClient) -> str:
 # leading whitespace) so only *module-level* defs/classes count — an indented
 # method or nested function is not a cross-file-referenceable top-level symbol,
 # and advertising one could mask a removed module-level name of the same spelling.
-_PY_SYMBOL_RE = re.compile(r"^(?:async[ \t]+)?(?:def|class)[ \t]+([A-Za-z_]\w*)", re.MULTILINE)
+_PY_SYMBOL_RE = re.compile(
+    r"^(?:async[ \t]+)?(?:def|class|type)[ \t]+([A-Za-z_]\w*)",
+    re.MULTILINE,
+)
 _TS_EXPORT_RE = re.compile(
-    r"^[ \t]*export[ \t]+(?:default[ \t]+)?(?:async[ \t]+)?"
-    r"(?:function|class|const|let|var|interface|type|enum)[ \t]+([A-Za-z_$][\w$]*)",
+    r"^[ \t]*export[ \t]+(?:default[ \t]+)?"
+    r"(?:async[ \t]+)?(?:abstract[ \t]+)?(?:declare[ \t]+)?(?:const[ \t]+)?"
+    r"(?:function\*?|class|const|let|var|interface|type|enum|namespace|module)"
+    r"[ \t]+([A-Za-z_$][\w$]*)",
     re.MULTILINE,
 )
 _TS_EXPORT_LIST_RE = re.compile(r"^[ \t]*export[ \t]*\{([^}]*)\}", re.MULTILINE)
+
+# Pre-numbered content (``FileSegment.pre_numbered`` / ``ChangeSurface`` blocks,
+# e.g. a diff-first submission's ``files=<surface.blocks>``) prefixes every line with its
+# original line number (``"42| def f():"``, or the legacy ``"42: def f():"``),
+# which would otherwise shift every line off column zero and make the anchored
+# symbol patterns above match nothing. Only a genuine numbered gutter at the
+# very start of a line matches (never mid-line, e.g. inside a dict literal or
+# docstring), so stripping it is safe for already-plain content too -- there is
+# nothing to strip there. Indented dict keys (``    1: value``) do not match:
+# they use ``: `` after a 4-space indent, whereas the live ``| `` gutter never
+# uses ``: ``, and the legacy ``N: `` gutter is column-zero only.
+_LINE_NUMBER_PREFIX_RE = re.compile(r"^(?:\d+: |[ ]*\d+\| )", re.MULTILINE)
 
 
 def _symbol_surface(content: str) -> List[str]:
     """Extract a file's top-level defined/exported symbol names.
 
     Postconditions:
-        - Returns a sorted, de-duplicated list of Python ``def``/``class`` names
-          and TS/JS ``export`` binding names (including names inside
-          ``export { a, b as c }``, where the exported name ``c`` is taken).
-          Heuristic and best-effort — used only as reviewer context, never to
-          gate a verdict.
+        - Returns a sorted, de-duplicated list of Python ``def``/``class``/
+          ``type`` names and TS/JS ``export`` binding names (including names
+          inside ``export { a, b as c }``, where the exported name ``c`` is
+          taken). Heuristic and best-effort — also hashed into the chunk
+          cache key via ``_sibling_surface``, so a missed export can leave a
+          stale map-phase hit after a sibling's public API changes. Prefer
+          false positives (extra cache misses) over false negatives.
+        - Pre-numbered content is de-numbered first (see
+          ``_LINE_NUMBER_PREFIX_RE``) so each line's original column position
+          -- and therefore top-level-vs-nested classification -- is unchanged
+          by whether the submission carried numbered ``N| `` / ``N: `` prefixes.
     """
+    content = _LINE_NUMBER_PREFIX_RE.sub("", content)
     names: set[str] = set()
     for match in _PY_SYMBOL_RE.finditer(content):
         names.add(match.group(1))
@@ -975,6 +974,9 @@ def _context_fingerprint(base_input: Dict, model_fingerprint: str) -> str:
           ``profile``) is normalized via ``getattr(value, "value", value)``
           before hashing; ``profile`` is typically a ``ReviewProfile`` handled
           the same way as any other enum-like field.
+        - ``model_fingerprint`` is the stable string returned by
+          ``_review_model_fingerprint(llm)`` for the review client (folded into
+          the digest as ``__model__``).
 
     Postconditions:
         - Returns a hex digest that changes whenever any shared review input
@@ -999,7 +1001,9 @@ def _context_fingerprint(base_input: Dict, model_fingerprint: str) -> str:
     return _stable_json_digest(normalized)
 
 
-def _submission_fingerprint(input_data: CodeReviewInput, model_fingerprint: str) -> str:
+def _submission_fingerprint(
+    input_data: CodeReviewInput, model_fingerprint: str, spec_compliance_single_pass: bool
+) -> str:
     """Hash the whole raw submission plus the resolved model.
 
     The submission-level analogue of ``_context_fingerprint`` (which keys only the
@@ -1010,26 +1014,52 @@ def _submission_fingerprint(input_data: CodeReviewInput, model_fingerprint: str)
         - ``input_data`` is a valid ``CodeReviewInput``.
         - ``model_fingerprint`` is ``_review_model_fingerprint(llm)`` for the
           client that would run the review.
+        - ``spec_compliance_single_pass`` is the caller's already-resolved decision
+          (``run_coordinator``'s single per-run computation, already folding in the
+          ``CODE_REVIEW`` profile restriction) — this function never reads the
+          ``CODE_REVIEW_SPEC_COMPLIANCE_PASS`` env var itself, so a non-``CODE_REVIEW``
+          submission is never fingerprinted as flag-sensitive merely because the
+          env var happens to be set (which would cause needless cache misses on
+          every such submission).
 
     Postconditions:
         - Returns a hex digest that changes whenever **any** input field (or the
-          resolved model) changes, and also whenever the output-affecting
-          ``CODE_REVIEW_SIDE_EFFECT_CONSOLIDATION`` toggle flips. It is derived
-          from ``input_data.model_dump()`` plus that toggle, so it keys on the
-          whole input (not a hand-picked subset) plus consolidation identity: a
-          new ``CodeReviewInput`` field is hashed automatically and can never be
-          silently dropped. Two submissions collide only when their full inputs
-          and consolidation setting are identical, so a hit means the review
-          would be the same work. (Every current field is verdict-affecting, so
-          this is exactly the submission identity; a future non-verdict field
-          would only cause extra misses — full re-reviews — never a stale hit.)
+          resolved model) changes, and also whenever an output-affecting toggle —
+          ``CODE_REVIEW_SIDE_EFFECT_CONSOLIDATION`` or the caller's resolved
+          ``spec_compliance_single_pass`` decision — flips. It is derived from
+          ``input_data.model_dump()`` plus those toggles, so it keys on the whole
+          input (not a hand-picked subset) plus consolidation and
+          spec-compliance-pass identity: a new ``CodeReviewInput`` field is hashed
+          automatically and can never be silently dropped. Two submissions
+          collide only when their full inputs and toggle settings are identical,
+          so a hit means the review would be the same work — in particular, an
+          identical ``CODE_REVIEW``-profile submission approved with
+          ``CODE_REVIEW_SPEC_COMPLIANCE_PASS`` off can never be served from cache
+          once the flag is on, since that would silently skip the post-dedupe
+          ``synthesize_spec_compliance`` pass the flag adds. (Every current field
+          is verdict-affecting, so this is exactly the submission identity; a
+          future non-verdict field would only cause extra misses — full
+          re-reviews — never a stale hit.)
         - Computed from raw fields only (no compaction/LLM), so the short-circuit
           it guards fires before any model call. Deterministic (``sort_keys``),
           so a stored approval survives across coordinator calls in a process.
     """
+    # Lazy import to keep module-load order robust: ``finding_combination`` and
+    # ``mapping`` are both imported by the coordinator, and deferring this import
+    # to call time avoids any import cycle regardless of future import edges
+    # between the two modules.
+    from .finding_combination import resolve_combine_similarity_threshold
+
     payload = input_data.model_dump(mode="json")
+    # A per-invocation caller id, not content: two submissions with identical code
+    # and context must still collide here even when their ``job_id``s differ (a
+    # resubmission of the same PR is a fresh job_id every time), or this field alone
+    # would turn every cache hit into a guaranteed miss.
+    payload.pop("job_id", None)
     payload["__model__"] = model_fingerprint
     payload["__side_effect_consolidation__"] = env_flag_enabled(SIDE_EFFECT_CONSOLIDATION_ENV)
+    payload["__combine_similarity_threshold__"] = resolve_combine_similarity_threshold()
+    payload["__spec_compliance_single_pass__"] = spec_compliance_single_pass
     return _stable_json_digest(payload)
 
 
@@ -1040,13 +1070,19 @@ def _chunk_cache_key(chunk: ReviewChunk, context_fp: str, sibling_surface: str) 
         - Combines the chunk's rendered content, segment notes, and the
           sibling-surface context (the bytes the reviewer actually sees) with the
           run's context fingerprint, so two chunks collide only when their LLM
-          inputs are byte-identical. Including ``sibling_surface`` invalidates a
-          cached chunk when a *sibling* changed file's public surface changed
-          (e.g. a renamed/removed export), so the reviewer re-runs with that new
-          surface — a body-only sibling edit leaves the surface (and the key)
-          unchanged, preserving the hit.
+          inputs are byte-identical. Fields are encoded as a JSON array (not a
+          delimiter-joined string) so embedded nulls or other delimiter-like
+          characters inside any field cannot fuse adjacent fields. Including
+          ``sibling_surface`` invalidates a cached chunk when a *sibling*
+          changed file's public surface changed (e.g. a renamed/removed export),
+          so the reviewer re-runs with that new surface — a body-only sibling
+          edit leaves the surface (and the key) unchanged, preserving the hit.
     """
-    body = f"{context_fp}\x00{chunk.content}\x00{_segment_notes(chunk)}\x00{sibling_surface}"
+    body = json.dumps(
+        [context_fp, chunk.content, _segment_notes(chunk), sibling_surface],
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
     return hashlib.sha256(body.encode("utf-8")).hexdigest()
 
 
@@ -1088,15 +1124,10 @@ def _cached_review_chunk(
           single review, even before the result is cached. This handoff covers
           *every* outcome, including the degraded/bisected ones that are never
           stored in the LRU.
-        - On a leader miss, runs the real review and — only when the outcome came
-          from the exact full-chunk LLM input (no ``not_reviewed_issues``, not a
-          ``degraded_recovery``, and *exactly one* ``approved_flags`` entry) —
-          stores a clone under the chunk key, evicting the oldest entry past
-          capacity. Degraded outcomes (a transient failure is retried for real
-          next cycle), bisected recoveries (>= 2 sub-reviews, reduced context),
-          and thinking-off recoveries (reduced-fidelity — ``degraded_recovery``)
-          are never cached, so the next identical cycle re-attempts at full
-          context/fidelity.
+        - On a leader miss, runs the real review and, only when the outcome is
+          the exact full-chunk result, stores a clone under the chunk key,
+          evicting the oldest entry past capacity — see the ``cacheable`` check
+          below for the precise criteria and why each excluded case is excluded.
         - Never suppresses ``_review_chunk_with_recovery``'s exceptions
           (infrastructure failure, unexpected defect): the leader re-raises them
           unchanged and hands the same exception to its waiters, so they fail the
@@ -1107,43 +1138,20 @@ def _cached_review_chunk(
           hit or a waiter, since neither fires an LLM call of its own).
     """
     capacity = _chunk_outcome_cache_size()
+    # Short-circuit before constructing a cache key / calling ``single_flight``.
+    # ``max_entries=0`` already bypasses durable storage inside the backend, but
+    # we still skip key hashing and the Redis/memory round-trip when caching is
+    # explicitly disabled (size 0) — the common local/test path that asserts on
+    # per-call LLM counts.
     if capacity <= 0:
         return _review_chunk_with_recovery(
             reviewer, chunk, base_input, sibling_surface, surface_by_path, run_limiter=run_limiter
         )
 
     key = _chunk_cache_key(chunk, context_fp, sibling_surface)
-    with _CHUNK_OUTCOME_CACHE_LOCK:
-        hit = _CHUNK_OUTCOME_CACHE.get(key)
-        if hit is not None:
-            _CHUNK_OUTCOME_CACHE.move_to_end(key)
-        else:
-            fut = _CHUNK_INFLIGHT.get(key)
-            is_leader = fut is None
-            if is_leader:
-                # No cached result and no review under way: register a pending
-                # future so concurrent duplicates wait on us instead of reviewing.
-                fut = _CHUNK_INFLIGHT[key] = Future()
-    if hit is not None:
-        # Clone outside the lock: a stored entry is never mutated in place, so the
-        # captured reference stays valid even if another thread evicts it, and the
-        # deep copy no longer serializes other workers on the cache lock.
-        return hit.clone()
+    cache = get_shared_cache(_chunk_cache_namespace())
 
-    if not is_leader:
-        # Waiter: an identical chunk is already being reviewed. Block on the
-        # leader's future rather than firing a second LLM call — ``result()``
-        # returns the outcome (or re-raises the leader's exception) with the
-        # right happens-before, and returns at once if the leader already
-        # finished. Clone per caller so each owns an isolated copy.
-        return fut.result().clone()
-
-    # Leader: run the single real review for this key, then resolve the future.
-    # Everything that can raise (the review and the outcome clones) is inside the
-    # ``try`` so the future is ALWAYS resolved and the slot ALWAYS released — a
-    # leader that failed to resolve it would hang every waiter on the untimed
-    # ``result()`` above and poison the key for the life of the process.
-    try:
+    def _compute() -> Tuple[bytes, bool]:
         outcome = _review_chunk_with_recovery(
             reviewer, chunk, base_input, sibling_surface, surface_by_path, run_limiter=run_limiter
         )
@@ -1162,34 +1170,26 @@ def _cached_review_chunk(
             and not outcome.degraded_recovery
             and len(outcome.approved_flags) == 1
         )
-        # Clone before taking the lock so the deep copy doesn't serialize other
-        # workers; ``outcome`` is a local not yet shared, so this is race-free.
-        stored = outcome.clone() if cacheable else None
-        # Store (if cacheable) and release the slot under a single lock acquisition.
-        with _CHUNK_OUTCOME_CACHE_LOCK:
-            if stored is not None:
-                _CHUNK_OUTCOME_CACHE[key] = stored
-                _CHUNK_OUTCOME_CACHE.move_to_end(key)
-                while len(_CHUNK_OUTCOME_CACHE) > capacity:
-                    _CHUNK_OUTCOME_CACHE.popitem(last=False)
-            if _CHUNK_INFLIGHT.get(key) is fut:
-                del _CHUNK_INFLIGHT[key]
-        # An isolated copy for any waiters (they clone again per caller), so a
-        # waiter can never observe the caller mutating the leader's outcome.
-        published = outcome.clone()
-    except BaseException as exc:
-        # Fail closed for the caller and every waiter: hand them the same
-        # exception (so they don't re-run rather than re-raise), free the slot
-        # (only if still ours — a mid-flight cache clear may have replaced it) so a
-        # later cycle can retry for real, and re-raise unchanged.
-        _release_inflight(key, fut)
-        fut.set_exception(exc)
-        raise
+        # Always hand waiters a clone of the full outcome (including non-cacheable
+        # ones); only durable storage is gated by ``cacheable``.
+        return _chunk_outcome_to_bytes(outcome.clone()), cacheable
 
-    # Nothing above the try's end can strand a waiter: the slot is already
-    # released and ``set_result`` cannot raise for a pending future.
-    fut.set_result(published)
-    return outcome
+    raw = cache.single_flight(key, _compute, max_entries=capacity)
+    try:
+        return _chunk_outcome_from_bytes(raw)
+    except Exception:
+        logger.warning(
+            "corrupt chunk-outcome cache entry for %s; evicting and recomputing",
+            key,
+            exc_info=True,
+        )
+        cache.delete(key)
+        # Cold compute (no single_flight) so we cannot race back into the same
+        # corrupt durable bytes if delete was delayed or another worker rewrote them.
+        raw, cacheable = _compute()
+        if cacheable:
+            cache.set(key, raw, max_entries=capacity)
+        return _chunk_outcome_from_bytes(raw)
 
 
 # Progress-bar band this phase reports into: [_MAP_PHASE_START, _MAP_PHASE_START +
@@ -1214,9 +1214,12 @@ def _map_chunks(
     Preconditions:
         - ``chunk_reviewer`` is safe for concurrent ``run`` calls: the agent is
           stateless and ``_run_chunk_review`` invokes the injected ``LLMClient``
-          directly, so the only object shared across workers is that injected
-          LLM client, whose central implementations guard their own state
-          (clients injected here must support concurrent calls).
+          directly. The mutable objects shared across workers are that injected
+          LLM client (central implementations guard their own state; clients
+          injected here must support concurrent calls) and the shared
+          chunk-outcome cache from ``get_shared_cache`` (Redis or in-process;
+          thread-safe / fail-open). The reviewer itself remains otherwise
+          stateless.
         - ``context_fp`` is the run's ``_context_fingerprint``; each chunk is
           reviewed through ``_cached_review_chunk``, which reuses a prior
           map-phase outcome when the chunk's LLM input and this fingerprint are

@@ -562,14 +562,27 @@ class _ImplementationMixin:
               status writes would race (mirrors ``_review_and_merge``'s fan-out suppression).
               ``True`` (default) keeps today's live per-phase progress for the serial/solo path.
         Postconditions:
-            - Returns True if passed, False if returned for revision.
+            - Returns True if the gates passed, or if they were skipped because no engine
+              provider is configured, or because the worker is a devops worker (see below).
+              Returns False if returned for revision — because a gate failed (build or lint) or
+              a gate tool raised an exception.
         """
+        if getattr(swe, "team_kind", None) == "devops":
+            # DevOps already runs its own 8 internal hard gates as part of its pipeline
+            # (iac_validate, policy_checks, pipeline_lint, deployment_dry_run,
+            # security_review, change_review, ...; see DEVOPS_REQUIRED_GATE_NAMES in
+            # devops_team/orchestrator.py) before ever returning a branch here. The
+            # generic build/lint gate below targets application code and has nothing
+            # to check against IaC/pipeline artifacts. getattr (not attribute access):
+            # some test stubs have no team_kind at all.
+            return True
         # The gate *tools* (build/lint) run inside the try so a tool crash never aborts the
         # swarm. The revision bookkeeping (_return_for_revision, which mutates the task graph)
         # is deliberately kept OUT of that try: if it raised inside the broad except, a build
         # REJECTION would be swallowed and reported as a gate PASS, merging unverified code. We
         # only record the verdict here and act on it after the try/except.
         revision_feedback: Optional[List[Dict[str, Any]]] = None
+        tool_error = False
         try:
             provider = self.engine_provider
             if provider is None:
@@ -626,10 +639,16 @@ class _ImplementationMixin:
             # must be debuggable. With the engines injected, an ImportError here
             # means the provider's engine stack is broken — that deserves the
             # same full-stack ERROR, not a silent "tools not available" skip.
-            # The swarm still proceeds — a failed gate must never abort the
-            # whole run — but the stack is now in the logs.
+            # The swarm still proceeds — a failed gate must never abort the whole run — but the
+            # stack is now in the logs, and the task is bounced for revision below rather than
+            # treated as a pass: a crashed tool means the gate never actually ran.
             logger.exception("Quality gate tools error for task %s; proceeding", task.id)
+            tool_error = True
 
         if revision_feedback is not None:
             return self._return_for_revision(task, revision_feedback)
+        if tool_error:
+            return self._return_for_revision(
+                task, [{"type": "tool_error", "error": "Quality gate tool crashed"}]
+            )
         return True

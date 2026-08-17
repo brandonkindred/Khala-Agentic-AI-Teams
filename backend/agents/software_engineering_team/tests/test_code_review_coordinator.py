@@ -1,38 +1,42 @@
 """Tests for Code Review Coordinator.
 
-Pure-function tests (``parse_code_into_file_blocks``, the splitter and
-chunker) stay LLM-free. The LLM-integration tests use ``DummyLLMClient``
-subclasses because ``ChunkReviewAgent`` calls ``llm.complete_json`` directly
-through ``complete_validated`` and validates responses against
-``ChunkReviewLLMResponse`` — no strands ``Agent``/``Model`` is involved.
+Pure-function tests (the splitter and chunker) stay LLM-free. The
+LLM-integration tests use ``DummyLLMClient`` subclasses because
+``ChunkReviewAgent`` uses a two-call via-reasoning path (``complete`` then
+``complete_json``) validated against ``ChunkReviewLLMResponse``.
 """
 
 from __future__ import annotations
 
 import json
+import math
+import re
 import threading
 import time
 from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
+from code_review_agent import mapping
 from code_review_agent.chunk_reviewer import CHUNK_REVIEW_NOTE, CODE_TO_REVIEW_HEADER
 from code_review_agent.chunking import _bisect_segment
 from code_review_agent.coordinator import (
     MAX_CODE_REVIEW_ISSUES,
     MIN_SPLIT_SEGMENT_CHARS,
     _cap_issues,
+    _compact_for_review,
+    _is_content_failure,
     _issues_from_chunk_output,
     _map_parallelism,
     _reconcile_approval,
     _render_architecture_context,
+    _run_tail_passes,
     _segment_range_label,
-    _tail_passes_run_sequentially,
+    _TailPassResult,
     _validate_line,
     build_review_chunks,
     cap_chunk_content,
     cap_review_chunk,
-    parse_code_into_file_blocks,
     run_coordinator,
     split_block_into_segments,
 )
@@ -45,6 +49,7 @@ from code_review_agent.models import (
     CodeReviewUnavailableError,
     FileSegment,
     ReviewChunk,
+    _normalized_severity,
     is_no_op_suggestion,
 )
 from pydantic import ValidationError
@@ -71,6 +76,12 @@ _LATE_NOTIFY_GRACE_PERIOD_S = 0.1
 # one chunk (forces separate map units in multi-file recovery/parallelism tests).
 _MAP_CHUNK_SEPARATION_HEADROOM = 2_000
 
+
+def _is_chunk_map_reasoning_prompt(prompt: str) -> bool:
+    """True when ``prompt`` is the map-phase chunk reasoning user message."""
+    return CODE_TO_REVIEW_HEADER in prompt
+
+
 # ---------------------------------------------------------------------------
 # Pure-function tests
 # ---------------------------------------------------------------------------
@@ -86,6 +97,22 @@ def _issue(severity: str, description: str, *, line: int = 1) -> CodeReviewIssue
         description=description,
         suggestion="fix it",
     )
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        (None, ""),
+        ("", ""),
+        ("high", "high"),
+        ("High", "high"),
+        ("HIGH", "high"),
+        (" critical ", "critical"),
+        ("Medium", "medium"),
+    ],
+)
+def test_normalized_severity_folds_case_and_whitespace(raw: str | None, expected: str) -> None:
+    assert _normalized_severity(raw) == expected
 
 
 def test_cap_issues_under_limit_preserves_order() -> None:
@@ -146,74 +173,42 @@ def test_cap_then_reconcile_keeps_critical_and_rejects() -> None:
     assert any(i.severity == "critical" for i in out)
 
 
-def test_parse_code_into_file_blocks_single_file() -> None:
-    """Parse single file block."""
-    code = "### app/main.py ###\ndef foo(): pass"
-    blocks = parse_code_into_file_blocks(code)
-    assert len(blocks) == 1
-    assert blocks[0][0] == "app/main.py"
-    assert "def foo" in blocks[0][1]
+@pytest.mark.parametrize(
+    "severity",
+    ["High", "HIGH", " high ", "Critical", "CRITICAL", " critical "],
+)
+def test_reconcile_approval_treats_mixed_case_critical_high_as_blocking(
+    severity: str,
+) -> None:
+    """Blocking membership must match ``_cap_issues`` fold, not raw equality."""
+    approved, out = _reconcile_approval(True, [_issue(severity, "blocker")])
+    assert approved is False
+    assert len(out) == 1
+    assert _normalized_severity(out[0].severity) in {"critical", "high"}
 
 
-def test_parse_code_into_file_blocks_multiple_files() -> None:
-    """Parse multiple file blocks."""
-    code = """### app/main.py ###
-def foo(): pass
-
-### app/models.py ###
-class User: pass"""
-    blocks = parse_code_into_file_blocks(code)
-    assert len(blocks) == 2
-    assert blocks[0][0] == "app/main.py"
-    assert blocks[1][0] == "app/models.py"
+@pytest.mark.parametrize("severity", ["Medium", "LOW", "Info"])
+def test_reconcile_approval_mixed_case_non_blocking_still_auto_approves(
+    severity: str,
+) -> None:
+    """Non-blocking severities remain non-blocking after case fold."""
+    approved, out = _reconcile_approval(False, [_issue(severity, "nit")])
+    assert approved is True
+    assert len(out) == 1
 
 
-def test_parse_code_into_file_blocks_content_with_blank_lines() -> None:
-    """Content with blank lines stays in same block."""
-    code = """### app/main.py ###
-def foo():
-    pass
-
-def bar():
-    pass"""
-    blocks = parse_code_into_file_blocks(code)
-    assert len(blocks) == 1
-    assert "def bar" in blocks[0][1]
-
-
-def test_parse_code_preserves_preamble_before_first_header() -> None:
-    """Content before the first header must become a headerless block, not be
-    silently dropped (full-coverage postcondition)."""
-    code = "import os\nhelper()\n\n### app/main.py ###\ndef foo(): pass"
-    blocks = parse_code_into_file_blocks(code)
-    assert blocks[0] == ("", "import os\nhelper()")
-    assert blocks[1][0] == "app/main.py"
-
-
-def test_parse_code_ignores_header_like_source_lines() -> None:
-    """Header-like fragments inside source — markdown headings without the
-    trailing marker, '###' starting a comment, mid-line strings — are content,
-    not file headers, and a header can never span multiple source lines."""
-    code = (
-        'md = """\n'
-        "### Title\n"
-        "Body text\n"
-        '"""\n'
-        "\n"
-        "### app/x.py ###\n"
-        'banner = "### not a header ###"\n'
-        "## ### also not ###\n"
-        "code = 1"
-    )
-    blocks = parse_code_into_file_blocks(code)
-    assert [b[0] for b in blocks] == ["", "app/x.py"]
-    # The markdown body survives intact in the headerless preamble block.
-    assert "### Title" in blocks[0][1]
-    assert "Body text" in blocks[0][1]
-    # Mid-line and non-line-start "###" sequences stay in the file's content.
-    assert 'banner = "### not a header ###"' in blocks[1][1]
-    assert "## ### also not ###" in blocks[1][1]
-    assert "code = 1" in blocks[1][1]
+def test_reconcile_approval_override_log_names_non_critical_high(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The auto-approve override log must describe the overridden severities
+    accurately: medium/low/info are 'non-critical/high', not 'minor/nit'.
+    """
+    with caplog.at_level("INFO"):
+        approved, out = _reconcile_approval(False, [_issue("medium", "m"), _issue("low", "l")])
+    assert approved is True
+    assert len(out) == 2
+    assert "2 non-critical/high issues, no critical/high" in caplog.text
+    assert "minor/nit" not in caplog.text
 
 
 # ---------------------------------------------------------------------------
@@ -221,7 +216,7 @@ def test_parse_code_ignores_header_like_source_lines() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_input_without_any_code_source_raises() -> None:
+def test_input_without_files_raises() -> None:
     with pytest.raises(ValidationError):
         CodeReviewInput(task_description="t")
 
@@ -230,10 +225,6 @@ def test_input_with_empty_files_dict_raises() -> None:
     """files={} (e.g. a glob miss) is a caller bug, not an empty review."""
     with pytest.raises(ValidationError):
         CodeReviewInput(files={}, task_description="t")
-
-
-def test_input_with_explicit_empty_code_is_valid() -> None:
-    assert CodeReviewInput(code="", task_description="t").code == ""
 
 
 # ---------------------------------------------------------------------------
@@ -277,9 +268,10 @@ class _ScriptedClient(DummyLLMClient):
 
 def test_run_coordinator_with_multi_file_code_merges_chunk_summaries() -> None:
     """Multiple file blocks → multiple chunks → merged CodeReviewOutput."""
-    file1 = "### app/main.py ###\n" + ("x" * 20_000)
-    file2 = "### app/models.py ###\n" + ("y" * 20_000)
-    code = file1 + "\n\n" + file2
+    files = {
+        "app/main.py": "x" * 20_000,
+        "app/models.py": "y" * 20_000,
+    }
 
     client = _ScriptedClient(
         [
@@ -293,7 +285,7 @@ def test_run_coordinator_with_multi_file_code_merges_chunk_summaries() -> None:
     result = run_coordinator(
         client,
         CodeReviewInput(
-            code=code,
+            files=files,
             task_description="Add feature",
             language="python",
         ),
@@ -334,7 +326,7 @@ def test_shared_context_compaction_is_memoized_across_runs() -> None:
     """The oversized spec/architecture/existing-codebase are compacted once and
     reused on the next coordinator run (the review→fix→re-review loop passes the
     same shared context each cycle)."""
-    from software_engineering_team.shared.models import SystemArchitecture
+    from shared.dev_models.models import SystemArchitecture
 
     over_budget = "specification detail line. " * 4000  # well over any budget
     arch = SystemArchitecture(
@@ -347,7 +339,7 @@ def test_shared_context_compaction_is_memoized_across_runs() -> None:
 
     def _make_input() -> CodeReviewInput:
         return CodeReviewInput(
-            code="### app/main.py ###\n" + ("x" * 500),
+            files={"app/main.py": "x" * 500},
             task_description="Add feature",
             language="python",
             spec_content=over_budget,
@@ -366,11 +358,52 @@ def test_shared_context_compaction_is_memoized_across_runs() -> None:
     assert client.compaction_calls == first_run_calls
 
 
+def test_shared_context_compaction_is_recorded_in_transcript(monkeypatch) -> None:
+    """Oversized spec/architecture/existing-codebase compaction is an LLM call
+    and must appear in the durable transcript, not only the later chunk review."""
+    from llm_service import llm_attribution
+    from shared.dev_models.models import SystemArchitecture
+
+    over_budget = "specification detail line. " * 4000
+    arch = SystemArchitecture(
+        overview="architecture overview line. " * 4000,
+        architecture_document="# Arch",
+        components=[],
+        decisions=[],
+        diagrams={},
+    )
+    captured: list = []
+    monkeypatch.setattr(
+        "code_review_agent.coordinator.record_transcript_entry",
+        lambda *args, **kwargs: captured.append(args),
+    )
+    client = _CompactionCountingClient()
+    with llm_attribution(job_id="job-1"):
+        run_coordinator(
+            client,
+            CodeReviewInput(
+                files={"app/main.py": "x" * 500},
+                task_description="Add feature",
+                language="python",
+                spec_content=over_budget,
+                architecture=arch,
+                existing_codebase="prior codebase line. " * 4000,
+            ),
+        )
+    compaction = [args for args in captured if args and args[0] == "compaction"]
+    assert len(compaction) == client.compaction_calls
+    assert {args[1] for args in compaction} == {
+        "specification",
+        "architecture overview",
+        "existing codebase",
+    }
+
+
 def test_render_architecture_context_folds_in_components_and_decisions() -> None:
     """The architecture excerpt built for the reviewer includes not just the
     overview prose but component responsibilities and architecture decisions
     (ADRs) -- the concrete signal an architecture-consistency check needs."""
-    from software_engineering_team.shared.models import ArchitectureComponent, SystemArchitecture
+    from shared.dev_models.models import ArchitectureComponent, SystemArchitecture
 
     arch = SystemArchitecture(
         overview="Layered service architecture.",
@@ -397,7 +430,7 @@ def test_render_architecture_context_handles_missing_and_malformed_fields() -> N
     """
     from types import SimpleNamespace
 
-    from software_engineering_team.shared.models import SystemArchitecture
+    from shared.dev_models.models import SystemArchitecture
 
     bare = SystemArchitecture(overview="Just an overview.")
     rendered_bare = _render_architecture_context(bare)
@@ -411,7 +444,7 @@ def test_render_architecture_context_handles_missing_and_malformed_fields() -> N
 def test_chunk_prompt_includes_component_and_decision_text() -> None:
     """End-to-end: a submission reviewed with a component/decision-bearing
     architecture renders that content into the chunk reviewer's prompt."""
-    from software_engineering_team.shared.models import ArchitectureComponent, SystemArchitecture
+    from shared.dev_models.models import ArchitectureComponent, SystemArchitecture
 
     class _PromptCapturingClient(DummyLLMClient):
         """Records prompts; lock-guarded for parallel map/tail callers."""
@@ -421,9 +454,12 @@ def test_chunk_prompt_includes_component_and_decision_text() -> None:
             self.prompts: list[str] = []
             self._lock = threading.Lock()
 
-        def complete_json(self, prompt: str, **kwargs: Any) -> dict[str, Any]:
+        def complete(self, prompt: str, **kwargs: Any) -> str:
             with self._lock:
                 self.prompts.append(prompt)
+            return super().complete(prompt, **kwargs)
+
+        def complete_json(self, prompt: str, **kwargs: Any) -> dict[str, Any]:
             return {"approved": True, "issues": [], "summary": "ok", "spec_compliance_notes": ""}
 
     arch = SystemArchitecture(
@@ -448,8 +484,7 @@ def test_chunk_prompt_includes_component_and_decision_text() -> None:
 def test_run_coordinator_merges_issues_and_rejects_if_critical() -> None:
     """Coordinator merges issues across chunks; a single critical issue
     propagates to ``approved=False``."""
-    file1 = "### app/main.py ###\n" + ("x" * 20_000)
-    code = file1
+    files = {"app/main.py": "x" * 20_000}
 
     client = _ScriptedClient(
         [
@@ -473,7 +508,7 @@ def test_run_coordinator_merges_issues_and_rejects_if_critical() -> None:
     result = run_coordinator(
         client,
         CodeReviewInput(
-            code=code,
+            files=files,
             task_description="Add feature",
             language="python",
         ),
@@ -494,7 +529,7 @@ def test_run_coordinator_keeps_same_description_on_different_lines() -> None:
     actionable critical/high issue -- unrelated to this test's actual subject
     (line-anchored dedup), so the fixture must satisfy it.
     """
-    code = "### app/main.py ###\n" + "\n".join(f"x{i} = {i}" for i in range(100))
+    files = {"app/main.py": "\n".join(f"x{i} = {i}" for i in range(100))}
 
     client = _ScriptedClient(
         [
@@ -526,7 +561,7 @@ def test_run_coordinator_keeps_same_description_on_different_lines() -> None:
 
     result = run_coordinator(
         client,
-        CodeReviewInput(code=code, task_description="Add feature", language="python"),
+        CodeReviewInput(files=files, task_description="Add feature", language="python"),
     )
 
     assert sorted(i.line for i in result.issues) == [10, 80]
@@ -536,7 +571,7 @@ def test_run_coordinator_drops_unanchored_twin_of_anchored_finding() -> None:
     """An unanchored (line=None) finding that duplicates an anchored one (same
     file_path + description) is dropped, so the issue is reported once (inline),
     not twice (once in the body, once inline)."""
-    code = "### app/main.py ###\n" + "\n".join(f"x{i} = {i}" for i in range(50))
+    files = {"app/main.py": "\n".join(f"x{i} = {i}" for i in range(50))}
 
     client = _ScriptedClient(
         [
@@ -567,7 +602,7 @@ def test_run_coordinator_drops_unanchored_twin_of_anchored_finding() -> None:
 
     result = run_coordinator(
         client,
-        CodeReviewInput(code=code, task_description="Add feature", language="python"),
+        CodeReviewInput(files=files, task_description="Add feature", language="python"),
     )
 
     assert len(result.issues) == 1
@@ -589,20 +624,23 @@ def test_code_review_agent_uses_coordinator_when_code_exceeds_limit() -> None:
             super().__init__()
             self.map_calls = 0
 
-        def complete_json(self, prompt: str, **kwargs: Any) -> dict[str, Any]:
+        def complete(self, prompt: str, **kwargs: Any) -> str:
             if CODE_TO_REVIEW_HEADER in prompt:
                 self.map_calls += 1
+            return super().complete(prompt, **kwargs)
+
+        def complete_json(self, prompt: str, **kwargs: Any) -> dict[str, Any]:
             return super().complete_json(prompt, **kwargs)
 
     # Multi-line so the splitter can break it at line boundaries into >1 chunk
     # (a single 25k-char line would stay one un-splittable chunk).
-    code = "### app/main.py ###\n" + "".join(f"x{i} = {i}\n" for i in range(4000))
+    files = {"app/main.py": "".join(f"x{i} = {i}\n" for i in range(4000))}
 
     client = _MapCounter()
-    agent = CodeReviewAgent(llm_client=client)
+    agent = CodeReviewAgent(llm_client=client, force_in_process=True)
     result = agent.run(
         CodeReviewInput(
-            code=code,
+            files=files,
             task_description="Test",
             language="python",
         )
@@ -632,26 +670,48 @@ def _failme_content_in_bisect_window(budget: int) -> str:
     Postconditions:
         - Returned content length L satisfies 2 * MIN_SPLIT_SEGMENT_CHARS <= L < budget.
         - Every line is 40 chars and contains the FAILME marker.
+    Raises:
+        ValueError: if budget is too tight for any whole number of lines to land in
+            [2 * MIN_SPLIT_SEGMENT_CHARS, budget) — this helper can only produce content
+            lengths that are multiples of the line stride (line_body_width + 1 chars),
+            so some tight budgets admit no valid line count at all.
     """
     line_body_width = 40
-    target = (2 * MIN_SPLIT_SEGMENT_CHARS + budget) // 2
-    # Joined length of n 40-char lines is 41*n - 1; use 41 as the stride estimate.
-    n_lines = max(1, (target + 1) // (line_body_width + 1))
+    stride = line_body_width + 1  # joined length of n lines is stride*n - 1
+    n_lines = max(1, math.ceil(2 * MIN_SPLIT_SEGMENT_CHARS / stride))
     content = "\n".join(
         f"FAILME {i:05d}".ljust(line_body_width, "x") for i in range(1, n_lines + 1)
     )
-    while len(content) >= budget and n_lines > 1:
+    if len(content) >= budget and n_lines > 1:
         n_lines -= 1
         content = "\n".join(
             f"FAILME {i:05d}".ljust(line_body_width, "x") for i in range(1, n_lines + 1)
         )
-    while len(content) < 2 * MIN_SPLIT_SEGMENT_CHARS:
-        n_lines += 1
-        content = "\n".join(
-            f"FAILME {i:05d}".ljust(line_body_width, "x") for i in range(1, n_lines + 1)
+    if not (2 * MIN_SPLIT_SEGMENT_CHARS <= len(content) < budget):
+        raise ValueError(
+            f"budget={budget} admits no line count landing content in "
+            f"[{2 * MIN_SPLIT_SEGMENT_CHARS}, budget) at this helper's {stride}-char "
+            "line granularity"
         )
-    assert 2 * MIN_SPLIT_SEGMENT_CHARS <= len(content) < budget
     return content
+
+
+def test_failme_content_in_bisect_window_raises_for_unsatisfiable_tight_budget() -> None:
+    """A budget within one line-stride of 2*MIN_SPLIT_SEGMENT_CHARS admits no valid
+    line count (this helper's line lengths are quantized to 41-char strides), so the
+    helper must raise a clear ValueError instead of silently violating its documented
+    postcondition (regression for the bisect-window helper)."""
+    budget = 2 * MIN_SPLIT_SEGMENT_CHARS + 1
+    with pytest.raises(ValueError, match="admits no line count"):
+        _failme_content_in_bisect_window(budget)
+
+
+def test_failme_content_in_bisect_window_satisfies_postcondition_at_min_feasible_budget() -> None:
+    """The smallest budget admitting a valid line count (one stride past the lower
+    bound) must still satisfy the documented postcondition exactly."""
+    budget = 2 * MIN_SPLIT_SEGMENT_CHARS + 41 + 1
+    content = _failme_content_in_bisect_window(budget)
+    assert 2 * MIN_SPLIT_SEGMENT_CHARS <= len(content) < budget
 
 
 def test_split_within_budget_returns_single_whole_segment() -> None:
@@ -685,7 +745,8 @@ def test_split_reassembles_content_exactly_and_tracks_lines() -> None:
     # and the rendered size stays within the budget the splitter was given
     for seg in segments:
         first_rendered = seg.prompt_content.splitlines()[0]
-        assert first_rendered.startswith(f"{seg.start_line}: ")
+        prefix = re.match(r"^[ ]*(\d+)[:|] ", first_rendered)
+        assert prefix is not None and int(prefix.group(1)) == seg.start_line
         assert len(seg.prompt_content) <= 4_000
 
 
@@ -800,7 +861,8 @@ def test_int_keyed_mapping_content_is_not_treated_as_pre_numbered() -> None:
     assert len(segments) > 1
     assert all(not s.pre_numbered for s in segments)
     for seg in segments:
-        assert seg.prompt_content.splitlines()[0].startswith(f"{seg.start_line}: ")
+        prefix = re.match(r"^[ ]*(\d+)[:|] ", seg.prompt_content.splitlines()[0])
+        assert prefix is not None and int(prefix.group(1)) == seg.start_line
 
 
 def test_segment_range_label_uses_embedded_numbers_for_pre_numbered() -> None:
@@ -821,6 +883,23 @@ def test_segment_range_label_uses_embedded_numbers_for_pre_numbered() -> None:
 def test_file_segment_valid_constructs() -> None:
     seg = FileSegment(path="a.py", content="x = 1\ny = 2", start_line=5, total_lines=20)
     assert seg.end_line == 6
+
+
+def test_partial_segment_prompt_content_aligns_source_across_digit_widths() -> None:
+    """Partial-file prefixes must not shift hanging indents at the 9→10 boundary."""
+    content = "    foo(\n        'bar',\n    )\n"
+    seg = FileSegment(path="a.py", content=content, start_line=9, total_lines=20)
+    match = re.compile(r"^([ ]*\d+(?:: |\| ))(.*)$")
+    gutters, sources = zip(
+        *(
+            (m.group(1), m.group(2))
+            for ln in seg.prompt_content.splitlines()
+            if (m := match.match(ln))
+        )
+    )
+    assert list(sources) == ["    foo(", "        'bar',", "    )"]
+    assert len({len(g) for g in gutters}) == 1
+    assert sources[1].index("'") - sources[0].index("f") == 4
 
 
 def test_file_segment_rejects_zero_start_line() -> None:
@@ -1059,52 +1138,6 @@ def test_review_chunk_paths_label_marks_partial_segments() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_files_dict_input_matches_code_input() -> None:
-    """`files=` must produce the same review as the equivalent `code=` blob."""
-    files = {
-        "app/main.py": "def main(): pass",
-        "app/util.py": "def util(): pass",
-    }
-    code = "\n\n".join(f"### {path} ###\n{content}" for path, content in files.items())
-    responses = [
-        {
-            "approved": False,
-            "issues": [
-                {
-                    "severity": "high",
-                    "category": "logic",
-                    "file_path": "app/main.py",
-                    "line": 1,
-                    "description": "main() is empty",
-                    "suggestion": "implement it",
-                }
-            ],
-            "summary": "Needs work.",
-            "spec_compliance_notes": "",
-        }
-    ]
-
-    via_files = run_coordinator(
-        _ScriptedClient(list(responses)),
-        CodeReviewInput(files=files, task_description="t", language="python"),
-    )
-    via_code = run_coordinator(
-        _ScriptedClient(list(responses)),
-        CodeReviewInput(code=code, task_description="t", language="python"),
-    )
-
-    assert via_files.model_dump() == via_code.model_dump()
-    assert via_files.approved is False
-    assert via_files.issues[0].line == 1
-
-
-def test_explicit_empty_code_short_circuits() -> None:
-    result = run_coordinator(DummyLLMClient(), CodeReviewInput(code="", task_description="t"))
-    assert result.approved is True
-    assert result.issues == []
-    assert result.summary == "No code to review."
-
-
 def test_blank_file_content_is_named_by_info_finding() -> None:
     """An empty/whitespace-only file is skipped from review but never silently:
     it gets a non-blocking info finding naming it."""
@@ -1120,19 +1153,6 @@ def test_blank_file_content_is_named_by_info_finding() -> None:
     info = [i for i in result.issues if i.severity == "info"]
     assert [i.file_path for i in info] == ["pkg/__init__.py"]
     assert "empty" in info[0].description
-
-
-def test_code_mode_blank_block_is_named_by_info_finding() -> None:
-    """A ``### path ###`` header whose block is blank is reported, not dropped."""
-    code = "### empty.py ###\n   \n\n### real.py ###\nx = 1"
-    result = run_coordinator(
-        _ScriptedClient(
-            [{"approved": True, "issues": [], "summary": "ok", "spec_compliance_notes": ""}]
-        ),
-        CodeReviewInput(code=code, task_description="t"),
-    )
-    info = [i for i in result.issues if i.severity == "info"]
-    assert [i.file_path for i in info] == ["empty.py"]
 
 
 def test_all_files_blank_short_circuits_with_info_findings() -> None:
@@ -1177,16 +1197,21 @@ class _SelectiveRaiser(DummyLLMClient):
         self.prompts: list[str] = []
         self._lock = threading.Lock()
 
-    def complete_json(self, prompt: str, **kwargs: Any) -> dict[str, Any]:
+    def complete(self, prompt: str, **kwargs: Any) -> str:
         with self._lock:
             self.prompts.append(prompt)
             if self.marker in prompt:
                 raise self.exc
+        return super().complete(prompt, **kwargs)
+
+    def complete_json(self, prompt: str, **kwargs: Any) -> dict[str, Any]:
+        with self._lock:
+            self.prompts.append(prompt)
         return super().complete_json(prompt, **kwargs)
 
 
 class _FailNTimes(DummyLLMClient):
-    """Fails the first ``n`` calls, then succeeds."""
+    """Fails the first ``n`` chunk-map reasoning passes, then succeeds."""
 
     def __init__(self, n: int) -> None:
         super().__init__()
@@ -1194,12 +1219,16 @@ class _FailNTimes(DummyLLMClient):
         self.prompts: list[str] = []
         self._lock = threading.Lock()
 
+    def complete(self, prompt: str, **kwargs: Any) -> str:
+        if _is_chunk_map_reasoning_prompt(prompt):
+            with self._lock:
+                self.prompts.append(prompt)
+                if self.remaining > 0:
+                    self.remaining -= 1
+                    raise _bisecting_failure("transient")
+        return super().complete(prompt, **kwargs)
+
     def complete_json(self, prompt: str, **kwargs: Any) -> dict[str, Any]:
-        with self._lock:
-            self.prompts.append(prompt)
-            if self.remaining > 0:
-                self.remaining -= 1
-                raise _bisecting_failure("transient")
         return super().complete_json(prompt, **kwargs)
 
 
@@ -1219,6 +1248,7 @@ class _HalfTimingDummyDelegate:
         self.delays = delays or {}
         self._lock = threading.Lock()
         self.intervals: dict[str, tuple[float, float]] = {}
+        self._pending_half: str | None = None
 
     def __getattr__(self, name: str) -> Any:
         # Forward anything not overridden below (get_max_context_tokens,
@@ -1226,8 +1256,25 @@ class _HalfTimingDummyDelegate:
         # the real DummyLLMClient — _NonDummyLLMClient calls those directly.
         return getattr(self._inner, name)
 
-    def complete_json(self, prompt: str, **kwargs: Any) -> dict[str, Any]:
-        is_chunk_review = CODE_TO_REVIEW_HEADER in prompt
+    def _half_review_response(self, key: str) -> dict[str, Any]:
+        return {
+            "approved": True,
+            "issues": [
+                {
+                    "severity": "low",
+                    "category": "general",
+                    "file_path": f"{key}.py",
+                    "line": 1,
+                    "description": f"finding-{key}",
+                    "suggestion": "n/a",
+                }
+            ],
+            "summary": f"summary-{key}",
+            "spec_compliance_notes": "",
+        }
+
+    def complete(self, prompt: str, **kwargs: Any) -> str:
+        is_chunk_review = _is_chunk_map_reasoning_prompt(prompt)
         has_a, has_b = "### a.py ###" in prompt, "### b.py ###" in prompt
         if is_chunk_review and has_a and has_b:
             raise _bisecting_failure("no content")  # force bisection
@@ -1238,21 +1285,14 @@ class _HalfTimingDummyDelegate:
             end = time.monotonic()
             with self._lock:
                 self.intervals[key] = (start, end)
-            return {
-                "approved": True,
-                "issues": [
-                    {
-                        "severity": "low",
-                        "category": "general",
-                        "file_path": f"{key}.py",
-                        "line": 1,
-                        "description": f"finding-{key}",
-                        "suggestion": "n/a",
-                    }
-                ],
-                "summary": f"summary-{key}",
-                "spec_compliance_notes": "",
-            }
+                self._pending_half = key
+        return self._inner.complete(prompt, **kwargs)
+
+    def complete_json(self, prompt: str, **kwargs: Any) -> dict[str, Any]:
+        key = self._pending_half
+        if key is not None:
+            self._pending_half = None
+            return self._half_review_response(key)
         return self._inner.complete_json(prompt, **kwargs)
 
 
@@ -1280,8 +1320,8 @@ class _MultiFileFirstCallFailsDelegate:
     def __getattr__(self, name: str) -> Any:
         return getattr(self._inner, name)
 
-    def complete_json(self, prompt: str, **kwargs: Any) -> dict[str, Any]:
-        is_chunk_review = CODE_TO_REVIEW_HEADER in prompt
+    def complete(self, prompt: str, **kwargs: Any) -> str:
+        is_chunk_review = _is_chunk_map_reasoning_prompt(prompt)
         path = next((p for p in self._paths if f"### {p} ###" in prompt), None)
         if is_chunk_review and path is not None:
             with self._lock:
@@ -1295,6 +1335,9 @@ class _MultiFileFirstCallFailsDelegate:
             self._release.wait(timeout=5)
             with self._lock:
                 self.current -= 1
+        return self._inner.complete(prompt, **kwargs)
+
+    def complete_json(self, prompt: str, **kwargs: Any) -> dict[str, Any]:
         return self._inner.complete_json(prompt, **kwargs)
 
 
@@ -1311,9 +1354,10 @@ class _TimedDummyHalfClient(DummyLLMClient):
         self.delay = delay
         self._lock = threading.Lock()
         self.intervals: dict[str, tuple[float, float]] = {}
+        self._pending_half: str | None = None
 
-    def complete_json(self, prompt: str, **kwargs: Any) -> dict[str, Any]:
-        is_chunk_review = CODE_TO_REVIEW_HEADER in prompt
+    def complete(self, prompt: str, **kwargs: Any) -> str:
+        is_chunk_review = _is_chunk_map_reasoning_prompt(prompt)
         has_a, has_b = "### a.py ###" in prompt, "### b.py ###" in prompt
         if is_chunk_review and has_a and has_b:
             raise _bisecting_failure("no content")
@@ -1324,6 +1368,12 @@ class _TimedDummyHalfClient(DummyLLMClient):
             end = time.monotonic()
             with self._lock:
                 self.intervals[key] = (start, end)
+                self._pending_half = key
+        return super().complete(prompt, **kwargs)
+
+    def complete_json(self, prompt: str, **kwargs: Any) -> dict[str, Any]:
+        if self._pending_half is not None:
+            self._pending_half = None
         return super().complete_json(prompt, **kwargs)
 
 
@@ -1336,11 +1386,14 @@ def test_failing_multi_segment_chunk_bisects_and_recovers() -> None:
             super().__init__()
             self.calls = 0
 
+        def complete(self, prompt: str, **kwargs: Any) -> str:
+            if _is_chunk_map_reasoning_prompt(prompt):
+                self.calls += 1
+                if "### a.py ###" in prompt and "### b.py ###" in prompt:
+                    raise LLMSemanticExhaustionError("no content")
+            return super().complete(prompt, **kwargs)
+
         def complete_json(self, prompt: str, **kwargs: Any) -> dict[str, Any]:
-            self.calls += 1
-            # Both files in one prompt → fail; single file → succeed.
-            if "### a.py ###" in prompt and "### b.py ###" in prompt:
-                raise LLMSemanticExhaustionError("no content")
             return super().complete_json(prompt, **kwargs)
 
     client = _FailOnCombined()
@@ -1350,13 +1403,12 @@ def test_failing_multi_segment_chunk_bisects_and_recovers() -> None:
             files={"a.py": "def a(): pass", "b.py": "def b(): pass"},
             task_description="t",
             language="python",
+            skip_tail_passes=True,
         ),
     )
-    # combined fail + two single-file successes + 1 reduce-phase synthesis pass
-    # (two recovered sub-reviews → one findings-only synthesis call) + 1
-    # merged architecture/side-effect pass call (its single prompt also inlines both
-    # files together, so it hits the same synthetic failure and fails safe).
-    assert client.calls == 5
+    # Map-phase reasoning attempts only (format passes are not counted): combined
+    # fail + two single-file recoveries.
+    assert client.calls == 3
     assert result.approved is True
     assert all(i.severity != "info" for i in result.issues)
 
@@ -1371,12 +1423,12 @@ def test_transient_failure_recovers_via_same_input_retry() -> None:
             files={"only.py": "def only(): pass"},
             task_description="t",
             language="python",
+            skip_tail_passes=True,
         ),
     )
     assert result.approved is True
-    # initial failure + successful retry + 1 merged architecture/side-effect pass call
-    # (additive, runs once per submission after the map phase completes).
-    assert len(client.prompts) == 3
+    # Map-phase reasoning attempts only: initial failure + successful retry.
+    assert len(client.prompts) == 2
 
 
 def test_transient_failure_in_bisected_child_recovers() -> None:
@@ -1390,13 +1442,21 @@ def test_transient_failure_in_bisected_child_recovers() -> None:
             self.a_failures = 0
             self.calls = 0
 
+        def complete(self, prompt: str, **kwargs: Any) -> str:
+            if _is_chunk_map_reasoning_prompt(prompt):
+                self.calls += 1
+                if "### a.py ###" in prompt and "### b.py ###" in prompt:
+                    raise _bisecting_failure("no content")  # force bisection
+                if (
+                    "### a.py ###" in prompt
+                    and "### b.py ###" not in prompt
+                    and self.a_failures == 0
+                ):
+                    self.a_failures += 1
+                    raise _bisecting_failure("transient child hiccup")
+            return super().complete(prompt, **kwargs)
+
         def complete_json(self, prompt: str, **kwargs: Any) -> dict[str, Any]:
-            self.calls += 1
-            if "### a.py ###" in prompt and "### b.py ###" in prompt:
-                raise _bisecting_failure("no content")  # force bisection
-            if "### a.py ###" in prompt and self.a_failures == 0:
-                self.a_failures += 1
-                raise _bisecting_failure("transient child hiccup")
             return super().complete_json(prompt, **kwargs)
 
     client = _FailCombinedAndChildOnce()
@@ -1406,21 +1466,19 @@ def test_transient_failure_in_bisected_child_recovers() -> None:
             files={"a.py": "def a(): pass", "b.py": "def b(): pass"},
             task_description="t",
             language="python",
+            skip_tail_passes=True,
         ),
     )
     assert result.approved is True
-    # combined fail + a fail + a retry success + b success
-    # + 1 reduce-phase synthesis pass (two recovered sub-reviews)
-    # + 1 merged architecture/side-effect pass call (its single prompt also inlines
-    # both files together, so it hits the same combined-fail branch and fails
-    # safe).
-    assert client.calls == 6
+    # Map-phase reasoning attempts only: combined fail + a fail + a retry success
+    # + b success.
+    assert client.calls == 4
 
 
 def test_bisect_halves_run_sequentially_detects_dummy_and_wrapped_dummy() -> None:
-    """Mirrors ``_tail_passes_run_sequentially``: True for a bare
-    ``DummyLLMClient`` and for a wrapper exposing a ``.client`` attribute
-    pointing at one; False for anything else."""
+    """The bisect-halves dummy guard (shared ``is_dummy_llm_client_wrapped``
+    detection): True for a bare ``DummyLLMClient`` and for a wrapper exposing a
+    ``.client`` attribute pointing at one; False for anything else."""
     assert _bisect_halves_run_sequentially(DummyLLMClient()) is True
     assert _bisect_halves_run_sequentially(MagicMock()) is False
 
@@ -1595,9 +1653,12 @@ def test_semantic_exhaustion_multi_file_still_separates_files(monkeypatch) -> No
     monkeypatch.delenv("CODE_REVIEW_BLOCK_ON_UNREVIEWED", raising=False)
 
     class _FailWhenBadPresent(DummyLLMClient):
-        def complete_json(self, prompt: str, **kwargs: Any) -> dict[str, Any]:
-            if "### bad.py ###" in prompt:
+        def complete(self, prompt: str, **kwargs: Any) -> str:
+            if _is_chunk_map_reasoning_prompt(prompt) and "### bad.py ###" in prompt:
                 raise LLMSemanticExhaustionError("no content", retry_thinking_level=False)
+            return super().complete(prompt, **kwargs)
+
+        def complete_json(self, prompt: str, **kwargs: Any) -> dict[str, Any]:
             return super().complete_json(prompt, **kwargs)
 
     result = run_coordinator(
@@ -1628,26 +1689,31 @@ def test_semantic_exhaustion_without_ladder_still_gets_same_input_retry() -> Non
     class _FailOnceNoLadder(DummyLLMClient):
         def __init__(self) -> None:
             super().__init__()
-            self.calls = 0
+            self._map_reasoning_attempts = 0
+
+        def complete(self, prompt: str, **kwargs: Any) -> str:
+            if _is_chunk_map_reasoning_prompt(prompt):
+                self._map_reasoning_attempts += 1
+                if self._map_reasoning_attempts == 1:
+                    raise LLMSemanticExhaustionError("reasoning only")
+            return super().complete(prompt, **kwargs)
 
         def complete_json(self, prompt: str, **kwargs: Any) -> dict[str, Any]:
-            self.calls += 1
-            if self.calls == 1:
-                # retry_thinking_level defaults to None: no proof-of-change rung ran.
-                raise LLMSemanticExhaustionError("reasoning only")
             return super().complete_json(prompt, **kwargs)
 
     client = _FailOnceNoLadder()
     result = run_coordinator(
         client,
         CodeReviewInput(
-            files={"only.py": "def only(): pass"}, task_description="t", language="python"
+            files={"only.py": "def only(): pass"},
+            task_description="t",
+            language="python",
+            skip_tail_passes=True,
         ),
     )
     assert result.approved is True
-    # initial no-ladder exhaustion + successful same-input retry + 1
-    # merged architecture/side-effect pass call (additive, runs once per submission).
-    assert client.calls == 3
+    # Map-phase reasoning attempts only: initial no-ladder exhaustion + retry.
+    assert client._map_reasoning_attempts == 2
 
 
 def test_context_chained_child_failure_is_not_misclassified_as_semantic() -> None:
@@ -1661,16 +1727,18 @@ def test_context_chained_child_failure_is_not_misclassified_as_semantic() -> Non
             super().__init__()
             self.bad_calls = 0
 
-        def complete_json(self, prompt: str, **kwargs: Any) -> dict[str, Any]:
+        def complete(self, prompt: str, **kwargs: Any) -> str:
+            if not _is_chunk_map_reasoning_prompt(prompt):
+                return super().complete(prompt, **kwargs)
             if "### a.py ###" in prompt and "### b.py ###" in prompt:
-                # Combined chunk semantically exhausts → split by file.
                 raise LLMSemanticExhaustionError("no content", retry_thinking_level=False)
-            if "### a.py ###" in prompt:
+            if "### a.py ###" in prompt and "### b.py ###" not in prompt:
                 self.bad_calls += 1
                 if self.bad_calls == 1:
-                    # a.py's own first attempt truncates; a same-input retry recovers
-                    # it — but only if it was NOT misclassified as semantic.
                     raise LLMTruncatedError("truncated", finish_reason="length")
+            return super().complete(prompt, **kwargs)
+
+        def complete_json(self, prompt: str, **kwargs: Any) -> dict[str, Any]:
             return super().complete_json(prompt, **kwargs)
 
     client = _CombinedExhaustsChildTruncatesOnce()
@@ -1855,8 +1923,6 @@ def test_is_content_failure_classifies_model_output_errors_only() -> None:
     ``LLMSemanticExhaustionError``, ``LLMTruncatedError``, and
     ``LLMSchemaValidationError``) are recoverable content failures;
     reviewer-code bugs are not."""
-    from code_review_agent.coordinator import _is_content_failure
-
     assert _is_content_failure(LLMJsonParseError("bad")) is True
     assert _is_content_failure(LLMSemanticExhaustionError("empty")) is True
     assert _is_content_failure(json.JSONDecodeError("Expecting value", "not json", 0)) is True
@@ -2103,8 +2169,6 @@ def test_thinking_off_retry_recovers_semantic_exhaustion(monkeypatch) -> None:
     by the last-resort thinking-off retry, producing a real review (no
     not-reviewed range). The retry is normally skipped for injected strands
     models, so force the production-path gate on to exercise it."""
-    from code_review_agent import mapping
-
     monkeypatch.setenv("CODE_REVIEW_THINKING_OFF_RETRY", "true")
     monkeypatch.setattr(mapping, "thinking_override_supported", lambda llm: True)
 
@@ -2123,8 +2187,6 @@ def test_thinking_off_retry_recovers_semantic_exhaustion(monkeypatch) -> None:
 def test_thinking_off_retry_that_also_fails_degrades(monkeypatch) -> None:
     """When the thinking-off retry ALSO returns a content failure, the chunk
     degrades to a not-reviewed outcome rather than raising."""
-    from code_review_agent import mapping
-
     monkeypatch.setenv("CODE_REVIEW_THINKING_OFF_RETRY", "true")
     monkeypatch.setattr(mapping, "thinking_override_supported", lambda llm: True)
     reviewer = _ThinkAwareReviewer(
@@ -2262,6 +2324,38 @@ def test_resolve_code_review_model_think_off_uses_real_factory(monkeypatch) -> N
     assert resolve_code_review_model(object()).get_config().get("think") is None
 
 
+def test_compact_for_review_rejects_negative_max_chars() -> None:
+    """The documented non-negative budget is enforced, not left to slice quirks."""
+    from llm_service.clients.dummy import DummyLLMClient
+
+    with pytest.raises(ValueError, match="non-negative"):
+        _compact_for_review("text", -1, DummyLLMClient(), "spec")
+
+
+def test_compact_for_review_uses_provider_start_timestamps(monkeypatch) -> None:
+    """Continuation callbacks share one outer complete(); each transcript
+    entry must keep that turn's provider-recorded start, not the callback time."""
+    from llm_service.clients.dummy import DummyLLMClient
+    from llm_service.interface import record_complete_json_turn, reset_complete_json_observer_state
+
+    reset_complete_json_observer_state()
+    captured: list = []
+    monkeypatch.setattr(
+        "code_review_agent.coordinator.record_transcript_entry",
+        lambda *args, **kwargs: captured.append((args, kwargs)),
+    )
+
+    class _ContinuationClient(DummyLLMClient):
+        def complete(self, prompt: str, **kwargs: Any) -> str:
+            record_complete_json_turn("first prompt", "PARTIAL", started_monotonic=10.0)
+            record_complete_json_turn("continuation messages", " REST", started_monotonic=20.0)
+            return "PARTIAL REST"
+
+    _compact_for_review("x" * 200, 50, _ContinuationClient(), "spec")
+    assert [kwargs["started_monotonic"] for _, kwargs in captured] == [10.0, 20.0]
+    assert [args[3] for args, _ in captured] == ["PARTIAL", " REST"]
+
+
 def test_not_reviewed_range_label_edge_cases() -> None:
     """The observability label handles a missing path and a missing line range."""
     from code_review_agent.coordinator import _not_reviewed_range_label
@@ -2397,11 +2491,15 @@ def test_parallel_map_failure_does_not_wait_for_inflight_reviews(fail_first: boo
             super().__init__()
             self.slow_finished = False
 
-        def complete_json(self, prompt: str, **kwargs: Any) -> dict[str, Any]:
+        def complete(self, prompt: str, **kwargs: Any) -> str:
             if "FAILME" in prompt:
                 raise LLMRateLimitError("429")
-            release.wait(timeout=10)
-            self.slow_finished = True
+            if _is_chunk_map_reasoning_prompt(prompt):
+                release.wait(timeout=10)
+                self.slow_finished = True
+            return super().complete(prompt, **kwargs)
+
+        def complete_json(self, prompt: str, **kwargs: Any) -> dict[str, Any]:
             return super().complete_json(prompt, **kwargs)
 
     llm_probe = DummyLLMClient()
@@ -2438,11 +2536,14 @@ def test_sequential_map_failure_does_not_start_later_chunk(monkeypatch) -> None:
             super().__init__()
             self.saw_second = False
 
-        def complete_json(self, prompt: str, **kwargs: Any) -> dict[str, Any]:
+        def complete(self, prompt: str, **kwargs: Any) -> str:
             if "FAILME" in prompt:
                 raise LLMRateLimitError("429")
-            if "SECONDCHUNK" in prompt:
+            if _is_chunk_map_reasoning_prompt(prompt) and "SECONDCHUNK" in prompt:
                 self.saw_second = True
+            return super().complete(prompt, **kwargs)
+
+        def complete_json(self, prompt: str, **kwargs: Any) -> dict[str, Any]:
             return super().complete_json(prompt, **kwargs)
 
     llm_probe = DummyLLMClient()
@@ -2493,13 +2594,17 @@ def test_map_phase_peak_concurrency_bounded_by_llm_max_concurrency(monkeypatch) 
     release = threading.Event()
 
     class _ConcurrencyProbe(DummyLLMClient):
+        def complete(self, prompt: str, **kwargs: Any) -> str:
+            if _is_chunk_map_reasoning_prompt(prompt):
+                with lock:
+                    state["current"] += 1
+                    state["peak"] = max(state["peak"], state["current"])
+                release.wait(timeout=5)
+                with lock:
+                    state["current"] -= 1
+            return super().complete(prompt, **kwargs)
+
         def complete_json(self, prompt: str, **kwargs: Any) -> dict[str, Any]:
-            with lock:
-                state["current"] += 1
-                state["peak"] = max(state["peak"], state["current"])
-            release.wait(timeout=5)
-            with lock:
-                state["current"] -= 1
             return super().complete_json(prompt, **kwargs)
 
     def _release_soon() -> None:
@@ -2534,13 +2639,17 @@ def test_small_diff_does_not_over_provision_workers(monkeypatch) -> None:
     state = {"current": 0, "peak": 0}
 
     class _ConcurrencyProbe(DummyLLMClient):
+        def complete(self, prompt: str, **kwargs: Any) -> str:
+            if _is_chunk_map_reasoning_prompt(prompt):
+                with lock:
+                    state["current"] += 1
+                    state["peak"] = max(state["peak"], state["current"])
+                time.sleep(0.05)
+                with lock:
+                    state["current"] -= 1
+            return super().complete(prompt, **kwargs)
+
         def complete_json(self, prompt: str, **kwargs: Any) -> dict[str, Any]:
-            with lock:
-                state["current"] += 1
-                state["peak"] = max(state["peak"], state["current"])
-            time.sleep(0.05)
-            with lock:
-                state["current"] -= 1
             return super().complete_json(prompt, **kwargs)
 
     llm_probe = DummyLLMClient()
@@ -2603,12 +2712,12 @@ def test_run_wide_limiter_caps_concurrent_bisection_across_top_level_chunks(monk
     assert delegate.peak >= 1  # sanity: the concurrent path (not the sequential fallback) ran
 
 
-def test_headerless_code_reviews_as_single_unnamed_block() -> None:
+def test_unnamed_path_reviews_as_single_unnamed_block() -> None:
     client = _ScriptedClient(
         [{"approved": True, "issues": [], "summary": "fine", "spec_compliance_notes": ""}]
     )
     result = run_coordinator(
-        client, CodeReviewInput(code="x = compute()\ny = x + 1", task_description="t")
+        client, CodeReviewInput(files={"": "x = compute()\ny = x + 1"}, task_description="t")
     )
     assert result.approved is True
     assert result.summary == "fine"
@@ -2689,8 +2798,9 @@ def test_unrecognized_category_is_clamped_to_general() -> None:
 
 def test_side_effects_category_survives_chunk_output_validation() -> None:
     """Regression test: the "side-effects" category (advertised to the chunk
-    reviewer by profiles.py's checklist item 12 / output contract) must be
-    accepted by the same validator as every other documented category -- it
+    reviewer by profiles.py's "Caller Side Effects" criterion, item 3, /
+    output contract) must be accepted by the same validator as every other
+    documented category -- it
     was previously missing from _VALID_CATEGORIES, silently clamping every
     chunk-level side-effects finding to "general" and losing its
     classification for rendering/grouping/dedup."""
@@ -2705,8 +2815,8 @@ def test_side_effects_category_survives_chunk_output_validation() -> None:
 
 def test_documentation_category_survives_chunk_output_validation() -> None:
     """The "documentation" category (advertised to the chunk reviewer by
-    profiles.py's Documentation criterion / output contract, and used for a
-    docstring-vs-implementation mismatch) must be accepted by the same
+    profiles.py's "Contracts" criterion, item 2, / output contract, and used
+    for a docstring-vs-implementation mismatch) must be accepted by the same
     validator as every other documented category rather than clamped to
     "general" -- mirrors the side-effects regression above."""
     seg = FileSegment(path="a.py", content="x = 1", total_lines=1)
@@ -2903,7 +3013,7 @@ def test_zero_issue_reject_with_summary_now_fails_schema_validation() -> None:
     with pytest.raises(CodeReviewUnavailableError):
         run_coordinator(
             client,
-            CodeReviewInput(code="### a.py ###\nx = 1", task_description="t", language="python"),
+            CodeReviewInput(files={"a.py": "x = 1"}, task_description="t", language="python"),
         )
 
 
@@ -2921,8 +3031,19 @@ def test_rejecting_chunk_with_only_a_summary_degrades_instead_of_blocking() -> N
     cap = compute_code_review_map_chunk_chars(llm_probe)
 
     class _RejectBWithSummaryOnly(DummyLLMClient):
+        _B_MARKER = "B_CHUNK_REJECT_SUMMARY_ONLY"
+
+        def complete(self, prompt: str, **kwargs: Any) -> str:
+            if (
+                _is_chunk_map_reasoning_prompt(prompt)
+                and "### b.py ###" in prompt
+                and "### a.py ###" not in prompt
+            ):
+                return self._B_MARKER
+            return super().complete(prompt, **kwargs)
+
         def complete_json(self, prompt: str, **kwargs: Any) -> dict[str, Any]:
-            if "### b.py ###" in prompt:
+            if self._B_MARKER in prompt:
                 return {
                     "approved": False,
                     "issues": [],
@@ -2968,8 +3089,19 @@ def test_silent_rejection_never_borrows_an_approving_chunks_summary() -> None:
     cap = compute_code_review_map_chunk_chars(llm_probe)
 
     class _SilentRejectB(DummyLLMClient):
+        _B_MARKER = "B_CHUNK_SILENT_REJECT"
+
+        def complete(self, prompt: str, **kwargs: Any) -> str:
+            if (
+                _is_chunk_map_reasoning_prompt(prompt)
+                and "### b.py ###" in prompt
+                and "### a.py ###" not in prompt
+            ):
+                return self._B_MARKER
+            return super().complete(prompt, **kwargs)
+
         def complete_json(self, prompt: str, **kwargs: Any) -> dict[str, Any]:
-            if "### b.py ###" in prompt:
+            if self._B_MARKER in prompt:
                 return {
                     "approved": False,
                     "issues": [],
@@ -3021,15 +3153,20 @@ def test_no_stale_progress_reports_after_map_failure() -> None:
             super().__init__()
             self.slow_finished = threading.Event()
 
-        def complete_json(self, prompt: str, **kwargs: Any) -> dict[str, Any]:
+        def complete(self, prompt: str, **kwargs: Any) -> str:
+            if not _is_chunk_map_reasoning_prompt(prompt):
+                return super().complete(prompt, **kwargs)
             if "FAILME" in prompt:
                 assert slow_started.wait(timeout=10), "slow chunk must start first"
                 raise LLMRateLimitError("429")
             slow_started.set()
             release.wait(timeout=10)
-            result = super().complete_json(prompt, **kwargs)
+            result = super().complete(prompt, **kwargs)
             self.slow_finished.set()
             return result
+
+        def complete_json(self, prompt: str, **kwargs: Any) -> dict[str, Any]:
+            return super().complete_json(prompt, **kwargs)
 
     llm_probe = DummyLLMClient()
     cap = compute_code_review_map_chunk_chars(llm_probe)
@@ -3057,6 +3194,13 @@ def test_no_stale_progress_reports_after_map_failure() -> None:
 
 
 def test_coordinator_single_chunk_propagates_notes() -> None:
+    """Default-off path: a single chunk's ``spec_compliance_notes`` propagate directly.
+
+    ``CODE_REVIEW_SPEC_COMPLIANCE_PASS`` is not enabled here, so the coordinator
+    keeps the single-chunk fast path (see ``_merge_narrative``) and the lone
+    chunk's notes reach ``CodeReviewOutput.spec_compliance_notes`` unchanged,
+    with no synthesis LLM call in between.
+    """
     client = _ScriptedClient(
         [
             {
@@ -3069,9 +3213,7 @@ def test_coordinator_single_chunk_propagates_notes() -> None:
     )
     result = run_coordinator(
         client,
-        CodeReviewInput(
-            code="### a.py ###\ndef a(): pass", task_description="t", language="python"
-        ),
+        CodeReviewInput(files={"a.py": "def a(): pass"}, task_description="t", language="python"),
     )
     assert result.spec_compliance_notes == "Meets all acceptance criteria."
 
@@ -3115,10 +3257,15 @@ def test_single_chunk_keeps_notes_after_bisection() -> None:
             super().__init__()
             self.calls = 0
 
+        def complete(self, prompt: str, **kwargs: Any) -> str:
+            if _is_chunk_map_reasoning_prompt(prompt):
+                self.calls += 1
+                if "### a.py ###" in prompt and "### b.py ###" in prompt:
+                    raise LLMSemanticExhaustionError("no content")
+            return super().complete(prompt, **kwargs)
+
         def complete_json(self, prompt: str, **kwargs: Any) -> dict[str, Any]:
             self.calls += 1
-            if "### a.py ###" in prompt and "### b.py ###" in prompt:
-                raise LLMSemanticExhaustionError("no content")
             return {
                 "approved": True,
                 "issues": [],
@@ -3151,8 +3298,11 @@ def test_language_is_threaded_into_every_chunk_prompt() -> None:
             super().__init__()
             self.prompts: list[str] = []
 
-        def complete_json(self, prompt: str, **kwargs: Any) -> dict[str, Any]:
+        def complete(self, prompt: str, **kwargs: Any) -> str:
             self.prompts.append(prompt)
+            return super().complete(prompt, **kwargs)
+
+        def complete_json(self, prompt: str, **kwargs: Any) -> dict[str, Any]:
             return super().complete_json(prompt, **kwargs)
 
     client = _Recorder()
@@ -3178,8 +3328,11 @@ def test_user_decisions_thread_through_coordinator_to_chunk_prompt() -> None:
             super().__init__()
             self.prompts: list[str] = []
 
-        def complete_json(self, prompt: str, **kwargs: Any) -> dict[str, Any]:
+        def complete(self, prompt: str, **kwargs: Any) -> str:
             self.prompts.append(prompt)
+            return super().complete(prompt, **kwargs)
+
+        def complete_json(self, prompt: str, **kwargs: Any) -> dict[str, Any]:
             return super().complete_json(prompt, **kwargs)
 
     client = _Recorder()
@@ -3203,7 +3356,7 @@ def test_user_decisions_thread_through_coordinator_to_chunk_prompt() -> None:
 
 
 class _RecordingClient(DummyLLMClient):
-    """Delegates to Dummy but records every prompt.
+    """Delegates to Dummy but records map-phase reasoning prompts.
 
     Thread-safe: map calls may append concurrently under parallelism.
     """
@@ -3213,9 +3366,12 @@ class _RecordingClient(DummyLLMClient):
         self.prompts: list[str] = []
         self._lock = threading.Lock()
 
-    def complete_json(self, prompt: str, **kwargs: Any) -> dict[str, Any]:
+    def complete(self, prompt: str, **kwargs: Any) -> str:
         with self._lock:
             self.prompts.append(prompt)
+        return super().complete(prompt, **kwargs)
+
+    def complete_json(self, prompt: str, **kwargs: Any) -> dict[str, Any]:
         return super().complete_json(prompt, **kwargs)
 
 
@@ -3226,7 +3382,7 @@ def test_large_synthetic_input_is_fully_covered_with_bounded_prompts() -> None:
     cap = compute_code_review_map_chunk_chars(client)
     files = {f"app/mod_{i}.py": _numbered_file(2_500) for i in range(5)}  # ~500K chars total
 
-    agent = CodeReviewAgent(llm_client=client)
+    agent = CodeReviewAgent(llm_client=client, force_in_process=True)
     result = agent.run(CodeReviewInput(files=files, task_description="t", language="python"))
 
     assert isinstance(result, CodeReviewOutput)
@@ -3251,9 +3407,10 @@ def test_coordinator_reports_per_chunk_progress() -> None:
     """With 2 chunks the coordinator reports one 'chunk i/2 reviewed' per
     completion (fractions inside (0.10, 0.90], non-decreasing even with
     parallel workers), then finalizing and done at 1.0."""
-    big_file_1 = "### app/main.py ###\n" + ("a" * 25_000)
-    big_file_2 = "### app/util.py ###\n" + ("b" * 25_000)
-    code = big_file_1 + "\n\n" + big_file_2
+    files = {
+        "app/main.py": "a" * 25_000,
+        "app/util.py": "b" * 25_000,
+    }
 
     calls: list = []
 
@@ -3262,7 +3419,7 @@ def test_coordinator_reports_per_chunk_progress() -> None:
 
     result = run_coordinator(
         DummyLLMClient(),
-        CodeReviewInput(code=code, task_description="Add feature", language="python"),
+        CodeReviewInput(files=files, task_description="Add feature", language="python"),
         progress_callback=_cb,
     )
     assert isinstance(result, CodeReviewOutput)
@@ -3288,7 +3445,7 @@ def test_empty_input_still_reports_done() -> None:
     calls: list = []
     result = run_coordinator(
         DummyLLMClient(),
-        CodeReviewInput(code="", task_description="t"),
+        CodeReviewInput(files={"a.py": ""}, task_description="t"),
         progress_callback=lambda s, d, f: calls.append((s, d, f)),
     )
     assert result.approved is True
@@ -3503,25 +3660,232 @@ def test_single_chunk_summary_reflects_side_effect_findings(monkeypatch) -> None
     assert any(i.description == side_effect_issue.description for i in result.issues)
 
 
-def test_tail_passes_run_sequentially_for_dummy_llm() -> None:
-    """A bare ``DummyLLMClient`` forces sequential tail passes; a non-Dummy
-    stand-in (``MagicMock``) does not."""
-    assert _tail_passes_run_sequentially(DummyLLMClient()) is True
-    assert _tail_passes_run_sequentially(MagicMock()) is False
+def test_spec_compliance_single_pass_off_by_default_skips_dedicated_pass(monkeypatch) -> None:
+    """Default (``CODE_REVIEW_SPEC_COMPLIANCE_PASS`` unset): ``synthesize_spec_compliance``
+    is never invoked -- the flag-off path costs zero extra calls, matching today's
+    behavior exactly (see ``test_chunk_reviewer.py`` for the per-chunk-prompt side of
+    this same guarantee).
+
+    Hermetic against external environment state: explicitly clears the env var
+    instead of relying on it happening to be unset in CI or a developer's shell.
+    """
+    import code_review_agent.coordinator as coord
+
+    monkeypatch.delenv("CODE_REVIEW_SPEC_COMPLIANCE_PASS", raising=False)
+    calls: list = []
+    monkeypatch.setattr(
+        coord,
+        "synthesize_spec_compliance",
+        lambda *a, **kw: calls.append(True) or "should not run",
+    )
+
+    run_coordinator(
+        DummyLLMClient(),
+        CodeReviewInput(files={"a.py": "x = 1\n"}, task_description="t"),
+    )
+
+    assert not calls, "synthesize_spec_compliance must not run when the flag is off"
 
 
-def test_tail_passes_run_sequentially_for_wrapped_dummy_llm() -> None:
-    """The coding team's default llm_getter wraps clients in a Strands LLMClientModel
-    (exposing the backing client via a `.client` property) before they reach the
-    coordinator -- a DummyLLMClient reached only through that wrapper must still
-    force sequential execution."""
+def test_spec_compliance_single_pass_routes_note_into_synthesis(monkeypatch) -> None:
+    """``CODE_REVIEW_SPEC_COMPLIANCE_PASS=true`` on an explicit ``CODE_REVIEW`` profile,
+    multi-chunk submission: ``synthesize_spec_compliance`` runs exactly once, after
+    deduplication, over the final merged issue list, and its note replaces the
+    (now-empty) per-chunk spec notes fed into ``synthesize_review_findings`` for
+    EVERY chunk -- not just the first one. Two chunks each report the identical
+    (file_path, line, description) finding, so the merged list ``synthesize_spec_compliance``
+    receives is the single deduped copy, never the raw two-copy per-chunk list; this
+    also proves the old single-chunk fast path is bypassed regardless of chunk count,
+    so the dedicated pass's finding is never silently dropped (ADR-010 contract
+    boundary point 4)."""
+    import code_review_agent.coordinator as coord
+    from code_review_agent.profiles import ReviewProfile
 
-    class _FakeStrandsModelWrapper:
-        def __init__(self, client):
-            self.client = client
+    monkeypatch.setenv("CODE_REVIEW_SPEC_COMPLIANCE_PASS", "true")
 
-    assert _tail_passes_run_sequentially(_FakeStrandsModelWrapper(DummyLLMClient())) is True
-    assert _tail_passes_run_sequentially(_FakeStrandsModelWrapper(MagicMock())) is False
+    spec_calls: list = []
+
+    def _spec_spy(*args, **kwargs):
+        spec_calls.append(kwargs)
+        return "SPEC_GAP_MARKER: missing rate limiting."
+
+    monkeypatch.setattr(coord, "synthesize_spec_compliance", _spec_spy)
+
+    synth_calls: list = []
+    original_synthesize = coord.synthesize_review_findings
+
+    def _spy(*args, **kwargs):
+        synth_calls.append(kwargs.get("chunk_spec_notes"))
+        return original_synthesize(*args, **kwargs)
+
+    monkeypatch.setattr(coord, "synthesize_review_findings", _spy)
+
+    duplicate_issue = {
+        "severity": "high",
+        "category": "logic",
+        "file_path": "app/main.py",
+        "line": 10,
+        "description": "duplicate string literal",
+        "suggestion": "extract a constant",
+    }
+    client = _ScriptedClient(
+        [
+            {
+                "approved": False,
+                "issues": [duplicate_issue],
+                "summary": "Chunk 1 finding.",
+                "spec_compliance_notes": "",
+            },
+            {
+                "approved": False,
+                "issues": [duplicate_issue],
+                "summary": "Chunk 2 finding.",
+                "spec_compliance_notes": "",
+            },
+        ]
+    )
+
+    files = {
+        "app/main.py": "x" * 20_000,
+        "app/models.py": "y" * 20_000,
+    }
+    result = run_coordinator(
+        client,
+        CodeReviewInput(
+            files=files,
+            task_description="t",
+            profile=ReviewProfile.CODE_REVIEW,
+            skip_tail_passes=True,
+        ),
+    )
+
+    assert synth_calls, (
+        "synthesis must run (fast path bypassed) so the single-pass note isn't dropped"
+    )
+    assert synth_calls[-1] == ["SPEC_GAP_MARKER: missing rate limiting."], (
+        "chunk_spec_notes must be the single dedicated note for every chunk, not a "
+        "per-chunk list -- otherwise a later chunk's per-chunk note could survive"
+    )
+
+    assert len(spec_calls) == 1, "synthesize_spec_compliance must be called exactly once"
+    assert spec_calls[0]["issues"] == result.issues, (
+        "synthesize_spec_compliance must run over the final merged/deduped issue list"
+    )
+    # Both chunks reported the identical (file_path, line, description) finding;
+    # a genuine post-dedupe call sees exactly one copy, not two.
+    assert len(spec_calls[0]["issues"]) == 1, (
+        "the duplicate finding from both chunks must already be deduped before "
+        "synthesize_spec_compliance runs"
+    )
+
+
+def test_spec_compliance_single_pass_restricted_to_code_review_profile(monkeypatch) -> None:
+    """``CODE_REVIEW_SPEC_COMPLIANCE_PASS=true`` on a non-``CODE_REVIEW`` profile must
+    not call ``synthesize_spec_compliance`` -- and (per ``test_chunk_reviewer.py``'s
+    gating tests, computed off the same profile-aware boolean) must not omit the
+    per-chunk acceptance-criteria/spec-excerpt blocks either. Either alone (chunk
+    omission without a replacement pass) would silently drop spec-compliance checking
+    for that submission entirely."""
+    import code_review_agent.coordinator as coord
+    from code_review_agent.profiles import ReviewProfile
+
+    monkeypatch.setenv("CODE_REVIEW_SPEC_COMPLIANCE_PASS", "true")
+    calls: list = []
+    monkeypatch.setattr(
+        coord,
+        "synthesize_spec_compliance",
+        lambda *a, **kw: calls.append(True) or "should not run",
+    )
+
+    run_coordinator(
+        DummyLLMClient(),
+        CodeReviewInput(
+            files={"a.py": "x = 1\n"},
+            task_description="t",
+            acceptance_criteria=["Must validate input"],
+            profile=ReviewProfile.ACCEPTANCE,
+        ),
+    )
+
+    assert not calls, "synthesize_spec_compliance must not run outside the CODE_REVIEW profile"
+
+
+def test_spec_compliance_single_pass_failure_falls_back_to_per_chunk_notes(monkeypatch) -> None:
+    """When the dedicated ``synthesize_spec_compliance`` pass raises, the coordinator
+    must not abort: ``single_pass_spec_notes`` stays ``None`` so ``_merge_narrative``
+    falls back to per-chunk-sourced behavior (documented on the call site).
+    """
+    import code_review_agent.coordinator as coord
+    from code_review_agent.profiles import ReviewProfile
+
+    monkeypatch.setenv("CODE_REVIEW_SPEC_COMPLIANCE_PASS", "true")
+
+    def _boom(*_args, **_kwargs):
+        raise RuntimeError("spec-compliance single pass exploded")
+
+    monkeypatch.setattr(coord, "synthesize_spec_compliance", _boom)
+
+    merge_kwargs: list = []
+    original_merge = coord._merge_narrative
+
+    def _merge_spy(*args, **kwargs):
+        merge_kwargs.append(kwargs)
+        return original_merge(*args, **kwargs)
+
+    monkeypatch.setattr(coord, "_merge_narrative", _merge_spy)
+
+    result = run_coordinator(
+        DummyLLMClient(),
+        CodeReviewInput(
+            files={"a.py": "x = 1\n"},
+            task_description="t",
+            profile=ReviewProfile.CODE_REVIEW,
+            skip_tail_passes=True,
+        ),
+    )
+
+    assert isinstance(result, CodeReviewOutput)
+    assert merge_kwargs, "_merge_narrative must still run after a failed single pass"
+    assert merge_kwargs[-1].get("single_pass_spec_notes") is None, (
+        "failed synthesize_spec_compliance must leave single_pass_spec_notes as None "
+        "so _merge_narrative falls back to per-chunk notes"
+    )
+
+
+def test_skip_tail_passes_short_circuits_with_no_llm_calls() -> None:
+    """``input_data.skip_tail_passes=True`` returns the genuine issues unchanged
+    with ``has_additive_findings`` False and no tail-pass LLM calls at all --
+    the raising stand-in below proves neither pass touched the LLM."""
+
+    class _RaisingLLM:
+        def __getattr__(self, name: str) -> Any:
+            raise AssertionError(
+                f"tail passes must not touch the LLM when skipped (called {name!r})"
+            )
+
+    from code_review_agent.false_positive_filter import CodebaseIndex
+
+    input_data = CodeReviewInput(files={"a.py": "x = 1\n"}, skip_tail_passes=True)
+    genuine_issues = [
+        CodeReviewIssue(
+            severity="high",
+            category="logic",
+            file_path="a.py",
+            description="bug",
+            suggestion="fix",
+        )
+    ]
+    index = CodebaseIndex.from_input(input_data, repo_reader=None)
+
+    result = _run_tail_passes(
+        llm=_RaisingLLM(),
+        input_data=input_data,
+        genuine_issues=genuine_issues,
+        repo_reader=None,
+        shared_index=index,
+    )
+
+    assert result == _TailPassResult(issues=genuine_issues, has_additive_findings=False)
 
 
 class _NonDummyLLMClient(LLMClient, Model):
@@ -3531,11 +3895,8 @@ class _NonDummyLLMClient(LLMClient, Model):
     .resolve_code_review_model`` only honors an injected client verbatim when
     it already implements the strands ``Model`` interface (otherwise it
     silently substitutes the default production model), so this must
-    implement ``Model`` too, not just ``LLMClient``. ``isinstance(self,
-    DummyLLMClient)`` is False and ``getattr(self, "client", None)`` finds
-    nothing, so ``_tail_passes_run_sequentially`` treats it like a production
-    client (e.g. an ``LLMClientModel`` wrapping ``OllamaLLMClient``) and takes
-    the concurrent branch, while chunk-review responses stay the
+    implement ``Model`` too, not just ``LLMClient``. Used to exercise the
+    production-client code path while chunk-review responses stay the
     deterministic canned ones from the inner scripted client."""
 
     def __init__(self, inner: DummyLLMClient) -> None:
@@ -3557,6 +3918,9 @@ class _NonDummyLLMClient(LLMClient, Model):
     def complete_json(self, prompt: str, **kwargs: Any) -> dict[str, Any]:
         return self._inner.complete_json(prompt, **kwargs)
 
+    def complete(self, prompt: str, **kwargs: Any) -> str:
+        return self._inner.complete(prompt, **kwargs)
+
     def chat(self, messages: list, **kwargs: Any) -> Any:
         return self._inner.chat(messages, **kwargs)
 
@@ -3574,107 +3938,80 @@ def _noop_merged(llm, input_data, repo_reader=None, index=None):
     return [], []
 
 
-def test_tail_passes_fan_out_concurrently_for_non_dummy_llm(monkeypatch) -> None:
-    """With a non-``DummyLLMClient`` ``llm``, the two tail passes (false-positive
-    filter and merged architecture/side-effect pass) run concurrently: each stub
-    records its arrival then blocks on a 2-party barrier, so the call only
-    completes if both are in flight together -- a fallback to sequential
-    execution would deadlock the first stub and the test would fail on the
-    barrier timeout. The recorded arrivals additionally prove, without relying
-    on that implicit timeout/exception behavior, that both stubs actually ran."""
+def test_merged_pass_runs_before_false_positive_filter(monkeypatch) -> None:
+    """The tail passes run sequentially in dependency order: the merged
+    architecture/side-effect pass FIRST, then the false-positive filter -- so
+    the additive findings are in the set the filter verifies. (The old code ran
+    the two concurrently and appended the merged findings AFTER filtering, so
+    they bypassed verification entirely.)"""
     import code_review_agent.coordinator as coord
 
-    arrivals: list[str] = []
-    lock = threading.Lock()
-    barrier = threading.Barrier(2, timeout=5)
-
-    def _record(name: str) -> None:
-        with lock:
-            arrivals.append(name)
-
-    def _filter(llm, input_data, issues, repo_reader=None, index=None):
-        _record("filter")
-        barrier.wait()
-        return list(issues)
+    order: list[str] = []
 
     def _merged(llm, input_data, repo_reader=None, index=None):
-        _record("merged")
-        barrier.wait()
+        order.append("merged")
         return [], []
-
-    monkeypatch.setattr(coord, "filter_false_positives", _filter)
-    monkeypatch.setattr(coord, "find_architecture_and_side_effect_issues", _merged)
-
-    stand_in = _NonDummyLLMClient(DummyLLMClient())
-    try:
-        result = run_coordinator(
-            stand_in,
-            CodeReviewInput(files={"a.py": "x = 1\n"}, task_description="t"),
-        )
-    finally:
-        # Leaves no party waiting on the barrier even if run_coordinator raises
-        # before both stubs reach it, so a failure here can't wedge a later
-        # test sharing the same worker process.
-        barrier.abort()
-
-    assert isinstance(result, CodeReviewOutput)
-    assert sorted(arrivals) == ["filter", "merged"]
-
-
-def test_tail_passes_run_sequentially_when_parallelism_budget_is_one(monkeypatch) -> None:
-    """``CODE_REVIEW_MAP_PARALLELISM=1`` must force the tail passes to run one
-    at a time even for a non-``DummyLLMClient`` ``llm`` -- the false-positive
-    filter's own internal verification workers are sized from this same knob
-    (``_verify_parallelism``), so fanning the filter out alongside the
-    architecture/side-effect passes would silently exceed a budget the
-    operator set to 1 specifically because the configured provider cannot
-    accept concurrent requests. Verified by tracking the max number of
-    tail-pass stubs ever in flight at once, rather than a barrier (which
-    would just deadlock/timeout if this regressed)."""
-    import code_review_agent.coordinator as coord
-
-    monkeypatch.setenv("CODE_REVIEW_MAP_PARALLELISM", "1")
-
-    lock = threading.Lock()
-    in_flight = 0
-    max_in_flight = 0
-
-    def _track() -> None:
-        nonlocal in_flight, max_in_flight
-        with lock:
-            in_flight += 1
-            max_in_flight = max(max_in_flight, in_flight)
-        time.sleep(0.05)
-        with lock:
-            in_flight -= 1
 
     def _filter(llm, input_data, issues, repo_reader=None, index=None):
-        _track()
+        order.append("filter")
         return list(issues)
 
-    def _merged(llm, input_data, repo_reader=None, index=None):
-        _track()
-        return [], []
-
-    monkeypatch.setattr(coord, "filter_false_positives", _filter)
     monkeypatch.setattr(coord, "find_architecture_and_side_effect_issues", _merged)
+    monkeypatch.setattr(coord, "filter_false_positives", _filter)
 
-    stand_in = _NonDummyLLMClient(DummyLLMClient())
     result = run_coordinator(
-        stand_in,
+        DummyLLMClient(),
         CodeReviewInput(files={"a.py": "x = 1\n"}, task_description="t"),
     )
 
     assert isinstance(result, CodeReviewOutput)
-    assert max_in_flight == 1, "tail passes must not overlap when the parallelism budget is 1"
+    assert order == ["merged", "filter"]
 
 
-def test_run_coordinator_concurrent_tail_passes_match_sequential_output(monkeypatch) -> None:
-    """The concurrent branch (non-``DummyLLMClient`` ``llm``) and the sequential
-    branch (``DummyLLMClient``) must produce a byte-identical merged
-    ``CodeReviewOutput`` for the same input -- the two tail passes are
-    independent and additive, so fanning them out must not change the result,
-    only the wall-clock order in which they run."""
+def test_additive_findings_are_false_positive_filtered(monkeypatch) -> None:
+    """Regression for the FP-bypass bug: an architecture/side-effect finding now
+    passes THROUGH the false-positive filter. A filter stub that confirms the
+    architecture finding is a false positive (dropping it) must remove it from
+    the output -- previously the merged findings were appended after the filter
+    and such a false positive would be posted as a PR comment."""
+    import code_review_agent.coordinator as coord
+    from code_review_agent.models import CodeReviewIssue
+
+    arch_fp = CodeReviewIssue(
+        severity="high",
+        category="architecture",
+        file_path="a.py",
+        description="Spurious: duplicates a service that does not actually exist.",
+    )
+
+    def _merged(llm, input_data, repo_reader=None, index=None):
+        return [arch_fp], []
+
+    def _drop_architecture(llm, input_data, issues, repo_reader=None, index=None):
+        # Simulate the verifier confirming the architecture finding is a false
+        # positive and dropping it, keeping every other finding.
+        return [i for i in issues if i.category != "architecture"]
+
+    monkeypatch.setattr(coord, "find_architecture_and_side_effect_issues", _merged)
+    monkeypatch.setattr(coord, "filter_false_positives", _drop_architecture)
+
+    result = run_coordinator(
+        DummyLLMClient(),
+        CodeReviewInput(files={"a.py": "x = 1\n"}, task_description="t"),
+    )
+
+    assert isinstance(result, CodeReviewOutput)
+    assert all(i.category != "architecture" for i in result.issues), (
+        "an additive finding confirmed as a false positive must be dropped by the filter"
+    )
+
+
+def test_run_coordinator_additive_findings_appear_for_dummy_and_nondummy(monkeypatch) -> None:
+    """A production (non-``DummyLLMClient``) client and a bare ``DummyLLMClient``
+    must produce a byte-identical merged ``CodeReviewOutput`` for the same input:
+    the tail passes run the same way for both, and the additive
+    architecture/side-effect findings survive combination + the (no-op here)
+    false-positive filter and appear in the final output."""
     import code_review_agent.coordinator as coord
     from code_review_agent.models import CodeReviewIssue
 

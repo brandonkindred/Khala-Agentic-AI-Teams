@@ -44,8 +44,9 @@ import re
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
 
-from llm_service.interface import LLMError
+from llm_service.interface import LLMError, LLMJsonParseError
 from software_engineering_team.code_review_agent.profiles import ReviewProfile
+from software_engineering_team.shared.json_utils import parse_json_object
 from software_engineering_team.shared.llm_tool_agent_base import LlmToolAgentBase
 from software_engineering_team.shared.v2_models import (
     ReviewIssue,
@@ -175,36 +176,29 @@ def relevant_code_for_issue(
 def lenient_json_object(
     raw: str, *, logger: logging.Logger, context: str, on_fail_msg: str
 ) -> Dict[str, Any]:
-    """Parse a JSON object from ``raw``, tolerating surrounding prose.
+    """Parse a JSON object from ``raw`` via the canonical recovery ladder.
 
-    Mirrors the historical inline fallback: try ``json.loads`` directly, then
-    the substring between the first ``{`` and last ``}``; on failure log a
-    warning and return ``{}``.
+    Delegates to :func:`software_engineering_team.shared.json_utils.parse_json_object`
+    -- the single recovery ladder shared across the SE team (markdown-fence
+    stripping, prose-prefix trimming, trailing-comma repair, and the
+    string-aware salvage engine behind it). This path therefore recovers the
+    fenced and prose-wrapped payloads that the historical first-``{``/last-``}``
+    substring slice mishandled (e.g. a fenced object followed by prose braces,
+    which the old slice ran past ``rfind("}")`` and dropped). On unrecoverable
+    or non-object output the canonical parser raises ``LLMJsonParseError`` or
+    ``TypeError``, both caught here and mapped to the historical ``{}`` return
+    plus a warning, so callers keep their dict contract.
 
     Preconditions: ``raw`` is a str; ``logger``/``context``/``on_fail_msg`` set.
-    Postconditions: returns a dict (``{}`` when no JSON object can be parsed,
-        or when the parsed JSON value is not a mapping).
+    Postconditions: returns a dict (``{}`` when no JSON object can be recovered,
+        or when the recovered JSON value is not a mapping). Never raises on
+        malformed input.
     """
     try:
-        parsed = json.loads(raw)
-        return parsed if isinstance(parsed, dict) else {}
-    except json.JSONDecodeError:
-        start = raw.find("{")
-        end = raw.rfind("}") + 1
-        if start >= 0 and end > start:
-            try:
-                parsed = json.loads(raw[start:end])
-                return parsed if isinstance(parsed, dict) else {}
-            except json.JSONDecodeError:
-                logger.warning(
-                    "%s: model output did not parse as JSON: %r; %s",
-                    context,
-                    raw,
-                    on_fail_msg,
-                )
-                return {}
+        return parse_json_object(raw)
+    except (LLMJsonParseError, TypeError):
         logger.warning(
-            "%s: model output contained no JSON object: %r; %s",
+            "%s: model output did not parse as JSON: %r; %s",
             context,
             raw,
             on_fail_msg,
@@ -682,9 +676,3 @@ class BaseReviewToolAgent(LlmToolAgentBase):
             summary; never touches ``inp`` or applies any change.
         """
         return ToolAgentPhaseOutput(summary=f"{self.name} deliver.")
-
-
-# Preferred name for the generalized review base. The historical
-# ``BaseReviewToolAgent`` name is retained above and aliased here so both stacks
-# (and their tests) can import either.
-ReviewToolAgent = BaseReviewToolAgent

@@ -32,8 +32,15 @@ logger = logging.getLogger(__name__)
 _PROMPT_DIR = Path(__file__).resolve().parent.parent / "prompts"
 
 # Loaded once at import — the system prompt is static, so re-reading it from disk
-# on every zero-trade repair is wasted I/O.
-_SYSTEM_PROMPT = (_PROMPT_DIR / "zero_trade_repair_system.md").read_text(encoding="utf-8")
+# on every zero-trade repair is wasted I/O. Appends the shared sizing/drawdown
+# risk-framing reference (deployed size IS the per-trade loss cap; no
+# max-drawdown constraint exists) so the canonical wording lives in one place
+# instead of an independently-worded inline copy.
+_SYSTEM_PROMPT = (
+    (_PROMPT_DIR / "zero_trade_repair_system.md").read_text(encoding="utf-8")
+    + "\n\n"
+    + (_PROMPT_DIR / "_sizing_risk_framing.md").read_text(encoding="utf-8")
+)
 
 # The JSON Schema the LLM response must conform to, rendered once for
 # injection into the prompt (mirrors ``refinement._REFINEMENT_SCHEMA_JSON``).

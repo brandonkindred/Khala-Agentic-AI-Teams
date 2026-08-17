@@ -47,7 +47,7 @@ def test_resolve_model_code_review_verify_agent_default(monkeypatch: pytest.Monk
     """code_review_verify has its own, genuinely lighter AGENT_DEFAULT_MODELS
     entry, independent of (and not affecting) code_review's.
 
-    glm-5.2:cloud is required here rather than a thinking-tier pin on the same model
+    deepseek-v4-flash:cloud is required here rather than a thinking-tier pin on the same model
     as code_review: deepseek-v4-pro:cloud's reasoning_effort wire mapping collapses
     "low"/"medium" onto the same "high" tier code_review already pinned (see
     KNOWN_MODEL_THINKING_LEVELS), so that route could not be made genuinely
@@ -56,16 +56,16 @@ def test_resolve_model_code_review_verify_agent_default(monkeypatch: pytest.Monk
     monkeypatch.delenv("LLM_MODEL", raising=False)
     monkeypatch.delenv("LLM_MODEL_code_review_verify", raising=False)
     monkeypatch.delenv("LLM_MODEL_code_review", raising=False)
-    assert config.resolve_model("code_review_verify") == "glm-5.2:cloud"
+    assert config.resolve_model("code_review_verify") == "deepseek-v4-flash:cloud"
     assert config.resolve_model("code_review") == "kimi-k2.7-code:cloud"
 
 
 def test_resolve_agent_default_think_code_review_verify_has_no_pin() -> None:
-    """code_review_verify's model (glm-5.2:cloud) registers no thinking levels, so it
+    """code_review_verify's model (deepseek-v4-flash:cloud) registers no thinking levels, so it
     has no AGENT_DEFAULT_THINK entry — the pin would be silently inert. code_review's
     own resolution is unaffected by the new key."""
     assert config.resolve_agent_default_think("code_review_verify") is None
-    assert "glm-5.2:cloud" not in config.KNOWN_MODEL_THINKING_LEVELS
+    assert "deepseek-v4-flash:cloud" not in config.KNOWN_MODEL_THINKING_LEVELS
     assert config.resolve_agent_default_think("code_review") == "high"
 
 
@@ -79,6 +79,33 @@ def test_resolve_agent_default_think_unlisted_and_none_are_none() -> None:
 
 def test_resolve_base_url_default(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("LLM_BASE_URL", raising=False)
+    assert config.resolve_base_url() == "https://ollama.com"
+
+
+def test_resolve_base_url_whitespace_runtime_falls_through_to_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A whitespace-only runtime value must not win the fallback chain as truthy."""
+    monkeypatch.setattr(config, "_runtime", lambda key: "   ")
+    monkeypatch.setenv("LLM_BASE_URL", "http://ollama-env:11434")
+    assert config.resolve_base_url() == "http://ollama-env:11434"
+
+
+def test_resolve_base_url_whitespace_runtime_and_env_falls_through_to_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Whitespace-only runtime and env values both fall through to the default."""
+    monkeypatch.setattr(config, "_runtime", lambda key: "   ")
+    monkeypatch.setenv("LLM_BASE_URL", "   ")
+    assert config.resolve_base_url() == "https://ollama.com"
+
+
+def test_resolve_base_url_whitespace_env_only_falls_through_to_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A whitespace-only env value (no runtime) falls through to the default."""
+    monkeypatch.setattr(config, "_runtime", lambda key: "")
+    monkeypatch.setenv("LLM_BASE_URL", "   ")
     assert config.resolve_base_url() == "https://ollama.com"
 
 
@@ -214,7 +241,7 @@ def test_agent_pin_dropped_for_unregistered_model(clean_thinking_env) -> None:
     level: it falls back to that model's safe default (plain boolean think),
     instead of sending an unvalidated reasoning_effort guess."""
     with llm_attribution(agent_key="code_review"):
-        assert config.resolve_think_for_model("glm-5.2:cloud", None) is True
+        assert config.resolve_think_for_model("deepseek-v4-flash:cloud", None) is True
 
 
 def test_agent_pin_defers_to_enable_thinking_kill_switch(monkeypatch) -> None:
@@ -265,6 +292,8 @@ def test_agent_pin_only_replaces_the_none_default(clean_thinking_env) -> None:
         ("0", False),
         ("no", False),
         ("No", False),
+        ("off", False),
+        ("OFF", False),
     ],
 )
 def test_env_flag_enabled(

@@ -3,10 +3,11 @@
 The map-reduce reviewer (``coordinator.py``) flags issues from *bounded
 chunks*, and even the checklist item that asks the chunk reviewer to notice a
 behavior change in the function/method it is editing (see
-``profiles._CODE_REVIEW_CRITERIA`` item 12) has no tools and cannot see beyond
-the chunk it was given — it can flag that a function's contract *looks* like
-it changed, but it can never know who else in the codebase calls that
-function, or whether the new behavior breaks them. Neither the false-positive
+``profiles._CODE_REVIEW_CRITERIA`` item 3, Caller Side Effects) has no tools
+and cannot see beyond the chunk it was given — it can flag that a function's
+contract *looks* like it changed, but it can never know who else in the
+codebase calls that function, or whether the new behavior breaks them.
+Neither the false-positive
 filter nor the architecture-consistency pass answers that question either:
 both operate over *this submission's* files (plus, via ``RepoReader``, read
 access to the rest of the repository), but neither searches the wider
@@ -17,10 +18,11 @@ This pass runs ONCE PER SUBMISSION (never once per chunk), after the
 architecture-consistency pass, and is purely additive: it is given the full
 content of the changed files, with read access to the rest of the repository
 via the same tools the false-positive filter and architecture pass use
-(``read_file``, ``list_files``, ``search_codebase``,
-``find_function_at_line``), plus one new tool this pass introduces,
-``search_repository``, which searches the REST of the repository (beyond the
-submission) for a substring — the capability actually needed to find a
+(``read_file``, ``read_lines``, ``read_function``, ``list_files``,
+``search_codebase``, ``find_function_at_line``, ``find_references``), plus
+one new tool this pass introduces, ``search_repository``, which searches
+the REST of the repository (beyond the submission) for a substring — the
+capability actually needed to find a
 changed function's callers outside the diff, which no existing tool provides
 (``search_codebase`` is explicitly submission-only). It emits new findings in
 two categories:
@@ -42,8 +44,13 @@ Invariants:
       produced. Any setup or LLM failure is swallowed and logged, returning
       no additional findings — the same fail-safe posture those passes use.
 
-    - **Bounded cost.** Exactly one LLM call per submission (not per chunk),
-      matching the architecture pass's per-submission cost shape.
+    - **One call with reactive bisect recovery.** Agent construction and
+      overflow recovery (file-list bisect only; no character truncation) are
+      owned by the shared
+      :func:`~code_review_agent.submission_pass_runner.run_submission_pass`
+      runner; this module supplies only its system prompt, tool set, and
+      prompt/parse callbacks. Prompts inline full file content — there is no
+      character packing.
 
     - **``CODE_REVIEW`` profile only.** The other :class:`.profiles.ReviewProfile`
       values narrow the engine to a specific checklist whose contract expects
@@ -56,23 +63,25 @@ Invariants:
 
 from __future__ import annotations
 
-import json
 import logging
 from typing import List, Optional, Tuple
 
-from strands import Agent, tool
+from strands import tool
 
 from llm_service import LLMClient
 from shared.env import env_flag_enabled
-from software_engineering_team.shared.context_sizing import compute_code_review_map_chunk_chars
+from software_engineering_team.shared.llm import extract_json_from_response
 
 from .chunking import _coerce_bool
 from .false_positive_filter import CodebaseIndex, _build_tools, _code_fence_for
-from .model_resolution import resolve_code_review_model
 from .models import CodeReviewInput, CodeReviewIssue, coerce_line, is_no_op_suggestion
 from .profiles import ReviewProfile
-from .prompts import SIDE_EFFECT_IMPACT_PROMPT
+from .prompts import (
+    SIDE_EFFECT_IMPACT_FORMATTING_INSTRUCTIONS,
+    SIDE_EFFECT_IMPACT_REASONING_SYSTEM_PROMPT,
+)
 from .repo_reader import DEFAULT_MAX_LISTED_FILES, DiskRepoReader, RepoReader
+from .submission_pass_runner import FileBatch, run_submission_pass
 
 logger = logging.getLogger(__name__)
 
@@ -218,12 +227,13 @@ def _build_side_effect_tools(index: CodebaseIndex) -> list:
     """Build this pass's tools: the shared submission tools plus repo-wide search.
 
     Postconditions:
-        - Returns the four shared tools from ``false_positive_filter._build_tools``
-          (``read_file``, ``list_files``, ``search_codebase``,
-          ``find_function_at_line``) plus a new ``search_repository`` tool bound
-          to ``index`` -- the only tool in this set whose entire purpose is
-          reaching beyond the submission's own files to find a changed
-          function's out-of-diff callers.
+        - Returns the seven shared tools from ``false_positive_filter._build_tools``
+          (``read_file``, ``read_lines``, ``read_function``, ``list_files``,
+          ``search_codebase``, ``find_function_at_line``, ``find_references``)
+          plus a new ``search_repository`` tool bound to ``index`` -- the only
+          tool in this set whose entire purpose is reaching beyond the
+          submission's own files to find a changed function's out-of-diff
+          callers.
     """
 
     @tool
@@ -275,46 +285,78 @@ def build_side_effect_tools(index: CodebaseIndex) -> list:
     return _build_side_effect_tools(index)
 
 
-def _build_prompt(index: CodebaseIndex, max_inline_chars: int) -> str:
-    """Render the single user prompt for this pass.
+def _render_manifest(paths: List[str]) -> List[str]:
+    """Render the full changed-file path list (no character truncation).
+
+    A small pass-owned duplicate of
+    ``merged_architecture_side_effect_pass._render_manifest`` -- that module
+    imports this one, so importing the reverse direction would be circular.
+
+    Postconditions: always includes the section header followed by every path.
+    """
+    return [f"**Changed files in this submission ({len(paths)}):**", *paths]
+
+
+def _build_prompt(
+    index: CodebaseIndex,
+    *,
+    content_items: Optional[List[Tuple[str, str]]] = None,
+    batch_index: Optional[int] = None,
+    total_batches: Optional[int] = None,
+    is_partial: bool = False,
+) -> str:
+    """Render the user prompt for one submission-pass runner call.
+
+    Preconditions:
+        - ``content_items``, when given, is this call's batch of the changed
+          files (a subset of ``index.files.items()``); ``None`` inlines every
+          changed file.
+        - ``batch_index``/``total_batches`` are both ``None`` (no batch label
+          rendered) or both set to this batch's 1-based position and the
+          total batch count.
+        - ``is_partial`` is True only for a reactive-recovery bisect child
+          batch (:attr:`~code_review_agent.submission_pass_runner.FileBatch.is_partial`).
 
     Postconditions:
-        - Inlines the submission's changed files up to ``max_inline_chars``;
-          any files beyond that budget are named as reachable via the
-          attached tools rather than silently dropped.
+        - The changed-file path manifest lists every changed file in the
+          submission (from ``index.files``, not ``content_items``) with no
+          truncation.
+        - Inlines every file in ``content_items`` (or every changed file when
+          ``None``) in full. When ``is_partial`` is True, the content section
+          header renders a reduced-view recovery banner; otherwise, when
+          ``total_batches`` is set (> 1), it names this batch's position.
     """
     parts: List[str] = []
 
     changed_files = list(index.files.items())
-    manifest = [path for path, _ in changed_files]
-    parts.append(f"**Changed files in this submission ({len(manifest)}):**")
-    parts.extend(manifest)
+    paths = [path for path, _ in changed_files]
+    parts.extend(_render_manifest(paths))
     parts.append("")
 
-    parts.append("**Full content of the changed files:**")
-    remaining = max_inline_chars
-    omitted = 0
-    for i, (path, content) in enumerate(changed_files):
-        if remaining <= 0:
-            omitted = len(changed_files) - i
-            break
-        body = content[:remaining]
-        body_fence = _code_fence_for(body)
+    batch_files = content_items if content_items is not None else changed_files
+    if is_partial:
+        parts.append(
+            f"**Content of the changed files shown in this call ({len(batch_files)} of "
+            f"{len(changed_files)} changed files in this submission -- a reduced view "
+            "produced while recovering from a context-size overflow; any file not shown "
+            "here is still listed in the manifest above and reachable via "
+            "read_file()/list_files()):**"
+        )
+    elif total_batches and total_batches > 1:
+        parts.append(
+            f"**Full content of the changed files (batch {batch_index} of {total_batches} -- "
+            f"showing {len(batch_files)} of {len(changed_files)} changed files in this "
+            "submission; the rest are listed in the manifest above and reachable via "
+            "read_file()/list_files()):**"
+        )
+    else:
+        parts.append("**Full content of the changed files:**")
+    for path, content in batch_files:
+        body_fence = _code_fence_for(content)
         parts.append(f"### {path} ###")
         parts.append(body_fence)
-        parts.append(body)
+        parts.append(content)
         parts.append(body_fence)
-        if len(body) < len(content):
-            parts.append(
-                f"(Only the first {len(body)} characters of `{path}` are shown above; call "
-                "read_file to see the rest.)"
-            )
-        remaining -= len(body)
-    if omitted:
-        parts.append(
-            f"... and {omitted} more changed file(s) not shown above; use read_file(path) or "
-            "list_files() to see them."
-        )
     parts.append("")
 
     parts.append(
@@ -324,8 +366,9 @@ def _build_prompt(index: CodebaseIndex, max_inline_chars: int) -> str:
         "search_repository reaches the rest of the repository."
     )
     parts.append(
-        'Return a single JSON object with a "side-effects"/"documentation" findings array, per the '
-        'output format above. Return {"findings": []} if you find nothing.'
+        "Summarize side-effect-impact findings in structured prose per the system "
+        "instructions (severity, category, file_path, line, description, suggestion, "
+        "pre_existing). State clearly when you find nothing."
     )
     return "\n".join(parts)
 
@@ -499,6 +542,28 @@ def validate_findings(
     return _validate_findings(index, findings, pre_numbered=pre_numbered)
 
 
+def _effective_pre_numbered(input_data: CodeReviewInput, index: CodebaseIndex) -> bool:
+    """True when this pass must treat the submission as bounded/pre-numbered.
+
+    Gates on ``index.full_content_complete`` -- set by ``CodebaseIndex.from_input``
+    only when ``input_data.full_content`` covered EVERY path the index holds --
+    rather than on ``input_data.full_content`` directly. A caller-supplied
+    ``full_content`` that covers only some paths never sets that flag (the
+    overlay is all-or-nothing; see ``from_input``), so this correctly keeps
+    treating the submission as pre-numbered rather than trusting a
+    partially-numbered, partially-full index as if every path were complete.
+
+    Preconditions:
+        - ``index`` was built from this same ``input_data`` (``CodebaseIndex.from_input``
+          or an equivalent shared build).
+
+    Postconditions:
+        - Returns ``input_data.pre_numbered and not index.full_content_complete``.
+        - Pure; never raises.
+    """
+    return input_data.pre_numbered and not index.full_content_complete
+
+
 def find_side_effect_impact_issues(
     llm: LLMClient,
     input_data: CodeReviewInput,
@@ -518,7 +583,8 @@ def find_side_effect_impact_issues(
         - ``index``, when given, must have been built from this same
           ``input_data``/``repo_reader`` (the coordinator shares one index
           across this pass and the others rather than each rebuilding it);
-          ``None`` builds a fresh one.
+          ``None`` builds a fresh one (here, before the pre-numbered gate
+          check below, so :func:`_effective_pre_numbered` can consult it).
 
     Postconditions:
         - Returns ``[]`` (no LLM call) when the pass is disabled via
@@ -528,18 +594,24 @@ def find_side_effect_impact_issues(
           attributable to a specific criterion/requirement, which a
           side-effects finding never is -- see
           ``architecture_consistency_pass``'s identical restriction), when
-          ``input_data.pre_numbered`` is True (the PR-review hunk-fallback
-          mode, used when whole-file fetching is unavailable: ``index.files``
-          then holds partial diff-hunk excerpts rendered with original-line-
-          number prefixes, not complete file content, and no tool this pass
-          has can retrieve a more complete view of a changed file --
-          ``read_file`` resolves a changed path from ``index.files`` first, so
-          it returns the same partial excerpt already in the prompt. This
-          pass's entire contract is "never flag from a guess"; reasoning
-          about a function's complete current behavior from a partial hunk
-          would violate that, risking false-positive caller-impact findings
-          on code the pass never actually saw in full), or when the
-          submission has no readable files.
+          :func:`_effective_pre_numbered` is True (the PR-review hunk-fallback
+          mode, used when whole-file fetching is unavailable and no fully-covering
+          ``full_content`` was supplied: ``index.files`` then holds partial
+          diff-hunk excerpts rendered with original-line-number prefixes, not
+          complete file content, and no tool this pass has can retrieve a
+          more complete view of a changed file -- ``read_file`` resolves a
+          changed path from ``index.files`` first, so it returns the same
+          partial excerpt already in the prompt. This pass's entire contract
+          is "never flag from a guess"; reasoning about a function's complete
+          current behavior from a partial hunk would violate that, risking
+          false-positive caller-impact findings on code the pass never
+          actually saw in full), or when the submission has no readable
+          files. A caller that supplies ``full_content`` covering every
+          changed path re-enables this pass (see ``_effective_pre_numbered``
+          / ``CodebaseIndex.full_content_complete``); a ``full_content`` that
+          covers only some paths does NOT re-enable it -- the pass would
+          otherwise reason over a mix of real bodies and bounded excerpts as
+          if all were complete.
         - Otherwise returns zero or more NEW ``CodeReviewIssue``s in category
           ``"side-effects"`` (a caller-breaking side effect) or
           ``"documentation"`` (a docstring/implementation mismatch) only, each
@@ -556,7 +628,9 @@ def find_side_effect_impact_issues(
         return []
     if input_data.profile != ReviewProfile.CODE_REVIEW:
         return []
-    if input_data.pre_numbered:
+    if index is None:
+        index = CodebaseIndex.from_input(input_data, repo_reader=repo_reader)
+    if _effective_pre_numbered(input_data, index):
         return []
     try:
         return _run_pass(llm, input_data, repo_reader, index)
@@ -586,6 +660,13 @@ def _run_pass(
     Postconditions:
         - Same contract as :func:`find_side_effect_impact_issues`, minus the
           env-toggle/profile early returns the caller already handled.
+        - Delegates ``Agent`` construction and reactive overflow bisect recovery
+          to
+          :func:`~code_review_agent.submission_pass_runner.run_submission_pass`,
+          which never raises; a batch's findings are folded into the returned
+          list in batch order. An empty runner result (context too small, or
+          every batch unrecoverable) folds to ``[]`` -- never ``None`` and
+          never a raised exception.
     """
     if index is None:
         index = CodebaseIndex.from_input(input_data, repo_reader=repo_reader)
@@ -594,20 +675,37 @@ def _run_pass(
         # for caller impact or documentation drift.
         return []
 
-    model = resolve_code_review_model(llm)
-    max_inline_chars = compute_code_review_map_chunk_chars(llm)
+    pre_numbered = _effective_pre_numbered(input_data, index)
+    tools = _build_side_effect_tools(index)
 
-    prompt = _build_prompt(index, max_inline_chars)
-    agent = Agent(
-        model=model,
-        system_prompt=SIDE_EFFECT_IMPACT_PROMPT,
-        tools=_build_side_effect_tools(index),
+    def _build_prompt_for_batch(batch: FileBatch) -> str:
+        return _build_prompt(
+            index,
+            content_items=batch.items,
+            batch_index=batch.index,
+            total_batches=batch.total,
+            is_partial=batch.is_partial,
+        )
+
+    def _parse_batch_reply(raw: str) -> List[CodeReviewIssue]:
+        data = extract_json_from_response(raw)
+        findings = _parse_findings(data)
+        if findings:
+            findings = _validate_findings(index, findings, pre_numbered=pre_numbered)
+        return findings
+
+    results = run_submission_pass(
+        llm,
+        changed_files=list(index.files.items()),
+        reasoning_system_prompt=SIDE_EFFECT_IMPACT_REASONING_SYSTEM_PROMPT,
+        formatting_instructions=SIDE_EFFECT_IMPACT_FORMATTING_INSTRUCTIONS,
+        build_prompt=_build_prompt_for_batch,
+        tools=tools,
+        parse=_parse_batch_reply,
+        pass_label="SideEffectImpactPass",
     )
-    raw = str(agent(prompt)).strip()
-    data = json.loads(raw)
-    findings = _parse_findings(data)
+    findings = [finding for batch_findings in results for finding in batch_findings]
     if findings:
-        findings = _validate_findings(index, findings, pre_numbered=input_data.pre_numbered)
         logger.info(
             "SideEffectImpactPass: found %s new finding(s) (side-effects/documentation)",
             len(findings),

@@ -29,9 +29,9 @@ TEAM_POSTGRES_MODULES: dict[str, str] = {
     # Teams with persistence being moved to Postgres.
     "branding": "branding_team.postgres",
     "startup_advisor": "startup_advisor.postgres",
-    "user_agent_founder": "user_agent_founder.postgres",
+    "user_agent_founder": "agent_team_studio.user_agent_founder.postgres",
     "team_assistant": "team_assistant.postgres",
-    "agentic_team_provisioning": "agentic_team_provisioning.postgres",
+    "agentic_team_provisioning": "agent_team_studio.agentic_team_provisioning.postgres",
     "blogging": "blogging.postgres",
     "product_delivery": "product_delivery.postgres",
     # Software Engineering observability & learning layer: traces, events, learnings.
@@ -39,9 +39,9 @@ TEAM_POSTGRES_MODULES: dict[str, str] = {
     # Agent Cognition Core — memory, rules, and the invoke idempotency ledger.
     "agent_cognition": "agent_cognition.postgres",
     # Agent Registry — cross-worker overlay of dynamically registered manifests.
-    "agent_registry": "agent_registry.postgres",
+    "agent_registry": "agent_platform.registry.postgres",
     # Agent Studio — durable authoring-conversation store.
-    "agent_studio": "agent_studio.postgres",
+    "agent_studio": "agent_platform.studio.postgres",
     # Issue #376 — investment team's first Postgres table: snapshot index
     # for the durable, content-hashed market-data cache.
     "investment_market_data": "investment_team.market_data_cache.postgres",

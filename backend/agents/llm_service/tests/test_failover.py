@@ -10,7 +10,7 @@ import pytest
 
 from llm_service import factory
 from llm_service import provider_store as ps
-from llm_service.clients import ClaudeLLMClient, OllamaLLMClient
+from llm_service.clients import ClaudeLLMClient, OllamaLLMClient, RunPodLLMClient
 from llm_service.factory import (
     FailoverLLMClient,
     _AttributingClient,
@@ -257,7 +257,7 @@ def test_mark_session_from_limit_kind_ignores_retry_after(monkeypatch):
     _mark_entry_exhausted(_entry(3), err)
     assert captured["limit_type"] == "session"
     delta = (captured["reset_at"] - before).total_seconds()
-    assert 4.5 * 3600 < delta < 5.5 * 3600
+    assert 60 * 60 < delta < 70 * 60
 
 
 def test_mark_session_from_body_phrase(monkeypatch):
@@ -445,11 +445,66 @@ def test_build_entry_client_empty_falls_back_to_resolvers(monkeypatch):
     assert c.model == "env-model" and c.base_url == "http://envhost:11434"
 
 
+def test_build_entry_client_runpod(monkeypatch):
+    e = _full_entry(
+        "runpod", model="mixtral", base_url="https://api.runpod.ai/v2/abc123/openai/v1", api_key="sk-rp"
+    )
+    c = _build_entry_client(e, None, None, 0)
+    assert isinstance(c, RunPodLLMClient)
+    assert c.model == "mixtral" and c.base_url == "https://api.runpod.ai/v2/abc123/openai/v1"
+
+
+def test_build_entry_client_runpod_strips_base_url(monkeypatch):
+    """A stored RunPod base_url with stray whitespace is trimmed before use, matching
+    the Ollama branch — otherwise endpoint resolution would break."""
+    e = _full_entry(
+        "runpod",
+        model="m",
+        base_url="  https://api.runpod.ai/v2/abc123/openai/v1  ",
+        api_key="sk-rp",
+    )
+    c = _build_entry_client(e, None, None, 0)
+    assert isinstance(c, RunPodLLMClient)
+    assert c.base_url == "https://api.runpod.ai/v2/abc123/openai/v1"
+
+
+def test_build_entry_client_runpod_empty_base_url_passes_through(monkeypatch):
+    """Unlike Ollama, a RunPod entry has no base_url fallback: an empty stored
+    base_url is passed through as-is (the route always populates it from
+    endpoint_id at write time — see ``_build_runpod_base_url`` — so an empty value
+    reaching the factory is a data problem to surface, not one to paper over)."""
+    e = _full_entry("runpod", model="m", base_url="", api_key="sk-rp")
+    c = _build_entry_client(e, None, None, 0)
+    assert isinstance(c, RunPodLLMClient)
+    assert c.base_url == ""
+
+
+def test_build_entry_client_runpod_empty_model_falls_back_to_resolver(monkeypatch):
+    """An empty ``model`` on a RunPod entry resolves via ``llm_config.resolve_model``
+    (the same resolver Ollama falls back to) — RunPod has no model default of its own."""
+    monkeypatch.setenv("LLM_MODEL", "env-model")
+    e = _full_entry("runpod", base_url="https://api.runpod.ai/v2/abc123/openai/v1", api_key="sk-rp")
+    c = _build_entry_client(e, None, None, 0)
+    assert isinstance(c, RunPodLLMClient)
+    assert c.model == "env-model"
+
+
 def test_build_entry_client_on_reasoning_is_fresh(monkeypatch):
     sink = lambda _t: None  # noqa: E731
     e = _full_entry("ollama", model="m", base_url="http://localhost:11434")
-    c = _build_entry_client(e, None, sink, 0)
-    assert isinstance(c, OllamaLLMClient) and c.on_reasoning is sink
+    c1 = _build_entry_client(e, None, sink, 0)
+    c2 = _build_entry_client(e, None, sink, 0)
+    assert isinstance(c1, OllamaLLMClient) and c1.on_reasoning is sink
+    assert c1 is not c2  # on_reasoning forces a fresh client each call, bypassing the cache
+
+
+def test_build_entry_client_runpod_on_reasoning_is_fresh(monkeypatch):
+    sink = lambda _t: None  # noqa: E731
+    e = _full_entry("runpod", model="m", base_url="https://api.runpod.ai/v2/abc123/openai/v1", api_key="sk-rp")
+    c1 = _build_entry_client(e, None, sink, 0)
+    c2 = _build_entry_client(e, None, sink, 0)
+    assert isinstance(c1, RunPodLLMClient) and c1.on_reasoning is sink
+    assert c1 is not c2  # on_reasoning forces a fresh client each call, bypassing the cache
 
 
 def test_build_entry_client_claude_empty_key_no_env_fallback(monkeypatch):

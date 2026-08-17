@@ -176,7 +176,8 @@ flowchart LR
 | Temporal workers | [`backend/shared/temporal/`](backend/shared/temporal/) | Pattern A: teams export `WORKFLOWS` / `ACTIVITIES` |
 | LLM client | [`backend/agents/llm_service/`](backend/agents/llm_service/) | Ordered Postgres provider list + failover |
 | Agent cache | `AGENT_CACHE` (Docker: `/data/agents`) | Per-team namespaced artifacts under `{team_name}/` |
-| Agent Console / Registry | UI `/agent-console`; [`agent_registry`](backend/agents/agent_registry/), [`agent_console`](backend/agents/agent_console/) | Discover, inspect, and run specialist agents |
+| Agent platform | [`agent_platform/`](backend/agents/agent_platform/) | In-process registry, console, sandbox, and Studio authoring |
+| Agent Console / Registry | UI `/agent-console`; [`registry`](backend/agents/agent_platform/registry/), [`console`](backend/agents/agent_platform/console/) | Discover, inspect, and run specialist agents |
 
 The Software Engineering deep dive (phases, task graphs, quality gates, Product Delivery loop) lives in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md). Repo orientation for agents and humans: [`CLAUDE.md`](CLAUDE.md).
 
@@ -254,9 +255,9 @@ Deep dive: [`backend/agents/llm_service/README.md`](backend/agents/llm_service/R
 
 Growing the collective is a first-class feature. Three ways in:
 
-1. **Design it conversationally with Agentic Team Provisioning.** Describe the roster in plain English; it drafts agents, roles, and process, and can bridge to Agent Provisioning for the environment. See [`backend/agents/agentic_team_provisioning/`](backend/agents/agentic_team_provisioning/).
+1. **Design it conversationally with Agentic Team Provisioning.** Describe the roster in plain English; it drafts agents, roles, and process, and can bridge to Agent Provisioning for the environment. See [`backend/agents/agent_team_studio/agentic_team_provisioning/`](backend/agents/agent_team_studio/agentic_team_provisioning/).
 2. **Author a single agent in Agent Studio.** Draft, clone from the registry, then save and register into the live catalog (`/api/agent-studio`, UI Agent Console).
-3. **Write it yourself.** Follow [`AGENT_ANATOMY.md`](backend/agents/agent_provisioning_team/AGENT_ANATOMY.md) (I/O, tools, memory, prompts, guardrails, sub-agents), register the team in [`backend/unified_api/config.py`](backend/unified_api/config.py) (`TEAM_CONFIGS`), and it mounts at `/api/<your-slug>` on next restart.
+3. **Write it yourself.** Follow [`AGENT_ANATOMY.md`](backend/agents/agent_team_studio/agent_provisioning_team/AGENT_ANATOMY.md) (I/O, tools, memory, prompts, guardrails, sub-agents), register the team in [`backend/unified_api/config.py`](backend/unified_api/config.py) (`TEAM_CONFIGS`), and it mounts at `/api/<your-slug>` on next restart.
 
 ---
 
@@ -270,13 +271,13 @@ Growing the collective is a first-class feature. Three ways in:
 - [`backend/agents/software_engineering_team/`](backend/agents/software_engineering_team/README.md) — flagship SE pipeline; Coding Team section covers Tech Lead + Task Graph
 - [`backend/agents/planning_team/`](backend/agents/planning_team/README.md)
 - [`backend/agents/ai_systems_team/`](backend/agents/ai_systems_team/README.md)
-- [`backend/agents/agent_provisioning_team/`](backend/agents/agent_provisioning_team/README.md)
-- [`backend/agents/agentic_team_provisioning/`](backend/agents/agentic_team_provisioning/README.md)
-- [`backend/agents/user_agent_founder/`](backend/agents/user_agent_founder/README.md) — Testing Personas
+- [`backend/agents/agent_team_studio/agent_provisioning_team/`](backend/agents/agent_team_studio/agent_provisioning_team/README.md)
+- [`backend/agents/agent_team_studio/agentic_team_provisioning/`](backend/agents/agent_team_studio/agentic_team_provisioning/README.md)
+- [`backend/agents/agent_team_studio/user_agent_founder/`](backend/agents/agent_team_studio/user_agent_founder/README.md) — Testing Personas
 - [`backend/agents/deepthought/`](backend/agents/deepthought/README.md)
 - [`backend/agents/product_delivery/`](backend/agents/product_delivery/README.md)
 - [`backend/agents/user_profile/`](backend/agents/user_profile/README.md)
-- Agent Studio — no dedicated README yet; see `TEAM_CONFIGS` in [`backend/unified_api/config.py`](backend/unified_api/config.py)
+- [`backend/agents/agent_platform/studio/`](backend/agents/agent_platform/studio/README.md) — Agent Studio; `AgentDefinition` view-model ↔ `AgentManifest` SoT field mapping
 
 ### Business
 
@@ -304,8 +305,8 @@ Growing the collective is a first-class feature. Three ways in:
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — SE pipeline, Product Delivery, Mermaid diagrams
 - [`docs/ENV_VARS.md`](docs/ENV_VARS.md) — full environment-variable reference
 - [`backend/agents/llm_service/`](backend/agents/llm_service/README.md) — provider-list LLM client
-- [`backend/agents/agent_registry/`](backend/agents/agent_registry/README.md) — Agent Console catalog
-- [`backend/agents/agent_console/`](backend/agents/agent_console/README.md) — runs, saved inputs, diff
+- [`backend/agents/agent_platform/registry/`](backend/agents/agent_platform/registry/README.md) — Agent Console catalog
+- [`backend/agents/agent_platform/console/`](backend/agents/agent_platform/console/README.md) — runs, saved inputs, diff
 - [`backend/unified_api/`](backend/unified_api/README.md) — mounts, `TeamConfig`, proxy behavior
 - [`backend/agents/`](backend/agents/README.md) — agent monorepo overview
 - [`docker/README.md`](docker/README.md) — Compose stack
@@ -336,7 +337,7 @@ More reference:
 - [`CONTRIBUTORS.md`](CONTRIBUTORS.md) — setup, branch conventions, standards, testing, PR process
 - [`CLAUDE.md`](CLAUDE.md) — guidance for Claude Code / Cursor in this repo
 - [`CHANGELOG.md`](CHANGELOG.md) — what shipped recently
-- [`AGENT_ANATOMY.md`](backend/agents/agent_provisioning_team/AGENT_ANATOMY.md) — standard structure for a Khala-native agent
+- [`AGENT_ANATOMY.md`](backend/agents/agent_team_studio/agent_provisioning_team/AGENT_ANATOMY.md) — standard structure for a Khala-native agent
 
 ---
 

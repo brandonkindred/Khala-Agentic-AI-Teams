@@ -101,6 +101,7 @@ def get_status(job_id: str) -> StatusResponse:
         github_context=data.get("github_context"),
         github_pr_url=data.get("github_pr_url"),
         review_summary=data.get("review_summary"),
+        grooming=data.get("grooming"),
         pending_questions=pending_questions_from_raw(data.get("pending_questions", [])),
         waiting_for_answers=bool(data.get("waiting_for_answers", False)),
         resume_token=data.get("resume_token"),

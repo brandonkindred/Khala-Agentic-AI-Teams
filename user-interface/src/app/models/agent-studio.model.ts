@@ -7,6 +7,8 @@
  * stepper and `AgentStudioStateService` both read.
  */
 
+import type { AgentManifest } from './agent-catalog.model';
+
 /** The four top-level stages, in forward order. */
 export type StudioStageKey = 'build' | 'test' | 'compose' | 'personas';
 
@@ -32,6 +34,28 @@ export const STUDIO_STAGES: readonly StudioStage[] = [
   { key: 'test', label: 'Test Agent', icon: 'play_circle', blurb: 'Run the agent in its sandbox and compare runs.', forwardLabel: 'Add to team →' },
   { key: 'compose', label: 'Compose Team', icon: 'groups', blurb: 'Assemble a team and design its process.', forwardLabel: 'Test this team →' },
   { key: 'personas', label: 'Test Team w/ Personas', icon: 'science', blurb: 'Drive the team manually or with autonomous personas.' },
+] as const;
+
+/**
+ * Stage 1's own forward-only sub-stepper (spec §3, Stage 1: "Build Agent is
+ * not a single screen — it is a three-step sub-stepper"). Index `i` is
+ * sub-step number `i + 1`; `AgentStudioStateService` tracks the active index
+ * and enforces the same forward-only rule as the main stepper.
+ */
+export type BuildSubStageKey = 'start' | 'define' | 'configure';
+
+export interface BuildSubStage {
+  /** Stable identity used by the state service and sub-stepper. */
+  key: BuildSubStageKey;
+  /** Display label shown in the sub-stepper. */
+  label: string;
+}
+
+/** The forward-only sub-stage order: 1.1 Start → 1.2 Define → 1.3 Configure. */
+export const BUILD_SUB_STAGES: readonly BuildSubStage[] = [
+  { key: 'start', label: 'Start' },
+  { key: 'define', label: 'Define' },
+  { key: 'configure', label: 'Configure' },
 ] as const;
 
 /**
@@ -77,6 +101,76 @@ export interface AgentDefinition {
   states: AgentState[];
   mode: 'new' | 'refine';
   cloned_from: string | null;
+}
+
+/**
+ * Wire shapes for the Stage-1 `/api/agent-studio` API — conversations, clone,
+ * save, and drafts. Mirrors `backend/agents/agent_platform/studio/models.py`
+ * field-for-field (snake_case), consumed by `AgentStudioApiService`.
+ */
+export interface ConversationMessage {
+  role: 'user' | 'assistant';
+  content: string;
+}
+
+export interface StartConversationRequest {
+  mode?: 'new' | 'refine';
+  source_agent_id?: string | null;
+  initial_message?: string | null;
+}
+
+export interface SendMessageRequest {
+  message: string;
+}
+
+export interface ConversationStateResponse {
+  conversation_id: string;
+  mode: 'new' | 'refine';
+  messages: ConversationMessage[];
+  definition: AgentDefinition;
+  readiness: string[];
+  suggested_questions: string[];
+}
+
+export interface SaveAgentRequest {
+  name?: string;
+  role?: string;
+  description?: string | null;
+  tags?: string[];
+  tools?: string[];
+  system_prompt?: string;
+  input_schema?: Record<string, unknown> | null;
+  output_schema?: Record<string, unknown> | null;
+  states?: AgentState[];
+}
+
+export interface SaveAgentResponse {
+  agent_id: string;
+  manifest: AgentManifest;
+  created: boolean;
+}
+
+export interface AgentStudioDraftSummary {
+  draft_id: string;
+  name: string;
+  updated_at: string;
+}
+
+export interface AgentStudioDraft {
+  draft_id: string;
+  name: string;
+  created_at: string;
+  updated_at: string;
+  payload: Record<string, unknown>;
+}
+
+export interface SaveDraftRequest {
+  name?: string | null;
+  payload?: Record<string, unknown> | null;
+}
+
+export interface RenameDraftRequest {
+  name: string;
 }
 
 /** Progress state of a single stepper indicator. */

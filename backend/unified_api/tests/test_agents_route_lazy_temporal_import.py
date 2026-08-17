@@ -1,7 +1,7 @@
 """Regression: importing ``unified_api.routes.agents`` must not load sandbox Temporal.
 
 ``routes/agents.py`` only needs the Temporal-aware sandbox acquire dispatch
-(``agent_provisioning_team.temporal.sandbox_dispatch``, which pulls in
+(``agent_platform.sandbox.temporal.dispatch``, which pulls in
 ``temporalio``) inside the ``invoke_agent`` handler's warm-sandbox step. Request
 paths that never touch a sandbox — registry listing, schema resolution,
 samples, run history — must not pay for that import graph at module-import
@@ -24,7 +24,7 @@ def _subprocess_pythonpath() -> str:
 
     Preconditions: ``_BACKEND_ROOT`` and ``_AGENTS_ROOT`` exist.
     Postconditions: returned string puts the ``agents`` and ``backend`` roots on
-        ``sys.path`` (so ``unified_api`` and ``agent_provisioning_team`` resolve).
+        ``sys.path`` (so ``unified_api`` and ``agent_platform`` resolve).
     """
     assert _BACKEND_ROOT.is_dir()
     assert _AGENTS_ROOT.is_dir()
@@ -41,7 +41,7 @@ def test_import_agents_route_does_not_load_sandbox_temporal_dispatch() -> None:
     The invoke handler resolves the Temporal dispatch lazily via the
     module-level ``acquire`` wrapper, which must still exist (and be callable)
     so route tests can monkeypatch it, without itself importing
-    ``sandbox_dispatch``/``temporalio`` at definition time.
+    ``agent_platform.sandbox.temporal.dispatch``/``temporalio`` at definition time.
 
     Preconditions: a fresh interpreter whose PYTHONPATH includes ``backend`` + ``agents``.
     Postconditions: subprocess exits 0; assertions inside the child pass.
@@ -49,16 +49,16 @@ def test_import_agents_route_does_not_load_sandbox_temporal_dispatch() -> None:
     script = """
 import sys
 assert "temporalio" not in sys.modules, "temporalio already loaded before import"
-assert "agent_provisioning_team.temporal.sandbox_dispatch" not in sys.modules, (
-    "sandbox_dispatch already loaded before import"
+assert "agent_platform.sandbox.temporal.dispatch" not in sys.modules, (
+    "sandbox dispatch already loaded before import"
 )
 import unified_api.routes.agents as agents_route_mod
 assert "temporalio" not in sys.modules, (
     f"importing unified_api.routes.agents loaded temporalio: "
     f"{[m for m in sys.modules if m.startswith('temporalio')]}"
 )
-assert "agent_provisioning_team.temporal.sandbox_dispatch" not in sys.modules, (
-    "importing unified_api.routes.agents loaded sandbox_dispatch"
+assert "agent_platform.sandbox.temporal.dispatch" not in sys.modules, (
+    "importing unified_api.routes.agents loaded sandbox dispatch"
 )
 assert callable(agents_route_mod.acquire), (
     "acquire must remain a callable module-level attribute for route tests to monkeypatch"

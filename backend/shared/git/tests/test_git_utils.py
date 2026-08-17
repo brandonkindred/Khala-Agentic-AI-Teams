@@ -19,12 +19,14 @@ from shared.git.git_utils import (
     DEVELOPMENT_BRANCH,
     add_worktree,
     checkout_branch,
+    clean_untracked_files,
     create_feature_branch,
     development_branch_exists,
     ensure_development_branch,
     initialize_new_repo,
     prune_worktrees,
     remove_worktree,
+    reset_hard_to,
 )
 
 
@@ -430,3 +432,132 @@ def test_create_feature_branch_fails_honestly_when_branch_owned_by_another_workt
         ["git", "branch", "--show-current"], cwd=owner_wt, capture_output=True, text=True
     )
     assert result.stdout.strip() == branch
+
+
+def test_reset_hard_to_discards_commits_unique_to_current_branch(repo: Path) -> None:
+    ok, branch = create_feature_branch(repo, DEVELOPMENT_BRANCH, "t4-reset")
+    assert ok, branch
+    (repo / "rejected.txt").write_text("stale attempt", encoding="utf-8")
+    subprocess.run(["git", "add", "-A"], cwd=repo, capture_output=True, check=True)
+    subprocess.run(["git", "commit", "-m", "rejected attempt"], cwd=repo, capture_output=True, check=True)
+    assert (repo / "rejected.txt").exists()
+
+    ok2, msg2 = reset_hard_to(repo, DEVELOPMENT_BRANCH)
+
+    assert ok2, msg2
+    # Still on the feature branch (reset never switches branches) but its tip and
+    # working tree now exactly match development's -- the rejected commit is gone.
+    result = subprocess.run(["git", "branch", "--show-current"], cwd=repo, capture_output=True, text=True)
+    assert result.stdout.strip() == branch
+    assert not (repo / "rejected.txt").exists()
+    head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True).stdout.strip()
+    dev_head = subprocess.run(
+        ["git", "rev-parse", DEVELOPMENT_BRANCH], cwd=repo, capture_output=True, text=True
+    ).stdout.strip()
+    assert head == dev_head
+
+
+def test_reset_hard_to_works_in_worktree_while_ref_checked_out_elsewhere(repo: Path) -> None:
+    """The crux claim this helper exists for: resetting to ``development`` from a linked
+    worktree must succeed even while ``development`` is attached (checked out) at the main
+    repo path -- unlike ``checkout_branch(path, DEVELOPMENT_BRANCH)``, which git refuses."""
+    wt_path = repo.parent / "wt-reset"
+    add_worktree(repo, wt_path, ref=DEVELOPMENT_BRANCH)
+    ok, branch = create_feature_branch(wt_path, DEVELOPMENT_BRANCH, "t5-reset-wt")
+    assert ok, branch
+    (wt_path / "rejected.txt").write_text("stale attempt", encoding="utf-8")
+    subprocess.run(["git", "add", "-A"], cwd=wt_path, capture_output=True, check=True)
+    subprocess.run(["git", "commit", "-m", "rejected attempt"], cwd=wt_path, capture_output=True, check=True)
+
+    # development is STILL checked out at repo while we reset in the worktree.
+    ok2, msg2 = reset_hard_to(wt_path, DEVELOPMENT_BRANCH)
+
+    assert ok2, msg2
+    assert not (wt_path / "rejected.txt").exists()
+    # repo's own checkout is untouched.
+    result = subprocess.run(["git", "branch", "--show-current"], cwd=repo, capture_output=True, text=True)
+    assert result.stdout.strip() == DEVELOPMENT_BRANCH
+
+
+def test_reset_hard_to_removes_untracked_files(repo: Path) -> None:
+    """git reset --hard only touches tracked files; a caller-run tool (e.g. a validation
+    dry-run that shells out to a package/build tool) can leave untracked files behind
+    that survive a bare reset and later get swept into an unrelated commit by a
+    subsequent `git add -A`. reset_hard_to must clean those up too."""
+    ok, branch = create_feature_branch(repo, DEVELOPMENT_BRANCH, "t6-reset-clean")
+    assert ok, branch
+    (repo / "untracked.lock").write_text("leftover from a validation tool", encoding="utf-8")
+    assert (repo / "untracked.lock").exists()
+
+    ok2, msg2 = reset_hard_to(repo, DEVELOPMENT_BRANCH)
+
+    assert ok2, msg2
+    assert not (repo / "untracked.lock").exists()
+
+
+def test_clean_untracked_files_removes_untracked_but_preserves_tracked(repo: Path) -> None:
+    (repo / "tracked.txt").write_text("committed content", encoding="utf-8")
+    subprocess.run(["git", "add", "-A"], cwd=repo, capture_output=True, check=True)
+    subprocess.run(["git", "commit", "-m", "add tracked file"], cwd=repo, capture_output=True, check=True)
+    (repo / "untracked.lock").write_text("leftover from a validation tool", encoding="utf-8")
+
+    ok, msg = clean_untracked_files(repo)
+
+    assert ok, msg
+    assert not (repo / "untracked.lock").exists()
+    assert (repo / "tracked.txt").exists()
+
+
+def test_clean_untracked_files_preserves_gitignored_paths(repo: Path) -> None:
+    """No ``-x`` flag is passed to ``git clean``, so gitignored paths (caches, build
+    output) must survive -- only genuinely untracked-and-not-ignored files are
+    removed. This is a documented guarantee (see the docstring) with no direct test
+    coverage otherwise."""
+    (repo / ".gitignore").write_text("*.ignored\n", encoding="utf-8")
+    subprocess.run(["git", "add", "-A"], cwd=repo, capture_output=True, check=True)
+    subprocess.run(["git", "commit", "-m", "add gitignore"], cwd=repo, capture_output=True, check=True)
+    (repo / "ignored.ignored").write_text("build output", encoding="utf-8")
+    (repo / "regular.lock").write_text("leftover from a validation tool", encoding="utf-8")
+
+    ok, msg = clean_untracked_files(repo)
+
+    assert ok, msg
+    assert not (repo / "regular.lock").exists()
+    assert (repo / "ignored.ignored").exists()
+
+
+def test_clean_untracked_files_fails_honestly_for_non_repo(tmp_path: Path) -> None:
+    not_a_repo = tmp_path / "plain"
+    not_a_repo.mkdir()
+    ok, msg = clean_untracked_files(not_a_repo)
+    assert not ok
+    assert "Not a git repository" in msg
+
+
+def test_reset_hard_to_fails_honestly_for_non_repo(tmp_path: Path) -> None:
+    not_a_repo = tmp_path / "plain"
+    not_a_repo.mkdir()
+    ok, msg = reset_hard_to(not_a_repo, DEVELOPMENT_BRANCH)
+    assert not ok
+    assert "Not a git repository" in msg
+
+
+def test_reset_hard_to_fails_honestly_for_unresolvable_ref(repo: Path) -> None:
+    ok, msg = reset_hard_to(repo, "does-not-exist")
+    assert not ok
+    assert "Failed to reset" in msg
+
+
+def test_reset_hard_to_propagates_untracked_cleanup_failure(repo: Path, monkeypatch) -> None:
+    """A post-reset git clean failure must not be swallowed into a reported success:
+    a caller relying on this call to guarantee no untracked leftovers survive (e.g.
+    before a delivery commit stages the whole tree with `git add -A`) would otherwise
+    proceed as though the working tree were clean when it isn't."""
+    import shared.git.git_utils as git_utils_mod
+
+    monkeypatch.setattr(git_utils_mod, "clean_untracked_files", lambda p: (False, "boom"))
+
+    ok, msg = reset_hard_to(repo, DEVELOPMENT_BRANCH)
+
+    assert not ok
+    assert "boom" in msg

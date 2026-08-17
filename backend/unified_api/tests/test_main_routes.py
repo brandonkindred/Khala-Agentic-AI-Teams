@@ -125,6 +125,16 @@ def test_list_teams_returns_200():
     assert resp.status_code == 200
 
 
+def test_list_teams_has_dbc_docstring():
+    """GET /teams handler documents its Preconditions/Postconditions."""
+    from unified_api.main import list_teams
+
+    doc = list_teams.__doc__
+    assert doc
+    assert "Preconditions:" in doc
+    assert "Postconditions:" in doc
+
+
 def test_list_teams_response_structure():
     """GET /teams returns a 'teams' dict with per-team info objects."""
     resp = client.get("/teams")

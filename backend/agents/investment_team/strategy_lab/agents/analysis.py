@@ -215,13 +215,18 @@ class AnalysisAgent:
             logger.exception("Draft analysis failed")
             return _fallback_narrative(spec, metrics, is_winning, alignment_report)
 
+        # Keep ``guard_design_budget=True`` even under ``charge=False``: a budget
+        # trip is a cycle-level stop and must propagate bare rather than being
+        # handed to ``on_failure`` (which would swallow it into
+        # ``_fallback_narrative``). That stays correct if charging is ever
+        # enabled at these sites.
         ok, draft_parsed = run_single_shot_agent(
             agent_key="strategy_analysis",
             phase="analysis_draft",
             system_prompt=system_prompt,
             user_prompt=draft_prompt,
             charge=False,
-            guard_design_budget=False,
+            guard_design_budget=True,
             logger=logger,
             on_failure=_on_draft_failure,
         )
@@ -264,7 +269,8 @@ class AnalysisAgent:
             system_prompt=review_system,
             user_prompt=review_prompt,
             charge=False,
-            guard_design_budget=False,
+            # Same budget-propagation invariant as the draft call above.
+            guard_design_budget=True,
             logger=logger,
             on_failure=_on_review_failure,
         )

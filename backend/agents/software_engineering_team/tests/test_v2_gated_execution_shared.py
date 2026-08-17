@@ -26,6 +26,7 @@ Preconditions:
 
 from __future__ import annotations
 
+import logging
 import threading
 import time
 from types import SimpleNamespace
@@ -34,12 +35,18 @@ from typing import Any, Dict, List, Optional
 import pytest
 
 from llm_service.clients.dummy import DummyLLMClient
+from shared.dev_models.models import SystemArchitecture
 from software_engineering_team.backend_code_v2_team import models as be_models
-from software_engineering_team.shared.models import SystemArchitecture
+from software_engineering_team.shared.phases import execution as execution_mod
 from software_engineering_team.shared.phases.execution import (
+    _WAVE_EXECUTION_CONCURRENCY,
     GatedExecutionConfig,
     GateOutcome,
     ReviewDependencies,
+    _execution_wave_concurrency,
+    _schedule_microtask_batches,
+    _serialize_progress,
+    _wave_max_workers,
     run_gated_execution_impl,
 )
 from software_engineering_team.shared.v2_models import ReviewIssue
@@ -162,6 +169,17 @@ def _coder_per_microtask(**kwargs: Any) -> Dict[str, str]:
     return {"src/b.py": "print('b')\n"}
 
 
+def _recording_coder(order: List[str]):
+    """Build a coder that appends the microtask's id to ``order`` before writing a file."""
+
+    def _coder_at(**kwargs: Any) -> Dict[str, str]:
+        mid = kwargs["microtask"].id
+        order.append(mid)
+        return {f"src/{mid}.py": "print(1)\n"}
+
+    return _coder_at
+
+
 def _cr_gate_fails_for(mid: str):
     """Code-review gate that fails only for the microtask whose id is ``mid``."""
 
@@ -218,6 +236,13 @@ def _doc_review(*, documentation=None, detail_callback=None, **kwargs: Any) -> S
     return SimpleNamespace(documentation={}, iterations=1, final_quality_score=0.95)
 
 
+def _dbc_review(*, code=None, detail_callback=None, **kwargs: Any) -> SimpleNamespace:
+    """Default no-op DbC review stub (returns no file changes)."""
+    if detail_callback is not None:
+        detail_callback("dbc")
+    return SimpleNamespace(files={})
+
+
 def _make_gate_config(
     *,
     code_review_gate=None,
@@ -225,6 +250,7 @@ def _make_gate_config(
     security_gate=None,
     batch_fix=_batch_fix,
     doc_review=_doc_review,
+    dbc_review=None,
     coder=_coder,
     requires_failing: bool = True,
     verb: str = "failed with",
@@ -254,6 +280,7 @@ def _make_gate_config(
         gate_issue_log_verb=verb,
         parallelize_qa_security=parallelize_qa_security,
         status_qa_security=status_qa_sec,
+        run_dbc_self_review=dbc_review,
     )
 
 
@@ -266,6 +293,7 @@ def _config(
     security_stops: bool = True,
     grounding_limit: int = 3,
     grounding_ratio: float = 0.75,
+    dbc_comments: bool = True,
 ) -> be_models.MicrotaskReviewConfig:
     return be_models.MicrotaskReviewConfig(
         code_review_max_retries=cr,
@@ -275,6 +303,7 @@ def _config(
         security_failure_always_stops=security_stops,
         grounding_failure_cycle_limit=grounding_limit,
         grounding_failure_ratio_threshold=grounding_ratio,
+        enable_dbc_comments=dbc_comments,
     )
 
 
@@ -364,6 +393,107 @@ def test_progress_callback_contract(tmp_path):
     } <= phases_seen
 
 
+def test_serialize_progress_completed_count_is_monotonic():
+    """A stale worker-local completed count cannot decrease the published value."""
+    calls: List[tuple] = []
+    cb = _serialize_progress(lambda *a: calls.append(a), threading.Lock())
+    assert cb is not None
+    cb(1, 0, 2, "mt-1", "coding", "")
+    cb(2, 1, 2, "mt-2", "completed", "")
+    cb(1, 0, 2, "mt-1", "code_review", "")
+
+    completed_counts = [c[1] for c in calls]
+    assert completed_counts == sorted(completed_counts)
+    assert calls[-1][1] == 1
+    assert calls[-1][4] == "code_review"
+
+
+def test_serialize_progress_does_not_publish_completed_while_sibling_active():
+    """A faster sibling's completed tick must not freeze the dashboard while another runs."""
+    calls: List[tuple] = []
+    cb = _serialize_progress(lambda *a: calls.append(a), threading.Lock())
+    assert cb is not None
+    cb(1, 0, 2, "mt-1", "coding", "")
+    cb(2, 0, 2, "mt-2", "coding", "")
+    cb(2, 1, 2, "mt-2", "completed", "")
+
+    assert calls[-1][3] == "mt-1"
+    assert calls[-1][4] == "coding"
+    assert calls[-1][1] == 1
+    assert not any(c[3] == "mt-2" and c[4] == "completed" for c in calls)
+
+    cb(1, 1, 2, "mt-1", "completed", "")
+    assert calls[-1][3] == "mt-1"
+    assert calls[-1][4] == "completed"
+    assert calls[-1][1] == 1
+
+
+def test_serialize_progress_does_not_publish_completed_before_sibling_starts():
+    """A faster worker must not publish completed before a registered sibling ticks."""
+    calls: List[tuple] = []
+    cb = _serialize_progress(lambda *a: calls.append(a), threading.Lock())
+    assert cb is not None
+    cb.expect([1, 2])
+    cb(2, 1, 2, "mt-2", "completed", "")
+
+    assert not any(c[4] == "completed" for c in calls)
+
+    cb(1, 1, 2, "mt-1", "coding", "")
+    assert calls[-1][3] == "mt-1"
+    assert calls[-1][4] == "coding"
+    assert calls[-1][1] == 1
+
+    cb(1, 1, 2, "mt-1", "completed", "")
+    assert calls[-1][3] == "mt-1"
+    assert calls[-1][4] == "completed"
+
+
+def test_execution_wave_concurrency_env(monkeypatch):
+    monkeypatch.delenv("SE_EXECUTION_WAVE_CONCURRENCY", raising=False)
+    assert _execution_wave_concurrency() == _WAVE_EXECUTION_CONCURRENCY
+    monkeypatch.setenv("SE_EXECUTION_WAVE_CONCURRENCY", "not-a-number")
+    assert _execution_wave_concurrency() == _WAVE_EXECUTION_CONCURRENCY
+    monkeypatch.setenv("SE_EXECUTION_WAVE_CONCURRENCY", "0")
+    assert _execution_wave_concurrency() == 1
+    monkeypatch.setenv("SE_EXECUTION_WAVE_CONCURRENCY", "7")
+    assert _execution_wave_concurrency() == 7
+
+
+def test_wave_max_workers_caps_at_concurrency(monkeypatch):
+    monkeypatch.setenv("SE_EXECUTION_WAVE_CONCURRENCY", "2")
+    assert _wave_max_workers(5) == 2
+    assert _wave_max_workers(1) == 1
+
+
+def test_gated_wave_caps_parallel_map_workers(tmp_path, monkeypatch):
+    import software_engineering_team.shared.phases.execution as execution_mod
+
+    seen: List[int] = []
+    real = execution_mod.parallel_map
+
+    def _wrapped(*args: Any, **kwargs: Any) -> Any:
+        seen.append(kwargs["max_workers"])
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(execution_mod, "parallel_map", _wrapped)
+    monkeypatch.setenv("SE_EXECUTION_WAVE_CONCURRENCY", "2")
+
+    def coder(**kwargs: Any) -> Dict[str, str]:
+        mid = kwargs["microtask"].id
+        return {f"src/{mid}.py": f"print({mid!r})\n"}
+
+    mts = [_microtask(f"mt-{i}") for i in range(5)]
+    _run(
+        _make_gate_config(coder=coder),
+        mts,
+        tmp_path,
+        review_config=_config(),
+    )
+
+    assert seen == [2]
+    assert all(mt.status == MS.COMPLETED for mt in mts)
+
+
 # ---------------------------------------------------------------------------
 # Dependency handling / microtask selection
 # ---------------------------------------------------------------------------
@@ -381,12 +511,21 @@ def test_dependent_of_review_failed_is_skipped(tmp_path):
     assert "depends on review-failed" in mt2.notes
 
 
-def test_unmet_dep_without_review_failure_runs_anyway(tmp_path):
-    """An unmet dep that is merely not-yet-complete (not review-failed) still runs."""
+def test_unmet_dep_without_review_failure_runs_anyway(tmp_path, caplog):
+    """An unmet dep that is merely not-yet-complete (not review-failed) still runs.
+
+    Also pins the "running anyway" soft-dependency log line, unchanged by the
+    wave-based scheduler: a ``depends_on`` id with no matching microtask in this
+    run never becomes a scheduling edge, so ``mt`` lands in the first batch and
+    hits this same runtime branch exactly as it did under the old flat order.
+    """
     mt = _microtask("mt-1", depends_on=["ghost"])
-    _run(_make_gate_config(), [mt], tmp_path, review_config=_config())
+    with caplog.at_level(logging.WARNING):
+        _run(_make_gate_config(), [mt], tmp_path, review_config=_config())
 
     assert mt.status == MS.COMPLETED
+    assert "has unmet deps" in caplog.text
+    assert "running anyway" in caplog.text
 
 
 def test_only_microtask_ids_filters(tmp_path):
@@ -400,6 +539,120 @@ def test_only_microtask_ids_filters(tmp_path):
     assert mt1.status == MS.PENDING  # never touched (default status)
     assert mt2.status == MS.COMPLETED
     assert len(result.microtasks) == 1
+
+
+def test_diamond_dependency_executes_in_wave_order(tmp_path):
+    """A -> (B, C) -> D: all four complete; B and C may finish in either order."""
+    mt_a = _microtask("mt-a")
+    mt_b = _microtask("mt-b", depends_on=["mt-a"])
+    mt_c = _microtask("mt-c", depends_on=["mt-a"])
+    mt_d = _microtask("mt-d", depends_on=["mt-b", "mt-c"])
+    order: List[str] = []
+    cfg = _make_gate_config(coder=_recording_coder(order))
+
+    result = _run(cfg, [mt_a, mt_b, mt_c, mt_d], tmp_path, review_config=_config())
+
+    assert order[0] == "mt-a"
+    assert order[-1] == "mt-d"
+    assert set(order[1:-1]) == {"mt-b", "mt-c"}
+    assert all(mt.status == MS.COMPLETED for mt in (mt_a, mt_b, mt_c, mt_d))
+    assert result.files == {
+        "src/mt-a.py": "print(1)\n",
+        "src/mt-b.py": "print(1)\n",
+        "src/mt-c.py": "print(1)\n",
+        "src/mt-d.py": "print(1)\n",
+    }
+    assert "4/4 microtasks successfully" in result.summary
+    assert "0 review-failed" in result.summary
+
+
+def test_fully_independent_microtasks_execute_as_single_batch(tmp_path):
+    """No cross-dependencies: all microtasks schedule into (and run within) one batch."""
+    mt1, mt2, mt3 = _microtask("mt-1"), _microtask("mt-2"), _microtask("mt-3")
+    order: List[str] = []
+    cfg = _make_gate_config(coder=_recording_coder(order))
+
+    result = _run(cfg, [mt1, mt2, mt3], tmp_path, review_config=_config())
+
+    assert set(order) == {"mt-1", "mt-2", "mt-3"}
+    assert all(mt.status == MS.COMPLETED for mt in (mt1, mt2, mt3))
+    assert "3/3 microtasks successfully" in result.summary
+
+
+def test_dependent_of_review_failed_is_skipped_across_batch_boundary(tmp_path):
+    """The SKIP check fires correctly even when the failure is two batches upstream."""
+    mt_a = _microtask("mt-a")
+    mt_b = _microtask("mt-b", depends_on=["mt-a"])
+    mt_c = _microtask("mt-c", depends_on=["mt-b"])
+    cfg = _make_gate_config(code_review_gate=_cr_gate_fails_for("mt-b"))
+    _run(
+        cfg,
+        [mt_a, mt_b, mt_c],
+        tmp_path,
+        review_config=_config(cr=1, on_failure="skip_continue"),
+    )
+
+    assert mt_a.status == MS.COMPLETED
+    assert mt_b.status == MS.REVIEW_FAILED
+    assert mt_c.status == MS.SKIPPED
+    assert "depends on review-failed" in mt_c.notes
+
+
+# ---------------------------------------------------------------------------
+# Wave-based (topological-batch) scheduler — direct unit tests
+# ---------------------------------------------------------------------------
+
+
+def test_schedule_diamond_dependency_batches_into_three_waves():
+    """A -> (B, C) -> D batches as [[A], [B, C], [D]]."""
+    mt_a = _microtask("mt-a")
+    mt_b = _microtask("mt-b", depends_on=["mt-a"])
+    mt_c = _microtask("mt-c", depends_on=["mt-a"])
+    mt_d = _microtask("mt-d", depends_on=["mt-b", "mt-c"])
+
+    batches = _schedule_microtask_batches([mt_a, mt_b, mt_c, mt_d])
+
+    assert [[m.id for m in b] for b in batches] == [["mt-a"], ["mt-b", "mt-c"], ["mt-d"]]
+
+
+def test_schedule_unmet_dependency_not_in_run_does_not_block():
+    """A ``depends_on`` id with no matching microtask in this run is not a scheduling edge."""
+    mt = _microtask("mt-1", depends_on=["ghost"])
+
+    batches = _schedule_microtask_batches([mt])
+
+    assert batches == [[mt]]
+
+
+def test_schedule_fully_independent_microtasks_form_single_batch():
+    """No cross-dependencies: everything lands in one batch, in original order."""
+    mt1, mt2, mt3 = _microtask("mt-1"), _microtask("mt-2"), _microtask("mt-3")
+
+    batches = _schedule_microtask_batches([mt1, mt2, mt3])
+
+    assert batches == [[mt1, mt2, mt3]]
+
+
+def test_schedule_cycle_flushes_remaining_into_final_batch():
+    """A dependency cycle can't be scheduled progressively; it's flushed, not looped forever."""
+    mt_x = _microtask("mt-x", depends_on=["mt-y"])
+    mt_y = _microtask("mt-y", depends_on=["mt-x"])
+
+    batches = _schedule_microtask_batches([mt_x, mt_y])
+
+    assert batches == [[mt_x, mt_y]]
+
+
+def test_schedule_duplicate_ids_raises_value_error_instead_of_hanging():
+    """Two microtasks sharing an id can't be placed progressively (id-keyed bookkeeping
+    collapses them); this must raise immediately rather than looping on empty batches
+    forever, which is the original bug (id-keyed ``placed`` never reaches ``len(microtasks)``).
+    """
+    mt1 = _microtask("dup")
+    mt2 = _microtask("dup")
+
+    with pytest.raises(ValueError, match="dup"):
+        _schedule_microtask_batches([mt1, mt2])
 
 
 # ---------------------------------------------------------------------------
@@ -426,9 +679,40 @@ def test_coding_exception_marks_failed(tmp_path):
 
 def test_unsafe_initial_write_marks_review_failed(tmp_path):
     mt = _microtask()
-    _run(_make_gate_config(coder=_coder_unsafe), [mt], tmp_path, review_config=_config())
+    calls: List[tuple] = []
+    _run(
+        _make_gate_config(coder=_coder_unsafe),
+        [mt],
+        tmp_path,
+        review_config=_config(),
+        progress=lambda *a: calls.append(a),
+    )
 
     assert mt.status == MS.REVIEW_FAILED
+    assert calls[-1][4] == "completed"
+
+
+def test_unsafe_initial_write_does_not_block_sibling_completed_progress(tmp_path):
+    """A rejected initial write must still emit completed so a sibling can finish progress."""
+    calls: List[tuple] = []
+
+    def coder(**kwargs: Any) -> Dict[str, str]:
+        if kwargs["microtask"].id == "mt-1":
+            return {"../evil.py": "x"}
+        return {"src/mt-2.py": "print(2)\n"}
+
+    mt1, mt2 = _microtask("mt-1"), _microtask("mt-2")
+    _run(
+        _make_gate_config(coder=coder),
+        [mt1, mt2],
+        tmp_path,
+        review_config=_config(),
+        progress=lambda *a: calls.append(a),
+    )
+
+    assert mt1.status == MS.REVIEW_FAILED
+    assert mt2.status == MS.COMPLETED
+    assert calls[-1][4] == "completed"
 
 
 # ---------------------------------------------------------------------------
@@ -574,7 +858,7 @@ def test_rollback_restores_earlier_microtask_file_on_overlap(tmp_path):
     not leak ``mt-b``'s clobbered content — while removing ``mt-b``'s own file.
     """
     mt_a = _microtask("mt-a")
-    mt_b = _microtask("mt-b")
+    mt_b = _microtask("mt-b", depends_on=["mt-a"])
     cfg = _make_gate_config(
         coder=_coder_per_microtask,
         code_review_gate=_cr_gate_fails_for("mt-b"),
@@ -1440,6 +1724,104 @@ def test_documentation_unsafe_path_is_skipped(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# DbC comments self-review phase (seam wiring)
+# ---------------------------------------------------------------------------
+
+
+def test_dbc_self_review_called_when_configured(tmp_path, monkeypatch):
+    """The DbC phase runs before Documentation when the callable is wired and on."""
+    calls: List[Dict[str, Any]] = []
+
+    def _recorder(**kwargs: Any) -> None:
+        calls.append(kwargs)
+
+    monkeypatch.setattr(execution_mod, "_run_dbc_self_review", _recorder)
+    mt = _microtask()
+    _run(
+        _make_gate_config(dbc_review=_dbc_review),
+        [mt],
+        tmp_path,
+        review_config=_config(),
+    )
+
+    assert mt.status == MS.COMPLETED
+    assert len(calls) == 1
+    kw = calls[0]
+    assert kw["language"] == "python"  # forwarded from planning_result.language
+    assert kw["build_verify_label"] == ""  # default until a team threads its label
+    assert kw["gate_config"].run_dbc_self_review is _dbc_review
+
+
+def test_dbc_self_review_skipped_when_callable_is_none(tmp_path, monkeypatch):
+    """With no ``run_dbc_self_review`` wired (the default), the phase never runs."""
+    calls: List[Dict[str, Any]] = []
+
+    def _recorder(**kwargs: Any) -> None:
+        calls.append(kwargs)
+
+    monkeypatch.setattr(execution_mod, "_run_dbc_self_review", _recorder)
+    mt = _microtask()
+    _run(_make_gate_config(), [mt], tmp_path, review_config=_config())
+
+    assert mt.status == MS.COMPLETED
+    assert calls == []
+
+
+def test_dbc_self_review_skipped_when_flag_disabled(tmp_path, monkeypatch):
+    """``enable_dbc_comments=False`` suppresses the phase even when wired."""
+    calls: List[Dict[str, Any]] = []
+
+    def _recorder(**kwargs: Any) -> None:
+        calls.append(kwargs)
+
+    monkeypatch.setattr(execution_mod, "_run_dbc_self_review", _recorder)
+    mt = _microtask()
+    _run(
+        _make_gate_config(dbc_review=_dbc_review),
+        [mt],
+        tmp_path,
+        review_config=_config(dbc_comments=False),
+    )
+
+    assert mt.status == MS.COMPLETED
+    assert calls == []
+
+
+def test_dbc_self_review_output_visible_to_documentation(tmp_path):
+    """DbC insertions land on disk and reach the subsequent Documentation call.
+
+    Runs the real ``_run_dbc_self_review`` orchestrator (no monkeypatch): its
+    inner callable rewrites ``src/a.py`` (the file ``_coder`` produced, so it
+    survives the phase's "only write back reviewed paths" filter), and the
+    Documentation stub captures its ``code_files`` kwarg.
+    """
+    augmented = "print(1)\n# Preconditions: none\n"
+
+    def _dbc(*, code=None, detail_callback=None, **kwargs: Any) -> SimpleNamespace:
+        return SimpleNamespace(files={"src/a.py": augmented})
+
+    captured: Dict[str, Dict[str, str]] = {}
+
+    def _doc_capture(
+        *, documentation=None, code_files=None, detail_callback=None, **kwargs: Any
+    ) -> SimpleNamespace:
+        captured["code_files"] = dict(code_files or {})
+        return SimpleNamespace(documentation={}, iterations=1, final_quality_score=0.95)
+
+    mt = _microtask()
+    _run(
+        _make_gate_config(dbc_review=_dbc, doc_review=_doc_capture),
+        [mt],
+        tmp_path,
+        review_config=_config(),
+    )
+
+    assert mt.status == MS.COMPLETED
+    assert captured["code_files"]["src/a.py"] == augmented  # DbC output flows into docs
+    assert (tmp_path / "src" / "a.py").read_text() == augmented  # and is written to disk
+
+
+# ---------------------------------------------------------------------------
 # Terminal gate-outcome observability
 # ---------------------------------------------------------------------------
 
@@ -1691,6 +2073,324 @@ def test_dedup_suppresses_repeated_issue_across_batch_fixes(tmp_path):
     assert len(captured) == 2
     assert len(captured[0]) == 1  # first attempt: not yet seen
     assert captured[1] == []  # exact repeat suppressed on the second attempt
+
+
+def test_independent_microtasks_execute_concurrently(tmp_path):
+    """Two independent microtasks overlap in wall-clock time (true concurrent coding)."""
+    a_entered = threading.Event()
+    b_entered = threading.Event()
+    overlap_timeout = 2.0
+
+    def overlapping_coder(**kwargs: Any) -> Dict[str, str]:
+        mid = kwargs["microtask"].id
+        if mid == "mt-1":
+            a_entered.set()
+            assert b_entered.wait(timeout=overlap_timeout), "mt-2 never overlapped with mt-1"
+        else:
+            b_entered.set()
+            assert a_entered.wait(timeout=overlap_timeout), "mt-1 never overlapped with mt-2"
+        time.sleep(0.05)
+        return {f"src/{mid}.py": "print(1)\n"}
+
+    mt1, mt2 = _microtask("mt-1"), _microtask("mt-2")
+    started = time.perf_counter()
+    result = _run(
+        _make_gate_config(coder=overlapping_coder),
+        [mt1, mt2],
+        tmp_path,
+        review_config=_config(),
+    )
+    elapsed = time.perf_counter() - started
+
+    assert mt1.status == MS.COMPLETED
+    assert mt2.status == MS.COMPLETED
+    assert result.files == {"src/mt-1.py": "print(1)\n", "src/mt-2.py": "print(1)\n"}
+    # Sequential coding would take ~0.10s of sleep plus barriers that never trip;
+    # concurrent coding finishes in roughly one sleep plus overlap wait.
+    assert elapsed < 0.20
+
+
+def test_sequential_dependency_chain_does_not_overlap(tmp_path):
+    """A -> B -> C stays fully sequential: each microtask starts after the previous ends."""
+    intervals: Dict[str, tuple] = {}
+    lock = threading.Lock()
+
+    def timed_coder(**kwargs: Any) -> Dict[str, str]:
+        mid = kwargs["microtask"].id
+        start = time.perf_counter()
+        time.sleep(0.03)
+        end = time.perf_counter()
+        with lock:
+            intervals[mid] = (start, end)
+        return {f"src/{mid}.py": "print(1)\n"}
+
+    mt_a = _microtask("mt-a")
+    mt_b = _microtask("mt-b", depends_on=["mt-a"])
+    mt_c = _microtask("mt-c", depends_on=["mt-b"])
+    result = _run(
+        _make_gate_config(coder=timed_coder),
+        [mt_a, mt_b, mt_c],
+        tmp_path,
+        review_config=_config(),
+    )
+
+    assert all(mt.status == MS.COMPLETED for mt in (mt_a, mt_b, mt_c))
+    assert result.files == {
+        "src/mt-a.py": "print(1)\n",
+        "src/mt-b.py": "print(1)\n",
+        "src/mt-c.py": "print(1)\n",
+    }
+    assert intervals["mt-a"][1] <= intervals["mt-b"][0]
+    assert intervals["mt-b"][1] <= intervals["mt-c"][0]
+
+
+def test_in_wave_coding_failure_does_not_block_sibling(tmp_path):
+    """A coding failure in one independent microtask still lets its wave sibling complete."""
+
+    def coder(**kwargs: Any) -> Dict[str, str]:
+        if kwargs["microtask"].id == "mt-1":
+            raise RuntimeError("boom")
+        return {"src/mt-2.py": "print(1)\n"}
+
+    mt1, mt2 = _microtask("mt-1"), _microtask("mt-2")
+    result = _run(
+        _make_gate_config(coder=coder),
+        [mt1, mt2],
+        tmp_path,
+        review_config=_config(on_failure="skip_continue"),
+    )
+
+    assert mt1.status == MS.FAILED
+    assert "boom" in mt1.notes
+    assert mt2.status == MS.COMPLETED
+    assert result.files == {"src/mt-2.py": "print(1)\n"}
+    assert "1/2 microtasks successfully" in result.summary
+
+
+def test_in_wave_review_failure_skip_continue_lets_sibling_complete(tmp_path):
+    """Review-failed sibling in the same wave does not prevent the other from completing."""
+    mt1, mt2 = _microtask("mt-1"), _microtask("mt-2")
+    result = _run(
+        _make_gate_config(coder=_recording_coder([]), code_review_gate=_cr_gate_fails_for("mt-1")),
+        [mt1, mt2],
+        tmp_path,
+        review_config=_config(cr=1, on_failure="skip_continue"),
+    )
+
+    assert mt1.status == MS.REVIEW_FAILED
+    assert mt2.status == MS.COMPLETED
+    assert "src/mt-2.py" in result.files
+    assert "src/mt-1.py" not in result.files
+    assert "1 review-failed" in result.summary
+
+
+def test_in_wave_review_failure_stop_does_not_start_next_wave(tmp_path):
+    """on_failure=stop aborts before the next wave; independent siblings may still run."""
+    mt1 = _microtask("mt-1")
+    mt2 = _microtask("mt-2")
+    mt3 = _microtask("mt-3", depends_on=["mt-1"])
+    with pytest.raises(be_models.MicrotaskReviewFailedError) as exc:
+        _run(
+            _make_gate_config(
+                coder=_recording_coder([]),
+                code_review_gate=_cr_gate_fails_for("mt-1"),
+            ),
+            [mt1, mt2, mt3],
+            tmp_path,
+            review_config=_config(cr=1, on_failure="stop"),
+        )
+
+    assert exc.value.microtask.id == "mt-1"
+    assert mt2.status == MS.COMPLETED
+    assert mt3.status == MS.PENDING
+
+
+def test_in_wave_review_failure_stop_waits_for_in_flight_sibling(tmp_path):
+    """on_failure=stop waits for an in-flight sibling to finish writing before raising."""
+    sibling_finished = threading.Event()
+
+    def coder(**kwargs: Any) -> Dict[str, str]:
+        mid = kwargs["microtask"].id
+        if mid == "mt-2":
+            time.sleep(0.3)
+            sibling_finished.set()
+            return {"src/mt-2.py": "print(2)\n"}
+        return {"src/mt-1.py": "print(1)\n"}
+
+    mt1, mt2 = _microtask("mt-1"), _microtask("mt-2")
+    with pytest.raises(be_models.MicrotaskReviewFailedError):
+        _run(
+            _make_gate_config(
+                coder=coder,
+                code_review_gate=_cr_gate_fails_for("mt-1"),
+            ),
+            [mt1, mt2],
+            tmp_path,
+            review_config=_config(cr=1, on_failure="stop"),
+        )
+
+    assert sibling_finished.is_set()
+    assert mt2.status == MS.COMPLETED
+    assert (tmp_path / "src" / "mt-2.py").read_text(encoding="utf-8") == "print(2)\n"
+
+
+def test_overlapping_independent_review_failure_preserves_sibling_content(tmp_path):
+    """A review-failed overlapping sibling must not restore a snapshot that wipes a completed one."""
+
+    def same_file_coder(**kwargs: Any) -> Dict[str, str]:
+        if kwargs["microtask"].id == "mt-a":
+            return {"shared.py": "owned-by-a\n"}
+        return {"shared.py": "owned-by-b\n"}
+
+    mt_a, mt_b = _microtask("mt-a"), _microtask("mt-b")
+    result = _run(
+        _make_gate_config(
+            coder=same_file_coder,
+            code_review_gate=_cr_gate_fails_for("mt-b"),
+        ),
+        [mt_a, mt_b],
+        tmp_path,
+        review_config=_config(cr=1, on_failure="skip_continue"),
+    )
+
+    assert mt_a.status == MS.COMPLETED
+    assert mt_b.status == MS.REVIEW_FAILED
+    assert result.files["shared.py"] == "owned-by-a\n"
+    assert (tmp_path / "shared.py").read_text(encoding="utf-8") == "owned-by-a\n"
+
+
+def test_review_introduced_path_stays_consistent_across_siblings(tmp_path):
+    """A file added by batch-fix (not in the initial generation set) stays consistent.
+
+    Two initially disjoint microtasks each fail code review once and the fix
+    writes the same new path; ``all_files`` must match disk afterward.
+    """
+
+    failed: set[str] = set()
+
+    def cr_fail_once(**kwargs: Any) -> GateOutcome:
+        mid = kwargs["microtask"].id
+        if mid not in failed:
+            failed.add(mid)
+            return GateOutcome(passed=False, issues=[_issue()], summary="fix me")
+        return GateOutcome(passed=True)
+
+    def batch_fix_adds_readme(**kwargs: Any) -> SimpleNamespace:
+        files = dict(kwargs["current_files"])
+        files["README.md"] = f"fix-{kwargs['microtask'].id}\n"
+        return SimpleNamespace(files=files)
+
+    mt1, mt2 = _microtask("mt-1"), _microtask("mt-2")
+    result = _run(
+        _make_gate_config(
+            coder=_recording_coder([]),
+            code_review_gate=cr_fail_once,
+            batch_fix=batch_fix_adds_readme,
+        ),
+        [mt1, mt2],
+        tmp_path,
+        review_config=_config(cr=1),
+    )
+
+    disk = (tmp_path / "README.md").read_text(encoding="utf-8")
+    assert result.files["README.md"] == disk
+    assert disk in {"fix-mt-1\n", "fix-mt-2\n"}
+    assert mt1.status == MS.COMPLETED
+    assert mt2.status == MS.COMPLETED
+
+
+def test_docs_introduced_path_stays_consistent_across_siblings(tmp_path):
+    """Documentation can add paths the initial generation set did not lock."""
+
+    def doc_review(**kwargs: Any) -> SimpleNamespace:
+        code_files = kwargs["code_files"]
+        owner = next(iter(code_files)).split("/")[-1].replace(".py", "")
+        return SimpleNamespace(
+            documentation={"README.md": f"docs-{owner}\n"},
+            iterations=1,
+            final_quality_score=0.95,
+        )
+
+    mt1, mt2 = _microtask("mt-1"), _microtask("mt-2")
+    result = _run(
+        _make_gate_config(coder=_recording_coder([]), doc_review=doc_review),
+        [mt1, mt2],
+        tmp_path,
+        review_config=_config(),
+    )
+
+    disk = (tmp_path / "README.md").read_text(encoding="utf-8")
+    assert result.files["README.md"] == disk
+    assert disk in {"docs-mt-1\n", "docs-mt-2\n"}
+    assert mt1.status == MS.COMPLETED
+    assert mt2.status == MS.COMPLETED
+
+
+def test_review_gates_do_not_overlap_across_wave_workers(tmp_path):
+    """Repo-wide review tools must not run concurrently for independent wave members."""
+    current = 0
+    max_current = 0
+    counter_lock = threading.Lock()
+
+    def cr_gate(**kwargs: Any) -> GateOutcome:
+        nonlocal current, max_current
+        with counter_lock:
+            current += 1
+            max_current = max(max_current, current)
+        time.sleep(0.05)
+        with counter_lock:
+            current -= 1
+        return GateOutcome(passed=True)
+
+    mt1, mt2 = _microtask("mt-1"), _microtask("mt-2")
+    _run(
+        _make_gate_config(coder=_recording_coder([]), code_review_gate=cr_gate),
+        [mt1, mt2],
+        tmp_path,
+        review_config=_config(),
+    )
+
+    assert max_current == 1
+    assert mt1.status == MS.COMPLETED
+    assert mt2.status == MS.COMPLETED
+
+
+def test_overlapping_writes_keep_all_files_and_disk_in_sync(tmp_path):
+    """Two independent microtasks writing the same path leave all_files matching disk."""
+
+    def same_file_coder(**kwargs: Any) -> Dict[str, str]:
+        mid = kwargs["microtask"].id
+        return {"shared.py": f"# {mid}\n"}
+
+    mt1, mt2 = _microtask("mt-1"), _microtask("mt-2")
+    result = _run(
+        _make_gate_config(coder=same_file_coder),
+        [mt1, mt2],
+        tmp_path,
+        review_config=_config(),
+    )
+
+    disk = (tmp_path / "shared.py").read_text(encoding="utf-8")
+    assert result.files["shared.py"] == disk
+    assert disk in {"# mt-1\n", "# mt-2\n"}
+    assert mt1.status == MS.COMPLETED
+    assert mt2.status == MS.COMPLETED
+
+
+def test_cycle_batch_preserves_skip_on_in_batch_review_failure(tmp_path):
+    """A cycle-flushed batch still SKIPs a member whose in-batch dependency review-failed."""
+    mt_x = _microtask("mt-x", depends_on=["mt-y"])
+    mt_y = _microtask("mt-y", depends_on=["mt-x"])
+    _run(
+        _make_gate_config(code_review_gate=_cr_gate_fails_for("mt-x")),
+        [mt_x, mt_y],
+        tmp_path,
+        review_config=_config(cr=1, on_failure="skip_continue"),
+    )
+
+    assert mt_x.status == MS.REVIEW_FAILED
+    assert mt_y.status == MS.SKIPPED
+    assert "depends on review-failed" in mt_y.notes
 
 
 def test_grounding_breaker_disabled_never_records(tmp_path, monkeypatch):

@@ -39,8 +39,13 @@ Design notes
   - ``"text"`` → ``chat(response_format="text")`` — free-form prose; no ``response_format`` is
     forced and no JSON parsing is attempted. Use this only for conversational
     agents whose replies should be natural language (e.g. branding assistant).
-  The structured-output path (``structured_output``) is unaffected and always
-  uses ``complete_json``.
+* ``Agent(structured_output_model=...)`` routes structured output through the
+  normal tool-calling event loop, so the live production path is
+  ``chat()``/``stream()`` handling a ``StructuredOutputTool`` like any other
+  tool call. This class's own ``structured_output()`` method (which always
+  uses ``complete_json``) is retained only for Strands' deprecated
+  ``Agent.structured_output()`` API and is not on the hot path for normal
+  agent runs.
 """
 
 from __future__ import annotations
@@ -49,6 +54,7 @@ import asyncio
 import dataclasses
 import json
 import logging
+import time
 from typing import Any, AsyncGenerator, Dict, List, Literal, Optional, Union
 
 from strands.models.model import Model
@@ -58,11 +64,12 @@ from strands.types.tools import ToolChoice, ToolSpec
 
 from .attribution import caller_agent, caller_team, current_attribution, llm_attribution
 from .factory import client_agent_key, get_client, unwrap_client
-from .interface import LLMClient
+from .interface import LLMClient, record_complete_json_turn, take_complete_json_turns
+from .util import _flatten_system_prompt_content
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["LLMClientConfig", "LLMClientModel", "get_strands_model", "run_json_via_strands"]
+__all__ = ["LLMClientConfig", "LLMClientModel", "run_json_via_strands"]
 
 
 ResponseFormat = Literal["json", "text"]
@@ -278,7 +285,24 @@ class LLMClientModel(Model):
         think: Optional[Union[bool, str]] = None,
         response_format: ResponseFormat = "json",
     ) -> None:
-        assert client is not None, "client is required"
+        """Construct the adapter around a backing ``LLMClient``.
+
+        See the class docstring above for parameter semantics.
+
+        Preconditions:
+            - ``client`` is not ``None``.
+
+        Postconditions:
+            - ``self.client`` is ``client``.
+            - ``self._config`` is a validated ``LLMClientConfig`` built from
+              the remaining keyword arguments.
+        """
+        if client is None:
+            # Explicit validation rather than ``assert``: the precondition
+            # must hold even under ``python -O`` (which strips asserts), or a
+            # missing client would surface as a confusing downstream
+            # AttributeError instead of a clear construction-time failure.
+            raise ValueError("client is required")
         self._client = client
         # The dataclass enforces ``response_format ∈ {"json","text"}``;
         # invalid values raise ``ValueError`` from ``__post_init__``.
@@ -294,12 +318,19 @@ class LLMClientModel(Model):
     # -- strands.models.Model required interface ---------------------------
 
     def update_config(self, **model_config: Any) -> None:
-        """Replace this model's config with the fields listed in ``model_config``.
+        """Update the fields listed in ``model_config`` on this model's config.
 
         Strands' ``Model.update_config`` is part of the public contract, so we
         keep the method name. Unlike the previous mutable-dict implementation,
         this builds a new ``LLMClientConfig`` (which validates), so unknown
         kwargs raise ``TypeError`` instead of being silently retained.
+
+        Postconditions:
+            - Fields present in ``model_config`` are updated to the given
+              values; unspecified fields retain their current values.
+            - Raises ``TypeError`` if ``model_config`` contains a key that is
+              not a field of ``LLMClientConfig``, or ``ValueError`` if the
+              resulting ``response_format`` is invalid.
         """
         self._config = dataclasses.replace(self._config, **model_config)
 
@@ -374,7 +405,7 @@ class LLMClientModel(Model):
             text_model = json_model.clone(response_format="text")
 
         The new model is constructed via the normal ``__init__`` path so it
-        re-runs every invariant (``client is not None`` assert, dataclass
+        re-runs every invariant (``client is not None`` validation, dataclass
         ``__post_init__`` validation). The cost is one extra
         ``LLMClientConfig`` construction; the win is the sibling stays valid
         if ``__init__`` ever grows additional setup.
@@ -417,13 +448,25 @@ class LLMClientModel(Model):
         prose opt into ``response_format="text"`` and are routed through
         ``chat(response_format="text")`` instead.
 
+        ``system_prompt`` (a plain string) and ``system_prompt_content``
+        (Strands' structured content-block form, e.g. ``[{"text": "..."}]``)
+        are both accepted and merged into a single ``{"role": "system", ...}``
+        message: ``system_prompt_content`` is flattened to text and appended
+        after ``system_prompt`` when both are present. Either may be omitted;
+        when both are absent, no system message is emitted.
+
         ``tool_choice`` is accepted for interface compatibility but is not
         forwarded: ``LLMClient`` does not currently expose a tool_choice knob.
         """
-        del tool_choice, system_prompt_content  # interface-only
+        del tool_choice  # interface-only: LLMClient exposes no tool_choice knob
         oai_messages = _strands_messages_to_openai(messages)
-        if system_prompt:
-            oai_messages.insert(0, {"role": "system", "content": system_prompt})
+        combined_system = "\n\n".join(
+            part
+            for part in (system_prompt, _flatten_system_prompt_content(system_prompt_content))
+            if part
+        )
+        if combined_system:
+            oai_messages.insert(0, {"role": "system", "content": combined_system})
 
         oai_tools = _tool_specs_to_openai(tool_specs)
 
@@ -494,17 +537,57 @@ class LLMClientModel(Model):
         # outer ``with llm_attribution(...)``; bypassing the wrapper ensures
         # ``cfg.agent_key`` (which may differ after ``clone``/``update_config``)
         # is the effective binding rather than the wrapper's original key.
-        with llm_attribution(agent_key=agent_key or None, team=team):
-            result = await asyncio.to_thread(
-                unwrap_client(self._client).chat,
-                oai_messages,
-                objective=objective,
-                response_format=response_format,
-                temperature=temperature,
-                tools=oai_tools,
-                think=think,
-                max_tokens=max_tokens,
+        turn_started = time.monotonic()
+        client = unwrap_client(self._client)
+        worker_turns: list[tuple[str, str, float]] = []
+
+        def _chat_in_worker() -> Any:
+            # ContextVar writes in this thread do not copy back to the caller.
+            # Drop the inherited snapshot, then stash turns on the shared list
+            # even when chat() raises (self-correction that still fails).
+            take_complete_json_turns()
+            try:
+                return client.chat(
+                    oai_messages,
+                    objective=objective,
+                    response_format=response_format,
+                    temperature=temperature,
+                    tools=oai_tools,
+                    think=think,
+                    max_tokens=max_tokens,
+                )
+            finally:
+                worker_turns.extend(take_complete_json_turns())
+
+        def _replay_worker_turns() -> None:
+            if worker_turns:
+                for turn_prompt, turn_response, started in worker_turns:
+                    record_complete_json_turn(turn_prompt, turn_response, started_monotonic=started)
+                return
+            try:
+                observer_response = json.dumps(result, default=str)
+            except (TypeError, ValueError):
+                observer_response = str(result)
+            record_complete_json_turn(
+                json.dumps(oai_messages, default=str),
+                observer_response,
+                started_monotonic=turn_started,
             )
+
+        chat_error: BaseException | None = None
+        result: Any = None
+        with llm_attribution(agent_key=agent_key or None, team=team):
+            try:
+                result = await asyncio.to_thread(_chat_in_worker)
+            except BaseException as exc:
+                chat_error = exc
+        if worker_turns:
+            for turn_prompt, turn_response, started in worker_turns:
+                record_complete_json_turn(turn_prompt, turn_response, started_monotonic=started)
+        elif chat_error is None:
+            _replay_worker_turns()
+        if chat_error is not None:
+            raise chat_error
 
         yield {"messageStart": {"role": "assistant"}}
 
@@ -570,10 +653,13 @@ class LLMClientModel(Model):
         """Get structured output validated against a Pydantic model.
 
         Flattens the incoming message list to a single user prompt, calls
-        ``LLMClient.complete_json`` in a worker thread, and feeds the dict
-        through ``output_model.model_validate``. Raises ``ValueError`` if the
-        response cannot be validated — matching the behavior of Strands'
-        built-in Ollama/OpenAI models.
+        ``LLMClient.complete_json`` in a worker thread — passing ``output_model``
+        through as ``structured_output_model`` so a client that supports
+        class-identity routing (e.g. the dummy stub) doesn't have to infer it
+        from prompt text — and feeds the dict through
+        ``output_model.model_validate``. Raises ``ValueError`` if the response
+        cannot be validated — matching the behavior of Strands' built-in
+        Ollama/OpenAI models.
         """
         oai_messages = _strands_messages_to_openai(prompt)
         user_parts = [
@@ -612,6 +698,7 @@ class LLMClientModel(Model):
                 temperature=temperature,
                 system_prompt=system_prompt,
                 think=think,
+                structured_output_model=output_model,
             )
 
         try:
@@ -629,7 +716,7 @@ class LLMClientModel(Model):
 # ---------------------------------------------------------------------------
 
 
-def get_strands_model(
+def _get_strands_model(
     agent_key: Optional[str] = None,
     *,
     temperature: float = 0.0,
@@ -639,11 +726,17 @@ def get_strands_model(
     client: Optional[LLMClient] = None,
     response_format: str = "json",
 ) -> LLMClientModel:
-    """Return a Strands-compatible ``Model`` wired to the Khala LLM service.
+    """Construct a Strands-compatible ``Model`` wired to a raw ``LLMClient``.
 
-    This is the canonical entry point for constructing a Strands ``Agent``
-    that should use the project's LLM stack. Under the hood it calls
-    :func:`llm_service.get_client` (respecting ``LLM_PROVIDER``,
+    This is a low-level, package-private helper: the canonical public entry
+    point for constructing a Strands ``Agent`` that should use the project's
+    LLM stack is :func:`llm_service.get_strands_model` (backed by
+    ``strands_provider``), which adds provider resolution, model caching, and
+    API-key-fingerprint cache invalidation on top of a directly-built
+    :class:`LLMClientModel`. This function is used directly, and intentionally,
+    only by ``strategy_lab.model_factory`` where the caller needs to inject
+    its own timeout-scoped client and bypass the provider cache. Under the
+    hood it calls :func:`llm_service.get_client` (respecting ``LLM_PROVIDER``,
     ``LLM_MODEL_<agent_key>``, and the rest of the env contract) and wraps
     the result in :class:`LLMClientModel`.
 

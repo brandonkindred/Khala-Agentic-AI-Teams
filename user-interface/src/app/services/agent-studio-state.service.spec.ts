@@ -105,6 +105,24 @@ describe('AgentStudioStateService', () => {
     });
   });
 
+  it('starts with no server draft bound', () => {
+    expect(service.currentDraftId()).toBeNull();
+    expect(service.currentDraftName()).toBeNull();
+  });
+
+  it('setCurrentDraft updates the id and name together', () => {
+    service.setCurrentDraft('draft-1', 'My draft');
+    expect(service.currentDraftId()).toBe('draft-1');
+    expect(service.currentDraftName()).toBe('My draft');
+  });
+
+  it('reset clears the bound server draft', () => {
+    service.setCurrentDraft('draft-1', 'My draft');
+    service.reset();
+    expect(service.currentDraftId()).toBeNull();
+    expect(service.currentDraftName()).toBeNull();
+  });
+
   it('starts with the Stage-3 gate signals unstaffed/unset', () => {
     expect(service.rosterFullyStaffed()).toBe(false);
     expect(service.composeProcessStatus()).toBeNull();
@@ -137,5 +155,74 @@ describe('AgentStudioStateService', () => {
     service.markHandoffConsumed('t-1::a');
     service.reset();
     expect(service.hasConsumedHandoff('t-1::a')).toBe(false);
+  });
+
+  describe('Stage-1 build sub-stepper', () => {
+    it('starts at sub-stage 0 (Start)', () => {
+      expect(service.activeBuildSubStage()).toBe(0);
+      expect(service.maxReachedBuildSubStage()).toBe(0);
+      expect(service.canAdvanceBuildSubStage()).toBe(true);
+    });
+
+    it('buildSubStageStatus reports active / todo / done relative to the active sub-stage', () => {
+      expect(service.buildSubStageStatus(0)).toBe('active');
+      expect(service.buildSubStageStatus(1)).toBe('todo');
+      expect(service.buildSubStageStatus(2)).toBe('todo');
+      service.advanceBuildSubStage();
+      expect(service.buildSubStageStatus(0)).toBe('done');
+      expect(service.buildSubStageStatus(1)).toBe('active');
+      expect(service.buildSubStageStatus(2)).toBe('todo');
+    });
+
+    it('buildSubStageStatus rejects out-of-range and non-integer indices', () => {
+      expect(() => service.buildSubStageStatus(-1)).toThrow(RangeError);
+      expect(() => service.buildSubStageStatus(3)).toThrow(RangeError);
+      expect(() => service.buildSubStageStatus(1.5)).toThrow(RangeError);
+    });
+
+    it('advanceBuildSubStage steps forward one sub-stage at a time and is a no-op at Configure', () => {
+      service.advanceBuildSubStage();
+      expect(service.activeBuildSubStage()).toBe(1);
+      expect(service.maxReachedBuildSubStage()).toBe(1);
+      service.advanceBuildSubStage();
+      expect(service.activeBuildSubStage()).toBe(2);
+      expect(service.canAdvanceBuildSubStage()).toBe(false);
+      service.advanceBuildSubStage();
+      expect(service.activeBuildSubStage()).toBe(2);
+    });
+
+    it('backToDefine moves Configure back to Define without lowering maxReachedBuildSubStage', () => {
+      service.advanceBuildSubStage();
+      service.advanceBuildSubStage();
+      expect(service.activeBuildSubStage()).toBe(2);
+      service.backToDefine();
+      expect(service.activeBuildSubStage()).toBe(1);
+      expect(service.maxReachedBuildSubStage()).toBe(2);
+    });
+
+    it('backToDefine rejects being called from any sub-stage other than Configure', () => {
+      expect(() => service.backToDefine()).toThrow(RangeError);
+      service.advanceBuildSubStage();
+      expect(() => service.backToDefine()).toThrow(RangeError);
+      expect(service.activeBuildSubStage()).toBe(1);
+    });
+
+    it('reset clears the sub-stepper back to Start', () => {
+      service.advanceBuildSubStage();
+      service.advanceBuildSubStage();
+      service.reset();
+      expect(service.activeBuildSubStage()).toBe(0);
+      expect(service.maxReachedBuildSubStage()).toBe(0);
+    });
+
+    it('resetBuildSubStage clears the sub-stepper back to Start without touching handoff state', () => {
+      service.setRegistryAgentId('reg-1');
+      service.advanceBuildSubStage();
+      service.advanceBuildSubStage();
+      service.resetBuildSubStage();
+      expect(service.activeBuildSubStage()).toBe(0);
+      expect(service.maxReachedBuildSubStage()).toBe(0);
+      expect(service.registryAgentId()).toBe('reg-1');
+    });
   });
 });

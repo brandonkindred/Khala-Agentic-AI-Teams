@@ -134,20 +134,49 @@ export const routes: Routes = [
       {
         path: 'agent-studio',
         loadComponent: () =>
-          import('./components/agent-studio-shell/agent-studio-shell.component').then(
+          import('./components/agent-team-studio/agent-studio-shell/agent-studio-shell.component').then(
             (m) => m.AgentStudioShellComponent,
           ),
         title: 'Agent Studio',
         data: { breadcrumb: 'Agent Studio' },
       },
       {
-        path: 'agent-console',
+        path: 'agent-studio/provisioning',
         loadComponent: () =>
-          import('./components/agent-console/agent-console.component').then((m) => m.AgentConsoleComponent),
-        title: 'Agent Console',
-        data: { breadcrumb: 'Agent Console' },
+          import(
+            './components/agent-team-studio/agent-provisioning-dashboard/agent-provisioning-dashboard.component'
+          ).then((m) => m.AgentProvisioningDashboardComponent),
+        title: 'Provisioning & Environments',
+        data: { breadcrumb: 'Provisioning' },
       },
-      { path: 'agent-provisioning', redirectTo: '/agent-console', pathMatch: 'full' },
+      {
+        path: 'agent-studio/metrics',
+        loadComponent: () =>
+          import('./components/agent-team-studio/metrics-tab/metrics-tab.component').then(
+            (m) => m.MetricsTabComponent,
+          ),
+        title: 'Metrics',
+        data: { breadcrumb: 'Metrics' },
+      },
+      { path: 'agent-provisioning', redirectTo: '/agent-studio/provisioning', pathMatch: 'full' },
+      {
+        path: 'product-delivery',
+        loadComponent: () =>
+          import('./components/product-delivery-page/product-delivery-page.component').then(
+            (m) => m.ProductDeliveryPageComponent,
+          ),
+        title: 'Product Delivery',
+        data: { breadcrumb: 'Product Delivery' },
+      },
+      {
+        path: 'cognition',
+        loadComponent: () =>
+          import('./components/cognition-page/cognition-page.component').then(
+            (m) => m.CognitionPageComponent,
+          ),
+        title: 'Cognition',
+        data: { breadcrumb: 'Cognition' },
+      },
       {
         path: 'ai-systems',
         loadComponent: () =>
@@ -213,6 +242,15 @@ export const routes: Routes = [
         data: { breadcrumb: 'LLM Provider' },
       },
       {
+        path: 'llm-usage',
+        loadComponent: () =>
+          import('./components/llm-usage-dashboard/llm-usage-dashboard.component').then(
+            (m) => m.LlmUsageDashboardComponent,
+          ),
+        title: 'LLM Usage',
+        data: { breadcrumb: 'LLM Usage' },
+      },
+      {
         path: 'sales',
         loadComponent: () =>
           import('./components/sales-dashboard/sales-dashboard.component').then((m) => m.SalesDashboardComponent),
@@ -222,7 +260,7 @@ export const routes: Routes = [
       {
         path: 'agentic-teams',
         loadComponent: () =>
-          import('./components/agentic-team-dashboard/agentic-team-dashboard.component').then(
+          import('./components/agent-team-studio/agentic-team-dashboard/agentic-team-dashboard.component').then(
             (m) => m.AgenticTeamDashboardComponent,
           ),
         title: 'Agentic Teams',
@@ -240,7 +278,7 @@ export const routes: Routes = [
       {
         path: 'persona-testing',
         loadComponent: () =>
-          import('./components/persona-testing-dashboard/persona-testing-dashboard.component').then(
+          import('./components/agent-team-studio/persona-testing-dashboard/persona-testing-dashboard.component').then(
             (m) => m.PersonaTestingDashboardComponent,
           ),
         title: 'Testing Personas',
@@ -249,7 +287,7 @@ export const routes: Routes = [
       {
         path: 'persona-testing/audit/:runId',
         loadComponent: () =>
-          import('./components/persona-test-audit-panel/persona-test-audit-panel.component').then(
+          import('./components/agent-team-studio/persona-test-audit-panel/persona-test-audit-panel.component').then(
             (m) => m.PersonaTestAuditPanelComponent,
           ),
         title: 'Testing Personas Audit',

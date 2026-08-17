@@ -1,6 +1,6 @@
 /**
  * Models for the Agent Console catalog — mirror of
- * `backend/agents/agent_registry/models.py`.
+ * `backend/agents/agent_platform/registry/models.py`.
  */
 
 export type InvokeKind = 'http' | 'function' | 'temporal';

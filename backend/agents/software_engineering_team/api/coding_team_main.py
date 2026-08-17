@@ -6,7 +6,7 @@ the actual logic:
 * ``models`` — Pydantic request/response schemas.
 * ``state`` — run-thread registry, timing constants, answer/progress helpers.
 * ``lifecycle`` — ASGI startup probe.
-* ``orchestration`` — orchestrator-thread lifecycle and auto-resume.
+* ``orchestration`` — orchestrator wiring and the github-hook run flow.
 * ``pr_review`` — PR-review execution machinery.
 * ``git_ops`` — git/branch machinery and the github-hook run flow.
 * ``routes/*`` — APIRouter modules grouped by concern.
@@ -65,12 +65,9 @@ from software_engineering_team.api.coding_team_models import (  # noqa: F401
     SubmitAnswersRequest,
 )
 from software_engineering_team.api.coding_team_state import (  # noqa: F401
-    _ANSWER_WAIT_HEARTBEAT_STALE_S,
     _BISECT_CONTINUATION_BODY,
     _HEARTBEAT_CLOCK_SKEW_TOLERANCE_S,
     _HTTP_UNPROCESSABLE,
-    _active_run_threads,
-    _answer_wait_heartbeat_fresh,
     _claim_run_thread,
     _clear_run_thread,
     _coerce_progress,
@@ -106,24 +103,15 @@ from software_engineering_team.api.git_ops import (  # noqa: F401
     _write_active_issue,
 )
 from software_engineering_team.api.orchestration import (  # noqa: F401
-    _RESUME_RECHECK_DELAY_S,
-    _claim_and_spawn_resume,
     _defer_terminal_success,
     _failed_tasks,
     _format_failed_tasks,
     _has_merged_tasks,
     _record_failure,
     _record_review_outage,
-    _recover_resume_plan,
-    _resolve_github_job_token,
     _run_with_github_hooks,
     _running_job_for_issue,
-    _schedule_resume_recheck,
-    _start_github_resume_thread,
-    _start_hook_thread,
-    _start_orchestrator_thread,
     _truncate_title,
-    _try_auto_resume,
     plan_from_input,
     run_orchestrator_wired,
 )
@@ -184,13 +172,10 @@ from software_engineering_team.github_source.review_submit import (  # noqa: F40
 from software_engineering_team.hitl import _format_questions_comment  # noqa: F401
 from software_engineering_team.job_store import (  # noqa: F401
     DEFAULT_CACHE_DIR,
-    RESUME_CLAIM_TTL_S,
-    claim_resume,
     create_job,
     get_job,
     heartbeat_job,
     list_jobs,
-    release_resume_claim,
     update_job,
 )
 from software_engineering_team.job_store import (
@@ -206,6 +191,7 @@ from software_engineering_team.models import (  # noqa: F401
 from software_engineering_team.postgres import SCHEMA as SE_POSTGRES_SCHEMA
 from software_engineering_team.review_history_store import (  # noqa: F401
     get_review,
+    get_review_transcript,
     list_reviews,
     record_review_start,
     update_review,
@@ -237,7 +223,7 @@ app = create_team_app(
 # a fully-populated hub.
 from software_engineering_team.api.routes import coding_team_hitl as hitl_routes  # noqa: E402
 from software_engineering_team.api.routes import coding_team_jobs as jobs  # noqa: E402
-from software_engineering_team.api.routes import github, reviews  # noqa: E402
+from software_engineering_team.api.routes import github, issue_grooming, reviews  # noqa: E402
 from software_engineering_team.api.routes._common import (  # noqa: E402
     register_job_service_unavailable_handlers,
 )
@@ -247,6 +233,7 @@ register_job_service_unavailable_handlers(app)
 app.include_router(jobs.router)
 app.include_router(hitl_routes.router)
 app.include_router(github.router)
+app.include_router(issue_grooming.router)
 app.include_router(reviews.router)
 
 # A few route handlers are also invoked directly (not only over HTTP) by sibling
