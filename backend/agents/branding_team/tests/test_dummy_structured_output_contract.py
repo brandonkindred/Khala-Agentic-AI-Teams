@@ -58,15 +58,15 @@ from branding_team.models import (
     ChannelGuidelineOutput,
     ColorPaletteSystemOutput,
     CoreValuesOutput,
-    CreativeRefinementDecisionOutput,
-    DesignSystemDefinitionOutput,
+    CreativeRefinementDecision,
+    DesignSystemDefinition,
     DifferentiationPillarsOutput,
     EvolutionFrameworkOutput,
     IconographyOutput,
     LogoSuiteOutput,
     MessagingFrameworkOutput,
     MoodBoardCandidatesOutput,
-    MoodBoardConceptOutput,
+    MoodBoardConcept,
     OwnershipOutput,
     PersonaProfilesOutput,
     PhotographyVideoOutput,
@@ -122,11 +122,11 @@ _CASES: tuple[tuple[str, Callable[[], Any], type], ...] = (
             # Bind the variant in a default arg so each lambda closes over its
             # own value rather than the loop's last one.
             (lambda v=variant: branding_agents.make_moodboard_conceptualist(v)),
-            MoodBoardConceptOutput,
+            MoodBoardConcept,
         )
         for variant in _PHASE3_CONCEPTUALIST_VARIANTS
     ),
-    ("converge_decider", branding_agents.make_converge_decider, CreativeRefinementDecisionOutput),
+    ("converge_decider", branding_agents.make_converge_decider, CreativeRefinementDecision),
     ("logo_specifier", branding_agents.make_logo_specifier, LogoSuiteOutput),
     ("color_system_builder", branding_agents.make_color_system_builder, ColorPaletteSystemOutput),
     ("typography_builder", branding_agents.make_typography_builder, TypographySystemOutput),
@@ -141,7 +141,7 @@ _CASES: tuple[tuple[str, Callable[[], Any], type], ...] = (
     (
         "design_system_codifier",
         branding_agents.make_design_system_codifier,
-        DesignSystemDefinitionOutput,
+        DesignSystemDefinition,
     ),
     (
         "brand_experience_principler",
@@ -213,15 +213,18 @@ _MODEL_ROUTED_CLASS_NAMES: frozenset[str] = frozenset(
     }
 )
 # Structured-output models with every field optional/default-constructible —
-# currently only BrandDiscoveryAudit, collapsed to a single soft model (used
-# both as discovery_auditor's structured_output and as
-# StrategicCoreOutput.brand_discovery's default_factory) rather than split
-# into a strict agent-facing twin. The dummy's generic unrouted fallback
-# payload validates against these just as happily as a routed one, so they
-# can't serve as routing evidence for test_generic_prompt_payload_is_rejected_by_every_schema
-# either — excluded here for an analogous reason to the model-routed classes
-# above, via a different mechanism (schema permissiveness, not routing).
-_PERMISSIVE_CLASS_NAMES: frozenset[str] = frozenset({"BrandDiscoveryAudit"})
+# BrandDiscoveryAudit, CreativeRefinementDecision, and DesignSystemDefinition,
+# each collapsed (Story 3b) to a single soft model used both as its agent's
+# structured_output and as the corresponding phase output's default_factory
+# merge target, rather than split into a strict agent-facing twin. The
+# dummy's generic unrouted fallback payload validates against these just as
+# happily as a routed one, so they can't serve as routing evidence for
+# test_generic_prompt_payload_is_rejected_by_every_schema either — excluded
+# here for an analogous reason to the model-routed classes above, via a
+# different mechanism (schema permissiveness, not routing).
+_PERMISSIVE_CLASS_NAMES: frozenset[str] = frozenset(
+    {"BrandDiscoveryAudit", "CreativeRefinementDecision", "DesignSystemDefinition"}
+)
 
 _TEXT_ROUTED_CASES: tuple[tuple[str, Callable[[], Any], type], ...] = tuple(
     case

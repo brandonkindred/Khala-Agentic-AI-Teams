@@ -127,7 +127,11 @@ class _CiteFirstPrefixed(DummyLLMClient):
             # not the synthetic content's "line" token, so the test stays robust
             # to changes in the filler format. The run-level assertion that cited
             # lines equal the segments' own start_lines confirms each is in range.
-            m = re.search(r"^[ ]*(\d+)[:|] ", prompt, re.M)
+            # This prompt is FileSegment.prompt_content (partial-segment
+            # rendering), which never carries a change-surface ``+``/``>``
+            # marker; the optional ``[+>]`` here only mirrors the production
+            # gutter parsers' tolerance and is not itself exercised.
+            m = re.search(r"^[+>]?[ ]*(\d+)[:|] ", prompt, re.M)
             assert m is not None, "split segments must render original-line prefixes"
             self._tls.cited = int(m.group(1))
         return super().complete(prompt, **kwargs)

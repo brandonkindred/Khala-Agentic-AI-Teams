@@ -31,7 +31,14 @@ from .models import (
 # First capture: the original line number embedded in a pre-numbered line
 # (live ``N| `` gutter, or legacy ``N: ``). Optional leading spaces are
 # width-padding on the live format, not source indent.
-_PRENUMBERED_LINE_RE = re.compile(r"^[ ]*(\d+)(?::|\|)")
+# Optional leading ``[+>]`` tolerates a change-surface marker column
+# (``+ 9| code``) so only the digit run is captured — the recovered line number
+# is identical with or without the marker. The delimiter alternation consumes
+# the trailing gutter space (``| `` / ``: ``) for parity with the equivalent
+# patterns in ``function_boundaries.py`` and ``mapping.py``; every rendered
+# gutter carries that space (``_NUMBERED_LINE_SEP``), so requiring it never
+# drops a real pre-numbered line.
+_PRENUMBERED_LINE_RE = re.compile(r"^[+>]?[ ]*(\d+)(?:: |\| )")
 
 # Suffix that ``ReviewChunk.paths_label`` appends to partial segments; stripped
 # when the model echoes it back inside an issue's file_path.

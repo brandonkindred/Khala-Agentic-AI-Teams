@@ -594,6 +594,56 @@ def load_design_attempt_checkpoint(
     return checkpoint
 
 
+def delete_design_attempt_checkpoint(run_id: str, cycle_scope: str, generation: int) -> None:
+    """Clear a design-attempt checkpoint on its attempt's terminal outcome (``ADR-012`` §4).
+
+    Preconditions:
+        ``cycle_scope`` is the caller's own recovered per-cycle correlation
+        id (never ``None`` — callers gate on ``checkpoint_enabled`` first, so
+        this is never invoked when recovery failed). ``generation`` is the
+        fencing generation the calling workflow incarnation was dispatched
+        with.
+    Postconditions:
+        Fencing-checks first, exactly like ``persist_design_attempt_checkpoint``
+        (see that function's docstring for the full non-atomicity rationale,
+        which applies verbatim here): raises a non-retryable
+        ``ApplicationError`` instead of writing when ``generation`` is stale.
+        This matters here for a different reason than on the write side — a
+        stale-generation execution belongs to a superseded run incarnation,
+        and since ``cycle_scope`` is derived only from ``run_id``/cycle index
+        (never generation — see ``_infer_cycle_scope_from_activity_context``),
+        a restart can in principle reuse the same field key; skipping the
+        delete on a stale check keeps a superseded execution from clobbering
+        a newer incarnation's own checkpoint under that key. Otherwise clears
+        the ``f"{_DESIGN_ATTEMPT_CHECKPOINT_FIELD_PREFIX}{cycle_scope}"``
+        field on ``run_id``'s job record via ``_persist_run_state`` — a JSONB
+        partial-merge write of ``None``, which ``load_design_attempt_checkpoint``'s
+        own falsy check on read (``if not raw: return None``) treats
+        identically to a wholly-absent field, so this is read-equivalent to
+        true deletion without needing a new storage primitive.
+
+        Unlike ``persist_design_attempt_checkpoint``, this function does
+        **not** itself swallow any failure — it raises on both a stale/lookup
+        fencing failure and a write failure, exactly like the write side.
+        Cleanup's unconditionally-best-effort policy (per ``ADR-012``'s
+        "best-effort... inert clutter, not a correctness hazard" framing) is
+        the caller's responsibility to apply, mirroring the existing division
+        of labor between ``persist_design_attempt_checkpoint`` (raises) and
+        the ``_write_checkpoint`` closure in ``run_design_attempt_activity``
+        (decides what to swallow).
+    """
+    from investment_team.strategy_lab.orchestrator_api import _persist_run_state
+
+    # Nothing has been written yet by this call, so a lookup failure is safe
+    # to retry -- same rationale as persist_design_attempt_checkpoint's own
+    # pre-write check.
+    _check_generation_fencing(run_id, generation, retry_on_lookup_failure=True)
+    _persist_run_state(
+        run_id,
+        {f"{_DESIGN_ATTEMPT_CHECKPOINT_FIELD_PREFIX}{cycle_scope}": None},
+    )
+
+
 _DESIGN_CONTEXT_WIRE_KEYS = ("rounds", "critiques", "stop_reason", "loop_telemetry")
 
 
@@ -910,6 +960,24 @@ def run_design_attempt_activity(params: Dict[str, Any]) -> Dict[str, Any]:
         Regardless of whether this execution resumed or ran Phase 1 fresh, a
         new checkpoint is (best-effort) written at the design/synthesis
         boundary for a *future* crash to resume from.
+
+        Checkpoint cleanup (``ADR-012`` §4): on every terminal outcome of
+        this attempt -- ``"record"``, ``"reentry"``, ``"skipped"``, or a
+        non-retryable mapped error -- this attempt's checkpoint (if any) is
+        deleted before returning/raising, so a subsequent, different
+        ``design_attempt`` index never has a stale checkpoint left behind to
+        (incorrectly) find. Cleanup does **not** fire on cancellation
+        (``CancelledError``) or a *retryable* mapped error (the
+        ``StrategyLabLLMError`` "exhausted"/"budget_exhausted" case) --
+        Temporal will retry this same attempt in both cases, and the
+        checkpoint is exactly what the retry needs to resume past Phase 1
+        instead of redoing it. Cleanup is unconditionally best-effort: unlike
+        the checkpoint *write*, a cleanup failure (stale fencing, a
+        job-service error) is always logged and swallowed, never propagated
+        -- an orphaned checkpoint is inert clutter (never legitimately
+        re-read once this ``design_attempt`` index is behind the workflow),
+        not a correctness hazard, so it must never turn an already-decided
+        terminal outcome into an activity failure.
     Invariants:
         The returned ``convergence_tracker_state``/``gate_results``/
         ``budget_calls`` reflect exactly this attempt's mutations layered on
@@ -1141,6 +1209,41 @@ def run_design_attempt_activity(params: Dict[str, Any]) -> Dict[str, Any]:
                 exc_info=True,
             )
 
+    def _delete_checkpoint() -> None:
+        """Best-effort checkpoint cleanup on a terminal outcome (``ADR-012`` §4).
+
+        Preconditions:
+            Called from exactly one of this attempt's terminal-outcome sites:
+            a ``"record"`` return, a ``"reentry"`` return, a ``"skipped"``
+            return, or immediately before re-raising a non-retryable mapped
+            error. Never called for cancellation or a retryable mapped error
+            — those are not terminal outcomes of the attempt in the sense
+            ``ADR-012`` §4 means (a retryable error means Temporal will retry
+            this same attempt, which still needs the checkpoint to resume
+            from).
+        Postconditions:
+            No-op when ``checkpoint_enabled`` is ``False``. Otherwise clears
+            this attempt's checkpoint. Unlike ``_write_checkpoint``, every
+            failure — fencing or write — is logged and swallowed
+            unconditionally, never re-raised: cleanup of an already-decided
+            terminal outcome must never turn that outcome into an activity
+            failure, and an orphaned checkpoint left by a failed delete is
+            inert clutter (never re-read once this ``design_attempt`` index
+            is behind the workflow), not a correctness hazard.
+        """
+        if not checkpoint_enabled:
+            return
+        try:
+            delete_design_attempt_checkpoint(run_id, cycle_scope, generation)
+        except Exception as exc:  # noqa: BLE001 -- unconditionally best-effort, see docstring
+            logger.warning(
+                "design attempt checkpoint delete failed for run %s attempt %s: %s",
+                run_id,
+                design_attempt_index,
+                exc,
+                exc_info=True,
+            )
+
     def _drift_to_wire(collector: _DriftCollector) -> Dict[str, Any]:
         return {
             "spec_history": [r.model_dump(mode="json") for r in collector.spec_history],
@@ -1149,6 +1252,7 @@ def run_design_attempt_activity(params: Dict[str, Any]) -> Dict[str, Any]:
         }
 
     def _skipped_outcome() -> Dict[str, Any]:
+        _delete_checkpoint()
         return {
             "kind": "skipped",
             "reason": "no_market_data",
@@ -1205,6 +1309,7 @@ def run_design_attempt_activity(params: Dict[str, Any]) -> Dict[str, Any]:
         # it to the real Temporal signal only here, at the activity boundary.
         raise CancelledError("Strategy Lab design attempt cancelled before completion") from None
     except SpecImplementabilityError as exc:
+        _delete_checkpoint()
         design_context_wire = _design_context_to_wire(exc.design_context)
         return {
             "kind": "reentry",
@@ -1229,9 +1334,15 @@ def run_design_attempt_activity(params: Dict[str, Any]) -> Dict[str, Any]:
         # HTTPException status is still a deep failure.
         if exc.status_code == 502:
             return _skipped_outcome()
-        raise _map_exception_to_application_error(exc) from exc
+        mapped = _map_exception_to_application_error(exc)
+        if mapped.non_retryable:
+            _delete_checkpoint()
+        raise mapped from exc
     except Exception as exc:  # noqa: BLE001
-        raise _map_exception_to_application_error(exc) from exc
+        mapped = _map_exception_to_application_error(exc)
+        if mapped.non_retryable:
+            _delete_checkpoint()
+        raise mapped from exc
 
     # Primary "no market data" signal: ``_fetch_market_data``/
     # ``_fetch_market_data_for_synthesis`` never raise on a failed/empty
@@ -1247,6 +1358,7 @@ def run_design_attempt_activity(params: Dict[str, Any]) -> Dict[str, Any]:
     ):
         return _skipped_outcome()
 
+    _delete_checkpoint()
     return {
         "kind": "record",
         "record": record.model_dump(mode="json"),
