@@ -1418,7 +1418,11 @@ def _build_tools(index: CodebaseIndex) -> List[Callable[..., Any]]:
             "Error: ..." message if the path is unknown or ambiguous. Never
             raises (returning ``status="error"`` instead of raising keeps a
             bad path a self-correcting tool message rather than an error that
-            aborts the agent loop).
+            aborts the agent loop). Every call is tracked: a call repeated
+            with identical arguments beyond ``_MAX_DUPLICATE_TOOL_CALLS``
+            still returns this, with a note appended saying so; once this
+            run's ``_MAX_TOTAL_TOOL_CALLS`` budget is exhausted, the text is
+            a ``status="error"`` stop directive instead (see ``_track_call``).
         """
         skip, note = _track_call("read_file", path)
         if skip:
@@ -1456,6 +1460,11 @@ def _build_tools(index: CodebaseIndex) -> List[Callable[..., Any]]:
 
         Returns:
             A header plus ``N| content`` lines, or an ``Error: ...`` message.
+            A call repeated with identical arguments beyond
+            ``_MAX_DUPLICATE_TOOL_CALLS`` still returns this, with a note
+            appended saying so; once this run's ``_MAX_TOTAL_TOOL_CALLS``
+            budget is exhausted, this becomes a stop directive instead (see
+            ``_track_call``).
         """
         skip, note = _track_call("read_lines", path, start, end)
         if skip:
@@ -1484,6 +1493,11 @@ def _build_tools(index: CodebaseIndex) -> List[Callable[..., Any]]:
 
         Returns:
             Header plus ``N| content`` lines, or an ``Error: ...`` message.
+            A call repeated with identical arguments beyond
+            ``_MAX_DUPLICATE_TOOL_CALLS`` still returns this, with a note
+            appended saying so; once this run's ``_MAX_TOTAL_TOOL_CALLS``
+            budget is exhausted, this becomes a stop directive instead (see
+            ``_track_call``).
         """
         skip, note = _track_call("read_function", path, name_or_line)
         if skip:
@@ -1514,7 +1528,11 @@ def _build_tools(index: CodebaseIndex) -> List[Callable[..., Any]]:
         """List every file path available to read in the code under review.
 
         Returns:
-            One path per line. Read any of them with read_file(path).
+            One path per line. Read any of them with read_file(path). A call
+            repeated beyond ``_MAX_DUPLICATE_TOOL_CALLS`` still returns this,
+            with a note appended saying so; once this run's
+            ``_MAX_TOTAL_TOOL_CALLS`` budget is exhausted, this becomes a
+            stop directive instead (see ``_track_call``).
         """
         skip, note = _track_call("list_files")
         if skip:
@@ -1544,7 +1562,12 @@ def _build_tools(index: CodebaseIndex) -> List[Callable[..., Any]]:
             query: The substring to search for (e.g. a function or class name).
 
         Returns:
-            Matching "path:line: text" lines, or a message that nothing matched.
+            Matching "path:line: text" lines, or a message that nothing
+            matched. A call repeated with an identical query beyond
+            ``_MAX_DUPLICATE_TOOL_CALLS`` still returns this, with a note
+            appended saying so; once this run's ``_MAX_TOTAL_TOOL_CALLS``
+            budget is exhausted, this becomes a stop directive instead (see
+            ``_track_call``).
         """
         skip, note = _track_call("search_codebase", query)
         if skip:
@@ -1575,7 +1598,11 @@ def _build_tools(index: CodebaseIndex) -> List[Callable[..., Any]]:
             The name and line range of the innermost enclosing function, method,
             or class (Python files), or the start line of the best-guess enclosing
             construct (all other languages). Returns an error string if the path
-            is not readable; never raises.
+            is not readable; never raises. A call repeated with identical
+            arguments beyond ``_MAX_DUPLICATE_TOOL_CALLS`` still returns this,
+            with a note appended saying so; once this run's
+            ``_MAX_TOTAL_TOOL_CALLS`` budget is exhausted, this becomes a
+            stop directive instead (see ``_track_call``).
         """
         skip, note = _track_call("find_function_at_line", path, line_number)
         if skip:
@@ -1628,7 +1655,12 @@ def _build_tools(index: CodebaseIndex) -> List[Callable[..., Any]]:
 
         Returns:
             Newline-separated reference blocks with excerpts, or a message
-            that nothing matched / access is limited to this submission.
+            that nothing matched / access is limited to this submission. A
+            call repeated with an identical symbol beyond
+            ``_MAX_DUPLICATE_TOOL_CALLS`` still returns this, with a note
+            appended saying so; once this run's ``_MAX_TOTAL_TOOL_CALLS``
+            budget is exhausted, this becomes a stop directive instead (see
+            ``_track_call``).
         """
         skip, note = _track_call("find_references", symbol)
         if skip:
