@@ -28,6 +28,7 @@ from software_engineering_team.api.coding_team_state import (
 from software_engineering_team.code_review_agent.change_surface import (
     ChangeSurface,
     build_change_surface_from_patches,
+    render_removed_body,
 )
 from software_engineering_team.github_source import (
     GitHubAPIError,
@@ -394,6 +395,31 @@ def _build_review_code(files: List[Any]) -> ReviewCode:
             continue
         rendered_by_path[f.filename] = rendered
     return ReviewCode(rendered_by_path, len(rendered_by_path))
+
+
+def _build_replaced_content(files: List[Any]) -> Dict[str, str]:
+    """Derive each changed file's pre-change body from its diff's removed side.
+
+    Built entirely from the already-fetched ``files`` payload (each file's
+    ``.patch``) -- no extra GitHub read. Mirrors ``_build_review_code``'s
+    eligibility filter (skip files with no patch or status == removed) so the
+    returned keyset is a subset of what ``hunk_files``/``head_files`` would
+    cover for the same PR.
+
+    Postconditions:
+        - Returns ``{path: removed-side body}`` for every changed file whose
+          removed-side rendering is non-empty. A file whose patch adds lines
+          only (no removed/context rows) is simply absent, not mapped to "".
+    """
+    replaced_by_path: Dict[str, str] = {}
+    for f in files:
+        if not f.patch or f.status == _FILE_STATUS_REMOVED:
+            continue
+        rendered = render_removed_body(f.patch)
+        if not rendered:
+            continue
+        replaced_by_path[f.filename] = rendered
+    return replaced_by_path
 
 
 def _build_change_surface_for_reviewable(
@@ -820,6 +846,11 @@ def _run_reviewer(
           contextvar (``CodeReviewAgent.run`` -> ``llm_attribution(job_id=...)``)
           and so job progress/outage recording stays keyed to the right job.
     Postconditions:
+        - ``replaced_content`` (each changed file's pre-change body, derived
+          once from ``files``' diff patches via ``_build_replaced_content``,
+          no extra GitHub read) is forwarded to every attempt when non-empty;
+          omitted entirely otherwise so ``CodeReviewInput.replaced_content``
+          stays at its ``None`` default.
         - On success, returns the single attempt's output unchanged when only
           one ran (identical behavior/kwargs to a single-mode dispatch for
           the all-whole-file, all-surface, and all-hunk cases). When two ran,
@@ -839,6 +870,7 @@ def _run_reviewer(
         agent="code_review",
         label=f"Reviewing PR #{pr_number}",
     )
+    replaced_content = _build_replaced_content(files)
     common = dict(
         repo_reader=repo_reader,
         task_description=f"Review pull request #{pr_number}: {pr.title}",
@@ -846,6 +878,8 @@ def _run_reviewer(
         progress_callback=pr_bridge,
         job_id=job_id,
     )
+    if replaced_content:
+        common["replaced_content"] = replaced_content
     # One reviewer call per non-empty source; see the docstring above.
     attempts: List[Dict[str, Any]] = []
     surface = change_surface

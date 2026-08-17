@@ -5,9 +5,11 @@ from __future__ import annotations
 from software_engineering_team.code_review_agent.change_surface import (
     extract_touched_lines,
     render_patch_hunks,
+    render_removed_body,
 )
 from software_engineering_team.github_source.pr_review_mapping import (
     render_annotated_hunks,
+    render_removed_hunks,
 )
 
 # Realistic single-file hunk: context, removed, added.
@@ -32,6 +34,27 @@ def test_render_patch_hunks_matches_annotated_helper() -> None:
 def test_render_patch_hunks_empty_patch() -> None:
     assert render_patch_hunks("") == ""
     assert render_patch_hunks("   \n") == render_annotated_hunks("   \n")
+
+
+def test_render_removed_body_matches_removed_helper() -> None:
+    assert render_removed_body(_SINGLE_FILE_PATCH) == render_removed_hunks(_SINGLE_FILE_PATCH)
+
+
+def test_render_removed_body_empty_patch() -> None:
+    assert render_removed_body("") == ""
+    assert render_removed_body("   \n") == render_removed_hunks("   \n")
+
+
+def test_render_removed_body_diverges_from_annotated_hunks() -> None:
+    """Lock the removed-side (before-image) vs annotated (after-image) split."""
+    removed = render_removed_body(_SINGLE_FILE_PATCH)
+    annotated = render_patch_hunks(_SINGLE_FILE_PATCH)
+    # Removed body: old-side context + deleted lines, no line-number gutter.
+    assert removed == "keep\ndeleted\ntrail"
+    assert "|" not in removed
+    # Annotated: new-side context + added lines, N| -gutter.
+    assert "added" in annotated
+    assert "deleted" not in annotated
 
 
 def test_touched_set_diverges_from_annotated_context_lines() -> None:

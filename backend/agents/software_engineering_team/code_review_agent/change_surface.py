@@ -31,6 +31,7 @@ from software_engineering_team.github_source.pr_review_mapping import (
     numbered_line_width,
     parse_valid_lines,
     render_annotated_hunks,
+    render_removed_hunks,
 )
 
 from .function_boundaries import (
@@ -47,6 +48,7 @@ __all__ = [
     "expand_touched_ranges",
     "extract_touched_lines",
     "render_patch_hunks",
+    "render_removed_body",
     "unified_diffs_from_pairs",
 ]
 
@@ -164,6 +166,22 @@ def render_patch_hunks(patch: str) -> str:
         - Never raises.
     """
     return render_annotated_hunks(patch or "")
+
+
+def render_removed_body(patch: str) -> str:
+    """Render one file's pre-change (removed-side) body from its unified patch.
+
+    Preconditions:
+        - ``patch`` is one file's unified-diff text (GitHub ``files[].patch``
+          style), or empty / blank for binary / oversized / unchanged files.
+
+    Postconditions:
+        - Return value is identical to ``render_removed_hunks(patch)`` for
+          every input (string equality).
+        - Empty or blank ``patch`` -> ``""``.
+        - Never raises.
+    """
+    return render_removed_hunks(patch or "")
 
 
 def unified_diffs_from_pairs(

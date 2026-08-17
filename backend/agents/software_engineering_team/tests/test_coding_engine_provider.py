@@ -104,3 +104,55 @@ def test_run_pr_code_review_whole_file_mode_forwards_reader(monkeypatch) -> None
     # A live GitHub reader cannot cross the Temporal boundary, so the provider
     # forces the in-process path whenever a reader is supplied.
     assert out.force_in_process is True
+
+
+def test_run_pr_code_review_forwards_replaced_content(monkeypatch) -> None:
+    """``replaced_content`` (the diff-derived before-image) is forwarded to
+    ``CodeReviewInput`` unchanged, additively alongside ``files``."""
+    import software_engineering_team.code_review_agent as cra
+
+    class _FakeAgent:
+        def __init__(self, llm_client=None, *, force_in_process=False):
+            pass
+
+        def run(self, review_input, **kwargs):
+            return types.SimpleNamespace(issues=[], review_input=review_input)
+
+    monkeypatch.setattr(cra, "CodeReviewAgent", _FakeAgent)
+
+    before = {"a.py": "x = 0\n"}
+    out = SECodeEngineProvider().run_pr_code_review(
+        files={"a.py": "x = 1\n"},
+        pre_numbered=False,
+        task_description="d",
+        task_requirements="r",
+        language="python",
+        progress_callback="cb",
+        replaced_content=before,
+    )
+    assert out.review_input.replaced_content == before
+    assert out.review_input.files == {"a.py": "x = 1\n"}
+
+
+def test_run_pr_code_review_defaults_replaced_content_to_none(monkeypatch) -> None:
+    """Omitting ``replaced_content`` behaves exactly as before its introduction."""
+    import software_engineering_team.code_review_agent as cra
+
+    class _FakeAgent:
+        def __init__(self, llm_client=None, *, force_in_process=False):
+            pass
+
+        def run(self, review_input, **kwargs):
+            return types.SimpleNamespace(issues=[], review_input=review_input)
+
+    monkeypatch.setattr(cra, "CodeReviewAgent", _FakeAgent)
+
+    out = SECodeEngineProvider().run_pr_code_review(
+        files={"a.py": "x = 1\n"},
+        pre_numbered=False,
+        task_description="d",
+        task_requirements="r",
+        language="python",
+        progress_callback="cb",
+    )
+    assert out.review_input.replaced_content is None
