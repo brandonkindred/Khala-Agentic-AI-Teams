@@ -105,6 +105,11 @@ def test_complete_json_accepts_schema_kwarg_as_noop():
     assert out == {"answer": 42}
 
 
+def test_claude_supports_prompt_caching_is_true():
+    client, _ = _make_client(_text_message("ok"))
+    assert client.supports_prompt_caching() is True
+
+
 def test_complete_json_never_sends_temperature():
     client, capture = _make_client(_text_message('{"ok": true}'))
     client.complete_json("q", objective="test", temperature=0.9)
@@ -262,6 +267,90 @@ def test_to_anthropic_messages_drops_empty_id_tool_result():
         for m in msgs
     )
     assert not has_tool_result
+
+
+def test_to_anthropic_messages_system_string_unchanged_without_breakpoint():
+    """No CacheBreakpoint anywhere -> identical str-typed system, unaffected by
+    the caching feature (regression guard for the pre-caching behavior)."""
+    from llm_service.clients.claude import _to_anthropic_messages
+
+    system, _msgs = _to_anthropic_messages(
+        [
+            {"role": "system", "content": "You are terse."},
+            {"role": "user", "content": "hi"},
+        ]
+    )
+    assert system == "You are terse."
+    assert isinstance(system, str)
+
+
+def test_to_anthropic_messages_translates_cache_breakpoint_to_cache_control_block():
+    from llm_service.cache_breakpoint import CacheBreakpoint
+    from llm_service.clients.claude import _to_anthropic_messages
+
+    system, _msgs = _to_anthropic_messages(
+        [
+            {
+                "role": "system",
+                "content": [CacheBreakpoint("stable prefix"), "\n\ntrailer text"],
+            },
+            {"role": "user", "content": "hi"},
+        ]
+    )
+    assert system == [
+        {"type": "text", "text": "stable prefix", "cache_control": {"type": "ephemeral"}},
+        {"type": "text", "text": "\n\ntrailer text"},
+    ]
+
+
+def test_to_anthropic_messages_list_system_without_breakpoint_still_flattens_to_str():
+    """A list-typed system content with no CacheBreakpoint still renders as a
+    plain joined string (the str/list branch point is CacheBreakpoint presence,
+    not content shape)."""
+    from llm_service.clients.claude import _to_anthropic_messages
+
+    system, _msgs = _to_anthropic_messages(
+        [
+            {"role": "system", "content": ["lead", "trail"]},
+            {"role": "user", "content": "hi"},
+        ]
+    )
+    assert system == "lead\n\ntrail"
+
+
+def test_json_system_appends_instruction_to_block_list_system():
+    from llm_service.clients.claude import _JSON_ONLY_INSTRUCTION, _json_system
+
+    blocks = [{"type": "text", "text": "stable", "cache_control": {"type": "ephemeral"}}]
+    result = _json_system(blocks, tools=None)
+    assert result == [*blocks, {"type": "text", "text": _JSON_ONLY_INSTRUCTION}]
+
+
+def test_json_system_leaves_block_list_system_unchanged_when_tools_present():
+    from llm_service.clients.claude import _json_system
+
+    blocks = [{"type": "text", "text": "stable", "cache_control": {"type": "ephemeral"}}]
+    assert _json_system(blocks, tools=[{"name": "f"}]) == blocks
+
+
+def test_chat_wire_payload_carries_cache_control_for_breakpoint_system():
+    from llm_service.cache_breakpoint import CacheBreakpoint
+
+    client, capture = _make_client(_text_message("hi there"))
+    client.chat(
+        [
+            {"role": "system", "content": [CacheBreakpoint("stable prefix"), "more"]},
+            {"role": "user", "content": "hi"},
+        ],
+        objective="test",
+        response_format="text",
+    )
+    assert capture["system"][0] == {
+        "type": "text",
+        "text": "stable prefix",
+        "cache_control": {"type": "ephemeral"},
+    }
+    assert capture["system"][1] == {"type": "text", "text": "more"}
 
 
 def test_complete_json_requires_objective():

@@ -22,7 +22,7 @@ backend/
                                 # and QA sub-teams
     planning_team/           # Client-facing discovery/PRD team (/api/planning)
     product_delivery/        # Persistent Product Delivery Loop (/api/product-delivery)
-    llm_service/             # Centralized LLM client (Ollama, Claude)
+    llm_service/             # Centralized LLM client (Ollama, Claude, RunPod)
     agent_platform/          # In-process platform: registry, console, sandbox, Studio authoring
     agent_cognition/         # Memory, rules, and tools substrate for generated agents
     agent_team_studio/       # Infra + domain apps: provisioning, agentic compose, personas
