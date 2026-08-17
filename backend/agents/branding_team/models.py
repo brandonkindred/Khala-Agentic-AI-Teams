@@ -26,14 +26,14 @@ instantiated. ``isinstance(CoreValueOutput(...), CoreValue)`` holds because
 the generated class is a real subclass of the soft base.
 
 This pattern does not apply to the Phase 2 cumulative-inheritance chain
-(``BrandStoryOutput`` → … → ``WritingGuidelinesOutput``) or to remaining
-hand-written sibling pairs that were never collapsed
-(``ChannelGuideline`` / ``ChannelGuidelineOutput``, and the mood-board /
-design-system agent-output wrappers). ``BrandDiscoveryAudit`` was fully
-collapsed to a single model (used both as ``discovery_auditor``'s
-``structured_output`` and as ``StrategicCoreOutput.brand_discovery``) rather
-than split into this soft/strict pair, since a no-argument-constructible
-default is needed either way.
+(``BrandStoryOutput`` → … → ``WritingGuidelinesOutput``) or to the remaining
+hand-written sibling pair that was never collapsed (``ChannelGuideline`` /
+``ChannelGuidelineOutput``). ``BrandDiscoveryAudit``, ``MoodBoardConcept``,
+``CreativeRefinementDecision``, and ``DesignSystemDefinition`` were each
+fully collapsed to a single model (used both as their agent's
+``structured_output`` and as the corresponding phase output's
+``default_factory`` merge target) rather than split into this soft/strict
+pair, since a no-argument-constructible default is needed either way.
 """
 
 from __future__ import annotations
@@ -1239,12 +1239,16 @@ class BrandBook(BaseModel):
 
 
 class MoodBoardConcept(BaseModel):
-    """A single mood-board direction; merge target for ``MoodBoardConceptOutput``.
+    """A single mood-board direction.
 
-    Field/type identical to ``MoodBoardConceptOutput`` — same names and types on
-    both sides, differing only in default/required strictness (this side keeps
-    empty defaults so partial fragments validate). Safe to collapse (Story 3b
-    Step 2).
+    Collapsed twin (Story 3b Step 2): used directly both as
+    ``MoodBoardConceptualist_*``'s ``structured_output=`` (agents.py) and as
+    the nested item type for ``MoodBoardCandidatesOutput.mood_board_candidates``
+    and ``VisualIdentityOutput.mood_board_candidates``, following the same
+    single-model pattern as ``BrandDiscoveryAudit`` — see the module
+    docstring. The former strict ``MoodBoardConceptOutput`` twin (Step 1
+    finding: field/type identical, differing only in default/required
+    strictness) has been removed.
     """
 
     title: str
@@ -1257,9 +1261,14 @@ class MoodBoardConcept(BaseModel):
 class CreativeRefinementDecision(BaseModel):
     """Phase 3 converge node output: which moodboard direction won and why.
 
-    Field/type identical to ``CreativeRefinementDecisionOutput`` — same names
-    and types on both sides, differing only in default/required strictness.
-    Safe to collapse (Story 3b Step 2).
+    Collapsed twin (Story 3b Step 2): used directly both as
+    ``converge_decider``'s ``structured_output=`` (agents.py) and as
+    ``VisualIdentityOutput.creative_refinement``'s ``default_factory`` merge
+    target, following the same single-model pattern as ``BrandDiscoveryAudit``
+    — see the module docstring. The former strict
+    ``CreativeRefinementDecisionOutput`` twin (Step 1 finding: field/type
+    identical, differing only in default/required strictness) has been
+    removed.
     """
 
     winning_candidate_title: str = ""
@@ -1290,11 +1299,16 @@ class WritingGuidelines(BaseModel):
 
 
 class DesignSystemDefinition(BaseModel):
-    """Codified design system; merge target for ``DesignSystemDefinitionOutput``.
+    """Codified design system.
 
-    Field/type identical to ``DesignSystemDefinitionOutput`` — same names and
-    types on both sides, differing only in default/required strictness. Safe
-    to collapse (Story 3b Step 2).
+    Collapsed twin (Story 3b Step 2): used directly both as
+    ``design_system_codifier``'s ``structured_output=`` (agents.py) and as
+    ``VisualIdentityOutput.design_system``'s ``default_factory`` merge
+    target, following the same single-model pattern as ``BrandDiscoveryAudit``
+    — see the module docstring. The former strict
+    ``DesignSystemDefinitionOutput`` twin (Step 1 finding: field/type
+    identical, differing only in default/required strictness) has been
+    removed.
     """
 
     design_principles: List[str] = Field(default_factory=list)
@@ -1309,38 +1323,16 @@ class DesignSystemDefinition(BaseModel):
 # Agent schemas below require content so Strands retries blank output.
 
 
-class MoodBoardConceptOutput(BaseModel):
-    """Agent-facing moodboard concept schema for MoodBoardConceptualist_*."""
-
-    title: str = Field(min_length=1)
-    visual_direction: str = Field(min_length=1)
-    color_story: List[str] = Field(min_length=1)
-    typography_direction: str = Field(min_length=1)
-    image_style: List[str] = Field(min_length=1)
-
-
 class MoodBoardCandidatesOutput(BaseModel):
     """Agent-facing CreativeDirector schema: collected moodboard candidates.
 
     ``min_length``/``max_length`` encode the diverge fan-out of 2–3 concepts.
-    Nested entries use ``MoodBoardConceptOutput`` so blank concepts fail validation.
+    Nested entries use ``MoodBoardConcept`` (the collapsed twin — see that
+    class's docstring), so this list's own cardinality bound is what guards
+    against a blank collection; individual concepts keep their defaults.
     """
 
-    mood_board_candidates: List[MoodBoardConceptOutput] = Field(min_length=2, max_length=3)
-
-
-class CreativeRefinementDecisionOutput(BaseModel):
-    """Agent-facing converge_decider schema.
-
-    Field-for-field twin of ``CreativeRefinementDecision`` with required content.
-    """
-
-    winning_candidate_title: str = Field(min_length=1)
-    scoring_criteria: List[str] = Field(min_length=1)
-    scores_by_candidate: Dict[str, float] = Field(min_length=1)
-    rationale: str = Field(min_length=1)
-    workshop_prompts: List[str] = Field(min_length=1)
-    decision_criteria: List[str] = Field(min_length=1)
+    mood_board_candidates: List[MoodBoardConcept] = Field(min_length=2, max_length=3)
 
 
 class LogoSuiteOutput(BaseModel):
@@ -1398,17 +1390,6 @@ class VoiceToneOutput(BaseModel):
     voice_tone_spectrum: List[VoiceToneEntryOutput] = Field(min_length=1)
     language_dos: List[str] = Field(min_length=4, max_length=5)
     language_donts: List[str] = Field(min_length=4, max_length=5)
-
-
-class DesignSystemDefinitionOutput(BaseModel):
-    """Agent-facing design_system_codifier schema.
-
-    Field-for-field twin of ``DesignSystemDefinition`` with required content.
-    """
-
-    design_principles: List[str] = Field(min_length=1)
-    foundation_tokens: List[str] = Field(min_length=1)
-    component_standards: List[str] = Field(min_length=1)
 
 
 # ---------------------------------------------------------------------------
