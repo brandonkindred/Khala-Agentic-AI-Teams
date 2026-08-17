@@ -590,12 +590,15 @@ export class AgentStudioPersonaComponent implements OnInit {
    * Preconditions: none (safe to call with no run).
    * Postconditions: when `run()` is set, navigates to
    *   `/agent-studio/persona-run/:runId` with that run's `run_id`. When `run()`
-   *   is null, does not navigate.
+   *   is null, does not navigate. A rejected navigation sets `error()` rather
+   *   than failing silently.
    */
   openFullAudit(): void {
     const id = this.run()?.run_id;
     if (!id) return;
-    void this.router.navigate(['/agent-studio', 'persona-run', id]);
+    this.router.navigate(['/agent-studio', 'persona-run', id]).catch(() => {
+      this.error.set('Could not open the full audit.');
+    });
   }
 
   /**

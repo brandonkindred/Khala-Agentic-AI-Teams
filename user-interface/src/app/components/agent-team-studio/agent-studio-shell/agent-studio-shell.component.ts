@@ -230,8 +230,11 @@ export class AgentStudioShellComponent {
    * Preconditions: `draftId` names a draft the current user owns (rows in
    *   `LoadDraftMenuComponent` only ever come from that user's own list).
    * Postconditions: on success, `state` is hydrated from the draft's payload
-   *   and the stepper is moved to the furthest reachable stage. If a nested
-   *   child (the persona-run audit) is showing, the router returns to this
+   *   and the stepper is moved to the furthest reachable stage. The current
+   *   persona live-run ID is cleared (`state.setPersonaLiveRunId(null)`)
+   *   because a persisted draft never contains an in-progress live run; this
+   *   prevents Stage 4 from displaying a stale run from the previous session.
+   *   If a nested child (the persona-run audit) is showing, the router returns to this
    *   shell's default child so the restored stage is visible. `loadingDraft()`
    *   stays `true` for the entire chain, including the nested process-status
    *   check, so a second selection can't race it. On failure, `loadingDraft()`
