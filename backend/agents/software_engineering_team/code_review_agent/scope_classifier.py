@@ -58,7 +58,7 @@ from llm_service.interface import LLMClient
 from shared.concurrency import parallel_map
 from software_engineering_team.shared.context_sizing import parse_env_int
 
-from ._prompt_utils import _cap_context_field, _render_finding_block
+from ._prompt_utils import _cap_context_field, _render_finding_block, _truncate_with_marker
 from .models import CodeReviewInput, CodeReviewIssue
 from .scope_filter import _is_unscripted_dummy
 
@@ -222,9 +222,7 @@ def _file_excerpt(file_path: str, files: Optional[Mapping[str, str]]) -> str:
     content = files.get(file_path) or ""
     if not content:
         return ""
-    if len(content) <= _FILE_EXCERPT_CHARS:
-        return content
-    return content[:_FILE_EXCERPT_CHARS] + _FILE_EXCERPT_TRUNCATION_MARKER
+    return _truncate_with_marker(content, _FILE_EXCERPT_CHARS, _FILE_EXCERPT_TRUNCATION_MARKER)
 
 
 def _build_classify_prompt(

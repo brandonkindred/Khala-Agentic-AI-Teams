@@ -52,6 +52,12 @@ def _sanitize_finding_field(text: str) -> str:
 def _render_finding_block(i: int, issue: CodeReviewIssue) -> List[str]:
     """Render one indexed finding block (anchor line + metadata) for the prompt.
 
+    Preconditions:
+        - ``i`` is an integer finding index.
+        - ``issue`` is a ``CodeReviewIssue`` exposing ``file_path``, ``line``,
+          ``severity``, ``category``, ``description``, and optional
+          ``suggestion``.
+
     Postconditions:
         - Returns the lines for finding ``i``: an ``--- Finding index i ---``
           anchor the verdict contract refers back to, a severity/category/
@@ -76,6 +82,23 @@ def _render_finding_block(i: int, issue: CodeReviewIssue) -> List[str]:
     return block
 
 
+def _truncate_with_marker(text: str, limit: int, marker: str) -> str:
+    """Return ``text`` unchanged within ``limit``, else a prefix plus ``marker``.
+
+    The single prefix-truncation primitive shared by the prompt-capping call
+    sites (``_cap_context_field`` here, ``scope_classifier._file_excerpt``), so
+    the "return the whole string, or a bounded prefix with a truncation marker"
+    rule lives in one place with its own contract.
+
+    Preconditions: ``text`` and ``marker`` are strings; ``limit >= 0``.
+    Postconditions: returns ``text`` when ``len(text) <= limit``; otherwise the
+        first ``limit`` characters followed by ``marker``. Never raises.
+    """
+    if len(text) <= limit:
+        return text
+    return text[:limit] + marker
+
+
 def _cap_context_field(text: str) -> str:
     """Truncate an inlined task/AC field to ``_CONTEXT_FIELD_CHARS``.
 
@@ -84,6 +107,4 @@ def _cap_context_field(text: str) -> str:
         a prefix of length ``_CONTEXT_FIELD_CHARS`` plus
         ``_CONTEXT_FIELD_TRUNCATION_MARKER``. Never raises.
     """
-    if len(text) <= _CONTEXT_FIELD_CHARS:
-        return text
-    return text[:_CONTEXT_FIELD_CHARS] + _CONTEXT_FIELD_TRUNCATION_MARKER
+    return _truncate_with_marker(text, _CONTEXT_FIELD_CHARS, _CONTEXT_FIELD_TRUNCATION_MARKER)

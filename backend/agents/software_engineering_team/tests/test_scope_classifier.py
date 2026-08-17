@@ -185,7 +185,7 @@ def test_non_positive_tuning_args_are_floored_not_raised() -> None:
     assert len(stub.calls) == 3
     assert all(v.in_scope is True for v in out)
 
-    # workers=0 would otherwise raise out of parallel_map; floored to 1.
+    # workers=-5 would otherwise raise out of parallel_map; floored to 1.
     stub2 = _Stub(_responder)
     out2 = classify_scope(issues, llm=stub2, max_findings_per_group=1, max_workers=-5)
     assert len(out2) == 3
