@@ -494,3 +494,9 @@ Expected: all PASS.
 - Return type: `Tuple[List[CodeReviewIssue], List[CodeReviewIssue]]`
 - Env vars: `CODE_REVIEW_ARCHITECTURE_CONSISTENCY_PASS`, `CODE_REVIEW_SIDE_EFFECT_IMPACT_PASS`
 - Merged user-prompt anchor: `"architecture_findings"/"side_effect_findings"`
+
+---
+
+## Status note (post-completion)
+
+This plan's Global Constraint against modifying Temporal activities/workflows applied only to this plan's own scope (the in-process coordinator). Temporal parity for the same merge order — a merged-pass activity plus a sequential combine → re-verify reorder, gated behind `_REORDERED_TAIL_PASSES_PATCH` for old-history replay compatibility — has since been completed as separate work; see `code_review_agent/temporal/workflows.py`'s module docstring for the durable-mode pipeline and `tests/test_code_review_temporal.py` for its replay/determinism coverage. Nothing in this document's tasks above changed as a result.
