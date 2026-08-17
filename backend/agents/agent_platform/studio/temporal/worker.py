@@ -1,40 +1,33 @@
 """Temporal worker bootstrap for the Agent Studio team.
 
 Exposes a no-arg ``start_agent_studio_temporal_worker_thread`` that the unified-API
-lifespan invokes at boot. Agent Studio is an in-process team (it is mounted directly
-on the unified API, not run as its own ``team_service`` container), so its worker runs
-inside the unified-API process — the same process that serves the HTTP handlers and
-that holds the shared :class:`~agent_platform.studio.service.AgentStudioService` singleton the
-activities delegate to.
-
-There is no ``is_temporal_enabled`` guard here: ``start_team_worker`` already
-no-ops when Temporal is unset, and authoring CRUD falls back to in-process
-``AgentStudioService`` when this worker is disabled or absent.
-``start_team_worker`` is idempotent per team, so calling this repeatedly
-(e.g. under uvicorn ``--reload``) is safe.
+lifespan invokes at boot. Authoring CRUD no longer registers any workflows or
+activities, so this entrypoint always returns ``False`` without starting a worker —
+Temporal is not required for conversations / clone / save. The lifespan hook is
+unchanged (gated on ``UNIFIED_API_AGENT_STUDIO_TEMPORAL_WORKER``); a false return
+there is a fully-functional mode, not a degraded state.
 """
 
 from __future__ import annotations
 
 import logging
 
-from agent_platform.studio.temporal import ACTIVITIES, TASK_QUEUE, WORKFLOWS
-from shared.temporal import start_team_worker
+from agent_platform.studio.temporal import TASK_QUEUE
 
 logger = logging.getLogger(__name__)
 
 
 def start_agent_studio_temporal_worker_thread() -> bool:
-    """Start the Agent Studio Temporal worker.
+    """No-op worker starter: authoring CRUD has no Temporal surface.
 
+    Preconditions:
+        - None.
     Postconditions:
-        - Returns ``True`` if a worker thread is running (or already running) on the
-          ``agent-studio-queue`` task queue. Safe to call multiple times — the
-          underlying ``start_team_worker`` is idempotent per team.
+        - Logs at INFO and returns ``False``. Never starts a worker thread.
+          Safe to call multiple times.
     """
-    return start_team_worker(
-        "agent_studio",
-        WORKFLOWS,
-        ACTIVITIES,
-        task_queue=TASK_QUEUE,
+    logger.info(
+        "Agent Studio has no Temporal authoring workflows; skipping worker on %s",
+        TASK_QUEUE,
     )
+    return False

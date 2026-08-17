@@ -35,10 +35,13 @@ def build_phase1_graph() -> Graph:
     ``positioning_synthesizer`` runs once all five have completed and
     synthesises their outputs into a positioning statement and brand promise.
 
-    Returns
-    -------
-    Graph
-        A callable ``Graph`` instance.
+    Preconditions:
+        None — the builder wires a fixed set of agent factories and takes no
+        arguments.
+    Postconditions:
+        Returns a built ``Graph`` whose five specialist nodes are entry points
+        running in parallel and whose sole terminal node,
+        ``positioning_synthesizer``, depends on all five (fan-out / fan-in).
     """
     builder = GraphBuilder()
 

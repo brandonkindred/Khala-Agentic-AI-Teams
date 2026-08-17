@@ -37,6 +37,15 @@ def list_brands(
 
     ``limit``/``offset`` are validated by FastAPI (``gt=0`` / ``ge=0``) so bad
     input is a 422, not a 500 from the store's pagination guard.
+
+    Preconditions:
+        ``client_id`` is a non-empty path string; ``limit`` (when supplied) is
+        ``> 0`` and ``offset`` is ``>= 0`` — FastAPI rejects violations with a
+        422 before this body runs.
+    Postconditions:
+        Returns the client's brands (a possibly empty list), sliced by
+        ``limit``/``offset`` when given. Raises 404 when no client row matches
+        ``client_id``.
     """
     from branding_team.api import main as _main
 
@@ -47,6 +56,36 @@ def list_brands(
 
 @router.post("/clients/{client_id}/brands", response_model=Brand, status_code=201)
 def create_brand(client_id: str, payload: CreateBrandRequest) -> Brand:
+    """Create a brand for a client and bind it to exactly one conversation.
+
+    The brand's mission is derived from ``payload`` via ``_mission_from_payload``.
+    Every successfully created brand ends up with a conversation attached, taking
+    one of two paths:
+
+    - ``payload.conversation_id`` set: attach that existing conversation
+      atomically via ``store.attach_conversation``.
+    - otherwise: create a fresh conversation and link it via ``store.update_brand``.
+
+    When the linking step reports a failure — a non-OK ``attach_conversation``
+    result, or an ``update_brand`` that finds no row — the just-created brand is
+    rolled back with ``store.delete_brand`` so that path leaves no listable,
+    conversation-less orphan. (An exception raised while creating the fresh
+    conversation on the create-new path, before the link is attempted, is not
+    caught here and would leave the brand row persisted.)
+
+    Preconditions:
+        ``client_id`` is a non-empty path string; ``payload`` is a validated
+        ``CreateBrandRequest``.
+    Postconditions:
+        Returns the created ``Brand`` with its conversation attached (HTTP 201).
+        Raises 404 "Client not found" when ``client_id`` matches no client.
+        When ``payload.conversation_id`` is set (after stripping), attaches that
+        conversation via ``store.attach_conversation``; on a non-OK result it
+        deletes the just-created brand and maps the failure to HTTP status: 404
+        for ``CONVERSATION_NOT_FOUND``/``BRAND_NOT_FOUND`` and 409 for
+        ``ALREADY_ATTACHED``. On the create-new path, deletes the brand and raises
+        404 "Brand not found" if the conversation link cannot be written.
+    """
     from branding_team.api import main as _main
 
     mission = _mission_from_payload(payload)
@@ -96,6 +135,15 @@ def create_brand(client_id: str, payload: CreateBrandRequest) -> Brand:
 
 @router.get("/clients/{client_id}/brands/{brand_id}", response_model=Brand)
 def get_brand(client_id: str, brand_id: str) -> Brand:
+    """Fetch a single brand belonging to a client.
+
+    Preconditions:
+        ``client_id`` and ``brand_id`` are non-empty path strings.
+    Postconditions:
+        Returns the ``Brand`` when it exists under ``client_id``. Raises 404
+        "Brand not found" otherwise (including when the brand exists but belongs
+        to a different client).
+    """
     from branding_team.api import main as _main
 
     brand = _main.branding_store.get_brand(client_id, brand_id)
@@ -106,6 +154,28 @@ def get_brand(client_id: str, brand_id: str) -> Brand:
 
 @router.put("/clients/{client_id}/brands/{brand_id}", response_model=Brand)
 def update_brand(client_id: str, brand_id: str, payload: UpdateBrandRequest) -> Brand:
+    """Patch a brand's mission fields, status, and/or name.
+
+    The mission patch is derived from the payload's own field set —
+    ``payload.model_dump(exclude_none=True, exclude={"status", "name"})`` — so it
+    tracks ``UpdateBrandRequest`` automatically rather than a hand-maintained
+    list. A no-op guard drops the mission when the derived value equals the
+    current one, so a status/name-only edit does not needlessly invalidate the
+    brand's cached generated output in the store (``store.update_brand`` clears
+    ``latest_output`` and resets ``current_phase`` whenever a mission is passed).
+
+    Preconditions:
+        ``client_id`` and ``brand_id`` are non-empty path strings; ``payload`` is
+        a validated ``UpdateBrandRequest``.
+    Postconditions:
+        Returns the updated ``Brand``. Raises 404 "Brand not found" when the brand
+        does not exist under ``client_id`` (checked up front and again if the
+        store write finds no row). Raises 400 "Invalid status: …" when
+        ``payload.status`` is set but does not name a valid ``BrandStatus``.
+        Forwards a mission to the store only when it differs from the brand's
+        current mission, keeping a status/name-only update idempotent with
+        respect to generated artifacts.
+    """
     from branding_team.api import main as _main
 
     brand = _main.branding_store.get_brand(client_id, brand_id)
@@ -147,7 +217,16 @@ def update_brand(client_id: str, brand_id: str, payload: UpdateBrandRequest) -> 
     "/clients/{client_id}/brands/{brand_id}/conversation", response_model=ConversationStateResponse
 )
 def get_brand_conversation(client_id: str, brand_id: str) -> ConversationStateResponse:
-    """Return the single conversation for a brand."""
+    """Return the single conversation for a brand.
+
+    Preconditions:
+        ``client_id`` and ``brand_id`` are non-empty path strings.
+    Postconditions:
+        Returns the ``ConversationStateResponse`` for the brand's one attached
+        conversation. Raises 404 "Brand not found" when the brand is unknown, and
+        404 "Brand has no conversation" when the brand exists but has none
+        attached.
+    """
     from branding_team.api import main as _main
 
     brand = _main.branding_store.get_brand(client_id, brand_id)
