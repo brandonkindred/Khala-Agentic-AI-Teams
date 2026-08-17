@@ -1044,6 +1044,12 @@ def _submission_fingerprint(
           it guards fires before any model call. Deterministic (``sort_keys``),
           so a stored approval survives across coordinator calls in a process.
     """
+    # Lazy import to keep module-load order robust: ``finding_combination`` and
+    # ``mapping`` are both imported by the coordinator, and deferring this import
+    # to call time avoids any import cycle regardless of future import edges
+    # between the two modules.
+    from .finding_combination import resolve_combine_similarity_threshold
+
     payload = input_data.model_dump(mode="json")
     # A per-invocation caller id, not content: two submissions with identical code
     # and context must still collide here even when their ``job_id``s differ (a
@@ -1052,6 +1058,7 @@ def _submission_fingerprint(
     payload.pop("job_id", None)
     payload["__model__"] = model_fingerprint
     payload["__side_effect_consolidation__"] = env_flag_enabled(SIDE_EFFECT_CONSOLIDATION_ENV)
+    payload["__combine_similarity_threshold__"] = resolve_combine_similarity_threshold()
     payload["__spec_compliance_single_pass__"] = spec_compliance_single_pass
     return _stable_json_digest(payload)
 

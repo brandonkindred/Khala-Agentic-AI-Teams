@@ -55,6 +55,7 @@ _BLOCKING_SEVERITIES = {"critical", "high"}
 
 # Captures the new-file start line from a hunk header: ``@@ -a,b +c,d @@``.
 _HUNK_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@")
+_HUNK_BOTH_SIDES_RE = re.compile(r"^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@")
 
 # Gutter between a right-aligned line number and the source: ``  9|     foo(``.
 # A pipe (not ``: ``) so the prefix cannot be mistaken for Python ``def``/dict
@@ -181,6 +182,82 @@ def parse_valid_lines(patch: str, *, added_only: bool = COMMENT_ON_ADDED_LINES_O
         # '-' removed lines and '\' ("\ No newline at end of file") do not advance
         # the new-file counter and are never commentable on the RIGHT side.
     return valid
+
+
+def parse_removed_lines(patch: str) -> set[int]:
+    """Return the old-file line numbers this patch deletes.
+
+    Preconditions:
+        - ``patch`` is one file's unified-diff text (GitHub's ``files[].patch``),
+          or empty.
+
+    Postconditions:
+        - Returns the set of 1-based old-file line numbers whose hunk rows
+          start with ``-``. Added and context lines are not included.
+          An empty patch yields an empty set. Never raises.
+        - Rows before the first ``@@ -old,count +new,count @@`` header are
+          ignored, so a truncated or malformed patch (no header, or hunk body
+          only) yields an empty set rather than raising.
+
+    Example:
+        >>> sorted(parse_removed_lines("@@ -3,2 +3,1 @@\\n ctx\\n-gone"))
+        [4]
+    """
+    removed: set[int] = set()
+    old_line = 0
+    in_hunk = False
+    for raw in (patch or "").splitlines():
+        m = _HUNK_BOTH_SIDES_RE.match(raw)
+        if m:
+            old_line = int(m.group(1))
+            in_hunk = True
+            continue
+        if not in_hunk:
+            continue
+        tag = raw[:1]
+        if tag == "-":
+            removed.add(old_line)
+            old_line += 1
+        elif tag == "+":
+            continue
+        elif tag == " " or raw == "":
+            old_line += 1
+    return removed
+
+
+def format_removed_excerpt(patch: str, *, max_lines: int = 20, max_chars: int = 120) -> str:
+    """Render a bounded list of deleted source lines for a scope-auditor prompt.
+
+    Postconditions:
+        - One ``L<old>: <text>`` line per deleted row, up to ``max_lines``,
+          each text clipped to ``max_chars``. Empty when the patch deletes
+          nothing. Never raises.
+    """
+    rows: list[str] = []
+    old_line = 0
+    in_hunk = False
+    for raw in (patch or "").splitlines():
+        m = _HUNK_BOTH_SIDES_RE.match(raw)
+        if m:
+            old_line = int(m.group(1))
+            in_hunk = True
+            continue
+        if not in_hunk:
+            continue
+        tag = raw[:1]
+        if tag == "-":
+            text = raw[1:]
+            if len(text) > max_chars:
+                text = text[:max_chars] + "…"
+            rows.append(f"L{old_line}: {text}")
+            old_line += 1
+            if len(rows) >= max_lines:
+                break
+        elif tag == "+":
+            continue
+        elif tag == " " or raw == "":
+            old_line += 1
+    return "\n".join(rows)
 
 
 def render_annotated_hunks(patch: str) -> str:

@@ -49,7 +49,7 @@ from branding_team.models import (
     AudienceSegmentsOutput,
     BrandArchetypesOutput,
     BrandArchitectureOutput,
-    BrandDiscoveryAuditOutput,
+    BrandDiscoveryAudit,
     BrandExperiencePrinciplesOutput,
     BrandGuidelinesOutput,
     BrandHealthKPIsOutput,
@@ -58,15 +58,15 @@ from branding_team.models import (
     ChannelGuidelineOutput,
     ColorPaletteSystemOutput,
     CoreValuesOutput,
-    CreativeRefinementDecisionOutput,
-    DesignSystemDefinitionOutput,
+    CreativeRefinementDecision,
+    DesignSystemDefinition,
     DifferentiationPillarsOutput,
     EvolutionFrameworkOutput,
     IconographyOutput,
     LogoSuiteOutput,
     MessagingFrameworkOutput,
     MoodBoardCandidatesOutput,
-    MoodBoardConceptOutput,
+    MoodBoardConcept,
     OwnershipOutput,
     PersonaProfilesOutput,
     PhotographyVideoOutput,
@@ -93,7 +93,7 @@ _UNROUTED_SYSTEM_PROMPT = "You are a helpful assistant."
 
 _CASES: tuple[tuple[str, Callable[[], Any], type], ...] = (
     # Phase 1 — Strategic Core
-    ("discovery_auditor", branding_agents.make_discovery_auditor, BrandDiscoveryAuditOutput),
+    ("discovery_auditor", branding_agents.make_discovery_auditor, BrandDiscoveryAudit),
     ("purpose_vision_writer", branding_agents.make_purpose_vision_writer, PurposeVisionOutput),
     ("values_articulator", branding_agents.make_values_articulator, CoreValuesOutput),
     ("audience_segmenter", branding_agents.make_audience_segmenter, AudienceSegmentsOutput),
@@ -122,11 +122,11 @@ _CASES: tuple[tuple[str, Callable[[], Any], type], ...] = (
             # Bind the variant in a default arg so each lambda closes over its
             # own value rather than the loop's last one.
             (lambda v=variant: branding_agents.make_moodboard_conceptualist(v)),
-            MoodBoardConceptOutput,
+            MoodBoardConcept,
         )
         for variant in _PHASE3_CONCEPTUALIST_VARIANTS
     ),
-    ("converge_decider", branding_agents.make_converge_decider, CreativeRefinementDecisionOutput),
+    ("converge_decider", branding_agents.make_converge_decider, CreativeRefinementDecision),
     ("logo_specifier", branding_agents.make_logo_specifier, LogoSuiteOutput),
     ("color_system_builder", branding_agents.make_color_system_builder, ColorPaletteSystemOutput),
     ("typography_builder", branding_agents.make_typography_builder, TypographySystemOutput),
@@ -141,7 +141,7 @@ _CASES: tuple[tuple[str, Callable[[], Any], type], ...] = (
     (
         "design_system_codifier",
         branding_agents.make_design_system_codifier,
-        DesignSystemDefinitionOutput,
+        DesignSystemDefinition,
     ),
     (
         "brand_experience_principler",
@@ -212,8 +212,25 @@ _MODEL_ROUTED_CLASS_NAMES: frozenset[str] = frozenset(
         "BrandGuidelinesOutput",
     }
 )
+# Structured-output models with every field optional/default-constructible —
+# BrandDiscoveryAudit, CreativeRefinementDecision, and DesignSystemDefinition,
+# each collapsed (Story 3b) to a single soft model used both as its agent's
+# structured_output and as the corresponding phase output's default_factory
+# merge target, rather than split into a strict agent-facing twin. The
+# dummy's generic unrouted fallback payload validates against these just as
+# happily as a routed one, so they can't serve as routing evidence for
+# test_generic_prompt_payload_is_rejected_by_every_schema either — excluded
+# here for an analogous reason to the model-routed classes above, via a
+# different mechanism (schema permissiveness, not routing).
+_PERMISSIVE_CLASS_NAMES: frozenset[str] = frozenset(
+    {"BrandDiscoveryAudit", "CreativeRefinementDecision", "DesignSystemDefinition"}
+)
+
 _TEXT_ROUTED_CASES: tuple[tuple[str, Callable[[], Any], type], ...] = tuple(
-    case for case in _CASES if case[2].__name__ not in _MODEL_ROUTED_CLASS_NAMES
+    case
+    for case in _CASES
+    if case[2].__name__ not in _MODEL_ROUTED_CLASS_NAMES
+    and case[2].__name__ not in _PERMISSIVE_CLASS_NAMES
 )
 _TEXT_ROUTED_CASE_IDS: tuple[str, ...] = tuple(
     case_id for case_id, _factory, _model in _TEXT_ROUTED_CASES
