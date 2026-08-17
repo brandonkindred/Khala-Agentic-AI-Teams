@@ -852,8 +852,8 @@ any client, LLM, or parse error degrades that batch's findings to an "unknown"
 verdict (a caller falls back to the free heuristic) rather than raising.
 Lowering this cap increases the number of classification calls (cost/latency)
 for files with many findings; raising it trades that against a larger prompt per
-call. A smaller default than
-`CODE_REVIEW_VERIFY_MAX_FINDINGS_PER_GROUP` keeps each scope decision focused.
+call. A smaller default than `CODE_REVIEW_VERIFY_MAX_FINDINGS_PER_GROUP`
+keeps each scope decision focused.
 
 ### CODE_REVIEW_MAX_CONCURRENT_ACTIVITIES
 Int (default `8`, floor `1`). Two things, both governed by this one knob (see

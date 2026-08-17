@@ -160,6 +160,28 @@ def test_max_findings_per_group_override_beats_env(monkeypatch: Any) -> None:
 # --------------------------------------------------------------------------- #
 
 
+def test_non_positive_tuning_args_are_floored_not_raised() -> None:
+    """A caller-supplied cap/workers below 1 is clamped to 1, never raises."""
+
+    def _responder(_prompt: str) -> Dict[str, Any]:
+        return {"verdicts": [{"index": 0, "in_scope": True, "reason": "r"}]}
+
+    issues = [_issue(file_path="a.py", description=f"f{i}") for i in range(3)]
+
+    # cap=0 would otherwise trip _batches' assert (or range(..., 0) ValueError);
+    # floored to 1 → one batch per finding, all classified.
+    stub = _Stub(_responder)
+    out = classify_scope(issues, llm=stub, max_findings_per_group=0)
+    assert len(stub.calls) == 3
+    assert all(v.in_scope is True for v in out)
+
+    # workers=0 would otherwise raise out of parallel_map; floored to 1.
+    stub2 = _Stub(_responder)
+    out2 = classify_scope(issues, llm=stub2, max_findings_per_group=1, max_workers=-5)
+    assert len(out2) == 3
+    assert all(v.in_scope is True for v in out2)
+
+
 def test_batches_run_in_parallel() -> None:
     """A barrier across three file-batches only clears if they run concurrently."""
     barrier = threading.Barrier(3, timeout=5)

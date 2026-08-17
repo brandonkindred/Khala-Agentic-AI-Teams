@@ -303,8 +303,6 @@ def classify_scope(
     Preconditions:
         - ``issues`` is a sequence of ``CodeReviewIssue``-like findings (each
           exposes ``file_path``/``line``/``description``/``suggestion``).
-        - ``max_findings_per_group``, when given, is ``>= 1``.
-        - ``max_workers``, when given, is ``>= 1``.
 
     Postconditions:
         - Returns a list positionally aligned 1:1 with ``issues`` — element ``i``
@@ -313,8 +311,12 @@ def classify_scope(
           failed, whose index the model omitted, or which ran under the
           production dummy / an unconfigured client is :data:`UNKNOWN`
           (``in_scope=None``), so a caller can fall back to its heuristic.
+        - A ``max_findings_per_group`` or ``max_workers`` argument below 1 is
+          floored to 1 (matching the env path's ``parse_env_int(..., 1)`` clamp),
+          so an out-of-range tuning value is clamped, never raised.
         - **Never raises**: client resolution, LLM, and parse failures all
-          degrade to ``UNKNOWN`` rather than propagating.
+          degrade to ``UNKNOWN`` rather than propagating; out-of-range tuning
+          arguments are floored. The guarantee is unconditional.
 
     Side effects:
         - One ``complete_json`` LLM call per batch (bounded by the
@@ -341,6 +343,10 @@ def classify_scope(
     cap = (
         max_findings_per_group if max_findings_per_group is not None else _max_findings_per_group()
     )
+    # Floor a caller-supplied cap the same way the env path clamps
+    # (parse_env_int(..., 1)), so classify_scope's "never raises" guarantee holds
+    # unconditionally rather than tripping _batches' assert on a value < 1.
+    cap = max(1, cap)
     batches = _batches(issues, cap)
 
     def _classify_one_batch(batch: List[int]) -> Dict[int, ScopeClassification]:
@@ -371,8 +377,10 @@ def classify_scope(
             )
             return {}
 
-    workers = (
-        max_workers if max_workers is not None else max(1, min(_scope_parallelism(), len(batches)))
+    # Floor at 1 on both paths so a caller-supplied max_workers < 1 is clamped
+    # rather than raising out of parallel_map (which requires max_workers >= 1).
+    workers = max(
+        1, max_workers if max_workers is not None else min(_scope_parallelism(), len(batches))
     )
     batch_results = parallel_map(
         batches,
