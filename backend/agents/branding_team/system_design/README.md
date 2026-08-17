@@ -30,6 +30,8 @@ and internal structure.
 | FastAPI app | `backend/agents/branding_team/api/main.py` |
 | Client/brand store | `backend/agents/branding_team/store.py` |
 | DB path resolver | `backend/agents/branding_team/db.py` |
+| Memoization (phase-input hashing) | `backend/agents/branding_team/shared/memoization.py` |
+| Phase-output cache | `backend/agents/branding_team/shared/phase_output_cache.py` |
 | Assistant agent | `backend/agents/branding_team/assistant/agent.py` |
 | Assistant prompts | `backend/agents/branding_team/assistant/prompts.py` |
 | Conversation store | `backend/agents/branding_team/assistant/store.py` |
