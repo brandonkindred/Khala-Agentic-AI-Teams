@@ -69,7 +69,7 @@ _NUMBERED_LINE_SEP = "| "
 # is a separate column BEFORE the number, so it never changes the rendered line
 # number the posting/mapping layer relies on.
 TOUCHED_LINE_MARKER = "+"
-CONTEXT_LINE_MARKER = " "
+CONTEXT_LINE_MARKER = " "  # a single space, not an empty string
 
 
 class ReviewFinding(Protocol):
