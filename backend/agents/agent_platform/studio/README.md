@@ -78,10 +78,17 @@ sees the `AgentManifest` these functions produce.
 | `mode`, `cloned_from` | *(not persisted)* | authoring provenance only — describes how the draft came to be, irrelevant to the saved manifest |
 | *(none)* | `id`, `team`, `schema_version`, `invoke`, `sandbox`, `source` | registry/runtime plumbing; always stamped by `build_studio_agent_manifest`, never editable via Studio |
 
-See `registration.py`'s module docstring for the runtime-binding caveat: a saved
-agent's `role` / `system_prompt` are advertised on the manifest but the shared
-generated-agent runtime still reconstructs persona from the invoke request body,
-not the stored manifest, at invoke time (binding is a separate, tracked follow-up).
-See
+**Runtime binding (shared with generated agents):** the generated-agent runtime
+binds a saved agent's persisted persona from the stored manifest when the invoke
+request omits those fields — its `role` (manifest `summary`) and the `system_prompt`
+folded into the `executing` state (see `build_studio_agent_manifest`) bind at invoke
+time. An explicitly-present request field (a raw-body presence test, not
+truthiness — so an explicitly-cleared empty list/blank string is an override too)
+wins over the manifest default for that invoke only, never written back; a
+request-supplied `system_prompt` fully replaces the base prompt instead of composing
+with the persona fields. This is the same entrypoint and the same precedence rule a
+generated team agent's invoke uses — see
+[`agentic_team_provisioning/README.md`](../../agent_team_studio/agentic_team_provisioning/README.md#roster-identity-thin-refs-manifest-sot)
+for the sibling write-up and
 [`system_design/adr/ADR-015-invoke-generated-agent-persona-state-precedence.md`](../../../../system_design/adr/ADR-015-invoke-generated-agent-persona-state-precedence.md)
-for the locked precedence contract that follow-up implements.
+for the locked precedence contract.
