@@ -179,6 +179,16 @@ describe('AgentStudioStateService', () => {
     expect(service.personaLiveRunEndedAtMs()).toBeNull();
   });
 
+  it('setPersonaLiveRunId(null) clears the id and both timestamps directly', () => {
+    service.setPersonaLiveRunId('run-1');
+    service.setPersonaLiveRunStartedAtMs(1_000);
+    service.setPersonaLiveRunEndedAtMs(2_000);
+    service.setPersonaLiveRunId(null);
+    expect(service.personaLiveRunId()).toBeNull();
+    expect(service.personaLiveRunStartedAtMs()).toBeNull();
+    expect(service.personaLiveRunEndedAtMs()).toBeNull();
+  });
+
   it('reset clears the persona live-run id', () => {
     service.setPersonaLiveRunId('run-1');
     service.setPersonaLiveRunStartedAtMs(1_000);
