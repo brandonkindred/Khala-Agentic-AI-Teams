@@ -54,6 +54,7 @@ logger = logging.getLogger(__name__)
 
 _ARCH_ENV = "CODE_REVIEW_ARCHITECTURE_CONSISTENCY_PASS"
 _SIDE_ENV = "CODE_REVIEW_SIDE_EFFECT_IMPACT_PASS"
+_MUTATION_ENV = "CODE_REVIEW_MUTATION_ANALYSIS"
 
 
 def find_architecture_and_side_effect_issues(
@@ -90,6 +91,11 @@ def find_architecture_and_side_effect_issues(
           ``CodebaseIndex.full_content_complete``). Architecture is forced off
           when there is no architecture payload and no ``repo_reader`` /
           ``existing_codebase`` evidence.
+        - When the side-effect half is enabled, whether it also runs the
+          mutation-vs-replaced-code contract sub-check is gated by
+          ``CODE_REVIEW_MUTATION_ANALYSIS`` (default on): when disabled,
+          ``input_data.replaced_content`` is never shown to the model and the
+          no-prior-version guard stays absolute for every file.
         - Starts with one think-then-format call over the full changed-file
           set. On an overflow-shaped failure the shared runner bisects the
           file list (never truncating content); findings from every recovered
@@ -166,8 +172,9 @@ def _run_pass(
     if not index.files:
         return [], []
 
+    mutation_on = env_flag_enabled(_MUTATION_ENV)
     reasoning_system_prompt = build_merged_architecture_side_effect_reasoning_system_prompt(
-        arch_on=arch_on, side_on=side_on
+        arch_on=arch_on, side_on=side_on, mutation_on=mutation_on
     )
     formatting_instructions = build_merged_architecture_side_effect_formatting_instructions(
         arch_on=arch_on, side_on=side_on
@@ -186,7 +193,7 @@ def _run_pass(
             batch_index=batch.index,
             total_batches=batch.total,
             is_partial=batch.is_partial,
-            replaced_content=input_data.replaced_content,
+            replaced_content=input_data.replaced_content if mutation_on else None,
         )
 
     def _parse_batch_reply(raw: str) -> Tuple[List[CodeReviewIssue], List[CodeReviewIssue]]:

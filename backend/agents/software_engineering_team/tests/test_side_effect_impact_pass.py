@@ -628,6 +628,75 @@ def test_returns_empty_when_disabled_via_env(monkeypatch: pytest.MonkeyPatch) ->
     assert result == []
 
 
+def test_replaced_content_reaches_prompt_when_mutation_analysis_enabled() -> None:
+    """Default (``CODE_REVIEW_MUTATION_ANALYSIS`` unset): a before-image supplied
+    on ``CodeReviewInput.replaced_content`` reaches the user prompt as a
+    "Replaced (pre-change) content" section, per story 4c's rendering."""
+
+    class _Capture(SubmissionPassTwoCallClient):
+        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+            return {"findings": []}
+
+    client = _Capture()
+    find_side_effect_impact_issues(
+        client,
+        CodeReviewInput(
+            files={"app/main.py": "def bar():\n    return 2\n"},
+            task_description="wire up bar",
+            replaced_content={"app/main.py": "def bar():\n    return 1\n"},
+        ),
+    )
+    assert "Replaced (pre-change) content" in client.latest_reasoning_prompt()
+    assert "def bar():\n    return 1\n" in client.latest_reasoning_prompt()
+
+
+def test_replaced_content_hidden_from_prompt_when_mutation_analysis_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``CODE_REVIEW_MUTATION_ANALYSIS=false`` must hide the before-image from
+    the model entirely, not merely leave it unused -- so the disabled toggle's
+    behavior matches the pass's pre-mutation-analysis behavior exactly."""
+    monkeypatch.setenv("CODE_REVIEW_MUTATION_ANALYSIS", "false")
+
+    class _Capture(SubmissionPassTwoCallClient):
+        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+            return {"findings": []}
+
+    client = _Capture()
+    find_side_effect_impact_issues(
+        client,
+        CodeReviewInput(
+            files={"app/main.py": "def bar():\n    return 2\n"},
+            task_description="wire up bar",
+            replaced_content={"app/main.py": "def bar():\n    return 1\n"},
+        ),
+    )
+    assert "Replaced (pre-change) content" not in client.latest_reasoning_prompt()
+    assert "def bar():\n    return 1\n" not in client.latest_reasoning_prompt()
+
+
+def test_reasoning_system_prompt_reflects_mutation_toggle(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The system prompt handed to the runner must carry (or omit) the
+    mutation-vs-replaced-code contract sub-check per ``CODE_REVIEW_MUTATION_ANALYSIS``."""
+    import code_review_agent.side_effect_impact_pass as pass_mod
+
+    captured: Dict[str, Any] = {}
+
+    def _fake_run_submission_pass(llm: Any, **kwargs: Any) -> list:
+        captured["reasoning_system_prompt"] = kwargs["reasoning_system_prompt"]
+        return []
+
+    monkeypatch.setattr(pass_mod, "run_submission_pass", _fake_run_submission_pass)
+
+    find_side_effect_impact_issues(DummyLLMClient(), _input())
+    assert "mutation-vs-replaced-code" in captured["reasoning_system_prompt"]
+
+    captured.clear()
+    monkeypatch.setenv("CODE_REVIEW_MUTATION_ANALYSIS", "false")
+    find_side_effect_impact_issues(DummyLLMClient(), _input())
+    assert "mutation-vs-replaced-code" not in captured["reasoning_system_prompt"]
+
+
 def test_returns_empty_when_submission_has_no_readable_files() -> None:
     result = find_side_effect_impact_issues(DummyLLMClient(), _input(files={"empty.py": "   "}))
     assert result == []

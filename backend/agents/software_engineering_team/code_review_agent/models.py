@@ -824,8 +824,12 @@ class CodeReviewInput(BaseModel):
           the diff's removed-hunk side with no extra fetch) supplies only the
           hunk-scoped removed/context excerpt, omitting unchanged lines
           outside a hunk. Default ``None`` and ignored by the review logic
-          when absent (behaves exactly as today); no pass consumes it yet. It
-          is still folded into the submission-level cache key via
+          when absent (behaves exactly as today). The side-effect-impact pass
+          (standalone and merged) renders it as a per-path "Replaced
+          (pre-change) content" prompt section and, when
+          ``CODE_REVIEW_MUTATION_ANALYSIS`` is enabled (default on), reasons
+          over it via the mutation-vs-replaced-code contract sub-check. It is
+          still folded into the submission-level cache key via
           ``model_dump`` (see ``mapping._submission_fingerprint``), so a
           verdict computed with a before-image is never served from a cache
           entry computed without one.
@@ -858,8 +862,10 @@ class CodeReviewInput(BaseModel):
         "populated this field. Default None; ignored by the review logic when absent (behaves "
         "exactly as today). Carried through the submission-level cache key so a verdict "
         "computed with a before-image is never served from a cache entry computed without "
-        "one. Reserved for before-image blast-radius / contract-change analysis; no pass "
-        "consumes it yet.",
+        "one. Rendered as a per-path 'Replaced (pre-change) content' prompt section by the "
+        "side-effect-impact pass (standalone and merged), which reasons over it via the "
+        "mutation-vs-replaced-code contract sub-check when CODE_REVIEW_MUTATION_ANALYSIS "
+        "is enabled (default on).",
     )
     spec_content: str = Field(
         default="",

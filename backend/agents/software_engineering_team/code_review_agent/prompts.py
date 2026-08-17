@@ -201,13 +201,15 @@ ARCHITECTURE_CONSISTENCY_PROMPT = (
 )
 
 
-_SIDE_EFFECT_IMPACT_BODY = """You are a Senior Software Engineer running a whole-codebase blast-radius check on top of an already-completed per-file code review. That per-file review only ever saw one bounded slice of the changed files at a time — it could flag that a function's current behavior looks notable, but it has no tools and cannot check who else in the codebase calls that function or whether its behavior breaks them. That is your one job here.
+_SIDE_EFFECT_IMPACT_HEADER = """You are a Senior Software Engineer running a whole-codebase blast-radius check on top of an already-completed per-file code review. That per-file review only ever saw one bounded slice of the changed files at a time — it could flag that a function's current behavior looks notable, but it has no tools and cannot check who else in the codebase calls that function or whether its behavior breaks them. That is your one job here.
 
-**What a side effect is.** In software engineering, a function has a *side effect* when it does something observable beyond computing and returning a value from its inputs: it mutates shared or passed-in state, writes to a store, performs I/O or a network call, raises an exception, or changes global/module state or ordering that other code can observe. The concern for this pass is a *side effect that ships an unintended logical consequence*: a change to what a function returns, raises, mutates, or does that causes OTHER code in the system — its callers — to now misbehave, crash, or silently produce wrong results. A side effect is NOT stale documentation. A docstring or comment that no longer matches the code is a documentation-accuracy problem, not a side effect — handle it in the separate `documentation` category described below, never as `side-effects`.
+**What a side effect is.** In software engineering, a function has a *side effect* when it does something observable beyond computing and returning a value from its inputs: it mutates shared or passed-in state, writes to a store, performs I/O or a network call, raises an exception, or changes global/module state or ordering that other code can observe. The concern for this pass is a *side effect that ships an unintended logical consequence*: a change to what a function returns, raises, mutates, or does that causes OTHER code in the system — its callers — to now misbehave, crash, or silently produce wrong results. A side effect is NOT stale documentation. A docstring or comment that no longer matches the code is a documentation-accuracy problem, not a side effect — handle it in the separate `documentation` category described below, never as `side-effects`."""
 
-**You are given the CURRENT content of the changed files only — never a prior version.** Do not guess, infer, or invent what any function looked like before this submission; you have no way to know, and stating an invented "old" behavior is worse than not commenting on history at all. Judge everything by what the code actually does AS WRITTEN NOW.
+_SIDE_EFFECT_IMPACT_GUARD_WITH_MUTATION_EXCEPTION = """**You are given the CURRENT content of the changed files only — never a prior version — with exactly one narrow, explicit exception: a file whose "Replaced (pre-change) content" section is shown to you below (see the mutation-vs-replaced-code contract check further down).** For every other file, do not guess, infer, or invent what any function looked like before this submission; you have no way to know, and stating an invented "old" behavior is worse than not commenting on history at all. Judge everything by what the code actually does AS WRITTEN NOW — except where that check hands you an actual before-image to compare against directly, and even there, never go beyond what that shown block actually contains."""
 
-**You are given:**
+_SIDE_EFFECT_IMPACT_GUARD_ABSOLUTE = """**You are given the CURRENT content of the changed files only — never a prior version.** Do not guess, infer, or invent what any function looked like before this submission; you have no way to know, and stating an invented "old" behavior is worse than not commenting on history at all. Judge everything by what the code actually does AS WRITTEN NOW."""
+
+_SIDE_EFFECT_IMPACT_GIVEN_AND_SECTION_A = """**You are given:**
 - The complete set of changed files in this submission (current content).
 - Tools to inspect the rest of the codebase, default path: search → `find_references` → `read_function`/`read_lines`. `search_codebase(query)` searches only the files shown in this prompt, and `find_function_at_line(path, line_number)` identifies the enclosing function/class for a cited line — neither reaches beyond this submission. `find_references(symbol)` DOES reach beyond the submission into the wider repository when it is attached, returning bounded `path:line` hits with a short enclosing-construct excerpt — use it first to find every caller of a function or method, in-submission or in the wider repository. `read_function(path, name_or_line)` and `read_lines(path, start, end)` then load just the construct(s) a search or `find_references` hit points at. `search_repository(query)` also reaches the rest of the repository, searching raw file content for a substring when a symbol lookup via `find_references` isn't precise enough. Non-default: `list_files()` (lists every file, including ones outside this submission) and `read_file(path)` (reads any of them, in full) — reserve these for confirming a whole file/module exists, or when a file is small enough that a full read is simplest, not as the default way to find callers.
 
@@ -219,12 +221,38 @@ For each function or method this submission touches whose CURRENT behavior could
 1. Identify precisely what the function currently does: its actual return value/type, exceptions, side effects, and ordering guarantees, as written now. Do not speculate about how this differs from any earlier version.
 2. Use `find_references` first to find every caller of that function or method, both inside this submission and (when attached) elsewhere in the repository; fall back to `search_codebase`/`search_repository` for a plain substring match `find_references` doesn't cover, and to `list_files`/`read_file` only to confirm whether a whole file/module exists.
 3. For each caller you find, read enough of it to judge whether its usage matches the function's CURRENT behavior: does the caller handle the exceptions the function can actually raise, does it use the return value in a way that matches its actual shape, does it depend on an ordering or side effect the function does not actually provide?
-4. Only flag a `side-effects` finding when you have tool-verified it — cite the specific caller file and line, quote or closely paraphrase the assumption that breaks, and explain the concrete failure mode (the unintended logical consequence). Do NOT flag from the function's name or from a guess; if you cannot find any callers, or every caller you find is consistent with the function's current behavior, do not flag a caller-impact finding for it. A function merely HAVING a side effect (a normal return value, an ordinary write, a network call) is not itself a finding — the finding is that a real caller relies on behavior the function does not actually provide.
+4. Only flag a `side-effects` finding when you have tool-verified it — cite the specific caller file and line, quote or closely paraphrase the assumption that breaks, and explain the concrete failure mode (the unintended logical consequence). Do NOT flag from the function's name or from a guess; if you cannot find any callers, or every caller you find is consistent with the function's current behavior, do not flag a caller-impact finding for it. A function merely HAVING a side effect (a normal return value, an ordinary write, a network call) is not itself a finding — the finding is that a real caller relies on behavior the function does not actually provide."""
+
+_SIDE_EFFECT_IMPACT_MUTATION_SUBCHECK = """
+
+**Mutation-vs-replaced-code contract check (still `category: "side-effects"` — another way to reach an A-type finding, not a new output category; only for a file whose "Replaced (pre-change) content" section is shown below).**
+For each function/method in such a file whose current body differs from its own shown "Replaced (pre-change) content":
+
+1. Compare the current content against its replaced content for data/variable-mutation differences: does the new code mutate a variable, field, or shared/passed-in state differently than the replaced code did, return a different value or type, raise a different exception, or change an ordering/timing guarantee the replaced code provided?
+2. When you find such a difference, assess its impact on the enclosing function/class: does it change that function/class's observable CONTRACT (its return type/value, exceptions, or side effects) from what the replaced code guaranteed — not merely an internal implementation detail with no external effect?
+3. When the contract changed, use `find_references` first (falling back to `search_repository` for a plain substring `find_references` does not cover) to find every caller of the enclosing function/method, in this submission and the wider repository; then `read_file`/`read_function`/`read_lines` enough of each caller to decide, in Design-by-Contract terms, whether the NEW code is the defect (it silently broke a contract callers still rely on — the callers are the injured party) or the CALLERS are the defect (they relied on the old, now-superseded contract and must be updated to match the new one — the new code's contract is the correct one going forward). State which side you conclude is wrong and why.
+4. Only flag a finding once you complete this chain with tool-verified evidence: cite the specific caller file/line and the assumption it makes when callers are implicated, or cite the concrete mutation difference and its contract effect when the new code itself is the defect. Never flag from the diff/replaced-content comparison alone without first tracing whether it actually changed the contract, and, when it did, without checking real callers.
+
+A file with no "Replaced (pre-change) content" section shown gets none of this: for it, the no-prior-version guard above applies with no exception — do not guess, infer, or invent any prior version, and do not perform this comparison."""
+
+_SIDE_EFFECT_IMPACT_SECTION_B_AND_TAGGING = """
 
 **B. `category: "documentation"` — a docstring/comment that does not match the implementation (the lower-severity, always-actionable half).**
 Separately, flag when the function's CURRENT implementation does not match what its OWN docstring/comments claim it does — a documentation/implementation mismatch, visible entirely from this submission's own content, regardless of whether this diff introduced it. This is a documentation-accuracy finding, NOT a side effect: emit it under `category: "documentation"`. It needs no caller search — the mismatch is provable from the function and its own docstring alone.
 
-**Tagging `pre_existing`:** you are shown whole files, which in PR-review mode can include unrelated, untouched functions that merely live in a file this submission also changed elsewhere — a `side-effects` caller-impact finding (A) can be about such an unrelated, already-broken caller relationship just as easily as a `documentation` finding (B) can be about an unrelated, already-wrong docstring. For EVERY finding from either A or B, tag `"pre_existing"`: set it `true` when the function(s) the finding is about — the callee for a caller-impact finding, the mismatched function for a documentation finding — look untouched by this submission's actual work (e.g. surrounding code, imports, or the rest of the file show no sign they were added or modified), and `false` when they look like part of what this submission changed. Because you cannot see history, this is a best-effort judgment, not a certainty — when genuinely unsure, prefer `false` (report it as tied to this submission) rather than guessing `true` and having a real regression silently routed away from review.
+**Tagging `pre_existing`:** you are shown whole files, which in PR-review mode can include unrelated, untouched functions that merely live in a file this submission also changed elsewhere — a `side-effects` caller-impact finding (A) can be about such an unrelated, already-broken caller relationship just as easily as a `documentation` finding (B) can be about an unrelated, already-wrong docstring. For EVERY finding from either A or B, tag `"pre_existing"`: set it `true` when the function(s) the finding is about — the callee for a caller-impact finding, the mismatched function for a documentation finding — look untouched by this submission's actual work (e.g. surrounding code, imports, or the rest of the file show no sign they were added or modified), and `false` when they look like part of what this submission changed. Because you cannot see history, this is a best-effort judgment, not a certainty — when genuinely unsure, prefer `false` (report it as tied to this submission) rather than guessing `true` and having a real regression silently routed away from review."""
+
+_SIDE_EFFECT_IMPACT_HARD_RULES_WITH_MUTATION_EXCEPTION = """
+
+**Hard rules:**
+- Every `side-effects` finding must be tool-verified: you actually read the caller's code and can name the exact line and assumption that breaks. Never speculate about a caller you have not read.
+- Do NOT re-review anything the per-file review already covers (naming, structure, general documentation quality, tests, spec compliance, generic code quality, single-file logic bugs) — only genuine caller-breaking side effects and docstring/implementation mismatches.
+- Do NOT invent a caller that does not exist, and do NOT invent or assume a prior/"old" version of any function — you were not given one, EXCEPT for a file whose "Replaced (pre-change) content" section is shown below, per the mutation-vs-replaced-code contract check above: comparing directly against that shown block is not "inventing" a prior version — it is content you were actually given — but never extend that comparison to a file without such a section, and never treat the replaced content as anything other than exactly what is shown.
+- Never file a stale/mismatched docstring under `side-effects`; it belongs in `documentation`. Never file a caller-breaking behavior change under `documentation`; it belongs in `side-effects`.
+- If you find nothing in either category, return an empty findings list — an empty list is a valid and expected outcome, not a failure.
+- Severity: use `"critical"`/`"high"` ONLY for a `side-effects` finding where a real, tool-verified caller would misbehave, crash, or silently produce wrong results given the function's current behavior (a genuine production risk). Use `"medium"`/`"low"` for a `documentation` mismatch, or for a caller impact you are not fully certain about."""
+
+_SIDE_EFFECT_IMPACT_HARD_RULES_ABSOLUTE = """
 
 **Hard rules:**
 - Every `side-effects` finding must be tool-verified: you actually read the caller's code and can name the exact line and assumption that breaks. Never speculate about a caller you have not read.
@@ -233,6 +261,65 @@ Separately, flag when the function's CURRENT implementation does not match what 
 - Never file a stale/mismatched docstring under `side-effects`; it belongs in `documentation`. Never file a caller-breaking behavior change under `documentation`; it belongs in `side-effects`.
 - If you find nothing in either category, return an empty findings list — an empty list is a valid and expected outcome, not a failure.
 - Severity: use `"critical"`/`"high"` ONLY for a `side-effects` finding where a real, tool-verified caller would misbehave, crash, or silently produce wrong results given the function's current behavior (a genuine production risk). Use `"medium"`/`"low"` for a `documentation` mismatch, or for a caller impact you are not fully certain about."""
+
+
+def _build_side_effect_impact_body(*, mutation_on: bool) -> str:
+    """Assemble the side-effect-impact pass's reasoning body for one toggle state.
+
+    ``mutation_on`` gates ``CODE_REVIEW_MUTATION_ANALYSIS``'s sub-check: whether a
+    file whose "Replaced (pre-change) content" section is shown gets a
+    mutation-vs-replaced-code contract check (data/variable-mutation diff -->
+    enclosing-function/class contract impact -> caller inspection when the
+    contract changed), and whether the no-prior-version guard names that one
+    narrow, file-scoped exception.
+
+    Preconditions: none.
+
+    Postconditions:
+        - Always includes the persona/"what a side effect is" header, section A
+          (caller-breaking side effect), section B (documentation mismatch), the
+          `pre_existing` tagging guidance, and the hard rules, unchanged.
+        - When ``mutation_on`` is True, additionally includes the
+          mutation-vs-replaced-code contract check (between section A and
+          section B) and uses guard/hard-rule wording that names it as the one
+          exception to the no-prior-version guard, scoped to a file whose
+          replaced-content section is actually shown.
+        - When ``mutation_on`` is False, omits that check entirely and uses
+          guard/hard-rule wording that keeps the no-prior-version guard
+          absolute for every file, with no textual reference to the check.
+    """
+    guard = (
+        _SIDE_EFFECT_IMPACT_GUARD_WITH_MUTATION_EXCEPTION
+        if mutation_on
+        else _SIDE_EFFECT_IMPACT_GUARD_ABSOLUTE
+    )
+    hard_rules = (
+        _SIDE_EFFECT_IMPACT_HARD_RULES_WITH_MUTATION_EXCEPTION
+        if mutation_on
+        else _SIDE_EFFECT_IMPACT_HARD_RULES_ABSOLUTE
+    )
+    parts = [
+        _SIDE_EFFECT_IMPACT_HEADER,
+        "\n\n",
+        guard,
+        "\n\n",
+        _SIDE_EFFECT_IMPACT_GIVEN_AND_SECTION_A,
+    ]
+    if mutation_on:
+        parts.append(_SIDE_EFFECT_IMPACT_MUTATION_SUBCHECK)
+    parts.append(_SIDE_EFFECT_IMPACT_SECTION_B_AND_TAGGING)
+    parts.append(hard_rules)
+    return "".join(parts)
+
+
+# Default-on variant (``CODE_REVIEW_MUTATION_ANALYSIS`` unset or not falsy): includes
+# the mutation-vs-replaced-code contract check. Kept as a module constant (rather
+# than always calling the builder) so every existing importer of
+# ``_SIDE_EFFECT_IMPACT_BODY`` keeps working unchanged.
+_SIDE_EFFECT_IMPACT_BODY = _build_side_effect_impact_body(mutation_on=True)
+# Variant used when ``CODE_REVIEW_MUTATION_ANALYSIS`` is explicitly disabled --
+# byte-identical to this body's pre-mutation-analysis text.
+_SIDE_EFFECT_IMPACT_BODY_NO_MUTATION = _build_side_effect_impact_body(mutation_on=False)
 
 _SIDE_EFFECT_IMPACT_OUTPUT_FORMAT = """
 
@@ -259,6 +346,23 @@ SIDE_EFFECT_IMPACT_FORMATTING_INSTRUCTIONS = (
 SIDE_EFFECT_IMPACT_PROMPT = (
     SIDE_EFFECT_IMPACT_REASONING_SYSTEM_PROMPT + SIDE_EFFECT_IMPACT_FORMATTING_INSTRUCTIONS
 )
+
+
+def build_side_effect_impact_reasoning_system_prompt(*, mutation_on: bool) -> str:
+    """Build the standalone side-effect pass's reasoning system prompt for one toggle state.
+
+    Preconditions: none.
+
+    Postconditions:
+        - Returns ``SIDE_EFFECT_IMPACT_REASONING_SYSTEM_PROMPT`` unchanged when
+          ``mutation_on`` is True (the default: ``CODE_REVIEW_MUTATION_ANALYSIS``
+          unset or not falsy).
+        - Otherwise returns the same prompt built from
+          ``_SIDE_EFFECT_IMPACT_BODY_NO_MUTATION`` -- the mutation-vs-replaced-code
+          contract check omitted and the no-prior-version guard left absolute.
+    """
+    body = _SIDE_EFFECT_IMPACT_BODY if mutation_on else _SIDE_EFFECT_IMPACT_BODY_NO_MUTATION
+    return body + _SUBMISSION_PASS_PROSE_INSTRUCTION
 
 
 _MERGED_ARCHITECTURE_SIDE_EFFECT_INTRO = """You are running TWO independent whole-codebase checks on top of an already-completed per-file code review, back to back, in a single pass. That per-file review only ever saw one bounded slice of the changed files at a time; both checks below see the whole submission instead, plus tools to inspect the rest of the repository. Address Part 1 and Part 2 completely independently — do not let either part's findings, categories, or severity judgments influence the other's, and do not let one part crowd out the other."""
@@ -305,16 +409,33 @@ MERGED_ARCHITECTURE_SIDE_EFFECT_PROMPT = (
 
 
 def build_merged_architecture_side_effect_reasoning_system_prompt(
-    *, arch_on: bool, side_on: bool
+    *, arch_on: bool, side_on: bool, mutation_on: bool = True
 ) -> str:
-    """Build the merged-pass reasoning system prompt for enabled halves."""
+    """Build the merged-pass reasoning system prompt for enabled halves.
+
+    ``mutation_on`` (default True, mirroring ``CODE_REVIEW_MUTATION_ANALYSIS``'s
+    default-on behavior) selects which side-effect body variant Part 2 uses when
+    ``side_on`` is True; it has no effect when ``side_on`` is False.
+    """
     if not arch_on and not side_on:
         raise ValueError(
             "build_merged_architecture_side_effect_reasoning_system_prompt requires "
             "arch_on or side_on"
         )
+    side_effect_body = (
+        _SIDE_EFFECT_IMPACT_BODY if mutation_on else _SIDE_EFFECT_IMPACT_BODY_NO_MUTATION
+    )
     if arch_on and side_on:
-        return MERGED_ARCHITECTURE_SIDE_EFFECT_REASONING_SYSTEM_PROMPT
+        if mutation_on:
+            return MERGED_ARCHITECTURE_SIDE_EFFECT_REASONING_SYSTEM_PROMPT
+        return (
+            _MERGED_ARCHITECTURE_SIDE_EFFECT_INTRO
+            + "\n\n## Part 1: Architecture Consistency & Cross-Codebase Redundancy\n\n"
+            + _ARCHITECTURE_CONSISTENCY_BODY
+            + "\n\n## Part 2: Side-Effect / Blast-Radius Impact\n\n"
+            + side_effect_body
+            + _SUBMISSION_PASS_PROSE_INSTRUCTION
+        )
 
     parts: list[str] = []
     if arch_on:
@@ -332,7 +453,7 @@ def build_merged_architecture_side_effect_reasoning_system_prompt(
             "or cross-codebase-redundancy analysis — report no architecture findings."
         )
         parts.append("\n\n## Part 2: Side-Effect / Blast-Radius Impact\n\n")
-        parts.append(_SIDE_EFFECT_IMPACT_BODY)
+        parts.append(side_effect_body)
     parts.append(_SUBMISSION_PASS_PROSE_INSTRUCTION)
     return "".join(parts)
 
@@ -349,24 +470,30 @@ def build_merged_architecture_side_effect_formatting_instructions(
     return _MERGED_ARCHITECTURE_SIDE_EFFECT_OUTPUT_FORMAT + JSON_OUTPUT_INSTRUCTION
 
 
-def build_merged_architecture_side_effect_prompt(*, arch_on: bool, side_on: bool) -> str:
+def build_merged_architecture_side_effect_prompt(
+    *, arch_on: bool, side_on: bool, mutation_on: bool = True
+) -> str:
     """Build the merged-pass system prompt for the halves that are actually enabled.
 
     Preconditions:
         - At least one of ``arch_on`` / ``side_on`` is True.
 
     Postconditions:
-        - When both halves are on, returns ``MERGED_ARCHITECTURE_SIDE_EFFECT_PROMPT``.
+        - When both halves are on (and ``mutation_on`` is True), returns
+          ``MERGED_ARCHITECTURE_SIDE_EFFECT_PROMPT``.
         - When only one half is on, omits the disabled half's instruction body and
           explicitly requires its dual-key array to be ``[]``, so the model does
           not spend tool iterations or output capacity on a discarded check.
+        - When ``side_on`` is True and ``mutation_on`` is False, Part 2 uses the
+          no-mutation side-effect body (contract check omitted, no-prior-version
+          guard absolute); has no effect when ``side_on`` is False.
         - Always uses the dual-key output format so the merged pass parser stays
           unchanged.
     """
     if not arch_on and not side_on:
         raise ValueError("build_merged_architecture_side_effect_prompt requires arch_on or side_on")
     return build_merged_architecture_side_effect_reasoning_system_prompt(
-        arch_on=arch_on, side_on=side_on
+        arch_on=arch_on, side_on=side_on, mutation_on=mutation_on
     ) + build_merged_architecture_side_effect_formatting_instructions(
         arch_on=arch_on, side_on=side_on
     )

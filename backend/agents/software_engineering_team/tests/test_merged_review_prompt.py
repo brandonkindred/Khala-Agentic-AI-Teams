@@ -20,6 +20,7 @@ from code_review_agent.models import (
 from code_review_agent.prompts import (
     _ARCHITECTURE_CONSISTENCY_BODY,
     _SIDE_EFFECT_IMPACT_BODY,
+    _SIDE_EFFECT_IMPACT_BODY_NO_MUTATION,
     ARCHITECTURE_CONSISTENCY_FORMATTING_INSTRUCTIONS,
     ARCHITECTURE_CONSISTENCY_PROMPT,
     ARCHITECTURE_CONSISTENCY_REASONING_SYSTEM_PROMPT,
@@ -31,6 +32,8 @@ from code_review_agent.prompts import (
     SIDE_EFFECT_IMPACT_PROMPT,
     SIDE_EFFECT_IMPACT_REASONING_SYSTEM_PROMPT,
     build_merged_architecture_side_effect_prompt,
+    build_merged_architecture_side_effect_reasoning_system_prompt,
+    build_side_effect_impact_reasoning_system_prompt,
 )
 from pydantic import ValidationError
 
@@ -249,3 +252,102 @@ def test_side_effect_body_prefers_scoped_reads_over_whole_file_first() -> None:
         "Use `search_codebase`/`search_repository`/`list_files`/`read_file` to find every caller"
         not in _SIDE_EFFECT_IMPACT_BODY
     )
+
+
+def test_side_effect_body_mutation_subcheck_present_by_default() -> None:
+    """The default (mutation-on) body documents the mutation-vs-replaced-code
+    contract sub-check: it's scoped to files with a shown before-image, cites
+    the caller-inspection tools, and frames the verdict in DbC terms."""
+    lower = _SIDE_EFFECT_IMPACT_BODY.lower()
+    assert "replaced (pre-change) content" in lower
+    assert "mutation" in lower
+    assert "contract" in lower
+    assert "find_references" in _SIDE_EFFECT_IMPACT_BODY
+    assert "search_repository" in _SIDE_EFFECT_IMPACT_BODY
+    assert "read_file" in _SIDE_EFFECT_IMPACT_BODY
+    # DbC framing: which side is the defect.
+    assert "callers" in lower and "defect" in lower
+
+
+def test_side_effect_body_guard_names_the_one_narrow_exception_by_default() -> None:
+    """With mutation analysis on, the no-prior-version guard must name its one
+    exception rather than reading as a blanket, unconditional prohibition."""
+    assert "never a prior version" in _SIDE_EFFECT_IMPACT_BODY
+    assert "one narrow, explicit exception" in _SIDE_EFFECT_IMPACT_BODY
+    assert "Replaced (pre-change) content" in _SIDE_EFFECT_IMPACT_BODY
+
+
+def test_side_effect_body_no_mutation_omits_subcheck_and_stays_absolute() -> None:
+    """The disabled (mutation-off) body variant must be byte-identical to the
+    pre-mutation-analysis body: no sub-check, and an unconditional guard."""
+    assert "mutation-vs-replaced-code" not in _SIDE_EFFECT_IMPACT_BODY_NO_MUTATION
+    assert "Replaced (pre-change) content" not in _SIDE_EFFECT_IMPACT_BODY_NO_MUTATION
+    assert (
+        "**You are given the CURRENT content of the changed files only — never a "
+        "prior version.** Do not guess, infer, or invent"
+    ) in _SIDE_EFFECT_IMPACT_BODY_NO_MUTATION
+    assert (
+        'do not invent or assume a prior/"old" version of any function — you were not given one.'
+        in _SIDE_EFFECT_IMPACT_BODY_NO_MUTATION.lower()
+    )
+    assert "EXCEPT" not in _SIDE_EFFECT_IMPACT_BODY_NO_MUTATION
+
+
+def test_side_effect_body_no_mutation_still_documents_find_references() -> None:
+    """Disabling the mutation sub-check must not remove the primary
+    caller-impact check's own tool guidance."""
+    assert "find_references" in _SIDE_EFFECT_IMPACT_BODY_NO_MUTATION
+    assert "read_lines" in _SIDE_EFFECT_IMPACT_BODY_NO_MUTATION
+    assert "read_function" in _SIDE_EFFECT_IMPACT_BODY_NO_MUTATION
+
+
+def test_build_side_effect_impact_reasoning_system_prompt_matches_toggle() -> None:
+    assert (
+        build_side_effect_impact_reasoning_system_prompt(mutation_on=True)
+        == SIDE_EFFECT_IMPACT_REASONING_SYSTEM_PROMPT
+    )
+    off_prompt = build_side_effect_impact_reasoning_system_prompt(mutation_on=False)
+    assert "mutation-vs-replaced-code" not in off_prompt
+    assert off_prompt != SIDE_EFFECT_IMPACT_REASONING_SYSTEM_PROMPT
+
+
+def test_merged_prompt_mutation_toggle_both_halves_on() -> None:
+    """With both halves on, mutation_on=True reuses the precomputed merged
+    constant; mutation_on=False must still carry both bodies but the
+    no-mutation side-effect variant."""
+    on_prompt = build_merged_architecture_side_effect_reasoning_system_prompt(
+        arch_on=True, side_on=True, mutation_on=True
+    )
+    assert on_prompt == MERGED_ARCHITECTURE_SIDE_EFFECT_REASONING_SYSTEM_PROMPT
+
+    off_prompt = build_merged_architecture_side_effect_reasoning_system_prompt(
+        arch_on=True, side_on=True, mutation_on=False
+    )
+    assert _ARCHITECTURE_CONSISTENCY_BODY in off_prompt
+    assert _SIDE_EFFECT_IMPACT_BODY_NO_MUTATION in off_prompt
+    assert "mutation-vs-replaced-code" not in off_prompt
+
+
+def test_merged_prompt_mutation_toggle_side_only() -> None:
+    on_prompt = build_merged_architecture_side_effect_reasoning_system_prompt(
+        arch_on=False, side_on=True, mutation_on=True
+    )
+    assert _SIDE_EFFECT_IMPACT_BODY in on_prompt
+    assert "mutation-vs-replaced-code" in on_prompt
+
+    off_prompt = build_merged_architecture_side_effect_reasoning_system_prompt(
+        arch_on=False, side_on=True, mutation_on=False
+    )
+    assert _SIDE_EFFECT_IMPACT_BODY_NO_MUTATION in off_prompt
+    assert "mutation-vs-replaced-code" not in off_prompt
+
+
+def test_merged_prompt_mutation_toggle_has_no_effect_when_side_off() -> None:
+    """mutation_on is meaningless when the side-effect half itself is off."""
+    arch_only_on = build_merged_architecture_side_effect_reasoning_system_prompt(
+        arch_on=True, side_on=False, mutation_on=True
+    )
+    arch_only_off = build_merged_architecture_side_effect_reasoning_system_prompt(
+        arch_on=True, side_on=False, mutation_on=False
+    )
+    assert arch_only_on == arch_only_off

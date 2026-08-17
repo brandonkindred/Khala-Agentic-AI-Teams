@@ -316,10 +316,10 @@ def test_skips_architecture_half_without_repository_evidence(
     built: Dict[str, Any] = {}
     real_build = pass_mod.build_merged_architecture_side_effect_reasoning_system_prompt
 
-    def _spy(*, arch_on: bool, side_on: bool) -> str:
+    def _spy(*, arch_on: bool, side_on: bool, mutation_on: bool = True) -> str:
         built["arch_on"] = arch_on
         built["side_on"] = side_on
-        built["prompt"] = real_build(arch_on=arch_on, side_on=side_on)
+        built["prompt"] = real_build(arch_on=arch_on, side_on=side_on, mutation_on=mutation_on)
         return built["prompt"]
 
     monkeypatch.setattr(
@@ -371,10 +371,10 @@ def test_discards_disabled_half_when_only_one_flag_on(monkeypatch: pytest.Monkey
     built: Dict[str, Any] = {}
     real_build = pass_mod.build_merged_architecture_side_effect_reasoning_system_prompt
 
-    def _spy(*, arch_on: bool, side_on: bool) -> str:
+    def _spy(*, arch_on: bool, side_on: bool, mutation_on: bool = True) -> str:
         built["arch_on"] = arch_on
         built["side_on"] = side_on
-        built["prompt"] = real_build(arch_on=arch_on, side_on=side_on)
+        built["prompt"] = real_build(arch_on=arch_on, side_on=side_on, mutation_on=mutation_on)
         return built["prompt"]
 
     monkeypatch.setattr(
@@ -701,6 +701,76 @@ def test_build_prompt_omits_replaced_content_when_absent() -> None:
     index = CodebaseIndex.from_input(_input())
     prompt = pass_mod._build_prompt(index, "", arch_on=False, side_on=True)
     assert "Replaced (pre-change) content" not in prompt
+
+
+# --------------------------------------------------------------------------- CODE_REVIEW_MUTATION_ANALYSIS
+
+
+def test_replaced_content_reaches_prompt_when_mutation_analysis_enabled() -> None:
+    """Default (``CODE_REVIEW_MUTATION_ANALYSIS`` unset): a before-image supplied
+    on ``CodeReviewInput.replaced_content`` reaches the merged pass's user
+    prompt as a "Replaced (pre-change) content" section."""
+
+    class _Capture(SubmissionPassTwoCallClient):
+        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+            return {"architecture_findings": [], "side_effect_findings": []}
+
+    client = _Capture()
+    find_architecture_and_side_effect_issues(
+        client,
+        _input(
+            files={"app/main.py": "def bar():\n    return 2\n"},
+        ).model_copy(update={"replaced_content": {"app/main.py": "def bar():\n    return 1\n"}}),
+    )
+    assert "Replaced (pre-change) content" in client.latest_reasoning_prompt()
+    assert "def bar():\n    return 1\n" in client.latest_reasoning_prompt()
+
+
+def test_replaced_content_hidden_from_prompt_when_mutation_analysis_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``CODE_REVIEW_MUTATION_ANALYSIS=false`` must hide the before-image from
+    the model entirely, even though the side-effect half is otherwise on."""
+    monkeypatch.setenv("CODE_REVIEW_MUTATION_ANALYSIS", "false")
+
+    class _Capture(SubmissionPassTwoCallClient):
+        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+            return {"architecture_findings": [], "side_effect_findings": []}
+
+    client = _Capture()
+    find_architecture_and_side_effect_issues(
+        client,
+        _input(
+            files={"app/main.py": "def bar():\n    return 2\n"},
+        ).model_copy(update={"replaced_content": {"app/main.py": "def bar():\n    return 1\n"}}),
+    )
+    assert "Replaced (pre-change) content" not in client.latest_reasoning_prompt()
+    assert "def bar():\n    return 1\n" not in client.latest_reasoning_prompt()
+
+
+def test_reasoning_system_prompt_reflects_mutation_toggle(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The merged pass's system prompt must carry (or omit) the
+    mutation-vs-replaced-code contract sub-check per ``CODE_REVIEW_MUTATION_ANALYSIS``,
+    while still carrying the side-effect body either way."""
+    import code_review_agent.merged_architecture_side_effect_pass as pass_mod
+
+    captured: Dict[str, Any] = {}
+
+    def _fake_run_submission_pass(llm: Any, **kwargs: Any) -> list:
+        captured["reasoning_system_prompt"] = kwargs["reasoning_system_prompt"]
+        return []
+
+    monkeypatch.setattr(pass_mod, "run_submission_pass", _fake_run_submission_pass)
+
+    find_architecture_and_side_effect_issues(DummyLLMClient(), _input())
+    assert "mutation-vs-replaced-code" in captured["reasoning_system_prompt"]
+    assert "Side-Effect / Blast-Radius Impact" in captured["reasoning_system_prompt"]
+
+    captured.clear()
+    monkeypatch.setenv("CODE_REVIEW_MUTATION_ANALYSIS", "false")
+    find_architecture_and_side_effect_issues(DummyLLMClient(), _input())
+    assert "mutation-vs-replaced-code" not in captured["reasoning_system_prompt"]
+    assert "Side-Effect / Blast-Radius Impact" in captured["reasoning_system_prompt"]
 
 
 def test_render_manifest_lists_every_path() -> None:
