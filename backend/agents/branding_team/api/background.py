@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import List, Optional
+from typing import Any, List, NoReturn, Optional
 from uuid import uuid4
 
 from fastapi import HTTPException
@@ -180,67 +180,117 @@ def _run_branding_background(
         pass
 
 
-def _submit_brand_run(
-    client_id: str,
-    brand_id: str,
-    payload: RunBrandRequest,
-    target_phase: Optional[BrandPhase],
-) -> RunBrandJobResponse:
-    from branding_team.api import main as _main
+def _temporal_enabled() -> bool:
+    """Report whether Temporal dispatch is available, tolerating its absence.
 
-    brand = _main.branding_store.get_brand(client_id, brand_id)
-    if not brand:
-        raise HTTPException(status_code=404, detail="Brand not found")
-    human_review = HumanReview(approved=payload.human_approved, feedback=payload.human_feedback)
-    job_id = str(uuid4())
-    create_job(
-        job_id,
-        client_id=client_id,
-        brand_id=brand_id,
-        current_phase=target_phase.value if target_phase else None,
-    )
+    Lazy import keeps main.py's import cost low and defers the Pattern A worker
+    boot in ``branding_team.temporal`` until the first dispatch.
 
-    # When Temporal is enabled, dispatch the job as a durable workflow (visible
-    # in the Temporal UI; an orphaned run after a restart is reconciled to
-    # ``interrupted`` by the team_service startup recovery rather than lost);
-    # otherwise fall back to the in-process thread pool. Lazy import keeps
-    # main.py's import cost low and defers the Pattern A worker boot in
-    # branding_team.temporal until the first dispatch.
+    Preconditions:
+        None.
+    Postconditions:
+        Returns ``is_temporal_enabled()`` when ``shared.temporal`` imports;
+        returns ``False`` when that import fails (Temporal not installed in this
+        deployment) rather than propagating the ``ImportError``.
+    """
     try:
         from shared.temporal import is_temporal_enabled
-
-        temporal_on = is_temporal_enabled()
     except ImportError:
-        temporal_on = False
+        return False
+    return is_temporal_enabled()
 
-    if temporal_on:
-        from branding_team.temporal.start_workflow import start_branding_workflow
 
-        wf_payload = {
-            "job_id": job_id,
-            "mission": brand.mission.model_dump(),
-            "human_review": human_review.model_dump(),
-            "brand_checks": [c.model_dump() for c in payload.brand_checks],
-            "client_id": client_id,
-            "brand_id": brand_id,
-            "include_market_research": payload.include_market_research,
-            "include_design_assets": payload.include_design_assets,
-            "target_phase": target_phase.value if target_phase else None,
-        }
-        try:
-            start_branding_workflow(job_id, wf_payload)
-        except Exception:
-            # Temporal client/worker not ready — fail the job row and return 503
-            # rather than surfacing the dispatch error as a 500.
-            logger.exception("Branding job %s Temporal dispatch failed", job_id)
-            try:
-                mark_failed(job_id, "temporal dispatch failed")
-            except Exception:
-                # Bookkeeping failure must not replace the intended 503 — the
-                # client should see "unavailable", not a leaked 500.
-                logger.exception("Branding job %s: mark_failed itself failed", job_id)
-            raise HTTPException(status_code=503, detail="Service temporarily unavailable")
-        return RunBrandJobResponse(job_id=job_id, status=JOB_STATUS_PENDING)
+def _fail_job_and_raise_503(job_id: str, reason: str) -> NoReturn:
+    """Mark a dispatched job failed and raise a 503, never surfacing a 500.
+
+    Shared by both dispatch paths: a dispatch failure should read to the client
+    as "service unavailable", and a secondary failure of the bookkeeping write
+    must not replace that intended outcome.
+
+    Preconditions:
+        ``job_id`` refers to a job row already created via ``create_job``;
+        ``reason`` is the failure message to record.
+    Postconditions:
+        Always raises ``HTTPException(503)``. First attempts
+        ``mark_failed(job_id, reason)``; if that itself raises, the error is
+        logged and swallowed so the 503 is not masked by a leaked 500. Never
+        returns.
+    """
+    try:
+        mark_failed(job_id, reason)
+    except Exception:
+        # Bookkeeping failure must not replace the intended 503 — the client
+        # should see "unavailable", not a leaked 500.
+        logger.exception("Branding job %s: mark_failed itself failed", job_id)
+    raise HTTPException(status_code=503, detail="Service temporarily unavailable")
+
+
+def _dispatch_temporal(
+    job_id: str,
+    brand: Any,
+    human_review: HumanReview,
+    payload: RunBrandRequest,
+    client_id: str,
+    brand_id: str,
+    target_phase: Optional[BrandPhase],
+) -> None:
+    """Dispatch a branding job as a durable Temporal workflow.
+
+    The run is visible in the Temporal UI; an orphaned run after a restart is
+    reconciled to ``interrupted`` by the team_service startup recovery rather
+    than lost.
+
+    Preconditions:
+        ``_temporal_enabled()`` returned True; ``job_id`` refers to a created
+        job row; ``brand`` exposes a ``mission`` model.
+    Postconditions:
+        Returns ``None`` after ``start_branding_workflow`` accepts a fully
+        serialized payload. On any dispatch error (client/worker not ready), the
+        error is logged and the job is failed via ``_fail_job_and_raise_503`` —
+        so this raises ``HTTPException(503)`` instead of a 500.
+    """
+    from branding_team.temporal.start_workflow import start_branding_workflow
+
+    wf_payload = {
+        "job_id": job_id,
+        "mission": brand.mission.model_dump(),
+        "human_review": human_review.model_dump(),
+        "brand_checks": [c.model_dump() for c in payload.brand_checks],
+        "client_id": client_id,
+        "brand_id": brand_id,
+        "include_market_research": payload.include_market_research,
+        "include_design_assets": payload.include_design_assets,
+        "target_phase": target_phase.value if target_phase else None,
+    }
+    try:
+        start_branding_workflow(job_id, wf_payload)
+    except Exception:
+        logger.exception("Branding job %s Temporal dispatch failed", job_id)
+        _fail_job_and_raise_503(job_id, "temporal dispatch failed")
+
+
+def _dispatch_thread(
+    job_id: str,
+    brand: Any,
+    human_review: HumanReview,
+    payload: RunBrandRequest,
+    client_id: str,
+    brand_id: str,
+    target_phase: Optional[BrandPhase],
+) -> None:
+    """Dispatch a branding job to the in-process bounded thread pool.
+
+    Preconditions:
+        ``_temporal_enabled()`` returned False; ``job_id`` refers to a created
+        job row; ``brand`` exposes a ``mission`` model.
+    Postconditions:
+        Returns ``None`` after submitting ``_run_branding_background`` to the run
+        executor. If the executor was shut down (``RuntimeError``, e.g. app
+        teardown), the job is failed via ``_fail_job_and_raise_503`` — so this
+        raises ``HTTPException(503)`` instead of letting the ``RuntimeError``
+        surface as a 500.
+    """
+    from branding_team.api import main as _main
 
     try:
         # Submit the hub's re-exported binding (not the module-local name) so a
@@ -260,15 +310,46 @@ def _submit_brand_run(
             target_phase,
         )
     except RuntimeError:
-        # Executor was shut down (e.g. app teardown) — fail the job row and
-        # return 503 rather than letting the RuntimeError surface as a 500.
-        try:
-            mark_failed(job_id, "run executor unavailable")
-        except Exception:
-            # Bookkeeping failure must not replace the intended 503 — the
-            # client should see "unavailable", not a leaked 500.
-            logger.exception("Branding job %s: mark_failed itself failed", job_id)
-        raise HTTPException(status_code=503, detail="Service temporarily unavailable")
+        _fail_job_and_raise_503(job_id, "run executor unavailable")
+
+
+def _submit_brand_run(
+    client_id: str,
+    brand_id: str,
+    payload: RunBrandRequest,
+    target_phase: Optional[BrandPhase],
+) -> RunBrandJobResponse:
+    """Create a job row and dispatch a branding run, Temporal or thread-pool.
+
+    Preconditions:
+        ``client_id``/``brand_id`` identify a brand; ``payload`` is the parsed
+        run request; ``target_phase`` is the single phase to run, or ``None``
+        for the full pipeline.
+    Postconditions:
+        Returns ``RunBrandJobResponse(job_id, status=JOB_STATUS_PENDING)`` after
+        creating the job row and dispatching it (durable workflow when
+        ``_temporal_enabled()``, else the bounded thread pool). Raises
+        ``HTTPException(404)`` when the brand is missing, and ``HTTPException(503)``
+        when dispatch fails (see ``_dispatch_temporal`` / ``_dispatch_thread``).
+    """
+    from branding_team.api import main as _main
+
+    brand = _main.branding_store.get_brand(client_id, brand_id)
+    if not brand:
+        raise HTTPException(status_code=404, detail="Brand not found")
+    human_review = HumanReview(approved=payload.human_approved, feedback=payload.human_feedback)
+    job_id = str(uuid4())
+    create_job(
+        job_id,
+        client_id=client_id,
+        brand_id=brand_id,
+        current_phase=target_phase.value if target_phase else None,
+    )
+
+    if _temporal_enabled():
+        _dispatch_temporal(job_id, brand, human_review, payload, client_id, brand_id, target_phase)
+    else:
+        _dispatch_thread(job_id, brand, human_review, payload, client_id, brand_id, target_phase)
     return RunBrandJobResponse(job_id=job_id, status=JOB_STATUS_PENDING)
 
 

@@ -37,18 +37,21 @@ from branding_team.models import (
     AudienceSegment,
     AudienceSegmentOutput,
     AudienceSegmentsOutput,
+    Brand,
     BrandArchetype,
     BrandArchetypeOutput,
     BrandArchetypesOutput,
     BrandArchitectureOutput,
     BrandArchitectureRule,
     BrandArchitectureRuleOutput,
+    BrandConsumerContext,
     BrandDiscoveryAudit,
     BrandExperiencePrinciplesOutput,
     BrandHealthKPI,
     BrandHealthKPIOutput,
     BrandInActionExample,
     BrandInActionExampleOutput,
+    BrandStatus,
     BrandStoryOutput,
     ChannelActivationOutput,
     ChannelGuidelineOutput,
@@ -68,21 +71,26 @@ from branding_team.models import (
     MessagingFrameworkOutput,
     MessagingPillar,
     MessagingPillarOutput,
+    NarrativeMessagingOutput,
     PersonaProfile,
     PersonaProfileOutput,
     PersonaProfilesOutput,
     PositioningOutput,
     PurposeVisionOutput,
+    StrategicCoreOutput,
     TaglineOutput,
+    TeamOutput,
     TypographySpec,
     TypographySpecOutput,
     VoiceToneEntry,
     VoiceToneEntryOutput,
     WikiEntry,
     WikiEntryOutput,
+    WorkflowStatus,
     WritingGuidelinesBody,
     WritingGuidelinesOutput,
 )
+from branding_team.tests.conftest import make_mission
 
 _DISCOVERY_KWARGS = dict(
     current_brand_perception="Seen as reliable but generic.",
@@ -1323,3 +1331,193 @@ def test_governance_accepts_strict_workflow_fragment_dump() -> None:
     assert len(merged.approval_workflows) == 3
     assert merged.approval_workflows[0].asset_type == "Campaign landing page"
     assert isinstance(merged.approval_workflows[0], ApprovalWorkflow)
+
+
+# ---------------------------------------------------------------------------
+# Brand.to_consumer_context() — cross-team consumer accessor
+# ---------------------------------------------------------------------------
+
+
+def _populated_team_output() -> TeamOutput:
+    """A ``TeamOutput`` with fully populated Phase 1 (strategic core) and
+    Phase 2 (narrative messaging) outputs, exercising every synthesis branch of
+    ``Brand.to_consumer_context``."""
+    strategic = StrategicCoreOutput(
+        brand_purpose="Help teams ship on-brand.",
+        mission_statement="Make brand consistency effortless.",
+        vision_statement="A world of coherent brands.",
+        brand_promise="On-brand, every time.",
+        positioning_statement="The brand OS for product teams.",
+        core_values=[
+            CoreValue(value="clarity", behavioral_definition="Plain over clever."),
+            CoreValue(value=""),  # skipped: no value
+        ],
+        target_audience_segments=[
+            AudienceSegment(name="Product leaders", description="VP/Director buyers"),
+            AudienceSegment(name="Founders"),  # no description -> name only
+            AudienceSegment(name=""),  # skipped: no name
+        ],
+        differentiation_pillars=[
+            DifferentiationPillar(
+                pillar="Execution speed", competitive_context="Rivals ship quarterly."
+            ),
+            DifferentiationPillar(pillar=""),  # skipped: no pillar
+        ],
+    )
+    narrative = NarrativeMessagingOutput(
+        brand_story="Founded to end brand drift.",
+        tagline="Ship the brand.",
+        brand_archetypes=[
+            BrandArchetype(
+                archetype="The Creator",
+                personality_traits=["Imaginative", "Original", "Bold"],
+            ),
+            BrandArchetype(archetype="The Sage"),  # no traits -> contributes nothing
+        ],
+        messaging_framework=[
+            MessagingPillar(pillar="Cohesion"),
+            MessagingPillar(pillar="Speed"),
+            MessagingPillar(pillar=""),  # skipped: no pillar
+        ],
+        audience_message_maps=[
+            AudienceMessageMap(
+                audience_segment="Product leaders", tone_adjustments="Confident, outcome-focused"
+            ),
+            AudienceMessageMap(audience_segment="Founders"),  # no tone -> skipped
+        ],
+    )
+    return TeamOutput(
+        status=WorkflowStatus.READY_FOR_ROLLOUT,
+        mission_summary="Brand OS",
+        strategic_core=strategic,
+        narrative_messaging=narrative,
+    )
+
+
+def _make_brand(**overrides) -> Brand:
+    """Construct a ``Brand`` inline, matching the canonical store construction."""
+    fields = dict(
+        id="brand-1",
+        client_id="client-1",
+        name="Northstar",
+        status=BrandStatus.active,
+        mission=make_mission(),
+        latest_output=None,
+    )
+    fields.update(overrides)
+    return Brand(**fields)
+
+
+def test_to_consumer_context_flattens_populated_brand() -> None:
+    """A fully populated Phase 1/2 brand synthesizes every consumer-facing field."""
+    brand = _make_brand(latest_output=_populated_team_output())
+
+    ctx = brand.to_consumer_context()
+    assert isinstance(ctx, BrandConsumerContext)
+
+    assert ctx.brand_name == "Northstar"
+
+    # Target audience: mission audience + each named segment (skips the blank one).
+    assert ctx.target_audience == (
+        "enterprise product leaders; Product leaders: VP/Director buyers; Founders"
+    )
+
+    # Voice and tone: mission voice + first archetype's traits (Sage has none).
+    assert ctx.voice_and_tone == "clear, confident, human; Imaginative, Original, Bold"
+
+    # Guidelines: positioning + non-blank value + non-blank pillar + tone map.
+    assert ctx.brand_guidelines == (
+        "Positioning: The brand OS for product teams.\n"
+        "Value -- clarity: Plain over clever.\n"
+        "Differentiator -- Execution speed: Rivals ship quarterly.\n"
+        "Tone for Product leaders: Confident, outcome-focused"
+    )
+
+    # Objectives: purpose / mission / vision / promise, in that order.
+    assert ctx.brand_objectives == (
+        "Purpose: Help teams ship on-brand.\n"
+        "Mission: Make brand consistency effortless.\n"
+        "Vision: A world of coherent brands.\n"
+        "Promise: On-brand, every time."
+    )
+
+    assert ctx.messaging_pillars == ["Cohesion", "Speed"]
+    assert ctx.brand_story == "Founded to end brand drift."
+    assert ctx.tagline == "Ship the brand."
+
+
+def test_to_consumer_context_degrades_without_latest_output() -> None:
+    """A brand with no phase outputs yields mission-only values and documented fallbacks."""
+    brand = _make_brand(latest_output=None)
+
+    ctx = brand.to_consumer_context()
+
+    assert ctx.brand_name == "Northstar"
+    # Only the mission audience is present; no segments to append.
+    assert ctx.target_audience == "enterprise product leaders"
+    # Only the mission voice; no archetype traits and no hardcoded-fallback needed.
+    assert ctx.voice_and_tone == "clear, confident, human"
+    # Every phase-derived field is empty.
+    assert ctx.brand_guidelines == ""
+    assert ctx.brand_objectives == ""
+    assert ctx.messaging_pillars == []
+    assert ctx.brand_story == ""
+    assert ctx.tagline == ""
+
+
+def test_to_consumer_context_handles_none_phase_outputs() -> None:
+    """A ``latest_output`` whose Phase 1/2 fields are ``None`` degrades like an absent output."""
+    brand = _make_brand(
+        latest_output=TeamOutput(
+            status=WorkflowStatus.NEEDS_HUMAN_DECISION,
+            mission_summary="Draft",
+            strategic_core=None,
+            narrative_messaging=None,
+        )
+    )
+
+    ctx = brand.to_consumer_context()
+
+    assert ctx.target_audience == "enterprise product leaders"
+    assert ctx.brand_guidelines == ""
+    assert ctx.brand_objectives == ""
+    assert ctx.messaging_pillars == []
+    assert ctx.brand_story == ""
+    assert ctx.tagline == ""
+
+
+def test_to_consumer_context_voice_falls_back_when_mission_voice_blank() -> None:
+    """With a blank mission voice and no archetypes, voice_and_tone uses the hardcoded fallback."""
+    brand = _make_brand(mission=make_mission(desired_voice=""))
+
+    ctx = brand.to_consumer_context()
+
+    assert ctx.voice_and_tone == "professional, clear, and human"
+
+
+def test_to_consumer_context_uses_brand_name() -> None:
+    """The accessor's ``brand_name`` is the brand's own ``name`` (the primary path).
+
+    ``Brand.name`` is required non-empty, so the accessor's ``self.name or
+    mission.company_name`` fallback branch is unreachable via a valid ``Brand``; only the
+    primary ``self.name`` path is exercised here. The documented ``mission.company_name``
+    fallback and the ``"Brand"`` placeholder are covered separately (see
+    ``test_brand_consumer_context_direct_construction_defaults``).
+    """
+    brand = _make_brand(name="Acme Co", mission=make_mission(company_name="Northstar Labs"))
+    assert brand.to_consumer_context().brand_name == "Acme Co"
+
+
+def test_brand_consumer_context_direct_construction_defaults() -> None:
+    """Direct construction (no accessor) uses the documented placeholder defaults.
+
+    Confirms the model-level defaults a consumer sees when building a
+    ``BrandConsumerContext`` by hand: ``brand_name`` is the generic ``"Brand"`` placeholder
+    (distinct from the accessor's ``mission.company_name`` fallback) and ``voice_and_tone``
+    is the accessor's shared fallback string.
+    """
+    ctx = BrandConsumerContext()
+    assert ctx.brand_name == "Brand"
+    assert ctx.voice_and_tone == "professional, clear, and human"
+    assert ctx.target_audience == ""
+    assert ctx.messaging_pillars == []

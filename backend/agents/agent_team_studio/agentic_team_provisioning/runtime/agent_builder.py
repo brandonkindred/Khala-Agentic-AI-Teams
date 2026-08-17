@@ -365,14 +365,17 @@ async def invoke_generated_agent(body: Any, *, agent_id: str | None = None) -> d
     cancellable model invocation is tracked as a follow-up.
 
     Manifest binding: persona fields the request omits (``role`` / ``skills`` /
-    ``capabilities`` / ``expertise``) and the ``system_prompt`` for the selected
-    ``state`` bind from the agent's stored ``AgentManifest``, resolved through the
-    trusted route-supplied ``agent_id`` (never a body-supplied id). A non-empty body
-    field still wins for that invoke; the explicit-override refinement (empty-list
-    clearing, request ``system_prompt`` replacement) is the sibling follow-up. **Tools
-    are not taken from the body**: the manifest declares ``cognition.tools = []`` and
-    tool brokering isn't wired yet, so the runtime grants no tools (a caller can't
-    escalate to ``python`` / ``http_request``). See the locked precedence contract in
+    ``capabilities`` / ``expertise``) and ``system_prompt`` bind from the agent's
+    stored ``AgentManifest``, resolved through the trusted route-supplied ``agent_id``
+    (never a body-supplied id). "Omits" is a raw-body key-presence test: an
+    explicitly-present field — including an explicitly-cleared empty list or blank
+    string — overrides the manifest default for that invoke only, never written back.
+    An explicit ``system_prompt`` fully replaces the base prompt; a manifest-sourced
+    state prompt (selected by ``state``) is composed with the resolved persona fields
+    instead. **Tools are not taken from the body**: the manifest declares
+    ``cognition.tools = []`` and tool brokering isn't wired yet, so the runtime grants
+    no tools (a caller can't escalate to ``python`` / ``http_request``). See the
+    locked precedence contract in
     ``system_design/adr/ADR-015-invoke-generated-agent-persona-state-precedence.md``.
 
     Preconditions:
@@ -409,8 +412,11 @@ def _invoke_generated_agent_sync(body: Any, agent_id: str | None = None) -> dict
           the sandbox path never binds from caller-controlled identity), maps it to
           persona defaults via :func:`persona_from_manifest`, and for each of
           ``role`` / ``skills`` / ``capabilities`` / ``expertise`` uses the manifest
-          default when the body value is empty. Composes the base prompt (persona +
-          the selected manifest state prompt) and invokes via
+          default unless the raw request body explicitly carries that key (per
+          ADR-015's presence test — an explicitly-cleared empty list/blank string is
+          an override, not an omission). Composes the base prompt: an explicit
+          request ``system_prompt`` is a full replacement; otherwise the persona
+          fields plus the selected manifest state prompt are composed. Invokes via
           :func:`call_agent_with_cognition`. Runtime tools stay ``[]``. When no
           manifest resolves, every field falls back to pure body values (today's
           degraded path).
@@ -421,7 +427,8 @@ def _invoke_generated_agent_sync(body: Any, agent_id: str | None = None) -> dict
         persona_from_manifest,
     )
 
-    spec = GeneratedAgentInvokeInput.model_validate(body if isinstance(body, dict) else {})
+    raw = body if isinstance(body, dict) else {}
+    spec = GeneratedAgentInvokeInput.model_validate(raw)
 
     # Trusted route id wins; the body id/name is only a fallback for direct callers
     # (tests, non-sandboxed internal callers) that never went through the shim.
@@ -432,16 +439,25 @@ def _invoke_generated_agent_sync(body: Any, agent_id: str | None = None) -> dict
         else EMPTY_ROSTER_PERSONA
     )
 
-    # Omit/default precedence: a non-empty body field wins; an empty/omitted one
-    # inherits the manifest default. Distinguishing an explicitly-cleared empty list
-    # from an omitted key (request-wins) is the sibling explicit-override story.
-    role = spec.role or persona.role
-    skills = spec.skills or persona.skills
-    capabilities = spec.capabilities or persona.capabilities
-    expertise = spec.expertise or persona.expertise
-    base_prompt = _compose_base_prompt(
-        spec.agent_name, role, skills, capabilities, expertise, manifest, spec.state
-    )
+    # Explicit-override precedence (ADR-015): a field explicitly present in the raw
+    # body — regardless of value — wins over the manifest default for this invoke
+    # only (never written back). An omitted key inherits the manifest default.
+    # Presence, not truthiness, is the test: an explicitly-cleared empty list/blank
+    # string is a caller override (e.g. clearing the manifest's skills), not "fall
+    # back to the manifest".
+    role = spec.role if "role" in raw else persona.role
+    skills = spec.skills if "skills" in raw else persona.skills
+    capabilities = spec.capabilities if "capabilities" in raw else persona.capabilities
+    expertise = spec.expertise if "expertise" in raw else persona.expertise
+
+    if "system_prompt" in raw:
+        # Full replacement: the caller owns the prompt; persona fields are not
+        # spliced in a second time.
+        base_prompt = spec.system_prompt
+    else:
+        base_prompt = _compose_base_prompt(
+            spec.agent_name, role, skills, capabilities, expertise, manifest, spec.state
+        )
 
     text, writeback = call_agent_with_cognition(
         spec.agent_name,
