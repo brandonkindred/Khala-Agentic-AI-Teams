@@ -8,21 +8,23 @@ check the persisted persona binds. Every case starts from a *real* Stage-1 save 
 into a live in-process registry — and then drives one of the three Stage-2 invoke
 paths ADR-015 scopes:
 
-* **Pipeline runner** and **Studio test-chat** resolve persona from the manifest
-  (``resolve_persona`` → ``build_agent``) *today*, so their binding is proven with
-  plain, green assertions: real evidence the Stage-2 promise already holds there.
-* **Sandbox invoke** (``POST /_agents/{id}/invoke`` → dispatch → the shared
-  generated-agent entrypoint) still composes persona from the request body and never
-  reads the resolved manifest. Its binding assertion is therefore ``xfail`` — it
-  reports XFAIL on today's *unbound* runtime and will flip to XPASS once the
-  runtime-binding implementation lands (at which point the marker is removed). That
-  XFAIL↔XPASS transition is the "failures clearly indicate unbound vs bound
-  behavior" signal this verification exists to give.
+* **Pipeline runner**, **Studio test-chat**, and **sandbox invoke**
+  (``POST /_agents/{id}/invoke`` → dispatch → the shared generated-agent entrypoint)
+  all resolve persona from the saved manifest today — manifest-first binding per
+  ADR-015 landed in ``invoke_generated_agent`` via the sibling stories that
+  implemented and unified this contract. Every case below is therefore a plain,
+  green regression guard: real evidence the Stage-2 promise holds on all three
+  paths, not a transition still in progress.
+* The sandbox-invoke cases are duplicated across both manifest producers — a
+  Studio-saved manifest (``build_studio_agent_manifest``) and an agentic-generated
+  one (``build_agent_manifest``) — to prove the binding is entrypoint-level, not
+  producer-specific: both share the identical save → shim → dispatch → entrypoint
+  path.
 
 The green sandbox cases (explicit-body override honored; runtime tools stay inert)
-guard the save → shim → dispatch → entrypoint wiring and hold both before and after
-binding. The LLM is faked (records the composed system prompt / granted tools); no
-network call is made and no Postgres is required (the registry is in-process).
+guard the save → shim → dispatch → entrypoint wiring for both producers. The LLM is
+faked (records the composed system prompt / granted tools); no network call is made
+and no Postgres is required (the registry is in-process).
 """
 
 from __future__ import annotations
@@ -40,19 +42,6 @@ from agent_team_studio.agentic_team_provisioning.roster_resolve import resolve_p
 from agent_team_studio.agentic_team_provisioning.runtime import agent_builder
 from agent_team_studio.agentic_team_provisioning.runtime.pipeline_runner import PipelineRunner
 from shared.agent_invoke import mount_invoke_shim
-
-# The sandbox invoke path composes persona from the request body and does not yet
-# read the resolved manifest, so its binding-after-save assertion is red today. The
-# reason names the unbound-vs-bound distinction; ``strict=False`` reports XFAIL now
-# and XPASS (not a failure) once binding lands — that transition is the signal.
-_SANDBOX_UNBOUND = pytest.mark.xfail(
-    reason=(
-        "sandbox invoke Stage-2 still composes persona from the request body, not the "
-        "saved manifest — manifest-first binding per ADR-015 is not yet implemented in "
-        "invoke_generated_agent (remove this marker when it XPASSes)"
-    ),
-    strict=False,
-)
 
 
 class _FakeResult:
@@ -209,20 +198,20 @@ def test_test_chat_stage2_binds_saved_persona_after_save(fake_strands, registry:
     assert "support" in prompt and "billing" in prompt
 
 
-# --- Sandbox invoke Stage-2 (unbound today → xfail until binding lands) -------
+# --- Sandbox invoke Stage-2, Studio-saved producer (bound today → green) ------
 
 
-@_SANDBOX_UNBOUND
 def test_sandbox_invoke_stage2_binds_saved_persona_after_save(
     fake_strands, registry: AgentRegistry
 ):
     """Invoking a saved agent without re-supplying persona must bind the manifest.
 
     This is the user-visible Stage-2 promise: after Stage-1 save, a sandbox invoke
-    with the persona fields omitted from the body should be driven by the saved
-    ``role`` and the authored ``executing``-state ``system_prompt`` — resolved via
-    the URL ``agent_id`` exactly as ADR-015 mandates. It is ``xfail`` until
-    manifest-first binding lands in ``invoke_generated_agent``.
+    with the persona fields omitted from the body is driven by the saved ``role``
+    and the authored ``executing``-state ``system_prompt`` — resolved via the URL
+    ``agent_id`` exactly as ADR-015 mandates. This is the regression guard proving
+    the promise holds for a Studio-saved producer; see the ``_for_generated_agent``
+    sibling below for the agentic-generated producer.
     """
     manifest = _save_studio_agent(
         registry,
@@ -294,6 +283,96 @@ def test_sandbox_invoke_stage2_never_grants_tools(fake_strands, registry: AgentR
         ),
     )
     assert manifest.cognition.tools == ["python", "http_request"]
+
+    response = _shim_client().post(
+        f"/_agents/{manifest.id}/invoke",
+        json={"agent_name": "Toolful Agent", "message": "run code", "tools": ["python"]},
+    )
+    assert response.status_code == 200
+    assert fake_strands.last_tools == []
+
+
+# --- Sandbox invoke Stage-2, agentic-generated producer (parity) --------------
+
+
+def test_sandbox_invoke_stage2_binds_saved_persona_after_save_for_generated_agent(
+    fake_strands, registry: AgentRegistry
+):
+    """The same binding promise holds for an agentic-generated producer.
+
+    Mirrors ``test_sandbox_invoke_stage2_binds_saved_persona_after_save`` but saves
+    via ``build_agent_manifest`` instead of ``build_studio_agent_manifest`` — same
+    save → shim → dispatch → entrypoint path, a different manifest producer. Proves
+    the binding is entrypoint-level, not Studio-specific.
+
+    Scope note: unlike ``build_studio_agent_manifest``, ``build_agent_manifest`` has
+    no ``states``/``system_prompt`` parameter, so this asserts role/skills/expertise
+    binding only — state/``system_prompt`` composition is already covered by the
+    Studio-producer test above, the only producer whose public builder can author a
+    state prompt.
+    """
+    manifest = _save_generated_agent(
+        registry,
+        agent_name="Contract Auditor",
+        summary="Audits vendor contracts",
+        skill_tags=["legal", "contracts"],
+    )
+
+    response = _shim_client().post(
+        f"/_agents/{manifest.id}/invoke",
+        json={"agent_name": manifest.name, "message": "Review this MSA."},
+    )
+    assert response.status_code == 200
+
+    prompt = fake_strands.last_system_prompt
+    assert "Role: Audits vendor contracts" in prompt
+    assert "Skills: legal, contracts" in prompt
+    assert "Expertise: agentic_team_provisioning" in prompt
+
+
+def test_sandbox_invoke_stage2_honors_explicit_body_override_for_generated_agent(
+    fake_strands, registry: AgentRegistry
+):
+    """An explicit body persona overrides the manifest default for this producer too.
+
+    Mirrors ``test_sandbox_invoke_stage2_honors_explicit_body_override``: the
+    override direction is the same regardless of which builder produced the saved
+    manifest.
+    """
+    manifest = _save_generated_agent(
+        registry, agent_name="Contract Auditor", summary="Audits vendor contracts"
+    )
+
+    response = _shim_client().post(
+        f"/_agents/{manifest.id}/invoke",
+        json={
+            "agent_name": "Contract Auditor",
+            "message": "Review this MSA.",
+            "role": "Explicit Body Role",
+            "skills": ["negotiation"],
+        },
+    )
+    assert response.status_code == 200
+
+    prompt = fake_strands.last_system_prompt
+    assert "Role: Explicit Body Role" in prompt
+    assert "Skills: negotiation" in prompt
+
+
+def test_sandbox_invoke_stage2_never_grants_tools_for_generated_agent(
+    fake_strands, registry: AgentRegistry
+):
+    """Runtime tools stay inert for an agentic-generated producer too.
+
+    ``build_agent_manifest`` has no parameter to advertise ``cognition.tools`` (it
+    always carries ``default_cognition_block()``), so this can only repeat the
+    producer-independent half of ``test_sandbox_invoke_stage2_never_grants_tools``:
+    a request-supplied ``tools`` field stays inert. The runtime never derives
+    granted tools from the manifest producer either way (the ``[]`` in
+    ``invoke_generated_agent`` is a literal, not producer-specific), so this is a
+    cheap parity check rather than new coverage.
+    """
+    manifest = _save_generated_agent(registry, agent_name="Toolful Agent")
 
     response = _shim_client().post(
         f"/_agents/{manifest.id}/invoke",
