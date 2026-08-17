@@ -72,7 +72,9 @@ def create_brand(client_id: str, payload: CreateBrandRequest) -> Brand:
     Preconditions:
         ``client_id`` is a non-empty path string; ``payload`` is a validated
         ``CreateBrandRequest``. When ``payload.conversation_id`` is set (after
-        stripping), it names a conversation not already attached to another brand.
+        stripping), it identifies an existing conversation belonging to the
+        caller. (Whether that conversation is already attached elsewhere is
+        checked and enforced by this handler — see Postconditions — not assumed.)
     Postconditions:
         Returns the created ``Brand`` with its conversation attached (HTTP 201).
         Raises 404 "Client not found" when ``client_id`` matches no client.
@@ -162,15 +164,15 @@ def update_brand(client_id: str, brand_id: str, payload: UpdateBrandRequest) -> 
 
     Preconditions:
         ``client_id`` and ``brand_id`` are non-empty path strings; ``payload`` is
-        a validated ``UpdateBrandRequest``. When ``payload.status`` is set it must
-        name a valid ``BrandStatus``.
+        a validated ``UpdateBrandRequest``.
     Postconditions:
         Returns the updated ``Brand``. Raises 404 "Brand not found" when the brand
         does not exist under ``client_id`` (checked up front and again if the
         store write finds no row). Raises 400 "Invalid status: …" when
-        ``payload.status`` is not a valid ``BrandStatus``. Forwards a mission to
-        the store only when it differs from the brand's current mission, keeping a
-        status/name-only update idempotent with respect to generated artifacts.
+        ``payload.status`` is set but does not name a valid ``BrandStatus``.
+        Forwards a mission to the store only when it differs from the brand's
+        current mission, keeping a status/name-only update idempotent with
+        respect to generated artifacts.
     """
     from branding_team.api import main as _main
 

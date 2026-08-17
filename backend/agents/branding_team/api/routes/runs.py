@@ -140,9 +140,10 @@ def cancel_branding_job(job_id: str) -> Dict[str, Any]:
     Postconditions:
         When the job is cancellable, marks it cancelled, delivers the cancel
         signal through ``main._signal_branding_cancel`` (the hub's re-exported,
-        interceptable binding), and returns ``{"job_id", "status": cancelled,
-        "success": True}``. When the job cannot be cancelled in its current
-        status, returns ``success: False`` with an explanatory ``message`` and no
+        interceptable binding), and returns ``{"job_id": job_id, "status":
+        JOB_STATUS_CANCELLED, "success": True}``. When the job cannot be cancelled
+        in its current status, returns a dict with ``"success": False`` and an
+        explanatory ``"message"`` (and the job's current ``"status"``) and no
         state change. Raises 404 "Job not found" when the job is unknown.
     """
     from branding_team.api import main as _main
@@ -172,7 +173,8 @@ def delete_branding_job(job_id: str) -> Dict[str, Any]:
     Preconditions:
         ``job_id`` is a non-empty path string.
     Postconditions:
-        Returns ``{"job_id", "deleted": True}`` once the job record is removed.
+        Returns ``{"job_id": job_id, "deleted": True}`` once the job record is
+        removed.
         Raises 404 "Job not found" when the job does not exist or the store
         reports no row deleted.
     """
