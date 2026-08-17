@@ -37,15 +37,20 @@ class RosterPersonaView(BaseModel):
 EMPTY_ROSTER_PERSONA = RosterPersonaView()
 
 
-def persona_from_manifest(manifest: AgentManifest) -> RosterPersonaView:
+def persona_from_manifest(
+    manifest: AgentManifest, *, extra_strip_tags: frozenset[str] = frozenset()
+) -> RosterPersonaView:
     """Map Manifest fields to the free-text persona view used by ``build_agent``.
 
     Preconditions: ``manifest`` is a validated ``AgentManifest``.
     Postconditions: ``role`` is ``summary`` (or ``name`` if summary blank);
         ``skills`` ← non-marker Manifest tags (excludes ``"generated"`` / team-key
-        stamps — same filter as :func:`skill_tags_from_manifest`);
+        stamps plus any tag in ``extra_strip_tags`` — same filter as
+        :func:`skill_tags_from_manifest`);
         ``tools`` ← ``cognition.tools`` or ``[]``;
         ``expertise`` ← ``[team]`` when team non-empty; ``capabilities`` always ``[]``.
+        ``extra_strip_tags`` defaults to empty (roster-view callers unchanged); the
+        invoke binding passes ``{"studio"}`` so a Studio stamp never leaks into skills.
     """
     tools: list[str] = []
     if manifest.cognition and manifest.cognition.tools:
@@ -54,7 +59,7 @@ def persona_from_manifest(manifest: AgentManifest) -> RosterPersonaView:
     name = (manifest.name or "").strip()
     return RosterPersonaView(
         role=summary or name,
-        skills=skill_tags_from_manifest(manifest),
+        skills=skill_tags_from_manifest(manifest, extra_strip_tags=extra_strip_tags),
         capabilities=[],
         tools=tools,
         expertise=[manifest.team] if manifest.team else [],

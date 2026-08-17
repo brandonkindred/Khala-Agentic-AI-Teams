@@ -300,24 +300,28 @@ class GeneratedAgentInvokeInput(BaseModel):
     roster metadata travels in the request body alongside the user message. This
     is the schema the generated manifest's ``inputs`` points at.
 
-    Binding caveat (tracked follow-up): the persona fields below (``role``,
-    ``skills``, ``capabilities``, ``expertise``) are currently supplied by the
-    caller and are **not yet bound to the agent's persisted roster definition** —
-    the dispatch contract hands the entrypoint only this body, never the resolved
-    manifest/id, so it cannot look up the immutable stored persona. ``tools`` is
+    Manifest binding: when the request **omits** a persona field (``role`` /
+    ``skills`` / ``capabilities`` / ``expertise``) or ``system_prompt``, the runtime
+    binds the value from the agent's stored ``AgentManifest`` — resolved through the
+    shim's trusted, route-supplied agent id (never a body-supplied one). Whether a
+    field is "omitted" is a **raw-body key-presence test**, not a truthiness test: an
+    explicitly-present field — including an explicitly-cleared empty list/blank
+    string — wins over the manifest default for that invoke only (never written
+    back). An explicit ``system_prompt`` is a **full replacement** of the base
+    prompt (persona fields are not spliced in a second time); a manifest-sourced
+    state prompt is composed with the resolved persona fields instead. ``tools`` is
     **inert at runtime**: the generated manifest declares ``cognition.tools = []``
     and tool brokering isn't wired for generated agents, so the runtime grants no
     tools regardless of this field (a caller cannot escalate to ``python`` /
-    ``http_request``). Until binding lands, a generated manifest selects which
-    agent is *advertised*, not an enforced persona. See
+    ``http_request``). See
     ``system_design/adr/ADR-015-invoke-generated-agent-persona-state-precedence.md``
-    for the locked precedence contract binding will implement.
+    for the locked precedence contract.
     """
 
     agent_name: str = Field(..., description="Roster agent name (stable within the team)")
     message: str = Field(..., description="The user/upstream task payload for this invoke")
     role: str = Field(
-        default="", description="Caller-supplied persona; not yet bound to the roster"
+        default="", description="Persona role; binds from the manifest summary when omitted"
     )
     skills: list[str] = Field(default_factory=list)
     capabilities: list[str] = Field(default_factory=list)
@@ -325,6 +329,16 @@ class GeneratedAgentInvokeInput(BaseModel):
         default_factory=list, description="Inert at runtime — no tools are granted (see class doc)"
     )
     expertise: list[str] = Field(default_factory=list)
+    system_prompt: str = Field(
+        default="",
+        description="Full base-prompt replacement when present; binds from the selected "
+        "manifest state's system_prompt (composed with persona fields) when omitted.",
+    )
+    state: str = Field(
+        default="executing",
+        description="Operating-state key selecting which manifest AgentStateSpec system "
+        "prompt binds when the request omits one (planning/executing/researching).",
+    )
     agent_id: Optional[str] = Field(
         default=None, description="Stable cognition agent id; defaults to the agent name"
     )

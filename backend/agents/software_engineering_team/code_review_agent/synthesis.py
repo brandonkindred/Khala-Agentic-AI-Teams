@@ -163,7 +163,7 @@ def _parse_json_object(raw: str) -> dict:
 
     Postconditions:
         Returns a ``dict`` on success. Parses via the canonical
-        ``extract_json_from_response`` recovery ladder (markdown fences, prose
+        ``parse_json_object`` recovery ladder (markdown fences, prose
         prefixes, and trailing commas are salvaged). Raises
         ``LLMJsonParseError`` when no JSON object can be recovered, or
         ``TypeError`` when the recovered payload is not a JSON object.
