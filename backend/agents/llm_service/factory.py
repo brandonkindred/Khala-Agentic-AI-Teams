@@ -434,10 +434,14 @@ def _build_entry_client(
     The entry is self-contained for credentials: its ``api_key`` authenticates the
     client with NO environment fallback (a Claude or Ollama-Cloud entry must carry
     its own key — enforced at write time by the route's credentials guard; a local
-    Ollama entry resolves to ``""`` → no Authorization header). Empty non-secret
-    fields (``model``/``base_url``) fall back to the provider defaults via the shared
-    resolvers. Goes through the shared client caches except when ``on_reasoning`` is
-    set (a per-caller hook must never be shared via the cache).
+    Ollama entry resolves to ``""`` → no Authorization header). An empty ``model``
+    falls back to the provider default via the shared resolvers for all three
+    providers. An empty ``base_url`` falls back the same way for Ollama only; a
+    RunPod entry's ``base_url`` is always stored at write time (derived from
+    ``endpoint_id``, never entered directly) and is used exactly as stored, with NO
+    fallback — an empty value here is a data problem, not one this function papers
+    over. Goes through the shared client caches except when ``on_reasoning`` is set
+    (a per-caller hook must never be shared via the cache).
 
     ``model_override``, when set, pins the model for an **Ollama** entry only (a
     per-stage override such as the blog planning model names an Ollama model). A

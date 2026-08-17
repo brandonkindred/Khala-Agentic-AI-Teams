@@ -374,6 +374,7 @@ def _patch_async_client_get(monkeypatch, *, get_return=None, get_side_effect=Non
 
     mock_client = AsyncMock()
     mock_client.__aenter__.return_value = mock_client
+    mock_client.__aexit__.return_value = False  # don't suppress exceptions raised in the `with` body
     if get_side_effect is not None:
         mock_client.get.side_effect = get_side_effect
     else:
@@ -447,13 +448,15 @@ def test_create_runpod_probe_http_error_propagates_remote_status(app_client, mon
 
     client, _state = app_client
     request = httpx.Request("GET", "https://api.runpod.ai/v2/abc123/openai/v1/models")
-    response = httpx.Response(401, request=request)
 
-    # Drive the real probe through a mocked httpx.AsyncClient whose response raises
-    # the status error _probe_runpod_endpoint is expected to catch and remap.
+    # Drive the real probe through a mocked httpx.AsyncClient whose response raises the
+    # status error _probe_runpod_endpoint is expected to catch and remap. The route only
+    # reads `e.response.status_code` off the exception, so the same mock_response serves
+    # as both the `.get()` return value and the exception's `response` — no need for a
+    # second, real httpx.Response just to carry the status code.
     mock_response = Mock(status_code=401)
     mock_response.raise_for_status.side_effect = httpx.HTTPStatusError(
-        "unauthorized", request=request, response=response
+        "unauthorized", request=request, response=mock_response
     )
     _patch_async_client_get(monkeypatch, get_return=mock_response)
     resp = client.post(
@@ -505,6 +508,71 @@ def test_update_runpod_rejects_bad_endpoint_id(app_client):
     resp = client.put("/api/llm-config/providers/1", json={"endpoint_id": "no good!"})
     assert resp.status_code == 400
     assert "alphanumeric" in resp.json()["detail"]
+
+
+def test_update_switch_to_runpod_without_endpoint_id_is_400(app_client):
+    """Switching a non-RunPod entry to RunPod without an endpoint_id must be rejected
+    — otherwise the entry would persist with provider="runpod" pointed at whatever
+    non-RunPod base_url it had before, an invalid combination create_provider would
+    never allow to be created in the first place."""
+    client, state = app_client
+    state["entries"] = [_entry(1, provider="ollama")]
+    resp = client.put("/api/llm-config/providers/1", json={"provider": "runpod", "api_key": "k"})
+    assert resp.status_code == 400
+    assert "endpoint_id is required" in resp.json()["detail"]
+    assert not any(op[0] == "update" for op in state["ops"] if isinstance(op, tuple))
+
+
+def test_update_switch_to_runpod_with_endpoint_id_succeeds(app_client):
+    client, state = app_client
+    state["entries"] = [_entry(1, provider="ollama")]
+    resp = client.put(
+        "/api/llm-config/providers/1", json={"provider": "runpod", "api_key": "k", "endpoint_id": "abc123"}
+    )
+    assert resp.status_code == 200
+    kw = _find_op(state, "update")[2]
+    assert kw["provider"] == "runpod"
+    assert kw["base_url"] == "https://api.runpod.ai/v2/abc123/openai/v1"
+
+
+def test_update_runpod_ignores_stray_base_url_without_endpoint_id(app_client):
+    """base_url is never directly settable on a RunPod entry — without a new
+    endpoint_id, a stray body.base_url must not overwrite the canonical URL."""
+    client, state = app_client
+    state["entries"] = [_entry(1, provider="runpod", api_key="k")]
+    resp = client.put("/api/llm-config/providers/1", json={"base_url": "http://evil.example.com"})
+    assert resp.status_code == 200
+    kw = _find_op(state, "update")[2]
+    assert kw["base_url"] is None  # unchanged sentinel, not the stray value
+
+
+def test_update_runpod_clear_api_key_is_400(app_client):
+    """RunPod always requires a key; clearing it on an existing RunPod entry must be
+    rejected by the same guard create_provider uses, not silently persisted keyless."""
+    client, state = app_client
+    state["entries"] = [_entry(1, provider="runpod", api_key="k")]
+    resp = client.put("/api/llm-config/providers/1", json={"clear_api_key": True})
+    assert resp.status_code == 400
+    assert "without an API key" in resp.json()["detail"]
+
+
+def test_update_runpod_changes_api_key(app_client):
+    client, state = app_client
+    state["entries"] = [_entry(1, provider="runpod", api_key="k")]
+    resp = client.put("/api/llm-config/providers/1", json={"api_key": "  new-key  "})
+    assert resp.status_code == 200
+    kw = _find_op(state, "update")[2]
+    assert kw["api_key"] == "new-key"
+
+
+def test_update_switch_runpod_to_ollama(app_client):
+    client, state = app_client
+    state["entries"] = [_entry(1, provider="runpod", api_key="k")]
+    resp = client.put("/api/llm-config/providers/1", json={"provider": "ollama", "base_url": "http://localhost:11434"})
+    assert resp.status_code == 200
+    kw = _find_op(state, "update")[2]
+    assert kw["provider"] == "ollama"
+    assert kw["base_url"] == "http://localhost:11434"
 
 
 def test_probe_runpod_endpoint_success_returns_none(monkeypatch):
