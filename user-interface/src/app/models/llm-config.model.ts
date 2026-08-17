@@ -36,25 +36,6 @@ export function providerUsesEndpointId(provider: LlmProvider): boolean {
   return provider === 'runpod';
 }
 
-/** Matches the canonical RunPod base URL the backend derives from an endpoint_id
- * (`_build_runpod_base_url` in `backend/unified_api/routes/llm_config.py`). */
-const RUNPOD_BASE_URL_PATTERN = /^https:\/\/api\.runpod\.ai\/v2\/([a-zA-Z0-9]+)\/openai\/v1\/?$/;
-
-/**
- * Recover the `endpoint_id` a RunPod entry was created with from its stored
- * `base_url`. The backend never returns `endpoint_id` directly — only the derived
- * URL — so the edit form must parse it back out to pre-fill the field.
- *
- * Preconditions: none.
- * Postconditions: returns the endpoint id substring when `base_url` matches the
- * canonical RunPod URL shape; returns `''` otherwise (including for non-RunPod
- * entries, whose `base_url` never matches).
- */
-export function extractRunpodEndpointId(base_url: string): string {
-  const match = RUNPOD_BASE_URL_PATTERN.exec(base_url);
-  return match ? match[1] : '';
-}
-
 /**
  * Runtime-store state for the settings page:
  * - `available`   — Postgres configured AND reachable (mutations enabled).
@@ -76,6 +57,8 @@ export interface LlmProviderEntry {
   base_url: string;
   /** 0-based fallback position; lower = more preferred. */
   sort_order: number;
+  /** RunPod endpoint ID recovered from `base_url` server-side; `''` for non-RunPod entries. */
+  endpoint_id: string;
   api_key_configured: boolean;
   /** True while this provider is usage-limited and being skipped. */
   limit_exceeded: boolean;

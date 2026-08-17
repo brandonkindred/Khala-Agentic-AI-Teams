@@ -20,7 +20,6 @@ import { InlineBannerComponent } from '../../shared/inline-banner/inline-banner.
 import {
   providerRequiresApiKey,
   providerUsesEndpointId,
-  extractRunpodEndpointId,
   type LlmProvider,
   type LlmProviderCreate,
   type LlmProviderEntry,
@@ -189,7 +188,7 @@ export class LlmConfigDashboardComponent implements OnInit, HasUnsavedChanges {
           f.provider !== entry.provider ||
           f.model !== entry.model ||
           f.base_url !== entry.base_url ||
-          f.endpoint_id !== (entry.provider === 'runpod' ? extractRunpodEndpointId(entry.base_url) : ''))
+          f.endpoint_id !== entry.endpoint_id)
       ) {
         return true;
       }
@@ -331,7 +330,7 @@ export class LlmConfigDashboardComponent implements OnInit, HasUnsavedChanges {
       base_url: entry.base_url,
       api_key: '',
       clear_api_key: false,
-      endpoint_id: entry.provider === 'runpod' ? extractRunpodEndpointId(entry.base_url) : '',
+      endpoint_id: entry.endpoint_id,
     };
     this.providersError = null;
   }

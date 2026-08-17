@@ -16,6 +16,7 @@ function entry(over: Partial<LlmProviderEntry> = {}): LlmProviderEntry {
     model: 'claude-opus-4-8',
     base_url: '',
     sort_order: 0,
+    endpoint_id: '',
     api_key_configured: true,
     limit_exceeded: false,
     limit_type: '',
@@ -166,7 +167,7 @@ describe('LlmConfigDashboardComponent', () => {
     expect(component.providersError).toContain('API key is required');
   });
 
-  it('adds a RunPod provider with endpoint_id and api_key, omitting base_url', () => {
+  it('adds a RunPod provider with endpoint_id and api_key, sending an empty base_url', () => {
     apiSpy.createProvider.mockReturnValue(of(listResponse([entry({ id: 6, provider: 'runpod' })])));
     component.startAdd();
     component.addForm!.label = 'RunPod';
@@ -240,7 +241,16 @@ describe('LlmConfigDashboardComponent', () => {
 
   it('does not report unsaved changes for a pristine RunPod edit form', () => {
     apiSpy.listProviders.mockReturnValue(
-      of(listResponse([entry({ id: 3, provider: 'runpod', base_url: 'https://api.runpod.ai/v2/abc123/openai/v1' })])),
+      of(
+        listResponse([
+          entry({
+            id: 3,
+            provider: 'runpod',
+            base_url: 'https://api.runpod.ai/v2/abc123/openai/v1',
+            endpoint_id: 'abc123',
+          }),
+        ]),
+      ),
     );
     component.loadProviders();
     component.startEdit(component.providers[0]);
@@ -293,6 +303,7 @@ describe('LlmConfigDashboardComponent', () => {
             id: 3,
             provider: 'runpod',
             base_url: 'https://api.runpod.ai/v2/abc123/openai/v1',
+            endpoint_id: 'abc123',
             api_key_configured: true,
           }),
         ]),
@@ -311,6 +322,7 @@ describe('LlmConfigDashboardComponent', () => {
             id: 3,
             provider: 'runpod',
             base_url: 'https://api.runpod.ai/v2/abc123/openai/v1',
+            endpoint_id: 'abc123',
             api_key_configured: true,
           }),
         ]),
@@ -319,7 +331,7 @@ describe('LlmConfigDashboardComponent', () => {
     component.loadProviders();
     apiSpy.updateProvider.mockReturnValue(of(listResponse([entry({ id: 3, provider: 'runpod' })])));
     component.startEdit(component.providers[0]);
-    expect(component.editForm.endpoint_id).toBe('abc123'); // pre-filled from base_url
+    expect(component.editForm.endpoint_id).toBe('abc123'); // pre-filled from entry.endpoint_id
     component.editForm.label = 'Renamed';
     component.editForm.endpoint_id = ''; // operator clears it without retyping
     component.submitEdit();

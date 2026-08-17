@@ -167,6 +167,27 @@ def _build_runpod_base_url(endpoint_id: str) -> str:
     return f"https://api.runpod.ai/v2/{endpoint_id}/openai/v1"
 
 
+#: Matches the URL ``_build_runpod_base_url`` produces, capturing the endpoint_id
+#: segment. Deliberately permissive (``[^/]+``, not the stricter alphanumeric-only
+#: charset ``_validate_runpod_endpoint_id`` enforces at create time) so recovery
+#: doesn't depend on that separate, independently-changeable validation rule.
+_RUNPOD_BASE_URL_RE = re.compile(r"^https://api\.runpod\.ai/v2/([^/]+)/openai/v1/?$")
+
+
+def _extract_runpod_endpoint_id(base_url: str) -> str:
+    """Recover the endpoint_id a RunPod entry's ``base_url`` was built from.
+
+    The inverse of ``_build_runpod_base_url`` — kept beside it so a future change to
+    the canonical URL shape is a one-file edit instead of a silent cross-stack break.
+
+    Preconditions: none.
+    Postconditions: returns the captured endpoint_id when ``base_url`` matches the
+        canonical RunPod URL shape; returns ``""`` otherwise. Never raises.
+    """
+    match = _RUNPOD_BASE_URL_RE.match(base_url)
+    return match.group(1) if match else ""
+
+
 #: Wall-clock ceiling (seconds) for the RunPod reachability probe. It bounds the
 #: added latency of create/update requests that configure a RunPod provider — the
 #: handler blocks for at most this long while the probe runs. Kept short so a slow
@@ -283,6 +304,9 @@ class LlmProviderEntryResponse(BaseModel):
     model: str
     base_url: str
     sort_order: int
+    endpoint_id: str = Field(
+        "", description="RunPod endpoint ID recovered from base_url; '' for non-RunPod entries."
+    )
     api_key_configured: bool = Field(
         False, description="True when this entry has a stored API key (the value is never returned)."
     )
@@ -406,6 +430,7 @@ def _entry_to_response(entry: provider_store.ProviderEntry) -> LlmProviderEntryR
         model=entry.model,
         base_url=entry.base_url,
         sort_order=entry.sort_order,
+        endpoint_id=_extract_runpod_endpoint_id(entry.base_url) if entry.provider == "runpod" else "",
         api_key_configured=bool(entry.api_key),
         limit_exceeded=entry.limit_exceeded,
         limit_type=entry.limit_type,
