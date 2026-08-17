@@ -8,7 +8,11 @@ without headers) via ``CodeReviewInput.files=``.
 This module locks types, signatures, and empty/no-op builder contracts.
 ``expand_touched_ranges`` expands touched lines via Python AST when possible,
 otherwise a heuristic start or capped context window. ``extract_touched_lines``
-wraps GitHub unified-patch helpers for added-only touched lines.
+wraps GitHub unified-patch helpers for added-only touched lines. The rendered
+body marks each added/modified (touched) line with a leading ``+`` gutter
+column and each enclosing context line with a space, so the reviewer has direct
+evidence of the change surface; the marker sits before the line number and never
+shifts the 1-based numbers the posting/mapping layer depends on.
 ``render_patch_hunks`` wraps annotated hunk rendering for the same patch text.
 Surface assembly from unified patches is implemented; ``unified_diffs_from_pairs``
 derives per-path diffs from SE old/new maps. Full pairs surface assembly
@@ -27,6 +31,8 @@ from dataclasses import dataclass, field
 from typing import Collection, Mapping, Optional, Sequence
 
 from software_engineering_team.github_source.pr_review_mapping import (
+    CONTEXT_LINE_MARKER,
+    TOUCHED_LINE_MARKER,
     format_numbered_source_line,
     numbered_line_width,
     parse_valid_lines,
@@ -92,7 +98,8 @@ class ChangeSurface:
     """Chunker-ready change surface for ``CodeReviewInput``.
 
     Invariants:
-        - ``blocks`` maps each path to a pre-numbered body (``N| `` prefixes)
+        - ``blocks`` maps each path to a pre-numbered body (``N| `` prefixes,
+          each line carrying a leading ``+``/space change-surface marker column)
           without ``### path ###`` headers.
         - Non-empty surfaces are always consumed with
           ``CodeReviewInput.pre_numbered=True``.
@@ -239,20 +246,36 @@ def _merge_line_ranges(ranges: Sequence[LineRange]) -> tuple[LineRange, ...]:
     return tuple(merged)
 
 
-def _pre_number_ranges(content: str, ranges: Sequence[LineRange]) -> str:
+def _pre_number_ranges(
+    content: str,
+    ranges: Sequence[LineRange],
+    touched: Collection[int] = (),
+) -> str:
     """Render merged-or-raw ranges as pre-numbered body text with gap markers.
 
     Preconditions:
         - ``content`` is the full new-file text (may be empty).
         - ``ranges`` is a sequence of inclusive 1-based ``LineRange`` values
           (caller should merge first when desired).
+        - ``touched`` is any collection of 1-based new-file line numbers that
+          were added/modified (e.g. ``extract_touched_lines(patch)``); it is
+          consulted only for membership, so any ``Collection[int]`` is accepted.
+          May be empty.
 
     Postconditions:
         - Emits a column-aligned ``N| <line>`` gutter for each line in each
           range, clamped to the file's last line when ``end_line`` exceeds
           length. Gutter width is the widest emitted line number so hanging
           indents stay visually 4 columns across 9→10 / 99→100.
-        - Between successive ranges, inserts a bare ``...`` line.
+        - When ``touched`` is non-empty, every emitted source line additionally
+          carries a single leading marker column — ``+`` when its number is in
+          ``touched`` (added/modified), a space otherwise (enclosing context) —
+          so the reviewer can tell the change surface from the context it was
+          given. The marker sits BEFORE the number, so the rendered line NUMBER
+          is unchanged (the number a citation maps against is identical with or
+          without the marker). When ``touched`` is empty, no marker column is
+          emitted (the body is byte-identical to the un-marked rendering).
+        - Between successive ranges, inserts a bare ``...`` line (never marked).
         - Empty ``ranges`` or empty file with no emitable lines → ``\"\"``.
         - Never raises.
     """
@@ -260,6 +283,8 @@ def _pre_number_ranges(content: str, ranges: Sequence[LineRange]) -> str:
     if not ranges or not lines:
         return ""
     total = len(lines)
+    touched_set = {int(n) for n in touched}
+    mark = bool(touched_set)
     rows: list[tuple[Optional[int], str]] = []
     for idx, r in enumerate(ranges):
         if idx > 0:
@@ -269,8 +294,15 @@ def _pre_number_ranges(content: str, ranges: Sequence[LineRange]) -> str:
         for n in range(start, end + 1):
             rows.append((n, lines[n - 1]))
     width = numbered_line_width(n for n, _ in rows if n is not None)
+
+    def _marker(n: int) -> str:
+        if not mark:
+            return ""
+        return TOUCHED_LINE_MARKER if n in touched_set else CONTEXT_LINE_MARKER
+
     return "\n".join(
-        text if n is None else format_numbered_source_line(n, text, width=width) for n, text in rows
+        text if n is None else format_numbered_source_line(n, text, width=width, marker=_marker(n))
+        for n, text in rows
     )
 
 
@@ -286,7 +318,9 @@ def _assemble_path_block(path: str, patch: str, content: str) -> Optional[str]:
     Postconditions:
         - Blank ``content`` → ``None``.
         - Empty ``extract_touched_lines(patch)`` → ``None``.
-        - Otherwise expands, merges, and pre-numbers; empty body → ``None``.
+        - Otherwise expands, merges, and pre-numbers, marking the added/modified
+          (touched) lines distinctly from enclosing context (see
+          ``_pre_number_ranges``); empty body → ``None``.
         - Never raises.
     """
     if not (content or "").strip():
@@ -296,7 +330,7 @@ def _assemble_path_block(path: str, patch: str, content: str) -> Optional[str]:
         return None
     ranges = expand_touched_ranges(content, touched, path=path)
     merged = _merge_line_ranges(ranges)
-    body = _pre_number_ranges(content, merged)
+    body = _pre_number_ranges(content, merged, touched)
     if not body.strip():
         return None
     return body

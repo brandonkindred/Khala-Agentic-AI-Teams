@@ -1,4 +1,4 @@
-"""Failing-first contract tests for manifest-first persona/state binding.
+"""Contract tests for manifest-first persona/state binding.
 
 These encode the locked precedence contract in
 ``system_design/adr/ADR-015-invoke-generated-agent-persona-state-precedence.md``
@@ -6,16 +6,11 @@ for ``invoke_generated_agent``: the resolved ``AgentManifest`` supplies the
 *default* for each persona field, and an *explicitly-present* request-body field
 overrides that default for a single invoke only (never written back).
 
-The omit/default direction of this contract is now implemented: when the request
-omits a persona field or a ``system_prompt`` for the selected ``state``, the resolved
-manifest supplies it (per-field truthy fallback + manifest state-prompt composition).
-Those omit/default tests are plain (green) assertions below. The two remaining
-``xfail(strict=False)`` tests cover the *explicit-override* refinement owned by the
-sibling story — an explicitly-cleared empty list clearing the manifest default (needs a
-raw-body presence check) and a request-supplied ``system_prompt`` full replacement (needs
-the new request field) — so they stay red-as-xfail until that story lands. The plain
-(non-xfail) guards assert behavior that holds *both* before and after binding — the
-non-empty explicit-override direction, the no-manifest fallback, and inert body tools.
+Both directions of this contract are implemented: when the request omits a persona
+field or ``system_prompt``, the resolved manifest supplies it (manifest state-prompt
+composition included); when the raw body explicitly carries a field — including an
+explicitly-cleared empty list or a request-supplied ``system_prompt`` (full
+replacement of the base prompt) — the request wins for that invoke only.
 
 The manifest is made resolvable through a monkeypatched registry keyed by the
 invoked agent id, so the tests do not depend on exactly how the implementation
@@ -35,15 +30,6 @@ from agent_platform.registry.models import (
     SourceInfo,
 )
 from agent_team_studio.agentic_team_provisioning.runtime import agent_builder
-
-_EXPLICIT_OVERRIDE_PENDING = pytest.mark.xfail(
-    reason=(
-        "explicit-override refinement per ADR-015 (raw-body presence check for empty-list "
-        "clearing; request system_prompt full replacement) is the sibling follow-up; the "
-        "omit/default binding this story lands does not cover these explicit cases"
-    ),
-    strict=False,
-)
 
 
 class _FakeResult:
@@ -180,7 +166,6 @@ async def test_body_skills_override_manifest_tags(fake_strands, monkeypatch: pyt
     assert "research" not in fake_strands.last_system_prompt
 
 
-@_EXPLICIT_OVERRIDE_PENDING
 @pytest.mark.asyncio
 async def test_explicit_empty_skills_clears_manifest_default(
     fake_strands, monkeypatch: pytest.MonkeyPatch
@@ -227,7 +212,6 @@ async def test_skills_strip_studio_plumbing_tag(fake_strands, monkeypatch: pytes
 # --- system_prompt / state precedence -----------------------------------------
 
 
-@_EXPLICIT_OVERRIDE_PENDING
 @pytest.mark.asyncio
 async def test_request_system_prompt_full_replacement(
     fake_strands, monkeypatch: pytest.MonkeyPatch
