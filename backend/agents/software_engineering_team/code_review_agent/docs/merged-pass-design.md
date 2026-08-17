@@ -3,6 +3,8 @@
 **Date:** 2026-07-28  
 **Scope:** In-process coordinator only. Temporal workflow wiring and snapshot comparison of findings are tracked separately.
 
+**Status update:** Temporal workflow wiring for this same merge order has since landed — `combine_findings_activity` (the durable, no-LLM counterpart of the combine step below) plus a sequential merged-pass → combine → re-verify pipeline, gated behind `_REORDERED_TAIL_PASSES_PATCH` for replay compatibility with in-flight pre-migration histories. This design's merge-order goal and decisions below are unchanged and remain the source of truth for the in-process path; see `code_review_agent/temporal/workflows.py`'s module docstring (and that gate's own docstring) as the authoritative source for the durable-mode pipeline and its old-history replay contract — not duplicated here.
+
 ## Goal
 
 Replace the two separate LLM calls to `architecture_consistency_pass` and `side_effect_impact_pass` in `coordinator._run_tail_passes` with a single merged-pass call. Split the merged response back into the two existing finding lists so downstream dedupe/gate/synthesis behavior stays unchanged, at one fewer LLM call per submission when both halves would previously have run.
@@ -146,4 +148,4 @@ Standalone `find_architecture_and_redundancy_issues` and `find_side_effect_impac
 ## Risks / follow-ups
 
 - Broadening architecture instructions can change finding volume/quality even before consolidation; later snapshot comparison should cover with-doc and without-doc submissions.
-- Until Temporal is migrated, that path still runs two separate activities. It will pick up the standalone architecture gate/prompt changes automatically via the shared module, while still making two LLM calls until the Temporal consolidation lands.
+- Temporal parity has since landed: `combine_findings_activity` plus the reordered sequential pipeline (merged pass → combine → re-verify) now mirror this design's in-process merge order — see `temporal/workflows.py`'s module docstring (particularly the `_REORDERED_TAIL_PASSES_PATCH` gate) for the durable-mode equivalent and its old-history replay-compatibility contract.

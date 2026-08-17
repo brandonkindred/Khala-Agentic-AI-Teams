@@ -38,6 +38,40 @@ while another Temporal-backed worker in the same process stays up — dispatch s
 and the workflow sits queued until a `strategy-lab-queue` poller resumes. Operators should
 monitor worker liveness (e.g. Temporal Web's task-queue pollers view), not rely on the 503 alone.
 
+## Design-attempt checkpointing
+
+One design attempt (`run_design_attempt_activity`) can run up to `_DESIGN_ATTEMPT_TIMEOUT` (2
+hours) and up to `STRATEGY_LAB_DESIGN_MAX_LLM_CALLS`-bounded LLM round-trips (540 at the
+documented defaults, spanning all re-entries) before it produces a record. A durable checkpoint
+taken at the design/synthesis boundary — where the design + review phase hands its `spec`/
+`rationale`/`design_context` off to code synthesis — means a worker crash partway through an
+attempt resumes past that design phase on the next (Temporal-granted) retry instead of
+re-running it, and re-paying for it, from scratch. There is no `STRATEGY_LAB_*` env var for
+this: checkpointing is unconditional, activating automatically whenever the attempt has a
+`run_id` and is executing inside a real Temporal activity context (both absent for thread mode
+and for direct-call unit tests, which simply always run Phase 1 fresh).
+
+The guarantee this closes: no double-charged LLM budget on resume. Skipping the design phase
+entirely on a valid-checkpoint resume means its LLM calls are never re-issued — there is nothing
+to double-charge — and the resumed budget is seeded from the checkpoint's own boundary-time call
+count, not from the pre-attempt count, so the budget ceiling can't silently regain headroom for
+calls that already happened.
+
+What it does *not* cover: only the design phase is checkpointed, so a crash during synthesis,
+refinement, alignment, verification, or analysis still discards that entire portion of the
+(possibly already-resumed) attempt. It does not grant extra retries — Temporal's own
+`maximum_attempts=2` for this activity is unchanged; a checkpoint just makes the one retry
+Temporal already grants cheaper to use. The checkpoint write/read is fencing-checked the same
+way `persist_run_state_activity`'s durable writes are (see `temporal/activities.py`'s module
+docstring), inheriting the same rare, accepted check-then-write race window rather than a
+genuinely atomic conditional write. Cleanup on a finished attempt is best-effort: a crash
+between finishing an attempt and deleting its checkpoint leaves one orphaned checkpoint behind,
+which is inert clutter (a `design_attempt` index the run will never revisit again), not a
+correctness hazard — there is no reaper/TTL for it. See
+`system_design/adr/ADR-012-strategy-lab-design-attempt-checkpoint-contract.md` for the full
+contract and `RETRY_STATE_ISOLATION.md`'s "Intra-attempt checkpointing" section for how this
+composes with the existing attempt-to-attempt retry-isolation guarantee.
+
 ## Branch coverage for `coverage_probe`
 
 `coverage_probe/subcondition_visitor.py` (`SubconditionVisitor._process_if` / `_process_or_if`
