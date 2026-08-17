@@ -3,8 +3,8 @@ import { TestBed } from '@angular/core/testing';
 import { NoopAnimationsModule } from '@angular/platform-browser/animations';
 import { Subject, of, throwError } from 'rxjs';
 import { MetricsTabComponent } from './metrics-tab.component';
-import { SeMetricsApiService } from '../../../../services/se-metrics-api.service';
-import type { SeMetrics } from '../../../../models/se-metrics.model';
+import { SeMetricsApiService } from '../../../services/se-metrics-api.service';
+import type { SeMetrics } from '../../../models/se-metrics.model';
 
 const mockMetrics: SeMetrics = {
   window_days: 30,

@@ -33,17 +33,46 @@ from agent_platform.registry import loader
 from agent_platform.registry.loader import AgentRegistry
 from unified_api.routes.agents import router as agents_router
 
+# Former top-level package dirs. Live code is under agent_platform/ or
+# agent_team_studio/; these names must not reappear as source trees.
+_RESIDUE_TOP_LEVEL = (
+    "agent_registry",
+    "agent_console",
+    "agent_studio",
+    "agent_provisioning_team",
+    "agentic_team_provisioning",
+    "user_agent_founder",
+)
+
+# Bare import roots that used to live on PYTHONPATH. Domain apps still import
+# as agent_team_studio.<name>, so those names are not in this list.
+_RESIDUE_IMPORT_ROOTS = ("agent_registry", "agent_console", "agent_studio")
+
 
 def test_old_registry_and_console_packages_do_not_import() -> None:
-    """Bare ``agent_registry`` / ``agent_console`` import roots are gone.
+    """Bare former platform package roots are gone.
 
     Postconditions:
-        * Importing either name raises ``ModuleNotFoundError``.
+        * Importing each residue root raises ``ModuleNotFoundError``.
     """
-    with pytest.raises(ModuleNotFoundError):
-        importlib.import_module("agent_registry")
-    with pytest.raises(ModuleNotFoundError):
-        importlib.import_module("agent_console")
+    for name in _RESIDUE_IMPORT_ROOTS:
+        with pytest.raises(ModuleNotFoundError):
+            importlib.import_module(name)
+
+
+def test_residue_top_level_dirs_have_no_python_source() -> None:
+    """Empty leftover ``backend/agents/agent_*`` package dirs stay gone.
+
+    Preconditions:
+        * ``_agents`` is the ``backend/agents`` tree.
+    Postconditions:
+        * None of the former top-level package dirs contain ``.py`` files.
+    """
+    leftover = []
+    for name in _RESIDUE_TOP_LEVEL:
+        root = _agents / name
+        leftover.extend(sorted(p for p in root.rglob("*.py") if p.is_file()))
+    assert leftover == []
 
 
 def test_agents_route_loads_platform_packages_not_old_paths() -> None:

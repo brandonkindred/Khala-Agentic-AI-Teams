@@ -214,13 +214,13 @@ def test_unrecognized_structured_output_model_falls_back_to_text_routing() -> No
     existing text-anchor scan (e.g. Phase 1 classes, which aren't part of
     the Phase 2 deterministic routing table).
     """
-    from branding_team.models import BrandDiscoveryAuditOutput
+    from branding_team.models import BrandDiscoveryAudit
 
     c = DummyLLMClient()
     j = c.complete_json(
         "Generate architecture_document with components and overview for the system.",
         temperature=0.0,
-        structured_output_model=BrandDiscoveryAuditOutput,
+        structured_output_model=BrandDiscoveryAudit,
     )
     assert "architecture_document" in j
 

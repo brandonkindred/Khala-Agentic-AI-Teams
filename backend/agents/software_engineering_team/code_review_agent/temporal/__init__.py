@@ -14,6 +14,7 @@ temporalio sandbox replays it during workflow registration.
 from __future__ import annotations
 
 from .activities import (
+    combine_findings_activity,
     consolidate_side_effect_issues_activity,
     filter_false_positives_activity,
     finalize_review_activity,
@@ -46,6 +47,7 @@ ACTIVITIES = [
     find_side_effect_impact_activity,
     find_architecture_and_side_effect_activity,
     consolidate_side_effect_issues_activity,
+    combine_findings_activity,
     finalize_review_activity,
     synthesize_findings_activity,
 ]
@@ -63,6 +65,7 @@ __all__ = [
     "find_side_effect_impact_activity",
     "find_architecture_and_side_effect_activity",
     "consolidate_side_effect_issues_activity",
+    "combine_findings_activity",
     "finalize_review_activity",
     "synthesize_findings_activity",
     "code_review_temporal_enabled",

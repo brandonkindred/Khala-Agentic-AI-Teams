@@ -184,6 +184,52 @@ def test_run_skips_config_resolution_when_already_supplied():
     assert "resolve_workflow_config_activity" not in calls
 
 
+def test_run_forwards_batch_cache_key_to_the_attempt_activity():
+    """The cycle workflow threads the parent's ``batch_cache_key`` into every
+    ``run_design_attempt_activity`` call so the worker can resolve the batch's
+    shared cache."""
+    seen: Dict[str, Any] = {}
+
+    def _attempt(args):
+        seen["batch_cache_key"] = args[0].get("batch_cache_key")
+        return _record_outcome()
+
+    handlers = {"run_design_attempt_activity": _attempt}
+    with _patch_execute(handlers):
+        _run(
+            {
+                "prior_records": [],
+                "config": _config_dict(),
+                "convergence_tracker_state": {},
+                "workflow_config": _WF_CONFIG,
+                "batch_cache_key": "run-1-b3",
+            }
+        )
+    assert seen["batch_cache_key"] == "run-1-b3"
+
+
+def test_run_tolerates_missing_batch_cache_key():
+    """Old-shaped/resumed cycle inputs predating the key still run; the forwarded
+    value is simply ``None``."""
+    seen: Dict[str, Any] = {}
+
+    def _attempt(args):
+        seen["batch_cache_key"] = args[0].get("batch_cache_key", "MISSING")
+        return _record_outcome()
+
+    handlers = {"run_design_attempt_activity": _attempt}
+    with _patch_execute(handlers):
+        _run(
+            {
+                "prior_records": [],
+                "config": _config_dict(),
+                "convergence_tracker_state": {},
+                "workflow_config": _WF_CONFIG,
+            }
+        )
+    assert seen["batch_cache_key"] is None
+
+
 def test_run_fetches_regime_summary_when_enabled_and_passes_it_down():
     seen: Dict[str, Any] = {}
 
@@ -205,6 +251,63 @@ def test_run_fetches_regime_summary_when_enabled_and_passes_it_down():
             }
         )
     assert seen["regime_summary"] == {"trend": "up"}
+
+
+def test_run_threads_run_id_and_generation_into_design_attempt_params():
+    """``cycle_input``'s ``run_id``/``generation`` (ADR-012) must reach
+    ``run_design_attempt_activity``'s params verbatim -- this is what lets
+    that activity look up and write a design-attempt checkpoint at all."""
+    seen: Dict[str, Any] = {}
+
+    def _attempt(args):
+        seen["run_id"] = args[0]["run_id"]
+        seen["generation"] = args[0]["generation"]
+        return _record_outcome()
+
+    handlers = {
+        "resolve_workflow_config_activity": lambda a: _WF_CONFIG,
+        "run_design_attempt_activity": _attempt,
+    }
+    with _patch_execute(handlers):
+        _run(
+            {
+                "run_id": "run-1",
+                "generation": 3,
+                "prior_records": [],
+                "config": _config_dict(),
+                "convergence_tracker_state": {},
+            }
+        )
+    assert seen["run_id"] == "run-1"
+    assert seen["generation"] == 3
+
+
+def test_run_defaults_run_id_and_generation_when_cycle_input_predates_them():
+    """A ``cycle_input`` from a workflow-history replay predating these
+    fields (pre-ADR-012) must still run -- run_id defaults to None
+    (disabling checkpointing) and generation defaults to
+    ``_DEFAULT_FENCING_GENERATION``."""
+    seen: Dict[str, Any] = {}
+
+    def _attempt(args):
+        seen["run_id"] = args[0]["run_id"]
+        seen["generation"] = args[0]["generation"]
+        return _record_outcome()
+
+    handlers = {
+        "resolve_workflow_config_activity": lambda a: _WF_CONFIG,
+        "run_design_attempt_activity": _attempt,
+    }
+    with _patch_execute(handlers):
+        _run(
+            {
+                "prior_records": [],
+                "config": _config_dict(),
+                "convergence_tracker_state": {},
+            }
+        )
+    assert seen["run_id"] is None
+    assert seen["generation"] == wf._DEFAULT_FENCING_GENERATION
 
 
 # ---------------------------------------------------------------------------

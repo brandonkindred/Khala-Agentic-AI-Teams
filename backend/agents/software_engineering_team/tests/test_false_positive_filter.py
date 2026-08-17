@@ -176,7 +176,9 @@ def _chat_tool_result_count(messages: List[Any]) -> int:
     return sum(1 for m in messages if isinstance(m, dict) and m.get("role") == "tool")
 
 
-def _chat_return_tool_call(tool_use_id: str, name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
+def _chat_return_tool_call(
+    tool_use_id: str, name: str, arguments: Dict[str, Any]
+) -> Dict[str, Any]:
     return {
         "__tool_calls__": [
             {
@@ -2310,6 +2312,36 @@ def test_verify_group_disables_strands_tool_result_truncation(monkeypatch) -> No
     assert manager.should_truncate_results is False
 
 
+def test_verify_group_records_full_tool_loop_in_transcript(monkeypatch) -> None:
+    """The durable transcript must record each reasoning model invocation
+    (toolUse request and the follow-up after read_file) as its own call, plus
+    the formatting pass -- not one collapsed conversation blob."""
+    from llm_service import llm_attribution
+
+    captured: List[Any] = []
+    monkeypatch.setattr(
+        "code_review_agent.false_positive_filter.record_transcript_entry",
+        lambda *args, **kwargs: captured.append(args),
+    )
+
+    keep = _issue(description="real bug", line=5)
+    stub = _VerdictStub(verdicts=[{"index": 0, "is_real_issue": True, "confidence": "high"}])
+    with llm_attribution(job_id="job-1"):
+        filter_false_positives(stub, _input(), [keep])
+
+    reasoning_entries = [args for args in captured if args[0] == "false_positive_filter"]
+    assert len(reasoning_entries) >= 3
+    tool_use_seen = False
+    for args in reasoning_entries[:-1]:
+        _stage, _target, prompt, response = args
+        blob = f"{prompt}\n{response}"
+        if "toolUse" in blob or "read_file" in blob or "__tool_calls__" in blob:
+            tool_use_seen = True
+    assert tool_use_seen
+    format_prompt, format_response = reasoning_entries[-1][2], reasoning_entries[-1][3]
+    assert "verdicts" in format_prompt.lower() or "is_real_issue" in format_response
+
+
 def test_filter_drop_log_truncates_description(caplog) -> None:
     """Drop INFO logs truncate oversized description and reasoning fields."""
     keep = _issue(description="real", line=5)
@@ -3045,9 +3077,9 @@ def test_filter_groups_by_file_and_removes_across_groups(monkeypatch, parallelis
         def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:  # type: ignore[override]
             if "verdicts" not in prompt.lower():
                 return super().complete_json(prompt, **kwargs)
-            if 'Verified findings for a.py' in prompt:
+            if "Verified findings for a.py" in prompt:
                 return {"verdicts": [{"index": 0, "is_real_issue": False, "confidence": "high"}]}
-            if 'Verified findings for b.py' in prompt:
+            if "Verified findings for b.py" in prompt:
                 return {"verdicts": [{"index": 0, "is_real_issue": True, "confidence": "high"}]}
             return super().complete_json(prompt, **kwargs)
 

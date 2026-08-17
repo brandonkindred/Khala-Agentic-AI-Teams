@@ -620,10 +620,12 @@ def find_repo_files(
     The pruned-walk counterpart of :func:`read_repo_code_budgeted` for callers
     that need *paths* (not concatenated content): stack-language detection
     (``_detect_language``) and the build-fix file collector. A streamed
-    ``os.walk`` prunes *exclude_dirs* in place via ``dirnames[:]``, so a checkout
-    with a huge ``node_modules`` / ``.git`` / ``.venv`` is never descended into —
-    the same I/O discipline ``read_repo_code_budgeted`` established, replacing the
-    ``rglob`` calls that materialized those excluded subtrees before filtering.
+    ``os.walk`` prunes excluded directory names in place via ``dirnames[:]``, so
+    a checkout with a huge ``node_modules`` / ``.git`` / ``.venv`` is never
+    descended into — the same I/O discipline ``read_repo_code_budgeted``
+    established, replacing the ``rglob`` calls that materialized those excluded
+    subtrees before filtering. *exclude_dirs* itself is copied into a new
+    ``frozenset`` and is never mutated.
 
     Preconditions:
         - *repo_path* is a ``Path`` (may not exist). A non-directory yields ``[]``
@@ -632,6 +634,9 @@ def find_repo_files(
         - *suffixes* are file suffixes including the leading dot (``.py``);
           *names* are exact basenames (``pom.xml``). Either may be empty (no
           filter on that axis). A file matches when it satisfies either axis.
+        - *exclude_dirs* may be any iterable of directory names, including a
+          ``frozenset``. It is copied; walk pruning mutates ``os.walk``'s
+          ``dirnames`` list only.
     Postconditions:
         - Returns paths for regular files matching a requested suffix or name,
           in walk order; ``[]`` when none match or *repo_path* is not a

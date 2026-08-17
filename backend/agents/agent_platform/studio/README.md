@@ -19,6 +19,23 @@ The router is included from `unified_api/main.py` at import time when
 import-time start — catalog:
 [`docs/UNIFIED_API_LIFESPAN.md`](../../../../docs/UNIFIED_API_LIFESPAN.md).
 
+### Dispatch
+
+Authoring CRUD (start conversation / send message / clone / save) dispatches
+through `temporal/dispatch.py`, which picks a path per call. When a Temporal
+cluster is configured *and* the `agent-studio-queue` worker has finished
+connecting, each helper runs the matching Studio workflow. Otherwise — worker
+disabled, still connecting, or absent — it calls the process-wide
+`AgentStudioService` singleton directly, in-process. Both paths share one
+conversation store and identical business logic, so the `agent-studio-queue`
+worker and its workflow wrappers are **not a hard requirement** for authoring:
+their absence is a mode switch, not a degraded state.
+
+This does not make Temporal optional for the platform. Temporal remains a
+required dependency for the durable, long-running subsystems (provisioning,
+sandbox lifecycle, pipeline runs, persona founder); only Studio authoring's
+single-activity workflow wrappers have been demoted to optional.
+
 ## Identity: `AgentDefinition` view-model vs. `AgentManifest` SoT
 
 `agent_platform.registry.models.AgentManifest` is the only persisted, writable **catalog**
@@ -30,8 +47,8 @@ in-progress `definition_json` on an Agent Studio conversation row
 conversation's definition, or cloning a registered agent into a new refine
 conversation, always crosses this boundary through exactly one pair of pure
 projection functions in `registration.py` (they delegate construction and
-field projection to `shared.manifests`; Studio-owned id, state-fold, and
-refine-draft rules stay in this package):
+field projection to [`shared.manifests`](../../../../shared/manifests/README.md);
+Studio-owned id, state-fold, and refine-draft rules stay in this package):
 
 - **`build_studio_agent_manifest(definition) -> AgentManifest`** — the save/register
   path (`service.py::save_agent`). Called on every `POST /agents`.
@@ -62,3 +79,6 @@ See `registration.py`'s module docstring for the runtime-binding caveat: a saved
 agent's `role` / `system_prompt` are advertised on the manifest but the shared
 generated-agent runtime still reconstructs persona from the invoke request body,
 not the stored manifest, at invoke time (binding is a separate, tracked follow-up).
+See
+[`system_design/adr/ADR-015-invoke-generated-agent-persona-state-precedence.md`](../../../../system_design/adr/ADR-015-invoke-generated-agent-persona-state-precedence.md)
+for the locked precedence contract that follow-up implements.

@@ -74,6 +74,136 @@ def test_get_review_degrades_on_db_error(monkeypatch) -> None:
     assert store.get_review("j") is None
 
 
+def test_append_transcript_entries_noop_when_postgres_disabled(monkeypatch) -> None:
+    monkeypatch.setattr(store, "is_postgres_enabled", lambda: False)
+
+    def _no_conn(*_a, **_kw):
+        raise AssertionError("get_conn must not be called when Postgres is disabled")
+
+    monkeypatch.setattr(store, "get_conn", _no_conn)
+    # Never raises, never touches the database; reports failure so the caller
+    # (the transcript flusher) knows to requeue rather than treat it as written.
+    assert store.append_review_transcript_entries("j", [{"stage": "chunk_review"}]) is False
+
+
+def test_append_transcript_entries_noop_for_empty_list(monkeypatch) -> None:
+    monkeypatch.setattr(store, "is_postgres_enabled", lambda: True)
+
+    def _no_conn(*_a, **_kw):
+        raise AssertionError("get_conn must not be called for an empty batch")
+
+    monkeypatch.setattr(store, "get_conn", _no_conn)
+    assert store.append_review_transcript_entries("j", []) is False
+
+
+def test_append_transcript_entries_swallows_db_errors(monkeypatch) -> None:
+    monkeypatch.setattr(store, "is_postgres_enabled", lambda: True)
+
+    def _boom(*_a, **_kw):
+        raise RuntimeError("db down")
+
+    monkeypatch.setattr(store, "get_conn", _boom)
+    # Best-effort: a DB failure (including a foreign-key violation for an
+    # unknown job_id) is logged, never raised, and reported as False.
+    assert store.append_review_transcript_entries("j", [{"stage": "chunk_review"}]) is False
+
+
+def test_unpersisted_transcript_entries_skips_known_ids() -> None:
+    from software_engineering_team.review_history_store import unpersisted_transcript_entries
+
+    existing = [{"entry_id": "a", "prompt": "old"}, {"prompt": "legacy"}]
+    incoming = [
+        {"entry_id": "a", "prompt": "retry"},
+        {"entry_id": "b", "prompt": "new"},
+        {"prompt": "no-id"},
+    ]
+    assert unpersisted_transcript_entries(existing, incoming) == [
+        {"entry_id": "b", "prompt": "new"},
+        {"prompt": "no-id"},
+    ]
+
+
+def test_append_casts_concat_operand_to_jsonb(monkeypatch) -> None:
+    """``entries || json`` is not a Postgres operator; the batch must be jsonb."""
+    monkeypatch.setattr(store, "is_postgres_enabled", lambda: True)
+    seen: list[str] = []
+
+    class _FakeCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_a):
+            return False
+
+        def execute(self, query, _params=None):
+            seen.append(str(query))
+
+        def fetchone(self):
+            return ([],)
+
+    class _FakeConn:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_a):
+            return False
+
+        def cursor(self, *_a, **_kw):
+            return _FakeCursor()
+
+    monkeypatch.setattr(store, "get_conn", lambda: _FakeConn())
+    assert store.append_review_transcript_entries("j", [{"entry_id": "e", "prompt": "p"}]) is True
+    updates = [q for q in seen if "SET entries" in q]
+    assert updates
+    assert "%s::jsonb" in updates[0]
+
+
+def test_get_review_transcript_none_when_postgres_disabled(monkeypatch) -> None:
+    monkeypatch.setattr(store, "is_postgres_enabled", lambda: False)
+    assert store.get_review_transcript("j") is None
+
+
+def test_get_review_transcript_degrades_on_db_error(monkeypatch) -> None:
+    monkeypatch.setattr(store, "is_postgres_enabled", lambda: True)
+
+    def _boom(*_a, **_kw):
+        raise RuntimeError("db down")
+
+    monkeypatch.setattr(store, "get_conn", _boom)
+    assert store.get_review_transcript("j") is None
+
+
+def test_get_review_transcript_returns_entries_on_success(monkeypatch) -> None:
+    monkeypatch.setattr(store, "is_postgres_enabled", lambda: True)
+    entries = [{"stage": "chunk_review", "prompt": "p", "response": "r"}]
+
+    class _FakeCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_a):
+            return False
+
+        def execute(self, *_a, **_kw):
+            pass
+
+        def fetchone(self):
+            return {"entries": entries}
+
+    class _FakeConn:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_a):
+            return False
+
+        def cursor(self, *_a, **_kw):
+            return _FakeCursor()
+
+    monkeypatch.setattr(store, "get_conn", lambda: _FakeConn())
+    assert store.get_review_transcript("j1") == entries
+
+
 def test_get_review_returns_row_on_success(monkeypatch) -> None:
     monkeypatch.setattr(store, "is_postgres_enabled", lambda: True)
     row = {"job_id": "j1", "owner": "o", "repo": "r", "pr_number": 7, "status": "completed"}

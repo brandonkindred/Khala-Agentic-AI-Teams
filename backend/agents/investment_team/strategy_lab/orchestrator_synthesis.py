@@ -65,7 +65,7 @@ from ._orchestrator_helpers import (
     _round_demoted_conformance,
     _SynthesisLoopOutcome,
 )
-from .agents._llm_budget import DesignBudgetExhausted
+from .agents._llm_budget import DesignBudgetExhausted, _annotate_budget_exhaustion
 from .backtest_cache import BacktestCache
 from .coverage_probe import format_coverage_report
 from .exceptions import SpecImplementabilityError
@@ -1112,8 +1112,7 @@ class SynthesisMixin:
                     emit=emit,
                 )
             except DesignBudgetExhausted as exc:
-                exc.latest_spec = spec
-                exc.latest_code = code
+                _annotate_budget_exhaustion(exc, spec, code=code)
                 raise
             all_gate_results.extend(zt_outcome.new_gates)
             if zt_outcome.committed:

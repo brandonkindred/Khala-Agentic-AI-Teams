@@ -20,7 +20,7 @@ from .attribution import (
 )
 from .backoff import parse_rate_limit_retry_config, rate_limit_retry_delay
 from .capabilities import provider_supports_structured_output
-from .clients import ClaudeLLMClient, DummyLLMClient, OllamaLLMClient
+from .clients import ClaudeLLMClient, DummyLLMClient, OllamaLLMClient, RunPodLLMClient
 from .compaction import clear_compaction_cache, compact_text, supports_compaction
 from .factory import (
     attributed_client,
@@ -160,6 +160,7 @@ __all__ = [
     "OllamaLLMClient",
     "ClaudeLLMClient",
     "DummyLLMClient",
+    "RunPodLLMClient",
     "record_llm_call",
     "register_call_observer",
     "unregister_call_observer",

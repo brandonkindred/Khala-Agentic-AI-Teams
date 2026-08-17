@@ -191,6 +191,7 @@ from software_engineering_team.models import (  # noqa: F401
 from software_engineering_team.postgres import SCHEMA as SE_POSTGRES_SCHEMA
 from software_engineering_team.review_history_store import (  # noqa: F401
     get_review,
+    get_review_transcript,
     list_reviews,
     record_review_start,
     update_review,

@@ -36,13 +36,22 @@ Invariants:
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass
 from typing import Callable, List, Tuple, TypeVar, Union
 
 from llm_service import LLMClient, LLMTruncatedError
+from llm_service.interface import take_complete_json_turns
 
 from .model_resolution import resolve_code_review_model
-from .via_reasoning import run_agent_via_reasoning
+from .transcript import (
+    model_label,
+    record_formatting_transcript_turns,
+    record_reasoning_transcript_turns,
+    record_transcript_entry,
+    resolve_format_turn_started,
+)
+from .via_reasoning import formatting_system_prompt_with_untrusted_guard, run_agent_via_reasoning
 
 try:
     from strands.models.model import Model as _StrandsModel
@@ -157,28 +166,97 @@ def _call_agent(
     tools: list,
     prompt: str,
     parse: Callable[[str], T],
+    *,
+    pass_label: str = "",
+    batch_target: str = "",
 ) -> T:
     """Run one think-then-format submission pass call and parse the JSON reply.
 
     Preconditions:
         - ``reasoning_system_prompt`` and ``formatting_instructions`` are non-empty.
         - ``prompt`` is the user message for the reasoning pass.
+        - ``pass_label``/``batch_target``, when non-blank, identify this call for
+          the durable transcript (see ``transcript.record_transcript_entry``) —
+          the calling pass's label and a short description of the batch (e.g.
+          ``"batch 1/2"``). Blank values (a caller that predates this parameter,
+          e.g. a direct test) simply record under an empty stage/target.
 
     Postconditions:
         - Returns ``parse``'s result from the formatting pass.
         - Tools are attached only to the reasoning pass (call 1).
         - Raises whatever ``run_agent_via_reasoning`` or ``parse`` raises —
           recovery is entirely the caller's concern.
+        - Records one transcript entry per reasoning-pass model invocation
+          (inner HTTP turns when the Strands adapter recorded them, otherwise
+          one entry per assistant message) and a separate formatting-pass
+          entry per formatting LLM turn (format prompt + JSON reply,
+          including continuation turns) into the durable transcript once each
+          call exists, even if the formatting pass or ``parse`` later fails,
+          so a tool-using call's requests and the subsequent JSON
+          transcription are not silently dropped. A no-op when no ``job_id``
+          is bound.
     """
-    return run_agent_via_reasoning(
-        model=model,
-        reasoning_prompt=prompt,
-        reasoning_system_prompt=reasoning_system_prompt,
-        formatting_instructions=formatting_instructions,
-        parse=parse,
-        tools=tools,
-        reasoning_think=True,
-    )
+    reasoning_agent = None
+    reasoning_turns: list[tuple[str, str, float]] = []
+    format_turns: list[tuple[str, str, float]] = []
+    started = time.monotonic()
+    reasoning_done_at = started
+    format_turn_started_at: float | None = None
+
+    def _capture_reasoning_agent(agent: object) -> None:
+        nonlocal reasoning_agent, reasoning_done_at, reasoning_turns
+        reasoning_agent = agent
+        reasoning_done_at = time.monotonic()
+        reasoning_turns = take_complete_json_turns()
+
+    def _on_formatting_start() -> None:
+        nonlocal format_turn_started_at
+        format_turn_started_at = time.monotonic()
+
+    def _capture_formatting(prompt: str, response: str) -> None:
+        turn_started = resolve_format_turn_started(
+            [started for _, _, started in format_turns],
+            format_turn_started_at,
+            time.monotonic(),
+        )
+        format_turns.append((prompt, response, turn_started))
+
+    try:
+        return run_agent_via_reasoning(
+            model=model,
+            reasoning_prompt=prompt,
+            reasoning_system_prompt=reasoning_system_prompt,
+            formatting_instructions=formatting_instructions,
+            parse=parse,
+            tools=tools,
+            reasoning_think=True,
+            on_reasoning_agent=_capture_reasoning_agent,
+            on_formatting=_capture_formatting,
+            on_formatting_start=_on_formatting_start,
+        )
+    finally:
+        now = time.monotonic()
+        record_reasoning_transcript_turns(
+            pass_label,
+            batch_target,
+            turns=reasoning_turns,
+            agent=reasoning_agent,
+            fallback_prompt=prompt,
+            started=started,
+            reasoning_done_at=reasoning_done_at,
+            system_prompt=reasoning_system_prompt,
+            model=model_label(model),
+            recorder=record_transcript_entry,
+        )
+        record_formatting_transcript_turns(
+            pass_label,
+            batch_target,
+            turns=format_turns,
+            last_ended=now,
+            system_prompt=formatting_system_prompt_with_untrusted_guard(None),
+            model=model_label(model),
+            recorder=record_transcript_entry,
+        )
 
 
 def _run_batch_with_recovery(
@@ -195,17 +273,12 @@ def _run_batch_with_recovery(
 ) -> List[T]:
     """Run one batch call, recovering from an overflow-shaped failure; never raises.
 
-    Preconditions: ``batch.items`` is non-empty.
+    Preconditions:
+        ``batch.items`` is non-empty.
 
     Postconditions:
-        - Returns ``[result]`` on success.
-        - Returns ``[]`` immediately (no retry) when the call raises a
-          non-overflow-shaped exception — matches the pre-runner fail-safe
-          posture (a bad batch must not discard other batches' findings).
-        - On an overflow-shaped exception, recovers via
-          :func:`_recover_from_overflow` (bisect while possible), returning
-          whatever that recovers (possibly ``[]``). Content is never
-          truncated as a recovery strategy.
+        Returns ``[result]`` on success, ``[]`` on a non-overflow failure, or
+        the recovered result on overflow.
     """
     try:
         prompt = build_prompt(batch)
@@ -216,6 +289,8 @@ def _run_batch_with_recovery(
             tools,
             prompt,
             parse,
+            pass_label=pass_label,
+            batch_target=f"batch {batch.index}/{batch.total}",
         )
     except Exception as exc:  # noqa: BLE001 - fail-safe: recover or skip, never raise
         if not _is_overflow_shaped(exc):

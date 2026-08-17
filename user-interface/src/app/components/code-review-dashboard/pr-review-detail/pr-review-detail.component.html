@@ -61,6 +61,7 @@
           <th scope="col">Severity</th>
           <th scope="col">Started</th>
           <th scope="col">Duration</th>
+          <th scope="col">Transcript</th>
         </tr>
       </thead>
       <tbody>
@@ -109,6 +110,21 @@
             </td>
             <td>{{ rec.startedAt | date: 'short' }}</td>
             <td>{{ reviewDuration(rec) ?? '—' }}</td>
+            <td>
+              @if (isRecordTerminal(rec)) {
+                <button
+                  mat-icon-button
+                  type="button"
+                  (click)="onViewTranscript(rec)"
+                  aria-label="View review transcript"
+                  title="View review transcript"
+                >
+                  <mat-icon aria-hidden="true">description</mat-icon>
+                </button>
+              } @else {
+                —
+              }
+            </td>
           </tr>
         }
       </tbody>

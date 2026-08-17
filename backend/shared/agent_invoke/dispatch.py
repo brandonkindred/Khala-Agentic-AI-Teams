@@ -25,15 +25,71 @@ class AgentNotRunnableError(RuntimeError):
     """The manifest's entrypoint cannot be loaded or invoked."""
 
 
-async def invoke_entrypoint(entrypoint: str, body: Any) -> Any:
-    """Import ``module:Symbol`` and call it with ``body``. Awaits if coroutine."""
+async def invoke_entrypoint(entrypoint: str, body: Any, *, agent_id: str | None = None) -> Any:
+    """Import ``module:Symbol`` and call it with ``body``. Awaits if coroutine.
+
+    ``agent_id`` is the trusted, route-resolved manifest id the shim already used to
+    look the manifest up (``shim.py``). It is forwarded to the entrypoint **only when
+    the entrypoint's signature declares an ``agent_id`` parameter** (or accepts
+    ``**kwargs``), so an entrypoint can bind its persisted manifest without re-deriving
+    identity from the caller-controlled body. Entrypoints that take only ``body`` (the
+    overwhelming majority) are called ``callable_obj(body)`` exactly as before.
+
+    Preconditions:
+        * ``entrypoint`` is a ``"module.path:Symbol"`` dotted ref.
+    Postconditions:
+        * Returns the entrypoint's result (awaited when it is a coroutine). The
+          ``agent_id`` value is passed as a keyword argument iff the resolved callable
+          accepts one; otherwise it is not passed and behavior is identical to a
+          two-argument call.
+    """
     target = _resolve_entrypoint(entrypoint)
     callable_obj = _materialise(target)
     logger.info("dispatching to %s (body keys: %s)", entrypoint, _sample_keys(body))
-    result = callable_obj(body)
+    result = _call_entrypoint(callable_obj, body, agent_id)
     if inspect.iscoroutine(result):
         result = await result
     return result
+
+
+def _call_entrypoint(callable_obj: Any, body: Any, agent_id: str | None) -> Any:
+    """Call ``callable_obj(body)``, forwarding ``agent_id`` only if it is accepted.
+
+    Preconditions:
+        * ``callable_obj`` accepts the request ``body`` as its first argument.
+    Postconditions:
+        * Returns ``callable_obj(body, agent_id=agent_id)`` when ``agent_id`` is not
+          ``None`` and the callable declares an ``agent_id`` parameter (or ``**kwargs``);
+          otherwise returns ``callable_obj(body)``. A callable whose signature cannot be
+          introspected (e.g. some C builtins) degrades to the plain ``callable_obj(body)``
+          call rather than raising.
+    """
+    if agent_id is not None and _accepts_kwarg(callable_obj, "agent_id"):
+        return callable_obj(body, agent_id=agent_id)
+    return callable_obj(body)
+
+
+def _accepts_kwarg(callable_obj: Any, name: str) -> bool:
+    """Whether ``callable_obj`` accepts a keyword argument named ``name``.
+
+    Postconditions: returns ``True`` iff the callable declares a parameter ``name``
+        (positional-or-keyword or keyword-only) or a ``**kwargs`` catch-all. Returns
+        ``False`` when the signature cannot be introspected, so an un-introspectable
+        callable is never handed an unexpected keyword.
+    """
+    try:
+        params = inspect.signature(callable_obj).parameters
+    except (TypeError, ValueError):
+        return False
+    for param in params.values():
+        if param.kind is inspect.Parameter.VAR_KEYWORD:
+            return True
+        if param.name == name and param.kind in (
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+            inspect.Parameter.KEYWORD_ONLY,
+        ):
+            return True
+    return False
 
 
 def _resolve_entrypoint(entrypoint: str) -> Any:

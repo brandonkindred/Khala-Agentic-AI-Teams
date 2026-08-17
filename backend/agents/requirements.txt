@@ -32,6 +32,8 @@ APScheduler>=3.11,<4.0
 pytz>=2026.1
 strands-agents>=1.35,<2.0
 strands-agents-tools>=0.4,<1.0
+# Native strands.models.ollama provider used by Agent Provisioning.
+ollama>=0.4.8,<1.0
 # Official Anthropic SDK for the Claude LLM provider (LLM_PROVIDER=claude)
 anthropic>=0.69,<1.0
 # Observability: exposes /metrics on the unified API for Prometheus scraping

@@ -46,6 +46,62 @@ def test_small_code_returns_code_review_output() -> None:
     assert result.issues == []
 
 
+def test_run_flushes_transcript_synchronously_when_job_id_bound(monkeypatch) -> None:
+    """When the caller supplied a job_id, the in-process run must synchronously
+    drain the transcript buffer before returning, rather than leaving it to the
+    background heartbeat -- otherwise a caller that immediately marks the review
+    terminal (making the UI's "View Transcript" action appear) could show an
+    incomplete transcript for up to a full flush interval."""
+    from code_review_agent import agent as agent_mod
+
+    calls = []
+    monkeypatch.setattr(agent_mod.transcript, "drain", lambda: calls.append(1))
+
+    reviewer = CodeReviewAgent(llm_client=DummyLLMClient(), force_in_process=True)
+    reviewer.run(_input(job_id="job-1"))
+
+    assert calls == [1]
+
+
+def test_run_flushes_transcript_even_when_coordinator_raises(monkeypatch) -> None:
+    """A review that fails partway through (e.g. one chunk raised
+    CodeReviewUnavailableError after an earlier chunk already buffered a
+    transcript entry) must still flush before propagating the failure — the
+    caller marks the review FAILED as soon as run() returns control, so a
+    drain reachable only on the success path would leave that entry stranded
+    until the next background heartbeat."""
+    from code_review_agent import agent as agent_mod
+
+    from llm_service import LLMRateLimitError
+
+    calls = []
+    monkeypatch.setattr(agent_mod.transcript, "drain", lambda: calls.append(1))
+
+    class _AlwaysRateLimited(DummyLLMClient):
+        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+            raise LLMRateLimitError("429")
+
+    reviewer = CodeReviewAgent(llm_client=_AlwaysRateLimited(), force_in_process=True)
+    with pytest.raises(CodeReviewUnavailableError):
+        reviewer.run(_input(job_id="job-1"))
+
+    assert calls == [1]
+
+
+def test_run_does_not_flush_transcript_without_a_job_id(monkeypatch) -> None:
+    """No caller-tracked job means nothing was buffered to flush; skip the
+    synchronous drain call entirely rather than paying for a pointless one."""
+    from code_review_agent import agent as agent_mod
+
+    calls = []
+    monkeypatch.setattr(agent_mod.transcript, "drain", lambda: calls.append(1))
+
+    reviewer = CodeReviewAgent(llm_client=DummyLLMClient(), force_in_process=True)
+    reviewer.run(_input())  # job_id defaults to ""
+
+    assert calls == []
+
+
 def test_small_code_with_all_optional_fields_does_not_crash() -> None:
     """spec_content, task_requirements, acceptance_criteria, architecture,
     existing_codebase all plumbed through the builder."""
@@ -283,6 +339,30 @@ def test_repo_root_defaults_none_and_round_trips_through_json() -> None:
     restored = CodeReviewInput.model_validate(dumped)
     assert restored.repo_root == "/tmp/checkout"
     assert restored.files == {"a.py": "x = 1\n"}
+
+
+def test_replaced_content_defaults_none_and_round_trips_through_json() -> None:
+    """``replaced_content`` (the before-image analogue of ``full_content``)
+    defaults to None, is JSON-native so it survives the Temporal boundary, and
+    its presence does not disturb the ``files`` validator."""
+    default = CodeReviewInput(files={"a.py": "x = 2\n"})
+    assert default.replaced_content is None
+
+    before = {"a.py": "x = 1\n"}
+    with_before = CodeReviewInput(files={"a.py": "x = 2\n"}, replaced_content=before)
+    dumped = with_before.model_dump(mode="json")
+    assert dumped["replaced_content"] == before
+    restored = CodeReviewInput.model_validate(dumped)
+    assert restored.replaced_content == before
+    assert restored.files == {"a.py": "x = 2\n"}
+
+
+def test_replaced_content_does_not_satisfy_files_requirement() -> None:
+    """``replaced_content`` is a before-image, not a code source: an input with
+    only ``replaced_content`` and no ``files`` still fails the non-empty-files
+    validator (absent/None must behave exactly as today)."""
+    with pytest.raises(ValueError):
+        CodeReviewInput(replaced_content={"a.py": "x = 1\n"})
 
 
 def test_repo_root_does_not_satisfy_code_or_files_requirement() -> None:

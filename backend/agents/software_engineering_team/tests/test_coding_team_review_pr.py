@@ -2216,6 +2216,119 @@ class TestReviewPersistence:
         )
 
 
+class TestReviewTranscript:
+    """GET /reviews/{job_id}/transcript: 200 with entries, 404s, owner/repo gate."""
+
+    def test_returns_entries_in_order(self, review_app, monkeypatch) -> None:
+        api_main = review_app["api"]
+        monkeypatch.setattr(
+            api_main,
+            "get_review",
+            lambda job_id: {"job_id": job_id, "owner": "o", "repo": "r"},
+        )
+        entries = [
+            {
+                "stage": "chunk_review",
+                "target": "a.py",
+                "model": "m",
+                "prompt": "p1",
+                "response": "r1",
+                "started_at": "2024-01-01T00:00:00+00:00",
+                "duration_ms": 10,
+            },
+            {
+                "stage": "synthesis",
+                "target": "",
+                "model": "m",
+                "prompt": "p2",
+                "response": "r2",
+                "started_at": "2024-01-01T00:00:01+00:00",
+                "duration_ms": 5,
+            },
+        ]
+        monkeypatch.setattr(api_main, "get_review_transcript", lambda job_id: entries)
+        resp = review_app["client"].get("/reviews/j1/transcript")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["job_id"] == "j1"
+        assert [e["stage"] for e in data["entries"]] == ["chunk_review", "synthesis"]
+
+    def test_404_when_review_unknown(self, review_app, monkeypatch) -> None:
+        api_main = review_app["api"]
+        monkeypatch.setattr(api_main, "get_review", lambda job_id: None)
+        resp = review_app["client"].get("/reviews/does-not-exist/transcript")
+        assert resp.status_code == 404
+
+    def test_empty_entries_when_transcript_not_yet_recorded(self, review_app, monkeypatch) -> None:
+        """A known review with no transcript row (not started, predates the
+        feature, or was served entirely from the submission-level cache) is a
+        200 with an empty list, not a 404 — the UI shows "View Transcript" for
+        any terminal review, so a legitimately-empty transcript must not error."""
+        api_main = review_app["api"]
+        monkeypatch.setattr(
+            api_main,
+            "get_review",
+            lambda job_id: {"job_id": job_id, "owner": "o", "repo": "r"},
+        )
+        monkeypatch.setattr(api_main, "get_review_transcript", lambda job_id: None)
+        resp = review_app["client"].get("/reviews/j1/transcript")
+        assert resp.status_code == 200
+        assert resp.json() == {"job_id": "j1", "entries": []}
+
+    def test_includes_unflushed_buffer_entries(self, review_app, monkeypatch) -> None:
+        """A known review whose durable row is still empty but whose final
+        drain requeued into the in-memory buffer must still return those
+        entries — the UI fetches once and would otherwise stay empty until
+        the heartbeat succeeds."""
+        from llm_service import llm_attribution
+        from software_engineering_team.code_review_agent import transcript
+
+        api_main = review_app["api"]
+        monkeypatch.setattr(
+            api_main,
+            "get_review",
+            lambda job_id: {"job_id": job_id, "owner": "o", "repo": "r"},
+        )
+        monkeypatch.setattr(api_main, "get_review_transcript", lambda job_id: None)
+        monkeypatch.setattr(transcript, "is_postgres_enabled", lambda: True)
+        transcript._reset_for_test()
+        with llm_attribution(job_id="j1"):
+            transcript.record_transcript_entry("chunk_review", "a.py", "p", "r")
+        try:
+            resp = review_app["client"].get("/reviews/j1/transcript")
+            assert resp.status_code == 200
+            data = resp.json()
+            assert len(data["entries"]) == 1
+            assert data["entries"][0]["target"] == "a.py"
+        finally:
+            transcript._reset_for_test()
+
+    def test_409_on_owner_repo_mismatch(self, review_app, monkeypatch) -> None:
+        api_main = review_app["api"]
+        monkeypatch.setattr(
+            api_main,
+            "get_review",
+            lambda job_id: {"job_id": job_id, "owner": "o", "repo": "r"},
+        )
+        resp = review_app["client"].get(
+            "/reviews/j1/transcript", params={"owner": "other", "repo": "r"}
+        )
+        assert resp.status_code == 409
+
+    def test_owner_repo_match_is_case_insensitive(self, review_app, monkeypatch) -> None:
+        api_main = review_app["api"]
+        monkeypatch.setattr(
+            api_main,
+            "get_review",
+            lambda job_id: {"job_id": job_id, "owner": "Owner", "repo": "Repo"},
+        )
+        monkeypatch.setattr(api_main, "get_review_transcript", lambda job_id: [])
+        resp = review_app["client"].get(
+            "/reviews/j1/transcript", params={"owner": "owner", "repo": "repo"}
+        )
+        assert resp.status_code == 200
+
+
 # ---------------------------------------------------------------------------
 # BUG CONDITION REGRESSION TESTS
 #
@@ -3173,6 +3286,236 @@ class TestFixedRunPrReview:
         job = review_app["jobs"].get_job(resp.json()["job_id"])
         assert job["status"] == "completed"
         assert job["review_summary"]["pending_issue_proposals"] == []
+
+    def test_scope_verifier_unsure_does_not_post_comment(self, review_app, monkeypatch) -> None:
+        """An unsure scope verdict fail-closes posting: no PR comment, proposal instead."""
+        from software_engineering_team.code_review_agent.models import CodeReviewIssue
+        from software_engineering_team.code_review_agent.scope_filter import (
+            ScopeVerdict,
+            apply_scope_verdicts,
+        )
+
+        def _force_unsure(
+            llm, *, issues, changed_by_path, files, repo_reader=None, input_data=None, **_kw
+        ):
+            converted = [
+                CodeReviewIssue(
+                    severity=getattr(i, "severity", "high"),
+                    category=getattr(i, "category", "logic"),
+                    file_path=getattr(i, "file_path", ""),
+                    line=getattr(i, "line", None),
+                    description=getattr(i, "description", ""),
+                    suggestion=getattr(i, "suggestion", ""),
+                    pre_existing=bool(getattr(i, "pre_existing", False)),
+                )
+                for i in issues
+            ]
+            return apply_scope_verdicts(
+                converted,
+                changed_by_path=changed_by_path,
+                verdicts={0: ScopeVerdict(scope="unsure", confidence="low")},
+                grounded=True,
+            )
+
+        monkeypatch.setattr(
+            "software_engineering_team.code_review_agent.scope_filter.apply_scope_verification",
+            _force_unsure,
+        )
+        review_app["github"]["client"] = _FakeReviewClient()
+        review_app["github"]["agent_output"] = _FakeOutput(
+            issues=[
+                _FakeReviewIssue(
+                    "high",
+                    line=99,
+                    file_path="a.py",
+                    description="maybe out of scope",
+                )
+            ]
+        )
+        resp = review_app["client"].post("/review-pr", json=_review_body())
+        assert resp.status_code == 200
+        gh = review_app["github"]["client"]
+        assert gh.comments == []
+        assert gh.review_comments == []
+        job = review_app["jobs"].get_job(resp.json()["job_id"])
+        assert job["review_summary"]["pending_issue_proposals"]
+        assert (
+            job["review_summary"]["pending_issue_proposals"][0]["description"]
+            == "maybe out of scope"
+        )
+
+    def test_scope_verifier_omission_still_posts(self, review_app, monkeypatch) -> None:
+        """A confident omission stays a PR finding even when the path is off-diff."""
+        from software_engineering_team.code_review_agent.models import CodeReviewIssue
+        from software_engineering_team.code_review_agent.scope_filter import (
+            ScopeVerdict,
+            apply_scope_verdicts,
+        )
+
+        def _force_omission(
+            llm, *, issues, changed_by_path, files, repo_reader=None, input_data=None, **_kw
+        ):
+            converted = [
+                CodeReviewIssue(
+                    severity=getattr(i, "severity", "high"),
+                    category=getattr(i, "category", "logic"),
+                    file_path=getattr(i, "file_path", ""),
+                    line=getattr(i, "line", None),
+                    description=getattr(i, "description", ""),
+                    suggestion=getattr(i, "suggestion", ""),
+                    pre_existing=bool(getattr(i, "pre_existing", False)),
+                )
+                for i in issues
+            ]
+            return apply_scope_verdicts(
+                converted,
+                changed_by_path=changed_by_path,
+                verdicts={0: ScopeVerdict(scope="omission", confidence="high")},
+                grounded=True,
+            )
+
+        monkeypatch.setattr(
+            "software_engineering_team.code_review_agent.scope_filter.apply_scope_verification",
+            _force_omission,
+        )
+        review_app["github"]["client"] = _FakeReviewClient()
+        review_app["github"]["agent_output"] = _FakeOutput(
+            issues=[
+                _FakeReviewIssue(
+                    "high",
+                    line=1,
+                    file_path="missing.py",
+                    description="should have added missing.py",
+                )
+            ]
+        )
+        resp = review_app["client"].post("/review-pr", json=_review_body())
+        assert resp.status_code == 200
+        gh = review_app["github"]["client"]
+        assert any("should have added missing.py" in c[1] for c in gh.comments)
+        job = review_app["jobs"].get_job(resp.json()["job_id"])
+        assert job["review_summary"]["pending_issue_proposals"] == []
+
+    def test_scope_verifier_leaves_not_reviewed_coverage_findings_untagged(
+        self, review_app, monkeypatch
+    ) -> None:
+        """Blocking unreviewed-range findings must not enter scope verification.
+
+        If they did, an unsure/fail-closed tag would route them to issue
+        proposals and they would no longer reject the PR.
+        """
+        from software_engineering_team.code_review_agent.mapping import (
+            NOT_REVIEWED_FINDING_MARKER,
+        )
+        from software_engineering_team.code_review_agent.models import CodeReviewIssue
+
+        seen: list[str] = []
+
+        def _tag_all_received_as_pre_existing(
+            llm, *, issues, changed_by_path, files, repo_reader=None, input_data=None, **_kw
+        ):
+            seen.extend(getattr(i, "description", "") or "" for i in issues)
+            return [
+                CodeReviewIssue(
+                    severity=getattr(i, "severity", "high"),
+                    category=getattr(i, "category", "logic"),
+                    file_path=getattr(i, "file_path", ""),
+                    line=getattr(i, "line", None),
+                    description=getattr(i, "description", ""),
+                    suggestion=getattr(i, "suggestion", ""),
+                    pre_existing=True,
+                )
+                for i in issues
+            ]
+
+        monkeypatch.setattr(
+            "software_engineering_team.code_review_agent.scope_filter.apply_scope_verification",
+            _tag_all_received_as_pre_existing,
+        )
+        coverage_desc = (
+            f"This code {NOT_REVIEWED_FINDING_MARKER} automatically (TimeoutError); "
+            "a.py (lines 90-99) was not reviewed. Blocking review so unreviewed "
+            "code is not approved."
+        )
+        review_app["github"]["client"] = _FakeReviewClient()
+        review_app["github"]["agent_output"] = _FakeOutput(
+            issues=[
+                _FakeReviewIssue(
+                    "high",
+                    line=99,
+                    file_path="a.py",
+                    description=coverage_desc,
+                ),
+                _FakeReviewIssue(
+                    "high",
+                    line=50,
+                    file_path="a.py",
+                    description="unrelated context nit",
+                ),
+            ]
+        )
+        resp = review_app["client"].post("/review-pr", json=_review_body())
+        assert resp.status_code == 200
+        assert coverage_desc not in seen
+        assert "unrelated context nit" in seen
+        gh = review_app["github"]["client"]
+        posted = " ".join(c.get("body", "") for c in gh.review_comments)
+        posted += " ".join(body for _n, body in gh.comments)
+        for review in gh.reviews:
+            posted += " ".join(c.get("body", "") for c in review.get("comments", []))
+        assert NOT_REVIEWED_FINDING_MARKER in posted
+        job = review_app["jobs"].get_job(resp.json()["job_id"])
+        proposals = job["review_summary"]["pending_issue_proposals"]
+        assert all(
+            NOT_REVIEWED_FINDING_MARKER not in (p.get("description") or "") for p in proposals
+        )
+        assert any("unrelated context nit" in (p.get("description") or "") for p in proposals)
+
+    def test_scope_verifier_receives_pr_task_text(self, review_app, monkeypatch) -> None:
+        """The PR hook must pass title/body into the verifier, not files-only input."""
+        captured: dict[str, Any] = {}
+
+        def _capture(
+            llm,
+            *,
+            issues,
+            changed_by_path,
+            files,
+            repo_reader=None,
+            input_data=None,
+            removed_by_path=None,
+            **_kw,
+        ):
+            captured["input_data"] = input_data
+            captured["changed"] = changed_by_path
+            captured["removed"] = removed_by_path
+            return list(issues)
+
+        monkeypatch.setattr(
+            "software_engineering_team.code_review_agent.scope_filter.apply_scope_verification",
+            _capture,
+        )
+        review_app["github"]["client"] = _FakeReviewClient()
+        review_app["github"]["agent_output"] = _FakeOutput(
+            issues=[
+                _FakeReviewIssue(
+                    "high",
+                    line=99,
+                    file_path="a.py",
+                    description="maybe related",
+                )
+            ]
+        )
+        resp = review_app["client"].post("/review-pr", json=_review_body())
+        assert resp.status_code == 200
+        data = captured.get("input_data")
+        assert data is not None
+        assert "Add feature" in (data.task_description or "")
+        assert "body" in (data.task_requirements or "")
+        # The PR hook must also thread the added/modified and deleted line maps
+        # into the verifier so scope classification has the diff to reason over.
+        assert captured.get("changed") is not None
+        assert captured.get("removed") is not None
 
 
 # ---------------------------------------------------------------------------

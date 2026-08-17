@@ -11,7 +11,12 @@ from pydantic import BaseModel
 from llm_service.interface import (
     LLMClient,
     LLMJsonParseError,
+    LLMRateLimitError,
     LLMSchemaValidationError,
+    LLMTruncatedError,
+    record_complete_json_raw,
+    record_complete_json_turn,
+    take_complete_json_turns,
 )
 from llm_service.structured import complete_validated
 
@@ -266,6 +271,351 @@ def test_context_is_forwarded_to_model_validate():
         complete_validated(
             client2, "prompt", objective="test", schema=ContextAwareModel, correction_attempts=0
         )
+
+
+def test_on_attempt_called_once_per_call_including_failed_ones():
+    """on_attempt sees every attempt (the initial parse failure AND the
+    corrective retry that succeeds), not just the final return value —
+    otherwise a caller building a durable transcript from it would silently
+    drop the first attempt's prompt/response, same as the pre-fix behavior
+    this replaces."""
+    valid_payload = {
+        "selected_option_id": "opt-a",
+        "other_text": None,
+        "rationale": "because reasons",
+    }
+
+    def handler(prompt: str, *, call_index: int) -> dict[str, Any]:
+        if call_index == 0:
+            raise LLMJsonParseError("Non-JSON reply", response_preview="# Markdown spec — not JSON")
+        return valid_payload
+
+    client = _StubClient(handler)
+    attempts: list[tuple[str, str]] = []
+    result = complete_validated(
+        client,
+        "generate an answer",
+        objective="test",
+        schema=FounderAnswer,
+        on_attempt=lambda p, r: attempts.append((p, r)),
+    )
+
+    assert isinstance(result, FounderAnswer)
+    assert len(attempts) == 2
+    # First attempt: the original prompt, and the raw (unparseable) preview.
+    assert attempts[0][0] == "generate an answer"
+    assert attempts[0][1] == "# Markdown spec — not JSON"
+    # Second attempt: the corrective prompt, and the final valid JSON.
+    assert "Non-JSON reply" in attempts[1][0]
+    assert "opt-a" in attempts[1][1]
+
+
+def test_on_attempt_called_for_validation_failure_then_success():
+    def handler(prompt: str, *, call_index: int) -> dict[str, Any]:
+        if call_index == 0:
+            return {"selected_option_id": "opt-a"}  # missing rationale
+        return {"selected_option_id": "opt-a", "rationale": "fixed"}
+
+    client = _StubClient(handler)
+    attempts: list[tuple[str, str]] = []
+    complete_validated(
+        client,
+        "prompt",
+        objective="test",
+        schema=FounderAnswer,
+        on_attempt=lambda p, r: attempts.append((p, r)),
+    )
+
+    assert len(attempts) == 2
+    assert attempts[0][0] == "prompt"
+    assert "opt-a" in attempts[0][1]  # the invalid payload that triggered the retry
+    assert "fixed" in attempts[1][1]
+
+
+def test_on_attempt_called_on_terminal_failure_too():
+    def handler(prompt: str, *, call_index: int) -> dict[str, Any]:
+        raise LLMJsonParseError(f"bad json {call_index}", response_preview=f"raw-{call_index}")
+
+    client = _StubClient(handler)
+    attempts: list[tuple[str, str]] = []
+    with pytest.raises(LLMJsonParseError):
+        complete_validated(
+            client,
+            "prompt",
+            objective="test",
+            schema=FounderAnswer,
+            on_attempt=lambda p, r: attempts.append((p, r)),
+        )
+
+    assert len(attempts) == 2  # initial + the one correction_attempts allows
+    assert attempts[0][1] == "raw-0"
+    assert attempts[1][1] == "raw-1"
+
+
+def test_on_attempt_receives_full_raw_response_on_parse_failure():
+    """Parse-failure observers get the untruncated reply, not the log-safe preview.
+
+    ``response_preview`` stays truncated for corrective prompts; ``raw_response``
+    is what transcript recorders need.
+    """
+    full = "malformed reply " + ("y" * 800)
+
+    def handler(prompt: str, *, call_index: int) -> dict[str, Any]:
+        raise LLMJsonParseError(
+            "bad json",
+            response_preview=full[:500],
+            raw_response=full,
+        )
+
+    client = _StubClient(handler)
+    attempts: list[tuple[str, str]] = []
+    with pytest.raises(LLMJsonParseError):
+        complete_validated(
+            client,
+            "prompt",
+            objective="test",
+            schema=FounderAnswer,
+            correction_attempts=0,
+            on_attempt=lambda p, r: attempts.append((p, r)),
+        )
+
+    assert len(attempts) == 1
+    assert attempts[0][1] == full
+    assert len(attempts[0][1]) > 500
+
+
+def test_on_attempt_exception_is_swallowed(caplog):
+    """A broken observer must never break the underlying structured-output call."""
+
+    def handler(prompt: str, *, call_index: int) -> dict[str, Any]:
+        return {"selected_option_id": "opt-a", "rationale": "ok"}
+
+    client = _StubClient(handler)
+
+    def _boom(_p, _r):
+        raise RuntimeError("observer bug")
+
+    with caplog.at_level(logging.WARNING, logger="llm_service.structured"):
+        result = complete_validated(
+            client, "prompt", objective="test", schema=FounderAnswer, on_attempt=_boom
+        )
+
+    assert isinstance(result, FounderAnswer)
+    assert any("on_attempt callback failed" in r.message for r in caplog.records)
+
+
+def test_on_attempt_called_for_truncated_complete_json():
+    """A token-limit truncation is a completed LLM call; on_attempt must see
+    the partial content even though complete_validated does not JSON-retry it."""
+
+    def handler(prompt: str, *, call_index: int) -> dict[str, Any]:
+        raise LLMTruncatedError("hit max_tokens", partial_content='{"selected_option_id":')
+
+    client = _StubClient(handler)
+    attempts: list[tuple[str, str]] = []
+    with pytest.raises(LLMTruncatedError):
+        complete_validated(
+            client,
+            "prompt",
+            objective="test",
+            schema=FounderAnswer,
+            on_attempt=lambda p, r: attempts.append((p, r)),
+        )
+    assert attempts == [("prompt", '{"selected_option_id":')]
+
+
+def test_on_attempt_sees_each_complete_json_continuation_turn():
+    """Inner continuation HTTP turns must each reach on_attempt so the
+    transcript records the truncated first reply and the continuation call,
+    not only json.dumps of the merged parse."""
+
+    class _ContinuationClient(LLMClient):
+        def complete_json(self, prompt, **kwargs):
+            record_complete_json_turn(prompt, '{"selected_option_id":')
+            record_complete_json_turn(
+                "Please continue exactly from where you left off.",
+                ' "opt-a", "rationale": "x"}',
+            )
+            record_complete_json_raw('{"selected_option_id": "opt-a", "rationale": "x"}')
+            return {"selected_option_id": "opt-a", "rationale": "x"}
+
+    attempts: list[tuple[str, str]] = []
+    complete_validated(
+        _ContinuationClient(),
+        "prompt",
+        objective="test",
+        schema=FounderAnswer,
+        on_attempt=lambda p, r: attempts.append((p, r)),
+    )
+    assert len(attempts) == 2
+    assert attempts[0] == ("prompt", '{"selected_option_id":')
+    assert "continue exactly from where you left off" in attempts[1][0]
+    assert attempts[1][1] == ' "opt-a", "rationale": "x"}'
+
+
+def test_on_attempt_binds_continuation_turn_start_times():
+    """Each inner turn's started_monotonic must be visible to on_attempt so
+    transcript writers can backdate started_at from the HTTP request, not
+    from the post-complete_json callback burst."""
+    from llm_service.interface import observer_turn_started_monotonic
+
+    class _ContinuationClient(LLMClient):
+        def complete_json(self, prompt, **kwargs):
+            record_complete_json_turn(prompt, '{"selected_option_id":', started_monotonic=10.0)
+            record_complete_json_turn("continue", ' "opt-a"}', started_monotonic=20.0)
+            record_complete_json_raw('{"selected_option_id": "opt-a", "rationale": "x"}')
+            return {"selected_option_id": "opt-a", "rationale": "x"}
+
+    seen_starts: list[float | None] = []
+    complete_validated(
+        _ContinuationClient(),
+        "prompt",
+        objective="test",
+        schema=FounderAnswer,
+        on_attempt=lambda _p, _r: seen_starts.append(observer_turn_started_monotonic()),
+    )
+    assert seen_starts == [10.0, 20.0]
+
+
+def test_stale_turns_from_prior_call_do_not_leak_into_next_observer():
+    """A previous complete_json that recorded a turn then raised must not
+    attach that turn to the next attempt's on_attempt payload."""
+    record_complete_json_turn("stale", "old-partial")
+
+    class _OkClient(LLMClient):
+        def complete_json(self, prompt, **kwargs):
+            return {"selected_option_id": "opt-a", "rationale": "x"}
+
+    attempts: list[tuple[str, str]] = []
+    complete_validated(
+        _OkClient(),
+        "prompt",
+        objective="test",
+        schema=FounderAnswer,
+        on_attempt=lambda p, r: attempts.append((p, r)),
+    )
+    assert all(p != "stale" for p, _ in attempts)
+    assert take_complete_json_turns() == []
+
+
+def test_on_attempt_sees_turns_when_complete_json_raises_after_recording():
+    """Turns recorded before a non-parse error still reach on_attempt, and
+    are consumed so they cannot leak into a later call."""
+
+    class _BoomAfterTurn(LLMClient):
+        def complete_json(self, prompt, **kwargs):
+            record_complete_json_turn(prompt, "PARTIAL")
+            raise LLMRateLimitError("429")
+
+    attempts: list[tuple[str, str]] = []
+    with pytest.raises(LLMRateLimitError):
+        complete_validated(
+            _BoomAfterTurn(),
+            "prompt",
+            objective="test",
+            schema=FounderAnswer,
+            on_attempt=lambda p, r: attempts.append((p, r)),
+        )
+    assert attempts == [("prompt", "PARTIAL")]
+    assert take_complete_json_turns() == []
+
+
+def test_on_attempt_prefers_recorded_complete_json_raw_over_reserialized_dict():
+    """Successful complete_json may unwrap fenced JSON; the observer must
+    see the model text, not json.dumps of the parsed dict. Raw text is
+    stored per-call on a ContextVar so concurrent users of one client
+    cannot overwrite each other's observer payload."""
+
+    class _FencedClient(LLMClient):
+        def complete_json(self, prompt, **kwargs):
+            record_complete_json_raw(
+                '```json\n{"selected_option_id": "opt-a", "rationale": "x"}\n```'
+            )
+            return {"selected_option_id": "opt-a", "rationale": "x"}
+
+    attempts: list[tuple[str, str]] = []
+    complete_validated(
+        _FencedClient(),
+        "prompt",
+        objective="test",
+        schema=FounderAnswer,
+        on_attempt=lambda p, r: attempts.append((p, r)),
+    )
+    assert len(attempts) == 1
+    assert attempts[0][1].startswith("```json")
+    assert '"selected_option_id": "opt-a"' in attempts[0][1]
+
+
+def test_complete_json_raw_is_isolated_across_threads():
+    """Two concurrent complete_json calls on one client must each observe
+    their own raw text. Instance attributes on the shared client would
+    let the slower observer read the later call's body."""
+    import threading
+
+    barrier = threading.Barrier(2)
+
+    class _SharedClient(LLMClient):
+        def complete_json(self, prompt, **kwargs):
+            record_complete_json_raw(prompt)
+            barrier.wait()
+            return {"selected_option_id": "opt-a", "rationale": prompt}
+
+    client = _SharedClient()
+    seen: list[str | None] = [None, None]
+
+    def _run(index: int, raw: str) -> None:
+        attempts: list[str] = []
+        complete_validated(
+            client,
+            raw,
+            objective="test",
+            schema=FounderAnswer,
+            on_attempt=lambda _p, r: attempts.append(r),
+        )
+        seen[index] = attempts[0]
+
+    t1 = threading.Thread(target=_run, args=(0, "raw-aaaa"))
+    t2 = threading.Thread(target=_run, args=(1, "raw-bbbb"))
+    t1.start()
+    t2.start()
+    t1.join()
+    t2.join()
+    assert seen == ["raw-aaaa", "raw-bbbb"]
+
+
+def test_complete_json_raw_is_consumed_so_later_calls_do_not_reuse_it():
+    """take_complete_json_raw clears the slot; a later call that does not
+    record raw text must serialize its dict instead of leaking the prior body."""
+
+    class _OnceRawClient(LLMClient):
+        def __init__(self) -> None:
+            self.n = 0
+
+        def complete_json(self, prompt, **kwargs):
+            self.n += 1
+            if self.n == 1:
+                record_complete_json_raw("RAW-FIRST")
+            return {"selected_option_id": "opt-a", "rationale": prompt}
+
+    attempts: list[str] = []
+    client = _OnceRawClient()
+    complete_validated(
+        client,
+        "first",
+        objective="test",
+        schema=FounderAnswer,
+        on_attempt=lambda _p, r: attempts.append(r),
+    )
+    complete_validated(
+        client,
+        "second",
+        objective="test",
+        schema=FounderAnswer,
+        on_attempt=lambda _p, r: attempts.append(r),
+    )
+    assert attempts[0] == "RAW-FIRST"
+    assert attempts[1] != "RAW-FIRST"
+    assert '"rationale": "second"' in attempts[1]
 
 
 def test_context_is_isolated_across_retry_attempts():

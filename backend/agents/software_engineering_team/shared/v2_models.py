@@ -237,6 +237,15 @@ class BaseMicrotaskReviewConfig(BaseModel):
             "there is no free-text hallucinated-claim filter left to toggle"
         ),
     )
+    enable_dbc_comments: bool = Field(
+        default=True,
+        description=(
+            "Run the Design by Contract comments self-review step (before the "
+            "Documentation phase) when the gate config injects a run_dbc_self_review "
+            "callable. Default on; a team whose GATE_CONFIG has not wired the "
+            "callable is unaffected regardless of this flag."
+        ),
+    )
     grounding_failure_cycle_limit: int = Field(
         default=3,
         description=(
