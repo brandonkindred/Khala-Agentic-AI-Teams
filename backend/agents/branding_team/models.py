@@ -699,8 +699,9 @@ class BrandStoryOutput(BaseModel):
     """Agent-facing brand story schema.
 
     Requires non-empty content so Strands retries blank structured_output.
-    ``boilerplate_variants`` cardinality encodes the prompt's stated "3 versions
-    (short/medium/long)".
+    ``boilerplate_variants`` cardinality is single-sourced from
+    ``BOILERPLATE_VARIANTS_COUNT`` (the same constant the prompt interpolates)
+    and covers the prompt's short/medium/long versions.
     """
 
     brand_story: str = Field(min_length=1)
@@ -730,9 +731,9 @@ class BrandArchetypesOutput(BrandStoryOutput):
 class TaglineOutput(BrandArchetypesOutput):
     """Prior narrative carry-forward plus tagline / elevator pitches.
 
-    Uses ``ElevatorPitchOutput`` (not the soft ``ElevatorPitch``) so each
-    pitch's fields are individually required — three blank-tier/blank-pitch
-    entries must fail validation instead of silently passing.
+    Uses ``ElevatorPitchOutput`` (not the soft ``ElevatorPitch``) so each of
+    the ``ELEVATOR_PITCHES_COUNT`` pitch tiers is individually required — a
+    blank tier or blank pitch must fail validation instead of silently passing.
     """
 
     tagline: str = Field(min_length=1)
