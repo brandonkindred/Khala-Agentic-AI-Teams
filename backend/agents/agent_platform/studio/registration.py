@@ -9,10 +9,11 @@ without a YAML file.
 Runtime binding (shared with generated agents): the generated runtime binds a saved
 agent's persisted persona from the stored manifest when the invoke request omits those
 fields — its ``role`` (manifest summary) and the ``system_prompt`` folded into the
-``executing`` state (see :func:`build_studio_agent_manifest`) bind at invoke time. A
-non-empty request field still wins for that invoke; the explicit-override refinement
-(empty-list clearing, request ``system_prompt`` full replacement) is the remaining
-sibling follow-up. See
+``executing`` state (see :func:`build_studio_agent_manifest`) bind at invoke time. An
+explicitly-present request field (a raw-body presence test, not truthiness — so an
+explicitly-cleared empty list/blank string is an override too) wins over the manifest
+default for that invoke; a request-supplied ``system_prompt`` fully replaces the base
+prompt. See
 ``system_design/adr/ADR-015-invoke-generated-agent-persona-state-precedence.md``
 for the locked precedence contract.
 
