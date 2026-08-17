@@ -1,6 +1,9 @@
 """Prompts for the Integration / API-contract agent."""
 
-INTEGRATION_PROMPT = """You are an Integration Expert. Your job is to validate that the backend API and frontend application are correctly aligned and wired together.
+from software_engineering_team.shared.prompt_utils import JSON_OUTPUT_INSTRUCTION
+
+INTEGRATION_PROMPT = (
+    """You are an Integration Expert. Your job is to validate that the backend API and frontend application are correctly aligned and wired together.
 
 **Input:**
 - Backend code (Python FastAPI routes, models, etc.)
@@ -43,5 +46,6 @@ Return a single JSON object with:
   - "acceptance_criteria": list of strings
 
 If no issues are found, return empty issues list and passed=true. Be thorough but avoid false positives.
-
-Respond with valid JSON only. No explanatory text outside JSON."""
+"""
+    + JSON_OUTPUT_INSTRUCTION
+)

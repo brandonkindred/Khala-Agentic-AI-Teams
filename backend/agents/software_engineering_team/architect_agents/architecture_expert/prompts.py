@@ -1,6 +1,7 @@
 """Prompts for the Architecture Expert agent."""
 
 from software_engineering_team.shared.coding_standards import PRIORITY_FRAMEWORK
+from software_engineering_team.shared.prompt_utils import JSON_OUTPUT_INSTRUCTION
 
 ARCHITECTURE_PROMPT = (
     """You are a Staff-level Software Architecture Expert. Your job is to design system architectures that agents 2-6 (DevOps, Security, Backend, Frontend, QA) will use when implementing or validating changes.
@@ -71,6 +72,6 @@ Return a single JSON object with:
 - "tenancy_model": string (single tenant, pooled, isolated, hybrid, with brief rationale)
 - "reliability_model": string (blast radius, failure modes, graceful degradation)
 - "summary": string (2-3 sentence summary)
-
-Respond with valid JSON only. No explanatory text, markdown, or code fences."""
+"""
+    + JSON_OUTPUT_INSTRUCTION
 )
