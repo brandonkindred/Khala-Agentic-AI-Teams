@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 
 import pytest
@@ -110,13 +111,18 @@ def test_lenient_json_extracts_object_from_prose():
 
 def test_lenient_json_no_object_returns_empty(caplog):
     """Text containing no JSON object at all logs a warning naming the context
-    and returns an empty dict rather than raising."""
+    and returns an empty dict rather than raising.
+
+    Since delegation collapses the historical no-object / didn't-parse branches
+    into the single ``LLMJsonParseError`` failure path, the warning is now the
+    unified "did not parse as JSON" message."""
     with caplog.at_level(logging.WARNING):
         data = lenient_json_object(
             "no json here", logger=logging.getLogger("t"), context="Review", on_fail_msg="zero."
         )
     assert data == {}
-    assert "contained no JSON object" in caplog.text
+    assert "did not parse as JSON" in caplog.text
+    assert "Review" in caplog.text
 
 
 def test_lenient_json_malformed_inner_returns_empty(caplog):
@@ -131,6 +137,41 @@ def test_lenient_json_malformed_inner_returns_empty(caplog):
         )
     assert data == {}
     assert "did not parse as JSON" in caplog.text
+
+
+def test_lenient_json_fenced_payload_with_prose_braces():
+    """A fenced JSON payload followed by prose containing braces is recovered.
+
+    Regression: the historical first-``{``/last-``}`` slice extended
+    ``rfind("}")`` to the ``}`` of the trailing prose ``{x}``, slicing a
+    non-JSON fragment and returning ``{}``. Delegating to the canonical ladder
+    strips the fence and parses the real object."""
+    raw = '```json\n{"a": 1}\n```\nNote: the set {x} matters here.'
+    # The old slice would have mis-sliced past the payload's closing brace.
+    naive_slice = raw[raw.find("{") : raw.rfind("}") + 1]
+    with pytest.raises(json.JSONDecodeError):
+        json.loads(naive_slice)
+    data = lenient_json_object(raw, logger=logging.getLogger("t"), context="ctx", on_fail_msg="x")
+    assert data == {"a": 1}
+
+
+def test_lenient_json_recovers_fenced_and_trailing_comma():
+    """The canonical ladder recovers plain fenced payloads and trailing-comma
+    defects that the historical slice left unrepaired."""
+    fenced = lenient_json_object(
+        '```json\n{"a": 1, "b": 2}\n```',
+        logger=logging.getLogger("t"),
+        context="ctx",
+        on_fail_msg="x",
+    )
+    assert fenced == {"a": 1, "b": 2}
+    trailing_comma = lenient_json_object(
+        '{"a": 1, "b": 2,}',
+        logger=logging.getLogger("t"),
+        context="ctx",
+        on_fail_msg="x",
+    )
+    assert trailing_comma == {"a": 1, "b": 2}
 
 
 # ---------------------------------------------------------------------------

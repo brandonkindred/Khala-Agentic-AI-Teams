@@ -6,6 +6,7 @@ from typing import Dict, List
 
 from strands import Agent  # noqa: F401  (kept so tests can monkeypatch this module's Agent)
 
+from software_engineering_team.shared.prompt_utils import JSON_OUTPUT_INSTRUCTION
 from software_engineering_team.shared.tool_agent_base import (
     BaseReviewToolAgent,
     lenient_json_object,
@@ -16,7 +17,8 @@ from ...models import ReviewIssue, ToolAgentPhaseInput, ToolAgentPhaseOutput
 
 MAX_RELEVANT_CODE_CHARS = 8_000
 
-UX_DESIGNER_PLAN_PROMPT = """You are an expert UX Designer Agent. Your job is to define user flows, information architecture, interaction design, microcopy, and edge cases BEFORE pixels get involved. You ensure the app makes sense from a user perspective.
+UX_DESIGNER_PLAN_PROMPT = (
+    """You are an expert UX Designer Agent. Your job is to define user flows, information architecture, interaction design, microcopy, and edge cases BEFORE pixels get involved. You ensure the app makes sense from a user perspective.
 
 **Your expertise:**
 - User journeys (happy path and sad paths)
@@ -44,8 +46,9 @@ Return a single JSON object with:
 - "interaction_rules": string (empty, error, loading, success state rules)
 - "microcopy_guidelines": string (tone, clarity, consistency guidelines)
 - "summary": string (2-3 sentence summary of key UX decisions)
-
-Respond with valid JSON only. No explanatory text outside JSON.
+"""
+    + JSON_OUTPUT_INSTRUCTION
+    + """
 
 ---
 
@@ -54,8 +57,10 @@ Respond with valid JSON only. No explanatory text outside JSON.
 **Spec (excerpt):**
 {spec_content}
 """
+)
 
-UX_ENGINEER_REVIEW_PROMPT = """You are an expert UX Engineer Agent. Your job is to focus on the feel of the product: performance perception, interaction polish, usability. You catch the stuff users notice immediately but specs rarely mention.
+UX_ENGINEER_REVIEW_PROMPT = (
+    """You are an expert UX Engineer Agent. Your job is to focus on the feel of the product: performance perception, interaction polish, usability. You catch the stuff users notice immediately but specs rarely mention.
 
 **Your expertise:**
 - Interaction polish (focus flow, keyboard shortcuts, friction removal)
@@ -90,8 +95,9 @@ Return a single JSON object with:
 - "approved": boolean (true when no critical/major issues; false when polish pass is needed)
 
 If no issues are found, return empty issues list and approved=true. Be practical – focus on issues that materially affect user experience.
-
-Respond with valid JSON only. No explanatory text outside JSON.
+"""
+    + JSON_OUTPUT_INSTRUCTION
+    + """
 
 ---
 
@@ -100,6 +106,7 @@ Respond with valid JSON only. No explanatory text outside JSON.
 **Code to review:**
 {code}
 """
+)
 
 
 def _relevant_code_for_issue(issue: ReviewIssue, current_files: Dict[str, str]) -> str:

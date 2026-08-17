@@ -63,7 +63,6 @@ Invariants:
 
 from __future__ import annotations
 
-import json
 import logging
 from typing import List, Optional, Tuple
 
@@ -71,6 +70,7 @@ from strands import tool
 
 from llm_service import LLMClient
 from shared.env import env_flag_enabled
+from software_engineering_team.shared.llm import extract_json_from_response
 
 from .chunking import _coerce_bool
 from .false_positive_filter import CodebaseIndex, _build_tools, _code_fence_for
@@ -688,7 +688,7 @@ def _run_pass(
         )
 
     def _parse_batch_reply(raw: str) -> List[CodeReviewIssue]:
-        data = json.loads(raw)
+        data = extract_json_from_response(raw)
         findings = _parse_findings(data)
         if findings:
             findings = _validate_findings(index, findings, pre_numbered=pre_numbered)

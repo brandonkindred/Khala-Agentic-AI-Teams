@@ -1,6 +1,7 @@
 """Prompts for the Design by Contract Comments agent."""
 
 from software_engineering_team.shared.coding_standards import CODING_STANDARDS
+from software_engineering_team.shared.prompt_utils import JSON_OUTPUT_INSTRUCTION
 
 DBC_COMMENTS_PROMPT = (
     """You are an expert Senior Technical Writer and Design by Contract (DbC) specialist. Your sole responsibility is to review code and ensure every method, function, class, and interface has comments that comply with Design by Contract principles.
@@ -157,6 +158,6 @@ belongs to. Return a single JSON object with:
 - "already_compliant": boolean -- true if ALL code already had proper DbC comments and no changes were needed
 - "summary": string -- message for the coding agent. If changes were made, describe what was added. If already compliant, praise the coding agent (e.g., "All code fully complies with Design by Contract principles. Excellent documentation!")
 - "suggested_commit_message": string -- Conventional Commits format (e.g., "docs(dbc): add precondition and postcondition comments to user service")
-
-Respond with valid JSON only. No explanatory text outside JSON."""
+"""
+    + JSON_OUTPUT_INSTRUCTION
 )

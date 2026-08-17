@@ -87,6 +87,34 @@ def wire_run_agent_via_reasoning_for_test_clients(
     monkeypatch.setattr(runner_mod, "run_agent_via_reasoning", _fake)
 
 
+def wire_run_agent_via_reasoning_with_raw(
+    monkeypatch: pytest.MonkeyPatch, runner_mod: Any, raw: str
+) -> None:
+    """Drive ``run_agent_via_reasoning`` so the pass's ``parse`` callback sees ``raw`` verbatim.
+
+    The default two-call wiring ``json.dumps``-es the formatting reply, which would
+    escape away any markdown fence or prose prefix before ``parse`` runs. This
+    helper hands the pass's own ``parse`` callback a raw string unchanged, so a
+    test can exercise the canonical recovery ladder on genuinely fenced /
+    prose-wrapped / trailing-comma output. Call it inside the test body to
+    override the autouse wiring for that test.
+
+    Preconditions:
+        ``runner_mod`` exposes a ``run_agent_via_reasoning`` attribute (the
+        submission-pass runner module). ``raw`` is the reply text to route
+        through ``parse``.
+
+    Postconditions:
+        ``runner_mod.run_agent_via_reasoning`` is monkeypatched so every call
+        returns ``parse(raw)``; the patch is reverted on fixture teardown.
+    """
+
+    def _fake(**kwargs: Any) -> Any:
+        return kwargs["parse"](raw)
+
+    monkeypatch.setattr(runner_mod, "run_agent_via_reasoning", _fake)
+
+
 @pytest.fixture(autouse=True)
 def _submission_pass_two_call_wiring(monkeypatch: pytest.MonkeyPatch) -> None:
     import code_review_agent.submission_pass_runner as runner_mod

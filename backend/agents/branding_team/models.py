@@ -28,9 +28,12 @@ the generated class is a real subclass of the soft base.
 This pattern does not apply to the Phase 2 cumulative-inheritance chain
 (``BrandStoryOutput`` → … → ``WritingGuidelinesOutput``) or to remaining
 hand-written sibling pairs that were never collapsed
-(``BrandDiscoveryAudit`` / ``BrandDiscoveryAuditOutput``,
-``ChannelGuideline`` / ``ChannelGuidelineOutput``, and the mood-board /
-design-system agent-output wrappers).
+(``ChannelGuideline`` / ``ChannelGuidelineOutput``, and the mood-board /
+design-system agent-output wrappers). ``BrandDiscoveryAudit`` was fully
+collapsed to a single model (used both as ``discovery_auditor``'s
+``structured_output`` and as ``StrategicCoreOutput.brand_discovery``) rather
+than split into this soft/strict pair, since a no-argument-constructible
+default is needed either way.
 """
 
 from __future__ import annotations
@@ -348,10 +351,10 @@ DifferentiationPillarOutput = _derive_strict_variant(
 class BrandDiscoveryAudit(BaseModel):
     """Brand discovery and audit findings.
 
-    Fields default to empty rather than being required: this model also
-    backs ``StrategicCoreOutput.brand_discovery``'s ``default_factory``, which
-    must construct successfully with no arguments. ``discovery_auditor``'s own
-    agent-facing schema is the stricter ``BrandDiscoveryAuditOutput`` below.
+    Fields default to empty rather than being required: this model backs
+    both ``discovery_auditor``'s agent-facing ``structured_output`` schema
+    and ``StrategicCoreOutput.brand_discovery``'s ``default_factory``, which
+    must construct successfully with no arguments.
     """
 
     current_brand_perception: str = ""
@@ -361,24 +364,6 @@ class BrandDiscoveryAudit(BaseModel):
     opportunities: List[str] = Field(default_factory=list)
     threats: List[str] = Field(default_factory=list)
     stakeholder_insights: List[str] = Field(default_factory=list)
-
-
-class BrandDiscoveryAuditOutput(BaseModel):
-    """Agent-facing brand discovery schema.
-
-    Requires non-empty content so Strands retries blank structured_output.
-    Field-for-field identical to ``BrandDiscoveryAudit`` — kept as a separate
-    model so this one can require real content without breaking
-    ``StrategicCoreOutput.brand_discovery``'s no-argument default construction.
-    """
-
-    current_brand_perception: str = Field(min_length=1)
-    market_position: str = Field(min_length=1)
-    strengths: List[NonEmptyStr] = Field(min_length=1)
-    weaknesses: List[NonEmptyStr] = Field(min_length=1)
-    opportunities: List[NonEmptyStr] = Field(min_length=1)
-    threats: List[NonEmptyStr] = Field(min_length=1)
-    stakeholder_insights: List[NonEmptyStr] = Field(min_length=1)
 
 
 class PurposeVisionOutput(BaseModel):
@@ -678,10 +663,13 @@ class PersonaProfilesOutput(MessagingFrameworkOutput):
 class WritingGuidelinesBody(BaseModel):
     """Strict writing-guidelines body nested under ``writing_guidelines``.
 
-    Field-for-field identical to ``WritingGuidelines`` — kept separate so this
-    one can require real content without breaking
+    Field *names* match ``WritingGuidelines`` — kept separate (not collapsed)
+    because the *types* genuinely differ (``List[NonEmptyStr]`` with a required
+    ``min_length=3, max_length=4`` here vs. plain ``List[str]`` with empty
+    defaults there) and because collapsing would break
     ``NarrativeMessagingOutput.writing_guidelines``'s no-argument default.
-    Cardinalities encode the prompt's stated "3-4" for each list.
+    Cardinalities encode the prompt's stated "3-4" for each list. Story 3b
+    Step 1 finding: this pair is genuinely different, not safe to collapse.
     """
 
     voice_principles: List[NonEmptyStr] = Field(min_length=3, max_length=4)
@@ -696,6 +684,12 @@ class WritingGuidelinesOutput(PersonaProfilesOutput):
     VoicePrinciplesDrafter is last in the linear Graph, so its payload must
     include every upstream fragment plus ``writing_guidelines`` in the shape
     ``NarrativeMessagingOutput`` expects (no nest-under remap needed).
+
+    Not a twin of ``WritingGuidelines`` despite the similar name — this class
+    inherits ten fields from ``PersonaProfilesOutput``'s cumulative carry-forward
+    chain on top of its own nested ``writing_guidelines`` field, a different
+    shape and purpose than the flat merge-target ``WritingGuidelines``. Story 3b
+    Step 1 finding: not comparable, not safe to collapse.
     """
 
     writing_guidelines: WritingGuidelinesBody
@@ -1245,7 +1239,13 @@ class BrandBook(BaseModel):
 
 
 class MoodBoardConcept(BaseModel):
-    """A single mood-board direction; merge target for ``MoodBoardConceptOutput``."""
+    """A single mood-board direction; merge target for ``MoodBoardConceptOutput``.
+
+    Field/type identical to ``MoodBoardConceptOutput`` — same names and types on
+    both sides, differing only in default/required strictness (this side keeps
+    empty defaults so partial fragments validate). Safe to collapse (Story 3b
+    Step 2).
+    """
 
     title: str
     visual_direction: str
@@ -1255,7 +1255,12 @@ class MoodBoardConcept(BaseModel):
 
 
 class CreativeRefinementDecision(BaseModel):
-    """Phase 3 converge node output: which moodboard direction won and why."""
+    """Phase 3 converge node output: which moodboard direction won and why.
+
+    Field/type identical to ``CreativeRefinementDecisionOutput`` — same names
+    and types on both sides, differing only in default/required strictness.
+    Safe to collapse (Story 3b Step 2).
+    """
 
     winning_candidate_title: str = ""
     scoring_criteria: List[str] = Field(default_factory=list)
@@ -1266,7 +1271,17 @@ class CreativeRefinementDecision(BaseModel):
 
 
 class WritingGuidelines(BaseModel):
-    """Voice/tone and editorial rules; merge target for ``WritingGuidelinesOutput``."""
+    """Voice/tone and editorial rules; merge target nested at
+    ``NarrativeMessagingOutput.writing_guidelines``.
+
+    Its real structural counterpart is ``WritingGuidelinesBody`` (not
+    ``WritingGuidelinesOutput``, which is a different, much larger construct —
+    see that class's docstring). Field *names* match ``WritingGuidelinesBody``,
+    but the *types* don't: this side is ``List[str]`` with no cardinality bound
+    and empty defaults, while ``WritingGuidelinesBody`` is ``List[NonEmptyStr]``
+    with a required ``min_length=3, max_length=4``. Genuinely different — not
+    safe to collapse (Story 3b Step 1 finding).
+    """
 
     voice_principles: List[str] = Field(default_factory=list)
     style_dos: List[str] = Field(default_factory=list)
@@ -1275,7 +1290,12 @@ class WritingGuidelines(BaseModel):
 
 
 class DesignSystemDefinition(BaseModel):
-    """Codified design system; merge target for ``DesignSystemDefinitionOutput``."""
+    """Codified design system; merge target for ``DesignSystemDefinitionOutput``.
+
+    Field/type identical to ``DesignSystemDefinitionOutput`` — same names and
+    types on both sides, differing only in default/required strictness. Safe
+    to collapse (Story 3b Step 2).
+    """
 
     design_principles: List[str] = Field(default_factory=list)
     foundation_tokens: List[str] = Field(default_factory=list)

@@ -174,7 +174,14 @@ class StrategyLabCycleWorkflow:
         tracker), and optionally ``workflow_config`` (a
         ``resolve_workflow_config_activity`` result; resolved via an activity
         call when absent — its ``regime_summary_enabled`` flag and
-        ``max_design_reentries`` value are read here).
+        ``max_design_reentries`` value are read here), ``run_id`` (the owning
+        run's id -- absent/``None`` disables design-attempt checkpointing for
+        every attempt in this cycle, see ``ADR-012``), and ``generation``
+        (int, default ``_DEFAULT_FENCING_GENERATION`` -- the fencing
+        generation this cycle's incarnation was dispatched with). Both are
+        ``.get(...)``-guarded so a ``cycle_input`` from a workflow-history
+        replay predating these fields still runs (with checkpointing simply
+        disabled).
     Postconditions:
         Returns ``{"record": StrategyLabRecord dump, "convergence_tracker_state":
         <updated dto wire dict>}`` on a terminal record, mirroring ``run_cycle``'s
@@ -187,7 +194,11 @@ class StrategyLabCycleWorkflow:
         Exactly one ``run_design_attempt_activity`` call happens per design
         attempt; the LLM-call budget, gate-result accumulation, and tracker
         state are threaded attempt→attempt so their ceilings/history span the
-        whole cycle, never resetting per attempt.
+        whole cycle, never resetting per attempt. The re-entry loop bound
+        (``max_reentries``) is resolved once, from ``wf_config``'s
+        ``max_design_reentries`` (falling back to
+        ``_MAX_DESIGN_REENTRIES_FALLBACK`` when absent), and stays constant
+        for every attempt in the cycle.
     """
 
     @workflow.run
@@ -197,6 +208,8 @@ class StrategyLabCycleWorkflow:
         signal_brief = cycle_input.get("signal_brief")
         exclude_asset_classes = cycle_input.get("exclude_asset_classes")
         tracker_state = cycle_input.get("convergence_tracker_state") or {}
+        run_id = cycle_input.get("run_id")
+        generation = int(cycle_input.get("generation", _DEFAULT_FENCING_GENERATION))
         # Per-batch cache key threaded from the parent batch workflow; forwarded
         # verbatim to run_design_attempt_activity so the worker can resolve the
         # one shared BatchIndicatorCache for this batch (when the flag is on).
@@ -250,6 +263,8 @@ class StrategyLabCycleWorkflow:
             outcome = await _exec(
                 act.run_design_attempt_activity,
                 params={
+                    "run_id": run_id,
+                    "generation": generation,
                     "prior_records": prior_records,
                     "config": config_dict,
                     "signal_brief": signal_brief,
@@ -529,6 +544,8 @@ class StrategyLabBatchWorkflow:
                 handles: List[tuple[int, Any]] = []
                 for cycle_index in wave_indices:
                     cycle_input = {
+                        "run_id": run_id,
+                        "generation": generation,
                         "prior_records": prior_records,
                         "config": config_dict,
                         "signal_brief": signal_brief,
@@ -682,9 +699,7 @@ class StrategyLabBatchWorkflow:
                 break
             await self._persist_state(run_id, {"completed_batches": batch_idx + 1}, generation)
 
-        status = external_terminal_status or (
-            "completed_with_errors" if errored else "completed"
-        )
+        status = external_terminal_status or ("completed_with_errors" if errored else "completed")
         await self._persist_state(run_id, {"status": status}, generation)
         return {
             "run_id": run_id,

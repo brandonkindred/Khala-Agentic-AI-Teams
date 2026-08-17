@@ -341,6 +341,30 @@ def test_repo_root_defaults_none_and_round_trips_through_json() -> None:
     assert restored.files == {"a.py": "x = 1\n"}
 
 
+def test_replaced_content_defaults_none_and_round_trips_through_json() -> None:
+    """``replaced_content`` (the before-image analogue of ``full_content``)
+    defaults to None, is JSON-native so it survives the Temporal boundary, and
+    its presence does not disturb the ``files`` validator."""
+    default = CodeReviewInput(files={"a.py": "x = 2\n"})
+    assert default.replaced_content is None
+
+    before = {"a.py": "x = 1\n"}
+    with_before = CodeReviewInput(files={"a.py": "x = 2\n"}, replaced_content=before)
+    dumped = with_before.model_dump(mode="json")
+    assert dumped["replaced_content"] == before
+    restored = CodeReviewInput.model_validate(dumped)
+    assert restored.replaced_content == before
+    assert restored.files == {"a.py": "x = 2\n"}
+
+
+def test_replaced_content_does_not_satisfy_files_requirement() -> None:
+    """``replaced_content`` is a before-image, not a code source: an input with
+    only ``replaced_content`` and no ``files`` still fails the non-empty-files
+    validator (absent/None must behave exactly as today)."""
+    with pytest.raises(ValueError):
+        CodeReviewInput(replaced_content={"a.py": "x = 1\n"})
+
+
 def test_repo_root_does_not_satisfy_code_or_files_requirement() -> None:
     """``repo_root`` is not a code source: an input with only ``repo_root`` and no
     files/code still fails the ``_require_code_or_files`` validator."""

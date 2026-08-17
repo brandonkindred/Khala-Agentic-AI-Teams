@@ -253,6 +253,63 @@ def test_run_fetches_regime_summary_when_enabled_and_passes_it_down():
     assert seen["regime_summary"] == {"trend": "up"}
 
 
+def test_run_threads_run_id_and_generation_into_design_attempt_params():
+    """``cycle_input``'s ``run_id``/``generation`` (ADR-012) must reach
+    ``run_design_attempt_activity``'s params verbatim -- this is what lets
+    that activity look up and write a design-attempt checkpoint at all."""
+    seen: Dict[str, Any] = {}
+
+    def _attempt(args):
+        seen["run_id"] = args[0]["run_id"]
+        seen["generation"] = args[0]["generation"]
+        return _record_outcome()
+
+    handlers = {
+        "resolve_workflow_config_activity": lambda a: _WF_CONFIG,
+        "run_design_attempt_activity": _attempt,
+    }
+    with _patch_execute(handlers):
+        _run(
+            {
+                "run_id": "run-1",
+                "generation": 3,
+                "prior_records": [],
+                "config": _config_dict(),
+                "convergence_tracker_state": {},
+            }
+        )
+    assert seen["run_id"] == "run-1"
+    assert seen["generation"] == 3
+
+
+def test_run_defaults_run_id_and_generation_when_cycle_input_predates_them():
+    """A ``cycle_input`` from a workflow-history replay predating these
+    fields (pre-ADR-012) must still run -- run_id defaults to None
+    (disabling checkpointing) and generation defaults to
+    ``_DEFAULT_FENCING_GENERATION``."""
+    seen: Dict[str, Any] = {}
+
+    def _attempt(args):
+        seen["run_id"] = args[0]["run_id"]
+        seen["generation"] = args[0]["generation"]
+        return _record_outcome()
+
+    handlers = {
+        "resolve_workflow_config_activity": lambda a: _WF_CONFIG,
+        "run_design_attempt_activity": _attempt,
+    }
+    with _patch_execute(handlers):
+        _run(
+            {
+                "prior_records": [],
+                "config": _config_dict(),
+                "convergence_tracker_state": {},
+            }
+        )
+    assert seen["run_id"] is None
+    assert seen["generation"] == wf._DEFAULT_FENCING_GENERATION
+
+
 # ---------------------------------------------------------------------------
 # Re-entry loop — SpecImplementabilityError surfaced as a structured outcome
 # ---------------------------------------------------------------------------

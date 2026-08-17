@@ -32,7 +32,6 @@ from code_review_agent.coordinator import (
     _render_architecture_context,
     _run_tail_passes,
     _segment_range_label,
-    _tail_passes_run_sequentially,
     _TailPassResult,
     _validate_line,
     build_review_chunks,
@@ -1477,9 +1476,9 @@ def test_transient_failure_in_bisected_child_recovers() -> None:
 
 
 def test_bisect_halves_run_sequentially_detects_dummy_and_wrapped_dummy() -> None:
-    """Mirrors ``_tail_passes_run_sequentially``: True for a bare
-    ``DummyLLMClient`` and for a wrapper exposing a ``.client`` attribute
-    pointing at one; False for anything else."""
+    """The bisect-halves dummy guard (shared ``is_dummy_llm_client_wrapped``
+    detection): True for a bare ``DummyLLMClient`` and for a wrapper exposing a
+    ``.client`` attribute pointing at one; False for anything else."""
     assert _bisect_halves_run_sequentially(DummyLLMClient()) is True
     assert _bisect_halves_run_sequentially(MagicMock()) is False
 
@@ -3889,27 +3888,6 @@ def test_skip_tail_passes_short_circuits_with_no_llm_calls() -> None:
     assert result == _TailPassResult(issues=genuine_issues, has_additive_findings=False)
 
 
-def test_tail_passes_run_sequentially_for_dummy_llm() -> None:
-    """A bare ``DummyLLMClient`` forces sequential tail passes; a non-Dummy
-    stand-in (``MagicMock``) does not."""
-    assert _tail_passes_run_sequentially(DummyLLMClient()) is True
-    assert _tail_passes_run_sequentially(MagicMock()) is False
-
-
-def test_tail_passes_run_sequentially_for_wrapped_dummy_llm() -> None:
-    """The coding team's default llm_getter wraps clients in a Strands LLMClientModel
-    (exposing the backing client via a `.client` property) before they reach the
-    coordinator -- a DummyLLMClient reached only through that wrapper must still
-    force sequential execution."""
-
-    class _FakeStrandsModelWrapper:
-        def __init__(self, client):
-            self.client = client
-
-    assert _tail_passes_run_sequentially(_FakeStrandsModelWrapper(DummyLLMClient())) is True
-    assert _tail_passes_run_sequentially(_FakeStrandsModelWrapper(MagicMock())) is False
-
-
 class _NonDummyLLMClient(LLMClient, Model):
     """A strands ``Model`` + ``LLMClient`` that is not a ``DummyLLMClient``
     instance, forwarding every call to an inner scripted ``DummyLLMClient`` by
@@ -3917,11 +3895,8 @@ class _NonDummyLLMClient(LLMClient, Model):
     .resolve_code_review_model`` only honors an injected client verbatim when
     it already implements the strands ``Model`` interface (otherwise it
     silently substitutes the default production model), so this must
-    implement ``Model`` too, not just ``LLMClient``. ``isinstance(self,
-    DummyLLMClient)`` is False and ``getattr(self, "client", None)`` finds
-    nothing, so ``_tail_passes_run_sequentially`` treats it like a production
-    client (e.g. an ``LLMClientModel`` wrapping ``OllamaLLMClient``) and takes
-    the concurrent branch, while chunk-review responses stay the
+    implement ``Model`` too, not just ``LLMClient``. Used to exercise the
+    production-client code path while chunk-review responses stay the
     deterministic canned ones from the inner scripted client."""
 
     def __init__(self, inner: DummyLLMClient) -> None:
@@ -3963,107 +3938,80 @@ def _noop_merged(llm, input_data, repo_reader=None, index=None):
     return [], []
 
 
-def test_tail_passes_fan_out_concurrently_for_non_dummy_llm(monkeypatch) -> None:
-    """With a non-``DummyLLMClient`` ``llm``, the two tail passes (false-positive
-    filter and merged architecture/side-effect pass) run concurrently: each stub
-    records its arrival then blocks on a 2-party barrier, so the call only
-    completes if both are in flight together -- a fallback to sequential
-    execution would deadlock the first stub and the test would fail on the
-    barrier timeout. The recorded arrivals additionally prove, without relying
-    on that implicit timeout/exception behavior, that both stubs actually ran."""
+def test_merged_pass_runs_before_false_positive_filter(monkeypatch) -> None:
+    """The tail passes run sequentially in dependency order: the merged
+    architecture/side-effect pass FIRST, then the false-positive filter -- so
+    the additive findings are in the set the filter verifies. (The old code ran
+    the two concurrently and appended the merged findings AFTER filtering, so
+    they bypassed verification entirely.)"""
     import code_review_agent.coordinator as coord
 
-    arrivals: list[str] = []
-    lock = threading.Lock()
-    barrier = threading.Barrier(2, timeout=5)
-
-    def _record(name: str) -> None:
-        with lock:
-            arrivals.append(name)
-
-    def _filter(llm, input_data, issues, repo_reader=None, index=None):
-        _record("filter")
-        barrier.wait()
-        return list(issues)
+    order: list[str] = []
 
     def _merged(llm, input_data, repo_reader=None, index=None):
-        _record("merged")
-        barrier.wait()
+        order.append("merged")
         return [], []
-
-    monkeypatch.setattr(coord, "filter_false_positives", _filter)
-    monkeypatch.setattr(coord, "find_architecture_and_side_effect_issues", _merged)
-
-    stand_in = _NonDummyLLMClient(DummyLLMClient())
-    try:
-        result = run_coordinator(
-            stand_in,
-            CodeReviewInput(files={"a.py": "x = 1\n"}, task_description="t"),
-        )
-    finally:
-        # Leaves no party waiting on the barrier even if run_coordinator raises
-        # before both stubs reach it, so a failure here can't wedge a later
-        # test sharing the same worker process.
-        barrier.abort()
-
-    assert isinstance(result, CodeReviewOutput)
-    assert sorted(arrivals) == ["filter", "merged"]
-
-
-def test_tail_passes_run_sequentially_when_parallelism_budget_is_one(monkeypatch) -> None:
-    """``CODE_REVIEW_MAP_PARALLELISM=1`` must force the tail passes to run one
-    at a time even for a non-``DummyLLMClient`` ``llm`` -- the false-positive
-    filter's own internal verification workers are sized from this same knob
-    (``_verify_parallelism``), so fanning the filter out alongside the
-    architecture/side-effect passes would silently exceed a budget the
-    operator set to 1 specifically because the configured provider cannot
-    accept concurrent requests. Verified by tracking the max number of
-    tail-pass stubs ever in flight at once, rather than a barrier (which
-    would just deadlock/timeout if this regressed)."""
-    import code_review_agent.coordinator as coord
-
-    monkeypatch.setenv("CODE_REVIEW_MAP_PARALLELISM", "1")
-
-    lock = threading.Lock()
-    in_flight = 0
-    max_in_flight = 0
-
-    def _track() -> None:
-        nonlocal in_flight, max_in_flight
-        with lock:
-            in_flight += 1
-            max_in_flight = max(max_in_flight, in_flight)
-        time.sleep(0.05)
-        with lock:
-            in_flight -= 1
 
     def _filter(llm, input_data, issues, repo_reader=None, index=None):
-        _track()
+        order.append("filter")
         return list(issues)
 
-    def _merged(llm, input_data, repo_reader=None, index=None):
-        _track()
-        return [], []
-
-    monkeypatch.setattr(coord, "filter_false_positives", _filter)
     monkeypatch.setattr(coord, "find_architecture_and_side_effect_issues", _merged)
+    monkeypatch.setattr(coord, "filter_false_positives", _filter)
 
-    stand_in = _NonDummyLLMClient(DummyLLMClient())
     result = run_coordinator(
-        stand_in,
+        DummyLLMClient(),
         CodeReviewInput(files={"a.py": "x = 1\n"}, task_description="t"),
     )
 
     assert isinstance(result, CodeReviewOutput)
-    assert max_in_flight == 1, "tail passes must not overlap when the parallelism budget is 1"
+    assert order == ["merged", "filter"]
 
 
-def test_run_coordinator_concurrent_tail_passes_match_sequential_output(monkeypatch) -> None:
-    """The concurrent branch (non-``DummyLLMClient`` ``llm``) and the sequential
-    branch (``DummyLLMClient``) must produce a byte-identical merged
-    ``CodeReviewOutput`` for the same input -- the two tail passes are
-    independent and additive, so fanning them out must not change the result,
-    only the wall-clock order in which they run."""
+def test_additive_findings_are_false_positive_filtered(monkeypatch) -> None:
+    """Regression for the FP-bypass bug: an architecture/side-effect finding now
+    passes THROUGH the false-positive filter. A filter stub that confirms the
+    architecture finding is a false positive (dropping it) must remove it from
+    the output -- previously the merged findings were appended after the filter
+    and such a false positive would be posted as a PR comment."""
+    import code_review_agent.coordinator as coord
+    from code_review_agent.models import CodeReviewIssue
+
+    arch_fp = CodeReviewIssue(
+        severity="high",
+        category="architecture",
+        file_path="a.py",
+        description="Spurious: duplicates a service that does not actually exist.",
+    )
+
+    def _merged(llm, input_data, repo_reader=None, index=None):
+        return [arch_fp], []
+
+    def _drop_architecture(llm, input_data, issues, repo_reader=None, index=None):
+        # Simulate the verifier confirming the architecture finding is a false
+        # positive and dropping it, keeping every other finding.
+        return [i for i in issues if i.category != "architecture"]
+
+    monkeypatch.setattr(coord, "find_architecture_and_side_effect_issues", _merged)
+    monkeypatch.setattr(coord, "filter_false_positives", _drop_architecture)
+
+    result = run_coordinator(
+        DummyLLMClient(),
+        CodeReviewInput(files={"a.py": "x = 1\n"}, task_description="t"),
+    )
+
+    assert isinstance(result, CodeReviewOutput)
+    assert all(i.category != "architecture" for i in result.issues), (
+        "an additive finding confirmed as a false positive must be dropped by the filter"
+    )
+
+
+def test_run_coordinator_additive_findings_appear_for_dummy_and_nondummy(monkeypatch) -> None:
+    """A production (non-``DummyLLMClient``) client and a bare ``DummyLLMClient``
+    must produce a byte-identical merged ``CodeReviewOutput`` for the same input:
+    the tail passes run the same way for both, and the additive
+    architecture/side-effect findings survive combination + the (no-op here)
+    false-positive filter and appear in the final output."""
     import code_review_agent.coordinator as coord
     from code_review_agent.models import CodeReviewIssue
 

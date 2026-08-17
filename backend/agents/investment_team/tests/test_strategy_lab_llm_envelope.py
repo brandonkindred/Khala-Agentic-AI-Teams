@@ -495,7 +495,10 @@ def test_near_miss_consult_fails_closed_and_logs(caplog: pytest.LogCaptureFixtur
 
     assert verdict.legitimate is False
     text = caplog.text
-    assert "fail-closed near-miss" in text
+    # Uses the envelope's canonical _FAILURE_FMT — one schema across the lab,
+    # no bespoke "(fail-closed near-miss)" prefix.
+    assert "strategy_lab LLM call failed:" in text
+    assert "attempt=1/1" in text
     assert "phase=alignment_near_miss" in text
     assert "error_class=ConnectError" in text
 
