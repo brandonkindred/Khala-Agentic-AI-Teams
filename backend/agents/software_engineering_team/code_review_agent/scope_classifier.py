@@ -181,7 +181,8 @@ def _parse_classifications(data: object, count: int) -> Dict[int, ScopeClassific
 
     Preconditions: ``count >= 0`` is the number of findings in the batch.
     Postconditions:
-        - Reads ``data["verdicts"]``; each in-range, non-duplicate entry with an
+        - Reads the ``verdicts`` value from ``data`` via ``.get`` (missing →
+          treated as absent); each in-range, non-duplicate entry with an
           integer ``index`` in ``[0, count)`` yields a verdict. The first entry
           for an index wins; later duplicates are dropped. A ``bool`` index is
           rejected (``bool`` is an ``int`` subclass). Malformed replies yield
@@ -211,8 +212,9 @@ def _file_excerpt(file_path: str, files: Optional[Mapping[str, str]]) -> str:
     """Return the cited file's content, capped, or empty when unavailable.
 
     Postconditions:
-        - Returns ``files[file_path]`` truncated to :data:`_FILE_EXCERPT_CHARS`
-          (with a marker) when present and non-empty; otherwise ``""``. Never
+        - Returns ``files.get(file_path)`` truncated to
+          :data:`_FILE_EXCERPT_CHARS` (with a marker) when present and
+          non-empty; otherwise ``""`` (missing ``files`` or key → ``""``). Never
           raises.
     """
     if not files:

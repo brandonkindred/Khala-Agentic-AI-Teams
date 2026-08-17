@@ -62,6 +62,7 @@ class _Stub(DummyLLMClient):
 
 
 def test_empty_issues_returns_empty() -> None:
+    """Precondition: empty ``issues``. Postcondition: returns ``[]`` (no LLM call)."""
     assert classify_scope([]) == []
 
 
@@ -88,6 +89,12 @@ def test_missing_client_is_all_unknown() -> None:
 
 
 def test_classifies_in_and_out_of_scope() -> None:
+    """Precondition: a scripted client returns in/out verdicts per index.
+
+    Postcondition: each verdict maps to the matching finding by index, with its
+    ``in_scope`` bool and ``reason`` preserved.
+    """
+
     def _responder(_prompt: str) -> Dict[str, Any]:
         return {
             "verdicts": [
@@ -142,6 +149,11 @@ def test_batching_cap_splits_one_file(monkeypatch: Any) -> None:
 
 
 def test_max_findings_per_group_override_beats_env(monkeypatch: Any) -> None:
+    """Precondition: an explicit ``max_findings_per_group`` arg and a different env value.
+
+    Postcondition: the explicit argument wins — three findings with cap 1 yield
+    three batches regardless of the env cap.
+    """
     monkeypatch.setenv("CODE_REVIEW_SCOPE_MAX_FINDINGS_PER_GROUP", "10")
 
     def _responder(_prompt: str) -> Dict[str, Any]:
@@ -245,6 +257,11 @@ def test_missing_index_stays_unknown() -> None:
 
 
 def test_prompt_includes_task_and_file_context() -> None:
+    """Precondition: ``input_data`` with task text, requirements, ACs, and file source.
+
+    Postcondition: the built prompt inlines the task description, requirements,
+    each acceptance criterion, and the cited file's content.
+    """
     captured: List[str] = []
 
     def _responder(prompt: str) -> Dict[str, Any]:
@@ -272,6 +289,12 @@ def test_prompt_includes_task_and_file_context() -> None:
 
 
 def test_parse_classifications_defensive() -> None:
+    """Precondition: malformed / out-of-range / duplicate verdict payloads.
+
+    Postcondition: non-dict data, a non-list ``verdicts``, non-dict items,
+    out-of-range and bool indices are all dropped; the first entry for an index
+    wins. Never raises.
+    """
     assert _parse_classifications("not a dict", 2) == {}
     assert _parse_classifications({"verdicts": "nope"}, 2) == {}
     assert _parse_classifications({"verdicts": [42, "x"]}, 2) == {}
@@ -292,6 +315,12 @@ def test_parse_classifications_defensive() -> None:
 
 
 def test_coerce_in_scope_tokens() -> None:
+    """Precondition: assorted ``in_scope`` values (bools, tokens, junk).
+
+    Postcondition: real bools map to themselves; recognized in/out tokens map to
+    ``True``/``False``; everything else (``"unknown"``, ``None``, numbers,
+    unknown strings) maps to ``None``.
+    """
     assert _coerce_in_scope(True) is True
     assert _coerce_in_scope(False) is False
     assert _coerce_in_scope("in_scope") is True
@@ -305,6 +334,12 @@ def test_coerce_in_scope_tokens() -> None:
 
 
 def test_batches_group_by_file_and_cap() -> None:
+    """Precondition: findings across two files and a blank path, with cap 1 then 10.
+
+    Postcondition: indices group by cited file (blank → ``(unknown)``) and chunk
+    by the cap — cap 1 yields one batch per finding; a larger cap groups a file's
+    findings into one batch.
+    """
     issues = [
         _issue(file_path="a.py"),
         _issue(file_path="b.py"),
@@ -321,6 +356,12 @@ def test_batches_group_by_file_and_cap() -> None:
 
 
 def test_file_excerpt_variants() -> None:
+    """Precondition: absent map, missing/empty/short/oversized cited-file content.
+
+    Postcondition: returns ``""`` when the map or key is missing/empty; the
+    content unchanged when within the cap; a truncated prefix plus marker when
+    it exceeds the cap.
+    """
     assert _file_excerpt("a.py", None) == ""
     assert _file_excerpt("a.py", {}) == ""
     assert _file_excerpt("a.py", {"a.py": ""}) == ""  # present but empty
@@ -332,6 +373,11 @@ def test_file_excerpt_variants() -> None:
 
 
 def test_max_findings_per_group_defensive_default(monkeypatch: Any) -> None:
+    """Precondition: the env var set to garbage, then to ``"0"``.
+
+    Postcondition: an unparseable value falls back to the default; a below-floor
+    value is clamped to 1. Never raises for a bad env value.
+    """
     monkeypatch.setenv("CODE_REVIEW_SCOPE_MAX_FINDINGS_PER_GROUP", "not-a-number")
     from code_review_agent.scope_classifier import DEFAULT_SCOPE_MAX_FINDINGS_PER_GROUP
 
