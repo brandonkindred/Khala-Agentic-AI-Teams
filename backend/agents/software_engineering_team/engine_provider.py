@@ -51,7 +51,9 @@ class CodeEngineProvider(Protocol):
 
     def run_pr_code_review(self, **kwargs: Any) -> Any:
         """Review a pull request's diff. Postconditions: returns an object with
-        an ``issues`` list."""
+        an ``issues`` list. Accepts an optional ``replaced_content`` kwarg
+        (``{path: pre-change body}``) forwarded additively to the review
+        input; absent/``None`` behaves exactly as before its introduction."""
         ...
 
 

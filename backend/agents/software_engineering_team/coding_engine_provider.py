@@ -31,7 +31,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, Dict, Optional
 
 # The two-insert idiom is inlined (rather than delegating to
 # ``shared.app.paths.bootstrap_syspath``) because importing ``shared.app`` runs its
@@ -88,6 +88,7 @@ class SECodeEngineProvider:
         files: Any = None,
         existing_codebase: Any = None,
         repo_reader: Any = None,
+        replaced_content: Optional[Dict[str, str]] = None,
         job_id: str = "",
     ) -> Any:
         """Run the PR code-review agent over a pull request's changes.
@@ -99,6 +100,10 @@ class SECodeEngineProvider:
             - ``repo_reader`` is None or a duck-typed ``RepoReader`` (``list_files``
               /``read_file``) giving the false-positive verifier read access to
               existing repository files outside the diff.
+            - ``replaced_content``, when not None, is a ``{path: pre-change body}``
+              mapping forwarded to ``CodeReviewInput.replaced_content`` unchanged;
+              the caller derives it (e.g. from diff removed-hunk sides) and this
+              method does not validate its shape beyond passing it through.
             - ``job_id``, when non-blank, is the caller's persisted review job id
               (e.g. a ``code_review_runs`` row) — forwarded so the reviewer's LLM
               calls can record into that job's durable transcript. ``""`` (the
@@ -117,6 +122,7 @@ class SECodeEngineProvider:
             task_requirements=task_requirements,
             language=language,
             existing_codebase=existing_codebase,
+            replaced_content=replaced_content,
             job_id=job_id,
         )
         run_kwargs: dict = {"progress_callback": progress_callback}
