@@ -1,13 +1,15 @@
 """Construction tests for the branding Strands graphs + agent factories.
 
-These exercise the graph builders (``graphs/*``), the ``build_agent`` helper and
-phase-order utilities (``graphs/shared``), and — transitively, since building the
+These exercise the graph builders (``graphs/*``), the ``build_agent`` / ``build_compositor``
+helpers and phase-order utilities (``graphs/shared``), and — transitively, since building the
 graphs instantiates every node — the ~35 agent factories in ``agents.py``. They
 run under ``LLM_PROVIDER=dummy`` (no real LLM, no Postgres): construction resolves
 a dummy Strands model and never invokes it.
 """
 
 from __future__ import annotations
+
+from types import SimpleNamespace
 
 import pytest
 from strands import Agent
@@ -19,9 +21,12 @@ from branding_team.graphs.phase3_visual import build_phase3_graph
 from branding_team.graphs.phase4_channel import build_phase4_graph
 from branding_team.graphs.phase5_governance import build_phase5_graph
 from branding_team.graphs.shared import (
+    COMPOSITOR_AGENT_KEY,
     PHASE_ORDER,
     PHASE_TITLES,
     build_agent,
+    build_compositor,
+    phase_agent_key,
     phase_index,
     phase_order_text,
     serialize_mission,
@@ -360,6 +365,216 @@ def test_build_agent_with_agent_key_override() -> None:
     agent = build_agent(name="a4", system_prompt="do w", agent_key="branding_assistant")
     assert isinstance(agent, Agent)
     assert agent.name == "a4"
+
+
+def _resolved_agent_key(agent: Agent) -> str:
+    """Read back the ``agent_key`` that reached ``get_strands_model`` for *agent*.
+
+    ``build_agent`` routes its ``agent_key`` argument through
+    ``get_strands_model(agent_key, ...)`` into the ``LLMClientModel`` config;
+    this recovers it the same way production code (and other teams' tests,
+    e.g. ``llm_service/tests/test_strands_adapter.py``) verify per-agent
+    routing — via the model's own ``get_config()``, not the ``build_agent``
+    call arguments, so a mistake inside ``build_agent``'s forwarding would
+    also be caught.
+    """
+    return agent.model.get_config()["agent_key"]
+
+
+def test_build_agent_forwards_agent_key_to_model_config() -> None:
+    """``build_agent``'s ``agent_key`` reaches ``get_strands_model`` (not just accepted)."""
+    agent = build_agent(name="a5", system_prompt="do v", agent_key="branding_strategic_core")
+    assert _resolved_agent_key(agent) == "branding_strategic_core"
+
+
+def test_build_agent_default_agent_key_is_branding() -> None:
+    """Omitting ``agent_key`` still resolves the historical "branding" default."""
+    agent = build_agent(name="a6", system_prompt="do u")
+    assert _resolved_agent_key(agent) == "branding"
+
+
+def test_build_compositor_pins_compositor_agent_key() -> None:
+    """``build_compositor`` is the one call site that decides the compositor tier;
+    callers cannot override or omit it (no ``agent_key`` parameter is exposed)."""
+    agent = build_compositor(name="a7", system_prompt="assemble")
+    assert isinstance(agent, Agent)
+    assert agent.name == "a7"
+    assert _resolved_agent_key(agent) == COMPOSITOR_AGENT_KEY
+
+
+def test_build_compositor_forwards_description() -> None:
+    agent = build_compositor(name="a8", system_prompt="assemble", description="joins things")
+    assert agent.description == "joins things"
+
+
+# ---------------------------------------------------------------------------
+# Per-phase agent_key tiers (graphs/shared.phase_agent_key + agents.py wiring)
+# ---------------------------------------------------------------------------
+
+
+def test_phase_agent_key_derives_from_phase_value() -> None:
+    assert phase_agent_key(BrandPhase.STRATEGIC_CORE) == "branding_strategic_core"
+    assert phase_agent_key(BrandPhase.NARRATIVE_MESSAGING) == "branding_narrative_messaging"
+    assert phase_agent_key(BrandPhase.VISUAL_IDENTITY) == "branding_visual_identity"
+    assert phase_agent_key(BrandPhase.CHANNEL_ACTIVATION) == "branding_channel_activation"
+    assert phase_agent_key(BrandPhase.GOVERNANCE) == "branding_governance"
+
+
+def test_phase_and_compositor_agent_keys_are_shell_safe() -> None:
+    """Keys must be valid identifiers so ``LLM_MODEL_<agent_key>`` can be exported."""
+    keys = [phase_agent_key(phase) for phase in PHASE_ORDER] + [COMPOSITOR_AGENT_KEY]
+    for key in keys:
+        assert key.isidentifier(), key
+        assert "." not in key
+
+
+def test_phase_agent_key_rejects_non_shell_safe_derivation() -> None:
+    """A future BrandPhase value that isn't ASCII shell-safe must raise, not silently pass.
+
+    ``str.isidentifier()`` alone would accept a Unicode value like ``"stratégie"``
+    (a valid Python identifier but not a valid POSIX/Compose env var name), so this
+    exercises the boundary a plain ``isidentifier()`` check would miss.
+    """
+    fake_phase = SimpleNamespace(value="café")
+    with pytest.raises(ValueError, match="non-shell-safe"):
+        phase_agent_key(fake_phase)
+
+
+def test_phase1_factories_use_strategic_core_agent_key() -> None:
+    from branding_team.agents import (
+        make_audience_segmenter,
+        make_differentiation_mapper,
+        make_discovery_auditor,
+        make_positioning_synthesizer,
+        make_purpose_vision_writer,
+        make_values_articulator,
+    )
+
+    expected = phase_agent_key(BrandPhase.STRATEGIC_CORE)
+    for factory in (
+        make_discovery_auditor,
+        make_purpose_vision_writer,
+        make_values_articulator,
+        make_audience_segmenter,
+        make_differentiation_mapper,
+        make_positioning_synthesizer,
+    ):
+        assert _resolved_agent_key(factory()) == expected, factory.__name__
+
+
+def test_phase2_factories_use_narrative_messaging_agent_key() -> None:
+    from branding_team.agents import (
+        make_archetype_analyst,
+        make_message_mapper,
+        make_persona_builder,
+        make_storyteller,
+        make_tagline_writer,
+        make_voice_principles_drafter,
+    )
+
+    expected = phase_agent_key(BrandPhase.NARRATIVE_MESSAGING)
+    for factory in (
+        make_storyteller,
+        make_archetype_analyst,
+        make_tagline_writer,
+        make_message_mapper,
+        make_persona_builder,
+        make_voice_principles_drafter,
+    ):
+        assert _resolved_agent_key(factory()) == expected, factory.__name__
+
+
+def test_phase3_factories_use_visual_identity_agent_key() -> None:
+    from branding_team.agents import (
+        make_color_system_builder,
+        make_converge_decider,
+        make_creative_director,
+        make_design_system_codifier,
+        make_iconography_director,
+        make_logo_specifier,
+        make_moodboard_conceptualist,
+        make_photography_video_director,
+        make_typography_builder,
+        make_voice_tone_builder,
+    )
+
+    expected = phase_agent_key(BrandPhase.VISUAL_IDENTITY)
+    for factory in (
+        make_creative_director,
+        make_converge_decider,
+        make_logo_specifier,
+        make_color_system_builder,
+        make_typography_builder,
+        make_iconography_director,
+        make_photography_video_director,
+        make_voice_tone_builder,
+        make_design_system_codifier,
+    ):
+        assert _resolved_agent_key(factory()) == expected, factory.__name__
+    assert _resolved_agent_key(make_moodboard_conceptualist("Editorial")) == expected
+
+
+def test_phase4_factories_use_channel_activation_agent_key() -> None:
+    from branding_team.agents import (
+        make_brand_architecture_builder,
+        make_brand_experience_principler,
+        make_brand_in_action_illustrator,
+        make_email_guide,
+        make_events_guide,
+        make_internal_guide,
+        make_partnerships_guide,
+        make_social_guide,
+        make_website_guide,
+    )
+
+    expected = phase_agent_key(BrandPhase.CHANNEL_ACTIVATION)
+    for factory in (
+        make_brand_experience_principler,
+        make_website_guide,
+        make_social_guide,
+        make_email_guide,
+        make_events_guide,
+        make_partnerships_guide,
+        make_internal_guide,
+        make_brand_architecture_builder,
+        make_brand_in_action_illustrator,
+    ):
+        assert _resolved_agent_key(factory()) == expected, factory.__name__
+
+
+def test_phase5_factories_use_governance_agent_key() -> None:
+    from branding_team.agents import (
+        make_approval_workflow_designer,
+        make_asset_wiki_planner,
+        make_brand_rules_codifier,
+        make_evolution_framer,
+        make_kpi_designer,
+        make_ownership_definer,
+        make_training_planner,
+    )
+
+    expected = phase_agent_key(BrandPhase.GOVERNANCE)
+    for factory in (
+        make_ownership_definer,
+        make_approval_workflow_designer,
+        make_asset_wiki_planner,
+        make_training_planner,
+        make_kpi_designer,
+        make_evolution_framer,
+        make_brand_rules_codifier,
+    ):
+        assert _resolved_agent_key(factory()) == expected, factory.__name__
+
+
+def test_compositor_nodes_use_compositor_agent_key() -> None:
+    """The remaining phase-terminal join agent uses the cross-phase compositor tier,
+    not its own phase's agent_key. Phases 4 and 5 have no compositor node."""
+    graphs = {
+        "visual_compositor": build_phase3_graph(),
+    }
+    for node_id, graph in graphs.items():
+        compositor_agent = graph.nodes[node_id].executor
+        assert _resolved_agent_key(compositor_agent) == COMPOSITOR_AGENT_KEY, node_id
 
 
 # ---------------------------------------------------------------------------
