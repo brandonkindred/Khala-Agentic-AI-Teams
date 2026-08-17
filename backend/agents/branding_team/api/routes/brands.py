@@ -66,21 +66,23 @@ def create_brand(client_id: str, payload: CreateBrandRequest) -> Brand:
       atomically via ``store.attach_conversation``.
     - otherwise: create a fresh conversation and link it via ``store.update_brand``.
 
-    Both paths roll the brand back (``store.delete_brand``) if the linking step
-    fails, so a failed request never leaves a listable, conversation-less orphan.
+    When the linking step reports a failure — a non-OK ``attach_conversation``
+    result, or an ``update_brand`` that finds no row — the just-created brand is
+    rolled back with ``store.delete_brand`` so that path leaves no listable,
+    conversation-less orphan. (An exception raised while creating the fresh
+    conversation on the create-new path, before the link is attempted, is not
+    caught here and would leave the brand row persisted.)
 
     Preconditions:
         ``client_id`` is a non-empty path string; ``payload`` is a validated
-        ``CreateBrandRequest``. When ``payload.conversation_id`` is set (after
-        stripping), it identifies an existing conversation belonging to the
-        caller. (Whether that conversation is already attached elsewhere is
-        checked and enforced by this handler — see Postconditions — not assumed.)
+        ``CreateBrandRequest``.
     Postconditions:
         Returns the created ``Brand`` with its conversation attached (HTTP 201).
         Raises 404 "Client not found" when ``client_id`` matches no client.
-        On the attach-existing path, maps ``store.attach_conversation`` failures —
-        after deleting the just-created brand — to HTTP status: 404 for
-        ``CONVERSATION_NOT_FOUND``/``BRAND_NOT_FOUND`` and 409 for
+        When ``payload.conversation_id`` is set (after stripping), attaches that
+        conversation via ``store.attach_conversation``; on a non-OK result it
+        deletes the just-created brand and maps the failure to HTTP status: 404
+        for ``CONVERSATION_NOT_FOUND``/``BRAND_NOT_FOUND`` and 409 for
         ``ALREADY_ATTACHED``. On the create-new path, deletes the brand and raises
         404 "Brand not found" if the conversation link cannot be written.
     """

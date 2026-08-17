@@ -79,7 +79,8 @@ def create_branding_session(payload: RunBrandingTeamRequest) -> BrandingSessionR
 
     Preconditions:
         ``payload`` is a validated ``RunBrandingTeamRequest``.
-        ``payload.target_phase`` is either unset or a recognized phase name.
+        ``payload.target_phase`` is either unset or a recognized phase name (an
+        unrecognized value parses to ``None``, meaning "run all phases").
     Postconditions:
         Runs the pipeline once, persists the resulting output under a new session
         via ``session_store.create``, and returns that session's
