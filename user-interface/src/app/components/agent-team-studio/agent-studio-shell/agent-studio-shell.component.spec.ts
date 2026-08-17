@@ -647,6 +647,8 @@ describe('AgentStudioShellComponent', () => {
     expect(harness.routeNativeElement?.querySelector('app-stub-audit-host')).toBeNull();
     expect(harness.routeNativeElement?.querySelector('app-stub-stage-host')).toBeTruthy();
     expect(harness.routeNativeElement?.querySelector('.studio__footer')).toBeTruthy();
+    // The draft payload sets only registryAgentId (no teamId), so resolveFurthestStage's
+    // furthest-reachable rule lands on Stage 1 (Test) rather than resetting to Stage 0 (Build).
     expect(shell.state.activeStage()).toBe(1);
     expect(shell.state.registryAgentId()).toBe('reg-from-draft');
   });
