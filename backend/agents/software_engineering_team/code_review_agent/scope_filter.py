@@ -27,6 +27,7 @@ from software_engineering_team.github_source.pr_review_mapping import (
 )
 from software_engineering_team.shared.llm import extract_json_from_response
 
+from ._llm_client_utils import is_unscripted_dummy
 from ._prompt_utils import _cap_context_field, _render_finding_block
 from .false_positive_filter import (
     CodebaseIndex,
@@ -202,7 +203,7 @@ def apply_scope_verification(
         return snapshot
     if not env_flag_enabled(_FILTER_ENV):
         return snapshot
-    if _is_unscripted_dummy(llm):
+    if is_unscripted_dummy(llm):
         return snapshot
     try:
         return _verify_scope(
@@ -236,21 +237,6 @@ def _copy_issue(issue: Any) -> Any:
     if callable(copier):
         return copier(deep=True)
     return issue
-
-
-def _is_unscripted_dummy(llm: Any) -> bool:
-    """True for the production dummy harness, not scripted test subclasses.
-
-    Preconditions: ``llm`` may be any object.
-    Postconditions: ``True`` iff ``llm`` or ``llm.client`` is exactly
-        ``DummyLLMClient`` (not a subclass used as a test stub). Pure.
-    """
-    from llm_service.clients.dummy import DummyLLMClient
-
-    if type(llm) is DummyLLMClient:
-        return True
-    inner = getattr(llm, "client", None)
-    return type(inner) is DummyLLMClient
 
 
 def _parse_scope_verdicts(data: object, count: int) -> Dict[int, ScopeVerdict]:

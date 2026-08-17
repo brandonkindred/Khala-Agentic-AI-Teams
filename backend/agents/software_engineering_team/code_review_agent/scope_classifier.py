@@ -58,9 +58,9 @@ from llm_service.interface import LLMClient
 from shared.concurrency import parallel_map
 from software_engineering_team.shared.context_sizing import parse_env_int
 
+from ._llm_client_utils import is_unscripted_dummy
 from ._prompt_utils import _cap_context_field, _render_finding_block, _truncate_with_marker
 from .models import CodeReviewInput, CodeReviewIssue
-from .scope_filter import _is_unscripted_dummy
 
 logger = logging.getLogger(__name__)
 
@@ -94,7 +94,7 @@ SCOPE_CLASSIFY_SYSTEM_PROMPT = (
 
 SCOPE_CLASSIFY_FORMATTING_INSTRUCTIONS = (
     "Reply with a single JSON object and nothing else, in exactly this shape:\n"
-    '{"verdicts": [{"index": <int>, "in_scope": <true|false>, '
+    '{"verdicts": [{"index": <int>, "in_scope": <true|false|"unknown">, '
     '"reason": "<one short sentence>"}]}\n'
     "Include one entry per finding, using the finding's index. Set in_scope to "
     "true for IN SCOPE and false for OUT OF SCOPE. If you truly cannot decide a "
@@ -339,7 +339,7 @@ def classify_scope(
     # The caller owns model resolution (the code_review_verify model, like the
     # sibling verification passes); a missing client degrades to all-unknown
     # rather than self-resolving a heavier code_review client here.
-    if llm is None or _is_unscripted_dummy(llm):
+    if llm is None or is_unscripted_dummy(llm):
         return [UNKNOWN] * n
 
     cap = (

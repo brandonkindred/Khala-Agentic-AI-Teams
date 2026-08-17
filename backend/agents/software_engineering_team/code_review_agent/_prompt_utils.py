@@ -42,7 +42,9 @@ def _sanitize_finding_field(text: str) -> str:
     collapsed = " ".join(text.split())
 
     def _break_runs(match: re.Match[str]) -> str:
-        return "​".join(match.group())
+        # Explicit U+200B (zero-width space) escape, not an invisible literal, so
+        # the intentional run-breaking char is obvious and edit-safe.
+        return "\u200b".join(match.group())
 
     collapsed = re.sub(r"`{3,}", _break_runs, collapsed)
     collapsed = re.sub(r"-{3,}", _break_runs, collapsed)
