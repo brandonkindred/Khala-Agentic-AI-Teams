@@ -20,15 +20,8 @@ import inspect
 import types
 
 import pytest
-from fastapi import FastAPI
-from fastapi.testclient import TestClient
 
 import unified_api.main as main
-from agent_platform.studio import router
-from agent_platform.studio.assistant import AgentDesignerAgent
-from agent_platform.studio.service import AgentStudioService
-from agent_platform.studio.store import AgentStudioConversationStore
-from agent_platform.studio.testing import FakeRegistry, seed_manifest
 
 
 def _fake_team_configs(enabled: bool) -> dict:
@@ -153,18 +146,17 @@ def test_worker_start_skipped_when_temporal_not_configured(monkeypatch: pytest.M
     assert warns == []
 
 
-def test_worker_absent_skips_boot_and_authoring_crud_succeeds_end_to_end(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Issue acceptance criterion: authoring works with the Studio Temporal
-    worker absent.
+def test_worker_start_skipped_when_temporal_address_env_absent(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Same acceptance criterion as ``test_worker_start_skipped_when_temporal_not_configured``,
+    but drives the real ``TEMPORAL_ADDRESS``-absent path instead of mocking
+    ``studio_temporal_enabled`` directly — proves the lifespan skip holds under
+    the actual worker-absent condition, not just a stubbed return value.
 
-    Unlike ``test_worker_start_skipped_when_temporal_not_configured`` (which
-    mocks ``studio_temporal_enabled`` directly), this drives the real
-    ``TEMPORAL_ADDRESS``-absent path and, in the same test, proves both
-    halves of the contract together: the lifespan hook never boots the
-    ``agent-studio-queue`` worker, and conversations/clone/save still
-    succeed end-to-end over HTTP.
+    CRUD-level coverage that authoring still succeeds under this same
+    condition lives in ``test_agent_studio_routes.py`` /
+    ``test_agent_studio_direct_routes.py``; the dispatch-level mirror of
+    ``test_temporal_enabled.py`` lives in
+    ``agent_platform/studio/tests/test_temporal_worker_absent.py``.
     """
     monkeypatch.delenv("TEMPORAL_ADDRESS", raising=False)
     monkeypatch.setattr(main, "UNIFIED_API_AGENT_STUDIO_TEMPORAL_WORKER", True)
@@ -178,47 +170,6 @@ def test_worker_absent_skips_boot_and_authoring_crud_succeeds_end_to_end(
     main._start_agent_studio_temporal_worker()
 
     assert called == [], "the agent-studio-queue worker must not boot when Temporal is absent"
-
-    registry = FakeRegistry()
-    registry.seed(seed_manifest())
-    reply = """\
-Drafted it.
-
-```agent
-{"name": "my.agent", "role": "Does a thing", "tools": ["web.search"]}
-```
-"""
-    service = AgentStudioService(
-        assistant=AgentDesignerAgent(complete=lambda _s, _p: reply),
-        store=AgentStudioConversationStore(),
-        registry_getter=lambda: registry,
-    )
-    monkeypatch.setattr("agent_platform.studio.runtime.get_studio_service", lambda: service)
-    app = FastAPI()
-    app.include_router(router)
-    client = TestClient(app)
-
-    started = client.post("/api/agent-studio/conversations", json={"mode": "new"})
-    assert started.status_code == 200
-    conversation_id = started.json()["conversation_id"]
-
-    messaged = client.post(
-        f"/api/agent-studio/conversations/{conversation_id}/messages",
-        json={"message": "make a planner"},
-    )
-    assert messaged.status_code == 200
-    assert messaged.json()["definition"]["name"] == "my.agent"
-
-    cloned = client.post("/api/agent-studio/agents/from-registry/blogging.planner")
-    assert cloned.status_code == 200
-    assert cloned.json()["cloned_from"] == "blogging.planner"
-
-    saved = client.post(
-        "/api/agent-studio/agents",
-        json={"name": "Saver", "role": "Saves things"},
-    )
-    assert saved.status_code == 200
-    assert saved.json()["created"] is True
 
 
 def test_worker_start_swallows_errors(monkeypatch: pytest.MonkeyPatch) -> None:

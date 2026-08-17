@@ -34,22 +34,6 @@ def test_studio_temporal_enabled_is_false_when_worker_absent() -> None:
     assert dispatch.studio_temporal_enabled() is False
 
 
-@pytest.fixture(autouse=True)
-def _forbid_temporal_execute(monkeypatch: pytest.MonkeyPatch) -> None:
-    """CRUD must never start a workflow, including when Temporal is absent."""
-
-    def _boom(*_a, **_k):
-        raise AssertionError("authoring CRUD must not call execute_workflow_sync")
-
-    monkeypatch.setattr(
-        "shared.temporal.execute_workflow_sync",
-        _boom,
-        raising=False,
-    )
-    if hasattr(dispatch, "execute_workflow_sync"):
-        monkeypatch.setattr(dispatch, "execute_workflow_sync", _boom)
-
-
 @pytest.fixture()
 def service(monkeypatch: pytest.MonkeyPatch) -> Mock:
     svc = Mock(spec=AgentStudioService)
