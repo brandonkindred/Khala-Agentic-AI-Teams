@@ -116,7 +116,9 @@ def make_discovery_auditor() -> Agent:
     Postconditions:
         Returns an ``Agent`` named ``discovery_auditor`` whose structured
         output is a ``BrandDiscoveryAudit`` covering current brand
-        perception, market position, SWOT, and stakeholder insights.
+        perception, market position, SWOT, and stakeholder insights. The
+        agent is routed through the ``branding_strategic_core`` agent_key
+        tier.
     """
     return build_agent(
         name="discovery_auditor",
@@ -140,7 +142,9 @@ def make_purpose_vision_writer() -> Agent:
     Postconditions:
         Returns an ``Agent`` named ``purpose_vision_writer`` whose
         structured output is a ``PurposeVisionOutput`` containing the
-        brand purpose, mission statement, and vision statement.
+        brand purpose, mission statement, and vision statement. The
+        agent is routed through the ``branding_strategic_core`` agent_key
+        tier.
     """
     return build_agent(
         name="purpose_vision_writer",
@@ -167,7 +171,8 @@ def make_values_articulator() -> Agent:
         Returns an ``Agent`` named ``values_articulator`` whose structured
         output is a ``CoreValuesOutput`` listing core values (count bounded by
         ``CORE_VALUES_MIN``/``CORE_VALUES_MAX``), each with a behavioral
-        definition and observable behaviors.
+        definition and observable behaviors. The agent is routed through
+        the ``branding_strategic_core`` agent_key tier.
     """
     return build_agent(
         name="values_articulator",
@@ -195,7 +200,8 @@ def make_audience_segmenter() -> Agent:
         Returns an ``Agent`` named ``audience_segmenter`` whose structured
         output is an ``AudienceSegmentsOutput`` describing target audience
         segments (count bounded by ``AUDIENCE_SEGMENTS_MIN``/``AUDIENCE_SEGMENTS_MAX``)
-        with pain points, goals, and decision drivers.
+        with pain points, goals, and decision drivers. The agent is
+        routed through the ``branding_strategic_core`` agent_key tier.
     """
     return build_agent(
         name="audience_segmenter",
@@ -224,7 +230,8 @@ def make_differentiation_mapper() -> Agent:
         structured output is a ``DifferentiationPillarsOutput`` listing
         differentiation pillars (count bounded by ``DIFFERENTIATION_PILLARS_MIN``/
         ``DIFFERENTIATION_PILLARS_MAX``) with proof points and competitive
-        context.
+        context. The agent is routed through the ``branding_strategic_core``
+        agent_key tier.
     """
     return build_agent(
         name="differentiation_mapper",
@@ -252,7 +259,8 @@ def make_positioning_synthesizer() -> Agent:
         Returns an ``Agent`` named ``positioning_synthesizer`` whose
         structured output is a ``PositioningOutput`` synthesizing the
         other Phase 1 fragments into a positioning statement and brand
-        promise.
+        promise. The agent is routed through the ``branding_strategic_core``
+        agent_key tier.
     """
     return build_agent(
         name="positioning_synthesizer",
@@ -282,7 +290,8 @@ def make_storyteller() -> Agent:
     Postconditions:
         Returns an ``Agent`` named ``Storyteller`` whose structured output
         is a ``BrandStoryOutput`` containing the brand story, hero
-        narrative, and boilerplate variants.
+        narrative, and boilerplate variants. The agent is routed through
+        the ``branding_narrative_messaging`` agent_key tier.
     """
     return build_agent(
         name="Storyteller",
@@ -319,7 +328,8 @@ def make_archetype_analyst() -> Agent:
         output is a ``BrandArchetypesOutput`` selecting brand archetypes
         (count bounded by ``BRAND_ARCHETYPES_MIN``/``BRAND_ARCHETYPES_MAX``)
         with rationale and personality traits, carrying
-        forward the prior narrative fields unchanged.
+        forward the prior narrative fields unchanged. The agent is
+        routed through the ``branding_narrative_messaging`` agent_key tier.
     """
     return build_agent(
         name="ArchetypeAnalyst",
@@ -354,6 +364,8 @@ def make_tagline_writer() -> Agent:
         Returns an ``Agent`` named ``TaglineWriter`` whose structured
         output is a ``TaglineOutput`` adding a tagline, tagline
         rationale, and elevator pitches to the prior narrative fields.
+        The agent is routed through the ``branding_narrative_messaging``
+        agent_key tier.
     """
     return build_agent(
         name="TaglineWriter",
@@ -391,7 +403,8 @@ def make_message_mapper() -> Agent:
         Returns an ``Agent`` named ``MessageMapper`` whose structured
         output is a ``MessagingFrameworkOutput`` adding a messaging
         framework and per-segment audience message maps to the prior
-        narrative fields.
+        narrative fields. The agent is routed through the
+        ``branding_narrative_messaging`` agent_key tier.
     """
     return build_agent(
         name="MessageMapper",
@@ -425,7 +438,8 @@ def make_persona_builder() -> Agent:
         Returns an ``Agent`` named ``PersonaBuilder`` whose structured
         output is a ``PersonaProfilesOutput`` adding persona profiles (count
         bounded by ``PERSONA_PROFILES_MIN``/``PERSONA_PROFILES_MAX``) to the
-        prior narrative fields.
+        prior narrative fields. The agent is routed through the
+        ``branding_narrative_messaging`` agent_key tier.
     """
     return build_agent(
         name="PersonaBuilder",
@@ -468,6 +482,8 @@ def make_voice_principles_drafter() -> Agent:
         structured output is a ``WritingGuidelinesOutput`` adding voice
         principles, style dos/don'ts, and an editorial quality bar to the
         prior narrative fields — the final step in narrative development.
+        The agent is routed through the ``branding_narrative_messaging``
+        agent_key tier.
     """
     return build_agent(
         name="VoicePrinciplesDrafter",
@@ -507,7 +523,8 @@ def make_creative_director() -> Agent:
         list, preserving each concept's title, visual_direction,
         color_story, typography_direction, and image_style. The agent does
         not select a winner; ``converge_decider`` scores the candidates
-        and selects the winning direction.
+        and selects the winning direction. This agent is routed through
+        the ``branding_visual_identity`` agent_key tier.
     """
     return build_agent(
         name="CreativeDirector",
@@ -551,7 +568,8 @@ def make_moodboard_conceptualist(variant: str) -> Agent:
         whose prompt is specialized to ``variant`` and whose output is a
         moodboard concept (title, visual direction, color story,
         typography direction, image style) for the ``CreativeDirector``
-        node in the Phase 3 Graph.
+        node in the Phase 3 Graph. The agent is routed through the
+        ``branding_visual_identity`` agent_key tier.
     """
     assert isinstance(variant, str) and variant.strip(), "variant must be a non-empty string"
     return build_agent(
@@ -587,7 +605,8 @@ def make_converge_decider() -> Agent:
         Returns an ``Agent`` named ``converge_decider`` that scores the
         diverge-phase moodboard candidates against audience resonance,
         distinctiveness, cross-channel consistency, and feasibility, and
-        selects a winning candidate.
+        selects a winning candidate. The agent is routed through the
+        ``branding_visual_identity`` agent_key tier.
     """
     return build_agent(
         name="converge_decider",
@@ -614,7 +633,8 @@ def make_logo_specifier() -> Agent:
         Returns an ``Agent`` named ``logo_specifier`` whose output
         defines the logo suite (primary, monochrome, icon-only,
         reversed variants) with usage rules for the winning moodboard
-        direction.
+        direction. The agent is routed through the
+        ``branding_visual_identity`` agent_key tier.
     """
     return build_agent(
         name="logo_specifier",
@@ -642,7 +662,8 @@ def make_color_system_builder() -> Agent:
         Returns an ``Agent`` named ``color_system_builder`` whose output
         defines brand colors (count bounded by ``COLOR_PALETTE_MIN``/
         ``COLOR_PALETTE_MAX``) with hex values, usage, and psychological
-        rationale for the winning moodboard direction.
+        rationale for the winning moodboard direction. The agent is
+        routed through the ``branding_visual_identity`` agent_key tier.
     """
     return build_agent(
         name="color_system_builder",
@@ -670,7 +691,8 @@ def make_typography_builder() -> Agent:
         Returns an ``Agent`` named ``typography_builder`` whose output
         defines a typography system for the winning moodboard direction; the
         number of type roles is governed by ``TYPOGRAPHY_SYSTEM_MIN`` and
-        ``TYPOGRAPHY_SYSTEM_MAX``.
+        ``TYPOGRAPHY_SYSTEM_MAX``. The agent is routed through the
+        ``branding_visual_identity`` agent_key tier.
     """
     return build_agent(
         name="typography_builder",
@@ -693,7 +715,8 @@ def make_iconography_director() -> Agent:
     Postconditions:
         Returns an ``Agent`` named ``iconography_director`` whose output
         defines the iconography and illustration style for the winning
-        moodboard direction.
+        moodboard direction. The agent is routed through the
+        ``branding_visual_identity`` agent_key tier.
     """
     return build_agent(
         name="iconography_director",
@@ -716,7 +739,9 @@ def make_photography_video_director() -> Agent:
     Postconditions:
         Returns an ``Agent`` named ``photography_video_director`` whose
         output defines photography direction, video direction, and
-        motion principles for the winning moodboard direction.
+        motion principles for the winning moodboard direction. The agent
+        is routed through the ``branding_visual_identity`` agent_key
+        tier.
     """
     return build_agent(
         name="photography_video_director",
@@ -743,7 +768,8 @@ def make_voice_tone_builder() -> Agent:
         Returns an ``Agent`` named ``voice_tone_builder`` whose output
         defines the voice/tone spectrum and language dos/don'ts, drawing
         on the brand narrative's writing guidelines and the moodboard
-        direction.
+        direction. The agent is routed through the
+        ``branding_visual_identity`` agent_key tier.
     """
     return build_agent(
         name="voice_tone_builder",
@@ -766,7 +792,9 @@ def make_design_system_codifier() -> Agent:
     Postconditions:
         Returns an ``Agent`` named ``design_system_codifier`` whose
         output codifies design principles, foundation tokens, and
-        component standards from the full visual identity work.
+        component standards from the full visual identity work. The
+        agent is routed through the ``branding_visual_identity``
+        agent_key tier.
     """
     return build_agent(
         name="design_system_codifier",
@@ -796,7 +824,8 @@ def make_brand_experience_principler() -> Agent:
     Postconditions:
         Returns an ``Agent`` named ``brand_experience_principler`` whose
         output defines brand experience principles, signature customer
-        journey moments, and sensory elements.
+        journey moments, and sensory elements. The agent is routed
+        through the ``branding_channel_activation`` agent_key tier.
     """
     return build_agent(
         name="brand_experience_principler",
@@ -859,7 +888,9 @@ def _make_channel_guide(
         Returns an ``Agent`` named ``f"{channel}_guide"`` whose prompt
         embeds ``channel`` and ``description`` and whose structured
         output defines that channel's strategy, dos/don'ts, content
-        types, and cadence per ``structured_output``.
+        types, and cadence per ``structured_output``. The agent is
+        routed through the ``branding_channel_activation`` agent_key
+        tier.
     """
     assert isinstance(channel, str) and channel.strip(), "channel must be a non-empty string"
     assert isinstance(description, str) and description.strip(), (
@@ -961,7 +992,8 @@ def make_brand_architecture_builder() -> Agent:
     Postconditions:
         Returns an ``Agent`` named ``brand_architecture_builder`` whose
         output defines brand architecture rules, naming conventions,
-        and a terminology glossary.
+        and a terminology glossary. The agent is routed through the
+        ``branding_channel_activation`` agent_key tier.
     """
     return build_agent(
         name="brand_architecture_builder",
@@ -987,7 +1019,9 @@ def make_brand_in_action_illustrator() -> Agent:
     Postconditions:
         Returns an ``Agent`` named ``brand_in_action_illustrator`` whose
         output produces correct-vs-incorrect brand usage examples (count
-        bounded by ``BRAND_IN_ACTION_MIN``/``BRAND_IN_ACTION_MAX``).
+        bounded by ``BRAND_IN_ACTION_MIN``/``BRAND_IN_ACTION_MAX``). The
+        agent is routed through the ``branding_channel_activation``
+        agent_key tier.
     """
     return build_agent(
         name="brand_in_action_illustrator",
@@ -1017,7 +1051,8 @@ def make_ownership_definer() -> Agent:
     Postconditions:
         Returns an ``Agent`` named ``ownership_definer`` whose output
         defines the brand ownership model and a decision authority
-        matrix.
+        matrix. The agent is routed through the ``branding_governance``
+        agent_key tier.
     """
     return build_agent(
         name="ownership_definer",
@@ -1040,7 +1075,8 @@ def make_approval_workflow_designer() -> Agent:
     Postconditions:
         Returns an ``Agent`` named ``approval_workflow_designer`` whose
         output defines approval workflows and agency briefing
-        protocols.
+        protocols. The agent is routed through the
+        ``branding_governance`` agent_key tier.
     """
     return build_agent(
         name="approval_workflow_designer",
@@ -1063,6 +1099,8 @@ def make_asset_wiki_planner() -> Agent:
     Postconditions:
         Returns an ``Agent`` named ``asset_wiki_planner`` whose output
         defines asset management guidance and the brand wiki backlog.
+        The agent is routed through the ``branding_governance``
+        agent_key tier.
     """
     return build_agent(
         name="asset_wiki_planner",
@@ -1084,7 +1122,8 @@ def make_training_planner() -> Agent:
 
     Postconditions:
         Returns an ``Agent`` named ``training_planner`` whose output
-        defines the brand training and onboarding plan.
+        defines the brand training and onboarding plan. The agent is
+        routed through the ``branding_governance`` agent_key tier.
     """
     return build_agent(
         name="training_planner",
@@ -1107,7 +1146,8 @@ def make_kpi_designer() -> Agent:
     Postconditions:
         Returns an ``Agent`` named ``kpi_designer`` whose output defines
         brand health KPIs, tracking methodology, and review trigger
-        points.
+        points. The agent is routed through the ``branding_governance``
+        agent_key tier.
     """
     return build_agent(
         name="kpi_designer",
@@ -1130,7 +1170,8 @@ def make_evolution_framer() -> Agent:
     Postconditions:
         Returns an ``Agent`` named ``evolution_framer`` whose output
         defines the brand evolution framework and version control
-        cadence.
+        cadence. The agent is routed through the ``branding_governance``
+        agent_key tier.
     """
     return build_agent(
         name="evolution_framer",
@@ -1160,7 +1201,8 @@ def make_brand_rules_codifier() -> Agent:
     Postconditions:
         Returns an ``Agent`` named ``brand_rules_codifier`` whose output
         codifies top-level brand governance rules (count bounded by
-        ``BRAND_GUIDELINES_MIN``/``BRAND_GUIDELINES_MAX``).
+        ``BRAND_GUIDELINES_MIN``/``BRAND_GUIDELINES_MAX``). The agent is
+        routed through the ``branding_governance`` agent_key tier.
     """
     return build_agent(
         name="brand_rules_codifier",
