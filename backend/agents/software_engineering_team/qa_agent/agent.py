@@ -82,10 +82,17 @@ def clear_review_cache() -> None:
         - None.
     Postconditions:
         - This process's view of the shared review-cache namespace is empty
-          when the call returns (best-effort across Redis). Intended for
-          tests and for callers that must force a cold review.
+          when the call returns (best-effort across Redis). A cache backend
+          error is caught and logged rather than propagated — fails open,
+          same as every other cache operation in this module — so a broken
+          backend never breaks a caller (e.g. a test-teardown fixture)
+          forcing a cold review. Intended for tests and for callers that
+          must force a cold review.
     """
-    get_shared_cache(_review_cache_namespace()).clear()
+    try:
+        get_shared_cache(_review_cache_namespace()).clear()
+    except Exception:
+        logger.warning("QA: review cache clear failed", exc_info=True)
 
 
 def _review_cache_key(input_data: QAInput, model_fp: str) -> str:

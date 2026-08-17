@@ -101,15 +101,15 @@ def model_fingerprint(model: Any) -> str:
 
     The canonical attribute-probing tail for turning a resolved Strands
     ``Model`` into a short, stable identity string. ``qa_agent.agent.run``
-    uses this directly for its review-result cache key.
+    uses this directly for its review-result cache key;
     ``code_review_agent.transcript.model_label`` (cosmetic display) and
     ``code_review_agent.mapping._review_model_fingerprint`` (cache-key
     fingerprint, which additionally resolves a raw ``LLMClient`` via
-    ``resolve_code_review_model`` before probing) still carry their own copy
-    of this same tail; they are candidates to adopt this helper too, but that
-    migration is out of scope here. A caller holding an unresolved
-    ``llm``/``LLMClient`` handle should resolve it first (e.g. via
-    :func:`resolve_strands_model`) and pass the resolved model here.
+    ``resolve_code_review_model`` before probing) both delegate to this
+    helper for the same tail rather than carrying their own copy. A caller
+    holding an unresolved ``llm``/``LLMClient`` handle should resolve it
+    first (e.g. via :func:`resolve_strands_model`) and pass the resolved
+    model here.
 
     Preconditions:
         - ``model`` is a resolved Strands ``Model`` (or any object exposing
