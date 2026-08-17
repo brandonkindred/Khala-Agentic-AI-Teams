@@ -4,10 +4,10 @@ import { MatDialog, MatDialogModule } from '@angular/material/dialog';
 import { MatIconModule } from '@angular/material/icon';
 import { MatTooltipModule } from '@angular/material/tooltip';
 import { Observable } from 'rxjs';
-import type { AgentStudioDraft, AgentStudioHandoffState } from '../../../models/agent-studio.model';
+import type { AgentStudioDraft } from '../../../models/agent-studio.model';
 import { STUDIO_STAGES } from '../../../models/agent-studio.model';
 import { AgentStudioFacade } from '../../../services/agent-studio.facade';
-import { AgentStudioStateService } from '../../../services/agent-studio-state.service';
+import { AgentStudioStateService, handoffEquals } from '../../../services/agent-studio-state.service';
 import { AgenticTeamApiService } from '../../../services/agentic-team-api.service';
 import { AgentStudioBuildAgentComponent } from './agent-studio-build-agent.component';
 import { AgentStudioComposeTeamComponent } from './agent-studio-compose-team.component';
@@ -40,16 +40,6 @@ const STAGE_PERSONAS = 3;
  *  trust a field's type without checking it first. */
 function asNullableString(value: unknown): string | null {
   return typeof value === 'string' ? value : null;
-}
-
-function sameHandoff(a: AgentStudioHandoffState, b: AgentStudioHandoffState): boolean {
-  return (
-    a.registryAgentId === b.registryAgentId &&
-    a.teamId === b.teamId &&
-    a.processId === b.processId &&
-    a.personaId === b.personaId &&
-    a.draftAgentId === b.draftAgentId
-  );
 }
 
 /**
@@ -262,11 +252,13 @@ export class AgentStudioShellComponent {
    * Load a saved draft and hydrate the session from it (spec §3.5 / §2.4).
    *
    * Preconditions: `draftId` names a draft the current user owns.
-   * Postconditions: when `!isDirty()`, hydrates immediately. When dirty, opens
-   *   the conflict dialog and `loadingDraft()` stays false until hydration
-   *   HTTP starts. Cancel / Escape / backdrop: no HTTP, state unchanged.
-   *   Discard: hydrate the chosen draft. Save first: persist current handoff
-   *   then hydrate; a failed persist does not hydrate.
+   * Postconditions: if `loadingDraft()` is already true, returns without
+   *   starting any HTTP and state is unchanged. Otherwise, when `!isDirty()`,
+   *   hydrates immediately. When dirty, opens the conflict dialog and
+   *   `loadingDraft()` stays false until hydration HTTP starts. Cancel /
+   *   Escape / backdrop: no HTTP, state unchanged. Discard: hydrate the
+   *   chosen draft. Save first: persist current handoff then hydrate; a
+   *   failed persist does not hydrate.
    */
   loadDraft(draftId: string): void {
     if (this.loadingDraft()) return;
@@ -380,7 +372,7 @@ export class AgentStudioShellComponent {
     this.facade.loadDraft(draftId).subscribe({
       next: (draft) => {
         if (token !== this.loadDraftToken) return;
-        if (!sameHandoff(this.state.handoff(), captured) || (!wasDirty && this.state.isDirty())) {
+        if (!handoffEquals(this.state.handoff(), captured) || (!wasDirty && this.state.isDirty())) {
           this.loadingDraft.set(false);
           return;
         }
@@ -393,6 +385,16 @@ export class AgentStudioShellComponent {
     });
   }
 
+  /**
+   * Replace the current session state with the contents of a loaded draft.
+   *
+   * Preconditions: caller has already run the token and dirty-state guards
+   *   (see `fetchAndHydrate`).
+   * Postconditions: `currentDraftId`/`currentDraftName` are bound to
+   *   `draft`; the five handoff ids are set from `draft.payload`; the
+   *   session is marked clean; the stepper advances to the furthest
+   *   reachable stage via `resolveFurthestStage`.
+   */
   private hydrateFromDraft(draft: AgentStudioDraft, token: number): void {
     this.state.setCurrentDraft(draft.draft_id, draft.name);
     const payload = draft.payload;

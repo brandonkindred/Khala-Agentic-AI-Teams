@@ -11,7 +11,7 @@
     <div class="studio__draft-actions">
       @if (state.currentDraftId()) {
         <span class="studio__current-draft">
-          <span class="studio__current-draft-name">{{ state.currentDraftName() }}</span>
+          <span class="studio__current-draft-name" [title]="state.currentDraftName()">{{ state.currentDraftName() }}</span>
           <button
             mat-icon-button
             type="button"
