@@ -1,19 +1,15 @@
 """Process-wide Agent Studio service singleton.
 
 Every authoring request is served by
-:class:`~agent_platform.studio.service.AgentStudioService`, reached one of two
-ways depending on whether Temporal is configured (see
-``agent_platform.studio.temporal.dispatch``): via a workflow → activity when
-enabled, or directly, in-process, when it isn't. Because Agent Studio is an in-process
-team, its Temporal worker (when running) shares the *same* process as the unified API,
-so the activity threads, the direct-dispatch calls, and the HTTP handlers must all
-share one service instance — with the in-memory store that shared instance is what
-makes a conversation created on one request resolvable on the next.
+:class:`~agent_platform.studio.service.AgentStudioService` via
+:mod:`agent_platform.studio.temporal.dispatch`, which calls this process-wide
+singleton directly in-process. Authoring CRUD does not use Temporal; a
+configured cluster or Studio worker is never required for conversations /
+clone / save.
 
 The store selection (Postgres when configured, else in-memory) is bound **once at
-import time**: ``POSTGRES_HOST`` must be set before this module first loads. This
-preserves the semantics the router documented before the Temporal migration —
-flipping the env at runtime does not re-select the store.
+import time**: ``POSTGRES_HOST`` must be set before this module first loads.
+Flipping the env at runtime does not re-select the store.
 """
 
 from __future__ import annotations
@@ -44,6 +40,8 @@ def _build_service() -> AgentStudioService:
     per-worker state. Any other unexpected error at construction likewise propagates
     (fail loud) instead of being swallowed into a silent fallback.
 
+    Preconditions:
+        - None; store selection reads process env at call time.
     Postconditions:
         - Returns an :class:`AgentStudioService`; Postgres-backed iff
           ``is_postgres_enabled()`` and the psycopg dependency is importable.
@@ -73,23 +71,20 @@ _service = _build_service()
 def get_studio_service() -> AgentStudioService:
     """Return the process-wide Agent Studio service singleton.
 
-    The single instance every request handler and every Temporal activity in this
-    process shares, so the in-memory conversation store is coherent across requests
-    and across the worker's activity threads (Agent Studio is in-process, so the
-    worker runs in the same process as uvicorn). With Postgres configured the store
-    is durable and the singleton is merely a convenience; with the in-memory store it
-    is a correctness requirement.
+    The single instance every request handler in this process shares, so the
+    in-memory conversation store is coherent across requests. With Postgres
+    configured the store is durable and the singleton is merely a convenience;
+    with the in-memory store it is a correctness requirement.
 
-    Coherence is **per process**: when Temporal is enabled, every uvicorn worker
-    starts its own Temporal worker on the shared ``agent-studio-queue``, and Temporal
-    does **not** bind an activity to the process that dispatched its workflow; when
-    Temporal is disabled, dispatch calls this singleton directly within whichever
-    process handled the request. Either way, the in-memory store is coherent only in
-    single-process mode (``make run``, tests, and default ``make deploy`` / Docker
-    ``--workers 1``). A multi-worker deployment **requires** ``POSTGRES_HOST``:
-    without it, a follow-up request may be served by a different process whose
-    in-memory store lacks the conversation, returning 404.
+    Coherence is **per process**. Dispatch calls this singleton directly within
+    whichever process handled the request. The in-memory store is coherent only
+    in single-process mode (``make run``, tests, and default ``make deploy`` /
+    Docker ``--workers 1``). A multi-worker deployment **requires**
+    ``POSTGRES_HOST``: without it, a follow-up request may be served by a
+    different process whose in-memory store lacks the conversation, returning 404.
 
+    Preconditions:
+        - None.
     Postconditions:
         - Returns the same instance on every call within a process.
     """
