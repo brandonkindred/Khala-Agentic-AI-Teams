@@ -600,10 +600,15 @@ async def update_provider(entry_id: int, body: LlmProviderUpdate) -> LlmProvider
 
     Unlike ``create_provider`` this does not probe the RunPod endpoint, so it adds
     no network latency: a new ``endpoint_id`` is only validated and used to rebuild
-    the stored base URL. A non-empty ``endpoint_id`` on a (resulting) RunPod entry
-    OVERWRITES the stored ``base_url`` with the canonical
-    ``https://api.runpod.ai/v2/{endpoint_id}/openai/v1`` — any ``base_url`` also sent
-    in the same request is ignored for RunPod, matching ``create_provider``.
+    the stored base URL. For a (resulting) RunPod entry, ``base_url`` is never
+    settable directly and any value sent for it is ignored — either it is
+    recomputed from a non-empty ``endpoint_id`` (which OVERWRITES the stored
+    ``base_url`` with the canonical
+    ``https://api.runpod.ai/v2/{endpoint_id}/openai/v1``), or, when ``endpoint_id``
+    is omitted/empty on an entry that is *already* RunPod, the stored ``base_url``
+    is left untouched. Switching a non-RunPod entry to RunPod REQUIRES a non-empty
+    ``endpoint_id`` in the same request (400 otherwise) — without one there would be
+    no canonical URL to persist, matching ``create_provider``'s requirement.
 
     Preconditions: the entry exists; Postgres configured; the per-entry key guards
         pass for the resulting (merged) provider/base_url/key. Postconditions:
@@ -648,17 +653,26 @@ async def update_provider(entry_id: int, body: LlmProviderUpdate) -> LlmProvider
     # This overrides any body.base_url value (which is ignored for RunPod entries) and
     # ensures update_entry receives a non-None base_url so the connection-affecting field
     # change triggers limit-state clearing per requirements 2.7 and 2.8.
-    # When endpoint_id is absent/empty, base_url remains None (leave stored value unchanged)
-    # per requirement 2.2.
     # ``body.endpoint_id`` is a plain ``str`` field (default ``""``), never ``None`` —
     # FastAPI/Pydantic rejects a null value for it with a 422 before this code runs.
     new_endpoint_id = body.endpoint_id.strip()
-    if merged_provider == "runpod" and new_endpoint_id:
-        try:
-            _validate_runpod_endpoint_id(new_endpoint_id)
-        except ValueError as e:
-            raise HTTPException(status_code=400, detail=str(e)) from e
-        base_url = _build_runpod_base_url(new_endpoint_id)
+    if merged_provider == "runpod":
+        if new_endpoint_id:
+            try:
+                _validate_runpod_endpoint_id(new_endpoint_id)
+            except ValueError as e:
+                raise HTTPException(status_code=400, detail=str(e)) from e
+            base_url = _build_runpod_base_url(new_endpoint_id)
+        elif existing.provider != "runpod":
+            # Switching a non-RunPod entry to RunPod requires an endpoint_id, same as
+            # create_provider — otherwise the entry would persist with
+            # provider="runpod" pointed at a stale, non-RunPod base_url.
+            raise HTTPException(status_code=400, detail="endpoint_id is required for RunPod.")
+        else:
+            # Already a RunPod entry and endpoint_id wasn't touched: base_url is
+            # always derived from endpoint_id, never directly settable — ignore any
+            # stray body.base_url instead of overwriting the canonical URL with it.
+            base_url = None
     try:
         updated = provider_store.update_entry(
             entry_id,
