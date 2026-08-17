@@ -264,6 +264,34 @@ rely on the unconstrained `json_object` + prompt-embedded-schema contract.
 
 `DummyLLMClient.complete_json` routes to its canned stubs by scanning the **user** prompt only (not the Strands system prompt). When migrating an agent and moving its persona to `Agent(system_prompt=...)`, the user prompt you build in `_build_user_prompt` must still include the distinctive tokens the matching dummy branch looks for — e.g. `bugs_found` + `test_plan` for the QA branch, or `integration expert` + `backend code` + `frontend code` for the Integration branch. An explicit "produce JSON with fields: foo, bar, baz" schema hint in the user prompt usually satisfies this for free. This only affects dummy-client tests; real LLMs see both prompts.
 
+## Prompt-cache breakpoints (capability check)
+
+`llm_service.CacheBreakpoint` marks a stable prompt-prefix segment (a spec
+excerpt, an architecture overview, ...) for provider-side caching. Pass it
+inside `system_prompt_content` when constructing a Strands `Agent` call
+through `get_strands_model(...)`/`LLMClientModel`:
+
+```python
+from llm_service import CacheBreakpoint
+
+system_prompt_content = [CacheBreakpoint(spec_excerpt_text)]
+```
+
+`client.supports_prompt_caching()` is a synchronous, no-network capability
+flag: `False` by default, `True` for `ClaudeLLMClient` (and for
+`get_strands_model(...)`/`LLMClientModel`, which delegate to their backing
+client). `False` for `FailoverLLMClient` always — a single call can hand off
+mid-flight to a non-caching provider on a 429, so it is conservatively
+treated as non-capable regardless of the currently-preferred candidate.
+
+When the backing client supports it, a `CacheBreakpoint` becomes an
+Anthropic `cache_control: {"type": "ephemeral"}` block on the outgoing
+system content. When it doesn't, the marker degrades to plain text (its
+`.text`) — a **documented no-op**: no output change, no error.
+
+Cache-token accounting/telemetry and call-site adoption in prompt builders
+are tracked separately (later steps).
+
 ## Exceptions
 
 - `LLMError` – base

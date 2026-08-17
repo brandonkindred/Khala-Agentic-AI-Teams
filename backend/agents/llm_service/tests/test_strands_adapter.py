@@ -9,6 +9,7 @@ from typing import Any, Dict, List, Optional
 import pytest
 from pydantic import BaseModel
 
+from llm_service.cache_breakpoint import CacheBreakpoint
 from llm_service.clients.dummy import DummyLLMClient
 from llm_service.interface import (
     LLMClient,
@@ -19,6 +20,8 @@ from llm_service.interface import (
 from llm_service.strands_adapter import (
     LLMClientModel,
     _flatten_system_prompt_content,
+    _has_cache_breakpoint,
+    _render_system_content,
     _strands_messages_to_openai,
     _tool_specs_to_openai,
     run_json_via_strands,
@@ -189,6 +192,12 @@ def test_flatten_system_prompt_content_handles_absence_and_non_dict_blocks() -> 
     assert _flatten_system_prompt_content([]) == ""
     assert _flatten_system_prompt_content([{"text": "a"}, {"text": "b"}]) == "ab"
     assert _flatten_system_prompt_content(["already-a-string"]) == "already-a-string"
+
+
+def test_flatten_system_prompt_content_unwraps_cache_breakpoint_text() -> None:
+    """A CacheBreakpoint degrades to its exact .text — never its dataclass repr."""
+    assert _flatten_system_prompt_content([CacheBreakpoint("stable prefix")]) == "stable prefix"
+    assert _flatten_system_prompt_content([{"text": "a"}, CacheBreakpoint("b"), "c"]) == "abc"
 
 
 def test_flatten_skips_unknown_blocks() -> None:
@@ -409,6 +418,182 @@ def test_stream_combines_system_prompt_and_system_prompt_content() -> None:
         "role": "system",
         "content": "You are a QA expert.\n\nFollow the house style.",
     }
+
+
+class _ExplodingCapabilityClient(_RecordingClient):
+    """Raises if its capability flag is ever consulted.
+
+    Used to prove ``stream()`` never calls ``supports_prompt_caching()``
+    when ``system_prompt_content`` carries no ``CacheBreakpoint`` at all —
+    the common path for every existing caller.
+    """
+
+    def supports_prompt_caching(self) -> bool:
+        raise AssertionError("supports_prompt_caching() must not be called with no breakpoint")
+
+
+def test_stream_skips_capability_check_when_no_cache_breakpoint_present() -> None:
+    client = _ExplodingCapabilityClient({"ok": True})
+    model = LLMClientModel(client)
+
+    _drain(
+        model.stream(
+            messages=[{"role": "user", "content": [{"text": "hi"}]}],
+            system_prompt="You are a QA expert.",
+            system_prompt_content=[{"text": "Follow the house style."}],
+        )
+    )
+
+    call = client.chat_calls[0]
+    assert call["messages"][0] == {
+        "role": "system",
+        "content": "You are a QA expert.\n\nFollow the house style.",
+    }
+
+
+def test_stream_cache_breakpoint_degrades_to_plain_text_on_non_supporting_client() -> None:
+    """A CacheBreakpoint on a client whose supports_prompt_caching() is False
+    (the inherited default) is a documented no-op: plain text, no
+    cache_control anywhere, no exception."""
+    client = _RecordingClient({"ok": True})
+    assert client.supports_prompt_caching() is False
+    model = LLMClientModel(client)
+
+    _drain(
+        model.stream(
+            messages=[{"role": "user", "content": [{"text": "hi"}]}],
+            system_prompt="You are a QA expert.",
+            system_prompt_content=[CacheBreakpoint("Stable spec excerpt.")],
+        )
+    )
+
+    call = client.chat_calls[0]
+    system_message = call["messages"][0]
+    assert system_message == {
+        "role": "system",
+        "content": "You are a QA expert.\n\nStable spec excerpt.",
+    }
+    assert isinstance(system_message["content"], str)
+    assert "cache_control" not in json.dumps(call)
+
+
+class _CachingCapableClient(_RecordingClient):
+    def supports_prompt_caching(self) -> bool:
+        return True
+
+
+def test_stream_cache_breakpoint_becomes_cache_control_block_on_supporting_client() -> None:
+    client = _CachingCapableClient({"ok": True})
+    model = LLMClientModel(client)
+
+    _drain(
+        model.stream(
+            messages=[{"role": "user", "content": [{"text": "hi"}]}],
+            system_prompt="You are a QA expert.",
+            system_prompt_content=[CacheBreakpoint("Stable spec excerpt.")],
+        )
+    )
+
+    call = client.chat_calls[0]
+    content = call["messages"][0]["content"]
+    assert content == [
+        {"type": "text", "text": "You are a QA expert."},
+        {
+            "type": "text",
+            "text": "Stable spec excerpt.",
+            "cache_control": {"type": "ephemeral"},
+        },
+    ]
+
+
+def test_stream_cache_breakpoint_only_no_leading_system_prompt_block() -> None:
+    client = _CachingCapableClient({"ok": True})
+    model = LLMClientModel(client)
+
+    _drain(
+        model.stream(
+            messages=[{"role": "user", "content": [{"text": "hi"}]}],
+            system_prompt_content=[CacheBreakpoint("Stable spec excerpt.")],
+        )
+    )
+
+    content = client.chat_calls[0]["messages"][0]["content"]
+    assert content == [
+        {
+            "type": "text",
+            "text": "Stable spec excerpt.",
+            "cache_control": {"type": "ephemeral"},
+        },
+    ]
+
+
+def test_stream_cache_breakpoint_interleaved_with_plain_blocks() -> None:
+    client = _CachingCapableClient({"ok": True})
+    model = LLMClientModel(client)
+
+    _drain(
+        model.stream(
+            messages=[{"role": "user", "content": [{"text": "hi"}]}],
+            system_prompt_content=[
+                {"text": "Intro."},
+                CacheBreakpoint("Cached spec excerpt."),
+                {"text": "Trailing note."},
+            ],
+        )
+    )
+
+    content = client.chat_calls[0]["messages"][0]["content"]
+    assert content == [
+        {"type": "text", "text": "Intro."},
+        {
+            "type": "text",
+            "text": "Cached spec excerpt.",
+            "cache_control": {"type": "ephemeral"},
+        },
+        {"type": "text", "text": "Trailing note."},
+    ]
+
+
+def test_render_system_content_stringifies_non_dict_non_breakpoint_block() -> None:
+    """A raw (non-dict) segment in the capable path is stringified, mirroring
+    _flatten_system_prompt_content's fallback for the same element shape."""
+    blocks = _render_system_content(
+        None,
+        ["already-a-string", CacheBreakpoint("Cached.")],
+        supports_prompt_caching=True,
+    )
+    assert blocks == [
+        {"type": "text", "text": "already-a-string"},
+        {"type": "text", "text": "Cached.", "cache_control": {"type": "ephemeral"}},
+    ]
+
+
+# ---------------------------------------------------------------------------
+# _has_cache_breakpoint / _render_system_content (unit-level)
+# ---------------------------------------------------------------------------
+
+
+def test_has_cache_breakpoint() -> None:
+    assert _has_cache_breakpoint(None) is False
+    assert _has_cache_breakpoint([]) is False
+    assert _has_cache_breakpoint([{"text": "a"}, "b"]) is False
+    assert _has_cache_breakpoint([{"text": "a"}, CacheBreakpoint("b")]) is True
+
+
+def test_render_system_content_no_breakpoint_matches_plain_join() -> None:
+    assert (
+        _render_system_content("You are X.", [{"text": "Y."}], supports_prompt_caching=False)
+        == "You are X.\n\nY."
+    )
+    assert (
+        _render_system_content("You are X.", [{"text": "Y."}], supports_prompt_caching=True)
+        == "You are X.\n\nY."
+    )
+
+
+def test_render_system_content_none_when_all_empty() -> None:
+    assert _render_system_content(None, None, supports_prompt_caching=True) is None
+    assert _render_system_content("", [], supports_prompt_caching=True) is None
 
 
 def test_stream_propagates_team_through_to_thread() -> None:
@@ -1170,6 +1355,12 @@ def test_llm_client_model_supports_structured_output_delegates_to_backing_client
     get_max_context_tokens delegation precedent above."""
     assert LLMClientModel(_StructuredOutputClient()).supports_structured_output() is True
     assert LLMClientModel(DummyLLMClient()).supports_structured_output() is False
+
+
+def test_llm_client_model_supports_prompt_caching_delegates_to_backing_client() -> None:
+    """Mirrors the supports_structured_output delegation precedent above."""
+    assert LLMClientModel(_CachingCapableClient({})).supports_prompt_caching() is True
+    assert LLMClientModel(DummyLLMClient()).supports_prompt_caching() is False
 
 
 # ---------------------------------------------------------------------------

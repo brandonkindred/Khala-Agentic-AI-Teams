@@ -13,6 +13,7 @@ from typing import Any, Awaitable, Callable, Dict, Optional
 
 from shared.llm_recovery import extract_json_object
 
+from .cache_breakpoint import CacheBreakpoint
 from .interface import (
     LLMJsonParseError,
     LLMPermanentError,
@@ -29,19 +30,29 @@ def _flatten_system_prompt_content(system_prompt_content: Optional[list] = None)
 
     Shared by ``clients.dummy`` and ``strands_adapter`` — both accept Strands'
     structured system-prompt form (a list of content blocks, e.g.
-    ``[{"text": "..."}]``) alongside a plain ``system_prompt`` string.
+    ``[{"text": "..."}]``) alongside a plain ``system_prompt`` string. A
+    ``CacheBreakpoint`` marker (see ``llm_service.cache_breakpoint``) unwraps
+    to its ``.text`` — this is the documented plain-text degrade path used
+    when the backing client/model does not support prompt caching, so the
+    marker never leaks its Python ``repr()`` onto the wire.
 
     Preconditions:
-        - ``system_prompt_content`` is ``None`` or a list of content blocks.
+        - ``system_prompt_content`` is ``None`` or a list of content blocks
+          (dicts, strings, ``CacheBreakpoint`` instances, or other objects).
 
     Postconditions:
         - Returns the concatenated block text (``""`` when absent/empty).
+        - A ``CacheBreakpoint`` element contributes its exact ``.text``
+          unchanged; a dict element contributes ``block.get("text", "")``;
+          any other element contributes ``str(block)``.
     """
     if not system_prompt_content:
         return ""
     parts: list = []
     for block in system_prompt_content:
-        if isinstance(block, dict):
+        if isinstance(block, CacheBreakpoint):
+            parts.append(block.text)
+        elif isinstance(block, dict):
             parts.append(str(block.get("text", "") or ""))
         else:
             parts.append(str(block))

@@ -102,6 +102,27 @@ def test_attributing_client_supports_structured_output_passthrough(seed_ollama):
     assert c.supports_structured_output() is True  # Ollama
 
 
+def test_attributing_client_supports_prompt_caching_passthrough(seed_ollama):
+    """supports_prompt_caching has no explicit wrapper method on _AttributingClient
+    either — it must reach the inner (failover) client's own explicit method."""
+    seed_ollama(model="m")
+    c = get_client("backend")
+    assert c.supports_prompt_caching() == c._inner.supports_prompt_caching()
+    assert c.supports_prompt_caching() is False
+
+
+def test_failover_supports_prompt_caching_is_always_false():
+    """A single failover call may hand off mid-flight to a different provider than
+    whichever candidate's capability was last observed, so this is unconditionally
+    False, and must never even consult the candidate list to answer."""
+
+    def _explode():
+        raise AssertionError("supports_prompt_caching() must not load candidates")
+
+    failover = FailoverLLMClient(_explode, lambda *a, **k: None, lambda *a, **k: None)
+    assert failover.supports_prompt_caching() is False
+
+
 def test_get_client_none_is_unwrapped_failover(seed_ollama):
     seed_ollama(model="default-model")
     c = get_client(None)

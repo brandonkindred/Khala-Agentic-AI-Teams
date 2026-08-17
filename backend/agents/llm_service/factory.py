@@ -613,6 +613,26 @@ class FailoverLLMClient:
     def chat(self, *args: Any, **kwargs: Any) -> Any:
         return self._dispatch("chat", *args, **kwargs)
 
+    def supports_prompt_caching(self) -> bool:
+        """Always False: a single failover call may hand off mid-flight to a
+        DIFFERENT provider than the one whose capability a caller last
+        observed (see ``_dispatch`` — each candidate is tried in order on a
+        429). A caller that built an Anthropic-shaped ``cache_control`` block
+        list based on today's first candidate's capability could have that
+        request silently mishandled by a later candidate that does not
+        understand it. Declared directly on the class (not left to
+        ``__getattr__`` delegation to the first candidate) so normal
+        attribute lookup finds this conservative answer before delegation is
+        ever consulted — unlike ``.model`` / ``get_max_context_tokens``,
+        which intentionally DO delegate to the active candidate.
+
+        Preconditions: none.
+        Postconditions: always returns False; synchronous, no network call
+            (does not call ``self._load_candidates()`` or build any client),
+            never raises.
+        """
+        return False
+
     def __getattr__(self, name: str) -> Any:
         # Only reached for attributes not defined on the wrapper itself: delegate to
         # the active provider client (``.model``, ``get_max_context_tokens``, the

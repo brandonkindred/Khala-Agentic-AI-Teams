@@ -63,6 +63,7 @@ from strands.types.streaming import StreamEvent
 from strands.types.tools import ToolChoice, ToolSpec
 
 from .attribution import caller_agent, caller_team, current_attribution, llm_attribution
+from .cache_breakpoint import CacheBreakpoint
 from .factory import client_agent_key, get_client, unwrap_client
 from .interface import LLMClient, record_complete_json_turn, take_complete_json_turns
 from .util import _flatten_system_prompt_content
@@ -113,6 +114,87 @@ class LLMClientConfig:
 # ---------------------------------------------------------------------------
 # Message + tool conversion helpers
 # ---------------------------------------------------------------------------
+
+
+def _has_cache_breakpoint(system_prompt_content: Optional[List[Any]]) -> bool:
+    """True if any element of ``system_prompt_content`` is a ``CacheBreakpoint``.
+
+    Preconditions:
+        - ``system_prompt_content`` is ``None`` or a list of content blocks.
+
+    Postconditions:
+        - Returns ``False`` for ``None``/an empty list. Returns ``True`` iff
+          at least one element is a ``CacheBreakpoint`` instance. O(n) in the
+          list length; never raises.
+    """
+    return any(isinstance(block, CacheBreakpoint) for block in system_prompt_content or [])
+
+
+def _render_system_content(
+    system_prompt: Optional[str],
+    system_prompt_content: Optional[List[Any]],
+    *,
+    supports_prompt_caching: bool,
+) -> Optional[Union[str, List[Dict[str, Any]]]]:
+    """Render the combined system content for one ``stream()`` call.
+
+    Threads a ``CacheBreakpoint`` marked prefix (see
+    ``llm_service.cache_breakpoint``) through to the provider's wire-level
+    cache-control block when the backing client supports it; degrades it to
+    plain text (via ``_flatten_system_prompt_content``, which unwraps
+    ``.text``) otherwise — a documented no-op with no output change and no
+    error.
+
+    Preconditions:
+        - ``system_prompt`` is ``None`` or a str.
+        - ``system_prompt_content`` is ``None`` or a list whose elements are
+          dicts (``{"text": ...}``), ``CacheBreakpoint`` instances, or other
+          objects (stringified — matches ``_flatten_system_prompt_content``).
+        - ``supports_prompt_caching`` reflects the backing client's
+          capability already resolved by the caller for this call.
+
+    Postconditions:
+        - When ``system_prompt_content`` contains no ``CacheBreakpoint``, OR
+          ``supports_prompt_caching`` is False: returns EXACTLY the
+          pre-existing plain-string computation — ``system_prompt`` and the
+          flattened ``system_prompt_content`` joined by ``"\\n\\n"`` (``None``
+          when both are empty). This is the byte-identical regression-safety
+          path for every caller that does not use ``CacheBreakpoint``, and
+          the documented no-op degrade for a caller that does but whose
+          backing client cannot honor it.
+        - Otherwise: returns a ``list[dict]`` of Anthropic-shaped
+          ``{"type": "text", "text": ...}`` blocks — an optional leading
+          block for ``system_prompt``, then one block per
+          ``system_prompt_content`` entry in order, with each
+          ``CacheBreakpoint`` additionally carrying ``"cache_control":
+          {"type": "ephemeral"}``.
+        - Never raises. Never mutates ``system_prompt_content`` or its
+          elements.
+    """
+    if not _has_cache_breakpoint(system_prompt_content) or not supports_prompt_caching:
+        return (
+            "\n\n".join(
+                part
+                for part in (system_prompt, _flatten_system_prompt_content(system_prompt_content))
+                if part
+            )
+            or None
+        )
+    blocks: List[Dict[str, Any]] = []
+    if system_prompt:
+        blocks.append({"type": "text", "text": system_prompt})
+    for block in system_prompt_content or []:
+        if isinstance(block, CacheBreakpoint):
+            blocks.append(
+                {"type": "text", "text": block.text, "cache_control": {"type": "ephemeral"}}
+            )
+        elif isinstance(block, dict):
+            text = str(block.get("text", "") or "")
+            if text:
+                blocks.append({"type": "text", "text": text})
+        elif block:
+            blocks.append({"type": "text", "text": str(block)})
+    return blocks or None
 
 
 def _tool_result_content_to_text(content: List[Dict[str, Any]]) -> str:
@@ -390,6 +472,16 @@ class LLMClientModel(Model):
         """
         return self._client.supports_structured_output()
 
+    def supports_prompt_caching(self) -> bool:
+        """Delegate to the backing ``LLMClient`` (see ``LLMClient.supports_prompt_caching``).
+
+        Postconditions:
+            - Returns the backing client's capability flag. Synchronous, no
+              network call, never raises (assuming the backing client's
+              override doesn't).
+        """
+        return self._client.supports_prompt_caching()
+
     def clone(self, **overrides: Any) -> "LLMClientModel":
         """Return a new ``LLMClientModel`` sharing the backing client but with
         per-field overrides applied to the config.
@@ -453,20 +545,29 @@ class LLMClientModel(Model):
         are both accepted and merged into a single ``{"role": "system", ...}``
         message: ``system_prompt_content`` is flattened to text and appended
         after ``system_prompt`` when both are present. Either may be omitted;
-        when both are absent, no system message is emitted.
+        when both are absent, no system message is emitted. A
+        ``CacheBreakpoint`` (see ``llm_service.cache_breakpoint``) inside
+        ``system_prompt_content`` becomes an Anthropic ``cache_control``
+        breakpoint block on the outgoing request when
+        ``self._client.supports_prompt_caching()`` is True; otherwise it
+        degrades to plain text (its ``.text``) — a documented no-op with no
+        output change and no error. See ``_render_system_content``.
 
         ``tool_choice`` is accepted for interface compatibility but is not
         forwarded: ``LLMClient`` does not currently expose a tool_choice knob.
         """
         del tool_choice  # interface-only: LLMClient exposes no tool_choice knob
         oai_messages = _strands_messages_to_openai(messages)
-        combined_system = "\n\n".join(
-            part
-            for part in (system_prompt, _flatten_system_prompt_content(system_prompt_content))
-            if part
+        has_cache_breakpoint = _has_cache_breakpoint(system_prompt_content)
+        system_content = _render_system_content(
+            system_prompt,
+            system_prompt_content,
+            supports_prompt_caching=(
+                self._client.supports_prompt_caching() if has_cache_breakpoint else False
+            ),
         )
-        if combined_system:
-            oai_messages.insert(0, {"role": "system", "content": combined_system})
+        if system_content:
+            oai_messages.insert(0, {"role": "system", "content": system_content})
 
         oai_tools = _tool_specs_to_openai(tool_specs)
 

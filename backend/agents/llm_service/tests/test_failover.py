@@ -454,6 +454,13 @@ def test_build_entry_client_runpod(monkeypatch):
     assert c.model == "mixtral" and c.base_url == "https://api.runpod.ai/v2/abc123/openai/v1"
 
 
+def test_runpod_client_supports_prompt_caching_is_false():
+    """RunPod (an OpenAI-compatible wire format) correctly inherits the
+    conservative default from OllamaLLMClient — no code change needed there."""
+    client = RunPodLLMClient(model="m", base_url="http://x", api_key="k")
+    assert client.supports_prompt_caching() is False
+
+
 def test_build_entry_client_runpod_strips_base_url(monkeypatch):
     """A stored RunPod base_url with stray whitespace is trimmed before use, matching
     the Ollama branch — otherwise endpoint resolution would break."""

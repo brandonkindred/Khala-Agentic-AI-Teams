@@ -175,15 +175,31 @@ def _require_text(name: str, value: str) -> None:
         raise ValueError(f"{name} must be a non-empty string")
 
 
-def _json_system(system_prompt: Optional[str], tools: Optional[list]) -> Optional[str]:
+def _json_system(
+    system_prompt: "Optional[str | list]", tools: Optional[list]
+) -> "Optional[str | list]":
     """Build the system prompt for JSON mode.
 
-    Preconditions: none.
-    Postconditions: when ``tools`` are present, returns the stripped ``system_prompt``
-        (or ``None``) WITHOUT the JSON-only instruction — it would fight the tool-use
-        protocol; otherwise appends ``_JSON_ONLY_INSTRUCTION`` (alone when there is no
-        system prompt). Never raises.
+    Preconditions: ``system_prompt`` is ``None``, a ``str``, or a list of
+        Anthropic system-content blocks (as produced by
+        ``_to_anthropic_messages`` when block-shaped ``role:"system"``
+        content was supplied — e.g. a cache-control breakpoint block).
+    Postconditions: when ``tools`` are present, returns ``system_prompt``
+        unchanged (str stripped as before; list returned verbatim, or
+        ``None`` when empty) WITHOUT the JSON-only instruction — it would
+        fight the tool-use protocol. Otherwise:
+        - str/``None`` input: appends ``_JSON_ONLY_INSTRUCTION`` (alone when
+          there is no system prompt) — unchanged from before list support.
+        - list input: returns a NEW list with ``_JSON_ONLY_INSTRUCTION``
+          appended as one additional trailing ``{"type": "text", "text":
+          ...}`` block (no ``cache_control`` on it); the input list and its
+          blocks are never mutated.
+        Never raises.
     """
+    if isinstance(system_prompt, list):
+        if tools:
+            return system_prompt or None
+        return [*system_prompt, {"type": "text", "text": _JSON_ONLY_INSTRUCTION}]
     base = system_prompt.strip() if system_prompt and system_prompt.strip() else ""
     if tools:
         return base or None
@@ -665,6 +681,17 @@ class ClaudeLLMClient(LLMClient):
             llm_config.resolve_think_for_model(self.model, think),
         )
 
+    def supports_prompt_caching(self) -> bool:
+        """Anthropic's wire protocol accepts a ``cache_control`` breakpoint on
+        a system-prompt content block (see ``_to_anthropic_messages`` /
+        ``_json_system``).
+
+        Preconditions: none.
+        Postconditions: always returns True; synchronous, no network call,
+            never raises (see ``LLMClient.supports_prompt_caching``).
+        """
+        return True
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
@@ -818,10 +845,15 @@ class ClaudeLLMClient(LLMClient):
             ``messages`` are translated to Anthropic blocks (orphan tool results
             with no matching tool_use are dropped); signed ``thinking`` blocks carried
             on a replayed assistant tool-use turn are re-emitted unchanged so
-            extended-thinking tool loops do not 400. Raises ``LLMPermanentError``
-            when ``messages`` yields no user/assistant turn, ``LLMJsonParseError``
-            (json mode, unparseable), or the unified ``LLM*`` errors. A telemetry
-            record is emitted for the call.
+            extended-thinking tool loops do not 400. A ``role:"system"`` entry's
+            ``content`` may be a plain ``str`` or an already-Anthropic-shaped list of
+            content blocks (e.g. one carrying a ``cache_control`` breakpoint) — see
+            ``_to_anthropic_messages``; either shape is forwarded to the wire as the
+            request's ``system`` parameter, with ``_json_system`` appending the
+            JSON-mode instruction as an extra block when the shape is a list. Raises
+            ``LLMPermanentError`` when ``messages`` yields no user/assistant turn,
+            ``LLMJsonParseError`` (json mode, unparseable), or the unified ``LLM*``
+            errors. A telemetry record is emitted for the call.
         """
         _require_text("objective", objective)
         if response_format not in ("json", "text"):
@@ -919,7 +951,7 @@ def _retry_after_seconds(error: Any) -> Optional[float]:
     return value if value > 0 else None
 
 
-def _to_anthropic_messages(messages: list) -> tuple[str, list]:
+def _to_anthropic_messages(messages: list) -> "tuple[str | list, list]":
     """Translate an OpenAI-style chat ``messages`` list to Anthropic shape.
 
     Anthropic carries the system prompt as a top-level parameter (not a
@@ -928,7 +960,13 @@ def _to_anthropic_messages(messages: list) -> tuple[str, list]:
     is what makes :func:`llm_service.tool_loop.complete_json_with_tool_loop` work
     under the Claude provider:
 
-    - ``role:"system"`` entries are concatenated into the returned system text.
+    - ``role:"system"`` entries with plain ``str`` content are concatenated
+      into the returned system text. A ``role:"system"`` entry whose
+      ``content`` is already a list (an Anthropic-shaped content-block list —
+      e.g. one built upstream by the Strands adapter to carry a
+      ``cache_control`` breakpoint) passes through unchanged, mirroring the
+      non-str passthrough already used for ``user``/``assistant`` content
+      below.
     - ``role:"assistant"`` with ``tool_calls`` becomes an assistant turn whose
       content is ``tool_use`` blocks (plus any leading text); string ``arguments``
       are parsed to a dict (Anthropic requires an object ``input``). Any signed
@@ -955,14 +993,21 @@ def _to_anthropic_messages(messages: list) -> tuple[str, list]:
         after their assistant turn) and neither re-orders nor rejects out-of-order
         tool results — it only flushes pending results on the next non-tool message,
         so a mis-ordered list is faithfully (and possibly invalidly) translated.
-    Postconditions: returns ``(system_text, anthropic_messages)`` where every
+    Postconditions: returns ``(system, anthropic_messages)`` where every
         emitted entry has role ``user``/``assistant`` and Anthropic-valid
         (non-empty) content, and every emitted ``tool_result`` has a matching
         ``tool_use`` earlier in the list (orphans are dropped, logged at debug, so
         Anthropic never sees a dangling ``tool_result``). Never raises for a
-        reasonably-shaped list.
+        reasonably-shaped list. ``system`` is a ``str`` (the pre-existing shape,
+        byte-identical to before block-content support) when every ``role:"system"``
+        entry seen had plain ``str`` content; otherwise it is a ``list[dict]`` —
+        any plain-string system entries are pooled into a single leading
+        ``{"type": "text", "text": ...}`` block (this function has never preserved
+        the relative position of multiple system entries), followed by the
+        block-shaped entries verbatim, in the order encountered.
     """
     system_parts: list[str] = []
+    system_blocks: list[dict] = []
     out: list[dict] = []
     pending_tool_results: list[dict] = []
     emitted_tool_use_ids: set[str] = set()
@@ -1003,6 +1048,12 @@ def _to_anthropic_messages(messages: list) -> tuple[str, list]:
         if role == "system":
             if isinstance(content, str) and content:
                 system_parts.append(content)
+            elif isinstance(content, list) and content:
+                # Block-shaped system content (e.g. an Anthropic cache_control
+                # breakpoint block built upstream by the Strands adapter)
+                # passes through unchanged — the same "non-str content
+                # forwards verbatim" precedent used for user/assistant below.
+                system_blocks.extend(content)
             continue
         if role == "assistant":
             tool_calls = msg.get("tool_calls") or []
@@ -1061,4 +1112,10 @@ def _to_anthropic_messages(messages: list) -> tuple[str, list]:
             elif content:
                 out.append({"role": "user", "content": content})
     _flush_tool_results()
+    if system_blocks:
+        combined: list[dict] = []
+        if system_parts:
+            combined.append({"type": "text", "text": "\n\n".join(system_parts)})
+        combined.extend(system_blocks)
+        return combined, out
     return "\n\n".join(system_parts), out

@@ -374,6 +374,113 @@ def test_chat_rejects_bad_response_format():
 
 
 # ---------------------------------------------------------------------------
+# Prompt-cache breakpoint plumbing
+# ---------------------------------------------------------------------------
+
+
+def test_claude_client_supports_prompt_caching_is_true():
+    client, _ = _make_client(_text_message("hi"))
+    assert client.supports_prompt_caching() is True
+
+
+def test_to_anthropic_messages_str_only_system_unchanged():
+    """Regression guard: two plain-string system entries must still join into
+    a single str, byte-identical to pre-cache-breakpoint behavior."""
+    from llm_service.clients.claude import _to_anthropic_messages
+
+    system, msgs = _to_anthropic_messages(
+        [
+            {"role": "system", "content": "A"},
+            {"role": "system", "content": "B"},
+            {"role": "user", "content": "hi"},
+        ]
+    )
+    assert system == "A\n\nB"
+    assert isinstance(system, str)
+    assert msgs == [{"role": "user", "content": "hi"}]
+
+
+def test_to_anthropic_messages_passes_through_list_shaped_system_content():
+    from llm_service.clients.claude import _to_anthropic_messages
+
+    blocks = [
+        {"type": "text", "text": "Stable spec excerpt.", "cache_control": {"type": "ephemeral"}}
+    ]
+    system, msgs = _to_anthropic_messages(
+        [
+            {"role": "system", "content": blocks},
+            {"role": "user", "content": "hi"},
+        ]
+    )
+    assert system == blocks
+    assert msgs == [{"role": "user", "content": "hi"}]
+
+
+def test_to_anthropic_messages_combines_str_and_list_system_entries():
+    from llm_service.clients.claude import _to_anthropic_messages
+
+    blocks = [{"type": "text", "text": "Cached.", "cache_control": {"type": "ephemeral"}}]
+    system, _msgs = _to_anthropic_messages(
+        [
+            {"role": "system", "content": "You are X."},
+            {"role": "system", "content": blocks},
+            {"role": "user", "content": "hi"},
+        ]
+    )
+    assert system == [{"type": "text", "text": "You are X."}, *blocks]
+
+
+def test_json_system_appends_instruction_block_to_list_system():
+    from llm_service.clients.claude import _JSON_ONLY_INSTRUCTION, _json_system
+
+    blocks = [{"type": "text", "text": "Cached.", "cache_control": {"type": "ephemeral"}}]
+    result = _json_system(blocks, None)
+    assert result == [*blocks, {"type": "text", "text": _JSON_ONLY_INSTRUCTION}]
+    # The input list must not be mutated.
+    assert blocks == [{"type": "text", "text": "Cached.", "cache_control": {"type": "ephemeral"}}]
+
+
+def test_json_system_list_system_with_tools_unchanged():
+    from llm_service.clients.claude import _json_system
+
+    blocks = [{"type": "text", "text": "Cached."}]
+    assert _json_system(blocks, [{"name": "f"}]) == blocks
+    assert _json_system([], [{"name": "f"}]) is None
+
+
+def test_chat_forwards_cache_control_system_blocks_to_wire_text_mode():
+    client, capture = _make_client(_text_message("prose"))
+    blocks = [{"type": "text", "text": "Cached spec.", "cache_control": {"type": "ephemeral"}}]
+    out = client.chat(
+        [
+            {"role": "system", "content": blocks},
+            {"role": "user", "content": "hi"},
+        ],
+        objective="t",
+        response_format="text",
+    )
+    assert out == "prose"
+    assert capture["system"] == blocks
+
+
+def test_chat_forwards_cache_control_system_blocks_to_wire_json_mode():
+    from llm_service.clients.claude import _JSON_ONLY_INSTRUCTION
+
+    client, capture = _make_client(_text_message('{"ok": true}'))
+    blocks = [{"type": "text", "text": "Cached spec.", "cache_control": {"type": "ephemeral"}}]
+    out = client.chat(
+        [
+            {"role": "system", "content": blocks},
+            {"role": "user", "content": "hi"},
+        ],
+        objective="t",
+        response_format="json",
+    )
+    assert out == {"ok": True}
+    assert capture["system"] == [*blocks, {"type": "text", "text": _JSON_ONLY_INSTRUCTION}]
+
+
+# ---------------------------------------------------------------------------
 # tool-loop message translation (_to_anthropic_messages)
 # ---------------------------------------------------------------------------
 

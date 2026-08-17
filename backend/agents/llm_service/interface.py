@@ -513,6 +513,25 @@ class LLMClient(ABC):
         """
         return False
 
+    def supports_prompt_caching(self) -> bool:
+        """Whether this client accepts an Anthropic-style ``cache_control``
+        breakpoint on the wire, as distinct from an ordinary plain-string
+        system prompt.
+
+        This is a capability FLAG, not a promise about the provider's actual
+        caching behavior for what is sent (e.g. Anthropic still applies its
+        own server-side minimum-cacheable-length rule) — it only says the
+        WIRE SHAPE (a system content-block list carrying ``cache_control``)
+        is understood rather than silently mishandled or dropped.
+
+        Preconditions: none.
+        Postconditions: synchronous, makes no network call, never raises.
+            Returns ``False`` by default (every client that has not opted
+            in). Override in a client whose wire protocol supports a
+            cache-control breakpoint on the system prompt.
+        """
+        return False
+
     def complete(
         self,
         prompt: str,
