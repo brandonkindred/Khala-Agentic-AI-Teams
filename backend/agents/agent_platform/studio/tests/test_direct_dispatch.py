@@ -6,6 +6,8 @@ native ``ValueError`` / ``LookupError`` propagate unchanged.
 
 from __future__ import annotations
 
+import contextvars
+import threading
 import time
 from unittest.mock import Mock
 
@@ -193,6 +195,61 @@ def test_start_conversation_timeout_raises_runtime_error(
 
     with pytest.raises(RuntimeError, match="dispatch timeout"):
         dispatch.start_conversation("new", None, "hi")
+
+
+# ── _DaemonAuthoringPool (bounded threads + context propagation) ─────────────────
+
+
+def test_pool_bounds_worker_threads_under_burst() -> None:
+    """A burst of submits must not spawn a thread per call — concurrency stays capped."""
+    pool = dispatch._DaemonAuthoringPool()
+    try:
+        idents: set[int] = set()
+        lock = threading.Lock()
+
+        def _record() -> None:
+            with lock:
+                idents.add(threading.get_ident())
+
+        futures = [pool.submit(_record) for _ in range(50)]
+        for fut in futures:
+            fut.result(timeout=5)
+
+        # Distinct worker thread ids can never exceed the fixed pool size, no
+        # matter how many tasks were submitted (thread-per-task would give ~50).
+        assert 0 < len(idents) <= dispatch._AUTHORING_POOL_WORKERS
+    finally:
+        pool.shutdown()
+
+
+def test_pool_propagates_caller_contextvars() -> None:
+    """A task runs inside the submitting thread's context snapshot (attribution/trace)."""
+    var: contextvars.ContextVar[str] = contextvars.ContextVar("studio_test_var", default="unset")
+    pool = dispatch._DaemonAuthoringPool()
+    try:
+        token = var.set("bound-in-caller")
+        try:
+            fut = pool.submit(var.get)
+            assert fut.result(timeout=5) == "bound-in-caller"
+        finally:
+            var.reset(token)
+    finally:
+        pool.shutdown()
+
+
+def test_pool_submit_after_shutdown_returns_runtime_error() -> None:
+    pool = dispatch._DaemonAuthoringPool()
+    pool.shutdown()
+    fut = pool.submit(lambda: "unreachable")
+    with pytest.raises(RuntimeError, match="shut down"):
+        fut.result(timeout=5)
+
+
+def test_pool_shutdown_is_idempotent() -> None:
+    pool = dispatch._DaemonAuthoringPool()
+    pool.shutdown()
+    pool.shutdown()
+    assert pool.is_live() is False
 
 
 def test_shutdown_authoring_executor_is_idempotent() -> None:
