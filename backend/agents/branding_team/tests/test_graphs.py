@@ -35,7 +35,6 @@ from branding_team.graphs.top_level import (
 from branding_team.models import (
     BrandingMission,
     BrandPhase,
-    GovernanceOutput,
     VisualIdentityOutput,
 )
 from branding_team.tests.conftest import make_mission
@@ -208,6 +207,28 @@ def test_build_phase5_graph_is_a_graph() -> None:
     assert isinstance(build_phase5_graph(), Graph)
 
 
+def test_build_phase5_graph_wires_pure_fan_out() -> None:
+    """Phase 5 has no compositor: all seven specialists are both entry points
+    and terminal nodes, with no edges between them. Their typed fragments are
+    merged into ``GovernanceOutput`` in Python by the orchestrator's Phase-5
+    ``merge_fn``, not by an LLM fan-in node.
+    """
+    graph = build_phase5_graph()
+    expected = {
+        "ownership_definer",
+        "approval_workflow_designer",
+        "asset_wiki_planner",
+        "training_planner",
+        "kpi_designer",
+        "evolution_framer",
+        "brand_rules_codifier",
+    }
+    assert set(graph.nodes.keys()) == expected
+    assert {n.node_id for n in graph.entry_points} == expected
+    assert len(graph.edges) == 0
+    assert "governance_compositor" not in graph.nodes
+
+
 def test_phase5_prompts_drop_redundant_json_reminder() -> None:
     """The Pydantic structured-output schema is the contract; the redundant
     "Output valid JSON" sentence is no longer needed for any of the 7 Phase 5
@@ -240,16 +261,16 @@ def test_phase5_prompts_drop_redundant_json_reminder() -> None:
 # Compositor (fan-in join) nodes — migrated to structured_output=
 # ---------------------------------------------------------------------------
 
-# The remaining phase-3/5 compositors are inline ``build_agent()`` calls in the
-# graph files (not ``agents.py`` factories), so they are reached through the
-# built graph's node executor rather than a factory. Each now carries its own
+# The remaining phase-3 compositor is an inline ``build_agent()`` call in the
+# graph file (not an ``agents.py`` factory), so it is reached through the
+# built graph's node executor rather than a factory. It carries its own
 # ``structured_output=`` model instead of a prose "output valid JSON" reminder,
-# which forces Strands' typed tool call and removes the compositors' reliance on
-# the free-text ``_parse_model_from_text`` recovery path. Phase 4 no longer has
-# a compositor (see ``test_build_phase4_graph_wires_pure_fan_out``).
+# which forces Strands' typed tool call and removes the compositor's reliance on
+# the free-text ``_parse_model_from_text`` recovery path. Phase 4 and Phase 5 no
+# longer have a compositor (see ``test_build_phase4_graph_wires_pure_fan_out``
+# and ``test_build_phase5_graph_wires_pure_fan_out``).
 _COMPOSITOR_CASES = [
     (build_phase3_graph, "visual_compositor", VisualIdentityOutput),
-    (build_phase5_graph, "governance_compositor", GovernanceOutput),
 ]
 
 
