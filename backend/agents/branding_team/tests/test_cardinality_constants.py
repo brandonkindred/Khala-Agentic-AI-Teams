@@ -20,6 +20,7 @@ systemic sibling of the single-instance prompt/schema drift guards already in
 
 from __future__ import annotations
 
+import re
 from typing import Callable
 
 import annotated_types as at
@@ -359,7 +360,10 @@ def test_prompt_renders_named_constant_range(
     factory: Callable[[], Agent], min_const: int, max_const: int
 ) -> None:
     """The rendered agent prompt states the constant's ``{min}-{max}`` range (prompt side)."""
-    assert f"{min_const}-{max_const}" in factory().system_prompt
+    pattern = rf"(?<!\d){min_const}-{max_const}(?!\d)"
+    assert re.search(pattern, factory().system_prompt), (
+        f"expected an unambiguous {min_const}-{max_const} range in the rendered prompt"
+    )
 
 
 def test_boilerplate_variants_fixed_count_single_sourced() -> None:
@@ -368,4 +372,7 @@ def test_boilerplate_variants_fixed_count_single_sourced() -> None:
         m.BOILERPLATE_VARIANTS_COUNT,
         m.BOILERPLATE_VARIANTS_COUNT,
     )
-    assert f"{m.BOILERPLATE_VARIANTS_COUNT} versions" in make_storyteller().system_prompt
+    pattern = rf"(?<!\d){m.BOILERPLATE_VARIANTS_COUNT}(?!\d) versions"
+    assert re.search(pattern, make_storyteller().system_prompt), (
+        f"expected an unambiguous {m.BOILERPLATE_VARIANTS_COUNT} versions count in the rendered prompt"
+    )
