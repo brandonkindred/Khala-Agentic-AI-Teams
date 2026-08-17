@@ -11,9 +11,13 @@ import { AgentStudioTestAgentComponent } from './agent-studio-test-agent.compone
  * Default `/agent-studio` child: the four-stage switch that used to live in the
  * shell template.
  *
- * Preconditions: `AgentStudioStateService` is provided by an ancestor (the shell).
+ * Preconditions: `AgentStudioStateService` is provided by an ancestor (the shell);
+ *   `state.activeStage()` is in range (enforced by `AgentStudioStateService`).
  * Postconditions: the template renders exactly one of the four stage components
- *   (or the defensive placeholder) matching `state.activeStage()`.
+ *   matching `state.activeStage()`. The template's placeholder branch is a
+ *   separate defensive fallback for a `STUDIO_STAGES` key with no matching
+ *   `@case` here, not for an out-of-range index — `activeStageDef` throws
+ *   `RangeError` for that instead of falling back, per the precondition above.
  */
 @Component({
   selector: 'app-agent-studio-stage-host',
