@@ -20,6 +20,9 @@ _MAP_FILES = (
     _REPO_ROOT / "backend" / "agents" / "agent_platform" / "README.md",
 )
 
+# Catalog startup steps are numbered 0 through 8 in docs/UNIFIED_API_LIFESPAN.md.
+_LIFESPAN_STARTUP_STEP_COUNT = 9
+
 
 def test_lifespan_catalog_documents_worker_and_route_registration() -> None:
     """The markdown catalog is the single map of lifespan + import-time registration.
@@ -33,7 +36,7 @@ def test_lifespan_catalog_documents_worker_and_route_registration() -> None:
     assert _CATALOG.is_file(), f"missing lifespan catalog: {_CATALOG}"
     text = _CATALOG.read_text(encoding="utf-8")
 
-    for step in range(9):
+    for step in range(_LIFESPAN_STARTUP_STEP_COUNT):
         assert f"{step}." in text, f"catalog missing lifespan step {step}"
 
     for token in (
@@ -52,6 +55,7 @@ def test_lifespan_catalog_documents_worker_and_route_registration() -> None:
         "_in_process_schema_failures",
         "register_usage_flusher",
         "_stop_in_process_temporal_workers",
+        "shutdown_authoring_executor",
         "usage_flusher.shutdown",
         "llm_call_records",
     ):

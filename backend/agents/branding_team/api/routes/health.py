@@ -11,4 +11,11 @@ router = APIRouter()
 
 @router.get("/health")
 def health() -> Dict[str, str]:
+    """Report liveness of the branding API.
+
+    Preconditions:
+        None — the endpoint takes no input and touches no external state.
+    Postconditions:
+        Always returns ``{"status": "ok"}`` with HTTP 200.
+    """
     return {"status": "ok"}
