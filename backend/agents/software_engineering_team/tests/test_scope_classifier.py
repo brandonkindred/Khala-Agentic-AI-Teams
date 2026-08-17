@@ -72,16 +72,14 @@ def test_plain_dummy_is_all_unknown() -> None:
     assert all(v.in_scope is None for v in out)
 
 
-def test_client_resolution_failure_is_all_unknown(monkeypatch: Any) -> None:
-    """A get_client failure (llm=None) degrades to all-unknown, never raises."""
-    import code_review_agent.scope_classifier as sc
+def test_missing_client_is_all_unknown() -> None:
+    """No caller-supplied client (llm=None) degrades to all-unknown, never raises.
 
-    def _boom(*a: Any, **k: Any) -> Any:
-        raise RuntimeError("no provider configured")
-
-    monkeypatch.setattr(sc, "get_client", _boom)
-    out = classify_scope([_issue()])
-    assert out == [UNKNOWN]
+    The pass does not self-resolve a client — the caller owns model resolution
+    (the code_review_verify model, like the sibling verification passes).
+    """
+    out = classify_scope([_issue(), _issue()])
+    assert out == [UNKNOWN, UNKNOWN]
 
 
 # --------------------------------------------------------------------------- #

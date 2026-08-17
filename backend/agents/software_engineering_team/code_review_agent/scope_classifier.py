@@ -14,11 +14,32 @@ batches out across the shared map-parallelism budget
 ``complete_json`` call — no reasoning agent and no file-read tools; the heavier
 tool-grounded verifier lives in :mod:`scope_filter`.
 
-The pass is **fail-safe by design**: any per-batch failure (client resolution,
-LLM error, malformed reply) degrades that batch's findings to the ``"unknown"``
+The pass is **fail-safe by design**: a missing client or any per-batch failure
+(LLM error, malformed reply) degrades the affected findings to the ``"unknown"``
 verdict (``in_scope=None``) so a caller can fall back to the free heuristic.
 :func:`classify_scope` never raises and always returns a verdict positionally
 aligned 1:1 with its input.
+
+Relationship to :mod:`scope_filter` and status:
+    This is a lightweight, standalone building block — it is **not yet wired
+    into the coordinator's tail-pass pipeline**, so it currently emits no
+    verdicts into a live review and cannot conflict with any other pass. The
+    existing :func:`scope_filter.apply_scope_verification` remains the wired-in
+    scope pass: it is heavier (a tool-grounded reasoning agent using the
+    added/modified/deleted line maps) and tags findings ``pre_existing``. This
+    module instead does one bounded ``complete_json`` call per file batch and
+    returns a structured :class:`ScopeClassification`. Reconciling the two into
+    a single wired-in source of scope truth is deliberately left to the
+    follow-up work that integrates this pass; until then the caller owns which
+    verdict it consumes.
+
+Model resolution mirrors the sibling verification passes
+(:func:`false_positive_filter.filter_false_positives`,
+:func:`scope_filter.apply_scope_verification`): the ``llm`` client is supplied
+by the caller, which is responsible for resolving the ``code_review_verify``
+model (e.g. via :func:`model_resolution.resolve_code_review_verify_model`) so
+this pass uses the same lighter verify model, pin, and failover behavior as its
+siblings rather than self-resolving a heavier ``code_review`` client.
 
 Invariants:
     - The returned list has exactly ``len(issues)`` elements, element ``i`` being
@@ -33,7 +54,6 @@ import logging
 from dataclasses import dataclass
 from typing import Any, Dict, List, Mapping, Optional, Sequence
 
-from llm_service import get_client
 from llm_service.interface import LLMClient
 from shared.concurrency import parallel_map
 from software_engineering_team.shared.context_sizing import parse_env_int
@@ -284,6 +304,12 @@ def classify_scope(
 ) -> List[ScopeClassification]:
     """Classify each finding in/out-of-scope, batched by file and fanned out.
 
+    ``llm`` is supplied by the caller — the verification pipeline resolves the
+    ``code_review_verify`` model and passes it in, mirroring
+    ``false_positive_filter``/``scope_filter``. This pass does not self-resolve a
+    client; ``llm=None`` degrades to all-:data:`UNKNOWN` rather than reaching for
+    a heavier ``code_review`` client of its own.
+
     Preconditions:
         - ``issues`` is a sequence of ``CodeReviewIssue``-like findings (each
           exposes ``file_path``/``line``/``description``/``suggestion``).
@@ -292,8 +318,8 @@ def classify_scope(
         - Returns a list positionally aligned 1:1 with ``issues`` — element ``i``
           is the verdict for ``issues[i]``. Empty ``issues`` returns ``[]``.
         - Every element is a :class:`ScopeClassification`. A finding whose batch
-          failed, whose index the model omitted, or which ran under the
-          production dummy / an unconfigured client is :data:`UNKNOWN`
+          failed, whose index the model omitted, or which ran with no client
+          (``llm=None``) or under the production dummy is :data:`UNKNOWN`
           (``in_scope=None``), so a caller can fall back to its heuristic.
         - A ``max_findings_per_group`` or ``max_workers`` argument below 1 is
           floored to 1 (matching the env path's ``parse_env_int(..., 1)`` clamp),
@@ -310,18 +336,10 @@ def classify_scope(
     if n == 0:
         return []
 
-    if llm is None:
-        try:
-            llm = get_client("code_review")
-        except Exception as exc:  # noqa: BLE001 — must never break the review
-            logger.warning(
-                "ScopeClassifier: could not resolve LLM client (%s: %s); returning all-unknown",
-                type(exc).__name__,
-                exc,
-            )
-            return [UNKNOWN] * n
-
-    if _is_unscripted_dummy(llm):
+    # The caller owns model resolution (the code_review_verify model, like the
+    # sibling verification passes); a missing client degrades to all-unknown
+    # rather than self-resolving a heavier code_review client here.
+    if llm is None or _is_unscripted_dummy(llm):
         return [UNKNOWN] * n
 
     cap = (
