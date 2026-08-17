@@ -235,18 +235,18 @@
                      cancellable during the ~poll-interval lag after the pipeline
                      ends, so Stop must remain available then. -->
                 <div class="persona__run-actions">
-                @if (runInProgress()) {
-                  <button
-                    mat-stroked-button
-                    type="button"
-                    class="persona__stop"
-                    [disabled]="cancelling()"
-                    (click)="stopRun()"
-                  >
-                    <mat-icon aria-hidden="true">stop</mat-icon>
-                    {{ cancelling() ? 'Stopping…' : 'Stop run' }}
-                  </button>
-                }
+                  @if (runInProgress()) {
+                    <button
+                      mat-stroked-button
+                      type="button"
+                      class="persona__stop"
+                      [disabled]="cancelling()"
+                      (click)="stopRun()"
+                    >
+                      <mat-icon aria-hidden="true">stop</mat-icon>
+                      {{ cancelling() ? 'Stopping…' : 'Stop run' }}
+                    </button>
+                  }
                   <button
                     mat-stroked-button
                     type="button"
