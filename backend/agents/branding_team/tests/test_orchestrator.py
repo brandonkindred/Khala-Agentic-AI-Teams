@@ -12,6 +12,7 @@ import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from pydantic import BaseModel
 
 from branding_team import (
     BrandingTeamOrchestrator,
@@ -26,13 +27,19 @@ from branding_team.models import (
     Brand,
     BrandArchetypeOutput,
     BrandArchetypesOutput,
+    BrandArchitectureOutput,
+    BrandArchitectureRuleOutput,
     BrandCheckRequest,
     BrandDiscoveryAudit,
+    BrandExperiencePrinciplesOutput,
     BrandHealthKPI,
+    BrandInActionExampleOutput,
+    BrandInActionOutput,
     BrandStatus,
     BrandStoryOutput,
     ChannelActivationOutput,
     ChannelGuideline,
+    ChannelGuidelineOutput,
     ColorEntry,
     CompetitiveSnapshot,
     CoreValue,
@@ -61,6 +68,7 @@ from branding_team.models import (
     WritingGuidelinesBody,
     WritingGuidelinesOutput,
 )
+from branding_team.orchestrator import _merge_phase4_fragments
 from branding_team.store import BrandVersionAppendConflict
 from branding_team.tests.conftest import make_mission
 
@@ -818,19 +826,21 @@ def test_extract_phase_output_uses_structured_output_when_present() -> None:
     "node_id,full_output,model_cls",
     [
         ("phase3_visual", _full_visual_identity(), VisualIdentityOutput),
-        ("phase4_channel", _full_channel_activation(), ChannelActivationOutput),
         ("phase5_governance", _full_governance(), GovernanceOutput),
     ],
-    ids=["phase3_visual", "phase4_channel", "phase5_governance"],
+    ids=["phase3_visual", "phase5_governance"],
 )
 def test_extract_compositor_output_uses_structured_output_not_text_parse(
     node_id, full_output, model_cls
 ) -> None:
-    """The Phase 3/4/5 compositors now pass ``structured_output=``, so their
-    typed payload lands on ``AgentResult.structured_output`` and extraction
+    """The Phase 3/5 compositors pass ``structured_output=``, so their typed
+    payload lands on ``AgentResult.structured_output`` and extraction
     consumes it via the structured path — ``_parse_model_from_text`` is never
     reached. The empty ``message`` proves the result is taken from the
-    structured field, not recovered from any text block.
+    structured field, not recovered from any text block. Phase 4 has no
+    compositor (``check_structured_output=False``), so it's excluded here —
+    see ``test_extract_phase_output_merges_every_phase4_fragment`` and
+    ``test_extract_phase_output_rejects_incomplete_phase4_fragments``.
     """
     agent_result = MagicMock()
     agent_result.message = {"content": []}
@@ -1351,6 +1361,267 @@ def test_extract_phase_output_falls_back_when_not_phase1_shaped() -> None:
     assert isinstance(output, StrategicCoreOutput)
     assert output.positioning_statement == "Fallback statement."
     assert output.brand_promise == "Fallback promise."
+
+
+def _channel_guide_output(channel: str) -> ChannelGuidelineOutput:
+    return ChannelGuidelineOutput(
+        channel=channel,
+        strategy=f"{channel} strategy.",
+        dos=[f"{channel} do 1", f"{channel} do 2", f"{channel} do 3"],
+        donts=[f"{channel} don't 1", f"{channel} don't 2", f"{channel} don't 3"],
+        content_types=[f"{channel} content 1", f"{channel} content 2", f"{channel} content 3"],
+        frequency_guidance=f"{channel} cadence.",
+    )
+
+
+_PHASE4_CHANNELS = ["website", "social", "email", "events", "partnerships", "internal"]
+
+
+def _phase4_nested_node_result() -> MagicMock:
+    """A mock NodeResult wrapping all nine Phase-4 specialists' fragments,
+    shaped like the real nested MultiAgentResult.results Strands returns."""
+    channels = _PHASE4_CHANNELS
+    nested_results = {
+        "brand_experience_principler": _phase1_leaf_node(
+            BrandExperiencePrinciplesOutput(
+                brand_experience_principles=["Consistent", "Human", "Confident"],
+                signature_moments=["Onboarding email", "First dashboard load", "Renewal call"],
+                sensory_elements=["Signature blue", "Rounded corners"],
+            )
+        ),
+        **{
+            f"{channel}_guide": _phase1_leaf_node(_channel_guide_output(channel))
+            for channel in channels
+        },
+        "brand_architecture_builder": _phase1_leaf_node(
+            BrandArchitectureOutput(
+                brand_architecture=[
+                    BrandArchitectureRuleOutput(
+                        entity="Parent brand",
+                        relationship="Master brand",
+                        naming_convention="Northstar [Product]",
+                        visual_treatment="Primary logo lockup",
+                    )
+                ],
+                naming_conventions=[
+                    "Title Case product names",
+                    "No internal codenames",
+                    "ASCII only",
+                ],
+                terminology_glossary={
+                    "Brand experience": "How the brand feels across touchpoints",
+                    "Signature moment": "A high-impact touchpoint",
+                    "Channel guideline": "Per-channel execution rules",
+                    "Brand architecture": "How entities relate under the brand",
+                    "Terminology glossary": "Shared vocabulary for the brand",
+                },
+            )
+        ),
+        "brand_in_action_illustrator": _phase1_leaf_node(
+            BrandInActionOutput(
+                brand_in_action=[
+                    BrandInActionExampleOutput(
+                        context="Website hero",
+                        correct_example="On-brand hero copy.",
+                        incorrect_example="Off-brand jargon-heavy copy.",
+                        rationale="Keeps the promise consistent.",
+                    ),
+                    BrandInActionExampleOutput(
+                        context="Support email",
+                        correct_example="Warm, direct reply.",
+                        incorrect_example="Cold, templated reply.",
+                        rationale="Matches the brand's human tone.",
+                    ),
+                    BrandInActionExampleOutput(
+                        context="Sales deck",
+                        correct_example="Outcome-led narrative.",
+                        incorrect_example="Feature-dump narrative.",
+                        rationale="Reinforces the positioning.",
+                    ),
+                ]
+            )
+        ),
+    }
+
+    inner_multi_result = MagicMock()
+    inner_multi_result.results = nested_results
+
+    node_result = MagicMock()
+    node_result.result = inner_multi_result
+    node_result.get_agent_results.return_value = [
+        node.get_agent_results.return_value[0] for node in nested_results.values()
+    ]
+    return node_result
+
+
+def _assert_every_field_populated(model: BaseModel) -> None:
+    """Fail with the offending field names if any field on ``model`` was left
+    at an empty/falsy value — used to prove a set of merged fragments
+    collectively covers every field on the target schema, so a future field
+    added without a producing specialist is caught automatically."""
+    empty = [name for name in type(model).model_fields if not getattr(model, name)]
+    assert not empty, f"{type(model).__name__} fields left empty: {empty}"
+
+
+def test_extract_phase_output_merges_every_phase4_fragment() -> None:
+    """Phase 4 wraps nine fan-out agents as one top-level node; the six
+    *_guide specialists each emit a single ChannelGuidelineOutput that must
+    all survive as separate channel_guidelines list elements, not overwrite
+    one another the way a plain nest_under assignment would."""
+    channels = _PHASE4_CHANNELS
+    node_result = _phase4_nested_node_result()
+
+    mock_result = MagicMock()
+    mock_result.result = {"phase4_channel": node_result}
+
+    output, degraded = BrandingTeamOrchestrator._extract_phase_output(
+        mock_result, "phase4_channel", ChannelActivationOutput
+    )
+
+    assert degraded is False
+    assert isinstance(output, ChannelActivationOutput)
+    assert output.brand_experience_principles == ["Consistent", "Human", "Confident"]
+    assert output.signature_moments == [
+        "Onboarding email",
+        "First dashboard load",
+        "Renewal call",
+    ]
+    assert output.sensory_elements == ["Signature blue", "Rounded corners"]
+    assert [g.channel for g in output.channel_guidelines] == channels
+    assert output.channel_guidelines[0].strategy == "website strategy."
+    assert output.channel_guidelines[-1].strategy == "internal strategy."
+    assert [r.entity for r in output.brand_architecture] == ["Parent brand"]
+    assert output.naming_conventions == [
+        "Title Case product names",
+        "No internal codenames",
+        "ASCII only",
+    ]
+    assert output.terminology_glossary["Signature moment"] == "A high-impact touchpoint"
+    assert [e.context for e in output.brand_in_action] == [
+        "Website hero",
+        "Support email",
+        "Sales deck",
+    ]
+
+
+def test_phase4_fragments_collectively_populate_every_output_field() -> None:
+    """Schema-coverage guard: the nine Phase-4 specialists' fragments must
+    collectively populate every field on ChannelActivationOutput, checked
+    generically against the model's own field list (not a hardcoded field
+    enumeration) so a field added later without a producing specialist fails
+    this test instead of silently shipping empty."""
+    mock_result = MagicMock()
+    mock_result.result = {"phase4_channel": _phase4_nested_node_result()}
+
+    output, degraded = BrandingTeamOrchestrator._extract_phase_output(
+        mock_result, "phase4_channel", ChannelActivationOutput
+    )
+
+    assert degraded is False
+    assert isinstance(output, ChannelActivationOutput)
+    _assert_every_field_populated(output)
+
+
+def test_full_run_phase4_not_degraded_with_nine_fragments() -> None:
+    """Phase 4's real runtime shape is nine separate specialist fragments,
+    not the single flat block _mock_graph_result's default gives every
+    phase (which never actually exercises _merge_phase4_fragments, since it
+    bails out unless node_result.result.results is a dict). Wire that real
+    shape through orchestrator.run() end-to-end and confirm the Python merge
+    keeps Phase 4 out of degraded_phases and fully populates its output."""
+    mock_result = _mock_graph_result(ALL_PHASES)
+    mock_result.result["phase4_channel"] = _phase4_nested_node_result()
+
+    async def mock_invoke_async(task, **kwargs):
+        return mock_result
+
+    with patch(
+        "branding_team.orchestrator.build_branding_graph",
+        return_value=MagicMock(invoke_async=AsyncMock(side_effect=mock_invoke_async)),
+    ):
+        orchestrator = BrandingTeamOrchestrator()
+        result = orchestrator.run(
+            mission=make_mission(
+                company_description="A strategic studio helping product teams ship cohesive digital experiences",
+                values=["clarity", "trust", "momentum"],
+            ),
+            human_review=HumanReview(approved=True),
+        )
+
+    assert result.degraded_phases == []
+    assert isinstance(result.channel_activation, ChannelActivationOutput)
+    _assert_every_field_populated(result.channel_activation)
+
+
+def test_merge_phase4_fragments_rejects_incomplete_specialist_set() -> None:
+    """A Phase 4 run missing one of the nine specialists (e.g. events_guide
+    never completed) must not validate as a complete ChannelActivationOutput
+    via field defaults — every field on it defaults to empty/absent, so a
+    partial merge would otherwise pass validation silently.
+
+    Tested directly against ``_merge_phase4_fragments`` (require_all=True) as
+    a focused unit test of the merge function in isolation. See
+    ``test_extract_phase_output_rejects_incomplete_phase4_fragments`` for the
+    end-to-end path through ``_extract_phase_output``.
+    """
+    channels = ["website", "social", "email", "partnerships", "internal"]  # events_guide omitted
+    nested_results = {
+        "brand_experience_principler": _phase1_leaf_node(
+            BrandExperiencePrinciplesOutput(
+                brand_experience_principles=["Consistent", "Human", "Confident"],
+                signature_moments=["Onboarding email", "First dashboard load", "Renewal call"],
+                sensory_elements=["Signature blue", "Rounded corners"],
+            )
+        ),
+        **{
+            f"{channel}_guide": _phase1_leaf_node(_channel_guide_output(channel))
+            for channel in channels
+        },
+    }
+
+    inner_multi_result = MagicMock()
+    inner_multi_result.results = nested_results
+
+    node_result = MagicMock()
+    node_result.result = inner_multi_result
+
+    merged = _merge_phase4_fragments(node_result, ChannelActivationOutput)
+
+    assert merged is None
+
+
+def test_extract_phase_output_rejects_incomplete_phase4_fragments() -> None:
+    """Without channel_compositor, a partial Phase 4 run (merge_fn returns
+    None) must degrade to defaults, not accept one specialist's own fragment
+    as the complete ChannelActivationOutput (``check_structured_output`` is
+    False for Phase 4, same guard Phase 2 already relies on)."""
+    nested_results = {
+        "brand_experience_principler": _phase1_leaf_node(
+            BrandExperiencePrinciplesOutput(
+                brand_experience_principles=["Consistent", "Human", "Confident"],
+                signature_moments=["Onboarding email", "First dashboard load", "Renewal call"],
+                sensory_elements=["Signature blue", "Rounded corners"],
+            )
+        ),
+    }
+    inner_multi_result = MagicMock()
+    inner_multi_result.results = nested_results
+
+    node_result = MagicMock()
+    node_result.result = inner_multi_result
+    node_result.get_agent_results.return_value = [
+        nested_results["brand_experience_principler"].get_agent_results.return_value[0]
+    ]
+
+    mock_result = MagicMock()
+    mock_result.result = {"phase4_channel": node_result}
+
+    output, degraded = BrandingTeamOrchestrator._extract_phase_output(
+        mock_result, "phase4_channel", ChannelActivationOutput
+    )
+
+    assert degraded is True
+    assert output == ChannelActivationOutput()
 
 
 def _text_node_result(text: str) -> MagicMock:

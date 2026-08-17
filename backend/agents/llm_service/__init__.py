@@ -68,7 +68,6 @@ from .util import (
     call_llm_with_retries,
     call_llm_with_retries_async,
     extract_json_from_response,
-    parse_json_object,
 )
 
 # ``strands_adapter`` / ``strands_provider`` depend on the optional
@@ -130,7 +129,6 @@ __all__ = [
     "clear_compaction_cache",
     "supports_compaction",
     "extract_json_from_response",
-    "parse_json_object",
     "generate_structured",
     "generate_text",
     "parse_rate_limit_retry_config",

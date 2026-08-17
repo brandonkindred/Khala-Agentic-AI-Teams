@@ -71,11 +71,12 @@ flowchart TB
 
     P3 --> P4
 
-    subgraph P4 ["Phase 4 · Channel Activation (Graph, fan-out/fan-in)"]
+    subgraph P4 ["Phase 4 · Channel Activation (Graph, pure fan-out — no compositor)"]
         direction LR
         P4nodes["brand_experience_principler, website_guide, social_guide,
         email_guide, events_guide, partnerships_guide, internal_guide,
-        brand_architecture_builder, brand_in_action_illustrator"] --> P4join[channel_compositor]
+        brand_architecture_builder, brand_in_action_illustrator
+        (nine parallel terminal nodes, Python-merged)"]
     end
 
     P4 --> P5
@@ -141,7 +142,7 @@ Per-phase participating nodes. Node identifiers are the explicit `node_id` value
 | 1 — Strategic Core | `Graph`, fan-out/fan-in | `discovery_auditor`, `purpose_vision_writer`, `values_articulator`, `audience_segmenter`, `differentiation_mapper` → `positioning_synthesizer` |
 | 2 — Narrative & Messaging | `Graph`, linear + carry-forward | `Storyteller` → `ArchetypeAnalyst` → `TaglineWriter` → `MessageMapper` → `PersonaBuilder` → `VoicePrinciplesDrafter` (single-predecessor chain; each `structured_output` inherits upstream fields) |
 | 3 — Visual & Expressive Identity | `Graph`, diverge fan-out + converge fan-out | `MoodBoardConceptualist_{Editorial,Minimalist,Bold}` → `CreativeDirector` → `converge_decider` → 7-way fan-out (`logo_specifier`, `color_system_builder`, `typography_builder`, `iconography_director`, `photography_video_director`, `voice_tone_builder`, `design_system_codifier`) → `visual_compositor` |
-| 4 — Channel Activation | `Graph`, fan-out/fan-in | `brand_experience_principler`, `website_guide`, `social_guide`, `email_guide`, `events_guide`, `partnerships_guide`, `internal_guide`, `brand_architecture_builder`, `brand_in_action_illustrator` → `channel_compositor` |
+| 4 — Channel Activation | `Graph`, pure fan-out (no compositor) | `brand_experience_principler`, `website_guide`, `social_guide`, `email_guide`, `events_guide`, `partnerships_guide`, `internal_guide`, `brand_architecture_builder`, `brand_in_action_illustrator` (nine parallel terminal nodes; merged in Python via `_PHASE4_NODE_MERGE`) |
 | 5 — Governance & Evolution | `Graph`, fan-out/fan-in | `ownership_definer`, `approval_workflow_designer`, `asset_wiki_planner`, `training_planner`, `kpi_designer`, `evolution_framer`, `brand_rules_codifier` → `governance_compositor` |
 
 ## API and session flow

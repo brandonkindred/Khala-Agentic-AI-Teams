@@ -22,7 +22,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from typing import TYPE_CHECKING, Any, Callable, Iterable, List, NamedTuple, Optional
+from typing import TYPE_CHECKING, Any, Callable, Iterable, List, NamedTuple, Optional, get_origin
 
 from pydantic import BaseModel, ValidationError
 from strands.multiagent.graph import GraphBuilder
@@ -97,6 +97,28 @@ _PHASE2_NODE_MERGE: dict[str, Optional[str]] = {
 }
 
 
+# Phase 4 fan-out node id -> the ChannelActivationOutput key its
+# structured_output nests under, or None to merge its fields in flat. Three
+# specialists (brand_experience_principler, brand_architecture_builder,
+# brand_in_action_illustrator) already match ChannelActivationOutput field
+# names 1:1 and merge flat. The six *_guide specialists each emit a single
+# ChannelGuidelineOutput for their own channel, all nesting under the same
+# "channel_guidelines" key -- since that's a List field on
+# ChannelActivationOutput, _merge_named_fragments appends each one as a list
+# element instead of overwriting, so all six survive the merge.
+_PHASE4_NODE_MERGE: dict[str, Optional[str]] = {
+    "brand_experience_principler": None,
+    "website_guide": "channel_guidelines",
+    "social_guide": "channel_guidelines",
+    "email_guide": "channel_guidelines",
+    "events_guide": "channel_guidelines",
+    "partnerships_guide": "channel_guidelines",
+    "internal_guide": "channel_guidelines",
+    "brand_architecture_builder": None,
+    "brand_in_action_illustrator": None,
+}
+
+
 def _merge_named_fragments(
     node_result: Any,
     model_class: type[BaseModel],
@@ -107,9 +129,9 @@ def _merge_named_fragments(
 ) -> Optional[BaseModel]:
     """Merge every recognized child's ``structured_output`` into one phase output.
 
-    Shared by Phase 1 (graph fan-out) and Phase 2 (sequential graph): both wrap
-    several named agents as a single top-level node whose nested
-    ``MultiAgentResult.results`` is keyed by node/agent id.
+    Shared by Phase 1 (graph fan-out), Phase 2 (sequential graph), and Phase 4
+    (graph fan-out): each wraps several named agents as a single top-level
+    node whose nested ``MultiAgentResult.results`` is keyed by node/agent id.
 
     Preconditions:
         ``node_result`` is the ``NodeResult`` for a single top-level graph node
@@ -125,6 +147,13 @@ def _merge_named_fragments(
         validation — in every None case the caller falls back to its existing
         single-agent-result logic unchanged.
 
+        When ``nest_under`` names a ``model_class`` field typed as a list
+        (e.g. Phase 4's ``channel_guidelines``), every child mapped to that
+        key appends its dump as one list element instead of overwriting —
+        this is how several single-item fragments (one per channel) combine
+        into one list field. Non-list nest_under fields keep the original
+        single-value-assignment behavior.
+
         When ``prefer_first`` is True, the first child that sets a flat key
         wins (later dumps do not overwrite). Phase 2 needs this because each
         specialist's cumulative ``structured_output`` re-emits upstream fields
@@ -133,6 +162,12 @@ def _merge_named_fragments(
     nested_results = getattr(getattr(node_result, "result", None), "results", None)
     if not isinstance(nested_results, dict):
         return None
+
+    list_fields = {
+        name
+        for name, field in model_class.model_fields.items()
+        if get_origin(field.annotation) is list
+    }
 
     merged: dict[str, Any] = {}
     found_ids: set[str] = set()
@@ -148,7 +183,9 @@ def _merge_named_fragments(
             continue
         found_ids.add(child_node_id)
         data = structured.model_dump()
-        if nest_under:
+        if nest_under and nest_under in list_fields:
+            merged.setdefault(nest_under, []).append(data)
+        elif nest_under:
             if prefer_first and nest_under in merged:
                 continue
             merged[nest_under] = data
@@ -224,6 +261,29 @@ def _merge_phase2_fragments(node_result: Any, model_class: type[BaseModel]) -> O
     )
 
 
+def _merge_phase4_fragments(node_result: Any, model_class: type[BaseModel]) -> Optional[BaseModel]:
+    """Merge every Phase 4 specialist's ``structured_output`` into one phase output.
+
+    Phase 4 wraps nine parallel fan-out agents as a single top-level
+    ``"phase4_channel"`` node (see ``graphs/phase4_channel.py``); the same
+    nested-``MultiAgentResult`` recovery Phase 1 uses applies here. All nine
+    specialists must be present — a partial run must not silently validate as
+    a complete ``ChannelActivationOutput`` via field defaults.
+
+    Preconditions:
+        ``node_result`` is the ``NodeResult`` for a single top-level graph node
+        (may or may not wrap a nested multi-agent result).
+    Postconditions:
+        Returns a validated ``model_class`` instance merging every Phase 4
+        specialist's ``structured_output`` when all of ``_PHASE4_NODE_MERGE``'s
+        node ids were found — the six ``*_guide`` fragments each contribute one
+        element of ``channel_guidelines``; returns None when any specialist is
+        missing or the merged data fails validation — same None contract as
+        ``_merge_phase1_fragments``.
+    """
+    return _merge_named_fragments(node_result, model_class, _PHASE4_NODE_MERGE, require_all=True)
+
+
 class _PhaseSpec(NamedTuple):
     """Everything ``run``/``run_single_phase``/``_extract_phase_output`` need for one phase.
 
@@ -243,16 +303,21 @@ class _PhaseSpec(NamedTuple):
         model_cls: The phase's output model.
         merge_fn: When the phase's node wraps several named sub-agents whose
             fragments must be merged into one ``model_cls`` (Phase 1's fan-out,
-            Phase 2's sequential graph), the merge function to try first.
-            ``None`` for phases whose terminal node's own output already is
-            the complete phase output (Phases 3-5's compositor nodes).
+            Phase 2's sequential graph, Phase 4's fan-out), the merge function
+            to try first. ``None`` for phases whose terminal node's own output
+            already is the complete phase output (Phases 3 and 5's compositor
+            nodes).
         check_structured_output: Whether the single-agent fallback may accept
             the last agent's own ``structured_output`` as the phase output.
-            ``False`` only for Phase 2, where the last agent
-            (VoicePrinciplesDrafter) only ever emits its own fragment, and
-            subset-validating that against ``NarrativeMessagingOutput`` would
-            silently report a non-degraded output with every other field
-            defaulted empty.
+            ``False`` for Phase 2 and Phase 4, whose last-seen agent (Phase
+            2's VoicePrinciplesDrafter; Phase 4's nine parallel specialists
+            have no single "last" node) only ever emits its own fragment —
+            subset-validating that against the phase's full output model
+            would silently report a non-degraded output with every other
+            field defaulted empty. Both phases have no compositor, so
+            ``merge_fn`` is the only legitimate extraction path; when it
+            returns ``None`` the phase must degrade instead of accepting a
+            stray fragment.
     """
 
     builder_fn: Callable[[], Any]
@@ -284,7 +349,11 @@ _PHASE_SPEC: dict[BrandPhase, _PhaseSpec] = {
         build_phase3_graph, "phase3_visual", VisualIdentityOutput
     ),
     BrandPhase.CHANNEL_ACTIVATION: _PhaseSpec(
-        build_phase4_graph, "phase4_channel", ChannelActivationOutput
+        build_phase4_graph,
+        "phase4_channel",
+        ChannelActivationOutput,
+        merge_fn=_merge_phase4_fragments,
+        check_structured_output=False,
     ),
     BrandPhase.GOVERNANCE: _PhaseSpec(build_phase5_graph, "phase5_governance", GovernanceOutput),
 }
@@ -804,11 +873,11 @@ class BrandingTeamOrchestrator:
         tool call to produce the payload and populates
         ``AgentResult.structured_output`` instead of the message's text blocks
         — so that's checked next, unless the spec sets
-        ``check_structured_output=False`` (Phase 2 only: a lone specialist's
-        own fragment must never be accepted as a complete phase output, since
-        subset validation against ``NarrativeMessagingOutput`` would succeed
-        via defaults). Agents without usable structured output fall back to
-        parsing the last text block.
+        ``check_structured_output=False`` (Phase 2 and Phase 4: a lone
+        specialist's own fragment must never be accepted as a complete phase
+        output, since subset validation against the phase's full output model
+        would succeed via defaults). Agents without usable structured output
+        fall back to parsing the last text block.
 
         Preconditions:
             - ``result`` is the Strands graph invocation result (or a test

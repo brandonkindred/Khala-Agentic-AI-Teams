@@ -44,9 +44,9 @@ import re
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
 
-from llm_service import parse_json_object
 from llm_service.interface import LLMError, LLMJsonParseError
 from software_engineering_team.code_review_agent.profiles import ReviewProfile
+from software_engineering_team.shared.json_utils import parse_json_object
 from software_engineering_team.shared.llm_tool_agent_base import LlmToolAgentBase
 from software_engineering_team.shared.v2_models import (
     ReviewIssue,
@@ -178,15 +178,16 @@ def lenient_json_object(
 ) -> Dict[str, Any]:
     """Parse a JSON object from ``raw`` via the canonical recovery ladder.
 
-    Delegates to :func:`llm_service.parse_json_object` -- the single recovery
-    ladder shared across the SE team (markdown-fence stripping, prose-prefix
-    trimming, trailing-comma repair, and the string-aware salvage engine
-    behind it). This path therefore recovers the fenced and prose-wrapped
-    payloads that the historical first-``{``/last-``}`` substring slice
-    mishandled (e.g. a fenced object followed by prose braces, which the old
-    slice ran past ``rfind("}")`` and dropped). On unrecoverable output the
-    ladder raises ``LLMJsonParseError``, which is caught here and mapped to the
-    historical ``{}`` return plus a warning, so callers keep their dict contract.
+    Delegates to :func:`software_engineering_team.shared.json_utils.parse_json_object`
+    -- the single recovery ladder shared across the SE team (markdown-fence
+    stripping, prose-prefix trimming, trailing-comma repair, and the
+    string-aware salvage engine behind it). This path therefore recovers the
+    fenced and prose-wrapped payloads that the historical first-``{``/last-``}``
+    substring slice mishandled (e.g. a fenced object followed by prose braces,
+    which the old slice ran past ``rfind("}")`` and dropped). On unrecoverable
+    or non-object output the canonical parser raises ``LLMJsonParseError`` or
+    ``TypeError``, both caught here and mapped to the historical ``{}`` return
+    plus a warning, so callers keep their dict contract.
 
     Preconditions: ``raw`` is a str; ``logger``/``context``/``on_fail_msg`` set.
     Postconditions: returns a dict (``{}`` when no JSON object can be recovered,
@@ -194,8 +195,8 @@ def lenient_json_object(
         malformed input.
     """
     try:
-        parsed = parse_json_object(raw, on_failure="raise")
-    except LLMJsonParseError:
+        return parse_json_object(raw)
+    except (LLMJsonParseError, TypeError):
         logger.warning(
             "%s: model output did not parse as JSON: %r; %s",
             context,
@@ -203,7 +204,6 @@ def lenient_json_object(
             on_fail_msg,
         )
         return {}
-    return parsed if isinstance(parsed, dict) else {}
 
 
 class SingleIssueProblemSolveMixin:

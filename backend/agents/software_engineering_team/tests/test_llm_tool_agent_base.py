@@ -356,7 +356,7 @@ def test_lenient_text_mode_calls_parse_review_hook(monkeypatch):
         boom_lenient,
     )
     monkeypatch.setattr(
-        "llm_service.parse_json_object",
+        "software_engineering_team.shared.json_utils.parse_json_object",
         boom_extract,
         raising=False,
     )
@@ -375,12 +375,13 @@ def test_lenient_text_mode_calls_parse_review_hook(monkeypatch):
 
 
 def test_extract_success_returns_dict(monkeypatch):
-    def fake_extract(raw: str, *, on_failure: str = "none"):
+    def fake_extract(raw: str):
         assert raw == '{"a": 1}'
-        assert on_failure == "none"
         return {"a": 1}
 
-    monkeypatch.setattr("llm_service.parse_json_object", fake_extract)
+    monkeypatch.setattr(
+        "software_engineering_team.shared.json_utils.parse_json_object", fake_extract
+    )
 
     class PlanJsonLike(LlmToolAgentBase):
         json_parse_strategy = "extract"
