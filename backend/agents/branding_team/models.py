@@ -1447,6 +1447,35 @@ class BrandVersionSummary(BaseModel):
     status: Optional[str] = None
 
 
+class BrandConsumerContext(BaseModel):
+    """Flattened, cross-team consumer view of a brand's Phase 1/2 outputs.
+
+    A stable, in-process shape other teams can consume without re-deriving the
+    extraction against the nested ``StrategicCoreOutput`` /
+    ``NarrativeMessagingOutput`` phase schemas they do not own. Produced by
+    :meth:`Brand.to_consumer_context`. Field names deliberately mirror the
+    social-marketing ``BrandContext`` adapter shape so a consumer can build one
+    from this via ``model_dump()`` without a remap.
+
+    Every field carries a default so an under-populated or degraded brand (no
+    ``latest_output``, or missing Phase 1/2 outputs) still yields a fully
+    constructed context. ``voice_and_tone`` defaults to the same fallback the
+    accessor applies when its sources are empty (``"professional, clear, and
+    human"``). ``brand_name`` defaults to the generic placeholder ``"Brand"``
+    for direct construction; the accessor itself does not use that placeholder —
+    it falls back to ``mission.company_name`` when a ``Brand`` has no name.
+    """
+
+    brand_name: str = "Brand"
+    target_audience: str = ""
+    voice_and_tone: str = "professional, clear, and human"
+    brand_guidelines: str = ""
+    brand_objectives: str = ""
+    messaging_pillars: List[str] = Field(default_factory=list)
+    brand_story: str = ""
+    tagline: str = ""
+
+
 class Brand(BaseModel):
     """A brand owned by a client; can be evolved over time."""
 
@@ -1462,3 +1491,107 @@ class Brand(BaseModel):
     history: List[BrandVersionSummary] = Field(default_factory=list)
     created_at: str = ""
     updated_at: str = ""
+
+    def to_consumer_context(self) -> BrandConsumerContext:
+        """Flatten this brand's Phase 1/2 outputs into a consumer-facing context.
+
+        Synthesizes audience, voice, guidelines, objectives, and messaging from
+        ``self.name``, ``self.mission``, and — when present — the strategic-core
+        (Phase 1) and narrative-messaging (Phase 2) outputs on
+        ``self.latest_output``. Mirrors the extraction the social-marketing
+        branding adapter hand-parses from the raw brand JSON, but operates on the
+        typed in-process models so any team holding a ``Brand`` can reuse it.
+
+        Preconditions:
+            - ``self`` is a valid ``Brand`` (in particular ``self.name`` is a
+              non-empty string and ``self.mission`` is a ``BrandingMission``).
+        Postconditions:
+            - Returns a ``BrandConsumerContext``; never raises for a missing or
+              ``None`` ``latest_output`` / ``strategic_core`` / ``narrative_messaging``.
+            - ``brand_name`` is ``self.name`` (falling back to
+              ``self.mission.company_name`` only if ``self.name`` is falsy).
+            - Phase-derived fields (``target_audience`` beyond the mission
+              audience, ``brand_guidelines``, ``brand_objectives``,
+              ``messaging_pillars``, ``brand_story``, ``tagline``) are empty when
+              their source phase output is absent.
+            - ``voice_and_tone`` is the mission voice plus any archetype traits,
+              falling back to ``"professional, clear, and human"`` only when both
+              are empty.
+        """
+        mission = self.mission
+        output = self.latest_output
+        strategic: Optional[StrategicCoreOutput] = output.strategic_core if output else None
+        narrative: Optional[NarrativeMessagingOutput] = (
+            output.narrative_messaging if output else None
+        )
+
+        brand_name = self.name or mission.company_name
+
+        # Target audience -- mission audience plus per-segment detail.
+        audience_parts = [mission.target_audience]
+        if strategic:
+            for seg in strategic.target_audience_segments:
+                if seg.name:
+                    audience_parts.append(
+                        f"{seg.name}: {seg.description}" if seg.description else seg.name
+                    )
+        target_audience = "; ".join(p for p in audience_parts if p)
+
+        # Voice and tone -- mission voice plus archetype personality traits.
+        voice_parts = [mission.desired_voice]
+        if narrative:
+            for archetype in narrative.brand_archetypes:
+                if archetype.personality_traits:
+                    voice_parts.append(", ".join(archetype.personality_traits[:5]))
+        voice_and_tone = "; ".join(p for p in voice_parts if p) or "professional, clear, and human"
+
+        # Brand guidelines -- synthesized from strategic core + narrative.
+        guideline_parts: List[str] = []
+        if strategic:
+            if strategic.positioning_statement:
+                guideline_parts.append(f"Positioning: {strategic.positioning_statement}")
+            for val in strategic.core_values:
+                if val.value:
+                    guideline_parts.append(f"Value -- {val.value}: {val.behavioral_definition}")
+            for pillar in strategic.differentiation_pillars:
+                if pillar.pillar:
+                    guideline_parts.append(
+                        f"Differentiator -- {pillar.pillar}: {pillar.competitive_context}"
+                    )
+        if narrative:
+            for aud_map in narrative.audience_message_maps:
+                if aud_map.tone_adjustments:
+                    guideline_parts.append(
+                        f"Tone for {aud_map.audience_segment or 'audience'}: "
+                        f"{aud_map.tone_adjustments}"
+                    )
+        brand_guidelines = "\n".join(guideline_parts)
+
+        # Brand objectives -- purpose/mission/vision/promise from strategic core.
+        objective_parts: List[str] = []
+        if strategic:
+            if strategic.brand_purpose:
+                objective_parts.append(f"Purpose: {strategic.brand_purpose}")
+            if strategic.mission_statement:
+                objective_parts.append(f"Mission: {strategic.mission_statement}")
+            if strategic.vision_statement:
+                objective_parts.append(f"Vision: {strategic.vision_statement}")
+            if strategic.brand_promise:
+                objective_parts.append(f"Promise: {strategic.brand_promise}")
+        brand_objectives = "\n".join(objective_parts)
+
+        # Messaging pillars -- pillar names from the narrative framework.
+        messaging_pillars: List[str] = []
+        if narrative:
+            messaging_pillars = [mp.pillar for mp in narrative.messaging_framework if mp.pillar]
+
+        return BrandConsumerContext(
+            brand_name=brand_name,
+            target_audience=target_audience,
+            voice_and_tone=voice_and_tone,
+            brand_guidelines=brand_guidelines,
+            brand_objectives=brand_objectives,
+            messaging_pillars=messaging_pillars,
+            brand_story=narrative.brand_story if narrative else "",
+            tagline=narrative.tagline if narrative else "",
+        )
