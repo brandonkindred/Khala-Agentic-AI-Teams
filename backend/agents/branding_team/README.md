@@ -419,6 +419,7 @@ In addition to codification, mood boards, guidelines, design system, wiki backlo
 
 ## Integration with other teams
 
+- **`Brand.to_consumer_context()` (in-process consumer accessor):** `Brand` (in `models.py`) exposes `to_consumer_context()`, which flattens its Phase 1 (`strategic_core`) and Phase 2 (`narrative_messaging`) outputs into a `BrandConsumerContext` — a stable, documented shape (`brand_name`, `target_audience`, `voice_and_tone`, `brand_guidelines`, `brand_objectives`, `messaging_pillars`, `brand_story`, `tagline`). Other teams holding a `Brand` can reuse this synthesis in-process instead of re-deriving it against the nested phase schemas, and it degrades safely (mission-only values plus documented fallbacks) when phase outputs are absent. Field names mirror the social-marketing branding adapter's `BrandContext`, so a consumer can build one via `model_dump()` without a remap.
 - **Market Research API:** Used for competitive/similar-brands research. Set `UNIFIED_API_BASE_URL` or `BRANDING_MARKET_RESEARCH_URL` to the base URL of the server that hosts the market research API (e.g. unified API at `http://localhost:8080`). The branding team POSTs to `/api/market-research/market-research/run`.
 - **Design service (design system workflow):** Not currently mounted on the unified API. When a design service is added and a “brand intake → design assets” contract is defined, set `BRANDING_DESIGN_SERVICE_URL` (or use the same base URL and path) so the design-asset adapter can call it instead of returning a stub.
 
