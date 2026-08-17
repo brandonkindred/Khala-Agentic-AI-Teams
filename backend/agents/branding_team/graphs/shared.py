@@ -7,17 +7,13 @@ Provides:
 
 from __future__ import annotations
 
-from functools import lru_cache
-from typing import TYPE_CHECKING, Any, Callable, Literal, Optional
+from typing import Any, Callable, Literal, Optional
 
 from strands import Agent
 from strands.multiagent.graph import GraphBuilder, GraphNode
 
 from branding_team.models import BrandPhase
 from llm_service import get_strands_model
-
-if TYPE_CHECKING:
-    from llm_service import LLMClientModel
 
 # ---------------------------------------------------------------------------
 # Agent-key tiers (per-phase LLM routing)
@@ -71,28 +67,6 @@ def phase_agent_key(phase: BrandPhase) -> str:
 # ---------------------------------------------------------------------------
 
 OutputMode = Literal["json", "text"]
-
-
-@lru_cache(maxsize=16)
-def _branding_model(agent_key: str, output_mode: OutputMode) -> "LLMClientModel":
-    """Return the shared, cached ``LLMClientModel`` for *(agent_key, output_mode)*.
-
-    Every branding agent resolves a model keyed by ``(agent_key, output_mode)``.
-    Building the graph instantiates ~40 agents per run; without memoisation
-    each one would construct a fresh ``LLMClientModel``. The model is a
-    stateless wrapper over the cached LLM client, so one instance per
-    ``(agent_key, output_mode)`` pair is safe to share across all agents and
-    all runs. The ``Agent`` objects built from this model are NOT cached —
-    they carry per-invocation conversation state and must stay distinct per
-    graph build.
-
-    ``maxsize`` bounds the cache: the key space is the agent_key tiers
-    (five phase tiers + ``"branding_compositor"`` + the ``"branding"``
-    default + ``"branding_assistant"``) crossed with the two output modes —
-    comfortably under 16 today, with headroom for a future tier without a
-    cache eviction cliff.
-    """
-    return get_strands_model(agent_key, response_format=output_mode)
 
 
 def build_agent(
@@ -151,7 +125,7 @@ def build_agent(
     kwargs: dict[str, Any] = {
         "name": name,
         "system_prompt": system_prompt,
-        "model": _branding_model(agent_key, output_mode),
+        "model": get_strands_model(agent_key, response_format=output_mode),
         "callback_handler": None,
     }
     if structured_output is not None:

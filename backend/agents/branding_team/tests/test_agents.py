@@ -64,7 +64,7 @@ from branding_team.agents import (
     make_voice_tone_builder,
     make_website_guide,
 )
-from branding_team.graphs.shared import _branding_model, serialize_mission
+from branding_team.graphs.shared import serialize_mission
 from branding_team.models import (
     BrandDiscoveryAudit,
     BrandStoryOutput,
@@ -783,19 +783,20 @@ def force_dummy_llm(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     ``conftest`` uses ``setdefault``, so an explicit ``LLM_PROVIDER`` survives
     collection. ``resolve_provider`` also prefers UI runtime config over the
     env var, so Postgres + a saved live provider would ignore
-    ``LLM_PROVIDER=dummy``. Combined with ``_branding_model``'s lru cache,
-    that would let this unmarked spot-check hit a live provider (and then
-    the ``real_llm`` parametrization would hit it again). Blank the runtime
-    lookup so the dummy env wins, stub the provider-list read so Strands
-    model construction does not round-trip Postgres for a fingerprint, and
-    drop cached models so ``pytest -m 'not real_llm'`` stays offline.
+    ``LLM_PROVIDER=dummy``. Combined with the Strands model cache in
+    ``llm_service.strands_provider``, that would let this unmarked spot-check
+    hit a live provider (and then the ``real_llm`` parametrization would hit
+    it again). Blank the runtime lookup so the dummy env wins, stub the
+    provider-list read so Strands model construction does not round-trip
+    Postgres for a fingerprint, and drop cached models so
+    ``pytest -m 'not real_llm'`` stays offline.
 
     Preconditions:
         ``monkeypatch`` is pytest's env-patch fixture.
     Postconditions:
         For the duration of the test, ``_runtime`` returns a blank string,
         ``load_ordered_entries`` returns an empty list, ``LLM_PROVIDER`` is
-        ``dummy``, and the branding-model / LLM-client caches have been
+        ``dummy``, and the LLM-client / Strands-model caches have been
         cleared. Caches are cleared again on teardown so a later ``real_llm``
         test can resolve the caller's provider.
     """
@@ -813,9 +814,7 @@ def force_dummy_llm(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     monkeypatch.setattr(llm_provider_store, "load_ordered_entries", lambda *a, **k: [])
     llm_factory.clear_client_cache()
     _clear_strands_model_cache_for_testing()
-    _branding_model.cache_clear()
     yield
-    _branding_model.cache_clear()
     _clear_strands_model_cache_for_testing()
     llm_factory.clear_client_cache()
 
