@@ -15,7 +15,7 @@ import { MatDialog } from '@angular/material/dialog';
 import { MatIconModule } from '@angular/material/icon';
 import { MatMenuModule } from '@angular/material/menu';
 import { MatProgressSpinnerModule } from '@angular/material/progress-spinner';
-import { extractErrorDetail } from '../../../../core/error-handler.interceptor';
+import { extractErrorDetail } from '../../../../shared/extract-error-detail';
 import {
   ConfirmDialogComponent,
   type ConfirmDialogData,

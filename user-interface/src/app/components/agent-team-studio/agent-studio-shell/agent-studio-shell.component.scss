@@ -35,7 +35,7 @@
   }
 
   &__current-draft-name {
-    max-width: 16rem;
+    max-width: var(--studio-draft-name-max-width, 16rem);
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;

@@ -1,4 +1,5 @@
 import { TestBed } from '@angular/core/testing';
+import { OverlayContainer } from '@angular/cdk/overlay';
 import { MatDialog } from '@angular/material/dialog';
 import { NoopAnimationsModule } from '@angular/platform-browser/animations';
 import { NEVER, Subject, of, throwError } from 'rxjs';
@@ -34,6 +35,16 @@ describe('LoadDraftMenuComponent', () => {
     expect(facade.listDrafts).toHaveBeenCalledWith(10, 0);
     expect(fixture.componentInstance.drafts()).toEqual([summary('d-1', 'A'), summary('d-2', 'B')]);
     expect(fixture.componentInstance.loading()).toBe(false);
+  });
+
+  it('clicking the real trigger opens the menu and fetches drafts (menuOpened is wired on the trigger, not a nonexistent MatMenu "opened" output)', () => {
+    const listDrafts = vi.fn().mockReturnValue(of([summary('d-1', 'A')]));
+    const { fixture, facade } = configure(listDrafts);
+    fixture.detectChanges();
+    const trigger: HTMLButtonElement = fixture.nativeElement.querySelector('.studio__draft-btn');
+    trigger.click();
+    expect(facade.listDrafts).toHaveBeenCalledWith(10, 0);
+    expect(fixture.componentInstance.drafts()).toEqual([summary('d-1', 'A')]);
   });
 
   it('hasMore is true when a full page is returned', () => {
@@ -129,6 +140,23 @@ describe('LoadDraftMenuComponent', () => {
     fixture.componentInstance.openDraft('d-1');
     expect(spy).toHaveBeenCalledWith('d-1');
     expect(facade.listDrafts).not.toHaveBeenCalled();
+  });
+
+  it('the row load button and the ⋯ options trigger are both real menu items, reachable via arrow-key navigation', () => {
+    const { fixture } = configure(vi.fn().mockReturnValue(of([summary('d-1', 'A')])));
+    fixture.detectChanges();
+    const trigger: HTMLButtonElement = fixture.nativeElement.querySelector('.studio__draft-btn');
+    trigger.click();
+    fixture.detectChanges();
+    const overlay = TestBed.inject(OverlayContainer).getContainerElement();
+    const loadItem = overlay.querySelector('.load-draft-menu__load');
+    const optionsItem = overlay.querySelector('.load-draft-menu__options');
+    // MatMenu's FocusKeyManager collects arrow-key-navigable items via the
+    // MatMenuItem directive, which stamps `role="menuitem"` — a plain
+    // mat-icon-button sibling would have neither and would be silently
+    // skipped by Arrow Up/Down navigation inside the open menu.
+    expect(loadItem?.getAttribute('role')).toBe('menuitem');
+    expect(optionsItem?.getAttribute('role')).toBe('menuitem');
   });
 
   it('the busy input disables the trigger button', () => {

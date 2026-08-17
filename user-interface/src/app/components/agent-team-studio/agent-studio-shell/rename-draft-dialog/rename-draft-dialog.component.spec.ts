@@ -6,7 +6,7 @@ import {
   RenameDraftDialogComponent,
   type RenameDraftDialogData,
 } from './rename-draft-dialog.component';
-import { AgentStudioApiService } from '../../../../services/agent-studio-api.service';
+import { AgentStudioFacade } from '../../../../services/agent-studio.facade';
 import type { AgentStudioDraftSummary } from '../../../../models/agent-studio.model';
 
 const summary = (id: string, name: string): AgentStudioDraftSummary => ({
@@ -20,17 +20,17 @@ function configure(
   renameDraft = vi.fn().mockReturnValue(of(summary(data.draftId, data.initialName))),
 ) {
   const ref = { close: vi.fn() };
-  const api = { renameDraft };
+  const facade = { renameDraft };
   TestBed.configureTestingModule({
     imports: [RenameDraftDialogComponent],
     providers: [
       { provide: MAT_DIALOG_DATA, useValue: data },
       { provide: MatDialogRef, useValue: ref },
-      { provide: AgentStudioApiService, useValue: api },
+      { provide: AgentStudioFacade, useValue: facade },
     ],
   });
   const fixture = TestBed.createComponent(RenameDraftDialogComponent);
-  return { fixture, ref, api };
+  return { fixture, ref, facade };
 }
 
 describe('RenameDraftDialogComponent', () => {
@@ -59,11 +59,11 @@ describe('RenameDraftDialogComponent', () => {
   });
 
   it('a blank name sets a server error and does not call the API', () => {
-    const { fixture, ref, api } = configure({ draftId: 'd-1', initialName: 'Old' });
+    const { fixture, ref, facade } = configure({ draftId: 'd-1', initialName: 'Old' });
     fixture.componentInstance.name.set('   ');
     fixture.componentInstance.submit();
     expect(fixture.componentInstance.serverError()).toBe('Name is required.');
-    expect(api.renameDraft).not.toHaveBeenCalled();
+    expect(facade.renameDraft).not.toHaveBeenCalled();
     expect(ref.close).not.toHaveBeenCalled();
   });
 
