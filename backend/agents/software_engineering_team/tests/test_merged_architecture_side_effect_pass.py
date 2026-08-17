@@ -638,6 +638,71 @@ def test_build_prompt_inlines_large_changed_files_in_full() -> None:
     assert "more changed file(s) not shown" not in prompt
 
 
+def test_build_prompt_renders_replaced_content_when_side_on() -> None:
+    """A path with a ``replaced_content`` entry gets its before-image section
+    when the side-effect half is on."""
+    import code_review_agent.merged_architecture_side_effect_pass as pass_mod
+    from code_review_agent.false_positive_filter import CodebaseIndex
+
+    files = {"app/main.py": "def bar():\n    return 2\n"}
+    index = CodebaseIndex.from_input(_input(files=files))
+    prompt = pass_mod._build_prompt(
+        index,
+        "",
+        arch_on=False,
+        side_on=True,
+        replaced_content={"app/main.py": "def bar():\n    return 1\n"},
+    )
+    assert "Replaced (pre-change) content" in prompt
+    assert "def bar():\n    return 1\n" in prompt
+
+
+def test_build_prompt_omits_replaced_content_when_side_off() -> None:
+    """The before-image section never renders when the side-effect half is off,
+    even if ``replaced_content`` is supplied (architecture-only prompts must
+    stay unaffected)."""
+    import code_review_agent.merged_architecture_side_effect_pass as pass_mod
+    from code_review_agent.false_positive_filter import CodebaseIndex
+
+    files = {"app/main.py": "def bar():\n    return 2\n"}
+    index = CodebaseIndex.from_input(_input(files=files))
+    prompt = pass_mod._build_prompt(
+        index,
+        "",
+        arch_on=True,
+        side_on=False,
+        replaced_content={"app/main.py": "def bar():\n    return 1\n"},
+    )
+    assert "Replaced (pre-change) content" not in prompt
+
+
+def test_build_prompt_renders_replaced_content_with_both_halves_on() -> None:
+    """The before-image section still renders when both halves are enabled."""
+    import code_review_agent.merged_architecture_side_effect_pass as pass_mod
+    from code_review_agent.false_positive_filter import CodebaseIndex
+
+    files = {"app/main.py": "def bar():\n    return 2\n"}
+    index = CodebaseIndex.from_input(_input(files=files))
+    prompt = pass_mod._build_prompt(
+        index,
+        "",
+        arch_on=True,
+        side_on=True,
+        replaced_content={"app/main.py": "def bar():\n    return 1\n"},
+    )
+    assert "Replaced (pre-change) content" in prompt
+
+
+def test_build_prompt_omits_replaced_content_when_absent() -> None:
+    """Default (``replaced_content=None``) renders exactly as today."""
+    import code_review_agent.merged_architecture_side_effect_pass as pass_mod
+    from code_review_agent.false_positive_filter import CodebaseIndex
+
+    index = CodebaseIndex.from_input(_input())
+    prompt = pass_mod._build_prompt(index, "", arch_on=False, side_on=True)
+    assert "Replaced (pre-change) content" not in prompt
+
+
 def test_render_manifest_lists_every_path() -> None:
     """``_render_manifest`` lists every changed path with no character cap."""
     import code_review_agent.merged_architecture_side_effect_pass as pass_mod
