@@ -25,10 +25,12 @@ from software_engineering_team.github_source.pr_review_mapping import (
     format_comment_body,
     format_issue_comment,
     format_numbered_source_line,
+    format_removed_excerpt,
     inline_comment_to_timeline_body,
     is_within_diff,
     map_issues_to_comments,
     numbered_line_width,
+    parse_removed_lines,
     parse_valid_lines,
     render_annotated_hunks,
     split_review_comments,
@@ -94,6 +96,19 @@ def test_parse_valid_lines_empty_patch() -> None:
 def test_parse_valid_lines_ignores_lines_before_first_hunk() -> None:
     patch = "garbage header\n+not in a hunk\n@@ -1 +1 @@\n+real"
     assert parse_valid_lines(patch) == {1}
+
+
+def test_parse_removed_lines_deletion_only_hunk() -> None:
+    patch = "@@ -10,3 +10,0 @@\n-alpha\n-beta\n-gamma"
+    assert parse_removed_lines(patch) == {10, 11, 12}
+    assert parse_valid_lines(patch, added_only=True) == set()
+
+
+def test_format_removed_excerpt_clips_deleted_text() -> None:
+    patch = "@@ -2,2 +2,0 @@\n-keep this\n-drop that"
+    excerpt = format_removed_excerpt(patch)
+    assert "L2: keep this" in excerpt
+    assert "L3: drop that" in excerpt
 
 
 # ---------------------------------------------------------------------------
