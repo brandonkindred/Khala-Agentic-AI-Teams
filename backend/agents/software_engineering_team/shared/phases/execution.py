@@ -842,7 +842,7 @@ def _run_one_gated_microtask(
         current_idx,
         total,
         mt.id,
-        mt.tool_agent.value,
+        mt.tool_agent,
     )
 
     def _detail_cb(detail: str, _idx: int, _phase: str) -> None:
@@ -1033,7 +1033,7 @@ def _run_one_ungated_microtask(
         current_idx,
         total,
         mt.id,
-        mt.tool_agent.value if mt.tool_agent else "none",
+        mt.tool_agent if mt.tool_agent else "none",
     )
 
     if progress_callback:

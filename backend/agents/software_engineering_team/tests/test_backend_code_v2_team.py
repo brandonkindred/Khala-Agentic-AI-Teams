@@ -71,13 +71,13 @@ class TestModels:
     def test_microtask_defaults(self):
         mt = Microtask(id="mt-1")
         assert mt.status == MicrotaskStatus.PENDING
-        assert mt.tool_agent == ToolAgentKind.GENERAL
+        assert mt.tool_agent == ""
         assert mt.depends_on == []
         assert mt.output_files == {}
 
     def test_planning_result_defaults(self):
         pr = PlanningResult()
-        assert pr.language == "python"
+        assert pr.language == ""
         assert pr.microtasks == []
 
     def test_workflow_result_defaults(self):
