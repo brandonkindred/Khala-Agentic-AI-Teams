@@ -82,6 +82,11 @@ def test_llm_client_default_supports_structured_output_is_false() -> None:
     assert _StubLLMClient().supports_structured_output() is False
 
 
+def test_llm_client_default_supports_prompt_caching_is_false() -> None:
+    """A client that doesn't override the capability flag reports no support, by design."""
+    assert _StubLLMClient().supports_prompt_caching() is False
+
+
 class _RecordingLLMClient(LLMClient):
     """Concrete LLMClient that records the kwargs each complete_json() call received.
 

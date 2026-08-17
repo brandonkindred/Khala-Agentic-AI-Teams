@@ -63,6 +63,7 @@ from strands.types.streaming import StreamEvent
 from strands.types.tools import ToolChoice, ToolSpec
 
 from .attribution import caller_agent, caller_team, current_attribution, llm_attribution
+from .cache_breakpoint import CacheBreakpoint
 from .factory import client_agent_key, get_client, unwrap_client
 from .interface import LLMClient, record_complete_json_turn, take_complete_json_turns
 from .util import _flatten_system_prompt_content
@@ -113,6 +114,45 @@ class LLMClientConfig:
 # ---------------------------------------------------------------------------
 # Message + tool conversion helpers
 # ---------------------------------------------------------------------------
+
+
+def _system_prompt_content_segments(
+    system_prompt_content: Optional[List[Any]],
+) -> List[Union[str, CacheBreakpoint]]:
+    """Convert Strands ``system_prompt_content`` blocks into an ordered segment list.
+
+    Companion to :func:`llm_service.util._flatten_system_prompt_content` — that
+    function collapses the same input to one string (the no-op path, used when
+    the backing client has no use for a marker); this one preserves structure so
+    a ``CacheBreakpoint`` segment survives intact for a caching-capable client
+    (see ``LLMClientModel.stream``).
+
+    Preconditions:
+        - ``system_prompt_content`` is ``None`` or a list of content blocks: a
+          ``CacheBreakpoint`` instance a prompt builder placed directly in the
+          list, a dict block (e.g. ``{"text": "..."}``), or a plain string.
+
+    Postconditions:
+        - Returns ``[]`` when absent/empty; otherwise one segment per block, in
+          order — a ``CacheBreakpoint`` is preserved as-is, a dict block's
+          ``text`` is extracted, anything else is stringified. Empty/blank text
+          segments are dropped. Never raises.
+    """
+    if not system_prompt_content:
+        return []
+    segments: List[Union[str, CacheBreakpoint]] = []
+    for block in system_prompt_content:
+        if isinstance(block, CacheBreakpoint):
+            segments.append(block)
+        elif isinstance(block, dict):
+            text = str(block.get("text", "") or "")
+            if text:
+                segments.append(text)
+        else:
+            text = str(block)
+            if text:
+                segments.append(text)
+    return segments
 
 
 def _tool_result_content_to_text(content: List[Dict[str, Any]]) -> str:
@@ -390,6 +430,20 @@ class LLMClientModel(Model):
         """
         return self._client.supports_structured_output()
 
+    def supports_prompt_caching(self) -> bool:
+        """Delegate to the backing ``LLMClient`` (see ``LLMClient.supports_prompt_caching``).
+
+        ``stream()`` uses this to decide whether a ``CacheBreakpoint`` segment in
+        ``system_prompt_content`` should be preserved as a wire-level cache
+        breakpoint or flattened to plain text (see :meth:`stream`).
+
+        Postconditions:
+            - Returns the backing client's capability flag. Synchronous, no
+              network call, never raises (assuming the backing client's
+              override doesn't — the default and Claude's override both don't).
+        """
+        return self._client.supports_prompt_caching()
+
     def clone(self, **overrides: Any) -> "LLMClientModel":
         """Return a new ``LLMClientModel`` sharing the backing client but with
         per-field overrides applied to the config.
@@ -455,18 +509,38 @@ class LLMClientModel(Model):
         after ``system_prompt`` when both are present. Either may be omitted;
         when both are absent, no system message is emitted.
 
+        A ``CacheBreakpoint`` (see ``llm_service.cache_breakpoint``) placed
+        directly in ``system_prompt_content`` is preserved — not flattened —
+        when the backing client's ``supports_prompt_caching()`` is ``True``
+        (``ClaudeLLMClient``): the system message's ``content`` becomes the
+        ordered segment list itself, and ``ClaudeLLMClient`` translates the
+        marked segment into a real ``cache_control`` breakpoint on the wire.
+        For every other backing client (or when no ``CacheBreakpoint`` is
+        present), the pre-caching flatten-to-text behavior is unchanged —
+        byte-identical output, no error.
+
         ``tool_choice`` is accepted for interface compatibility but is not
         forwarded: ``LLMClient`` does not currently expose a tool_choice knob.
         """
         del tool_choice  # interface-only: LLMClient exposes no tool_choice knob
+        # Unwrapped once, up front: needed both for the prompt-caching capability
+        # check below and for the dispatch later on (see the comment at the
+        # dispatch site for why the *unwrapped* client is used there).
+        client = unwrap_client(self._client)
         oai_messages = _strands_messages_to_openai(messages)
-        combined_system = "\n\n".join(
-            part
-            for part in (system_prompt, _flatten_system_prompt_content(system_prompt_content))
-            if part
-        )
-        if combined_system:
-            oai_messages.insert(0, {"role": "system", "content": combined_system})
+        content_segments = _system_prompt_content_segments(system_prompt_content)
+        if any(isinstance(seg, CacheBreakpoint) for seg in content_segments) and (
+            client.supports_prompt_caching()
+        ):
+            system_content: Any = ([system_prompt] if system_prompt else []) + content_segments
+        else:
+            system_content = "\n\n".join(
+                part
+                for part in (system_prompt, _flatten_system_prompt_content(system_prompt_content))
+                if part
+            )
+        if system_content:
+            oai_messages.insert(0, {"role": "system", "content": system_content})
 
         oai_tools = _tool_specs_to_openai(tool_specs)
 
@@ -514,8 +588,8 @@ class LLMClientModel(Model):
         # key already bound on the context by an orchestrator; then the key held
         # by the backing ``_AttributingClient`` when the model was built via
         # ``get_strands_model(client=get_client("backend"))`` *without* repeating
-        # ``agent_key`` — recovering it here is essential because the dispatch
-        # below unwraps that client, discarding its binding. Only when none of
+        # ``agent_key`` — recovering it here is essential because ``client`` was
+        # already unwrapped above, discarding that binding. Only when none of
         # those authoritative keys exist does a path-derived identity fill the
         # field so unkeyed ``get_strands_model()`` calls aren't recorded as
         # ``agent=-``. The configured objective is a fallback — a caller that
@@ -530,15 +604,15 @@ class LLMClientModel(Model):
         objective = (
             current_attribution().objective or f"strands agent turn ({cfg.agent_key or 'agent'})"
         )
-        # Dispatch to the raw (unwrapped) client so that if ``self._client`` is
-        # an ``_AttributingClient`` (from ``get_client(agent_key)``), its inner
-        # ``llm_attribution(agent_key=...)`` binding does not override the key
-        # we set above.  The correct key is already on the context via the
-        # outer ``with llm_attribution(...)``; bypassing the wrapper ensures
-        # ``cfg.agent_key`` (which may differ after ``clone``/``update_config``)
-        # is the effective binding rather than the wrapper's original key.
+        # Dispatch to the raw (unwrapped) ``client`` computed above so that if
+        # ``self._client`` is an ``_AttributingClient`` (from
+        # ``get_client(agent_key)``), its inner ``llm_attribution(agent_key=...)``
+        # binding does not override the key we set above.  The correct key is
+        # already on the context via the outer ``with llm_attribution(...)``;
+        # bypassing the wrapper ensures ``cfg.agent_key`` (which may differ after
+        # ``clone``/``update_config``) is the effective binding rather than the
+        # wrapper's original key.
         turn_started = time.monotonic()
-        client = unwrap_client(self._client)
         worker_turns: list[tuple[str, str, float]] = []
 
         def _chat_in_worker() -> Any:
