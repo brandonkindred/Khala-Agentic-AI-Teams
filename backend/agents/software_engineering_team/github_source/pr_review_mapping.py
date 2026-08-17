@@ -310,7 +310,7 @@ def render_removed_hunks(patch: str) -> str:
 
     Preconditions:
         - ``patch`` is one file's unified-diff text (GitHub's ``files[].patch``),
-          or empty for a binary/oversized/unchanged file.
+          or empty/``None`` for a binary/oversized/unchanged file.
     Postconditions:
         - Returns the removed (``-``) and context (`` ``) lines of each hunk, in
           old-file order, with a ``...`` marker between non-contiguous hunks

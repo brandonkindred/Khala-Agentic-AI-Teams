@@ -28,7 +28,6 @@ from software_engineering_team.api.coding_team_state import (
 from software_engineering_team.code_review_agent.change_surface import (
     ChangeSurface,
     build_change_surface_from_patches,
-    render_removed_body,
 )
 from software_engineering_team.github_source import (
     GitHubAPIError,
@@ -48,6 +47,7 @@ from software_engineering_team.github_source import (
     partition_issues_by_existing_comments,
     proposal_from_findings,
     render_annotated_hunks,
+    render_removed_hunks,
     scrub_token_from_text,
     split_review_comments,
 )
@@ -415,7 +415,7 @@ def _build_replaced_content(files: List[Any]) -> Dict[str, str]:
     for f in files:
         if not f.patch or f.status == _FILE_STATUS_REMOVED:
             continue
-        rendered = render_removed_body(f.patch)
+        rendered = render_removed_hunks(f.patch)
         if not rendered:
             continue
         replaced_by_path[f.filename] = rendered

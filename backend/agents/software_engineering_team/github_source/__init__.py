@@ -82,6 +82,7 @@ from .pr_review_mapping import (
     parse_removed_lines,
     parse_valid_lines,
     render_annotated_hunks,
+    render_removed_hunks,
     split_review_comments,
 )
 from .repo_reader import GitHubRepoReader
@@ -139,6 +140,7 @@ __all__ = [
     "pick_ready_issue",
     "proposal_from_findings",
     "render_annotated_hunks",
+    "render_removed_hunks",
     "resolve_scoring_mode",
     "score_issue",
     "score_issue_by_mode",
