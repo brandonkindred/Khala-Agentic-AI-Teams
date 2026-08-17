@@ -2,12 +2,13 @@
 
 Agent Studio is an in-process team, so its Temporal worker starter is invoked from
 the unified-API lifespan (not a separate ``team_service`` container). The helper is
-gated on the team being enabled, must never let a worker-start failure break app
+gated on the team being enabled and on Temporal being configured
+(``studio_temporal_enabled()``), must never let a worker-start failure break app
 startup, and must log honestly: INFO both when a worker actually started and when
-the starter returns ``False`` (nothing to register, or Temporal unset) —
-authoring CRUD is in-process either way, so it is a mode switch, not a degraded
-state, and does not warrant a WARNING. A genuine worker-start failure (an
-exception) still logs a WARNING.
+the starter returns ``False`` (nothing to register) — authoring CRUD is in-process
+either way, so it is a mode switch, not a degraded state, and does not warrant a
+WARNING. A genuine worker-start failure (an exception) still logs a WARNING. When
+Temporal is not configured, the worker module is not even imported/called.
 
 Log assertions patch ``main.logger`` methods directly rather than using ``caplog``,
 which is unreliable here because importing the unified API configures logging.
@@ -44,6 +45,7 @@ def test_worker_start_invoked_when_enabled(monkeypatch: pytest.MonkeyPatch) -> N
         return True
 
     monkeypatch.setattr(main, "TEAM_CONFIGS", _fake_team_configs(True))
+    monkeypatch.setattr("agent_platform.studio.temporal.dispatch.studio_temporal_enabled", lambda: True)
     monkeypatch.setattr("agent_platform.studio.temporal.worker.start_agent_studio_temporal_worker_thread", _start)
     infos, warns = _capture_logs(monkeypatch)
 
@@ -55,10 +57,12 @@ def test_worker_start_invoked_when_enabled(monkeypatch: pytest.MonkeyPatch) -> N
 
 
 def test_worker_start_logs_info_when_temporal_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A ``False`` return (worker not started) logs an INFO note that authoring
-    dispatches in-process — not a WARNING, since that path is fully functional —
-    and never raises."""
+    """A ``False`` return (worker not started, even though Temporal is configured
+    and nothing is registered) logs an INFO note that authoring dispatches
+    in-process — not a WARNING, since that path is fully functional — and never
+    raises."""
     monkeypatch.setattr(main, "TEAM_CONFIGS", _fake_team_configs(True))
+    monkeypatch.setattr("agent_platform.studio.temporal.dispatch.studio_temporal_enabled", lambda: True)
     monkeypatch.setattr(
         "agent_platform.studio.temporal.worker.start_agent_studio_temporal_worker_thread",
         lambda: False,
@@ -102,7 +106,8 @@ def test_worker_start_skipped_when_temporal_worker_flag_disabled(monkeypatch: py
 
 
 def test_worker_start_invoked_when_temporal_worker_flag_enabled(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Default (flag true, or unset) must preserve today's always-on behavior."""
+    """Default (flag true, or unset) must preserve today's always-on behavior
+    when Temporal is configured."""
     called: list[bool] = []
 
     def _start() -> bool:
@@ -111,6 +116,7 @@ def test_worker_start_invoked_when_temporal_worker_flag_enabled(monkeypatch: pyt
 
     monkeypatch.setattr(main, "UNIFIED_API_AGENT_STUDIO_TEMPORAL_WORKER", True)
     monkeypatch.setattr(main, "TEAM_CONFIGS", _fake_team_configs(True))
+    monkeypatch.setattr("agent_platform.studio.temporal.dispatch.studio_temporal_enabled", lambda: True)
     monkeypatch.setattr("agent_platform.studio.temporal.worker.start_agent_studio_temporal_worker_thread", _start)
 
     main._start_agent_studio_temporal_worker()
@@ -118,11 +124,34 @@ def test_worker_start_invoked_when_temporal_worker_flag_enabled(monkeypatch: pyt
     assert called == [True]
 
 
+def test_worker_start_skipped_when_temporal_not_configured(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Acceptance criterion: lifespan must not unconditionally start the
+    agent-studio-queue worker. When Temporal is not configured, the worker
+    module must not even be imported/called, and startup must succeed cleanly
+    with the Studio worker absent (no WARNING)."""
+    called: list[bool] = []
+    monkeypatch.setattr(main, "UNIFIED_API_AGENT_STUDIO_TEMPORAL_WORKER", True)
+    monkeypatch.setattr(main, "TEAM_CONFIGS", _fake_team_configs(True))
+    monkeypatch.setattr("agent_platform.studio.temporal.dispatch.studio_temporal_enabled", lambda: False)
+    monkeypatch.setattr(
+        "agent_platform.studio.temporal.worker.start_agent_studio_temporal_worker_thread",
+        lambda: called.append(True),
+    )
+    infos, warns = _capture_logs(monkeypatch)
+
+    main._start_agent_studio_temporal_worker()
+
+    assert called == []
+    assert any("not configured" in m for m in infos)
+    assert warns == []
+
+
 def test_worker_start_swallows_errors(monkeypatch: pytest.MonkeyPatch) -> None:
     def _boom() -> bool:
         raise RuntimeError("worker exploded")
 
     monkeypatch.setattr(main, "TEAM_CONFIGS", _fake_team_configs(True))
+    monkeypatch.setattr("agent_platform.studio.temporal.dispatch.studio_temporal_enabled", lambda: True)
     monkeypatch.setattr("agent_platform.studio.temporal.worker.start_agent_studio_temporal_worker_thread", _boom)
     infos, warns = _capture_logs(monkeypatch)
 

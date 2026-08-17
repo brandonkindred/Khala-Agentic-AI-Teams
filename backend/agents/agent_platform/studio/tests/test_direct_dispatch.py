@@ -265,3 +265,18 @@ def test_authoring_crud_works_after_executor_shutdown(service: Mock) -> None:
     out = dispatch.start_conversation("new", None, None)
 
     assert out is resp
+
+
+# ── studio_temporal_enabled ─────────────────────────────────────────────────────
+
+
+def test_studio_temporal_enabled_delegates_to_shared_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("shared.temporal.client.is_temporal_enabled", lambda: True)
+    assert dispatch.studio_temporal_enabled() is True
+
+
+def test_studio_temporal_enabled_false_when_not_configured(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("shared.temporal.client.is_temporal_enabled", lambda: False)
+    assert dispatch.studio_temporal_enabled() is False
