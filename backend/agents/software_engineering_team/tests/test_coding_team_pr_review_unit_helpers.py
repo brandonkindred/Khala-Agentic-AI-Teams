@@ -718,6 +718,43 @@ class TestRunReviewerUnit:
 
         assert "replaced_content" not in provider.calls[0]
 
+    def test_replaced_content_forwarded_alongside_change_surface_and_hunk(
+        self, monkeypatch
+    ) -> None:
+        """The change-surface attempt replaces the whole-file attempt (see
+        test_surface_plus_hunk_files_two_prenumbred_calls), a distinct dispatch
+        branch from the whole-file/hunk pairing covered above -- replaced_content
+        must still reach both the surface call and the hunk call."""
+        self._patch_collaborators(monkeypatch)
+        surface_out = _FakeOutput(["s"], "s", "")
+        hunk_out = _FakeOutput(["h"], "", "h")
+        provider = _RecordingProvider([surface_out, hunk_out])
+        surface = ChangeSurface(blocks={"a.py": "1: a"})
+        patch_a = "@@ -1,2 +1,1 @@\n keep\n-deleted line"
+        patch_b = "@@ -1,1 +1,2 @@\n ctx\n+added"
+        kwargs = _run_reviewer_kwargs(
+            files=[
+                _FakeFile("a.py", patch=patch_a, status="modified"),
+                _FakeFile("b.py", patch=patch_b, status="modified"),
+            ],
+            head_files={"a.py": "a\n"},
+            hunk_files={"b.py": "1: y = 2"},
+            change_surface=surface,
+        )
+
+        result = pr_review._run_reviewer(provider, **kwargs)
+
+        assert len(provider.calls) == 2
+        assert provider.calls[0]["pre_numbered"] is True
+        assert provider.calls[0]["files"] == dict(surface.blocks)
+        assert provider.calls[1]["pre_numbered"] is True
+        assert provider.calls[1]["files"] == {"b.py": "1: y = 2"}
+        expected = {"a.py": "keep\ndeleted line", "b.py": "ctx"}
+        assert provider.calls[0]["replaced_content"] == expected
+        assert provider.calls[1]["replaced_content"] == expected
+        assert isinstance(result, pr_review._MergedReviewerOutput)
+        assert result.issues == ["s", "h"]
+
 
 # ---------------------------------------------------------------------------
 # _finalize_review
