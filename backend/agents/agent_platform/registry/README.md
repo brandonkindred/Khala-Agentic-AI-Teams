@@ -28,6 +28,17 @@ ad-hoc `AgentManifest(...)`. See
 [`studio/README.md`](../studio/README.md#identity-agentdefinition-view-model-vs-agentmanifest-sot)
 for the full `AgentDefinition` ↔ `AgentManifest` field mapping.
 
+A registered manifest's `role`/`skills`/`capabilities`/`expertise` and
+`system_prompt` are the *default* persona for that agent's invoke, not the whole
+story: the shared generated-agent runtime (`invoke_generated_agent`) binds an
+omitted request field from the manifest but lets an explicitly-present request
+field override it for that invoke only. See
+[`studio/README.md`](../studio/README.md#identity-agentdefinition-view-model-vs-agentmanifest-sot),
+[`agentic_team_provisioning/README.md`](../../agent_team_studio/agentic_team_provisioning/README.md#roster-identity-thin-refs-manifest-sot),
+and
+[`system_design/adr/ADR-015-invoke-generated-agent-persona-state-precedence.md`](../../../../system_design/adr/ADR-015-invoke-generated-agent-persona-state-precedence.md)
+for the locked precedence contract.
+
 ## Why it exists
 
 Historically, Khala had a flat, team-level roster in

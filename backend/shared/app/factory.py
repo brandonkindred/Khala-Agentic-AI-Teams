@@ -100,8 +100,9 @@ def _stop_in_process_temporal_workers(team_key: str) -> None:
         - ``team_key`` is a non-empty string used only in log messages.
         - Safe to call when no workers are registered (no-op).
     Postconditions:
-        - :func:`shared.temporal.worker.stop_all_team_workers` has been invoked.
-          Failures are logged and swallowed. Never raises.
+        - An attempt to invoke :func:`shared.temporal.worker.stop_all_team_workers`
+          has been made. Import or runtime failures are logged and swallowed.
+          Never raises.
     """
     try:
         from shared.temporal.worker import stop_all_team_workers
