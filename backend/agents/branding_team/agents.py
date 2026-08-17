@@ -217,8 +217,9 @@ def make_values_articulator() -> Agent:
 
     Postconditions:
         Returns an ``Agent`` named ``values_articulator`` whose structured
-        output is a ``CoreValuesOutput`` listing 3-5 core values, each with
-        a behavioral definition and observable behaviors.
+        output is a ``CoreValuesOutput`` listing core values (count bounded by
+        ``CORE_VALUES_MIN``/``CORE_VALUES_MAX``), each with a behavioral
+        definition and observable behaviors.
     """
     return build_agent(
         name="values_articulator",
@@ -249,8 +250,9 @@ def make_audience_segmenter() -> Agent:
 
     Postconditions:
         Returns an ``Agent`` named ``audience_segmenter`` whose structured
-        output is an ``AudienceSegmentsOutput`` describing 1-3 target
-        audience segments with pain points, goals, and decision drivers.
+        output is an ``AudienceSegmentsOutput`` describing target audience
+        segments (count bounded by ``AUDIENCE_SEGMENTS_MIN``/``AUDIENCE_SEGMENTS_MAX``)
+        with pain points, goals, and decision drivers.
     """
     return build_agent(
         name="audience_segmenter",
@@ -282,7 +284,8 @@ def make_differentiation_mapper() -> Agent:
     Postconditions:
         Returns an ``Agent`` named ``differentiation_mapper`` whose
         structured output is a ``DifferentiationPillarsOutput`` listing
-        2-4 differentiation pillars with proof points and competitive
+        differentiation pillars (count bounded by ``DIFFERENTIATION_PILLARS_MIN``/
+        ``DIFFERENTIATION_PILLARS_MAX``) with proof points and competitive
         context.
     """
     return build_agent(
@@ -384,8 +387,9 @@ def make_archetype_analyst() -> Agent:
 
     Postconditions:
         Returns an ``Agent`` named ``ArchetypeAnalyst`` whose structured
-        output is a ``BrandArchetypesOutput`` selecting 1-2 brand
-        archetypes with rationale and personality traits, carrying
+        output is a ``BrandArchetypesOutput`` selecting brand archetypes
+        (count bounded by ``BRAND_ARCHETYPES_MIN``/``BRAND_ARCHETYPES_MAX``)
+        with rationale and personality traits, carrying
         forward the prior narrative fields unchanged.
     """
     return build_agent(
@@ -487,8 +491,9 @@ def make_persona_builder() -> Agent:
 
     Postconditions:
         Returns an ``Agent`` named ``PersonaBuilder`` whose structured
-        output is a ``PersonaProfilesOutput`` adding 2-3 persona profiles
-        to the prior narrative fields.
+        output is a ``PersonaProfilesOutput`` adding persona profiles (count
+        bounded by ``PERSONA_PROFILES_MIN``/``PERSONA_PROFILES_MAX``) to the
+        prior narrative fields.
     """
     return build_agent(
         name="PersonaBuilder",
@@ -720,8 +725,9 @@ def make_color_system_builder() -> Agent:
 
     Postconditions:
         Returns an ``Agent`` named ``color_system_builder`` whose output
-        defines 5-7 brand colors with hex values, usage, and
-        psychological rationale for the winning moodboard direction.
+        defines brand colors (count bounded by ``COLOR_PALETTE_MIN``/
+        ``COLOR_PALETTE_MAX``) with hex values, usage, and psychological
+        rationale for the winning moodboard direction.
     """
     return build_agent(
         name="color_system_builder",
@@ -746,8 +752,9 @@ def make_typography_builder() -> Agent:
 
     Postconditions:
         Returns an ``Agent`` named ``typography_builder`` whose output
-        defines a typography system of 3-4 type roles for the winning
-        moodboard direction.
+        defines a typography system for the winning moodboard direction; the
+        number of type roles is governed by ``TYPOGRAPHY_SYSTEM_MIN`` and
+        ``TYPOGRAPHY_SYSTEM_MAX``.
     """
     return build_agent(
         name="typography_builder",
@@ -1125,7 +1132,8 @@ def make_brand_in_action_illustrator() -> Agent:
 
     Postconditions:
         Returns an ``Agent`` named ``brand_in_action_illustrator`` whose
-        output produces 3-5 correct-vs-incorrect brand usage examples.
+        output produces correct-vs-incorrect brand usage examples (count
+        bounded by ``BRAND_IN_ACTION_MIN``/``BRAND_IN_ACTION_MAX``).
     """
     return build_agent(
         name="brand_in_action_illustrator",
@@ -1354,7 +1362,8 @@ def make_brand_rules_codifier() -> Agent:
 
     Postconditions:
         Returns an ``Agent`` named ``brand_rules_codifier`` whose output
-        codifies 5-8 top-level brand governance rules.
+        codifies top-level brand governance rules (count bounded by
+        ``BRAND_GUIDELINES_MIN``/``BRAND_GUIDELINES_MAX``).
     """
     return build_agent(
         name="brand_rules_codifier",

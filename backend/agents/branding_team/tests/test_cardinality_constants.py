@@ -331,8 +331,10 @@ def _field_bounds(model_cls: type[BaseModel], field: str) -> tuple[int, int]:
         Returns the two bounds as ints.
     """
     md = model_cls.model_fields[field].metadata
-    mn = next(c.min_length for c in md if isinstance(c, at.MinLen))
-    mx = next(c.max_length for c in md if isinstance(c, at.MaxLen))
+    mn = next((c.min_length for c in md if isinstance(c, at.MinLen)), None)
+    mx = next((c.max_length for c in md if isinstance(c, at.MaxLen)), None)
+    if mn is None or mx is None:
+        raise AssertionError(f"{model_cls.__name__}.{field} missing MinLen/MaxLen metadata")
     return mn, mx
 
 
