@@ -224,7 +224,11 @@ _MERGED_ARCHITECTURE_SIDE_EFFECT_PASS_PATCH = "code-review-merged-architecture-s
 # unconditionally) once no pre-reorder CodeReviewWorkflow histories remain
 # open (confirm via the Temporal UI), then deprecate the marker with
 # ``workflow.deprecate_patch(_REORDERED_TAIL_PASSES_PATCH)`` before deleting
-# it.
+# it. Owner: code-review team -- given the recurring per-review cost this
+# gate carries (see above), this cleanup should not wait for an unrelated
+# touch of this file; revisit as soon as the Temporal UI confirms zero
+# pre-reorder CodeReviewWorkflow executions in flight, rather than only
+# opportunistically.
 _REORDERED_TAIL_PASSES_PATCH = "code-review-reordered-tail-passes"
 
 
