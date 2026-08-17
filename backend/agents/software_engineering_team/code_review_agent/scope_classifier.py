@@ -40,6 +40,7 @@ from software_engineering_team.shared.context_sizing import parse_env_int
 
 from .false_positive_filter import _cap_context_field, _render_finding_block
 from .models import CodeReviewInput, CodeReviewIssue
+from .scope_filter import _is_unscripted_dummy
 
 logger = logging.getLogger(__name__)
 
@@ -132,23 +133,6 @@ def _scope_parallelism() -> int:
     from .coordinator import _map_parallelism
 
     return _map_parallelism()
-
-
-def _is_unscripted_dummy(llm: Any) -> bool:
-    """True for the production dummy harness, not scripted test subclasses.
-
-    Preconditions: ``llm`` may be any object.
-    Postconditions: ``True`` iff ``llm`` or ``llm.client`` is exactly
-        ``DummyLLMClient`` (not a subclass used as a test stub), so the no-LLM
-        harness makes no fake classification calls while scripted stubs still
-        run the real path. Pure; never raises.
-    """
-    from llm_service.clients.dummy import DummyLLMClient
-
-    if type(llm) is DummyLLMClient:
-        return True
-    inner = getattr(llm, "client", None)
-    return type(inner) is DummyLLMClient
 
 
 def _coerce_in_scope(value: Any) -> Optional[bool]:
