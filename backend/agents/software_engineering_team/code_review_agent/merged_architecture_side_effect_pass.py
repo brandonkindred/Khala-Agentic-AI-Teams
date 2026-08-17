@@ -25,7 +25,6 @@ Invariants:
 
 from __future__ import annotations
 
-import json
 import logging
 from typing import Callable, List, Optional, Tuple
 
@@ -33,6 +32,7 @@ from strands import tool
 
 from llm_service import LLMClient
 from shared.env import env_flag_enabled
+from software_engineering_team.shared.llm import extract_json_from_response
 
 from . import architecture_consistency_pass as arch_pass
 from . import side_effect_impact_pass as side_pass
@@ -189,7 +189,7 @@ def _run_pass(
         )
 
     def _parse_batch_reply(raw: str) -> Tuple[List[CodeReviewIssue], List[CodeReviewIssue]]:
-        data = json.loads(raw)
+        data = extract_json_from_response(raw)
         if not isinstance(data, dict):
             raise TypeError(f"merged pass expected a JSON object, got {type(data).__name__}")
         # Validate each half independently. A malformed / missing key on one side

@@ -14,5 +14,4 @@ DOC_RUNBOOK_PROMPT = build_json_output_prompt(
 """
     ),
     json_schema=("- files: object(path -> content)\n- summary: string"),
-    trailer="Return JSON only.\n",
 )
