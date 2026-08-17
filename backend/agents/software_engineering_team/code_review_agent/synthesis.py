@@ -31,7 +31,7 @@ from pydantic import BaseModel, Field
 
 from llm_service import LLMClient
 from llm_service.interface import take_complete_json_turns
-from software_engineering_team.shared.llm import extract_json_from_response
+from software_engineering_team.shared.json_utils import parse_json_object
 
 from .model_resolution import resolve_code_review_model
 from .models import CodeReviewInput, CodeReviewIssue
@@ -155,6 +155,9 @@ def build_findings_digest(
 def _parse_json_object(raw: str) -> dict:
     """Parse formatting-pass JSON text into a dict.
 
+    Thin delegate to the canonical
+    :func:`software_engineering_team.shared.json_utils.parse_json_object`.
+
     Preconditions:
         ``raw`` is the JSON text from the formatting pass.
 
@@ -165,10 +168,7 @@ def _parse_json_object(raw: str) -> dict:
         ``LLMJsonParseError`` when no JSON object can be recovered, or
         ``TypeError`` when the recovered payload is not a JSON object.
     """
-    data = extract_json_from_response(raw)
-    if not isinstance(data, dict):
-        raise TypeError("model returned non-object JSON")
-    return data
+    return parse_json_object(raw)
 
 
 def _run_via_reasoning_with_transcript(

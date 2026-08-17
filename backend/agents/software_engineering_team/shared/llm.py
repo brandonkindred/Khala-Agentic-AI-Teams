@@ -7,7 +7,6 @@ and adds complete_json_with_continuation (delegates to Strands Agent).
 
 from __future__ import annotations
 
-import json
 import logging
 from typing import Any, Dict, Optional, Union
 
@@ -73,12 +72,7 @@ def complete_json_with_continuation(
         invocation_kwargs["think"] = think
     result = agent(prompt, **invocation_kwargs)
     raw = str(result).strip()
-    # Try bare json.loads first; fall back to extract_json_from_response for
-    # responses wrapped in markdown fences or prefixed with explanatory text.
-    try:
-        return json.loads(raw)
-    except (json.JSONDecodeError, ValueError):
-        return extract_json_from_response(raw)
+    return extract_json_from_response(raw)
 
 
 __all__ = [
