@@ -6,7 +6,28 @@ import sys
 import types
 from pathlib import Path
 
+import pytest
+
 from software_engineering_team.coding_engine_provider import SECodeEngineProvider
+
+
+class _FakeReplacedContentAgent:
+    """Stub ``CodeReviewAgent`` that just echoes back the ``review_input`` it
+    was run with, for tests asserting on how ``replaced_content`` was built."""
+
+    def __init__(self, llm_client=None, *, force_in_process=False):
+        pass
+
+    def run(self, review_input, **kwargs):
+        return types.SimpleNamespace(issues=[], review_input=review_input)
+
+
+@pytest.fixture
+def fake_code_review_agent(monkeypatch):
+    """Monkeypatch ``CodeReviewAgent`` with ``_FakeReplacedContentAgent``."""
+    import software_engineering_team.code_review_agent as cra
+
+    monkeypatch.setattr(cra, "CodeReviewAgent", _FakeReplacedContentAgent)
 
 
 def test_import_bootstraps_se_team_dir_on_syspath() -> None:
@@ -106,20 +127,9 @@ def test_run_pr_code_review_whole_file_mode_forwards_reader(monkeypatch) -> None
     assert out.force_in_process is True
 
 
-def test_run_pr_code_review_forwards_replaced_content(monkeypatch) -> None:
+def test_run_pr_code_review_forwards_replaced_content(fake_code_review_agent) -> None:
     """``replaced_content`` (the diff-derived before-image) is forwarded to
     ``CodeReviewInput`` unchanged, additively alongside ``files``."""
-    import software_engineering_team.code_review_agent as cra
-
-    class _FakeAgent:
-        def __init__(self, llm_client=None, *, force_in_process=False):
-            pass
-
-        def run(self, review_input, **kwargs):
-            return types.SimpleNamespace(issues=[], review_input=review_input)
-
-    monkeypatch.setattr(cra, "CodeReviewAgent", _FakeAgent)
-
     before = {"a.py": "x = 0\n"}
     out = SECodeEngineProvider().run_pr_code_review(
         files={"a.py": "x = 1\n"},
@@ -134,19 +144,8 @@ def test_run_pr_code_review_forwards_replaced_content(monkeypatch) -> None:
     assert out.review_input.files == {"a.py": "x = 1\n"}
 
 
-def test_run_pr_code_review_defaults_replaced_content_to_none(monkeypatch) -> None:
+def test_run_pr_code_review_defaults_replaced_content_to_none(fake_code_review_agent) -> None:
     """Omitting ``replaced_content`` behaves exactly as before its introduction."""
-    import software_engineering_team.code_review_agent as cra
-
-    class _FakeAgent:
-        def __init__(self, llm_client=None, *, force_in_process=False):
-            pass
-
-        def run(self, review_input, **kwargs):
-            return types.SimpleNamespace(issues=[], review_input=review_input)
-
-    monkeypatch.setattr(cra, "CodeReviewAgent", _FakeAgent)
-
     out = SECodeEngineProvider().run_pr_code_review(
         files={"a.py": "x = 1\n"},
         pre_numbered=False,
