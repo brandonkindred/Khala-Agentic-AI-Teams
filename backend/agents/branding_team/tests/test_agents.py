@@ -72,6 +72,7 @@ from branding_team.models import (
     IconographyOutput,
     OwnershipOutput,
 )
+from branding_team.prompt_spec import AgentPromptSpec
 from branding_team.tests.conftest import make_mission
 
 _EXPECTED_PURPOSE_VISION_PROMPT = (
@@ -762,6 +763,221 @@ def test_agents_py_build_agent_calls_use_render_agent_prompt() -> None:
             f"got {ast.unparse(system_prompt)}"
         )
     assert build_agent_calls > 0
+
+
+# ---------------------------------------------------------------------------
+# Story 5a Step 2 — schema-derived field-path migration guard
+# ---------------------------------------------------------------------------
+
+_MIGRATED_SCHEMA_DERIVED_PROMPT_SPEC_NAMES: tuple[str, ...] = (
+    "_DISCOVERY_AUDITOR_PROMPT",
+    "_PURPOSE_VISION_PROMPT",
+    "_VALUES_ARTICULATOR_PROMPT",
+    "_AUDIENCE_SEGMENTER_PROMPT",
+    "_DIFFERENTIATION_MAPPER_PROMPT",
+    "_POSITIONING_SYNTHESIZER_PROMPT",
+    "_STORYTELLER_PROMPT",
+    "_CREATIVE_DIRECTOR_PROMPT",
+    "_CONVERGE_DECIDER_PROMPT",
+    "_LOGO_SPECIFIER_PROMPT",
+    "_COLOR_SYSTEM_BUILDER_PROMPT",
+    "_TYPOGRAPHY_BUILDER_PROMPT",
+    "_ICONOGRAPHY_PROMPT",
+    "_PHOTOGRAPHY_VIDEO_DIRECTOR_PROMPT",
+    "_VOICE_TONE_BUILDER_PROMPT",
+    "_DESIGN_SYSTEM_CODIFIER_PROMPT",
+    "_BRAND_EXPERIENCE_PRINCIPLER_PROMPT",
+    "_BRAND_ARCHITECTURE_BUILDER_PROMPT",
+    "_BRAND_IN_ACTION_ILLUSTRATOR_PROMPT",
+    "_OWNERSHIP_DEFINER_PROMPT",
+    "_APPROVAL_WORKFLOW_DESIGNER_PROMPT",
+    "_ASSET_WIKI_PLANNER_PROMPT",
+    "_TRAINING_PLANNER_PROMPT",
+    "_KPI_DESIGNER_PROMPT",
+    "_EVOLUTION_FRAMER_PROMPT",
+    "_BRAND_RULES_CODIFIER_PROMPT",
+)
+
+# Phase-2 cumulative-carry-forward chain: each bound model inherits every
+# upstream field via subclassing, so schema-derivation would emit lines for
+# fields the prompt intentionally omits (carried forward in prose instead).
+# Removing that inheritance is story 5b's job, not this one's — see the
+# ``AgentPromptSpec``/``models.py`` module docstrings.
+_STILL_FIELDS_BASED_PROMPT_SPEC_NAMES: tuple[str, ...] = (
+    "_ARCHETYPE_ANALYST_PROMPT",
+    "_TAGLINE_WRITER_PROMPT",
+    "_MESSAGE_MAPPER_PROMPT",
+    "_PERSONA_BUILDER_PROMPT",
+    "_VOICE_PRINCIPLES_DRAFTER_PROMPT",
+)
+
+
+def test_migrated_specs_are_schema_derived_not_hand_written() -> None:
+    """Each Step-2-migrated ``AgentPromptSpec`` binds ``structured_output``, not ``fields``.
+
+    Preconditions:
+        ``branding_agents`` exposes every name in
+        ``_MIGRATED_SCHEMA_DERIVED_PROMPT_SPEC_NAMES`` and
+        ``_STILL_FIELDS_BASED_PROMPT_SPEC_NAMES`` as a module-level
+        ``AgentPromptSpec``.
+    Postconditions:
+        Every migrated spec has an empty ``fields`` tuple and a non-None
+        ``structured_output``; every deliberately-unmigrated spec (the
+        Phase-2 cumulative-carry-forward chain, out of scope per story 5b)
+        keeps the opposite: a non-empty ``fields`` tuple and no
+        ``structured_output``. Guards against a migrated spec silently
+        regressing back onto hand-written ``PromptFieldSpec`` entries, or
+        the reverse.
+    """
+    for name in _MIGRATED_SCHEMA_DERIVED_PROMPT_SPEC_NAMES:
+        spec = getattr(branding_agents, name)
+        assert spec.fields == (), f"{name} should have no hand-written PromptFieldSpec entries"
+        assert spec.structured_output is not None, f"{name} should bind structured_output"
+    for name in _STILL_FIELDS_BASED_PROMPT_SPEC_NAMES:
+        spec = getattr(branding_agents, name)
+        assert spec.fields != (), f"{name} is expected to still use hand-written fields="
+        assert spec.structured_output is None, f"{name} should not bind structured_output"
+
+
+def test_moodboard_and_channel_guide_prompt_factories_migration_state() -> None:
+    """The two parameterized prompt-spec factories reflect their migration decisions.
+
+    Preconditions:
+        ``branding_agents._moodboard_conceptualist_prompt`` and
+        ``branding_agents._channel_guide_prompt`` are importable.
+    Postconditions:
+        ``_moodboard_conceptualist_prompt`` (migrated — its 5 field
+        descriptions are static) returns a spec bound to
+        ``structured_output`` with no hand-written fields.
+        ``_channel_guide_prompt`` (not migrated — its ``channel`` field
+        description is interpolated per call and can't be represented by a
+        single static ``Field(description=...)``) still returns a
+        hand-written ``fields=`` spec.
+    """
+    moodboard_spec = branding_agents._moodboard_conceptualist_prompt("Minimalist")
+    assert moodboard_spec.fields == ()
+    assert moodboard_spec.structured_output is not None
+
+    channel_spec = branding_agents._channel_guide_prompt("website", "Company website.")
+    assert channel_spec.fields != ()
+    assert channel_spec.structured_output is None
+
+
+# ---------------------------------------------------------------------------
+# Story 5a Step 3 — schema/prompt parity sweep
+# ---------------------------------------------------------------------------
+
+_SCHEMA_DERIVED_SPEC_TO_FACTORY: dict[str, Callable[[], Agent]] = {
+    "_DISCOVERY_AUDITOR_PROMPT": make_discovery_auditor,
+    "_PURPOSE_VISION_PROMPT": make_purpose_vision_writer,
+    "_VALUES_ARTICULATOR_PROMPT": make_values_articulator,
+    "_AUDIENCE_SEGMENTER_PROMPT": make_audience_segmenter,
+    "_DIFFERENTIATION_MAPPER_PROMPT": make_differentiation_mapper,
+    "_POSITIONING_SYNTHESIZER_PROMPT": make_positioning_synthesizer,
+    "_STORYTELLER_PROMPT": make_storyteller,
+    "_CREATIVE_DIRECTOR_PROMPT": make_creative_director,
+    "_CONVERGE_DECIDER_PROMPT": make_converge_decider,
+    "_LOGO_SPECIFIER_PROMPT": make_logo_specifier,
+    "_COLOR_SYSTEM_BUILDER_PROMPT": make_color_system_builder,
+    "_TYPOGRAPHY_BUILDER_PROMPT": make_typography_builder,
+    "_ICONOGRAPHY_PROMPT": make_iconography_director,
+    "_PHOTOGRAPHY_VIDEO_DIRECTOR_PROMPT": make_photography_video_director,
+    "_VOICE_TONE_BUILDER_PROMPT": make_voice_tone_builder,
+    "_DESIGN_SYSTEM_CODIFIER_PROMPT": make_design_system_codifier,
+    "_BRAND_EXPERIENCE_PRINCIPLER_PROMPT": make_brand_experience_principler,
+    "_BRAND_ARCHITECTURE_BUILDER_PROMPT": make_brand_architecture_builder,
+    "_BRAND_IN_ACTION_ILLUSTRATOR_PROMPT": make_brand_in_action_illustrator,
+    "_OWNERSHIP_DEFINER_PROMPT": make_ownership_definer,
+    "_APPROVAL_WORKFLOW_DESIGNER_PROMPT": make_approval_workflow_designer,
+    "_ASSET_WIKI_PLANNER_PROMPT": make_asset_wiki_planner,
+    "_TRAINING_PLANNER_PROMPT": make_training_planner,
+    "_KPI_DESIGNER_PROMPT": make_kpi_designer,
+    "_EVOLUTION_FRAMER_PROMPT": make_evolution_framer,
+    "_BRAND_RULES_CODIFIER_PROMPT": make_brand_rules_codifier,
+}
+
+
+def test_schema_derived_parity_case_table_matches_migration_registry() -> None:
+    """The parity sweep's factory lookup stays in sync with the migration registry.
+
+    Preconditions:
+        ``_MIGRATED_SCHEMA_DERIVED_PROMPT_SPEC_NAMES`` is the authoritative list
+        of module-level ``AgentPromptSpec`` constants migrated to the
+        schema-derived path (guarded separately by
+        ``test_migrated_specs_are_schema_derived_not_hand_written``).
+    Postconditions:
+        ``_SCHEMA_DERIVED_SPEC_TO_FACTORY`` has exactly one entry per name in
+        ``_MIGRATED_SCHEMA_DERIVED_PROMPT_SPEC_NAMES``, no more and no fewer.
+        Guards against a future migration updating the registry tuple without
+        also adding its factory here, which would silently narrow the parity
+        sweep below.
+    """
+    assert set(_SCHEMA_DERIVED_SPEC_TO_FACTORY) == set(_MIGRATED_SCHEMA_DERIVED_PROMPT_SPEC_NAMES)
+
+
+def _expected_prompt_from_schema(spec: AgentPromptSpec) -> str:
+    """Independently reconstruct the prompt text a schema-derived *spec* should render.
+
+    Preconditions:
+        ``spec.structured_output`` is not ``None`` and declares at least one
+        field with a non-blank ``Field(description=...)``.
+    Postconditions:
+        Returns ``spec.opening``, one 1-indexed ``"{n}. {name} — {description}"``
+        line per field of ``spec.structured_output.model_fields`` (in
+        declaration order), and ``spec.closing`` when set — built directly
+        from the schema rather than by calling
+        ``prompt_spec._field_lines_from_model``/``render_agent_prompt``, so
+        this is an independent cross-check of the production renderer rather
+        than a tautology.
+    """
+    lines = [spec.opening]
+    for index, (name, field_info) in enumerate(
+        spec.structured_output.model_fields.items(), start=1
+    ):
+        lines.append(f"{index}. {name} — {field_info.description}")
+    if spec.closing is not None:
+        lines.append(spec.closing)
+    return "\n".join(lines)
+
+
+_SCHEMA_DERIVED_PARITY_CASES: tuple[tuple[str, Callable[[], Agent], AgentPromptSpec], ...] = tuple(
+    (name, factory, getattr(branding_agents, name))
+    for name, factory in _SCHEMA_DERIVED_SPEC_TO_FACTORY.items()
+) + (
+    (
+        "_moodboard_conceptualist_prompt[Minimalist]",
+        lambda: make_moodboard_conceptualist("Minimalist"),
+        branding_agents._moodboard_conceptualist_prompt("Minimalist"),
+    ),
+)
+_SCHEMA_DERIVED_PARITY_CASE_IDS: tuple[str, ...] = tuple(
+    case_id for case_id, _factory, _spec in _SCHEMA_DERIVED_PARITY_CASES
+)
+
+
+@pytest.mark.parametrize(
+    ("_case_id", "factory", "spec"),
+    _SCHEMA_DERIVED_PARITY_CASES,
+    ids=_SCHEMA_DERIVED_PARITY_CASE_IDS,
+)
+def test_schema_derived_factory_prompt_matches_structured_output_schema(
+    _case_id: str, factory: Callable[[], Agent], spec: AgentPromptSpec
+) -> None:
+    """A migrated factory's rendered system prompt matches its bound schema.
+
+    Preconditions:
+        ``factory`` is a ``make_*`` factory whose ``AgentPromptSpec`` binds
+        ``structured_output`` (no hand-written ``fields``); ``spec`` is that
+        same ``AgentPromptSpec``.
+    Postconditions:
+        ``factory().system_prompt`` equals the prompt text independently
+        reconstructed from ``spec``'s schema by ``_expected_prompt_from_schema``.
+        Proves the field list the agent actually receives has not drifted
+        from the Pydantic model that is supposed to define it — not merely
+        that the spec *uses* the schema-derived code path.
+    """
+    agent = factory()
+    assert agent.system_prompt == _expected_prompt_from_schema(spec)
 
 
 _PHASE_SPOT_CHECKS: tuple[tuple[str, Callable[[], Agent], type], ...] = (

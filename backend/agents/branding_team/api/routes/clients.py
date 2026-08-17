@@ -22,6 +22,15 @@ router = APIRouter()
 
 @router.post("/clients", response_model=Client, status_code=201)
 def create_client(payload: CreateClientRequest) -> Client:
+    """Create a client record.
+
+    Preconditions:
+        ``payload`` is a validated ``CreateClientRequest`` (``name`` present;
+        ``contact_info`` and ``notes`` optional).
+    Postconditions:
+        Returns the newly persisted ``Client`` with a store-assigned id
+        (HTTP 201).
+    """
     from branding_team.api import main as _main
 
     return _main.branding_store.create_client(
@@ -41,6 +50,13 @@ def list_clients(
     ``limit``/``offset`` are validated by FastAPI (``gt=0`` / ``ge=0``), so
     out-of-range input yields a 422 rather than reaching the store's
     ``_validate_pagination`` guard and surfacing as a 500.
+
+    Preconditions:
+        ``limit`` (when supplied) is ``> 0`` and ``offset`` is ``>= 0`` — FastAPI
+        rejects violations with a 422 before this body runs.
+    Postconditions:
+        Returns the clients (a possibly empty list), sliced by ``limit``/``offset``
+        when given.
     """
     from branding_team.api import main as _main
 
@@ -49,6 +65,14 @@ def list_clients(
 
 @router.get("/clients/{client_id}", response_model=Client)
 def get_client(client_id: str) -> Client:
+    """Fetch a single client by id.
+
+    Preconditions:
+        ``client_id`` is a non-empty path string.
+    Postconditions:
+        Returns the ``Client`` when it exists. Raises 404 "Client not found"
+        otherwise.
+    """
     from branding_team.api import main as _main
 
     client = _main.branding_store.get_client(client_id)

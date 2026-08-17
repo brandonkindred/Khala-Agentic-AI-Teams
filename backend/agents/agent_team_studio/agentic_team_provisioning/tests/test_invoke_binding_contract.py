@@ -1,4 +1,4 @@
-"""Failing-first contract tests for manifest-first persona/state binding.
+"""Contract tests for manifest-first persona/state binding.
 
 These encode the locked precedence contract in
 ``system_design/adr/ADR-015-invoke-generated-agent-persona-state-precedence.md``
@@ -6,14 +6,11 @@ for ``invoke_generated_agent``: the resolved ``AgentManifest`` supplies the
 *default* for each persona field, and an *explicitly-present* request-body field
 overrides that default for a single invoke only (never written back).
 
-``invoke_generated_agent`` does not yet consult the manifest — it takes persona
-entirely from the caller-supplied body — so the binding-dependent assertions
-below are expected to be red until the runtime-binding implementation lands. They
-are marked ``xfail(strict=False)`` so CI stays green now and reports XPASS (at
-which point the marker is removed) once binding is implemented. The plain
-(non-xfail) tests assert behavior that holds *both* today and after binding — the
-explicit-override direction, the no-manifest fallback, and inert body tools — so
-they are green regression guards regardless of whether binding has landed.
+Both directions of this contract are implemented: when the request omits a persona
+field or ``system_prompt``, the resolved manifest supplies it (manifest state-prompt
+composition included); when the raw body explicitly carries a field — including an
+explicitly-cleared empty list or a request-supplied ``system_prompt`` (full
+replacement of the base prompt) — the request wins for that invoke only.
 
 The manifest is made resolvable through a monkeypatched registry keyed by the
 invoked agent id, so the tests do not depend on exactly how the implementation
@@ -33,14 +30,6 @@ from agent_platform.registry.models import (
     SourceInfo,
 )
 from agent_team_studio.agentic_team_provisioning.runtime import agent_builder
-
-_BINDING_UNIMPLEMENTED = pytest.mark.xfail(
-    reason=(
-        "manifest-first persona/state binding per ADR-015 is not yet implemented "
-        "in invoke_generated_agent (persona still taken from the request body)"
-    ),
-    strict=False,
-)
 
 
 class _FakeResult:
@@ -122,7 +111,6 @@ def _body(manifest_id: str, **overrides) -> dict:
 # --- Persona field precedence: manifest default vs explicit body override ------
 
 
-@_BINDING_UNIMPLEMENTED
 @pytest.mark.asyncio
 async def test_manifest_role_binds_when_body_omits_it(
     fake_strands, monkeypatch: pytest.MonkeyPatch
@@ -152,7 +140,6 @@ async def test_body_role_overrides_manifest_default(fake_strands, monkeypatch: p
     assert "Manifest role" not in fake_strands.last_system_prompt
 
 
-@_BINDING_UNIMPLEMENTED
 @pytest.mark.asyncio
 async def test_manifest_skills_bind_from_tags(fake_strands, monkeypatch: pytest.MonkeyPatch):
     """Body omits ``skills`` → non-plumbing manifest tags become the Skills line."""
@@ -179,7 +166,6 @@ async def test_body_skills_override_manifest_tags(fake_strands, monkeypatch: pyt
     assert "research" not in fake_strands.last_system_prompt
 
 
-@_BINDING_UNIMPLEMENTED
 @pytest.mark.asyncio
 async def test_explicit_empty_skills_clears_manifest_default(
     fake_strands, monkeypatch: pytest.MonkeyPatch
@@ -198,7 +184,6 @@ async def test_explicit_empty_skills_clears_manifest_default(
     assert "Skills:" not in fake_strands.last_system_prompt
 
 
-@_BINDING_UNIMPLEMENTED
 @pytest.mark.asyncio
 async def test_manifest_expertise_binds_from_team(fake_strands, monkeypatch: pytest.MonkeyPatch):
     """Body omits ``expertise`` → the manifest team is the resolved expertise."""
@@ -210,7 +195,6 @@ async def test_manifest_expertise_binds_from_team(fake_strands, monkeypatch: pyt
     assert "Expertise: demo" in fake_strands.last_system_prompt
 
 
-@_BINDING_UNIMPLEMENTED
 @pytest.mark.asyncio
 async def test_skills_strip_studio_plumbing_tag(fake_strands, monkeypatch: pytest.MonkeyPatch):
     """Plumbing markers ({generated, agentic_team_provisioning, studio}) must not
@@ -228,7 +212,6 @@ async def test_skills_strip_studio_plumbing_tag(fake_strands, monkeypatch: pytes
 # --- system_prompt / state precedence -----------------------------------------
 
 
-@_BINDING_UNIMPLEMENTED
 @pytest.mark.asyncio
 async def test_request_system_prompt_full_replacement(
     fake_strands, monkeypatch: pytest.MonkeyPatch
@@ -245,7 +228,6 @@ async def test_request_system_prompt_full_replacement(
     assert "specialist agent" not in fake_strands.last_system_prompt
 
 
-@_BINDING_UNIMPLEMENTED
 @pytest.mark.asyncio
 async def test_manifest_state_prompt_composed_with_persona(
     fake_strands, monkeypatch: pytest.MonkeyPatch
@@ -268,7 +250,6 @@ async def test_manifest_state_prompt_composed_with_persona(
     assert "STATE INSTRUCTION" in fake_strands.last_system_prompt
 
 
-@_BINDING_UNIMPLEMENTED
 @pytest.mark.asyncio
 async def test_state_selects_matching_agentstatespec(fake_strands, monkeypatch: pytest.MonkeyPatch):
     """The request ``state`` selects which ``AgentStateSpec`` backs the prompt."""
@@ -313,3 +294,75 @@ async def test_body_tools_never_granted(fake_strands, monkeypatch: pytest.Monkey
     await agent_builder.invoke_generated_agent(_body(manifest.id, tools=["python", "http_request"]))
 
     assert fake_strands.last_tools == []
+
+
+@pytest.mark.asyncio
+async def test_manifest_cognition_tools_never_granted(
+    fake_strands, monkeypatch: pytest.MonkeyPatch
+):
+    """A manifest advertising ``cognition.tools`` (e.g. a Studio agent) must not have
+    those tools granted at invoke — binding is persona/state text only, not tools."""
+    manifest = _manifest(cognition=CognitionSpec(tools=["python", "http_request"]))
+    _install_manifest(monkeypatch, manifest)
+
+    await agent_builder.invoke_generated_agent(_body(manifest.id))
+
+    assert fake_strands.last_tools == []
+
+
+@pytest.mark.asyncio
+async def test_threaded_agent_id_preferred_over_body_id(
+    fake_strands, monkeypatch: pytest.MonkeyPatch
+):
+    """The trusted route ``agent_id`` (threaded by the shim) resolves the manifest —
+    not a differing body-supplied ``agent_id``. A request cannot claim another agent's
+    persona than the one the URL committed to."""
+    trusted = _manifest(id="trusted.agent", summary="Trusted role")
+    other = _manifest(id="other.agent", summary="Other role")
+
+    class _Reg:
+        def get(self, agent_id: str, *, conn=None):
+            return {"trusted.agent": trusted, "other.agent": other}.get(agent_id)
+
+    monkeypatch.setattr("agent_platform.registry.get_registry", lambda: _Reg())
+
+    body = {"agent_name": "x", "agent_id": "other.agent", "message": "hi"}
+    await agent_builder.invoke_generated_agent(body, agent_id="trusted.agent")
+
+    assert "Role: Trusted role" in fake_strands.last_system_prompt
+    assert "Other role" not in fake_strands.last_system_prompt
+
+
+@pytest.mark.asyncio
+async def test_unknown_state_key_falls_through_to_generic_composer(
+    fake_strands, monkeypatch: pytest.MonkeyPatch
+):
+    """A ``state`` the manifest doesn't carry silently falls through to the generic
+    persona composer (no state text appended) rather than failing the invoke."""
+    manifest = _manifest(
+        summary="Manifest role",
+        states=[AgentStateSpec(key="executing", label="Executing", system_prompt="EXEC")],
+    )
+    _install_manifest(monkeypatch, manifest)
+
+    await agent_builder.invoke_generated_agent(_body(manifest.id, state="nonexistent"))
+
+    assert "Role: Manifest role" in fake_strands.last_system_prompt
+    assert "EXEC" not in fake_strands.last_system_prompt
+
+
+@pytest.mark.asyncio
+async def test_registry_error_falls_back_to_body_persona(
+    fake_strands, monkeypatch: pytest.MonkeyPatch
+):
+    """A failure resolving the manifest (registry/store error) degrades to the request
+    body persona rather than raising — the well-defined no-manifest path."""
+
+    def _boom():
+        raise RuntimeError("registry unavailable")
+
+    monkeypatch.setattr("agent_platform.registry.get_registry", _boom)
+
+    await agent_builder.invoke_generated_agent(_body("some.agent", role="Body role"))
+
+    assert "Role: Body role" in fake_strands.last_system_prompt

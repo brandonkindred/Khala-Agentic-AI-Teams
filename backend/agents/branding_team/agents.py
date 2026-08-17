@@ -21,23 +21,10 @@ from strands import Agent
 
 from .graphs.shared import build_agent
 from .models import (
-    AGENCY_BRIEFING_PROTOCOLS_MAX,
-    AGENCY_BRIEFING_PROTOCOLS_MIN,
-    APPROVAL_WORKFLOWS_MAX,
-    APPROVAL_WORKFLOWS_MIN,
-    ASSET_MANAGEMENT_GUIDANCE_MAX,
-    ASSET_MANAGEMENT_GUIDANCE_MIN,
     AUDIENCE_SEGMENTS_MAX,
     AUDIENCE_SEGMENTS_MIN,
-    BOILERPLATE_VARIANTS_COUNT,
     BRAND_ARCHETYPES_MAX,
     BRAND_ARCHETYPES_MIN,
-    BRAND_EXPERIENCE_PRINCIPLES_MAX,
-    BRAND_EXPERIENCE_PRINCIPLES_MIN,
-    BRAND_GUIDELINES_MAX,
-    BRAND_GUIDELINES_MIN,
-    BRAND_HEALTH_KPIS_MAX,
-    BRAND_HEALTH_KPIS_MIN,
     BRAND_IN_ACTION_MAX,
     BRAND_IN_ACTION_MIN,
     CHANNEL_CONTENT_TYPES_MAX,
@@ -54,38 +41,18 @@ from .models import (
     DIFFERENTIATION_PILLARS_MIN,
     EDITORIAL_QUALITY_BAR_MAX,
     EDITORIAL_QUALITY_BAR_MIN,
-    LANGUAGE_DONTS_MAX,
-    LANGUAGE_DONTS_MIN,
-    LANGUAGE_DOS_MAX,
-    LANGUAGE_DOS_MIN,
     MESSAGING_PILLARS_MAX,
     MESSAGING_PILLARS_MIN,
-    MOTION_PRINCIPLES_MAX,
-    MOTION_PRINCIPLES_MIN,
-    NAMING_CONVENTIONS_MAX,
-    NAMING_CONVENTIONS_MIN,
     PERSONA_PROFILES_MAX,
     PERSONA_PROFILES_MIN,
-    REVIEW_TRIGGER_POINTS_MAX,
-    REVIEW_TRIGGER_POINTS_MIN,
-    SENSORY_ELEMENTS_MAX,
-    SENSORY_ELEMENTS_MIN,
-    SIGNATURE_MOMENTS_MAX,
-    SIGNATURE_MOMENTS_MIN,
     STYLE_DONTS_MAX,
     STYLE_DONTS_MIN,
     STYLE_DOS_MAX,
     STYLE_DOS_MIN,
-    TERMINOLOGY_GLOSSARY_MAX,
-    TERMINOLOGY_GLOSSARY_MIN,
-    TRAINING_ONBOARDING_MAX,
-    TRAINING_ONBOARDING_MIN,
     TYPOGRAPHY_SYSTEM_MAX,
     TYPOGRAPHY_SYSTEM_MIN,
     VOICE_PRINCIPLES_MAX,
     VOICE_PRINCIPLES_MIN,
-    WIKI_BACKLOG_MAX,
-    WIKI_BACKLOG_MIN,
     ApprovalWorkflowsOutput,
     AssetWikiOutput,
     AudienceSegmentsOutput,
@@ -135,18 +102,7 @@ _DISCOVERY_AUDITOR_PROMPT = AgentPromptSpec(
         "You are a Brand Discovery Analyst. Given a branding mission, produce a comprehensive "
         "brand discovery audit."
     ),
-    fields=(
-        PromptFieldSpec(
-            "current_brand_perception",
-            "how the brand is currently perceived by its audience and market",
-        ),
-        PromptFieldSpec("market_position", "where the brand sits relative to competitors today"),
-        PromptFieldSpec("strengths", "the brand's key strengths"),
-        PromptFieldSpec("weaknesses", "the brand's key weaknesses"),
-        PromptFieldSpec("opportunities", "opportunities the brand can pursue"),
-        PromptFieldSpec("threats", "threats the brand faces"),
-        PromptFieldSpec("stakeholder_insights", "insights gathered from stakeholders"),
-    ),
+    structured_output=BrandDiscoveryAudit,
     closing="Be specific and grounded in the company description and target audience provided.",
 )
 
@@ -169,13 +125,7 @@ def make_discovery_auditor() -> Agent:
 
 _PURPOSE_VISION_PROMPT = AgentPromptSpec(
     opening="You are a Purpose & Vision Writer. Given a branding mission, write three things:",
-    fields=(
-        PromptFieldSpec("brand_purpose", "why the company exists (one sentence)"),
-        PromptFieldSpec(
-            "mission_statement", "what the company does for its audience (one sentence)"
-        ),
-        PromptFieldSpec("vision_statement", "the aspirational future state (one sentence)"),
-    ),
+    structured_output=PurposeVisionOutput,
     closing="Be concise, inspiring, and specific to the company.",
 )
 
@@ -201,14 +151,7 @@ _VALUES_ARTICULATOR_PROMPT = AgentPromptSpec(
         "You are a Values Articulator. Given a branding mission with optional seed values, "
         f"produce a list of {CORE_VALUES_MIN}-{CORE_VALUES_MAX} core values."
     ),
-    fields=(
-        PromptFieldSpec(
-            "core_values",
-            "for each value provide: value (the value name), behavioral_definition (what this "
-            "value means in practice), and observable_behaviors (2-3 concrete behaviors that "
-            "demonstrate this value)",
-        ),
-    ),
+    structured_output=CoreValuesOutput,
 )
 
 
@@ -234,13 +177,7 @@ _AUDIENCE_SEGMENTER_PROMPT = AgentPromptSpec(
         "You are an Audience Segmenter. Given a branding mission, identify "
         f"{AUDIENCE_SEGMENTS_MIN}-{AUDIENCE_SEGMENTS_MAX} target audience segments."
     ),
-    fields=(
-        PromptFieldSpec(
-            "target_audience_segments",
-            "for each segment provide: name, description, pain_points (2-3), goals (2-3), and "
-            "decision_drivers (2-3)",
-        ),
-    ),
+    structured_output=AudienceSegmentsOutput,
     closing="Ground your analysis in the company description and stated target audience.",
 )
 
@@ -268,13 +205,7 @@ _DIFFERENTIATION_MAPPER_PROMPT = AgentPromptSpec(
         f"differentiators, produce {DIFFERENTIATION_PILLARS_MIN}-{DIFFERENTIATION_PILLARS_MAX} "
         "differentiation pillars."
     ),
-    fields=(
-        PromptFieldSpec(
-            "differentiation_pillars",
-            "for each pillar provide: pillar (the differentiator name), proof_points (2-3 "
-            "evidence items), and competitive_context (how competitors fall short here)",
-        ),
-    ),
+    structured_output=DifferentiationPillarsOutput,
 )
 
 
@@ -302,14 +233,7 @@ _POSITIONING_SYNTHESIZER_PROMPT = AgentPromptSpec(
         "purpose/vision writer, values articulator, audience segmenter, and differentiation "
         "mapper. Synthesise them into:"
     ),
-    fields=(
-        PromptFieldSpec(
-            "positioning_statement",
-            "a single sentence following the format: 'For [audience] who need [need], "
-            "[company] is the [differentiator] that delivers [value] because [proof].'",
-        ),
-        PromptFieldSpec("brand_promise", "a one-sentence commitment to the customer"),
-    ),
+    structured_output=PositioningOutput,
 )
 
 
@@ -337,14 +261,7 @@ def make_positioning_synthesizer() -> Agent:
 
 _STORYTELLER_PROMPT = AgentPromptSpec(
     opening="You are a Brand Storyteller. Using the strategic core output and branding mission, craft:",
-    fields=(
-        PromptFieldSpec("brand_story", "a compelling 2-3 paragraph origin/purpose story"),
-        PromptFieldSpec("hero_narrative", "a shorter, punchy version for hero sections"),
-        PromptFieldSpec(
-            "boilerplate_variants",
-            f"{BOILERPLATE_VARIANTS_COUNT} versions (short/medium/long) for press and bios",
-        ),
-    ),
+    structured_output=BrandStoryOutput,
 )
 
 
@@ -556,13 +473,7 @@ _CREATIVE_DIRECTOR_PROMPT = AgentPromptSpec(
         "You are a Creative Director reviewing visual identity exploration. Using the three "
         "moodboard concepts from Inputs from previous nodes, collect them into:"
     ),
-    fields=(
-        PromptFieldSpec(
-            "mood_board_candidates",
-            "preserve each concept (title, visual_direction, color_story, "
-            "typography_direction, image_style)",
-        ),
-    ),
+    structured_output=MoodBoardCandidatesOutput,
     closing="Do not pick a winner — converge_decider selects the winning direction.",
 )
 
@@ -604,13 +515,7 @@ def _moodboard_conceptualist_prompt(variant: str) -> AgentPromptSpec:
             f"directions. Given a brand's strategic core and narrative, create a moodboard "
             f"concept with:"
         ),
-        fields=(
-            PromptFieldSpec("title", "a name for this direction"),
-            PromptFieldSpec("visual_direction", "overall aesthetic description"),
-            PromptFieldSpec("color_story", "3-4 color names/descriptions"),
-            PromptFieldSpec("typography_direction", "font style recommendations"),
-            PromptFieldSpec("image_style", "3-4 image style descriptions"),
-        ),
+        structured_output=MoodBoardConcept,
     )
 
 
@@ -650,14 +555,7 @@ _CONVERGE_DECIDER_PROMPT = AgentPromptSpec(
         "- Execution feasibility\n\n"
         "Produce:"
     ),
-    fields=(
-        PromptFieldSpec("winning_candidate_title", "the selected candidate title"),
-        PromptFieldSpec("scoring_criteria", "the criteria used to score candidates"),
-        PromptFieldSpec("scores_by_candidate", "dict of title→score"),
-        PromptFieldSpec("rationale", "why this candidate won"),
-        PromptFieldSpec("workshop_prompts", "3 questions for stakeholders"),
-        PromptFieldSpec("decision_criteria", "decision criteria used"),
-    ),
+    structured_output=CreativeRefinementDecision,
 )
 
 
@@ -683,7 +581,7 @@ _LOGO_SPECIFIER_PROMPT = AgentPromptSpec(
         "You are a Logo Specifier. Based on the winning moodboard direction, define a logo "
         "suite. For each variant (primary, monochrome, icon-only, reversed), specify:"
     ),
-    fields=(PromptFieldSpec("logo_suite", "variant, usage_context, minimum_size, clear_space"),),
+    structured_output=LogoSuiteOutput,
 )
 
 
@@ -710,13 +608,7 @@ _COLOR_SYSTEM_BUILDER_PROMPT = AgentPromptSpec(
         f"{COLOR_PALETTE_MIN}-{COLOR_PALETTE_MAX} colors. Include primary, secondary, accent, "
         "surface, and critical colors."
     ),
-    fields=(
-        PromptFieldSpec(
-            "color_palette",
-            "for each: name, hex_value, usage (where to use it), and "
-            "psychological_rationale (why this color works for the brand)",
-        ),
-    ),
+    structured_output=ColorPaletteSystemOutput,
 )
 
 
@@ -743,7 +635,7 @@ _TYPOGRAPHY_BUILDER_PROMPT = AgentPromptSpec(
         f"typography system with {TYPOGRAPHY_SYSTEM_MIN}-{TYPOGRAPHY_SYSTEM_MAX} type roles "
         "(display, body, caption, code). For each:"
     ),
-    fields=(PromptFieldSpec("typography_system", "role, font_family, weight_range, usage_notes"),),
+    structured_output=TypographySystemOutput,
 )
 
 
@@ -766,14 +658,7 @@ def make_typography_builder() -> Agent:
 
 _ICONOGRAPHY_PROMPT = AgentPromptSpec(
     opening="You are an Iconography Director. Based on the winning moodboard, define:",
-    fields=(
-        PromptFieldSpec(
-            "iconography_style", "describe the icon aesthetic (line weight, corner radius, fill)"
-        ),
-        PromptFieldSpec(
-            "illustration_style", "describe the illustration approach (flat, isometric, etc.)"
-        ),
-    ),
+    structured_output=IconographyOutput,
 )
 
 
@@ -795,14 +680,7 @@ def make_iconography_director() -> Agent:
 
 _PHOTOGRAPHY_VIDEO_DIRECTOR_PROMPT = AgentPromptSpec(
     opening="You are a Photography & Video Director. Based on the winning moodboard, define:",
-    fields=(
-        PromptFieldSpec("photography_direction", "shooting style, lighting, composition, subjects"),
-        PromptFieldSpec("video_direction", "pacing, tone, visual style for video content"),
-        PromptFieldSpec(
-            "motion_principles",
-            f"{MOTION_PRINCIPLES_MIN}-{MOTION_PRINCIPLES_MAX} principles for animation/motion design",
-        ),
-    ),
+    structured_output=PhotographyVideoOutput,
 )
 
 
@@ -827,19 +705,7 @@ _VOICE_TONE_BUILDER_PROMPT = AgentPromptSpec(
         "You are a Voice & Tone Builder. Using the brand narrative's writing guidelines and "
         "the moodboard direction, define:"
     ),
-    fields=(
-        PromptFieldSpec(
-            "voice_tone_spectrum",
-            "for each context (marketing, support, legal, social, internal), specify the "
-            "tone and 2-3 examples",
-        ),
-        PromptFieldSpec(
-            "language_dos", f"{LANGUAGE_DOS_MIN}-{LANGUAGE_DOS_MAX} approved language patterns"
-        ),
-        PromptFieldSpec(
-            "language_donts", f"{LANGUAGE_DONTS_MIN}-{LANGUAGE_DONTS_MAX} language anti-patterns"
-        ),
-    ),
+    structured_output=VoiceToneOutput,
 )
 
 
@@ -862,17 +728,7 @@ def make_voice_tone_builder() -> Agent:
 
 _DESIGN_SYSTEM_CODIFIER_PROMPT = AgentPromptSpec(
     opening="You are a Design System Codifier. Based on the full visual identity work, produce:",
-    fields=(
-        PromptFieldSpec(
-            "design_principles", "3-4 guiding principles (e.g. 'Clarity over decoration')"
-        ),
-        PromptFieldSpec(
-            "foundation_tokens", "4-6 token categories (color, type, spacing, motion, etc.)"
-        ),
-        PromptFieldSpec(
-            "component_standards", "3-5 component rules (buttons, cards, navigation, etc.)"
-        ),
-    ),
+    structured_output=DesignSystemDefinition,
 )
 
 
@@ -899,23 +755,7 @@ def make_design_system_codifier() -> Agent:
 
 _BRAND_EXPERIENCE_PRINCIPLER_PROMPT = AgentPromptSpec(
     opening="You are a Brand Experience Architect. Define:",
-    fields=(
-        PromptFieldSpec(
-            "brand_experience_principles",
-            f"{BRAND_EXPERIENCE_PRINCIPLES_MIN}-{BRAND_EXPERIENCE_PRINCIPLES_MAX} principles that "
-            "govern every brand touchpoint",
-        ),
-        PromptFieldSpec(
-            "signature_moments",
-            f"{SIGNATURE_MOMENTS_MIN}-{SIGNATURE_MOMENTS_MAX} key moments in the customer journey "
-            "that should feel distinctly on-brand",
-        ),
-        PromptFieldSpec(
-            "sensory_elements",
-            f"{SENSORY_ELEMENTS_MIN}-{SENSORY_ELEMENTS_MAX} sensory cues "
-            "(sound, texture, scent, etc.) if applicable",
-        ),
-    ),
+    structured_output=BrandExperiencePrinciplesOutput,
 )
 
 
@@ -1078,20 +918,7 @@ def make_internal_guide() -> Agent:
 
 _BRAND_ARCHITECTURE_BUILDER_PROMPT = AgentPromptSpec(
     opening="You are a Brand Architecture Specialist. Define:",
-    fields=(
-        PromptFieldSpec(
-            "brand_architecture",
-            "rules for parent brand, sub-brands, product lines. Each with: entity, "
-            "relationship, naming_convention, visual_treatment",
-        ),
-        PromptFieldSpec(
-            "naming_conventions", f"{NAMING_CONVENTIONS_MIN}-{NAMING_CONVENTIONS_MAX} naming rules"
-        ),
-        PromptFieldSpec(
-            "terminology_glossary",
-            f"{TERMINOLOGY_GLOSSARY_MIN}-{TERMINOLOGY_GLOSSARY_MAX} key terms with definitions (dict)",
-        ),
-    ),
+    structured_output=BrandArchitectureOutput,
 )
 
 
@@ -1116,14 +943,7 @@ _BRAND_IN_ACTION_ILLUSTRATOR_PROMPT = AgentPromptSpec(
         f"You are a Brand-in-Action Illustrator. Create {BRAND_IN_ACTION_MIN}-{BRAND_IN_ACTION_MAX} "
         "applied examples showing correct vs incorrect brand usage:"
     ),
-    fields=(
-        PromptFieldSpec(
-            "brand_in_action",
-            "each example has: context (where this applies, e.g. 'sales deck header'), "
-            "correct_example (the on-brand version), incorrect_example (the off-brand "
-            "version), rationale (why the correct version is better)",
-        ),
-    ),
+    structured_output=BrandInActionOutput,
 )
 
 
@@ -1150,14 +970,7 @@ def make_brand_in_action_illustrator() -> Agent:
 
 _OWNERSHIP_DEFINER_PROMPT = AgentPromptSpec(
     opening="You are a Brand Ownership Definer. Define:",
-    fields=(
-        PromptFieldSpec("ownership_model", "who owns the brand (paragraph)"),
-        PromptFieldSpec(
-            "decision_authority",
-            "a dict mapping decision types to responsible roles "
-            "(e.g. 'logo_changes': 'Brand Director', 'campaign_messaging': 'Marketing Lead')",
-        ),
-    ),
+    structured_output=OwnershipOutput,
 )
 
 
@@ -1179,18 +992,7 @@ def make_ownership_definer() -> Agent:
 
 _APPROVAL_WORKFLOW_DESIGNER_PROMPT = AgentPromptSpec(
     opening="You are an Approval Workflow Designer. Define:",
-    fields=(
-        PromptFieldSpec(
-            "approval_workflows",
-            f"{APPROVAL_WORKFLOWS_MIN}-{APPROVAL_WORKFLOWS_MAX} workflows, each with: asset_type, "
-            "approvers (list), sla, escalation_path",
-        ),
-        PromptFieldSpec(
-            "agency_briefing_protocols",
-            f"{AGENCY_BRIEFING_PROTOCOLS_MIN}-{AGENCY_BRIEFING_PROTOCOLS_MAX} protocols for "
-            "briefing external agencies",
-        ),
-    ),
+    structured_output=ApprovalWorkflowsOutput,
 )
 
 
@@ -1212,20 +1014,7 @@ def make_approval_workflow_designer() -> Agent:
 
 _ASSET_WIKI_PLANNER_PROMPT = AgentPromptSpec(
     opening="You are an Asset & Wiki Planner. Define:",
-    fields=(
-        PromptFieldSpec(
-            "asset_management_guidance",
-            f"{ASSET_MANAGEMENT_GUIDANCE_MIN}-{ASSET_MANAGEMENT_GUIDANCE_MAX} guidelines for "
-            "managing brand assets",
-        ),
-        PromptFieldSpec(
-            "wiki_backlog",
-            f"{WIKI_BACKLOG_MIN}-{WIKI_BACKLOG_MAX} wiki entries, each with: title, summary, "
-            "owners (list), "
-            "update_cadence. Cover: Brand North Star, Voice Playbook, Design System, Brand "
-            "Review Intake, Channel Playbook, Governance Charter.",
-        ),
-    ),
+    structured_output=AssetWikiOutput,
 )
 
 
@@ -1246,14 +1035,7 @@ def make_asset_wiki_planner() -> Agent:
 
 _TRAINING_PLANNER_PROMPT = AgentPromptSpec(
     opening="You are a Training Planner. Define:",
-    fields=(
-        PromptFieldSpec(
-            "training_onboarding_plan",
-            f"{TRAINING_ONBOARDING_MIN}-{TRAINING_ONBOARDING_MAX} training initiatives for "
-            "onboarding new team members and maintaining "
-            "brand literacy.",
-        ),
-    ),
+    structured_output=TrainingOnboardingOutput,
 )
 
 
@@ -1274,19 +1056,7 @@ def make_training_planner() -> Agent:
 
 _KPI_DESIGNER_PROMPT = AgentPromptSpec(
     opening="You are a Brand KPI Designer. Define:",
-    fields=(
-        PromptFieldSpec(
-            "brand_health_kpis",
-            f"{BRAND_HEALTH_KPIS_MIN}-{BRAND_HEALTH_KPIS_MAX} KPIs, each with: metric, "
-            "measurement_method, target, review_frequency",
-        ),
-        PromptFieldSpec("tracking_methodology", "paragraph describing the measurement approach"),
-        PromptFieldSpec(
-            "review_trigger_points",
-            f"{REVIEW_TRIGGER_POINTS_MIN}-{REVIEW_TRIGGER_POINTS_MAX} events that should trigger a "
-            "brand health review",
-        ),
-    ),
+    structured_output=BrandHealthKPIsOutput,
 )
 
 
@@ -1308,16 +1078,7 @@ def make_kpi_designer() -> Agent:
 
 _EVOLUTION_FRAMER_PROMPT = AgentPromptSpec(
     opening="You are a Brand Evolution Framer. Define:",
-    fields=(
-        PromptFieldSpec(
-            "evolution_framework",
-            "paragraph describing how the brand evolves over time",
-        ),
-        PromptFieldSpec(
-            "version_control_cadence",
-            "how often the brand system is formally reviewed and versioned",
-        ),
-    ),
+    structured_output=EvolutionFrameworkOutput,
 )
 
 
@@ -1342,14 +1103,7 @@ _BRAND_RULES_CODIFIER_PROMPT = AgentPromptSpec(
         "You are a Brand Rules Codifier. Using the full brand context (positioning, promise, "
         "values, narrative, visual identity), produce:"
     ),
-    fields=(
-        PromptFieldSpec(
-            "brand_guidelines",
-            f"a list of {BRAND_GUIDELINES_MIN}-{BRAND_GUIDELINES_MAX} governance rules that "
-            "everyone in the organisation must follow. "
-            "Each rule is a single clear sentence.",
-        ),
-    ),
+    structured_output=BrandGuidelinesOutput,
     closing=(
         "Cover: identity usage, messaging hierarchy, approval gates, asset management, and "
         "evolution."

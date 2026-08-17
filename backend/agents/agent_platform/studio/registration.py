@@ -6,12 +6,14 @@ schemas that ``agentic_team_provisioning`` stamps onto generated team agents, so
 it resolves via ``GET /api/agents/{id}`` and runs via ``POST /api/agents/{id}/invoke``
 without a YAML file.
 
-Runtime-binding caveat (inherited from generated agents): the generated runtime
-reconstructs the persona from the *invoke request body*, not the stored manifest,
-so a saved agent's persisted ``role`` / ``system_prompt`` (the latter via the
-``executing`` state — see :func:`build_studio_agent_manifest`) are advertised but
-not yet bound at invoke time. Binding is the same tracked follow-up generated team
-agents carry; out of scope for this Stage-1 backend slice. See
+Runtime binding (shared with generated agents): the generated runtime binds a saved
+agent's persisted persona from the stored manifest when the invoke request omits those
+fields — its ``role`` (manifest summary) and the ``system_prompt`` folded into the
+``executing`` state (see :func:`build_studio_agent_manifest`) bind at invoke time. An
+explicitly-present request field (a raw-body presence test, not truthiness — so an
+explicitly-cleared empty list/blank string is an override too) wins over the manifest
+default for that invoke; a request-supplied ``system_prompt`` fully replaces the base
+prompt. See
 ``system_design/adr/ADR-015-invoke-generated-agent-persona-state-precedence.md``
 for the locked precedence contract.
 

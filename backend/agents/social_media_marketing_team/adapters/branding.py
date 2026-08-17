@@ -148,6 +148,12 @@ def validate_brand_for_social_marketing(
     return _extract_brand_context(brand_data, mission, strategic_core, narrative)
 
 
+# Note: the branding team's ``Brand`` model exposes an equivalent in-process
+# accessor, ``Brand.to_consumer_context()`` (returns a ``BrandConsumerContext``
+# with these same field names). This adapter keeps its own raw-JSON extraction
+# because it consumes the branding API's HTTP response, but a future refactor
+# that already holds a typed ``Brand`` can adopt that accessor and build a
+# ``BrandContext`` from ``brand.to_consumer_context().model_dump()``.
 def _extract_brand_context(
     brand_data: dict, mission: dict, strategic_core: dict, narrative: dict
 ) -> BrandContext:

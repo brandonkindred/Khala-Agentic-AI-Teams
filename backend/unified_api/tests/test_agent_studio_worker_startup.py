@@ -1,13 +1,13 @@
 """Tests for the unified-API lifespan hook that boots the Agent Studio worker.
 
-Agent Studio is an in-process team, so its Temporal worker is started from the
-unified-API lifespan (not a separate ``team_service`` container). The helper is gated
-on the team being enabled, must never let a worker-start failure break app startup,
-and must log honestly: INFO both when a worker actually started and when
-``start_team_worker`` returns ``False`` (``TEMPORAL_ADDRESS`` unset → no worker) —
-authoring CRUD falls back to direct in-process dispatch in that case, so it is a mode
-switch, not a degraded state, and does not warrant a WARNING. A genuine worker-start
-failure (an exception) still logs a WARNING.
+Agent Studio is an in-process team, so its Temporal worker starter is invoked from
+the unified-API lifespan (not a separate ``team_service`` container). The helper is
+gated on the team being enabled, must never let a worker-start failure break app
+startup, and must log honestly: INFO both when a worker actually started and when
+the starter returns ``False`` (nothing to register, or Temporal unset) —
+authoring CRUD is in-process either way, so it is a mode switch, not a degraded
+state, and does not warrant a WARNING. A genuine worker-start failure (an
+exception) still logs a WARNING.
 
 Log assertions patch ``main.logger`` methods directly rather than using ``caplog``,
 which is unreliable here because importing the unified API configures logging.
@@ -55,9 +55,9 @@ def test_worker_start_invoked_when_enabled(monkeypatch: pytest.MonkeyPatch) -> N
 
 
 def test_worker_start_logs_info_when_temporal_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A ``False`` return (worker not started, e.g. TEMPORAL_ADDRESS unset) logs an
-    INFO note that authoring falls back to direct dispatch — not a WARNING, since
-    that path is fully functional — and never raises."""
+    """A ``False`` return (worker not started) logs an INFO note that authoring
+    dispatches in-process — not a WARNING, since that path is fully functional —
+    and never raises."""
     monkeypatch.setattr(main, "TEAM_CONFIGS", _fake_team_configs(True))
     monkeypatch.setattr(
         "agent_platform.studio.temporal.worker.start_agent_studio_temporal_worker_thread",
@@ -157,6 +157,17 @@ def test_stop_in_process_temporal_workers_swallows_errors(monkeypatch: pytest.Mo
     assert infos == []
 
 
+# NOTE: These two assertions verify shutdown ordering via source-string indexing
+# of ``main.lifespan``. If the lifecycle hooks are renamed, update the string
+# literals below to match.
 def test_lifespan_stops_temporal_workers_before_usage_flusher() -> None:
     src = inspect.getsource(main.lifespan)
     assert src.index("_stop_in_process_temporal_workers") < src.index("usage_flush_shutdown")
+
+
+def test_lifespan_shuts_down_authoring_executor_before_postgres_close() -> None:
+    src = inspect.getsource(main.lifespan)
+    assert src.index("shutdown_authoring_executor") < src.index("close_pool")
+    assert src.index("shutdown_authoring_executor") > src.index("_stop_in_process_temporal_workers")
+    gate = src.index('TEAM_CONFIGS["agent_studio"].enabled')
+    assert gate < src.index("shutdown_authoring_executor")

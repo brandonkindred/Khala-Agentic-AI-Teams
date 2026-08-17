@@ -51,8 +51,13 @@ def build_phase2_graph() -> Graph:
     Each node emits a cumulative ``structured_output`` fragment; the
     orchestrator merges them into ``NarrativeMessagingOutput``.
 
-    Returns:
-        A configured ``Graph`` instance ready for invocation.
+    Preconditions:
+        None — the builder wires a fixed six-agent factory set and takes no
+        arguments.
+    Postconditions:
+        Returns a built ``Graph`` with ``Storyteller`` as the entry point and a
+        single-predecessor chain through to ``VoicePrinciplesDrafter``, so each
+        node runs only after its immediate predecessor (never a premature fan-in).
     """
     builder = GraphBuilder()
 
