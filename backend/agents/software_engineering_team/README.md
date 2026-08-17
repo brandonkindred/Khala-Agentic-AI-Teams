@@ -486,6 +486,7 @@ Sub-team orchestrators (`backend_code_v2_team/`, `frontend_code_v2_team/`, `devo
 `shared/cache/` (`get_shared_cache(namespace: str)` in `shared/cache/factory.py`) is a small Redis-backed caching abstraction with an automatic in-process fallback. In this team it backs:
 
 - **Code review agent** (`code_review_agent/mapping.py`, `coordinator.py`): the per-chunk review-outcome cache and the whole-submission short-circuit cache.
+- **QA agent** (`qa_agent/agent.py`): per-review result cache, keyed by the whole `QAInput` content plus the resolved model (mirrors code-review's submission-level cache design; caches every genuine review outcome — approved or not — never a fallback result). `QA_REVIEW_CACHE_SIZE` (default `256`, `0` disables) controls its capacity.
 - **LLM service compaction** (`llm_service/compaction.py`): `compact_text` memoization.
 
 **Backend selection:** if `REDIS_URL` or `REDIS_HOST` is set (non-blank), `shared.cache` attempts to build a `RedisBackend`; otherwise it uses an in-process `MemoryBackend` directly, without ever trying Redis. Any failure building or talking to Redis (bad config, missing `redis` package, connection/runtime error) is logged (messages contain `shared.cache`) and the cache **fails open** — the operation falls back to memory / a cache miss / local recompute. A Redis outage can only reduce cache hit rate; it never fails a code review or a compaction call.

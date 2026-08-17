@@ -21,13 +21,17 @@ output contract).
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
-from typing import Dict
+from typing import Any, Dict, Optional
 
 from strands import Agent
 
 from llm_service import get_strands_model
 from llm_service.strands_model import resolve_strands_model
+from shared.cache import get_shared_cache
+from shared.env_config import env_int
 from software_engineering_team.shared.persona_agent_base import run_structured_persona
 from software_engineering_team.shared.security_service import derive_approved
 
@@ -40,6 +44,107 @@ from .prompts import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Shared review-result cache: keyed on the whole QAInput content plus the
+# resolved review model, so a byte-identical resubmission (e.g. across the
+# review->fix->re-review retry loop, or an unchanged sibling task) skips the
+# LLM call entirely. Same key design as code_review_agent.mapping's
+# submission-level cache. Backed by shared.cache (Redis, falls open to an
+# in-process store). Base stem; ``_review_cache_namespace()`` appends build id.
+DEFAULT_REVIEW_CACHE_SIZE = 256  # QA_REVIEW_CACHE_SIZE, floor 0
+_REVIEW_CACHE_NAMESPACE = "qa:review:v1"
+
+
+def _review_cache_namespace() -> str:
+    """Shared-cache namespace for QA review results (includes build id)."""
+    from shared.cache import with_cache_build_id  # noqa: PLC0415
+
+    return with_cache_build_id(_REVIEW_CACHE_NAMESPACE)
+
+
+def _review_cache_size() -> int:
+    """Resolve the review cache capacity from the environment.
+
+    Postconditions:
+        - Returns ``QA_REVIEW_CACHE_SIZE`` parsed as an int, clamped to a
+          floor of 0: an unset or unparseable value falls back to
+          ``DEFAULT_REVIEW_CACHE_SIZE``, a negative value clamps to 0. An
+          explicit or clamped-to 0 disables the cache — every ``run()`` call
+          re-invokes the model, matching pre-cache behavior.
+    """
+    return env_int("QA_REVIEW_CACHE_SIZE", DEFAULT_REVIEW_CACHE_SIZE, 0)
+
+
+def clear_review_cache() -> None:
+    """Drop every cached QA review result.
+
+    Preconditions:
+        - None.
+    Postconditions:
+        - This process's view of the shared review-cache namespace is empty
+          when the call returns (best-effort across Redis). Intended for
+          tests and for callers that must force a cold review.
+    """
+    get_shared_cache(_review_cache_namespace()).clear()
+
+
+def _model_fingerprint(model: Any) -> str:
+    """Best-effort stable identifier for the resolved review model.
+
+    Mirrors ``code_review_agent.transcript.model_label`` /
+    ``code_review_agent.mapping._review_model_fingerprint``'s
+    attribute-probing tail (duplicated rather than imported — coupling
+    qa_agent to code_review_agent is out of scope, and this copy's output IS
+    hashed into a cache key, unlike ``model_label``'s purely cosmetic use).
+    Unlike ``_review_model_fingerprint``, this takes the already-resolved
+    Strands model (``self._model``) directly — no ``LLMClient``-to-model
+    resolution step is needed here.
+
+    Postconditions:
+        - Returns the first non-empty ``model_id``/``model_name``/``model``
+          string attribute found on ``model`` (or, for a ``dict``-shaped
+          ``.config``, the same three keys within it), else the type name.
+          Never raises. The value is identity-only — hashed into the cache
+          key, never published.
+    """
+    for attr in ("model_id", "model_name", "model"):
+        value = getattr(model, attr, None)
+        if isinstance(value, str) and value:
+            return value
+    config = getattr(model, "config", None)
+    if isinstance(config, dict):
+        for key in ("model_id", "model_name", "model"):
+            candidate = config.get(key)
+            if isinstance(candidate, str) and candidate:
+                return candidate
+    return type(model).__name__
+
+
+def _review_cache_key(input_data: QAInput, model_fingerprint: str) -> str:
+    """Hash of the whole QA input plus the resolved review model.
+
+    The qa_agent analogue of ``code_review_agent.mapping._submission_
+    fingerprint`` (same key design, per the caching contract this module
+    implements): keys the entire ``QAInput`` — code, language, task
+    description, architecture, build errors, request mode, acceptance
+    criteria, tool results — so any reviewed-file byte change naturally
+    busts the key with no explicit invalidation logic. ``QAInput`` carries no
+    per-invocation id field (no ``job_id``/``task_id``/``microtask_id``), so
+    nothing needs to be excluded before hashing.
+
+    Preconditions:
+        - ``input_data`` is a valid ``QAInput``.
+        - ``model_fingerprint`` is ``_model_fingerprint(self._model)``.
+
+    Postconditions:
+        - Returns a hex digest that changes whenever any input field or the
+          resolved model changes, and is stable (``sort_keys``) across calls
+          in a process, so a byte-identical resubmission is recognized.
+    """
+    payload = input_data.model_dump(mode="json")
+    payload["__model__"] = model_fingerprint
+    body = json.dumps(payload, sort_keys=True)
+    return hashlib.sha256(body.encode("utf-8")).hexdigest()
 
 
 class QAExpertAgent:
@@ -84,7 +189,19 @@ class QAExpertAgent:
         }
 
     def run(self, input_data: QAInput) -> QAOutput:
-        """Review code for bugs and produce integration tests. Reports bugs; does not fix them."""
+        """Review code for bugs and produce integration tests. Reports bugs; does not fix them.
+
+        Preconditions:
+            - ``input_data`` is a valid :class:`QAInput`.
+        Postconditions:
+            - A cache hit (byte-identical ``QAInput`` and resolved model)
+              returns the prior result without invoking the LLM. A cache
+              miss, a disabled cache (``QA_REVIEW_CACHE_SIZE=0``), or any
+              cache backend error falls open to a genuine review — never
+              raises for a cache failure. Only a genuine (non-fallback)
+              result is written back to the cache, regardless of
+              ``approved``.
+        """
         mode = self._select_mode(input_data)
         logger.info(
             "QA: reviewing %s chars of code, mode=%s",
@@ -92,9 +209,48 @@ class QAExpertAgent:
             mode,
         )
 
+        capacity = _review_cache_size()
+        cache_key: Optional[str] = None
+        if capacity > 0:
+            cache_key = _review_cache_key(input_data, _model_fingerprint(self._model))
+            cache = get_shared_cache(_review_cache_namespace())
+            # shared.cache is fail-open, but keep an explicit local guard so a
+            # misbehaving backend / unexpected raise never aborts the review
+            # (mirrors code_review_agent.coordinator's submission cache).
+            try:
+                raw = cache.get(cache_key)
+            except Exception:
+                logger.warning("QA: review cache get failed; treating as miss", exc_info=True)
+                raw = None
+            if raw is not None:
+                try:
+                    cached_result = QAOutput.model_validate_json(raw)
+                except Exception:
+                    logger.warning(
+                        "QA: corrupt review cache entry for %s; treating as miss",
+                        cache_key,
+                        exc_info=True,
+                    )
+                    try:
+                        cache.delete(cache_key)
+                    except Exception:
+                        logger.warning(
+                            "QA: review cache delete failed after corrupt entry", exc_info=True
+                        )
+                else:
+                    logger.info(
+                        "QA: review cache hit; skipping LLM call (approved=%s)",
+                        cached_result.approved,
+                    )
+                    return cached_result
+
         user_prompt = self._build_user_prompt(input_data)
 
+        is_fallback = False
+
         def _fallback(exc: Exception) -> QAOutput:
+            nonlocal is_fallback
+            is_fallback = True
             logger.warning("QA: structured_output failed (%s); returning fallback", exc)
             # In acceptance_evidence mode a parse failure must still fail closed with
             # an explicit failing gate, since this mode's consumers block on gate
@@ -156,6 +312,22 @@ class QAExpertAgent:
             len(result.bugs_found),
             result.approved,
         )
+
+        if cache_key is not None and not is_fallback:
+            payload = result.model_dump_json().encode("utf-8")
+            try:
+                get_shared_cache(_review_cache_namespace()).set(
+                    cache_key, payload, max_entries=capacity
+                )
+            except Exception:
+                logger.warning(
+                    "QA: review cache set failed; continuing without cache write", exc_info=True
+                )
+            else:
+                logger.info(
+                    "QA: cached review result under key=%s (bytes=%d)", cache_key, len(payload)
+                )
+
         return result
 
     @staticmethod
