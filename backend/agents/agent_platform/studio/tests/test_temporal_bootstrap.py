@@ -3,15 +3,13 @@
 Guards the failure modes the wiring is designed to avoid:
 
 1. **Self-bootstrap at import time.** Importing the package must NOT spin up a worker
-   thread (that would race the first request's client-ready wait). Boot is the
-   unified-API lifespan's job.
-2. **Workflow sandbox blocks ``os.getenv``.** The temporalio sandbox re-imports the
-   workflow module + package ``__init__`` during workflow registration; neither may
-   call ``os.getenv`` at module top level. That is why ``TASK_QUEUE`` is a literal.
-3. **Parent façade must stay lazy.** ``import agent_platform.studio.temporal.workflows``
+   thread. Boot is the unified-API lifespan's job.
+2. **Empty authoring surface.** The 1-activity workflows are gone; ``WORKFLOWS`` and
+   ``ACTIVITIES`` stay empty, and the worker starter is a no-op (an empty Temporal
+   Worker is invalid).
+3. **Parent façade must stay lazy.** Importing ``agent_platform.studio.temporal``
    also executes ``agent_platform.studio.__init__``. Eager re-exports of ``routes`` /
-   ``runtime`` would construct process singletons and import FastAPI /
-   ``shared.temporal`` inside the sandbox (``RestrictedWorkflowAccessError``).
+   ``runtime`` would construct process singletons at import time.
 """
 
 from __future__ import annotations
@@ -19,6 +17,8 @@ from __future__ import annotations
 import importlib
 import sys
 import unittest.mock as mock
+
+import pytest
 
 
 def _purge(prefix: str) -> None:
@@ -63,36 +63,29 @@ def test_importing_temporal_package_does_not_call_start_team_worker():
     _purge("agent_platform.studio.temporal")
     with mock.patch.object(shared.temporal, "start_team_worker") as patched:
         importlib.import_module("agent_platform.studio.temporal")
-        importlib.import_module("agent_platform.studio.temporal.workflows")
         importlib.import_module("agent_platform.studio.temporal.dispatch")
+        importlib.import_module("agent_platform.studio.temporal.worker")
         assert patched.call_count == 0, (
             f"Module-level start_team_worker bootstrap re-introduced "
-            f"(call count = {patched.call_count}). This causes a race on the first "
-            f"request and a temporalio sandbox violation when the workflow registers."
+            f"(call count = {patched.call_count})."
         )
 
 
-def test_importing_workflows_does_not_load_routes_runtime_or_call_getenv():
-    """The temporalio sandbox re-imports the workflow module, which also executes
-    the parent ``agent_platform.studio`` package init. That façade must not
-    eager-import ``routes`` / ``runtime`` (those construct process singletons and
-    call ``os.getenv``), and neither the workflows module nor the parent init may
+def test_importing_temporal_package_does_not_load_routes_runtime_or_call_getenv():
+    """Importing the Temporal package must not pull ``routes`` / ``runtime`` or
     call ``os.getenv`` at import time.
     """
     import os
 
-    # Warm temporalio + the workflows module so the measured re-import only
-    # re-executes Studio packages, not third-party import-time getenv.
-    importlib.import_module("agent_platform.studio.temporal.workflows")
+    importlib.import_module("agent_platform.studio.temporal")
     saved = _snapshot_studio_modules()
     _purge("agent_platform.studio")
     try:
         with mock.patch.object(os, "getenv", wraps=os.getenv) as spy:
-            importlib.import_module("agent_platform.studio.temporal.workflows")
+            importlib.import_module("agent_platform.studio.temporal")
             assert spy.call_count == 0, (
-                f"importing agent_platform.studio.temporal.workflows (and parent "
-                f"studio/__init__) called os.getenv {spy.call_count} time(s) — this "
-                f"trips the temporalio workflow sandbox during registration."
+                f"importing agent_platform.studio.temporal (and parent "
+                f"studio/__init__) called os.getenv {spy.call_count} time(s)."
             )
 
         assert "agent_platform.studio.routes" not in sys.modules
@@ -145,28 +138,23 @@ def test_worker_module_exposes_lifespan_entrypoint():
     )
 
 
-def test_worker_start_delegates_to_start_team_worker(monkeypatch):
-    """The no-arg func delegates to ``start_team_worker`` with the team's own task
-    queue and returns its result. No ``is_temporal_enabled`` guard here —
-    ``start_team_worker`` already no-ops when Temporal is unset."""
+def test_authoring_workflows_and_activities_are_empty() -> None:
+    """1-activity authoring workflows are gone; CRUD must not depend on them."""
     from agent_platform.studio.temporal import ACTIVITIES, TASK_QUEUE, WORKFLOWS
+
+    assert WORKFLOWS == []
+    assert ACTIVITIES == []
+    assert TASK_QUEUE == "agent-studio-queue"
+
+
+def test_authoring_workflow_module_is_gone() -> None:
+    """The 1-activity workflow module must not resolve."""
+    with pytest.raises(ModuleNotFoundError):
+        importlib.import_module("agent_platform.studio.temporal.workflows")
+
+
+def test_worker_start_is_noop() -> None:
+    """The lifespan entrypoint must not boot a worker now that CRUD has no workflows."""
     from agent_platform.studio.temporal import worker as worker_mod
 
-    captured: dict = {}
-
-    def _fake_start(team, workflows, activities, *, task_queue):
-        captured.update(
-            team=team, workflows=workflows, activities=activities, task_queue=task_queue
-        )
-        return True
-
-    monkeypatch.setattr(worker_mod, "start_team_worker", _fake_start)
-
-    assert worker_mod.start_agent_studio_temporal_worker_thread() is True
-    assert captured == {
-        "team": "agent_studio",
-        "workflows": WORKFLOWS,
-        "activities": ACTIVITIES,
-        "task_queue": TASK_QUEUE,
-    }
-    assert TASK_QUEUE == "agent-studio-queue"
+    assert worker_mod.start_agent_studio_temporal_worker_thread() is False
