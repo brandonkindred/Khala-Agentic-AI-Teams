@@ -1,13 +1,20 @@
 """Resolve a Strands Model instance from environment configuration.
 
-Priority:
-  1. Ollama Cloud  (OLLAMA_API_KEY set)
-  2. Ollama local  (LLM_BASE_URL points to a local server)
-  3. Bedrock       (LLM_PROVIDER=bedrock)
-  4. Error         (nothing configured)
+Priority (via ``resolve_provider()``):
+  1. Ollama  (default) — routed through the hardened ``llm_service`` client,
+     whose ``get_client`` treats the Postgres-backed ordered provider list as
+     the SOLE source of credentials (each entry carries its own API key; there
+     is NO environment-variable fallback for Ollama Cloud auth — see
+     ``llm_service.factory.get_client`` / ``llm_service.provider_store``).
+  2. Bedrock  (LLM_PROVIDER=bedrock)
+  3. Error    (LLM_PROVIDER=dummy, or any other unsupported value)
 
-Uses the existing ``llm_service.config`` resolvers so that all LLM_* env vars
-are respected consistently with the rest of the platform.
+Uses the existing ``llm_service.config`` resolvers for the non-secret bits
+(provider selection, model id, base URL) so those stay consistent with the
+rest of the platform. This module must NOT re-derive Ollama Cloud credential
+state from raw ``OLLAMA_API_KEY``/``LLM_OLLAMA_API_KEY`` env vars — that
+would diverge from ``get_client``'s provider-list resolution and misfire
+against a correctly configured deployment.
 """
 
 from __future__ import annotations
@@ -311,27 +318,18 @@ def get_strands_model(
             f"Unsupported LLM_PROVIDER: {provider!r}. Supported values: ollama, bedrock."
         )
 
-    # Provider is "ollama" (the default). Fail fast on the one misconfiguration
-    # the llm_service client would otherwise only surface at request time: an
-    # Ollama Cloud base URL with no API key. Mirror the client's resolution
-    # exactly — the host is ``resolve_base_url()`` (``LLM_BASE_URL``, default the
-    # ollama.com cloud endpoint) and the key is ``OLLAMA_API_KEY`` /
-    # ``LLM_OLLAMA_API_KEY`` (``OllamaLLMClient._ollama_auth_headers``).
-    # ``OLLAMA_HOST`` is deliberately NOT consulted: the llm_service transport
-    # keys off ``resolve_base_url()`` only, so reading ``OLLAMA_HOST`` here would
-    # diverge from the client and mis-fire the guard (it could block a valid
-    # local config, or pass a keyless cloud config straight to a request-time
-    # failure).
-    host = base_url
-    api_key = (
-        os.environ.get("OLLAMA_API_KEY") or os.environ.get("LLM_OLLAMA_API_KEY") or ""
-    ).strip()
-    if not api_key and "ollama.com" in host:
-        raise ValueError(
-            "Ollama Cloud requires an API key. Set OLLAMA_API_KEY (or "
-            "LLM_OLLAMA_API_KEY), or point LLM_BASE_URL to a local Ollama "
-            "server (e.g. http://localhost:11434)."
-        )
+    # Provider is "ollama" (the default). Credential validation is NOT done
+    # here: the Postgres-backed ordered provider list is the sole source of
+    # Ollama Cloud auth (each entry carries its own API key with no
+    # environment fallback — see ``llm_service.factory.get_client`` /
+    # ``llm_service.provider_store``), so re-checking ``OLLAMA_API_KEY`` /
+    # ``LLM_OLLAMA_API_KEY`` against ``resolve_base_url()`` here would consult
+    # a completely different (and, for a provider-list deployment, always
+    # empty) source and reject a correctly configured deployment. An entry
+    # that genuinely lacks a required key still fails clearly and fast — as a
+    # non-retryable ``LLMPermanentError``/``LLMNotConfiguredError`` raised by
+    # ``get_client`` or the first authenticated request — without this module
+    # duplicating that resolution.
 
     # Route through the hardened llm_service path. Imported lazily so the module
     # carries no import-time dependency on strands beyond the provider branches
@@ -340,11 +338,10 @@ def get_strands_model(
 
     logger.info(
         "Strategy Lab LLM routed through llm_service: agent_key=%s model=%s host=%s "
-        "cloud=%s response_format=%s explicit_timeout=%s temperature=%.2f",
+        "response_format=%s explicit_timeout=%s temperature=%.2f",
         agent_key,
         model_id,
-        host,
-        bool(api_key),
+        base_url,
         response_format,
         timeout if timeout is not None else "-",
         resolved_temperature,
