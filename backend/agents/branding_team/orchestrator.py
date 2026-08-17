@@ -119,6 +119,72 @@ _PHASE4_NODE_MERGE: dict[str, Optional[str]] = {
 }
 
 
+def _child_structured_output(child: Any) -> Optional[BaseModel]:
+    """Recover a merge child's usable ``structured_output``, or ``None``.
+
+    Preconditions:
+        ``child`` is a value looked up from a nested ``MultiAgentResult.results``
+        mapping — either a ``NodeResult``-shaped object or ``None`` (a node id
+        not present in that run).
+    Postconditions:
+        Returns the last agent result's ``structured_output`` when ``child`` is
+        present, exposes a non-empty ``get_agent_results()``, and that output is
+        a ``pydantic.BaseModel``; returns ``None`` otherwise. The ``None`` cases
+        are exactly the ``continue`` conditions the caller skips over.
+    """
+    if child is None or not hasattr(child, "get_agent_results"):
+        return None
+    child_agent_results = child.get_agent_results()
+    if not child_agent_results:
+        return None
+    structured = getattr(child_agent_results[-1], "structured_output", None)
+    if not isinstance(structured, BaseModel):
+        return None
+    return structured
+
+
+def _apply_fragment(
+    merged: dict[str, Any],
+    data: dict[str, Any],
+    nest_under: Optional[str],
+    *,
+    prefer_first: bool,
+    list_fields: frozenset[str] = frozenset(),
+) -> None:
+    """Fold one recognized fragment's dumped ``data`` into the ``merged`` accumulator.
+
+    Preconditions:
+        ``merged`` is the in-progress accumulator; ``data`` is a child's
+        ``model_dump()``; ``nest_under`` is the child's optional nest-under key;
+        ``list_fields`` is the set of ``model_class`` field names typed as a
+        list.
+    Postconditions:
+        Mutates ``merged`` in place and returns ``None``.
+        - When ``nest_under`` names a list field, ``data`` is appended as one
+          element under it (several single-item fragments combine into one list,
+          e.g. Phase 4's ``channel_guidelines``); ``prefer_first`` does not
+          apply to list fields.
+        - When ``nest_under`` names a non-list field, ``data`` is placed under
+          it — skipped when ``prefer_first`` and that key is already present
+          (the first writer wins).
+        - When ``nest_under`` is ``None``: with ``prefer_first`` each key is
+          filled only if absent (``setdefault``, first writer wins); otherwise
+          ``data`` overwrites (last writer wins).
+        No other keys are touched.
+    """
+    if nest_under and nest_under in list_fields:
+        merged.setdefault(nest_under, []).append(data)
+    elif nest_under:
+        if prefer_first and nest_under in merged:
+            return
+        merged[nest_under] = data
+    elif prefer_first:
+        for key, value in data.items():
+            merged.setdefault(key, value)
+    else:
+        merged.update(data)
+
+
 def _merge_named_fragments(
     node_result: Any,
     model_class: type[BaseModel],
@@ -172,28 +238,17 @@ def _merge_named_fragments(
     merged: dict[str, Any] = {}
     found_ids: set[str] = set()
     for child_node_id, nest_under in node_merge.items():
-        child = nested_results.get(child_node_id)
-        if child is None or not hasattr(child, "get_agent_results"):
-            continue
-        child_agent_results = child.get_agent_results()
-        if not child_agent_results:
-            continue
-        structured = getattr(child_agent_results[-1], "structured_output", None)
-        if not isinstance(structured, BaseModel):
+        structured = _child_structured_output(nested_results.get(child_node_id))
+        if structured is None:
             continue
         found_ids.add(child_node_id)
-        data = structured.model_dump()
-        if nest_under and nest_under in list_fields:
-            merged.setdefault(nest_under, []).append(data)
-        elif nest_under:
-            if prefer_first and nest_under in merged:
-                continue
-            merged[nest_under] = data
-        elif prefer_first:
-            for key, value in data.items():
-                merged.setdefault(key, value)
-        else:
-            merged.update(data)
+        _apply_fragment(
+            merged,
+            structured.model_dump(),
+            nest_under,
+            prefer_first=prefer_first,
+            list_fields=list_fields,
+        )
 
     if not found_ids:
         return None
@@ -899,28 +954,15 @@ class BrandingTeamOrchestrator:
         """
         spec = _SPEC_BY_NODE_ID.get(node_id)
         try:
-            result_obj = getattr(result, "result", None)
-            if result_obj is not None and hasattr(result_obj, "get"):
-                node_result = result_obj.get(node_id)
-                if node_result and hasattr(node_result, "result"):
-                    if spec is not None and spec.merge_fn is not None:
-                        merged = spec.merge_fn(node_result, model_class)
-                        if merged is not None:
-                            return merged, False
-                    agent_results = node_result.get_agent_results()
-                    if agent_results:
-                        last = agent_results[-1]
-                        if spec is None or spec.check_structured_output:
-                            structured = getattr(last, "structured_output", None)
-                            if isinstance(structured, BaseModel):
-                                parsed = _merge_structured_output(structured, model_class)
-                                if parsed is not None:
-                                    return parsed, False
-                        if hasattr(last, "message") and last.message:
-                            text = _collect_message_text(last.message)
-                            parsed = _parse_model_from_text(text, model_class)
-                            if parsed is not None:
-                                return parsed, False
+            node_result = _locate_node_result(result, node_id)
+            if node_result is not None:
+                if spec is not None and spec.merge_fn is not None:
+                    merged = spec.merge_fn(node_result, model_class)
+                    if merged is not None:
+                        return merged, False
+                parsed = _extract_from_single_agent(node_result, model_class, spec)
+                if parsed is not None:
+                    return parsed, False
         except Exception:
             # Malformed JSON / schema mismatch already returns None from
             # _parse_model_from_text; reaching here means an unexpected error
@@ -1022,6 +1064,68 @@ def _parse_model_from_text(text: str, model_class: type[BaseModel]) -> Optional[
         return model_class.model_validate(data)
     except ValidationError:
         return None
+
+
+def _locate_node_result(result: Any, node_id: str) -> Optional[Any]:
+    """Walk a Strands graph invocation ``result`` down to one node's result.
+
+    Preconditions:
+        ``result`` is the graph invocation result (or a test double shaped like
+        one); ``node_id`` identifies the node to fetch.
+    Postconditions:
+        Returns the ``NodeResult`` for ``node_id`` when ``result`` exposes a
+        ``result`` mapping (duck-typed via ``.get``) that contains ``node_id``
+        and the fetched value itself wraps a ``result``; returns ``None`` for
+        any missing/malformed link in that chain (no ``result`` attr, not a
+        mapping, node id absent, or a node result without a ``result``).
+    """
+    result_obj = getattr(result, "result", None)
+    if result_obj is None or not hasattr(result_obj, "get"):
+        return None
+    node_result = result_obj.get(node_id)
+    if node_result and hasattr(node_result, "result"):
+        return node_result
+    return None
+
+
+def _extract_from_single_agent(
+    node_result: Any, model_class: type[BaseModel], spec: Optional["_PhaseSpec"]
+) -> Optional[BaseModel]:
+    """Recover a phase output from a node's last agent result, or ``None``.
+
+    The per-node fallback for phases whose merge_fn didn't apply: prefer the
+    last agent's typed ``structured_output`` (Strands populates it when the
+    agent was built with ``structured_output=``), then fall back to parsing the
+    last text block.
+
+    Preconditions:
+        ``node_result`` is a ``NodeResult`` exposing ``get_agent_results()``;
+        ``spec`` is the phase's ``_PhaseSpec`` or ``None`` for an unrecognized
+        node id.
+    Postconditions:
+        Returns a validated ``model_class`` instance from the last agent's
+        ``structured_output`` (only when ``spec`` is ``None`` or
+        ``spec.check_structured_output`` is True) or from parsing its last text
+        block; returns ``None`` when there are no agent results or neither
+        source yields a usable value — in which case the caller degrades to a
+        default-constructed model.
+    """
+    agent_results = node_result.get_agent_results()
+    if not agent_results:
+        return None
+    last = agent_results[-1]
+    if spec is None or spec.check_structured_output:
+        structured = getattr(last, "structured_output", None)
+        if isinstance(structured, BaseModel):
+            parsed = _merge_structured_output(structured, model_class)
+            if parsed is not None:
+                return parsed
+    if hasattr(last, "message") and last.message:
+        text = _collect_message_text(last.message)
+        parsed = _parse_model_from_text(text, model_class)
+        if parsed is not None:
+            return parsed
+    return None
 
 
 def _bullets(title: str, items: Iterable[Any], fmt: Callable[[Any], str] = lambda x: x) -> str:
