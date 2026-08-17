@@ -6,7 +6,7 @@
  * state and lets the operator overwrite a key, never read it.
  */
 
-export type LlmProvider = 'ollama' | 'claude';
+export type LlmProvider = 'ollama' | 'claude' | 'runpod';
 
 /**
  * Whether a provider authenticates with an API key (vs. a local base URL).
@@ -20,7 +20,39 @@ export type LlmProvider = 'ollama' | 'claude';
  * without a stored API key.
  */
 export function providerRequiresApiKey(provider: LlmProvider): boolean {
-  return provider === 'claude';
+  return provider === 'claude' || provider === 'runpod';
+}
+
+/**
+ * Whether a provider is configured via a RunPod `endpoint_id` rather than a
+ * base URL. Kept alongside `providerRequiresApiKey` so the "which field does
+ * this provider need" logic lives in one place instead of hardcoded strings.
+ *
+ * Preconditions: `provider` is a member of `LlmProvider`.
+ * Postconditions: returns true iff the add/edit form should show the
+ * Endpoint ID field (and hide Base URL) for `provider`.
+ */
+export function providerUsesEndpointId(provider: LlmProvider): boolean {
+  return provider === 'runpod';
+}
+
+/** Matches the canonical RunPod base URL the backend derives from an endpoint_id
+ * (`_build_runpod_base_url` in `backend/unified_api/routes/llm_config.py`). */
+const RUNPOD_BASE_URL_PATTERN = /^https:\/\/api\.runpod\.ai\/v2\/([a-zA-Z0-9]+)\/openai\/v1\/?$/;
+
+/**
+ * Recover the `endpoint_id` a RunPod entry was created with from its stored
+ * `base_url`. The backend never returns `endpoint_id` directly — only the derived
+ * URL — so the edit form must parse it back out to pre-fill the field.
+ *
+ * Preconditions: none.
+ * Postconditions: returns the endpoint id substring when `base_url` matches the
+ * canonical RunPod URL shape; returns `''` otherwise (including for non-RunPod
+ * entries, whose `base_url` never matches).
+ */
+export function extractRunpodEndpointId(base_url: string): string {
+  const match = RUNPOD_BASE_URL_PATTERN.exec(base_url);
+  return match ? match[1] : '';
 }
 
 /**
@@ -67,6 +99,8 @@ export interface LlmProviderCreate {
   model?: string;
   base_url?: string;
   api_key?: string;
+  /** RunPod endpoint ID (alphanumeric). Required when provider is 'runpod'. */
+  endpoint_id?: string;
 }
 
 /** Request body to edit a provider; omitted/empty fields keep the stored value. */
@@ -82,4 +116,7 @@ export interface LlmProviderUpdate {
    * non-empty `api_key` takes precedence over this flag on the server.
    */
   clear_api_key?: boolean;
+  /** New RunPod endpoint ID; empty/omitted leaves the stored endpoint ID (and its
+   * derived base URL) unchanged. */
+  endpoint_id?: string;
 }
