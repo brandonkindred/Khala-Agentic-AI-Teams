@@ -48,7 +48,7 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
-    gap: 8px;
+    gap: var(--kh-space-2);
   }
 
   // Overrides Material's default `width: 100%` on `mat-menu-item` so the
@@ -71,7 +71,7 @@
     min-width: 0;
     min-height: 0;
     justify-content: center;
-    padding: 8px;
+    padding: var(--kh-space-2);
 
     .mat-icon {
       margin-right: 0;
