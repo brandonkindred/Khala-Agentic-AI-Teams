@@ -7,6 +7,7 @@ Provides:
 
 from __future__ import annotations
 
+import re
 from typing import Any, Callable, Literal, Optional
 
 from strands import Agent
@@ -48,6 +49,13 @@ from llm_service import get_strands_model
 COMPOSITOR_AGENT_KEY = "branding_compositor"
 
 
+# ``str.isidentifier()`` accepts Unicode letters (PEP 3131), which are valid
+# Python identifiers but not valid POSIX/Docker Compose env var names — so
+# it under-enforces the shell/Compose guarantee ``phase_agent_key`` makes
+# below. This is the ASCII-only shape env var names actually require.
+_SHELL_SAFE_KEY_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+
 def phase_agent_key(phase: BrandPhase) -> str:
     """Return the ``agent_key`` tier for *phase*'s specialist agents.
 
@@ -56,16 +64,18 @@ def phase_agent_key(phase: BrandPhase) -> str:
     Postconditions:
         Returns ``f"branding_{phase.value}"`` (e.g.
         ``"branding_strategic_core"`` for ``BrandPhase.STRATEGIC_CORE``).
-        The result is a valid Python/shell identifier so
+        The result is a valid shell/Compose identifier (ASCII letters,
+        digits, and underscores, not starting with a digit) so
         ``LLM_MODEL_<agent_key>`` can be set in env files and Compose.
         Raises ``ValueError`` rather than returning a key that would
         violate that guarantee — the mechanical ``f"branding_{phase.value}"``
         derivation has no other enforcement point, so a future ``BrandPhase``
-        value containing e.g. a hyphen or space is caught here instead of
-        silently producing an unexportable env var name.
+        value containing e.g. a hyphen, space, or non-ASCII character is
+        caught here instead of silently producing an unexportable env var
+        name.
     """
     key = f"branding_{phase.value}"
-    if not key.isidentifier():
+    if not _SHELL_SAFE_KEY_RE.fullmatch(key):
         raise ValueError(f"phase_agent_key derived a non-shell-safe key {key!r} from {phase!r}")
     return key
 

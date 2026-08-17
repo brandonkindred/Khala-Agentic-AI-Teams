@@ -9,6 +9,8 @@ a dummy Strands model and never invokes it.
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 from strands import Agent
 from strands.multiagent.graph import Graph
@@ -400,6 +402,18 @@ def test_phase_and_compositor_agent_keys_are_shell_safe() -> None:
     for key in keys:
         assert key.isidentifier(), key
         assert "." not in key
+
+
+def test_phase_agent_key_rejects_non_shell_safe_derivation() -> None:
+    """A future BrandPhase value that isn't ASCII shell-safe must raise, not silently pass.
+
+    ``str.isidentifier()`` alone would accept a Unicode value like ``"stratégie"``
+    (a valid Python identifier but not a valid POSIX/Compose env var name), so this
+    exercises the boundary a plain ``isidentifier()`` check would miss.
+    """
+    fake_phase = SimpleNamespace(value="café")
+    with pytest.raises(ValueError, match="non-shell-safe"):
+        phase_agent_key(fake_phase)
 
 
 def test_phase1_factories_use_strategic_core_agent_key() -> None:
