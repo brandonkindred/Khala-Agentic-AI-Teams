@@ -6,23 +6,35 @@ resumable computation. It orchestrates the review as: prepare → map fan-out
 ``asyncio.gather(..., return_exceptions=True)``, then a fixed-order scan
 re-raises the earliest-index exception; pre-migration histories keep the
 original unconstrained ``asyncio.gather`` without ``return_exceptions``) →
-tail passes run concurrently via the same return_exceptions idiom → optional
-side-effect consolidation → deterministic gate → (conditional) narrative
-synthesis — so a worker restart mid-review re-runs only the unfinished
-activities instead of re-reviewing the whole submission. New concurrent
-fan-outs await every sibling and re-raise in list order so completion-order
-races never pick the surfaced exception or abandon an activity.
+tail passes run through a concurrent verify+merged gather (see below) →
+optional side-effect consolidation → (under
+``_REORDERED_TAIL_PASSES_PATCH``) a sequential combine + re-verify pass →
+deterministic gate → (conditional) narrative synthesis — so a worker restart
+mid-review re-runs only the unfinished activities instead of re-reviewing the
+whole submission. New concurrent fan-outs await every sibling and re-raise in
+list order so completion-order races never pick the surfaced exception or
+abandon an activity.
 
 For current executions (under ``_MERGED_ARCHITECTURE_SIDE_EFFECT_PASS_PATCH``)
 the tail passes are two slots — false-positive verify and a single merged
-architecture-consistency + side-effect-impact pass (one LLM call) — mirroring
-``coordinator._run_tail_passes``'s identical "filter" + "merged" concurrent
-fan-out in thread mode. Histories recorded before that patch existed keep
-replaying the original three-slot gather (verify → architecture →
-side-effect, as two independent additive activities); see that patch's
-docstring for the deprecation plan. Either way, the tail passes have no
-cross-pass data dependency (each reads only ``review_input`` and/or the map
-phase's aggregated ``issues``, never another pass's output).
+architecture-consistency + side-effect-impact pass (one LLM call) — run
+concurrently. This no longer mirrors thread mode, which moved to a fully
+sequential merged → combine → filter pipeline (see
+``coordinator._run_tail_passes``); the concurrent gather here is retained
+purely as a migration-compatibility artifact for in-flight histories.
+``_REORDERED_TAIL_PASSES_PATCH`` (see its own docstring) is what now mirrors
+thread mode's sequential order: it combines the merged pass's findings with
+the map-phase issues via ``combine_findings_activity`` and re-verifies that
+combined set, replacing the concurrent gather's result for any execution new
+enough to take that path. Histories recorded before the merged-pass patch
+existed keep replaying the original three-slot gather (verify → architecture
+→ side-effect, as two independent additive activities); see that patch's
+docstring for the deprecation plan. Within the concurrent gather itself, the
+tail passes have no cross-pass data dependency (each reads only
+``review_input`` and/or the map phase's aggregated ``issues``, never another
+pass's output) — that gather predates ``_REORDERED_TAIL_PASSES_PATCH``, which
+is precisely why the merged pass's own findings never see false-positive
+filtering there.
 
 Every phase calls the same underlying coordinator functions (through
 :mod:`.activities`): the map unit is ``mapping._cached_review_chunk``,
@@ -171,6 +183,53 @@ _CONCURRENT_TAIL_PASSES_PATCH = "code-review-concurrent-tail-passes"
 # ``workflow.deprecate_patch(_MERGED_ARCHITECTURE_SIDE_EFFECT_PASS_PATCH)``
 # before deleting it.
 _MERGED_ARCHITECTURE_SIDE_EFFECT_PASS_PATCH = "code-review-merged-architecture-side-effect-pass"
+
+# Replay-compatibility gate for reordering the tail passes to match the
+# in-process coordinator's current sequential pipeline (see
+# ``coordinator._run_tail_passes``): merged architecture/side-effect pass ->
+# ``combine_findings_activity`` over the FULL stream (map-phase issues plus
+# both additive lists) -> ``filter_false_positives_activity`` over that
+# combined set -> finalize. This fixes a real bug in the concurrent path
+# above: under ``_MERGED_ARCHITECTURE_SIDE_EFFECT_PASS_PATCH``'s True branch,
+# the merged pass's architecture/side-effect findings are appended onto
+# ``verified`` AFTER false-positive filtering already ran (they were
+# scheduled concurrently WITH the filter, not sequenced after it), so those
+# findings currently bypass false-positive verification entirely; this gate
+# routes them through both ``combine_findings_activity`` and the filter,
+# exactly as ``_run_tail_passes`` does in thread mode.
+#
+# Must be checked strictly AFTER every existing gate above (including
+# ``_SIDE_EFFECT_CONSOLIDATION_PATCH``), per this file's append-only
+# convention for workflow.patched() call order. Because of that ordering
+# requirement, this gate cannot be consulted early enough to skip the
+# concurrent verify+merged gather or the consolidation activity above for a
+# brand-new execution -- both are unconditionally entered (workflow.patched()
+# is always True for a live/non-replaying run), so their results are computed
+# and then intentionally discarded here in favor of this gate's own
+# ``verified``. This is a real, extra filter_false_positives_activity call
+# (an LLM round trip) plus a wasted consolidate_side_effect_issues_activity
+# call on every new execution for as long as this gate exists -- an accepted,
+# temporary cost of the migration window, the same trade-off this file
+# already makes for _ARCHITECTURE_PASS_PATCH/_SIDE_EFFECT_PASS_PATCH staying
+# registered and called (though unused by the merged branch) since the
+# merged-pass migration.
+#
+# A history recorded before this gate existed (which is every history
+# recorded up to and including this deploy) has no marker for it, so
+# ``workflow.patched`` returns False on replay and that history's original
+# concurrent-gather-then-consolidate-then-finalize sequence is reproduced
+# exactly.
+# TODO: Remove this gate (and the now-dead concurrent verify+merged gather /
+# consolidation call above, always taking the reordered pipeline
+# unconditionally) once no pre-reorder CodeReviewWorkflow histories remain
+# open (confirm via the Temporal UI), then deprecate the marker with
+# ``workflow.deprecate_patch(_REORDERED_TAIL_PASSES_PATCH)`` before deleting
+# it. Owner: code-review team -- given the recurring per-review cost this
+# gate carries (see above), this cleanup should not wait for an unrelated
+# touch of this file; revisit as soon as the Temporal UI confirms zero
+# pre-reorder CodeReviewWorkflow executions in flight, rather than only
+# opportunistically.
+_REORDERED_TAIL_PASSES_PATCH = "code-review-reordered-tail-passes"
 
 
 @workflow.defn(name="CodeReviewWorkflow")
@@ -388,14 +447,25 @@ class CodeReviewWorkflow:
 
         # Architecture-consistency / cross-codebase-redundancy pass and
         # side-effect / blast-radius pass are both additive, once per
-        # submission (not once per chunk), matching thread mode's
-        # run_coordinator (see coordinator.py's identical call ordering —
-        # after false-positive verification, before the final dedupe/gate).
-        # Each is gated by its own workflow.patched so a pre-migration
-        # history (recorded before that activity existed) replays its
-        # original finalize-next sequence exactly.
+        # submission (not once per chunk). Below, they are scheduled
+        # concurrently with false-positive verification — a migration
+        # artifact that no longer matches thread mode's run_coordinator,
+        # which runs the merged pass BEFORE verification and folds these
+        # findings through the false-positive filter too (see
+        # coordinator.py's _run_tail_passes). _REORDERED_TAIL_PASSES_PATCH
+        # further down replicates that corrected ordering for new
+        # executions. Each pass here is still gated by its own
+        # workflow.patched so a pre-migration history (recorded before that
+        # activity existed) replays its original finalize-next sequence
+        # exactly.
         has_architecture_findings = False
         has_side_effect_findings = False
+        # Populated by the _MERGED_ARCHITECTURE_SIDE_EFFECT_PASS_PATCH True
+        # branch below (the only branch reachable when
+        # _REORDERED_TAIL_PASSES_PATCH is True, since that gate postdates the
+        # merged-pass migration); consumed by that gate's branch further down.
+        architecture_result: List[Dict[str, Any]] = []
+        side_effect_result: List[Dict[str, Any]] = []
 
         async def _empty_tail_pass() -> List[Dict[str, Any]]:
             # Stand-in for a disabled pass in the gather below: schedules no
@@ -532,6 +602,63 @@ class CodeReviewWorkflow:
                 task_queue=TASK_QUEUE,
                 start_to_close_timeout=timedelta(minutes=5),
                 retry_policy=_DEFAULT_RETRY,
+            )
+
+        if workflow.patched(_REORDERED_TAIL_PASSES_PATCH):
+            # New executions: replace the concurrently-computed (and now
+            # discarded) `verified`/consolidated result above with the
+            # coordinator._run_tail_passes-matching sequential order. The
+            # merged pass already ran in the branch above (the only branch
+            # reachable when this gate is True) -- reuse its
+            # architecture_result/side_effect_result and the untouched raw
+            # map-phase `issues` rather than re-invoking the merged-pass
+            # activity. combine_findings_activity then
+            # filter_false_positives_activity run over that combined stream
+            # so the additive findings are deduped AND false-positive-checked
+            # (see this gate's comment above for the bug this fixes and why
+            # the gather above can't be skipped instead).
+            #
+            # Precondition, enforced rather than left comment-only:
+            # architecture_result/side_effect_result are only ever populated
+            # by the _MERGED_ARCHITECTURE_SIDE_EFFECT_PASS_PATCH True branch
+            # above -- the pre-merged-pass legacy branches (both the 3-slot
+            # gather and the fully-sequential pre-_CONCURRENT_TAIL_PASSES_PATCH
+            # path) assign differently-named locals and never touch these two.
+            # This gate is brand-new (no history has ever recorded its
+            # marker), so it only evaluates True for a live execution, and
+            # every live execution also takes the merged-pass branch -- but
+            # that coupling is otherwise implicit, and a future edit that
+            # decouples these two gates could silently reintroduce this PR's
+            # bug (architecture/side-effect findings dropped, not just
+            # unfiltered). workflow.patched() results are memoized per patch
+            # id, so re-checking the same id here is a cache read, not a new
+            # replay-order-sensitive event. A plain ``assert`` would be wrong
+            # here: it is compiled away under ``-O``/``-OO``, which would
+            # silently defeat this exact guard, so this is an explicit,
+            # always-evaluated raise instead (mirrors the internal-invariant
+            # convention in ``transcript.py``'s ``_note_overflow``).
+            if not workflow.patched(_MERGED_ARCHITECTURE_SIDE_EFFECT_PASS_PATCH):
+                raise RuntimeError(
+                    "_REORDERED_TAIL_PASSES_PATCH requires the merged-pass branch "
+                    "to have populated architecture_result/side_effect_result"
+                )
+            combined = await workflow.execute_activity(
+                A.combine_findings_activity,
+                args=[review_input, [*issues, *architecture_result, *side_effect_result]],
+                task_queue=TASK_QUEUE,
+                start_to_close_timeout=timedelta(minutes=5),
+                retry_policy=_DEFAULT_RETRY,
+            )
+            verified = await workflow.execute_activity(
+                A.filter_false_positives_activity,
+                args=[
+                    review_input,
+                    combined,
+                    bool(review_input.get("skip_false_positive_filter", False)),
+                ],
+                task_queue=TASK_QUEUE,
+                start_to_close_timeout=timedelta(minutes=60),
+                retry_policy=_LLM_RETRY,
             )
 
         self._advance("finalizing", 0.95)

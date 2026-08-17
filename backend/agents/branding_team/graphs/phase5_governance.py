@@ -32,8 +32,13 @@ def build_phase5_graph() -> Graph:
         governance_compositor — assembles every upstream fragment into a
         single GovernanceOutput JSON document.
 
-    Returns:
-        A compiled ``Graph`` ready for invocation.
+    Preconditions:
+        None — the builder wires a fixed seven-agent factory set and takes no
+        arguments.
+    Postconditions:
+        Returns a built ``Graph`` whose seven specialist nodes are entry points
+        running in parallel and whose sole terminal node, ``governance_compositor``,
+        depends on all seven (fan-out / fan-in).
     """
     builder = GraphBuilder()
 
