@@ -17,10 +17,16 @@ covered in dual-mode: the soft base still permits blank/omitted content
 generates a real subclass. Wrapper and compositor schemas
 (``PurposeVisionOutput``, ``CoreValuesOutput``, Phase 2's cumulative chain,
 Phase 4/5 compositor models) keep their cardinality and blank-rejection
-tests. ``BrandDiscoveryAudit`` is a fully collapsed single model (used both
-as ``discovery_auditor``'s ``structured_output`` and as
-``StrategicCoreOutput.brand_discovery``'s ``default_factory``), so its
-fields default to empty rather than being required.
+tests. ``BrandDiscoveryAudit``, ``CreativeRefinementDecision``, and
+``DesignSystemDefinition`` are each a fully collapsed single model (used both
+as an agent's ``structured_output`` and as the corresponding phase output's
+``default_factory`` merge target — see ``VisualIdentityOutput`` for the
+latter two), so their fields default to empty rather than being required.
+``MoodBoardConcept`` is the same collapsed-twin pattern but a hybrid: three
+fields stay required (matching its role as ``MoodBoardConceptualist_*``'s
+strict agent payload) while two default to empty (matching its role as the
+nested item type on ``MoodBoardCandidatesOutput``/``VisualIdentityOutput``'s
+``mood_board_candidates`` lists, which must accept partial fragments).
 """
 
 from __future__ import annotations
@@ -60,6 +66,8 @@ from branding_team.models import (
     CoreValue,
     CoreValueOutput,
     CoreValuesOutput,
+    CreativeRefinementDecision,
+    DesignSystemDefinition,
     DifferentiationPillar,
     DifferentiationPillarOutput,
     DifferentiationPillarsOutput,
@@ -71,6 +79,8 @@ from branding_team.models import (
     MessagingFrameworkOutput,
     MessagingPillar,
     MessagingPillarOutput,
+    MoodBoardCandidatesOutput,
+    MoodBoardConcept,
     NarrativeMessagingOutput,
     PersonaProfile,
     PersonaProfileOutput,
@@ -82,6 +92,7 @@ from branding_team.models import (
     TeamOutput,
     TypographySpec,
     TypographySpecOutput,
+    VisualIdentityOutput,
     VoiceToneEntry,
     VoiceToneEntryOutput,
     WikiEntry,
@@ -124,6 +135,156 @@ def test_brand_discovery_audit_round_trips_given_fields() -> None:
     assert audit.opportunities == ["Category consolidating"]
     assert audit.threats == ["Bigger competitors out-spending"]
     assert audit.stakeholder_insights == ["Sales wants sharper differentiation"]
+
+
+_CREATIVE_REFINEMENT_KWARGS = dict(
+    winning_candidate_title="Editorial Clarity",
+    scoring_criteria=["Audience resonance", "Distinctiveness", "Feasibility"],
+    scores_by_candidate={"Editorial Clarity": 8.5, "Bold Minimalism": 7.0},
+    rationale="Strongest fit for the target audience segment.",
+    workshop_prompts=["Which direction feels most ownable?"],
+    decision_criteria=["Cross-channel consistency"],
+)
+
+
+def test_creative_refinement_decision_constructs_with_no_arguments() -> None:
+    """Backs VisualIdentityOutput.creative_refinement's default_factory."""
+    decision = CreativeRefinementDecision()
+    assert decision.winning_candidate_title == ""
+    assert decision.scoring_criteria == []
+    assert decision.scores_by_candidate == {}
+    assert decision.rationale == ""
+    assert decision.workshop_prompts == []
+    assert decision.decision_criteria == []
+
+
+def test_creative_refinement_decision_round_trips_given_fields() -> None:
+    assert set(CreativeRefinementDecision.model_fields.keys()) == set(
+        _CREATIVE_REFINEMENT_KWARGS.keys()
+    )
+
+    decision = CreativeRefinementDecision(**_CREATIVE_REFINEMENT_KWARGS)
+    assert decision.winning_candidate_title == "Editorial Clarity"
+    assert decision.scoring_criteria == ["Audience resonance", "Distinctiveness", "Feasibility"]
+    assert decision.scores_by_candidate == {"Editorial Clarity": 8.5, "Bold Minimalism": 7.0}
+    assert decision.rationale == "Strongest fit for the target audience segment."
+    assert decision.workshop_prompts == ["Which direction feels most ownable?"]
+    assert decision.decision_criteria == ["Cross-channel consistency"]
+
+
+_DESIGN_SYSTEM_KWARGS = dict(
+    design_principles=["Clarity over decoration"],
+    foundation_tokens=["color", "type", "spacing"],
+    component_standards=["Buttons use the primary token for fills"],
+)
+
+
+def test_design_system_definition_constructs_with_no_arguments() -> None:
+    """Backs VisualIdentityOutput.design_system's default_factory."""
+    design_system = DesignSystemDefinition()
+    assert design_system.design_principles == []
+    assert design_system.foundation_tokens == []
+    assert design_system.component_standards == []
+
+
+def test_design_system_definition_round_trips_given_fields() -> None:
+    assert set(DesignSystemDefinition.model_fields.keys()) == set(_DESIGN_SYSTEM_KWARGS.keys())
+
+    design_system = DesignSystemDefinition(**_DESIGN_SYSTEM_KWARGS)
+    assert design_system.design_principles == ["Clarity over decoration"]
+    assert design_system.foundation_tokens == ["color", "type", "spacing"]
+    assert design_system.component_standards == ["Buttons use the primary token for fills"]
+
+
+_MOOD_BOARD_CONCEPT_KWARGS = dict(
+    title="Editorial Clarity",
+    visual_direction="Clean, typographic, generous whitespace.",
+    color_story=["Ink black", "Warm white", "Signal red"],
+    typography_direction="A grotesque display face paired with a humanist body face.",
+    image_style=["High-contrast editorial photography", "Minimal line illustration"],
+)
+
+
+def test_mood_board_concept_round_trips_given_fields() -> None:
+    assert set(MoodBoardConcept.model_fields.keys()) == set(_MOOD_BOARD_CONCEPT_KWARGS.keys())
+
+    concept = MoodBoardConcept(**_MOOD_BOARD_CONCEPT_KWARGS)
+    assert concept.title == "Editorial Clarity"
+    assert concept.visual_direction == "Clean, typographic, generous whitespace."
+    assert concept.color_story == ["Ink black", "Warm white", "Signal red"]
+    assert (
+        concept.typography_direction == "A grotesque display face paired with a humanist body face."
+    )
+    assert concept.image_style == [
+        "High-contrast editorial photography",
+        "Minimal line illustration",
+    ]
+
+
+def test_mood_board_concept_rejects_missing_required_fields() -> None:
+    """title/visual_direction/typography_direction stay required even though the
+    collapsed model dropped the deleted MoodBoardConceptOutput's min_length=1 —
+    key omission must still fail, matching the agent-payload/strict role."""
+    for missing_field in ("title", "visual_direction", "typography_direction"):
+        kwargs = {k: v for k, v in _MOOD_BOARD_CONCEPT_KWARGS.items() if k != missing_field}
+        with pytest.raises(ValidationError):
+            MoodBoardConcept(**kwargs)
+
+
+def test_mood_board_concept_permits_blank_required_fields_and_defaults_optional_fields() -> None:
+    """Documents a deliberate loosening from the deleted MoodBoardConceptOutput
+    twin, which enforced min_length=1 on every field. The collapsed model only
+    requires the three string fields to be present — blank is now valid — and
+    color_story/image_style are fully optional, defaulting to [] so partial
+    fragments still validate (the merge-target/soft role)."""
+    concept = MoodBoardConcept(title="", visual_direction="", typography_direction="")
+    assert concept.title == ""
+    assert concept.visual_direction == ""
+    assert concept.typography_direction == ""
+    assert concept.color_story == []
+    assert concept.image_style == []
+
+
+def test_visual_identity_output_nests_the_collapsed_phase3_models() -> None:
+    """Confirms the same collapsed classes used as agents.py's structured_output
+    (see test_dummy_structured_output_contract.py) are what VisualIdentityOutput
+    accepts as its merge target — the single-model, dual-role contract."""
+    output = VisualIdentityOutput(
+        creative_refinement=CreativeRefinementDecision(winning_candidate_title="Editorial Clarity"),
+        design_system=DesignSystemDefinition(design_principles=["Clarity over decoration"]),
+        mood_board_candidates=[
+            MoodBoardConcept(
+                title="Editorial Clarity",
+                visual_direction="Clean, typographic.",
+                typography_direction="A grotesque display face.",
+            )
+        ],
+    )
+    assert isinstance(output.creative_refinement, CreativeRefinementDecision)
+    assert output.creative_refinement.winning_candidate_title == "Editorial Clarity"
+    assert isinstance(output.design_system, DesignSystemDefinition)
+    assert output.design_system.design_principles == ["Clarity over decoration"]
+    assert isinstance(output.mood_board_candidates[0], MoodBoardConcept)
+    assert output.mood_board_candidates[0].title == "Editorial Clarity"
+
+
+def test_mood_board_candidates_output_nests_mood_board_concept() -> None:
+    candidates = MoodBoardCandidatesOutput(
+        mood_board_candidates=[
+            MoodBoardConcept(
+                title="Editorial Clarity",
+                visual_direction="Clean, typographic.",
+                typography_direction="A grotesque display face.",
+            ),
+            MoodBoardConcept(
+                title="Bold Minimalism",
+                visual_direction="High contrast, oversized type.",
+                typography_direction="A single confident geometric sans.",
+            ),
+        ]
+    )
+    assert len(candidates.mood_board_candidates) == 2
+    assert all(isinstance(c, MoodBoardConcept) for c in candidates.mood_board_candidates)
 
 
 def test_purpose_vision_output_rejects_missing_and_empty_fields() -> None:
