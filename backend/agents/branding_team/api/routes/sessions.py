@@ -71,6 +71,21 @@ def run_branding_team(payload: RunBrandingTeamRequest) -> TeamOutput:
 
 @router.post("/sessions", response_model=BrandingSessionResponse)
 def create_branding_session(payload: RunBrandingTeamRequest) -> BrandingSessionResponse:
+    """Start an interactive review session from an initial pipeline run.
+
+    Runs the orchestrator with ``HumanReview(approved=False)`` so the pipeline
+    produces a first draft and surfaces open review questions rather than
+    finalizing.
+
+    Preconditions:
+        ``payload`` is a validated ``RunBrandingTeamRequest``.
+        ``payload.target_phase`` is either unset or a recognized phase name (an
+        unrecognized value parses to ``None``, meaning "run all phases").
+    Postconditions:
+        Runs the pipeline once, persists the resulting output under a new session
+        via ``session_store.create``, and returns that session's
+        ``BrandingSessionResponse`` (including any open questions).
+    """
     from branding_team.api import main as _main
 
     mission = _mission_from_payload(payload)
@@ -87,6 +102,14 @@ def create_branding_session(payload: RunBrandingTeamRequest) -> BrandingSessionR
 
 @router.get("/sessions/{session_id}", response_model=BrandingSessionResponse)
 def get_branding_session(session_id: str) -> BrandingSessionResponse:
+    """Fetch an interactive review session by id.
+
+    Preconditions:
+        ``session_id`` is a non-empty path string.
+    Postconditions:
+        Returns the session's ``BrandingSessionResponse``. Raises 404 "Session not
+        found" when no such session exists.
+    """
     session = session_store.get(session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
@@ -95,6 +118,15 @@ def get_branding_session(session_id: str) -> BrandingSessionResponse:
 
 @router.get("/sessions/{session_id}/questions", response_model=List[BrandingQuestion])
 def get_branding_questions(session_id: str) -> List[BrandingQuestion]:
+    """List the still-open review questions for a session.
+
+    Preconditions:
+        ``session_id`` is a non-empty path string.
+    Postconditions:
+        Returns only the session's questions whose ``status == "open"`` (a
+        possibly empty list; answered questions are excluded). Raises 404
+        "Session not found" when the session is unknown.
+    """
     session = session_store.get(session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
@@ -109,6 +141,25 @@ def answer_branding_question(
     question_id: str,
     payload: AnswerBrandingQuestionRequest,
 ) -> BrandingSessionResponse:
+    """Record an answer to an open review question and refresh the session.
+
+    Applies the answer to the session mission and, to avoid wasted work,
+    debounces regeneration: the full ~40-agent pipeline is re-run exactly once —
+    only when answering leaves no open questions remaining — since answers only
+    refine Phase 1 inputs that would be rebuilt again on the next answer.
+
+    Preconditions:
+        ``session_id`` and ``question_id`` are non-empty path strings; ``payload``
+        is a validated ``AnswerBrandingQuestionRequest``.
+    Postconditions:
+        Marks the question answered, applies the answer to the mission via
+        ``_apply_answer``, and persists the session. Re-runs the pipeline with
+        ``HumanReview(approved=True)`` and updates ``latest_output`` only when the
+        answered question was the last open one. Returns the updated
+        ``BrandingSessionResponse``. Raises 404 "Session not found" when the
+        session is unknown and 404 "Open question not found" when no open question
+        matches ``question_id``.
+    """
     from branding_team.api import main as _main
 
     session = session_store.get(session_id)

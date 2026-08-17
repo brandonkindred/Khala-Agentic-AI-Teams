@@ -31,16 +31,21 @@ def build_branding_graph(
 ) -> Graph:
     """Build the top-level branding pipeline graph.
 
-    Parameters
-    ----------
-    target_phase:
-        Stop after this phase. ``None`` means run all phases.
+    Phase 1 always runs and is the entry point; each later phase is appended (and
+    edged onto the previous phase) only while its index is ``<= stop_idx``, where
+    ``stop_idx`` comes from ``phase_index(target_phase)`` or defaults to the last
+    runnable phase. Phases therefore form a single linear chain up to the target.
 
-    Returns
-    -------
-    Graph
-        A Strands ``Graph`` ready to be invoked with a task string
-        (the serialised ``BrandingMission``).
+    Preconditions:
+        ``target_phase`` is either ``None`` or a runnable ``BrandPhase`` (i.e. one
+        for which ``phase_index`` returns a valid index; ``BrandPhase.COMPLETE`` is
+        not a runnable stage).
+    Postconditions:
+        Returns a built Strands ``Graph`` whose entry point is Phase 1 and which
+        contains exactly the phases up to and including ``target_phase`` (all five
+        when ``target_phase`` is ``None``), each wired to its predecessor. The
+        graph carries the module's execution/node timeout budgets and is ready to
+        invoke with the serialised ``BrandingMission`` as its task string.
     """
     stop_idx = (
         phase_index(target_phase) if target_phase else _MAX_RUNNABLE_PHASE_INDEX
