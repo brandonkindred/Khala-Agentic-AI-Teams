@@ -37,6 +37,7 @@ from shared.env_config import env_float
 from unified_api.bounded_executor import get_or_recreate_executor
 from unified_api.config import (
     TEAM_CONFIGS,
+    UNIFIED_API_AGENT_STUDIO_TEMPORAL_WORKER,
     UNIFIED_API_SANDBOX_TEMPORAL_WORKER,
     UNIFIED_API_TEAM_ASSISTANTS_ENABLED,
     get_enabled_teams,
@@ -574,12 +575,56 @@ def _register_proxy_routes(app: FastAPI) -> dict[str, bool]:
 # ---------------------------------------------------------------------------
 
 
+def _start_agent_studio_temporal_worker() -> None:
+    """Start the in-process Agent Studio Temporal worker.
+
+    Agent Studio is an in-process team (mounted on this app, not a separate
+    ``team_service`` container). Gated on ``UNIFIED_API_AGENT_STUDIO_TEMPORAL_WORKER``
+    and on the team being enabled. Authoring CRUD (start conversation / send
+    message / clone / save) does not use Temporal: dispatch always calls
+    :class:`AgentStudioService` in-process, and the worker starter no-ops when
+    there are no authoring workflows to register. This helper always returns
+    ``None``. A ``False`` return from the starter is a fully-functional mode
+    (in-process CRUD), not a degraded state. Log-and-continue on failure,
+    matching the other lifespan startup steps.
+
+    Preconditions:
+        - ``TEAM_CONFIGS`` includes ``agent_studio``.
+    Postconditions:
+        - Returns ``None``. Logs at INFO and does not start a worker when
+          ``UNIFIED_API_AGENT_STUDIO_TEMPORAL_WORKER`` is false.
+        - Returns ``None`` and logs nothing (no worker started) when the
+          ``agent_studio`` team is disabled in ``TEAM_CONFIGS``.
+        - Logs at INFO when a worker actually started, or when the starter
+          returns ``False`` (nothing to register, or Temporal unset) — Agent
+          Studio serves authoring requests in-process either way. Startup is
+          not aborted (that would take down every other team for one
+          in-process team's config).
+    """
+    if not UNIFIED_API_AGENT_STUDIO_TEMPORAL_WORKER:
+        logger.info("Agent Studio Temporal worker disabled (UNIFIED_API_AGENT_STUDIO_TEMPORAL_WORKER=false)")
+        return
+    if not TEAM_CONFIGS["agent_studio"].enabled:
+        return
+    try:
+        from agent_platform.studio.temporal.worker import start_agent_studio_temporal_worker_thread
+
+        started = start_agent_studio_temporal_worker_thread()
+    except Exception:
+        logger.warning("Agent Studio Temporal worker failed to start", exc_info=True)
+        return
+    if started:
+        logger.info("Started Agent Studio Temporal worker")
+    else:
+        logger.info("Agent Studio Temporal worker NOT started; authoring requests dispatch in-process.")
+
+
 def _stop_in_process_temporal_workers() -> None:
     """Stop in-process Temporal workers before usage-flusher / Postgres teardown.
 
-    The platform sandbox polls from this process. Its activities can invoke the
-    LLM; they must finish (or be shut down) before the usage observer unregisters
-    and the shared pool closes.
+    Agent Studio and the platform sandbox poll from this process. Their
+    activities can invoke the LLM; they must finish (or be shut down) before
+    the usage observer unregisters and the shared pool closes.
 
     Preconditions:
         - Safe to call when no workers are registered (no-op).
@@ -809,6 +854,9 @@ async def lifespan(app: FastAPI):  # noqa: PLR0915 - linear startup orchestrator
     except Exception:
         logger.warning("Agent Cognition scheduler failed to start", exc_info=True)
 
+    # 8. Start the Agent Studio Temporal worker (in-process team; see helper).
+    _start_agent_studio_temporal_worker()
+
     yield
 
     if cognition_scheduler_task is not None:
@@ -830,6 +878,16 @@ async def lifespan(app: FastAPI):  # noqa: PLR0915 - linear startup orchestrator
         logger.warning("shared.neo4j close_graphiti failed", exc_info=True)
 
     _stop_in_process_temporal_workers()
+
+    # In-process Studio authoring CRUD (daemon pool). Skip the import when
+    # the team is disabled so the package stays out of ``sys.modules``.
+    if TEAM_CONFIGS["agent_studio"].enabled:
+        try:
+            from agent_platform.studio.temporal.dispatch import shutdown_authoring_executor
+
+            shutdown_authoring_executor()
+        except Exception:
+            logger.warning("studio authoring executor shutdown failed", exc_info=True)
 
     try:
         from llm_service.usage_flusher import shutdown as usage_flush_shutdown

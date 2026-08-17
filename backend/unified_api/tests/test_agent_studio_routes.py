@@ -1,12 +1,10 @@
 """Hermetic route-level tests for the Agent Studio Stage-1 endpoints.
 
-Agent Studio authoring CRUD is a plain in-process RPC over
-:class:`~agent_platform.studio.service.AgentStudioService` — it does **not** go
-through Temporal (Temporal is reserved for the platform's durable subsystems). These
-tests exercise the full router → service → response path in-process by patching
-``agent_platform.studio.runtime.get_studio_service`` with a service wired to a scripted
-assistant + fake registry (no live LLM / Postgres), so the route's
-``ValueError`` → 400 / ``LookupError`` → 404 mapping is genuinely exercised.
+Authoring CRUD is in-process: the router calls
+``agent_platform.studio.temporal.dispatch``, which delegates to
+``AgentStudioService``. These tests patch
+``agent_platform.studio.runtime.get_studio_service`` so handlers use a scripted
+assistant + fake registry (no live LLM / Postgres / Temporal).
 
 ``backend/conftest.py`` already puts ``agents/`` on ``sys.path``.
 """
@@ -57,11 +55,10 @@ def registry() -> FakeRegistry:
 
 @pytest.fixture()
 def make_client(monkeypatch: pytest.MonkeyPatch):
-    """Factory: a TestClient whose routes dispatch to the given service in-process.
+    """Factory: a TestClient whose dispatch uses the in-process service.
 
-    Patches ``agent_platform.studio.runtime.get_studio_service`` (the same seam the
-    route handlers resolve at call time) via ``monkeypatch`` so it auto-reverts. Each
-    call builds a fresh app so there is no cross-test router leakage.
+    Patches the runtime singleton via ``monkeypatch`` so it auto-reverts after
+    the test. Each call builds a fresh app so there is no cross-test router leakage.
     """
 
     def _factory(service: object, *, raise_server_exceptions: bool = True) -> TestClient:
@@ -224,7 +221,7 @@ def test_clone_from_registry_unknown_is_404(client: TestClient) -> None:
 
 
 def test_clone_from_registry_persists_no_second_identity(client: TestClient, registry: FakeRegistry) -> None:
-    """Cloning must never register anything on the registry.
+    """Regression for #5896: cloning must never register anything on the registry.
 
     The endpoint only projects the source manifest into a draft — it must leave
     `registry.registered` untouched, so no second persisted identity is created
@@ -326,8 +323,8 @@ def test_save_agent_not_ready_is_400(client: TestClient) -> None:
 def test_save_agent_unexpected_error_is_500(registry: FakeRegistry, make_client) -> None:
     """An unmapped service error surfaces as a 500, not a swallowed success.
 
-    Only ``ValueError``/``LookupError`` are mapped by the route (→ 400/404); any other
-    service failure is not caught → FastAPI's default 500.
+    Only ``ValueError``/``LookupError`` map to 400/404; any other failure is
+    uncaught by the route → FastAPI's default 500.
     ``raise_server_exceptions=False`` lets the TestClient return that 500.
     """
     service = Mock(spec=AgentStudioService)

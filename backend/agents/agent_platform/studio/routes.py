@@ -8,12 +8,11 @@ CRUD:
     POST /api/agent-studio/agents/from-registry/{agent_id}     — clone a registry agent into a refine draft
     POST /api/agent-studio/agents                              — save + register a finished definition
 
-These handlers call the process-wide
+These handlers call :mod:`agent_platform.studio.temporal.dispatch`, which
+delegates to the process-wide
 :class:`~agent_platform.studio.service.AgentStudioService` singleton
-(:func:`agent_platform.studio.runtime.get_studio_service`) directly, in-process.
-Authoring CRUD is a request/response RPC, not durable/long-running work, so it does
-**not** go through Temporal — Temporal is reserved for the platform's durable
-subsystems (provisioning, sandbox lifecycle, agentic pipeline, persona founder).
+(:func:`agent_platform.studio.runtime.get_studio_service`) in-process.
+Authoring CRUD does not start Temporal workflows.
 
 User-scoped Studio drafts are **sync store CRUD** (not Temporal) over
 :func:`agent_platform.studio.drafts_runtime.get_draft_store`. Bodies are an
@@ -29,9 +28,10 @@ opaque ``{name?, payload?}`` envelope; tenancy uses :func:`get_current_user_id`
 
 Tool discovery for the definition panel reuses the existing ``GET /api/llm-tools/``
 (no new route here). Handlers are synchronous ``def`` so FastAPI runs them in its
-threadpool (store I/O stays off the event loop). Errors map cleanly: :class:`ValueError`
-→ 400, :class:`LookupError` / missing draft → 404 — the service raises those native
-exceptions directly and each handler maps them.
+threadpool (store I/O stays off the event loop). Errors map cleanly:
+:class:`ValueError` → 400, :class:`LookupError` / missing draft → 404 — the
+dispatch layer lets the service's native exceptions propagate, so
+conversation/agent mapping here is unchanged.
 
 Auth: these routes carry no real authentication dependency, consistent with the
 other team routers on the Unified API. Authentication/authorization is expected to be
@@ -48,7 +48,6 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
-from agent_platform.studio import runtime as studio_runtime
 from agent_platform.studio.drafts_runtime import get_draft_store
 from agent_platform.studio.models import (
     AgentDefinition,
@@ -62,6 +61,7 @@ from agent_platform.studio.models import (
     SendMessageRequest,
     StartConversationRequest,
 )
+from agent_platform.studio.temporal import dispatch
 
 logger = logging.getLogger(__name__)
 
@@ -199,9 +199,7 @@ def start_conversation(req: StartConversationRequest) -> ConversationStateRespon
           agent); no other exception is translated here.
     """
     try:
-        return studio_runtime.get_studio_service().start_conversation(
-            req.mode, req.source_agent_id, req.initial_message
-        )
+        return dispatch.start_conversation(req.mode, req.source_agent_id, req.initial_message)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except LookupError as exc:
@@ -222,7 +220,7 @@ def send_message(conversation_id: str, req: SendMessageRequest) -> ConversationS
           (unknown conversation) — both branches present so neither escapes as a 500.
     """
     try:
-        return studio_runtime.get_studio_service().send_message(conversation_id, req.message)
+        return dispatch.send_message(conversation_id, req.message)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except LookupError as exc:
@@ -241,7 +239,7 @@ def clone_from_registry(agent_id: str) -> AgentDefinition:
           mutated). ``LookupError`` → 404 when ``agent_id`` names no registered agent.
     """
     try:
-        return studio_runtime.get_studio_service().clone_from_registry(agent_id)
+        return dispatch.clone_from_registry(agent_id)
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
@@ -261,7 +259,7 @@ def save_agent(req: SaveAgentRequest) -> SaveAgentResponse:
           ready (missing required fields).
     """
     try:
-        manifest, created = studio_runtime.get_studio_service().save_agent(req.to_definition())
+        manifest, created = dispatch.save_agent(req.to_definition())
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return SaveAgentResponse(agent_id=manifest.id, manifest=manifest, created=created)

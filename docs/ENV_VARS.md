@@ -380,6 +380,14 @@ for teams that receive assistant traffic). Set to `false`/`0`/`no` to skip
 registration entirely (no assistant sub-app is ever mounted, regardless of
 traffic) — team proxy routes and health checks are unaffected.
 
+### UNIFIED_API_AGENT_STUDIO_TEMPORAL_WORKER
+Agent Studio Temporal worker toggle (default: true). When true, the
+unified-api `lifespan` calls the Agent Studio worker starter; that starter
+no-ops when there are no authoring workflows to register. Authoring CRUD
+(conversations / clone / save) always uses in-process `AgentStudioService`
+and does not require `agent-studio-queue`. Set to `false`/`0`/`no` to skip
+the starter call entirely. Other teams' Temporal workers are unaffected.
+
 ### ENABLE_LOG_API
 Exposes HTTP log endpoint.
 

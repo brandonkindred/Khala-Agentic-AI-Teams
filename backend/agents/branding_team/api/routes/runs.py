@@ -34,7 +34,17 @@ router = APIRouter()
     response_model_exclude_none=True,
 )
 def run_brand(client_id: str, brand_id: str, payload: RunBrandRequest) -> RunBrandJobResponse:
-    """Submit a branding run job. Poll GET /branding/status/{job_id} for results."""
+    """Submit a branding run job. Poll GET /branding/status/{job_id} for results.
+
+    Preconditions:
+        ``client_id`` and ``brand_id`` are non-empty path strings; ``payload`` is
+        a validated ``RunBrandRequest``. ``payload.target_phase`` is either unset
+        or a recognized phase name (an unrecognized value parses to ``None``,
+        meaning "run all phases").
+    Postconditions:
+        Returns a ``RunBrandJobResponse`` carrying the id of the async job just
+        enqueued; the run itself proceeds in the background.
+    """
     target_phase = _parse_target_phase(payload.target_phase)
     return _bg._submit_brand_run(client_id, brand_id, payload, target_phase)
 
@@ -47,7 +57,18 @@ def run_brand(client_id: str, brand_id: str, payload: RunBrandRequest) -> RunBra
 def run_brand_phase(
     client_id: str, brand_id: str, phase: str, payload: RunBrandRequest
 ) -> RunBrandJobResponse:
-    """Submit a branding run job scoped to a specific phase."""
+    """Submit a branding run job scoped to a specific phase.
+
+    Preconditions:
+        ``client_id`` and ``brand_id`` are non-empty path strings; ``payload`` is
+        a validated ``RunBrandRequest``. ``phase`` is a path segment naming the
+        target phase.
+    Postconditions:
+        Returns a ``RunBrandJobResponse`` for the async job scoped to ``phase``.
+        Raises 400 "Invalid phase: …" when ``phase`` does not parse to a known
+        phase (unlike ``run_brand``, an unparseable value here is rejected rather
+        than treated as "run all").
+    """
     target_phase = _parse_target_phase(phase)
     if target_phase is None:
         raise HTTPException(status_code=400, detail=f"Invalid phase: {phase}")
@@ -56,6 +77,17 @@ def run_brand_phase(
 
 @router.get("/branding/status/{job_id}", response_model=BrandJobStatusResponse)
 def get_branding_job_status(job_id: str) -> BrandJobStatusResponse:
+    """Return the current status/result payload for a branding run job.
+
+    Preconditions:
+        ``job_id`` is a non-empty path string.
+    Postconditions:
+        Returns the job's ``BrandJobStatusResponse``, validated from the raw job
+        store payload (extra keys ignored, new response fields picked up
+        automatically). ``job_id`` and ``status`` are defaulted explicitly before
+        validation because they are required and the store may not set them.
+        Raises 404 "Job not found" when no job matches ``job_id``.
+    """
     data = get_job(job_id)
     if data is None:
         raise HTTPException(status_code=404, detail="Job not found")
@@ -77,6 +109,17 @@ def get_branding_job_status(job_id: str) -> BrandJobStatusResponse:
 
 @router.get("/branding/jobs", response_model=BrandJobListResponse)
 def list_branding_jobs(running_only: bool = False) -> BrandJobListResponse:
+    """List branding run jobs, optionally restricted to in-flight ones.
+
+    Preconditions:
+        ``running_only`` is a boolean.
+    Postconditions:
+        Returns a ``BrandJobListResponse`` over all jobs, or only those in
+        ``PENDING``/``RUNNING`` status when ``running_only`` is true. Each item is
+        validated with the same explicit-default pattern as
+        ``get_branding_job_status`` (missing ``job_id``/``status`` defaulted rather
+        than raising).
+    """
     statuses = [JOB_STATUS_PENDING, JOB_STATUS_RUNNING] if running_only else None
     # Same model_validate + explicit-default pattern as get_branding_job_status.
     items = [
@@ -90,6 +133,19 @@ def list_branding_jobs(running_only: bool = False) -> BrandJobListResponse:
 
 @router.post("/branding/jobs/{job_id}/cancel")
 def cancel_branding_job(job_id: str) -> Dict[str, Any]:
+    """Request cancellation of a branding run job.
+
+    Preconditions:
+        ``job_id`` is a non-empty path string.
+    Postconditions:
+        When the job is cancellable, marks it cancelled, delivers the cancel
+        signal through ``main._signal_branding_cancel`` (the hub's re-exported,
+        interceptable binding), and returns ``{"job_id": job_id, "status":
+        JOB_STATUS_CANCELLED, "success": True}``. When the job cannot be cancelled
+        in its current status, returns a dict with ``"success": False`` and an
+        explanatory ``"message"`` (and the job's current ``"status"``) and no
+        state change. Raises 404 "Job not found" when the job is unknown.
+    """
     from branding_team.api import main as _main
 
     data = get_job(job_id)
@@ -112,6 +168,16 @@ def cancel_branding_job(job_id: str) -> Dict[str, Any]:
 
 @router.delete("/branding/jobs/{job_id}")
 def delete_branding_job(job_id: str) -> Dict[str, Any]:
+    """Delete a branding run job's record.
+
+    Preconditions:
+        ``job_id`` is a non-empty path string.
+    Postconditions:
+        Returns ``{"job_id": job_id, "deleted": True}`` once the job record is
+        removed.
+        Raises 404 "Job not found" when the job does not exist or the store
+        reports no row deleted.
+    """
     if get_job(job_id) is None:
         raise HTTPException(status_code=404, detail="Job not found")
     if not delete_job(job_id):

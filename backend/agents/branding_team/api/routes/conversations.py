@@ -52,6 +52,15 @@ async def create_branding_conversation(
     a conversation row and persists a greeting, so it stays off that pool — where
     it could otherwise queue behind multi-minute pipeline runs and make opening a
     fresh chat hang under load — and runs on the default executor instead.
+
+    Preconditions:
+        ``body`` is either ``None`` or a validated ``CreateConversationRequest``;
+        a ``None`` body is treated as an empty request.
+    Postconditions:
+        Returns the new conversation's ``ConversationStateResponse``, including the
+        assistant's reply when an initial message was supplied. Runs the blocking
+        body off the event loop either way (pipeline executor when an initial
+        message is present, default executor otherwise).
     """
     req = body or CreateConversationRequest()
     if (req.initial_message or "").strip():
@@ -73,6 +82,15 @@ async def send_branding_conversation_message(
     executes on the bounded pipeline executor (see ``_run_in_pipeline_executor``)
     to keep the request from holding a worker thread — or the shared default
     executor — for the full pipeline duration.
+
+    Preconditions:
+        ``conversation_id`` is a non-empty path string; ``payload`` is a validated
+        ``SendMessageRequest``.
+    Postconditions:
+        Returns the refreshed ``ConversationStateResponse`` with the assistant's
+        reply and any derived mission/output persisted. Auto-creates and links a
+        brand once enough information is present, unless ``payload.skip_save``.
+        Raises 404 when the conversation is unknown.
     """
     return await _bg._run_in_pipeline_executor(
         _send_branding_conversation_message_impl, conversation_id, payload
@@ -82,7 +100,15 @@ async def send_branding_conversation_message(
 @router.get("/conversations/{conversation_id}", response_model=ConversationStateResponse)
 def get_branding_conversation(conversation_id: str) -> ConversationStateResponse:
     """Return the full stored state (messages, mission, output, brand) for a
-    conversation in a single query; 404 if it does not exist."""
+    conversation in a single query; 404 if it does not exist.
+
+    Preconditions:
+        ``conversation_id`` is a non-empty path string.
+    Postconditions:
+        Returns the conversation's ``ConversationStateResponse`` assembled from a
+        single ``get_state`` read. Raises 404 "Conversation not found" when no
+        such conversation exists.
+    """
     from branding_team.api import main as _main
 
     state = _main.conversation_store.get_state(conversation_id)
@@ -103,7 +129,16 @@ def list_branding_conversations(
     brand_id: Optional[str] = None,
 ) -> List[ConversationSummaryResponse]:
     """List conversation summaries (optionally filtered by ``brand_id``),
-    resolving each attached brand's name in a single batched lookup."""
+    resolving each attached brand's name in a single batched lookup.
+
+    Preconditions:
+        ``brand_id``, when supplied, is a non-empty string.
+    Postconditions:
+        Returns the matching ``ConversationSummaryResponse`` list (empty when none
+        match). Each summary's ``brand_name`` is resolved via one batched
+        ``get_brand_names`` lookup over only the referenced brand ids, and is
+        ``None`` for conversations with no attached brand.
+    """
     from branding_team.api import main as _main
 
     summaries = _main.conversation_store.list_conversations(brand_id=brand_id)
@@ -130,7 +165,18 @@ def attach_conversation_to_brand(
     conversation_id: str, payload: AttachConversationBrandRequest
 ) -> ConversationStateResponse:
     """Attach an existing conversation to an existing brand and return the
-    updated state. 404 if either the brand or the conversation is unknown."""
+    updated state. 404 if either the brand or the conversation is unknown.
+
+    Preconditions:
+        ``conversation_id`` is a non-empty path string; ``payload`` is a validated
+        ``AttachConversationBrandRequest`` whose ``brand_id`` is non-empty after
+        stripping.
+    Postconditions:
+        Returns the conversation's ``ConversationStateResponse`` now pointing at
+        ``payload.brand_id``. Raises 404 "Brand not found" when the brand does not
+        exist, and 404 "Conversation not found" when the conversation is missing
+        (checked both before and during ``set_brand``).
+    """
     from branding_team.api import main as _main
 
     brand_id = payload.brand_id.strip()

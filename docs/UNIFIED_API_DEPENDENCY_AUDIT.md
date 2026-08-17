@@ -39,7 +39,7 @@ at lifespan startup):
 
 - `user_profile`
 - `product_delivery`
-- `agent_studio` (including its Temporal worker, started in-process)
+- `agent_studio` (authoring CRUD is in-process; its Temporal worker starter is a no-op)
 - Platform modules that aren't "teams" in `TEAM_CONFIGS` but are always mounted:
   `agent_platform.console`, `agent_platform.registry`, `agent_cognition`, `team_assistant`, `llm_service`,
   `agent_llm_tools_service`, `agent_platform.sandbox` (sandbox reaper + routes)
@@ -70,12 +70,12 @@ resolve explicitly rather than silently drop or silently keep.
 
 | Package | Verdict | Justification |
 |---|---|---|
-| `strands-agents`, `strands-agents-tools` | **Keep** | Genuine in-process dependency: `agent_platform/studio/assistant.py` imports `strands` directly (the Studio authoring assistant runs in-process). Also unconditionally pulls in `boto3` transitively via `strands.models.bedrock` — no separate `boto3` line is needed for unified-api. |
+| `strands-agents`, `strands-agents-tools` | **Keep** | Genuine in-process dependency: `agent_platform/studio/assistant.py` imports `strands` directly, and Agent Studio's Temporal worker/activities run in-process (started from `unified_api/main.py` lifespan). Also unconditionally pulls in `boto3` transitively via `strands.models.bedrock` — no separate `boto3` line is needed for unified-api. |
 | `anthropic` | **Keep** | `llm_service/clients/claude.py` imports it lazily inside a helper (only paid when the Claude provider is actually used), but the `llm_service` package itself is imported eagerly by unified-api's own `routes/llm_config.py` and `routes/llm_usage.py`, which are always mounted. Lightweight HTTP SDK regardless. |
 | `neo4j`, `graphiti-core` | **Keep** | `unified_api/main.py` lifespan unconditionally starts `agent_cognition`'s graph sync worker (self-disables via try/except if `NEO4J_BOLT_URL`/`POSTGRES_HOST` unset), which imports both eagerly through `shared/neo4j/client.py`. Real, if optional-at-runtime, in-process dependency. |
 | `psycopg[binary]`, `psycopg_pool` | **Keep** | `shared.postgres` is imported eagerly at lifespan startup for schema registration (`register_team_schemas`/`ensure_team_schema`) across every in-process module (`agent_platform.console`, `agent_platform.registry`, `user_profile`, `product_delivery`, `agent_studio`, `agent_cognition`, `team_assistant`). |
 | `cryptography` | **Keep** | Used for encrypted integration credentials (`Fernet`) — generated at Docker build time (`backend/Dockerfile` line 28) and used by unified-api's own credential store. |
-| `temporalio` | **Keep** | `shared/temporal/__init__.py` is imported eagerly at startup for the sandbox reaper worker, started in-process. |
+| `temporalio` | **Keep** | `shared/temporal/__init__.py` is imported eagerly at startup for the sandbox reaper (started in-process). |
 | `slack-sdk` | **Keep** | Directly imported by unified-api's own `slack_events_handler.py` and `slack_notifier.py` — not a proxied-team dependency. |
 | `APScheduler`, `pytz` | **Keep** | Scheduling primitives used by in-process modules (e.g. sandbox reaper, cognition scheduler). |
 | `fastapi`, `uvicorn[standard]`, `pydantic`, `httpx`, `PyYAML`, `json-repair`, `jsonschema`, `python-multipart` | **Keep** | Core web-framework / serialization / validation stack; all lightweight and directly required by `unified_api/main.py` and its always-mounted routes (`jsonschema` specifically: `agent_platform.registry.models` validates `IOSchema.inline_schema` at module load). |

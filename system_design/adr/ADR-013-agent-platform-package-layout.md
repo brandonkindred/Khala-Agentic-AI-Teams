@@ -103,12 +103,14 @@ Unlike the other three, it **is** present in `TEAM_CONFIGS`, with `in_process=Tr
 `/api/agent-studio` — already correctly modeled as an in-process team, not a proxied one. It is
 Pattern B (`agent_studio/postgres.py::SCHEMA`, registered in the lifespan, gated on
 `TEAM_CONFIGS["agent_studio"].enabled`). Authoring CRUD (start conversation / send message /
-clone / save) is a plain synchronous in-process RPC: each route handler calls the process-local
-`AgentStudioService` singleton (`agent_studio/runtime.py`) directly. These are request/response
-operations, not durable work, so Studio authoring runs **no** Temporal worker — there is no
-`agent-studio-queue`. (Temporal remains required for the platform's durable subsystems; see the
-sandbox worker in Decision §4.) Studio depends on `agent_registry.models.AgentManifest`;
-registry does not depend on Studio.
+clone / save) runs in-process via `agent_studio/temporal/dispatch.py`'s bounded daemon thread
+pool, which calls the process-local `AgentStudioService` singleton (`agent_studio/runtime.py`)
+directly. These are request/response operations, not durable work, so Studio authoring starts
+**no** Temporal workflow — the former 1-activity authoring workflows are gone, `WORKFLOWS`/
+`ACTIVITIES` are empty, and the worker starter is a permanent no-op; `agent-studio-queue` remains
+only as an unused legacy constant. (Temporal remains required for the platform's durable
+subsystems; see the sandbox worker in Decision §4.) Studio depends on
+`agent_registry.models.AgentManifest`; registry does not depend on Studio.
 
 **Adjacent, distinct concern that stays put.** The sibling directory
 `agent_team_studio/agent_provisioning_team/` also holds an unrelated, onboarding-style

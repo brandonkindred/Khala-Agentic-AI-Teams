@@ -39,6 +39,15 @@ async def request_market_research_for_brand(client_id: str, brand_id: str) -> Co
     Async so the (potentially multi-minute) status polling yields to the event
     loop instead of holding a worker thread. 404 if the brand is unknown; 503
     if the market-research service is unconfigured or fails.
+
+    Preconditions:
+        ``client_id`` and ``brand_id`` are non-empty path strings.
+    Postconditions:
+        Returns the ``CompetitiveSnapshot`` produced for the brand's mission.
+        Raises 404 "Brand not found" when the brand is unknown. Any exception
+        raised by ``request_market_research_async`` is logged with its full
+        traceback and remapped to an opaque 503 "Market research service
+        unavailable"; a falsy snapshot yields the same 503.
     """
     from branding_team.api import main as _main
 
@@ -75,6 +84,14 @@ async def request_design_assets_for_brand(
     when no cached core exists. Async so the blocking store read and the (rare)
     Phase 1 fallback run off the event loop instead of holding a worker thread.
     404 if the brand is unknown.
+
+    Preconditions:
+        ``client_id`` and ``brand_id`` are non-empty path strings.
+    Postconditions:
+        Returns the ``DesignAssetRequestResult`` for the brand's strategic core.
+        Uses ``brand.latest_output.strategic_core`` when a prior run persisted
+        one; otherwise runs Phase 1 only (on the bounded pipeline executor) to
+        derive it. Raises 404 "Brand not found" when the brand is unknown.
     """
     from branding_team.api import main as _main
 
