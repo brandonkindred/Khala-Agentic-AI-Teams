@@ -7,6 +7,25 @@ from typing import Dict, List, Optional
 
 from pydantic import BaseModel, Field
 
+from software_engineering_team.shared.v2_models import (
+    ExecutionResult as _SharedExecutionResult,
+)
+from software_engineering_team.shared.v2_models import (
+    Microtask as Microtask,
+)
+from software_engineering_team.shared.v2_models import (
+    MicrotaskStatus as MicrotaskStatus,
+)
+from software_engineering_team.shared.v2_models import (
+    PlanningResult,
+)
+from software_engineering_team.shared.v2_models import (
+    ToolAgentInput as _SharedToolAgentInput,
+)
+from software_engineering_team.shared.v2_models import (
+    ToolAgentPhaseInput as ToolAgentPhaseInput,
+)
+
 
 class Phase(str, Enum):
     INTAKE = "intake"
@@ -27,13 +46,6 @@ class ToolAgentKind(str, Enum):
     MCP_SERVER_CONNECTIVITY = "mcp_server_connectivity"
 
 
-class MicrotaskStatus(str, Enum):
-    PENDING = "pending"
-    IN_PROGRESS = "in_progress"
-    COMPLETED = "completed"
-    FAILED = "failed"
-
-
 class IntakeResult(BaseModel):
     system_goal: str = ""
     constraints: List[str] = Field(default_factory=list)
@@ -42,27 +54,12 @@ class IntakeResult(BaseModel):
     summary: str = ""
 
 
-class Microtask(BaseModel):
-    id: str
-    title: str
-    description: str = ""
-    tool_agent: ToolAgentKind = ToolAgentKind.GENERAL
-    depends_on: List[str] = Field(default_factory=list)
-    status: MicrotaskStatus = MicrotaskStatus.PENDING
-    output_files: Dict[str, str] = Field(default_factory=dict)
-    notes: str = ""
+class ToolAgentInput(_SharedToolAgentInput):
+    """Adds ``spec_context``: the LLM prompt context threaded through this team's
+    ``JsonGeneratorToolAgent`` (unlike the code-v2 teams, this team has no
+    ``language`` notion, so that shared field stays unused here)."""
 
-
-class PlanningResult(BaseModel):
-    microtasks: List[Microtask] = Field(default_factory=list)
-    summary: str = ""
-
-
-class ToolAgentInput(BaseModel):
-    microtask: Microtask
-    repo_path: str = ""
     spec_context: str = ""
-    existing_code: str = ""
 
 
 class ToolAgentOutput(BaseModel):
@@ -72,11 +69,11 @@ class ToolAgentOutput(BaseModel):
     success: bool = True
 
 
-class ExecutionResult(BaseModel):
-    files: Dict[str, str] = Field(default_factory=dict)
-    microtasks: List[Microtask] = Field(default_factory=list)
+class ExecutionResult(_SharedExecutionResult):
+    """Adds ``notes``: free-form notes accumulated from tool-agent
+    recommendations across an execution run."""
+
     notes: List[str] = Field(default_factory=list)
-    summary: str = ""
 
 
 class ReviewIssue(BaseModel):
