@@ -208,25 +208,31 @@ def build_compositor(
 def build_fan_out_fan_in(
     builder: GraphBuilder,
     agents: list[tuple[str, Callable[[], Agent]]],
-    compositor: GraphNode,
+    fan_in_node: GraphNode,
 ) -> None:
     """Wire a fan-out/fan-in topology onto *builder*.
 
     For each ``(node_id, factory)`` pair in *agents*: builds the node via
     ``factory()``, adds it to *builder*, wires an edge from it to
-    *compositor*, and marks it as a graph entry point.
+    *fan_in_node*, and marks it as a graph entry point.
+
+    *fan_in_node* is any collector node already on *builder* — a regular
+    phase specialist (e.g. Phase 1's ``positioning_synthesizer``, Phase 3's
+    ``CreativeDirector``) or a :func:`build_compositor` result. It is not
+    required to be a compositor: this helper predates that concept and wires
+    plain fan-out/fan-in topology generically.
 
     Preconditions:
-        *agents* is non-empty. *compositor* is the ``GraphNode`` already
+        *agents* is non-empty. *fan_in_node* is the ``GraphNode`` already
         returned by ``builder.add_node(...)`` on the same *builder*.
     Postconditions:
         Every ``(node_id, factory)`` pair is added as a node on *builder*,
-        edged to *compositor*, and registered as an entry point.
+        edged to *fan_in_node*, and registered as an entry point.
     """
     assert agents, "agents must be non-empty"
     for node_id, factory in agents:
         node = builder.add_node(factory(), node_id=node_id)
-        builder.add_edge(node, compositor)
+        builder.add_edge(node, fan_in_node)
         builder.set_entry_point(node_id)
 
 
