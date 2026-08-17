@@ -23,13 +23,13 @@ from llm_service import provider_store as ps  # noqa: E402
 from unified_api.routes import llm_config as route  # noqa: E402
 
 
-def _entry(entry_id, *, provider="ollama", label="e", api_key="", limit=False):
+def _entry(entry_id, *, provider="ollama", label="e", api_key="", limit=False, base_url=None):
     return ps.ProviderEntry(
         id=entry_id,
         label=label,
         provider=provider,
         model="m",
-        base_url="http://localhost:11434" if provider == "ollama" else "",
+        base_url=base_url if base_url is not None else ("http://localhost:11434" if provider == "ollama" else ""),
         api_key=api_key,
         sort_order=entry_id,
         limit_exceeded=limit,
@@ -124,6 +124,19 @@ def test_list_masks_keys_and_reports_state(app_client):
     assert body["providers"][1]["api_key_configured"] is False
     assert "sk-secret" not in resp.text  # key value never returned
     assert body["storage_available"] is True
+
+
+def test_list_returns_endpoint_id_for_runpod_entries_only(app_client):
+    client, state = app_client
+    state["entries"] = [
+        _entry(1, provider="runpod", api_key="k", base_url="https://api.runpod.ai/v2/abc123/openai/v1"),
+        _entry(2, provider="ollama"),
+    ]
+    resp = client.get("/api/llm-config/providers")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["providers"][0]["endpoint_id"] == "abc123"
+    assert body["providers"][1]["endpoint_id"] == ""
 
 
 def test_list_degrades_gracefully_on_read_error(app_client, monkeypatch):
@@ -381,6 +394,21 @@ def _patch_async_client_get(monkeypatch, *, get_return=None, get_side_effect=Non
         mock_client.get.return_value = get_return
     monkeypatch.setattr(httpx, "AsyncClient", MagicMock(return_value=mock_client))
     return mock_client
+
+
+@pytest.mark.parametrize("endpoint_id", ["abc123", "a", "0000000000", "with-a-hyphen", "MiXedCase9"])
+def test_extract_runpod_endpoint_id_round_trips_through_build(endpoint_id):
+    """Guards the cross-stack contract the UI relies on: whatever shape
+    _build_runpod_base_url produces, _extract_runpod_endpoint_id must recover
+    exactly — including ids _validate_runpod_endpoint_id would itself reject
+    (e.g. a hyphen), since extraction must not depend on that separate rule."""
+    built = route._build_runpod_base_url(endpoint_id)
+    assert route._extract_runpod_endpoint_id(built) == endpoint_id
+
+
+def test_extract_runpod_endpoint_id_returns_empty_for_non_runpod_url():
+    assert route._extract_runpod_endpoint_id("http://localhost:11434") == ""
+    assert route._extract_runpod_endpoint_id("") == ""
 
 
 def test_create_runpod_requires_endpoint_id(app_client, monkeypatch):

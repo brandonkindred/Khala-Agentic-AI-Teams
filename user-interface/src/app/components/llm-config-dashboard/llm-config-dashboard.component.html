@@ -62,6 +62,7 @@
                   <mat-select name="editProvider" [(ngModel)]="editForm.provider">
                     <mat-option value="ollama">Ollama</mat-option>
                     <mat-option value="claude">Claude (Anthropic)</mat-option>
+                    <mat-option value="runpod">RunPod</mat-option>
                   </mat-select>
                 </mat-form-field>
                 <mat-form-field appearance="outline">
@@ -72,6 +73,15 @@
                   <mat-form-field appearance="outline">
                     <mat-label>Base URL</mat-label>
                     <input matInput name="editBaseUrl" [(ngModel)]="editForm.base_url" placeholder="http://localhost:11434" />
+                  </mat-form-field>
+                }
+                @if (usesEndpointId(editForm.provider)) {
+                  <mat-form-field appearance="outline">
+                    <mat-label>Endpoint ID</mat-label>
+                    <input matInput name="editEndpointId" [(ngModel)]="editForm.endpoint_id" placeholder="abc1de2fghij3k" />
+                    @if (!editForm.endpoint_id.trim()) {
+                      <mat-hint>Required for RunPod.</mat-hint>
+                    }
                   </mat-form-field>
                 }
                 <mat-form-field appearance="outline">
@@ -86,7 +96,7 @@
                     [placeholder]="entry.api_key_configured ? '•••••••• (configured — leave blank to keep)' : 'Enter API key'"
                   />
                   @if (requiresApiKey(editForm.provider) && !entry.api_key_configured) {
-                    <mat-hint>Required for Claude.</mat-hint>
+                    <mat-hint>Required for Claude and RunPod.</mat-hint>
                   }
                 </mat-form-field>
                 @if (entry.api_key_configured && !editForm.api_key.trim()) {
@@ -150,6 +160,7 @@
             <mat-select name="addProvider" [(ngModel)]="addForm.provider">
               <mat-option value="ollama">Ollama</mat-option>
               <mat-option value="claude">Claude (Anthropic)</mat-option>
+              <mat-option value="runpod">RunPod</mat-option>
             </mat-select>
           </mat-form-field>
           <mat-form-field appearance="outline">
@@ -162,12 +173,21 @@
               <input matInput name="addBaseUrl" [(ngModel)]="addForm.base_url" placeholder="http://localhost:11434" />
             </mat-form-field>
           }
+          @if (usesEndpointId(addForm.provider)) {
+            <mat-form-field appearance="outline">
+              <mat-label>Endpoint ID</mat-label>
+              <input matInput name="addEndpointId" [(ngModel)]="addForm.endpoint_id" placeholder="abc1de2fghij3k" />
+              @if (!addForm.endpoint_id.trim()) {
+                <mat-hint>Required for RunPod.</mat-hint>
+              }
+            </mat-form-field>
+          }
           <mat-form-field appearance="outline">
             <mat-label>API key</mat-label>
             <input matInput type="password" autocomplete="off" name="addApiKey" [(ngModel)]="addForm.api_key"
               [attr.aria-required]="requiresApiKey(addForm.provider)" placeholder="Enter API key" />
             @if (requiresApiKey(addForm.provider)) {
-              <mat-hint>Required for Claude.</mat-hint>
+              <mat-hint>Required for Claude and RunPod.</mat-hint>
             }
           </mat-form-field>
           <div class="form-actions">
