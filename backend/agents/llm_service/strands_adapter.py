@@ -135,8 +135,11 @@ def _system_prompt_content_segments(
     Postconditions:
         - Returns ``[]`` when absent/empty; otherwise one segment per block, in
           order — a ``CacheBreakpoint`` is preserved as-is, a dict block's
-          ``text`` is extracted, anything else is stringified. Empty/blank text
-          segments are dropped. Never raises.
+          ``text`` is extracted, anything else is stringified. Empty (falsy)
+          text segments are dropped; a whitespace-only segment is NOT
+          considered empty and is kept as-is (consistent with how a
+          whitespace-only ``system_prompt`` string is treated elsewhere in
+          this module). Never raises.
     """
     if not system_prompt_content:
         return []

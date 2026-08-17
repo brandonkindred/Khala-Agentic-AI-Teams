@@ -194,10 +194,11 @@ def _json_system(
 
     Preconditions: none.
     Postconditions: when ``tools`` are present, returns ``system_prompt`` unchanged
-        (stripped, or ``None``, for the string form) WITHOUT the JSON-only
-        instruction — it would fight the tool-use protocol; otherwise appends
-        ``_JSON_ONLY_INSTRUCTION`` (alone when there is no system prompt). Never
-        raises.
+        for the list form (or ``None`` when the list is empty), or the stripped
+        string form (or ``None`` when blank) — in both cases WITHOUT the
+        JSON-only instruction, since it would fight the tool-use protocol;
+        otherwise appends ``_JSON_ONLY_INSTRUCTION`` (alone when there is no
+        system prompt). Never raises.
     """
     if isinstance(system_prompt, list):
         if tools:
@@ -960,7 +961,11 @@ def _render_anthropic_system(parts: list) -> "str | list[dict]":
     ``CacheBreakpoint`` markers a caller placed in a list-typed system message
     (see ``llm_service.cache_breakpoint`` and ``strands_adapter.stream``).
 
-    Preconditions: every item in ``parts`` is a ``str`` or a ``CacheBreakpoint``.
+    Preconditions: every item in ``parts`` is a non-empty ``str`` or a
+        ``CacheBreakpoint`` — the sole caller (:func:`_to_anthropic_messages`)
+        only ever appends non-empty strings, and ``CacheBreakpoint`` itself
+        cannot hold empty text (validated at construction). An empty string is
+        a caller bug, not a case this function silently tolerates.
     Postconditions:
         - When no item is a ``CacheBreakpoint``, returns ``"\\n\\n".join(parts)``
           — byte-identical to this function's pre-caching behavior, so a request
@@ -979,7 +984,7 @@ def _render_anthropic_system(parts: list) -> "str | list[dict]":
             blocks.append(
                 {"type": "text", "text": part.text, "cache_control": dict(_CACHE_CONTROL_EPHEMERAL)}
             )
-        elif part:
+        elif isinstance(part, str):
             blocks.append({"type": "text", "text": part})
     return blocks
 
@@ -1080,7 +1085,8 @@ def _to_anthropic_messages(messages: list) -> "tuple[str | list[dict], list]":
             elif isinstance(content, list):
                 # Structured system content (``strands_adapter.stream`` inserts
                 # this form when a ``CacheBreakpoint`` is present) — preserve
-                # each item in order instead of collapsing to one string, so
+                # non-empty string parts and ``CacheBreakpoint`` markers in
+                # order instead of collapsing to one string, so
                 # _render_anthropic_system can attach cache_control to the
                 # marked segment(s).
                 for item in content:

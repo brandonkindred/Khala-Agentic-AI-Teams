@@ -273,7 +273,7 @@ from llm_service import CacheBreakpoint
 
 agent = Agent(
     model=model,
-    system_prompt=[CacheBreakpoint(stable_spec_excerpt), "\n\n" + rest_of_persona],
+    system_prompt_content=[CacheBreakpoint(stable_spec_excerpt), "\n\n" + rest_of_persona],
 )
 ```
 
