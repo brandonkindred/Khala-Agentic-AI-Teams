@@ -2669,7 +2669,9 @@ async def test_workflow_tail_passes_in_flight_concurrently(
     # Activities are fail-safe; this test only validates orchestration-level
     # concurrency. Sleeps are intentionally tiny (only to allow thread
     # scheduling variance without making the test slow).
-    def _filter(*_args: Any, **_kwargs: Any) -> list[CodeReviewIssue]:
+    def _filter(
+        _llm: Any, _input_data: Any, issues: list[CodeReviewIssue], **_kwargs: Any
+    ) -> list[CodeReviewIssue]:
         nonlocal filter_call_count
         with filter_lock:
             filter_call_count += 1
@@ -2685,7 +2687,7 @@ async def test_workflow_tail_passes_in_flight_concurrently(
         # from DummyLLMClient; on the second, surviving call: the combined
         # architecture/side-effect findings) plus contribute filter_issue,
         # so nothing is silently dropped on the reordered branch's real call.
-        return [*_args[2], filter_issue]
+        return [*issues, filter_issue]
 
     def _merged(*_args: Any, **_kwargs: Any) -> tuple[list[CodeReviewIssue], list[CodeReviewIssue]]:
         _wait("merged")
@@ -2700,7 +2702,6 @@ async def test_workflow_tail_passes_in_flight_concurrently(
     except RuntimeError as exc:
         pytest.skip(f"Temporal ephemeral test server unavailable (no egress?): {exc}")
 
-    barrier_aborted = False
     try:
         async with test_env as env:
             with concurrent.futures.ThreadPoolExecutor(max_workers=8) as activity_executor:
@@ -2722,9 +2723,8 @@ async def test_workflow_tail_passes_in_flight_concurrently(
         # Always abort so any stray worker threads can't leak into later
         # tests if the barrier throws early.
         barrier.abort()
-        barrier_aborted = True
 
-    assert barrier_aborted, "barrier abort should have run"
+    assert barrier.broken, "barrier should be broken after test cleanup"
     assert sorted(started) == ["filter", "merged"]
 
     descriptions = {i["description"] for i in result["issues"]}
@@ -2811,7 +2811,9 @@ async def test_workflow_aggregates_tail_pass_results_when_completed_out_of_order
         with lock:
             completion_order.append(name)
 
-    def _filter(*_args: Any, **_kwargs: Any) -> list[CodeReviewIssue]:
+    def _filter(
+        _llm: Any, _input_data: Any, issues: list[CodeReviewIssue], **_kwargs: Any
+    ) -> list[CodeReviewIssue]:
         nonlocal filter_call_count
         with filter_call_lock:
             filter_call_count += 1
@@ -2833,7 +2835,7 @@ async def test_workflow_aggregates_tail_pass_results_when_completed_out_of_order
         # from DummyLLMClient; on the second, surviving call: the combined
         # architecture/side-effect findings) plus contribute filter_issue,
         # so nothing is silently dropped on the reordered branch's real call.
-        return [*_args[2], filter_issue]
+        return [*issues, filter_issue]
 
     def _merged(*_args: Any, **_kwargs: Any) -> tuple[list[CodeReviewIssue], list[CodeReviewIssue]]:
         if coordinate.is_set():

@@ -632,11 +632,16 @@ class CodeReviewWorkflow:
             # bug (architecture/side-effect findings dropped, not just
             # unfiltered). workflow.patched() results are memoized per patch
             # id, so re-checking the same id here is a cache read, not a new
-            # replay-order-sensitive event.
-            assert workflow.patched(_MERGED_ARCHITECTURE_SIDE_EFFECT_PASS_PATCH), (
-                "_REORDERED_TAIL_PASSES_PATCH requires the merged-pass branch "
-                "to have populated architecture_result/side_effect_result"
-            )
+            # replay-order-sensitive event. A plain ``assert`` would be wrong
+            # here: it is compiled away under ``-O``/``-OO``, which would
+            # silently defeat this exact guard, so this is an explicit,
+            # always-evaluated raise instead (mirrors the internal-invariant
+            # convention in ``transcript.py``'s ``_note_overflow``).
+            if not workflow.patched(_MERGED_ARCHITECTURE_SIDE_EFFECT_PASS_PATCH):
+                raise RuntimeError(
+                    "_REORDERED_TAIL_PASSES_PATCH requires the merged-pass branch "
+                    "to have populated architecture_result/side_effect_result"
+                )
             combined = await workflow.execute_activity(
                 A.combine_findings_activity,
                 args=[review_input, [*issues, *architecture_result, *side_effect_result]],
