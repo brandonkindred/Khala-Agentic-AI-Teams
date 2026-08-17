@@ -159,6 +159,18 @@ describe('LoadDraftMenuComponent', () => {
     expect(optionsItem?.getAttribute('role')).toBe('menuitem');
   });
 
+  it('each row\'s ⋯ options trigger has a distinct, draft-identifying aria-label', () => {
+    const { fixture } = configure(vi.fn().mockReturnValue(of([summary('d-1', 'Alpha'), summary('d-2', 'Beta')])));
+    fixture.detectChanges();
+    const trigger: HTMLButtonElement = fixture.nativeElement.querySelector('.studio__draft-btn');
+    trigger.click();
+    fixture.detectChanges();
+    const overlay = TestBed.inject(OverlayContainer).getContainerElement();
+    const options = overlay.querySelectorAll('.load-draft-menu__options');
+    expect(options[0].getAttribute('aria-label')).toBe('Options for Alpha');
+    expect(options[1].getAttribute('aria-label')).toBe('Options for Beta');
+  });
+
   it('the busy input disables the trigger button', () => {
     const { fixture } = configure();
     fixture.componentRef.setInput('busy', true);

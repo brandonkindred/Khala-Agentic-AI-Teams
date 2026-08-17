@@ -46,7 +46,7 @@
         mat-menu-item
         type="button"
         class="load-draft-menu__options"
-        aria-label="Draft options"
+        [attr.aria-label]="'Options for ' + draft.name"
         [matMenuTriggerFor]="rowMenu"
         [disabled]="isDeleting(draft.draft_id)"
       >

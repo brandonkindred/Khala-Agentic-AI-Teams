@@ -123,4 +123,13 @@ describe('RenameDraftDialogComponent', () => {
     fixture.componentInstance.cancel();
     expect(ref.close).not.toHaveBeenCalled();
   });
+
+  it('a second submit while a rename is in flight is a no-op', () => {
+    const renameDraft = vi.fn().mockReturnValue(NEVER);
+    const { fixture } = configure({ draftId: 'd-1', initialName: 'Old' }, renameDraft);
+    fixture.componentInstance.submit();
+    fixture.componentInstance.submit();
+    expect(renameDraft).toHaveBeenCalledTimes(1);
+    expect(fixture.componentInstance.busy()).toBe(true);
+  });
 });

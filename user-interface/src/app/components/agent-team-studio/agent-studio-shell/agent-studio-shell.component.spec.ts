@@ -18,6 +18,7 @@ import { AgentStudioPersonaComponent } from './agent-studio-persona.component';
 import { AgentStudioShellComponent } from './agent-studio-shell.component';
 import { AgentStudioTestAgentComponent } from './agent-studio-test-agent.component';
 import { LoadDraftMenuComponent } from './load-draft-menu/load-draft-menu.component';
+import { SaveDraftDialogComponent } from './save-draft-dialog/save-draft-dialog.component';
 
 /** Stub the heavy Agent Console runner so the Test stage can mount with an agent
  *  set without firing sandbox polling / HTTP inside the shell tests. */
@@ -511,6 +512,19 @@ describe('AgentStudioShellComponent', () => {
         .mockReturnValueOnce({ afterClosed: () => of('save') } as unknown as ReturnType<MatDialog['open']>)
         .mockReturnValueOnce({ afterClosed: () => of(undefined) } as unknown as ReturnType<MatDialog['open']>);
       component.loadDraft('d-1');
+      expect(openSpy).toHaveBeenCalledTimes(2);
+      expect(openSpy.mock.calls[1][0]).toBe(SaveDraftDialogComponent);
+      expect((openSpy.mock.calls[1][1] as { data: unknown }).data).toEqual({
+        draftId: null,
+        initialName: null,
+        payload: {
+          registryAgentId: 'local-1',
+          teamId: null,
+          processId: null,
+          personaId: null,
+          draftAgentId: null,
+        },
+      });
       expect(facade.loadDraft).not.toHaveBeenCalled();
       expect(component.state.registryAgentId()).toBe('local-1');
     });
@@ -530,7 +544,7 @@ describe('AgentStudioShellComponent', () => {
       expect(component.state.isDirty()).toBe(true);
     });
 
-    it('Save first when unbound does not hydrate if a load rebound the session during the save dialog', () => {
+    it('Save first when unbound does not hydrate if the session is rebound by another load during the save dialog', () => {
       component.state.setRegistryAgentId('local-1');
       const saveClosed = new Subject<AgentStudioDraftSummary>();
       openSpy
@@ -691,7 +705,7 @@ describe('AgentStudioShellComponent', () => {
       const root = fixture.nativeElement.querySelector('.studio__current-draft') as HTMLElement;
       expect(root.textContent).toContain('My draft');
       const btn = fixture.nativeElement.querySelector('.studio__rename-draft') as HTMLButtonElement;
-      expect(btn.getAttribute('aria-label')).toBe('Rename draft');
+      expect(btn.getAttribute('aria-label')).toBe('Rename draft My draft');
     });
 
     it('pencil opens the rename dialog with the bound id and name', () => {
