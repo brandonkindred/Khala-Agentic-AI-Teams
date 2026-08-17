@@ -769,11 +769,15 @@ export class AgentStudioPersonaComponent implements OnInit {
    * Cap elapsed time at the run's completion rather than wall-clock since launch.
    *
    * Preconditions: `detail` is the active run and is terminal.
-   * Postconditions: `personaLiveRunEndedAtMs` is set; `elapsedSec` is
-   *   `endedAt - startedAt` in seconds (0 if startedAt is missing). When both
-   *   `created_at` and `updated_at` parse, both endpoints are taken from the
-   *   payload so elapsed is not a browser-clock start minus a server-clock end.
-   *   If `updated_at` is later than a previously stored end, this is a new
+   * Postconditions: if `personaLiveRunStartedAtMs()` is null, this is a no-op —
+   *   that can only happen if something cleared the session's live-run state
+   *   (e.g. `setTeamId` on a team change) since this poll was issued, meaning
+   *   `detail` belongs to an orphaned run that Stage 4 must not resurrect
+   *   timing for. Otherwise `personaLiveRunEndedAtMs` is set and `elapsedSec`
+   *   is `endedAt - startedAt` in seconds. When both `created_at` and
+   *   `updated_at` parse, both endpoints are taken from the payload so
+   *   elapsed is not a browser-clock start minus a server-clock end. If
+   *   `updated_at` is later than a previously stored end, this is a new
    *   attempt that finished while unmounted; that attempt's start was never
    *   observed, so `elapsedSec` is 0. If the payload timestamps are missing,
    *   falls back to the client-observed end (`storedEnd` or `Date.now()`).
