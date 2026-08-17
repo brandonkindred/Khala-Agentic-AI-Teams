@@ -119,6 +119,23 @@ _PHASE4_NODE_MERGE: dict[str, Optional[str]] = {
 }
 
 
+# Phase 5 fan-out node id -> the GovernanceOutput key its structured_output
+# nests under, or None to merge its fields in flat. Unlike Phase 4's six
+# *_guide specialists (which all nest under the same list field), every
+# Phase 5 specialist's structured_output matches a disjoint set of
+# GovernanceOutput field names 1:1 (see models.py) -- so every value here is
+# None and the merge is a plain flat union with no list-append case.
+_PHASE5_NODE_MERGE: dict[str, Optional[str]] = {
+    "ownership_definer": None,
+    "approval_workflow_designer": None,
+    "asset_wiki_planner": None,
+    "training_planner": None,
+    "kpi_designer": None,
+    "evolution_framer": None,
+    "brand_rules_codifier": None,
+}
+
+
 def _child_structured_output(child: Any) -> Optional[BaseModel]:
     """Recover a merge child's usable ``structured_output``, or ``None``.
 
@@ -339,6 +356,29 @@ def _merge_phase4_fragments(node_result: Any, model_class: type[BaseModel]) -> O
     return _merge_named_fragments(node_result, model_class, _PHASE4_NODE_MERGE, require_all=True)
 
 
+def _merge_phase5_fragments(node_result: Any, model_class: type[BaseModel]) -> Optional[BaseModel]:
+    """Merge every Phase 5 specialist's ``structured_output`` into one phase output.
+
+    Phase 5 wraps seven parallel fan-out agents as a single top-level
+    ``"phase5_governance"`` node (see ``graphs/phase5_governance.py``); the
+    same nested-``MultiAgentResult`` recovery Phase 1 and Phase 4 use applies
+    here. All seven specialists must be present -- a partial run must not
+    silently validate as a complete ``GovernanceOutput`` via field defaults.
+
+    Preconditions:
+        ``node_result`` is the ``NodeResult`` for a single top-level graph node
+        (may or may not wrap a nested multi-agent result).
+    Postconditions:
+        Returns a validated ``model_class`` instance merging every recognized
+        Phase 5 specialist's ``structured_output`` when all of
+        ``_PHASE5_NODE_MERGE``'s node ids were found -- every specialist's
+        fields land flat since none of them nest under a shared key; returns
+        None when any specialist is missing or the merged data fails
+        validation -- same None contract as ``_merge_phase1_fragments``.
+    """
+    return _merge_named_fragments(node_result, model_class, _PHASE5_NODE_MERGE, require_all=True)
+
+
 class _PhaseSpec(NamedTuple):
     """Everything ``run``/``run_single_phase``/``_extract_phase_output`` need for one phase.
 
@@ -358,21 +398,21 @@ class _PhaseSpec(NamedTuple):
         model_cls: The phase's output model.
         merge_fn: When the phase's node wraps several named sub-agents whose
             fragments must be merged into one ``model_cls`` (Phase 1's fan-out,
-            Phase 2's sequential graph, Phase 4's fan-out), the merge function
-            to try first. ``None`` for phases whose terminal node's own output
-            already is the complete phase output (Phases 3 and 5's compositor
-            nodes).
+            Phase 2's sequential graph, Phase 4's and Phase 5's fan-out), the
+            merge function to try first. ``None`` for phases whose terminal
+            node's own output already is the complete phase output (Phase 3's
+            compositor node).
         check_structured_output: Whether the single-agent fallback may accept
             the last agent's own ``structured_output`` as the phase output.
-            ``False`` for Phase 2 and Phase 4, whose last-seen agent (Phase
-            2's VoicePrinciplesDrafter; Phase 4's nine parallel specialists
-            have no single "last" node) only ever emits its own fragment —
-            subset-validating that against the phase's full output model
-            would silently report a non-degraded output with every other
-            field defaulted empty. Both phases have no compositor, so
-            ``merge_fn`` is the only legitimate extraction path; when it
-            returns ``None`` the phase must degrade instead of accepting a
-            stray fragment.
+            ``False`` for Phase 2, Phase 4, and Phase 5, whose last-seen agent
+            (Phase 2's VoicePrinciplesDrafter; Phase 4's nine and Phase 5's
+            seven parallel specialists have no single "last" node) only ever
+            emits its own fragment — subset-validating that against the
+            phase's full output model would silently report a non-degraded
+            output with every other field defaulted empty. All three phases
+            have no compositor, so ``merge_fn`` is the only legitimate
+            extraction path; when it returns ``None`` the phase must degrade
+            instead of accepting a stray fragment.
     """
 
     builder_fn: Callable[[], Any]
@@ -410,7 +450,13 @@ _PHASE_SPEC: dict[BrandPhase, _PhaseSpec] = {
         merge_fn=_merge_phase4_fragments,
         check_structured_output=False,
     ),
-    BrandPhase.GOVERNANCE: _PhaseSpec(build_phase5_graph, "phase5_governance", GovernanceOutput),
+    BrandPhase.GOVERNANCE: _PhaseSpec(
+        build_phase5_graph,
+        "phase5_governance",
+        GovernanceOutput,
+        merge_fn=_merge_phase5_fragments,
+        check_structured_output=False,
+    ),
 }
 
 # node id -> spec, so `_extract_phase_output` (which only receives a node id,
