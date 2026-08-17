@@ -15,7 +15,6 @@ import pytest
 import agent_platform.studio.temporal.dispatch as dispatch
 from agent_platform.studio.models import AgentDefinition, ConversationStateResponse
 from agent_platform.studio.registration import build_studio_agent_manifest
-from agent_platform.studio.service import AgentStudioService
 
 
 @pytest.fixture(autouse=True)
@@ -25,13 +24,6 @@ def _temporal_and_worker_ready(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         "shared.temporal.worker.is_team_worker_ready", lambda team: team == "agent_studio"
     )
-
-
-@pytest.fixture()
-def service(monkeypatch: pytest.MonkeyPatch) -> Mock:
-    svc = Mock(spec=AgentStudioService)
-    monkeypatch.setattr("agent_platform.studio.runtime.get_studio_service", lambda: svc)
-    return svc
 
 
 def test_start_conversation_uses_service_when_temporal_ready(service: Mock) -> None:

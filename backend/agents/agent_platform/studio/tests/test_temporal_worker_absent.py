@@ -18,7 +18,6 @@ import pytest
 import agent_platform.studio.temporal.dispatch as dispatch
 from agent_platform.studio.models import AgentDefinition, ConversationStateResponse
 from agent_platform.studio.registration import build_studio_agent_manifest
-from agent_platform.studio.service import AgentStudioService
 
 
 @pytest.fixture(autouse=True)
@@ -32,13 +31,6 @@ def _temporal_and_worker_absent(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_studio_temporal_enabled_is_false_when_worker_absent() -> None:
     """Sanity check linking the forced fixture to the real gate function."""
     assert dispatch.studio_temporal_enabled() is False
-
-
-@pytest.fixture()
-def service(monkeypatch: pytest.MonkeyPatch) -> Mock:
-    svc = Mock(spec=AgentStudioService)
-    monkeypatch.setattr("agent_platform.studio.runtime.get_studio_service", lambda: svc)
-    return svc
 
 
 def test_start_conversation_uses_service_when_temporal_worker_absent(service: Mock) -> None:

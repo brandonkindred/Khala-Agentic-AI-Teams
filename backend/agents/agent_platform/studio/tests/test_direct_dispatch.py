@@ -17,16 +17,6 @@ from temporalio.exceptions import ApplicationError
 import agent_platform.studio.temporal.dispatch as dispatch
 from agent_platform.studio.models import AgentDefinition, ConversationStateResponse
 from agent_platform.studio.registration import build_studio_agent_manifest
-from agent_platform.studio.service import AgentStudioService
-
-
-@pytest.fixture()
-def service(monkeypatch: pytest.MonkeyPatch) -> Mock:
-    """Mock installed at the lazy-import seam ``_direct_service()`` uses."""
-    svc = Mock(spec=AgentStudioService)
-    monkeypatch.setattr("agent_platform.studio.runtime.get_studio_service", lambda: svc)
-    return svc
-
 
 # ── start_conversation ──────────────────────────────────────────────────────────
 
