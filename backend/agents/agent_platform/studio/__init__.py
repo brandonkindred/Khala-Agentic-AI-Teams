@@ -21,9 +21,9 @@ Public façade (import these four from ``agent_platform.studio``). Everything el
 Internal modules in this package must import sibling submodules, never this
 façade, so these re-exports cannot create an import cycle.
 
-The four public names resolve lazily via PEP 562 ``__getattr__`` so
-``import agent_platform.studio.temporal.workflows`` does not pull ``routes`` or
-``runtime`` (those construct process singletons and are not sandbox-safe).
+The four public names resolve lazily via PEP 562 ``__getattr__`` so importing
+a Temporal submodule does not pull ``routes`` or ``runtime`` (those construct
+process singletons).
 """
 
 from typing import TYPE_CHECKING, Any
