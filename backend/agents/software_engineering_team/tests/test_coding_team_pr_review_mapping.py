@@ -33,6 +33,7 @@ from software_engineering_team.github_source.pr_review_mapping import (
     parse_removed_lines,
     parse_valid_lines,
     render_annotated_hunks,
+    render_removed_hunks,
     split_review_comments,
 )
 
@@ -250,6 +251,47 @@ def test_render_annotated_hunks_lines_align_with_valid_lines() -> None:
     # ...added lines marked ``+``, context lines marked with a space.
     for number, marker in by_number.items():
         assert marker == ("+" if number in added else " ")
+
+
+# ---------------------------------------------------------------------------
+# render_removed_hunks
+# ---------------------------------------------------------------------------
+
+
+def test_render_removed_hunks_single_hunk() -> None:
+    patch = "@@ -1,3 +1,2 @@\n keep\n-deleted\n+replacement"
+    # Old-file side: context line, then the removed line; the added
+    # replacement has no old-file position and is omitted.
+    assert render_removed_hunks(patch) == "keep\ndeleted"
+
+
+def test_render_removed_hunks_omits_added_lines() -> None:
+    patch = "@@ -1,2 +1,3 @@\n ctx\n+added\n more"
+    # No removed lines in this hunk; only the two context rows survive.
+    assert render_removed_hunks(patch) == "ctx\nmore"
+
+
+def test_render_removed_hunks_deletion_only_hunk() -> None:
+    patch = "@@ -10,3 +10,0 @@\n-alpha\n-beta\n-gamma"
+    assert render_removed_hunks(patch) == "alpha\nbeta\ngamma"
+
+
+def test_render_removed_hunks_separates_multiple_hunks() -> None:
+    patch = "@@ -1,2 +1,1 @@\n a\n-b\n@@ -10,2 +11,1 @@\n c\n-d"
+    assert render_removed_hunks(patch) == "a\nb\n...\nc\nd"
+
+
+def test_render_removed_hunks_empty_patch() -> None:
+    assert render_removed_hunks("") == ""
+    assert render_removed_hunks(None) == ""
+
+
+def test_render_removed_hunks_no_gutter_unlike_render_annotated_hunks() -> None:
+    # replaced_content mirrors full_content's plain-body shape, not the
+    # pre_numbered N| -gutter shape used for hunk_files.
+    patch = "@@ -5,2 +5,2 @@\n keep\n-old line\n+new line"
+    assert render_removed_hunks(patch) == "keep\nold line"
+    assert "|" not in render_removed_hunks(patch)
 
 
 # ---------------------------------------------------------------------------

@@ -304,6 +304,7 @@ def _build_prompt(
     batch_index: Optional[int] = None,
     total_batches: Optional[int] = None,
     is_partial: bool = False,
+    replaced_content: Optional[dict] = None,
 ) -> str:
     """Render the user prompt for one submission-pass runner call.
 
@@ -316,6 +317,9 @@ def _build_prompt(
           total batch count.
         - ``is_partial`` is True only for a reactive-recovery bisect child
           batch (:attr:`~code_review_agent.submission_pass_runner.FileBatch.is_partial`).
+        - ``replaced_content``, when given, is ``CodeReviewInput.replaced_content``
+          verbatim (path -> before-image text); not guaranteed to cover every
+          path, or to be a complete file body for the paths it does cover.
 
     Postconditions:
         - The changed-file path manifest lists every changed file in the
@@ -325,6 +329,12 @@ def _build_prompt(
           ``None``) in full. When ``is_partial`` is True, the content section
           header renders a reduced-view recovery banner; otherwise, when
           ``total_batches`` is set (> 1), it names this batch's position.
+        - For each path shown in this call, immediately after that path's
+          current-content block, renders a "Replaced (pre-change) content"
+          block with ``replaced_content[path]`` when that entry is present and
+          non-empty. A path with no entry (or ``replaced_content`` itself
+          ``None``/empty) gets no such block -- identical output to omitting
+          the parameter entirely.
     """
     parts: List[str] = []
 
@@ -357,6 +367,13 @@ def _build_prompt(
         parts.append(body_fence)
         parts.append(content)
         parts.append(body_fence)
+        replaced = (replaced_content or {}).get(path)
+        if replaced:
+            replaced_fence = _code_fence_for(replaced)
+            parts.append(f"### {path} — Replaced (pre-change) content ###")
+            parts.append(replaced_fence)
+            parts.append(replaced)
+            parts.append(replaced_fence)
     parts.append("")
 
     parts.append(
@@ -685,6 +702,7 @@ def _run_pass(
             batch_index=batch.index,
             total_batches=batch.total,
             is_partial=batch.is_partial,
+            replaced_content=input_data.replaced_content,
         )
 
     def _parse_batch_reply(raw: str) -> List[CodeReviewIssue]:

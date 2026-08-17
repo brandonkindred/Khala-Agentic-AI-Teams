@@ -331,6 +331,40 @@ def render_annotated_hunks(patch: str) -> str:
     )
 
 
+def render_removed_hunks(patch: Optional[str]) -> str:
+    """Render a file's diff hunks as old-file body text (the removed side).
+
+    Preconditions:
+        - ``patch`` is one file's unified-diff text (GitHub's ``files[].patch``),
+          or empty/``None`` for a binary/oversized/unchanged file.
+    Postconditions:
+        - Returns the removed (``-``) and context (`` ``) lines of each hunk, in
+          old-file order, with a ``...`` marker between non-contiguous hunks
+          (same convention as ``render_annotated_hunks``). Added (``+``) lines
+          are omitted (they are not in the old file). No line-number gutter --
+          this is a plain body (mirrors ``full_content``'s shape), not a
+          numbered excerpt. An empty/binary patch yields an empty string.
+    """
+    rows: list[str] = []
+    in_hunk = False
+    first_hunk = True
+    for raw in (patch or "").splitlines():
+        header = _HUNK_BOTH_SIDES_RE.match(raw)
+        if header:
+            if not first_hunk:
+                rows.append("...")
+            first_hunk = False
+            in_hunk = True
+            continue
+        if not in_hunk:
+            continue
+        tag = raw[:1]
+        if tag == "-" or tag == " " or raw == "":
+            rows.append(raw[1:] if raw else "")
+        # '+' added lines and '\' ("\ No newline...") have no old-file line.
+    return "\n".join(rows)
+
+
 def _normalize_path(file_path: str, valid_by_path: dict[str, set[int]]) -> Optional[str]:
     """Resolve a finding's ``file_path`` to a key in ``valid_by_path``.
 
