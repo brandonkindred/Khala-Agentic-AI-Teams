@@ -3,8 +3,8 @@
 ``IndicatorRegistry`` (``strategy_lab/indicators/streaming.py``) can
 optionally be given a ``BatchIndicatorCache`` reference at construction, but
 only actually consults it via ``resolve_indicator`` when the
-``STRATEGY_LAB_BATCH_INDICATOR_CACHE_ENABLED`` env var is true (default:
-off). These tests cover both flag states plus the guard conditions
+``STRATEGY_LAB_BATCH_INDICATOR_CACHE_ENABLED`` env var is truthy (default:
+on). These tests cover both flag states plus the guard conditions
 (``timeframe``/``symbol`` must be present) that gate consultation even when
 the flag is on, and confirm the cached and uncached code paths always agree
 on the value returned — the wiring may change *how* a value is produced, but
@@ -146,9 +146,9 @@ def test_default_construction_has_no_batch_cache() -> None:
 
 
 def test_flag_off_discards_passed_cache_at_construction(monkeypatch) -> None:
-    """With the flag unset (default), a ``batch_cache`` argument is
+    """With the flag set falsy, a ``batch_cache`` argument is
     discarded immediately at construction, not merely ignored later."""
-    monkeypatch.delenv(_ENV_VAR, raising=False)
+    monkeypatch.setenv(_ENV_VAR, "false")
     cache = BatchIndicatorCache()
     reg = IndicatorRegistry(batch_cache=cache, timeframe="1d")
     assert reg._batch_cache is None
@@ -162,13 +162,22 @@ def test_flag_on_keeps_passed_cache(monkeypatch) -> None:
     assert reg._batch_cache is cache
 
 
+def test_default_flag_unset_keeps_passed_cache(monkeypatch) -> None:
+    """The flag now defaults on: with the env var unset, a passed
+    ``batch_cache`` is kept (the flipped bake-in default)."""
+    monkeypatch.delenv(_ENV_VAR, raising=False)
+    cache = BatchIndicatorCache()
+    reg = IndicatorRegistry(batch_cache=cache, timeframe="1d")
+    assert reg._batch_cache is cache
+
+
 # ---------------------------------------------------------------------------
-# Flag off (default): behavior byte-for-byte identical, cache never touched
+# Flag off (explicit opt-out): behavior byte-for-byte identical, cache never touched
 # ---------------------------------------------------------------------------
 
 
 def test_flag_off_never_consults_cache_and_matches_uncached_values(monkeypatch) -> None:
-    monkeypatch.delenv(_ENV_VAR, raising=False)
+    monkeypatch.setenv(_ENV_VAR, "false")
     cache = BatchIndicatorCache()
     bars = _series("AAPL", 60)
     reg = IndicatorRegistry(batch_cache=cache, timeframe="1d")

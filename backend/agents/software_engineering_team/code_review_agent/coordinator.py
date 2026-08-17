@@ -2,17 +2,18 @@
 
 Pipeline: input → (path, content) blocks → bounded ``FileSegment``s →
 ``ReviewChunk``s (``chunking``) → per-chunk LLM review with retry/bisect
-recovery and the map-phase cache (``mapping``) → false-positive verification
-(each genuine finding is re-checked against the *whole* submission, since a
-chunk reviewer saw only a slice, and confirmed false positives are dropped — see
-``false_positive_filter``) → merged architecture-consistency + side-effect /
-blast-radius pass (a single additive LLM call covering architecture
-contradictions, cross-codebase redundancy, and caller-impact / documentation
-mismatches the per-chunk view cannot see — see
-``merged_architecture_side_effect_pass``) → side-effect consolidation (merges
-related ``side-effects`` findings that share an enclosing construct or cite
-one another — see ``side_effect_consolidation``) → deterministic merge (dedupe,
-severity gate, safety nets) → optional post-dedupe spec-compliance synthesis.
+recovery and the map-phase cache (``mapping``) → merged architecture-consistency
++ side-effect / blast-radius pass (a single additive LLM call covering
+architecture contradictions, cross-codebase redundancy, and caller-impact /
+documentation mismatches the per-chunk view cannot see — see
+``merged_architecture_side_effect_pass``) → finding combination (proximity +
+same-anchor similarity, subsuming the exact-match dedupe and the side-effect
+consolidation — see ``finding_combination``) → false-positive verification over
+the combined set (each finding, including the additive ones, re-checked against
+the *whole* submission since a chunk reviewer saw only a slice, and confirmed
+false positives dropped — see ``false_positive_filter``) → deterministic merge
+(fold in coverage findings, severity gate, safety nets) → optional post-dedupe
+spec-compliance synthesis.
 When ``CODE_REVIEW_SPEC_COMPLIANCE_PASS`` is enabled for the ``CODE_REVIEW``
 profile, each chunk's prompt omits the per-chunk ``acceptance_criteria``/
 ``spec_excerpt`` blocks (``architecture_overview`` is unaffected) and, after the
@@ -97,7 +98,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
-from typing import Callable, List, NamedTuple, Optional, Tuple
+from typing import List, NamedTuple, Optional, Tuple
 
 from llm_service import LLMClient, compact_text
 from llm_service.interface import observer_turn_started_monotonic
@@ -128,6 +129,7 @@ from .chunking import (
     split_block_into_segments,
 )
 from .false_positive_filter import CodebaseIndex, filter_false_positives
+from .finding_combination import combine_findings
 from .mapping import (
     _cached_review_chunk,
     _chunk_cache_key,
@@ -157,12 +159,7 @@ from .models import (
 )
 from .profiles import ReviewProfile
 from .repo_reader import RepoReader
-from .side_effect_consolidation import (
-    SIDE_EFFECT_CONSOLIDATION_ENV as _SIDE_EFFECT_CONSOLIDATION_ENV,
-)
-from .side_effect_consolidation import (
-    consolidate_side_effect_issues,
-)
+from .side_effect_consolidation import SIDE_EFFECT_CONSOLIDATION_ENV
 from .synthesis import synthesize_review_findings, synthesize_spec_compliance
 from .transcript import model_label, record_transcript_entry
 
@@ -295,25 +292,6 @@ def _not_reviewed_range_label(issue: CodeReviewIssue) -> str:
     if issue.start_line is not None and issue.line is not None:
         return f"{path} (lines {issue.start_line}-{issue.line})"
     return path
-
-
-def _tail_passes_run_sequentially(llm: LLMClient) -> bool:
-    """True when the coordinator's tail passes must run one at a time.
-
-    Scripted ``DummyLLMClient`` doubles use a shared non-thread-safe response index,
-    so they are not safe under concurrent fan-out. Mirrors
-    ``shared.v2_review._review_steps_run_sequentially``; both delegate to the shared
-    ``is_dummy_llm_client_wrapped`` helper (unwraps a Strands ``LLMClientModel``
-    wrapper before checking) so the detection logic lives in one place.
-
-    Preconditions: ``llm`` is the LLM client that will be handed to the tail-pass thunks.
-    Postconditions: returns ``True`` iff ``llm`` is (or wraps) a ``DummyLLMClient``. Pure.
-    """
-    # Local import: dummy detection is test infrastructure; keep it out of the
-    # production module-load graph while still allowing runtime detection.
-    from llm_service.clients.dummy import is_dummy_llm_client_wrapped
-
-    return is_dummy_llm_client_wrapped(llm)
 
 
 def _dedupe_issues(all_issues: List[CodeReviewIssue]) -> List[CodeReviewIssue]:
@@ -527,86 +505,88 @@ def _run_tail_passes(
     repo_reader: Optional[RepoReader],
     shared_index: CodebaseIndex,
 ) -> _TailPassResult:
-    """Run the false-positive filter and the merged architecture/side-effect pass.
+    """Run the additive pass, combine findings, then false-positive filter them.
 
-    Both are once-per-submission, read-only checks over the same shared
-    ``CodebaseIndex`` (built once by the caller): false-positive verification
-    re-checks each genuine chunk finding against the whole submission and drops
-    confirmed false positives; the merged pass runs architecture-consistency and
-    side-effect / blast-radius checks in a single LLM call and returns the two
-    finding lists separately. Neither reads the other's output, so they are
-    independent of call order.
+    Three once-per-submission steps run **sequentially**, in dependency order,
+    over the same shared ``CodebaseIndex`` (built once by the caller):
+
+        1. The merged architecture-consistency + side-effect / blast-radius pass
+           (a single LLM call returning the two finding lists separately).
+        2. ``combine_findings`` over the full stream — the map-phase findings
+           plus both additive lists — collapsing proximity/similarity
+           near-duplicates (this subsumes the exact-match dedupe and the old
+           side-effect consolidation).
+        3. The false-positive filter over that combined set, so the additive
+           findings are verified too (previously the filter ran concurrently
+           with the merged pass and never saw its findings).
+
+    Ordering matters here: the additive pass must precede combination and
+    filtering so its findings are deduped and verified alongside the rest.
 
     Preconditions:
-        - ``genuine_issues`` is the deduped set of genuine chunk findings
-          (coverage/safety findings excluded, per ``filter_false_positives``'s
-          own precondition).
+        - ``genuine_issues`` is the set of genuine chunk findings (coverage/
+          safety findings excluded, per ``filter_false_positives``'s own
+          precondition). It need not be pre-deduped: step 2 dedupes/combines.
         - ``shared_index`` was built from the same ``input_data``/``repo_reader``.
 
     Postconditions:
-        - When ``input_data.skip_tail_passes`` is set, neither pass runs (no LLM
-          calls at all): returns a :class:`_TailPassResult` whose ``issues`` is
-          ``genuine_issues`` unchanged and whose ``has_additive_findings`` is
-          always False. This is a strict superset of
-          ``skip_false_positive_filter``'s effect (setting both is redundant,
-          not conflicting) — a lightweight mode for a fallback caller that
-          wants speed over full tail-pass rigor.
-        - Otherwise, returns a :class:`_TailPassResult` whose ``issues`` is the
-          false-positive-filtered (or, when ``input_data.skip_false_positive_filter``
-          is set, unfiltered) ``genuine_issues``, followed by the architecture
-          findings, followed by the side-effect findings — the same order the
-          caller's merge produced before this fan-out existed — and whose
-          ``has_additive_findings`` is True iff either half of the merged pass
-          contributed at least one finding.
-        - When ``llm`` is (or wraps) a ``DummyLLMClient`` (see
-          ``_tail_passes_run_sequentially``), fewer than two passes are
-          scheduled, or ``_map_parallelism()`` resolves to <= 1, the passes run
-          sequentially. Otherwise they run concurrently via ``parallel_map``.
+        - When ``input_data.skip_tail_passes`` is set, none of the three steps
+          run (no LLM calls at all): returns a :class:`_TailPassResult` whose
+          ``issues`` is ``genuine_issues`` unchanged and whose
+          ``has_additive_findings`` is always False. This is a strict superset
+          of ``skip_false_positive_filter``'s effect (setting both is redundant,
+          not conflicting) — a lightweight mode for a fallback caller that wants
+          speed over full tail-pass rigor.
+        - Otherwise returns a :class:`_TailPassResult` whose ``issues`` is
+          ``combine_findings([*genuine_issues, *architecture, *side_effect])``,
+          then false-positive-filtered unless
+          ``input_data.skip_false_positive_filter`` is set (which runs steps 1-2
+          but skips the drop-false-positives step 3). ``has_additive_findings``
+          is True iff either half of the merged pass contributed at least one
+          finding (computed from the raw pass output, before combination).
+        - Combination is fail-safe: any error in step 2 is logged and degrades
+          to the uncombined stream rather than failing the review.
     """
     if input_data.skip_tail_passes:
         return _TailPassResult(issues=genuine_issues, has_additive_findings=False)
 
-    calls: List[Tuple[str, Callable[[], object]]] = []
-    if not input_data.skip_false_positive_filter:
-        calls.append(
-            (
-                "filter",
-                lambda: filter_false_positives(
-                    llm, input_data, genuine_issues, repo_reader=repo_reader, index=shared_index
-                ),
-            )
-        )
-    calls.append(
-        (
-            "merged",
-            lambda: find_architecture_and_side_effect_issues(
-                llm, input_data, repo_reader=repo_reader, index=shared_index
-            ),
-        )
+    # 1) Additive review pass FIRST: architecture-consistency + side-effect /
+    #    mutation blast-radius, in a single merged LLM call. Running it before
+    #    combination and false-positive filtering is what lets those findings
+    #    join the main stream and be deduped/verified alongside the map findings
+    #    (they previously ran concurrently with the FP filter and bypassed it).
+    architecture_findings, side_effect_findings = find_architecture_and_side_effect_issues(
+        llm, input_data, repo_reader=repo_reader, index=shared_index
     )
+    combined = [*genuine_issues, *architecture_findings, *side_effect_findings]
 
-    if _tail_passes_run_sequentially(llm) or len(calls) <= 1 or _map_parallelism() <= 1:
-        results = {name: fn() for name, fn in calls}
-    else:
-        # Imported lazily, matching shared/v2_review.py's and
-        # shared/phases/review_cycle.py's identical parallel_map import — keeps
-        # the module import light for callers that never hit the concurrent
-        # branch (e.g. every DummyLLMClient-backed test).
-        from shared.concurrency import parallel_map
-
-        outputs = parallel_map(
-            [fn for _, fn in calls], lambda fn: fn(), max_workers=len(calls), skip_none=False
+    # 2) Combine near-duplicate / co-located findings across the WHOLE stream
+    #    (proximity + same-file similarity). This subsumes both the exact-match
+    #    ``_dedupe_issues`` for the main stream and the old side-effect
+    #    consolidation, and shrinks the set the FP filter must verify. Fail-safe:
+    #    any error degrades to the uncombined list rather than failing the review.
+    try:
+        combined = combine_findings(
+            combined,
+            shared_index,
+            consolidate_side_effects=env_flag_enabled(SIDE_EFFECT_CONSOLIDATION_ENV),
         )
-        results = {name: output for (name, _), output in zip(calls, outputs)}
+    except Exception:
+        logger.exception(
+            "CodeReviewCoordinator: finding combination failed; using uncombined tail-pass issues"
+        )
 
-    verified = results.get("filter", genuine_issues)
-    architecture_findings, side_effect_findings = results["merged"]
-    if architecture_findings:
-        verified = [*verified, *architecture_findings]
-    if side_effect_findings:
-        verified = [*verified, *side_effect_findings]
+    # 3) False-positive verification over the FULL combined set, so the additive
+    #    architecture/side-effect findings are verified too. Skipped only when
+    #    ``skip_false_positive_filter`` is set (a gate whose findings must never
+    #    be silently dropped): that still runs the merged pass and combination.
+    if not input_data.skip_false_positive_filter:
+        combined = filter_false_positives(
+            llm, input_data, combined, repo_reader=repo_reader, index=shared_index
+        )
+
     return _TailPassResult(
-        issues=verified,
+        issues=combined,
         has_additive_findings=bool(architecture_findings) or bool(side_effect_findings),
     )
 
@@ -701,16 +681,17 @@ def run_coordinator(
           when that removes the last critical/high finding the gate approves (a
           chunk-local false positive never blocks the merge). The check is
           fail-safe — any verifier failure keeps the findings — and never
-          touches the not-reviewed coverage findings. This pass and the merged
-          architecture/side-effect pass below it — their concurrency/fallback
-          scheduling, finding-list order, and ``skip_tail_passes`` behavior —
-          are exactly as documented on ``_run_tail_passes``, which this
-          function calls unchanged.
-        - After the false-positive filter and the merged additive pass, related
-          ``side-effects`` findings may be optionally consolidated (gated by
-          ``CODE_REVIEW_SIDE_EFFECT_CONSOLIDATION``; fail-safe on error — see
-          the consolidation step in the body) before the deterministic
-          dedupe/severity gate.
+          touches the not-reviewed coverage findings. This pass runs after (not
+          concurrently with) the merged architecture/side-effect pass and the
+          finding-combination step: their sequential order, fail-safe behavior,
+          and ``skip_tail_passes`` handling are exactly as documented on
+          ``_run_tail_passes``, which this function calls unchanged.
+        - Related ``side-effects`` findings are optionally consolidated as the
+          ``side-effects`` special case of ``combine_findings`` (step 2 of
+          ``_run_tail_passes``), gated by ``CODE_REVIEW_SIDE_EFFECT_CONSOLIDATION``
+          and applied before the false-positive filter rather than as a separate
+          post-filter step. The final deterministic dedupe below only folds in
+          the coverage findings.
         - When ``CODE_REVIEW_SPEC_COMPLIANCE_PASS`` is enabled and
           ``input_data.profile`` is ``ReviewProfile.CODE_REVIEW``, every chunk's
           prompt omits the ``acceptance_criteria``/``spec_excerpt`` blocks
@@ -973,36 +954,38 @@ def run_coordinator(
             unreviewed=[i.description for i in outcome.not_reviewed_issues],
         )
 
-    # False-positive verification (see ``false_positive_filter``'s module
-    # docstring for the full rationale). Coverage/safety findings
+    # Genuine chunk findings handed to the tail passes. Coverage/safety findings
     # (``not_reviewed_issues``, empty-file notices) are never passed in, so the
-    # gate's anti-loop nets stay intact.
-    genuine_issues = _dedupe_issues(outcome.issues)
+    # gate's anti-loop nets stay intact. No exact dedupe here: ``_run_tail_passes``
+    # now runs ``combine_findings`` over the full stream (map + additive), which
+    # subsumes both the exact-match dedupe and the side-effect consolidation
+    # before the false-positive filter runs.
+    genuine_issues = list(outcome.issues)
     notify_review_progress(
         progress_callback,
         "verifying",
         f"verifying {len(genuine_issues)} findings against the full codebase",
         _PROGRESS_VERIFYING,
     )
-    # Built once and shared with the false-positive filter, the merged
-    # architecture/side-effect pass, and the side-effect consolidation step
-    # below: all read the same submission/repo_reader,
-    # so a single index avoids parsing the submission twice.
-    # CodebaseIndex is read-only after construction (see its own docstring's Invariants),
-    # so this one instance is safe to hand to the tail passes when they run
-    # concurrently in worker threads (see ``_run_tail_passes``).
+    # Built once and shared with the merged architecture/side-effect pass, the
+    # finding-combination step, and the false-positive filter: all read the same
+    # submission/repo_reader, so a single index avoids parsing the submission
+    # twice. CodebaseIndex is read-only after construction (see its own
+    # docstring's Invariants), so this one instance is safe to hand to the tail
+    # passes (see ``_run_tail_passes``). It is a local: passed only into the tail
+    # passes and never stored on any coordinator/instance state, so it is not
+    # retained past this call and cannot outlive the submission it describes.
     shared_index = CodebaseIndex.from_input(input_data, repo_reader=repo_reader)
 
-    # See ``_run_tail_passes`` for the false-positive filter / merged
-    # architecture-side-effect pass split, scheduling, and skip behavior.
-    # ``skip_false_positive_filter`` is for a gate whose findings must never be
-    # silently dropped; skipping only removes the drop-false-positives step, so
-    # it can only ever keep more findings. After those passes, related
-    # ``side-effects`` findings may optionally be consolidated (gated by
-    # ``CODE_REVIEW_SIDE_EFFECT_CONSOLIDATION``; fail-safe on error) before the
-    # same dedupe/severity-gate/merge machinery below. The merged halves are
-    # restricted internally to the default CODE_REVIEW profile -- see their own
-    # docstrings for why the other profiles must never receive these findings.
+    # ``_run_tail_passes`` now runs sequentially: the merged architecture/
+    # side-effect pass, then ``combine_findings`` over the full stream (which
+    # subsumes the exact-match dedupe and side-effect consolidation), then the
+    # false-positive filter over everything (so additive findings are verified
+    # too). ``skip_false_positive_filter`` is for a gate whose findings must
+    # never be silently dropped; it removes only the drop-false-positives step,
+    # so it can only ever keep more findings. The merged halves are restricted
+    # internally to the default CODE_REVIEW profile -- see their own docstrings
+    # for why the other profiles must never receive these findings.
     tail_pass_result = _run_tail_passes(
         llm=llm,
         input_data=input_data,
@@ -1011,19 +994,6 @@ def run_coordinator(
         shared_index=shared_index,
     )
     tail_pass_issues = tail_pass_result.issues
-    # Merge related "side-effects" findings (same enclosing function, or one
-    # citing another's) into single consolidated issues before the exact-match
-    # dedupe below -- see side_effect_consolidation's own docstring for the
-    # grouping rules. Additive-only inputs in, fewer-but-richer issues out;
-    # every other category passes through untouched.
-    if env_flag_enabled(_SIDE_EFFECT_CONSOLIDATION_ENV):
-        try:
-            tail_pass_issues = consolidate_side_effect_issues(tail_pass_issues, shared_index)
-        except Exception:
-            logger.exception(
-                "CodeReviewCoordinator: side-effect consolidation failed; "
-                "using unconsolidated tail-pass issues"
-            )
 
     notify_review_progress(
         progress_callback,

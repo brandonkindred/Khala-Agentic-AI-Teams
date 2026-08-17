@@ -352,7 +352,7 @@ def _phase3_creative_director_stub() -> Dict[str, Any]:
 
 
 def _phase3_moodboard_conceptualist_stub() -> Dict[str, Any]:
-    """Return the MoodBoardConceptualist ``MoodBoardConceptOutput`` stub."""
+    """Return the MoodBoardConceptualist ``MoodBoardConcept`` stub."""
     return {
         "title": "Dummy Moodboard Direction",
         "visual_direction": "Cohesive visual system for Dummy Co. (dummy).",
@@ -363,7 +363,7 @@ def _phase3_moodboard_conceptualist_stub() -> Dict[str, Any]:
 
 
 def _phase3_converge_decider_stub() -> Dict[str, Any]:
-    """Return the ConvergeDecider ``CreativeRefinementDecisionOutput`` stub."""
+    """Return the ConvergeDecider ``CreativeRefinementDecision`` stub."""
     return {
         "winning_candidate_title": "Editorial Clarity",
         "scoring_criteria": [
@@ -622,9 +622,9 @@ def _branding_phase3_structured_stub(system_lowered: str) -> Optional[Dict[str, 
            → ``MoodBoardCandidatesOutput`` (must precede MoodBoardConceptualist
            because its prompt also names the moodboard field list).
         2. MoodBoardConceptualist — ``moodboard conceptualist`` + ``visual_direction``
-           → ``MoodBoardConceptOutput``.
+           → ``MoodBoardConcept``.
         3. ConvergeDecider — ``winning_candidate_title`` + ``scores_by_candidate``
-           → ``CreativeRefinementDecisionOutput`` (separate from CreativeDirector).
+           → ``CreativeRefinementDecision`` (separate from CreativeDirector).
         The seven specialists in ``_PHASE3_SPECIALIST_REGISTRY`` are matched
         afterward, in registry order, by agent-specific prompt anchors; their
         anchor pairs are mutually exclusive so registry order is not significant.

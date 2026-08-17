@@ -66,7 +66,7 @@ from branding_team.agents import (
 )
 from branding_team.graphs.shared import _branding_model, serialize_mission
 from branding_team.models import (
-    BrandDiscoveryAuditOutput,
+    BrandDiscoveryAudit,
     BrandStoryOutput,
     ChannelGuidelineOutput,
     IconographyOutput,
@@ -765,7 +765,7 @@ def test_agents_py_build_agent_calls_use_render_agent_prompt() -> None:
 
 
 _PHASE_SPOT_CHECKS: tuple[tuple[str, Callable[[], Agent], type], ...] = (
-    ("phase1_discovery_auditor", make_discovery_auditor, BrandDiscoveryAuditOutput),
+    ("phase1_discovery_auditor", make_discovery_auditor, BrandDiscoveryAudit),
     ("phase2_storyteller", make_storyteller, BrandStoryOutput),
     ("phase3_iconography_director", make_iconography_director, IconographyOutput),
     ("phase4_website_guide", make_website_guide, ChannelGuidelineOutput),

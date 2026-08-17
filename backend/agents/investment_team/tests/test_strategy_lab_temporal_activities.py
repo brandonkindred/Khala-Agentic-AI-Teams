@@ -296,6 +296,7 @@ def _design_attempt_checkpoint(**overrides: Any):
 
     base = dict(
         run_id="run-1",
+        cycle_scope="run-1-c0",
         design_attempt=0,
         generation=1,
         spec=_spec_dict(),
@@ -348,6 +349,15 @@ def test_design_attempt_checkpoint_round_trips_through_model_dump():
     restored = DesignAttemptCheckpoint.model_validate(dumped)
 
     assert restored == checkpoint
+    assert restored.cycle_scope == "run-1-c0"
+
+
+def test_design_attempt_checkpoint_is_frozen():
+    from pydantic import ValidationError
+
+    checkpoint = _design_attempt_checkpoint()
+    with pytest.raises(ValidationError, match="frozen"):
+        checkpoint.rationale = "mutated"
 
 
 def test_persist_design_attempt_checkpoint_delegates_to_persist_run_state(monkeypatch):
@@ -364,12 +374,14 @@ def test_persist_design_attempt_checkpoint_delegates_to_persist_run_state(monkey
         ),
     )
 
-    checkpoint = _design_attempt_checkpoint(run_id="run-1", generation=1)
+    checkpoint = _design_attempt_checkpoint(run_id="run-1", cycle_scope="run-1-c0", generation=1)
     act.persist_design_attempt_checkpoint(checkpoint)
 
     assert captured["run_id"] == "run-1"
     assert captured["create"] is False
-    assert captured["state"] == {"design_attempt_checkpoint": checkpoint.model_dump(mode="json")}
+    assert captured["state"] == {
+        f"{act._DESIGN_ATTEMPT_CHECKPOINT_FIELD_PREFIX}run-1-c0": checkpoint.model_dump(mode="json")
+    }
 
 
 def test_persist_design_attempt_checkpoint_rejects_stale_generation(monkeypatch):
@@ -405,15 +417,56 @@ def test_persist_design_attempt_checkpoint_accepts_current_or_newer_generation(m
 
     # Same generation: accepted (fan-out from the same incarnation).
     act.persist_design_attempt_checkpoint(
-        _design_attempt_checkpoint(generation=2, design_attempt=0)
+        _design_attempt_checkpoint(generation=2, design_attempt=0, cycle_scope="run-1-c0")
     )
-    assert captured["state"]["design_attempt_checkpoint"]["design_attempt"] == 0
+    assert (
+        captured["state"][f"{act._DESIGN_ATTEMPT_CHECKPOINT_FIELD_PREFIX}run-1-c0"][
+            "design_attempt"
+        ]
+        == 0
+    )
 
     # Newer generation: also accepted.
     act.persist_design_attempt_checkpoint(
-        _design_attempt_checkpoint(generation=3, design_attempt=1)
+        _design_attempt_checkpoint(generation=3, design_attempt=1, cycle_scope="run-1-c0")
     )
-    assert captured["state"]["design_attempt_checkpoint"]["design_attempt"] == 1
+    assert (
+        captured["state"][f"{act._DESIGN_ATTEMPT_CHECKPOINT_FIELD_PREFIX}run-1-c0"][
+            "design_attempt"
+        ]
+        == 1
+    )
+
+
+def test_persist_design_attempt_checkpoint_scopes_field_by_cycle(monkeypatch):
+    """Two checkpoints sharing (run_id, design_attempt) but different
+    cycle_scope must land in two distinct fields -- the whole point of
+    baking cycle_scope into the field name: two StrategyLabCycleWorkflow
+    children racing the same run_id in one wave (StrategyLabBatchWorkflow's
+    max_parallel) must never clobber each other's checkpoint."""
+    from investment_team.strategy_lab import orchestrator_api, run_state
+
+    monkeypatch.setattr(run_state, "get_run_generation_strict", lambda run_id: 1)
+
+    captured_states = []
+    monkeypatch.setattr(
+        orchestrator_api,
+        "_persist_run_state",
+        lambda run_id, state, *, create=False: captured_states.append(state),
+    )
+
+    act.persist_design_attempt_checkpoint(
+        _design_attempt_checkpoint(run_id="run-1", cycle_scope="run-1-c0", design_attempt=0)
+    )
+    act.persist_design_attempt_checkpoint(
+        _design_attempt_checkpoint(run_id="run-1", cycle_scope="run-1-c1", design_attempt=0)
+    )
+
+    field_names = {list(state.keys())[0] for state in captured_states}
+    assert field_names == {
+        f"{act._DESIGN_ATTEMPT_CHECKPOINT_FIELD_PREFIX}run-1-c0",
+        f"{act._DESIGN_ATTEMPT_CHECKPOINT_FIELD_PREFIX}run-1-c1",
+    }
 
 
 def test_persist_design_attempt_checkpoint_fails_closed_on_generation_lookup_failure(monkeypatch):
@@ -438,6 +491,304 @@ def test_persist_design_attempt_checkpoint_fails_closed_on_generation_lookup_fai
 
     assert exc_info.value.non_retryable is False
     assert persisted == []  # the write never happened despite a legitimately fresh generation
+
+
+def test_delete_design_attempt_checkpoint_clears_the_field(monkeypatch):
+    """A valid delete clears the same field persist_design_attempt_checkpoint
+    writes, by setting it to None (read-equivalent to deletion, per
+    load_design_attempt_checkpoint's own falsy check on read)."""
+    from investment_team.strategy_lab import orchestrator_api, run_state
+
+    monkeypatch.setattr(run_state, "get_run_generation_strict", lambda run_id: 3)
+
+    captured = {}
+    monkeypatch.setattr(
+        orchestrator_api,
+        "_persist_run_state",
+        lambda run_id, state, *, create=False: captured.update(
+            run_id=run_id, state=state, create=create
+        ),
+    )
+
+    act.delete_design_attempt_checkpoint("run-1", "run-1-c0", 3)
+
+    assert captured["run_id"] == "run-1"
+    assert captured["create"] is False
+    assert captured["state"] == {f"{act._DESIGN_ATTEMPT_CHECKPOINT_FIELD_PREFIX}run-1-c0": None}
+
+
+def test_delete_design_attempt_checkpoint_rejects_stale_generation(monkeypatch):
+    """A stale generation raises non-retryable and never writes -- deleting
+    under a superseded incarnation's generation would risk clobbering a
+    newer incarnation's own checkpoint under the same field key."""
+    from investment_team.strategy_lab import orchestrator_api, run_state
+
+    monkeypatch.setattr(run_state, "get_run_generation_strict", lambda run_id: 2)
+
+    persisted = []
+    monkeypatch.setattr(
+        orchestrator_api, "_persist_run_state", lambda *a, **k: persisted.append((a, k))
+    )
+
+    with pytest.raises(ApplicationError) as exc_info:
+        act.delete_design_attempt_checkpoint("run-1", "run-1-c0", 1)
+
+    assert exc_info.value.non_retryable is True
+    assert exc_info.value.type == "StaleFencingTokenError"
+    assert persisted == []
+
+
+def test_delete_design_attempt_checkpoint_fails_closed_on_generation_lookup_failure(monkeypatch):
+    """A transient durable-read failure inside the fencing check raises but
+    stays RETRYABLE, mirroring persist_design_attempt_checkpoint's own
+    fail-closed-but-retryable contract -- the caller decides whether to
+    swallow it."""
+    from investment_team.strategy_lab import orchestrator_api, run_state
+
+    def _broken(run_id):
+        raise ConnectionError("connection refused")
+
+    monkeypatch.setattr(run_state, "get_run_generation_strict", _broken)
+
+    persisted = []
+    monkeypatch.setattr(
+        orchestrator_api, "_persist_run_state", lambda *a, **k: persisted.append((a, k))
+    )
+
+    with pytest.raises(ApplicationError) as exc_info:
+        act.delete_design_attempt_checkpoint("run-1", "run-1-c0", 5)
+
+    assert exc_info.value.non_retryable is False
+    assert persisted == []
+
+
+# ---------------------------------------------------------------------------
+# _infer_cycle_scope_from_activity_context
+# ---------------------------------------------------------------------------
+
+
+def test_infer_cycle_scope_from_activity_context_recovers_workflow_id(monkeypatch):
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(act.activity, "info", lambda: SimpleNamespace(workflow_id="run-1-c0"))
+    assert act._infer_cycle_scope_from_activity_context() == "run-1-c0"
+
+
+def test_infer_cycle_scope_from_activity_context_returns_none_outside_activity_execution(
+    monkeypatch,
+):
+    def _no_context():
+        raise RuntimeError("Not in activity context")
+
+    monkeypatch.setattr(act.activity, "info", _no_context)
+    assert act._infer_cycle_scope_from_activity_context() is None
+
+
+# ---------------------------------------------------------------------------
+# load_design_attempt_checkpoint
+# ---------------------------------------------------------------------------
+
+
+def test_load_design_attempt_checkpoint_returns_valid_checkpoint(monkeypatch):
+    from investment_team.strategy_lab import run_state
+
+    checkpoint = _design_attempt_checkpoint(
+        run_id="run-1", cycle_scope="run-1-c0", design_attempt=0, generation=2
+    )
+    monkeypatch.setattr(
+        run_state,
+        "load_run_from_job_service",
+        lambda run_id: {
+            f"{act._DESIGN_ATTEMPT_CHECKPOINT_FIELD_PREFIX}run-1-c0": checkpoint.model_dump(
+                mode="json"
+            )
+        },
+    )
+    monkeypatch.setattr(run_state, "get_run_generation_strict", lambda run_id: 2)
+
+    result = act.load_design_attempt_checkpoint("run-1", "run-1-c0", 0)
+    assert result == checkpoint
+
+
+def test_load_design_attempt_checkpoint_returns_none_when_no_field_for_cycle_scope(monkeypatch):
+    from investment_team.strategy_lab import run_state
+
+    monkeypatch.setattr(
+        run_state, "load_run_from_job_service", lambda run_id: {"status": "running"}
+    )
+    monkeypatch.setattr(run_state, "get_run_generation_strict", lambda run_id: 1)
+
+    assert act.load_design_attempt_checkpoint("run-1", "run-1-c0", 0) is None
+
+
+def test_load_design_attempt_checkpoint_returns_none_when_no_job_record(monkeypatch):
+    from investment_team.strategy_lab import run_state
+
+    monkeypatch.setattr(run_state, "load_run_from_job_service", lambda run_id: None)
+
+    assert act.load_design_attempt_checkpoint("run-1", "run-1-c0", 0) is None
+
+
+def test_load_design_attempt_checkpoint_returns_none_when_cycle_scope_unavailable(monkeypatch):
+    """cycle_scope=None (recovery failed outside real Temporal context) must
+    short-circuit before any durable read -- proves the no-op-safely contract."""
+    from investment_team.strategy_lab import run_state
+
+    def _fail_if_called(run_id):
+        raise AssertionError(
+            "load_run_from_job_service must not be called when cycle_scope is None"
+        )
+
+    monkeypatch.setattr(run_state, "load_run_from_job_service", _fail_if_called)
+
+    assert act.load_design_attempt_checkpoint("run-1", None, 0) is None
+
+
+def test_load_design_attempt_checkpoint_returns_none_for_wrong_design_attempt(monkeypatch):
+    from investment_team.strategy_lab import run_state
+
+    checkpoint = _design_attempt_checkpoint(
+        run_id="run-1", cycle_scope="run-1-c0", design_attempt=1, generation=1
+    )
+    monkeypatch.setattr(
+        run_state,
+        "load_run_from_job_service",
+        lambda run_id: {
+            f"{act._DESIGN_ATTEMPT_CHECKPOINT_FIELD_PREFIX}run-1-c0": checkpoint.model_dump(
+                mode="json"
+            )
+        },
+    )
+    monkeypatch.setattr(run_state, "get_run_generation_strict", lambda run_id: 1)
+
+    # Stored checkpoint is for design_attempt=1; caller is asking about 0.
+    assert act.load_design_attempt_checkpoint("run-1", "run-1-c0", 0) is None
+
+
+def test_load_design_attempt_checkpoint_returns_none_for_stale_generation(monkeypatch):
+    from investment_team.strategy_lab import run_state
+
+    checkpoint = _design_attempt_checkpoint(
+        run_id="run-1", cycle_scope="run-1-c0", design_attempt=0, generation=1
+    )
+    monkeypatch.setattr(
+        run_state,
+        "load_run_from_job_service",
+        lambda run_id: {
+            f"{act._DESIGN_ATTEMPT_CHECKPOINT_FIELD_PREFIX}run-1-c0": checkpoint.model_dump(
+                mode="json"
+            )
+        },
+    )
+    # A restart minted generation 2 since this checkpoint was written under 1.
+    monkeypatch.setattr(run_state, "get_run_generation_strict", lambda run_id: 2)
+
+    assert act.load_design_attempt_checkpoint("run-1", "run-1-c0", 0) is None
+
+
+def test_load_design_attempt_checkpoint_fails_open_on_generation_lookup_failure(monkeypatch):
+    """Unlike the write side's fail-closed contract, a read-side generation
+    lookup failure returns None (proceed as if no checkpoint exists) rather
+    than raising -- the worst case is one unnecessary Phase-1 re-run, not a
+    correctness violation, since nothing has been mutated yet at this point."""
+    from investment_team.strategy_lab import run_state
+
+    checkpoint = _design_attempt_checkpoint(
+        run_id="run-1", cycle_scope="run-1-c0", design_attempt=0, generation=1
+    )
+    monkeypatch.setattr(
+        run_state,
+        "load_run_from_job_service",
+        lambda run_id: {
+            f"{act._DESIGN_ATTEMPT_CHECKPOINT_FIELD_PREFIX}run-1-c0": checkpoint.model_dump(
+                mode="json"
+            )
+        },
+    )
+
+    def _broken(run_id):
+        raise ConnectionError("connection refused")
+
+    monkeypatch.setattr(run_state, "get_run_generation_strict", _broken)
+
+    assert act.load_design_attempt_checkpoint("run-1", "run-1-c0", 0) is None
+
+
+def test_load_design_attempt_checkpoint_fails_open_on_durable_read_failure(monkeypatch):
+    from investment_team.strategy_lab import run_state
+
+    def _broken(run_id):
+        raise ConnectionError("connection refused")
+
+    monkeypatch.setattr(run_state, "load_run_from_job_service", _broken)
+
+    assert act.load_design_attempt_checkpoint("run-1", "run-1-c0", 0) is None
+
+
+def test_load_design_attempt_checkpoint_returns_none_for_malformed_payload(monkeypatch):
+    from investment_team.strategy_lab import run_state
+
+    monkeypatch.setattr(
+        run_state,
+        "load_run_from_job_service",
+        lambda run_id: {
+            f"{act._DESIGN_ATTEMPT_CHECKPOINT_FIELD_PREFIX}run-1-c0": {"not": "a checkpoint"}
+        },
+    )
+    monkeypatch.setattr(run_state, "get_run_generation_strict", lambda run_id: 1)
+
+    assert act.load_design_attempt_checkpoint("run-1", "run-1-c0", 0) is None
+
+
+# ---------------------------------------------------------------------------
+# _design_context_to_wire / _design_context_from_wire
+# ---------------------------------------------------------------------------
+
+
+def test_design_context_to_wire_returns_none_for_none_input():
+    assert act._design_context_to_wire(None) is None
+
+
+def test_design_context_from_wire_returns_none_for_none_or_empty_input():
+    assert act._design_context_from_wire(None) is None
+    assert act._design_context_from_wire({}) is None
+
+
+def test_design_context_from_wire_rejects_partial_payload():
+    with pytest.raises(ValueError, match="design_context"):
+        act._design_context_from_wire({"rounds": 2})
+
+
+def test_design_context_from_wire_rejects_wrong_field_types():
+    with pytest.raises((TypeError, ValueError)):
+        act._design_context_from_wire(
+            {
+                "rounds": 2,
+                "critiques": {},
+                "stop_reason": "ready",
+                "loop_telemetry": {},
+            }
+        )
+
+
+def test_design_context_round_trips_through_wire_helpers():
+    from investment_team.strategy_lab._orchestrator_helpers import _DesignPersistContext
+    from investment_team.strategy_lab.agents.design_review import SpecCritique
+
+    design_context = _DesignPersistContext(
+        rounds=2,
+        critiques=[SpecCritique(ready=False, rationale="needs work")],
+        stop_reason="round_cap",
+        loop_telemetry={"k": 1},
+    )
+    wire = act._design_context_to_wire(design_context)
+    restored = act._design_context_from_wire(wire)
+
+    assert restored.rounds == 2
+    assert restored.stop_reason == "round_cap"
+    assert restored.loop_telemetry == {"k": 1}
+    assert len(restored.critiques) == 1
+    assert restored.critiques[0].model_dump() == design_context.critiques[0].model_dump()
 
 
 def test_snapshot_prior_records_activity_delegates_to_orchestrator_api(monkeypatch):
@@ -555,6 +906,28 @@ def _run_design_attempt_params(**overrides: Any) -> Dict[str, Any]:
     return base
 
 
+def test_run_design_attempt_activity_treats_null_budget_calls_as_zero(monkeypatch):
+    from investment_team.strategy_lab.agents._llm_budget import active_budget
+    from investment_team.strategy_lab.orchestrator import StrategyLabOrchestrator
+
+    class _FakeRecord:
+        def model_dump(self, *, mode: str = "python") -> Dict[str, Any]:
+            return {"lab_record_id": "rec-1"}
+
+    captured: Dict[str, Any] = {}
+
+    def _fake_attempt(self, **kwargs):
+        captured["budget_calls_seen"] = active_budget().calls_made
+        return _FakeRecord()
+
+    monkeypatch.setattr(StrategyLabOrchestrator, "_run_design_attempt", _fake_attempt)
+
+    out = act.run_design_attempt_activity(_run_design_attempt_params(budget_calls=None))
+
+    assert captured["budget_calls_seen"] == 0
+    assert out["budget_calls"] == 0
+
+
 def test_run_design_attempt_activity_returns_record_outcome(monkeypatch):
     """On a terminal record, the activity returns ``kind='record'`` plus the
     threaded whole-cycle accumulators (tracker state, gate results, budget)."""
@@ -642,7 +1015,7 @@ def test_run_design_attempt_activity_no_cache_when_flag_off(monkeypatch):
     a key is supplied (behavior unchanged)."""
     from investment_team.strategy_lab import batch_cache_context as bcc
 
-    monkeypatch.delenv(_BATCH_CACHE_ENV_VAR, raising=False)
+    monkeypatch.setenv(_BATCH_CACHE_ENV_VAR, "false")
     bcc._caches.clear()
 
     bound = _run_attempt_capturing_bound_cache(monkeypatch, batch_cache_key="run-1-b0")
@@ -923,6 +1296,758 @@ def test_run_design_attempt_activity_maps_non_502_http_exception_as_fatal(monkey
     with pytest.raises(ApplicationError) as exc_info:
         act.run_design_attempt_activity(_run_design_attempt_params())
     assert exc_info.value.non_retryable is True
+
+
+# ---------------------------------------------------------------------------
+# run_design_attempt_activity — checkpoint resume (ADR-012)
+# ---------------------------------------------------------------------------
+
+
+def test_run_design_attempt_activity_without_run_id_never_checks_for_a_checkpoint(monkeypatch):
+    """No run_id in params (today's baseline) must behave byte-for-byte
+    unchanged: checkpointing is disabled entirely, no lookup happens, and no
+    resume kwargs are passed."""
+    from investment_team.strategy_lab.orchestrator import StrategyLabOrchestrator
+
+    captured: Dict[str, Any] = {}
+
+    class _FakeRecord:
+        def model_dump(self, *, mode: str = "python") -> Dict[str, Any]:
+            return {"lab_record_id": "rec-1"}
+
+    def _fake_attempt(self, **kwargs):
+        captured.update(kwargs)
+        return _FakeRecord()
+
+    def _fail_if_called(run_id, cycle_scope, design_attempt):
+        raise AssertionError("load_design_attempt_checkpoint must not be called without run_id")
+
+    monkeypatch.setattr(StrategyLabOrchestrator, "_run_design_attempt", _fake_attempt)
+    monkeypatch.setattr(act, "load_design_attempt_checkpoint", _fail_if_called)
+
+    act.run_design_attempt_activity(_run_design_attempt_params())
+
+    assert captured["resume_spec"] is None
+    assert captured["resume_rationale"] is None
+    assert captured["resume_design_context"] is None
+
+
+def test_run_design_attempt_activity_write_hook_is_a_no_op_without_run_id(monkeypatch):
+    """Without run_id, checkpoint_hook is still passed to _run_design_attempt
+    (it fires unconditionally at the design/synthesis boundary), but invoking
+    it must no-op rather than attempt a write -- checkpointing is disabled
+    end to end, not just on the read side."""
+    from investment_team.models import StrategySpec
+    from investment_team.strategy_lab._orchestrator_helpers import _DesignPersistContext
+    from investment_team.strategy_lab.orchestrator import StrategyLabOrchestrator
+
+    spec = StrategySpec.parse_persisted(_spec_dict())
+    design_context = _DesignPersistContext(
+        rounds=1, critiques=[], stop_reason="ready", loop_telemetry={}
+    )
+
+    class _FakeRecord:
+        def model_dump(self, *, mode: str = "python") -> Dict[str, Any]:
+            return {"lab_record_id": "rec-1"}
+
+    def _fake_attempt(self, **kwargs):
+        kwargs["checkpoint_hook"](
+            "design_synthesis_boundary",
+            {"spec": spec, "rationale": "because", "design_context": design_context},
+        )
+        return _FakeRecord()
+
+    persisted = []
+    monkeypatch.setattr(StrategyLabOrchestrator, "_run_design_attempt", _fake_attempt)
+    monkeypatch.setattr(
+        act, "persist_design_attempt_checkpoint", lambda checkpoint: persisted.append(checkpoint)
+    )
+
+    out = act.run_design_attempt_activity(_run_design_attempt_params())
+
+    assert out["kind"] == "record"
+    assert persisted == []
+
+
+def test_run_design_attempt_activity_resumes_from_valid_checkpoint(monkeypatch):
+    """A valid checkpoint's spec/rationale/design_context/drift/gate-results/
+    budget strictly dominate the params-seeded pre-attempt state -- the
+    concrete 'checkpoint wins' assertion."""
+    from investment_team.strategy_lab.agents._llm_budget import active_budget
+    from investment_team.strategy_lab.orchestrator import StrategyLabOrchestrator
+
+    checkpoint = _design_attempt_checkpoint(
+        run_id="run-1",
+        cycle_scope="run-1-c0",
+        design_attempt=0,
+        generation=1,
+        budget_calls=99,
+        gate_results=[
+            {
+                "gate_name": "checkpointed_gate",
+                "passed": True,
+                "phase": "design",
+                "severity": "info",
+                "details": "ok",
+            }
+        ],
+        spec_history=[
+            {
+                "phase": "design",
+                "agent": "DesignAgent",
+                "timestamp": "2023-01-01T00:00:00Z",
+                "before_hash": "a" * 64,
+                "after_hash": "b" * 64,
+                "diff": "- old\n+ new",
+                "reason": "checkpointed revision",
+            }
+        ],
+    )
+
+    class _FakeRecord:
+        def model_dump(self, *, mode: str = "python") -> Dict[str, Any]:
+            return {"lab_record_id": "rec-1"}
+
+    captured: Dict[str, Any] = {}
+
+    def _fake_attempt(self, **kwargs):
+        captured.update(kwargs)
+        captured["budget_calls_seen"] = active_budget().calls_made
+        return _FakeRecord()
+
+    monkeypatch.setattr(StrategyLabOrchestrator, "_run_design_attempt", _fake_attempt)
+    monkeypatch.setattr(act, "_infer_cycle_scope_from_activity_context", lambda: "run-1-c0")
+    monkeypatch.setattr(
+        act,
+        "load_design_attempt_checkpoint",
+        lambda run_id, cycle_scope, design_attempt: checkpoint,
+    )
+
+    out = act.run_design_attempt_activity(
+        _run_design_attempt_params(run_id="run-1", generation=1, budget_calls=7, gate_results=[])
+    )
+
+    assert captured["resume_spec"] == checkpoint.spec
+    assert captured["resume_rationale"] == checkpoint.rationale
+    assert captured["resume_design_context"].rounds == checkpoint.design_context["rounds"]
+    # Checkpoint's budget (99), not params' pre-attempt budget_calls (7).
+    assert captured["budget_calls_seen"] == 99
+    assert out["budget_calls"] == 99
+    # Checkpoint's gate results, not params' empty list.
+    assert [g["gate_name"] for g in out["gate_results"]] == ["checkpointed_gate"]
+    # Checkpoint's drift, not params' empty drift.
+    assert len(captured["drift_collector"].spec_history) == 1
+    assert captured["drift_collector"].spec_history[0].reason == "checkpointed revision"
+
+
+def test_run_design_attempt_activity_malformed_checkpoint_gate_results_falls_back_to_scratch(
+    monkeypatch,
+):
+    """A checkpoint that passes DesignAttemptCheckpoint validation (gate_results
+    is typed loosely as List[Dict[str, Any]]) but whose gate_results entries
+    don't reconstruct into real QualityGateResult objects (e.g. missing the
+    required gate_name field) must be treated the same as no checkpoint found
+    -- never raise and never adopt a partial mix of checkpoint/params state."""
+    from investment_team.strategy_lab.agents._llm_budget import active_budget
+    from investment_team.strategy_lab.orchestrator import StrategyLabOrchestrator
+
+    checkpoint = _design_attempt_checkpoint(
+        run_id="run-1",
+        cycle_scope="run-1-c0",
+        design_attempt=0,
+        generation=1,
+        budget_calls=99,
+        gate_results=[
+            {
+                # Missing required "gate_name" -- QualityGateResult.model_validate
+                # raises reconstructing this, well after DesignAttemptCheckpoint's
+                # own (loosely-typed) validation already accepted it.
+                "passed": True,
+                "phase": "design",
+                "severity": "info",
+                "details": "malformed",
+            }
+        ],
+    )
+
+    class _FakeRecord:
+        def model_dump(self, *, mode: str = "python") -> Dict[str, Any]:
+            return {"lab_record_id": "rec-1"}
+
+    captured: Dict[str, Any] = {}
+
+    def _fake_attempt(self, **kwargs):
+        captured.update(kwargs)
+        captured["budget_calls_seen"] = active_budget().calls_made
+        return _FakeRecord()
+
+    monkeypatch.setattr(StrategyLabOrchestrator, "_run_design_attempt", _fake_attempt)
+    monkeypatch.setattr(act, "_infer_cycle_scope_from_activity_context", lambda: "run-1-c0")
+    monkeypatch.setattr(
+        act,
+        "load_design_attempt_checkpoint",
+        lambda run_id, cycle_scope, design_attempt: checkpoint,
+    )
+
+    out = act.run_design_attempt_activity(
+        _run_design_attempt_params(run_id="run-1", generation=1, budget_calls=7, gate_results=[])
+    )
+
+    # Falls through to a normal Phase 1 re-run: no resume kwargs, params'
+    # pre-attempt budget (7), not the unusable checkpoint's (99).
+    assert captured["resume_spec"] is None
+    assert captured["resume_rationale"] is None
+    assert captured["resume_design_context"] is None
+    assert captured["budget_calls_seen"] == 7
+    assert out["budget_calls"] == 7
+    assert out["gate_results"] == []
+    assert len(captured["drift_collector"].spec_history) == 0
+
+
+def test_run_design_attempt_activity_empty_checkpoint_design_context_falls_back_to_scratch(
+    monkeypatch,
+):
+    """A checkpoint whose design_context is {} still passes DesignAttemptCheckpoint
+    validation (the field is Dict[str, Any]) and _design_context_from_wire
+    returns None without raising. Resume must treat that as reconstruction
+    failure and re-run Phase 1 rather than skip it with a missing context."""
+    from investment_team.strategy_lab.agents._llm_budget import active_budget
+    from investment_team.strategy_lab.orchestrator import StrategyLabOrchestrator
+
+    checkpoint = _design_attempt_checkpoint(
+        run_id="run-1",
+        cycle_scope="run-1-c0",
+        design_attempt=0,
+        generation=1,
+        budget_calls=99,
+        design_context={},
+    )
+
+    class _FakeRecord:
+        def model_dump(self, *, mode: str = "python") -> Dict[str, Any]:
+            return {"lab_record_id": "rec-1"}
+
+    captured: Dict[str, Any] = {}
+
+    def _fake_attempt(self, **kwargs):
+        captured.update(kwargs)
+        captured["budget_calls_seen"] = active_budget().calls_made
+        return _FakeRecord()
+
+    monkeypatch.setattr(StrategyLabOrchestrator, "_run_design_attempt", _fake_attempt)
+    monkeypatch.setattr(act, "_infer_cycle_scope_from_activity_context", lambda: "run-1-c0")
+    monkeypatch.setattr(
+        act,
+        "load_design_attempt_checkpoint",
+        lambda run_id, cycle_scope, design_attempt: checkpoint,
+    )
+
+    out = act.run_design_attempt_activity(
+        _run_design_attempt_params(run_id="run-1", generation=1, budget_calls=7, gate_results=[])
+    )
+
+    assert captured["resume_spec"] is None
+    assert captured["resume_rationale"] is None
+    assert captured["resume_design_context"] is None
+    assert captured["budget_calls_seen"] == 7
+    assert out["budget_calls"] == 7
+
+
+def test_run_design_attempt_activity_partial_checkpoint_design_context_falls_back_to_scratch(
+    monkeypatch,
+):
+    """A nonempty but incomplete design_context (e.g. only rounds) still
+    passes DesignAttemptCheckpoint validation. Resume must fail open and
+    re-run Phase 1 rather than skip it with defaulted critiques/telemetry."""
+    from investment_team.strategy_lab.agents._llm_budget import active_budget
+    from investment_team.strategy_lab.orchestrator import StrategyLabOrchestrator
+
+    checkpoint = _design_attempt_checkpoint(
+        run_id="run-1",
+        cycle_scope="run-1-c0",
+        design_attempt=0,
+        generation=1,
+        budget_calls=99,
+        design_context={"rounds": 2},
+    )
+
+    class _FakeRecord:
+        def model_dump(self, *, mode: str = "python") -> Dict[str, Any]:
+            return {"lab_record_id": "rec-1"}
+
+    captured: Dict[str, Any] = {}
+
+    def _fake_attempt(self, **kwargs):
+        captured.update(kwargs)
+        captured["budget_calls_seen"] = active_budget().calls_made
+        return _FakeRecord()
+
+    monkeypatch.setattr(StrategyLabOrchestrator, "_run_design_attempt", _fake_attempt)
+    monkeypatch.setattr(act, "_infer_cycle_scope_from_activity_context", lambda: "run-1-c0")
+    monkeypatch.setattr(
+        act,
+        "load_design_attempt_checkpoint",
+        lambda run_id, cycle_scope, design_attempt: checkpoint,
+    )
+
+    out = act.run_design_attempt_activity(
+        _run_design_attempt_params(run_id="run-1", generation=1, budget_calls=7, gate_results=[])
+    )
+
+    assert captured["resume_spec"] is None
+    assert captured["resume_rationale"] is None
+    assert captured["resume_design_context"] is None
+    assert captured["budget_calls_seen"] == 7
+    assert out["budget_calls"] == 7
+
+
+def test_run_design_attempt_activity_no_valid_checkpoint_runs_from_scratch(monkeypatch):
+    """run_id present but no valid checkpoint found (e.g. first-ever attempt)
+    -- resume kwargs are all None, matching the no-checkpoint case."""
+    from investment_team.strategy_lab.orchestrator import StrategyLabOrchestrator
+
+    class _FakeRecord:
+        def model_dump(self, *, mode: str = "python") -> Dict[str, Any]:
+            return {"lab_record_id": "rec-1"}
+
+    captured: Dict[str, Any] = {}
+
+    def _fake_attempt(self, **kwargs):
+        captured.update(kwargs)
+        return _FakeRecord()
+
+    monkeypatch.setattr(StrategyLabOrchestrator, "_run_design_attempt", _fake_attempt)
+    monkeypatch.setattr(act, "_infer_cycle_scope_from_activity_context", lambda: "run-1-c0")
+    monkeypatch.setattr(
+        act, "load_design_attempt_checkpoint", lambda run_id, cycle_scope, design_attempt: None
+    )
+
+    act.run_design_attempt_activity(_run_design_attempt_params(run_id="run-1", generation=1))
+
+    assert captured["resume_spec"] is None
+    assert captured["resume_rationale"] is None
+    assert captured["resume_design_context"] is None
+
+
+def test_run_design_attempt_activity_write_hook_persists_checkpoint(monkeypatch):
+    """The checkpoint_hook threaded into _run_design_attempt, when invoked
+    (simulating Phase 1 converging), must call persist_design_attempt_checkpoint
+    with a correctly-populated DesignAttemptCheckpoint."""
+    from investment_team.models import StrategySpec
+    from investment_team.strategy_lab._orchestrator_helpers import _DesignPersistContext
+    from investment_team.strategy_lab.orchestrator import StrategyLabOrchestrator
+
+    spec = StrategySpec.parse_persisted(_spec_dict())
+    design_context = _DesignPersistContext(
+        rounds=1, critiques=[], stop_reason="ready", loop_telemetry={}
+    )
+
+    class _FakeRecord:
+        def model_dump(self, *, mode: str = "python") -> Dict[str, Any]:
+            return {"lab_record_id": "rec-1"}
+
+    def _fake_attempt(self, **kwargs):
+        kwargs["checkpoint_hook"](
+            "design_synthesis_boundary",
+            {"spec": spec, "rationale": "because", "design_context": design_context},
+        )
+        return _FakeRecord()
+
+    persisted = []
+    monkeypatch.setattr(StrategyLabOrchestrator, "_run_design_attempt", _fake_attempt)
+    monkeypatch.setattr(act, "_infer_cycle_scope_from_activity_context", lambda: "run-1-c0")
+    monkeypatch.setattr(
+        act, "load_design_attempt_checkpoint", lambda run_id, cycle_scope, design_attempt: None
+    )
+    monkeypatch.setattr(
+        act, "persist_design_attempt_checkpoint", lambda checkpoint: persisted.append(checkpoint)
+    )
+
+    act.run_design_attempt_activity(
+        _run_design_attempt_params(run_id="run-1", generation=3, design_attempt=0)
+    )
+
+    assert len(persisted) == 1
+    written = persisted[0]
+    assert written.run_id == "run-1"
+    assert written.cycle_scope == "run-1-c0"
+    assert written.design_attempt == 0
+    assert written.generation == 3
+    assert written.spec == spec
+    assert written.rationale == "because"
+    assert written.design_context["rounds"] == 1
+
+
+def test_run_design_attempt_activity_write_hook_non_retryable_failure_propagates(monkeypatch):
+    """A stale-fencing (non-retryable) checkpoint-write failure kills the
+    whole activity -- this execution belongs to a superseded incarnation."""
+    from investment_team.models import StrategySpec
+    from investment_team.strategy_lab._orchestrator_helpers import _DesignPersistContext
+    from investment_team.strategy_lab.orchestrator import StrategyLabOrchestrator
+
+    spec = StrategySpec.parse_persisted(_spec_dict())
+    design_context = _DesignPersistContext(
+        rounds=1, critiques=[], stop_reason="ready", loop_telemetry={}
+    )
+
+    class _FakeRecord:
+        def model_dump(self, *, mode: str = "python") -> Dict[str, Any]:
+            return {"lab_record_id": "rec-1"}
+
+    def _fake_attempt(self, **kwargs):
+        kwargs["checkpoint_hook"](
+            "design_synthesis_boundary",
+            {"spec": spec, "rationale": "because", "design_context": design_context},
+        )
+        return _FakeRecord()
+
+    def _raise_stale(checkpoint):
+        raise ApplicationError("stale", type="StaleFencingTokenError", non_retryable=True)
+
+    monkeypatch.setattr(StrategyLabOrchestrator, "_run_design_attempt", _fake_attempt)
+    monkeypatch.setattr(act, "_infer_cycle_scope_from_activity_context", lambda: "run-1-c0")
+    monkeypatch.setattr(
+        act, "load_design_attempt_checkpoint", lambda run_id, cycle_scope, design_attempt: None
+    )
+    monkeypatch.setattr(act, "persist_design_attempt_checkpoint", _raise_stale)
+
+    with pytest.raises(ApplicationError) as exc_info:
+        act.run_design_attempt_activity(_run_design_attempt_params(run_id="run-1"))
+    assert exc_info.value.non_retryable is True
+
+
+def test_run_design_attempt_activity_write_hook_retryable_failure_is_swallowed(monkeypatch):
+    """A transient (retryable) checkpoint-write failure is logged and
+    swallowed -- Phase 1's real LLM work already happened, so the activity
+    still returns its normal outcome instead of burning a Temporal retry
+    purely to recover a checkpoint write."""
+    from investment_team.models import StrategySpec
+    from investment_team.strategy_lab._orchestrator_helpers import _DesignPersistContext
+    from investment_team.strategy_lab.orchestrator import StrategyLabOrchestrator
+
+    spec = StrategySpec.parse_persisted(_spec_dict())
+    design_context = _DesignPersistContext(
+        rounds=1, critiques=[], stop_reason="ready", loop_telemetry={}
+    )
+
+    class _FakeRecord:
+        def model_dump(self, *, mode: str = "python") -> Dict[str, Any]:
+            return {"lab_record_id": "rec-1"}
+
+    def _fake_attempt(self, **kwargs):
+        kwargs["checkpoint_hook"](
+            "design_synthesis_boundary",
+            {"spec": spec, "rationale": "because", "design_context": design_context},
+        )
+        return _FakeRecord()
+
+    def _raise_retryable(checkpoint):
+        raise ApplicationError("blip", type="ConnectionError", non_retryable=False)
+
+    monkeypatch.setattr(StrategyLabOrchestrator, "_run_design_attempt", _fake_attempt)
+    monkeypatch.setattr(act, "_infer_cycle_scope_from_activity_context", lambda: "run-1-c0")
+    monkeypatch.setattr(
+        act, "load_design_attempt_checkpoint", lambda run_id, cycle_scope, design_attempt: None
+    )
+    monkeypatch.setattr(act, "persist_design_attempt_checkpoint", _raise_retryable)
+
+    out = act.run_design_attempt_activity(_run_design_attempt_params(run_id="run-1"))
+    assert out["kind"] == "record"
+    assert out["record"]["lab_record_id"] == "rec-1"
+
+
+def test_run_design_attempt_activity_write_hook_raw_exception_is_swallowed(monkeypatch):
+    """A raw (non-ApplicationError) checkpoint-write failure -- e.g. a
+    job-service connection/HTTP error surfacing after _persist_run_state's
+    own retries are exhausted -- must be treated exactly like a retryable
+    ApplicationError: logged and swallowed, never propagated to discard the
+    whole (already-completed) design attempt. Only the fencing pre-check
+    raises ApplicationError; the write call itself can fail with an
+    ordinary exception."""
+    from investment_team.models import StrategySpec
+    from investment_team.strategy_lab._orchestrator_helpers import _DesignPersistContext
+    from investment_team.strategy_lab.orchestrator import StrategyLabOrchestrator
+
+    spec = StrategySpec.parse_persisted(_spec_dict())
+    design_context = _DesignPersistContext(
+        rounds=1, critiques=[], stop_reason="ready", loop_telemetry={}
+    )
+
+    class _FakeRecord:
+        def model_dump(self, *, mode: str = "python") -> Dict[str, Any]:
+            return {"lab_record_id": "rec-1"}
+
+    def _fake_attempt(self, **kwargs):
+        kwargs["checkpoint_hook"](
+            "design_synthesis_boundary",
+            {"spec": spec, "rationale": "because", "design_context": design_context},
+        )
+        return _FakeRecord()
+
+    def _raise_connection_error(checkpoint):
+        raise ConnectionError("job service unreachable")
+
+    monkeypatch.setattr(StrategyLabOrchestrator, "_run_design_attempt", _fake_attempt)
+    monkeypatch.setattr(act, "_infer_cycle_scope_from_activity_context", lambda: "run-1-c0")
+    monkeypatch.setattr(
+        act, "load_design_attempt_checkpoint", lambda run_id, cycle_scope, design_attempt: None
+    )
+    monkeypatch.setattr(act, "persist_design_attempt_checkpoint", _raise_connection_error)
+
+    out = act.run_design_attempt_activity(_run_design_attempt_params(run_id="run-1"))
+    assert out["kind"] == "record"
+    assert out["record"]["lab_record_id"] == "rec-1"
+
+
+# ---------------------------------------------------------------------------
+# Checkpoint cleanup on terminal outcome (ADR-012 §4)
+# ---------------------------------------------------------------------------
+
+
+def _enable_checkpointing(monkeypatch, cycle_scope: str = "run-1-c0") -> None:
+    """Recover a fixed cycle_scope and make checkpoint resume a no-op, the
+    same enablement pattern the checkpoint-write-hook tests above use, so a
+    run_id-bearing params dict exercises the checkpoint_enabled path without
+    touching the real job-service-backed load."""
+    monkeypatch.setattr(act, "_infer_cycle_scope_from_activity_context", lambda: cycle_scope)
+    monkeypatch.setattr(
+        act, "load_design_attempt_checkpoint", lambda run_id, cycle_scope, design_attempt: None
+    )
+
+
+def test_run_design_attempt_activity_deletes_checkpoint_on_record_outcome(monkeypatch):
+    """A terminal 'record' outcome deletes this attempt's checkpoint before
+    returning."""
+    from investment_team.strategy_lab.orchestrator import StrategyLabOrchestrator
+
+    class _FakeRecord:
+        def model_dump(self, *, mode: str = "python") -> Dict[str, Any]:
+            return {"lab_record_id": "rec-1"}
+
+    monkeypatch.setattr(
+        StrategyLabOrchestrator, "_run_design_attempt", lambda self, **kwargs: _FakeRecord()
+    )
+    _enable_checkpointing(monkeypatch)
+    deleted = []
+    monkeypatch.setattr(act, "delete_design_attempt_checkpoint", lambda *a: deleted.append(a))
+
+    out = act.run_design_attempt_activity(_run_design_attempt_params(run_id="run-1", generation=3))
+
+    assert out["kind"] == "record"
+    assert deleted == [("run-1", "run-1-c0", 3)]
+
+
+def test_run_design_attempt_activity_deletes_checkpoint_on_reentry_outcome(monkeypatch):
+    """A design re-entry (SpecImplementabilityError) deletes this attempt's
+    checkpoint -- the primary motivating case in ADR-012 §4: without this,
+    a cycle with multiple re-entries accumulates one stale checkpoint per
+    abandoned attempt."""
+    from investment_team.models import StrategySpec
+    from investment_team.strategy_lab.exceptions import SpecImplementabilityError
+    from investment_team.strategy_lab.orchestrator import StrategyLabOrchestrator
+
+    last_spec = StrategySpec.parse_persisted(_spec_dict(strategy_id="strat-x"))
+
+    def _fake_attempt(self, **kwargs):
+        raise SpecImplementabilityError(
+            "risk limits loosened",
+            failure_phase="evaluation",
+            last_spec=last_spec,
+            last_code="def x(): pass",
+        )
+
+    monkeypatch.setattr(StrategyLabOrchestrator, "_run_design_attempt", _fake_attempt)
+    _enable_checkpointing(monkeypatch)
+    deleted = []
+    monkeypatch.setattr(act, "delete_design_attempt_checkpoint", lambda *a: deleted.append(a))
+
+    out = act.run_design_attempt_activity(_run_design_attempt_params(run_id="run-1"))
+
+    assert out["kind"] == "reentry"
+    assert deleted == [("run-1", "run-1-c0", 1)]
+
+
+def test_run_design_attempt_activity_deletes_checkpoint_on_skipped_outcome_for_502(monkeypatch):
+    """A 502 ('no market data') HTTPException deletes this attempt's
+    checkpoint via the shared _skipped_outcome() helper."""
+    from fastapi import HTTPException
+
+    from investment_team.strategy_lab.orchestrator import StrategyLabOrchestrator
+
+    def _fake_attempt(self, **kwargs):
+        raise HTTPException(status_code=502, detail="Failed to fetch historical market data.")
+
+    monkeypatch.setattr(StrategyLabOrchestrator, "_run_design_attempt", _fake_attempt)
+    _enable_checkpointing(monkeypatch)
+    deleted = []
+    monkeypatch.setattr(act, "delete_design_attempt_checkpoint", lambda *a: deleted.append(a))
+
+    out = act.run_design_attempt_activity(_run_design_attempt_params(run_id="run-1"))
+
+    assert out["kind"] == "skipped"
+    assert deleted == [("run-1", "run-1-c0", 1)]
+
+
+def test_run_design_attempt_activity_deletes_checkpoint_on_skipped_outcome_for_market_data_gate(
+    monkeypatch,
+):
+    """A failed 'market_data' gate (the primary no-exception skip signal)
+    deletes this attempt's checkpoint via the same _skipped_outcome() path."""
+    from investment_team.strategy_lab.orchestrator import StrategyLabOrchestrator
+
+    class _FakeRecord:
+        def model_dump(self, *, mode: str = "python") -> Dict[str, Any]:
+            return {"lab_record_id": "rec-nodata"}
+
+    class _FakeGate:
+        gate_name = "market_data"
+        passed = False
+
+        def model_dump(self, *, mode: str = "python") -> Dict[str, Any]:
+            return {"gate_name": "market_data", "passed": False}
+
+    def _fake_attempt(self, **kwargs):
+        kwargs["cumulative_gate_results"].append(_FakeGate())
+        return _FakeRecord()
+
+    monkeypatch.setattr(StrategyLabOrchestrator, "_run_design_attempt", _fake_attempt)
+    _enable_checkpointing(monkeypatch)
+    deleted = []
+    monkeypatch.setattr(act, "delete_design_attempt_checkpoint", lambda *a: deleted.append(a))
+
+    out = act.run_design_attempt_activity(_run_design_attempt_params(run_id="run-1"))
+
+    assert out["kind"] == "skipped"
+    assert deleted == [("run-1", "run-1-c0", 1)]
+
+
+def test_run_design_attempt_activity_deletes_checkpoint_on_non_retryable_error(monkeypatch):
+    """A non-retryable mapped error deletes this attempt's checkpoint before
+    re-raising -- the checkpoint is useless once no retry will ever consult
+    it."""
+    from investment_team.strategy_lab.orchestrator import StrategyLabOrchestrator
+
+    def _fake_attempt(self, **kwargs):
+        raise ValueError("boom")
+
+    monkeypatch.setattr(StrategyLabOrchestrator, "_run_design_attempt", _fake_attempt)
+    _enable_checkpointing(monkeypatch)
+    deleted = []
+    monkeypatch.setattr(act, "delete_design_attempt_checkpoint", lambda *a: deleted.append(a))
+
+    with pytest.raises(ApplicationError) as exc_info:
+        act.run_design_attempt_activity(_run_design_attempt_params(run_id="run-1"))
+
+    assert exc_info.value.non_retryable is True
+    assert deleted == [("run-1", "run-1-c0", 1)]
+
+
+def test_run_design_attempt_activity_does_not_delete_checkpoint_on_retryable_error(monkeypatch):
+    """A *retryable* mapped error (StrategyLabLLMError 'exhausted'/
+    'budget_exhausted') must NOT delete the checkpoint -- Temporal will
+    retry this same attempt, and the checkpoint is exactly what the retry
+    needs to resume past Phase 1."""
+    from investment_team.strategy_lab.exceptions import StrategyLabLLMError
+    from investment_team.strategy_lab.orchestrator import StrategyLabOrchestrator
+
+    def _fake_attempt(self, **kwargs):
+        raise StrategyLabLLMError("timed out", outcome="exhausted")
+
+    monkeypatch.setattr(StrategyLabOrchestrator, "_run_design_attempt", _fake_attempt)
+    _enable_checkpointing(monkeypatch)
+    deleted = []
+    monkeypatch.setattr(act, "delete_design_attempt_checkpoint", lambda *a: deleted.append(a))
+
+    with pytest.raises(ApplicationError) as exc_info:
+        act.run_design_attempt_activity(_run_design_attempt_params(run_id="run-1"))
+
+    assert exc_info.value.non_retryable is False
+    assert deleted == []
+
+
+def test_run_design_attempt_activity_does_not_delete_checkpoint_on_cancellation(monkeypatch):
+    """Cancellation is not one of ADR-012 §4's four cleanup triggers -- the
+    checkpoint must survive untouched so a subsequent retry can still
+    resume from it."""
+    from temporalio.exceptions import CancelledError
+
+    from investment_team.strategy_lab.orchestrator import StrategyLabOrchestrator
+
+    def _is_cancelled_after_first_call():
+        calls = {"n": 0}
+
+        def _check():
+            calls["n"] += 1
+            return calls["n"] > 1
+
+        return _check
+
+    monkeypatch.setattr(act, "is_cancelled", _is_cancelled_after_first_call())
+
+    def _fake_attempt(self, **kwargs):
+        kwargs["emit"]("design", {"sub_phase": "round_1"})
+        kwargs["emit"]("design", {"sub_phase": "round_2"})
+        raise AssertionError("should not run past the cancelled checkpoint")
+
+    monkeypatch.setattr(StrategyLabOrchestrator, "_run_design_attempt", _fake_attempt)
+    _enable_checkpointing(monkeypatch)
+    deleted = []
+    monkeypatch.setattr(act, "delete_design_attempt_checkpoint", lambda *a: deleted.append(a))
+
+    with pytest.raises(CancelledError):
+        act.run_design_attempt_activity(_run_design_attempt_params(run_id="run-1"))
+
+    assert deleted == []
+
+
+def test_run_design_attempt_activity_never_deletes_checkpoint_without_run_id(monkeypatch):
+    """checkpoint_enabled is False when run_id is absent (the default for
+    callers predating ADR-012) -- cleanup must be a full no-op, never
+    touching delete_design_attempt_checkpoint at all."""
+    from investment_team.strategy_lab.orchestrator import StrategyLabOrchestrator
+
+    class _FakeRecord:
+        def model_dump(self, *, mode: str = "python") -> Dict[str, Any]:
+            return {"lab_record_id": "rec-1"}
+
+    monkeypatch.setattr(
+        StrategyLabOrchestrator, "_run_design_attempt", lambda self, **kwargs: _FakeRecord()
+    )
+    deleted = []
+    monkeypatch.setattr(act, "delete_design_attempt_checkpoint", lambda *a: deleted.append(a))
+
+    out = act.run_design_attempt_activity(_run_design_attempt_params())
+
+    assert out["kind"] == "record"
+    assert deleted == []
+
+
+def test_run_design_attempt_activity_checkpoint_delete_failure_is_swallowed(monkeypatch):
+    """A delete failure must never turn an already-decided terminal outcome
+    into an activity failure -- an orphaned checkpoint is inert clutter, not
+    a correctness hazard (ADR-012's 'Best-effort cleanup' risk section).
+    This is the test that most directly proves the acceptance criterion
+    'no leaked checkpoint state after a successful run' can't come at the
+    cost of losing a real result."""
+    from investment_team.strategy_lab.orchestrator import StrategyLabOrchestrator
+
+    class _FakeRecord:
+        def model_dump(self, *, mode: str = "python") -> Dict[str, Any]:
+            return {"lab_record_id": "rec-1"}
+
+    def _raise(*a):
+        raise ConnectionError("job service unreachable")
+
+    monkeypatch.setattr(
+        StrategyLabOrchestrator, "_run_design_attempt", lambda self, **kwargs: _FakeRecord()
+    )
+    _enable_checkpointing(monkeypatch)
+    monkeypatch.setattr(act, "delete_design_attempt_checkpoint", _raise)
+
+    out = act.run_design_attempt_activity(_run_design_attempt_params(run_id="run-1"))
+
+    assert out["kind"] == "record"
+    assert out["record"]["lab_record_id"] == "rec-1"
 
 
 # ---------------------------------------------------------------------------

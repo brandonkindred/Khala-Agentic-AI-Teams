@@ -1085,6 +1085,19 @@ file/module a finding claims is missing ("add X" / "X does not exist") already
 exists, and drop that false positive. The reader is read-only, bounded, and
 fail-safe (a read failure only ever keeps a finding).
 
+### CODE_REVIEW_SCOPE_FILTER
+Default-on toggle for the scope-verification pass that runs after the reviewer
+returns findings and before PR comments are posted. A tool-using verifier
+sees the PR's added/modified line map and classifies each genuine finding as
+in-scope (including required omissions), out-of-scope / pre-existing, or
+unsure. Findings that are not confidently in-scope are tagged `pre_existing`
+so they become pending issue proposals instead of PR comments. Posting is
+fail-closed (unsure does not comment). An ungrounded out-of-scope verdict is
+ignored so it cannot hide a real in-scope finding. Coverage/safety findings
+never enter this pass. The unscripted dummy LLM harness is a no-op so tests
+that do not stub the verifier keep their existing posting behavior. Set to
+`false`/`0`/`no` to disable (any other value, or unset, leaves it enabled).
+
 ### CODE_REVIEW_ARCHITECTURE_CONSISTENCY_PASS
 Default-on toggle for the architecture-consistency / cross-codebase-redundancy
 pass. This toggle enables the architecture half of the in-process coordinator's
@@ -1192,9 +1205,39 @@ matches a finding keyed as `app/foo.py`. Set to `false`/`0`/`no` to
 disable consolidation (any other value, or unset, leaves it enabled) — this
 only turns off merging, the underlying findings are unaffected.
 
+In the in-process thread-mode coordinator this consolidation is now performed
+as the `side-effects` special case of the generalized finding-combination step
+(see `CODE_REVIEW_COMBINE_SIMILARITY_THRESHOLD` below), which runs after the
+merged architecture/side-effect pass and before the false-positive filter;
+setting this flag to `false` disables that `side-effects`-specific merging
+(the merge-regardless-of-wording construct rule and the citation link) while
+the generic same-construct-plus-similar and same-anchor de-duplication still
+apply. The durable Temporal path continues to run the standalone consolidation
+activity gated by this same flag.
+
 Any setup failure is fail-safe: it is logged and the original `side-effects`
 findings pass through unchanged, so a broken consolidation step never blocks
 or changes the rest of the review.
+
+### CODE_REVIEW_COMBINE_SIMILARITY_THRESHOLD
+Jaccard word-set similarity floor (default `0.6`, clamped to `[0, 1]`; garbage
+→ default) used by the thread-mode coordinator's finding-combination step to
+decide when two findings describe the same underlying issue. Combination runs
+once over the whole finding stream — the map-phase findings plus the merged
+architecture/side-effect pass's additive findings — after that pass and
+**before** the false-positive filter, so the filter verifies a smaller, deduped
+set (fewer tokens). Two same-category findings are combined when they are
+anchored in the same enclosing Python construct and are either `side-effects`
+(see `CODE_REVIEW_SIDE_EFFECT_CONSOLIDATION` above) or have description Jaccard
+`>= threshold`; or when they are the same-anchor near-duplicate (same file, same
+line or one unanchored, Jaccard `>= threshold`). Raising the threshold merges
+less (more separate findings, more filter calls); lowering it merges more. It is
+included in the submission-cache fingerprint, so changing it invalidates a
+stored verdict. Separate occurrences on different lines are never merged; that
+cross-line theming is left to the review narrative / systemic synthesis. This
+step subsumes the exact-match dedupe and the standalone side-effect
+consolidation on the in-process path; it is fail-safe (any error degrades to the
+uncombined findings). The durable Temporal path does not yet run it.
 
 ### CODE_REVIEW_SPEC_COMPLIANCE_PASS
 Default-**off** toggle (`env_bool`, unlike the default-on tail passes above)

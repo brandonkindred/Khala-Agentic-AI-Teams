@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from strands import Agent  # noqa: F401  (kept so tests can monkeypatch this module's Agent)
 
+from software_engineering_team.shared.prompt_utils import JSON_OUTPUT_INSTRUCTION
+
 from ...models import ToolAgentPhaseInput
 from .._plan_base import PlanGeneratorToolAgent
 
@@ -13,7 +15,8 @@ from .._plan_base import PlanGeneratorToolAgent
 # that degrades the whole call to the generic "planning failed" fallback.
 MAX_SPEC_CHARS = 6_000
 
-FRONTEND_ARCHITECT_PROMPT = """You are an expert Frontend Architect Agent. Your job is to define app architecture and long-term maintainability. You stop the codebase from turning into a spaghetti museum.
+FRONTEND_ARCHITECT_PROMPT = (
+    """You are an expert Frontend Architect Agent. Your job is to define app architecture and long-term maintainability. You stop the codebase from turning into a spaghetti museum.
 
 **Your expertise:**
 - Folder/module structure and conventions
@@ -44,8 +47,9 @@ Return a single JSON object with:
 - "error_handling": string (error boundaries, interceptors, user-facing errors)
 - "api_client_patterns": string (HTTP client, typing, error handling)
 - "summary": string (2-3 sentence summary of architecture decisions)
-
-Respond with valid JSON only. No explanatory text outside JSON.
+"""
+    + JSON_OUTPUT_INSTRUCTION
+    + """
 
 ---
 
@@ -54,6 +58,7 @@ Respond with valid JSON only. No explanatory text outside JSON.
 **Spec (excerpt):**
 {spec_content}
 """
+)
 
 
 class ArchitectureToolAgent(PlanGeneratorToolAgent):

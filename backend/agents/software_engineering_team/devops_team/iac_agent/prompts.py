@@ -21,5 +21,4 @@ IAC_AGENT_PROMPT = build_json_output_prompt(
         "- destructive_changes_detected: boolean\n"
         "- blast_radius_notes: list[string]"
     ),
-    trailer="Return JSON only.\n",
 )
