@@ -47,7 +47,7 @@ def test_pre_number_ranges_aligns_source_columns_across_digit_widths() -> None:
     content = "\n".join(lines) + "\n"
     body = _pre_number_ranges(content, (LineRange(9, 11),))
     rendered = body.splitlines()
-    match = re.compile(r"^([ ]*\d+(?:: |\| ))(.*)$")
+    match = re.compile(r"^([+>]?[ ]*\d+(?:: |\| ))(.*)$")
     gutters, sources = zip(*((m.group(1), m.group(2)) for ln in rendered if (m := match.match(ln))))
     assert list(sources) == ["    foo(", '        "j1",', "    )"]
     assert len({len(g) for g in gutters}) == 1
@@ -60,6 +60,40 @@ def test_pre_number_ranges_inserts_gap_marker() -> None:
     assert body == "1| a\n...\n4| d\n5| e"
 
 
+def test_pre_number_ranges_marks_touched_vs_context() -> None:
+    # When ``touched`` is given, each line in the range is marked: ``+`` for a
+    # touched line, a space for enclosing context. Numbers are unchanged.
+    content = "a\nb\nc\nd\n"
+    body = _pre_number_ranges(content, (LineRange(1, 4),), touched={2, 3})
+    assert body == " 1| a\n+2| b\n+3| c\n 4| d"
+
+
+def test_pre_number_ranges_touched_leaves_gap_marker_unmarked() -> None:
+    # Non-adjacent ranges keep a bare ``...`` gap that is never marked, and each
+    # emitted source line still carries its touched/context marker.
+    content = "a\nb\nc\nd\ne\n"
+    body = _pre_number_ranges(content, (LineRange(1, 1), LineRange(4, 5)), touched={1, 5})
+    assert body == "+1| a\n...\n 4| d\n+5| e"
+
+
+def test_pre_number_ranges_marker_preserves_line_numbers() -> None:
+    # Number-preservation invariant: marking must not change the 1-based line
+    # numbers the posting/mapping layer relies on. The digit run recovered from
+    # each marked line equals the number the same line renders un-marked.
+    content = "a\nb\nc\nd\n"
+    ranges = (LineRange(1, 4),)
+    plain = _pre_number_ranges(content, ranges)
+    marked = _pre_number_ranges(content, ranges, touched={2, 4})
+    gutter_re = re.compile(r"^[+>]?[ ]*(\d+)(?::|\|) ")
+
+    def _numbers(body: str) -> list[int]:
+        return [
+            int(m.group(1)) for ln in body.splitlines() if (m := gutter_re.match(ln)) is not None
+        ]
+
+    assert _numbers(marked) == _numbers(plain) == [1, 2, 3, 4]
+
+
 def test_build_from_patches_single_file_expands_construct() -> None:
     surface = build_change_surface_from_patches(
         {"mod.py": _PY_PATCH},
@@ -67,8 +101,10 @@ def test_build_from_patches_single_file_expands_construct() -> None:
     )
     assert not surface.is_empty
     assert list(surface.blocks.keys()) == ["mod.py"]
-    # AST expansion of line 2 → enclosing ``outer`` (lines 1-2).
-    assert surface.blocks["mod.py"] == "1| def outer():\n2|     return 1"
+    # AST expansion of line 2 → enclosing ``outer`` (lines 1-2). The touched
+    # body line 2 carries a ``+`` marker; the enclosing ``def`` (line 1) carries
+    # a space marker, so the reviewer sees which line actually changed.
+    assert surface.blocks["mod.py"] == " 1| def outer():\n+2|     return 1"
 
 
 def test_build_from_patches_multi_file() -> None:
@@ -135,4 +171,6 @@ def test_build_from_patches_two_hunks_same_function_emits_one_span() -> None:
     body = surface.blocks["f.py"]
     assert body.count("def f():") == 1
     assert "..." not in body
-    assert body == ("1| def f():\n2|     a = 1\n3|     b = 2\n4|     return a + b")
+    # Both touched lines (2 and 4) carry ``+``; the ``def`` and the intervening
+    # context line 3 carry a space marker.
+    assert body == (" 1| def f():\n+2|     a = 1\n 3|     b = 2\n+4|     return a + b")
