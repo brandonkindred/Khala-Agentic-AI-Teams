@@ -8,6 +8,7 @@ import logging
 import re
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
 
+from llm_service import extract_json_from_response
 from software_engineering_team.shared.deduplication import dedupe_strings
 
 if TYPE_CHECKING:
@@ -90,6 +91,27 @@ def attempt_fix_output_continuation(
         task_id=agent_name,
     )
     return result.content
+
+
+def parse_json_object(raw: str) -> dict:
+    """Parse LLM output into a JSON object via the canonical recovery ladder.
+
+    Single source of recovery behavior for every "parse this LLM response as a
+    JSON object" call site in the SE team; delegates entirely to
+    ``extract_json_from_response`` (markdown fences, prose-prefix stripping,
+    trailing-comma repair, truncation salvage).
+
+    Preconditions:
+        ``raw`` is a string.
+    Postconditions:
+        Returns a ``dict`` on success. Raises ``LLMJsonParseError`` when no
+        JSON object can be recovered, or ``TypeError`` when the recovered
+        payload is not a JSON object.
+    """
+    data = extract_json_from_response(raw)
+    if not isinstance(data, dict):
+        raise TypeError("model returned non-object JSON")
+    return data
 
 
 def parse_json_with_recovery(

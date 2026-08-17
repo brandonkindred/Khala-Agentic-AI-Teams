@@ -39,15 +39,15 @@ from .models import (
     ChannelGuidelineOutput,
     ColorPaletteSystemOutput,
     CoreValuesOutput,
-    CreativeRefinementDecisionOutput,
-    DesignSystemDefinitionOutput,
+    CreativeRefinementDecision,
+    DesignSystemDefinition,
     DifferentiationPillarsOutput,
     EvolutionFrameworkOutput,
     IconographyOutput,
     LogoSuiteOutput,
     MessagingFrameworkOutput,
     MoodBoardCandidatesOutput,
-    MoodBoardConceptOutput,
+    MoodBoardConcept,
     OwnershipOutput,
     PersonaProfilesOutput,
     PhotographyVideoOutput,
@@ -529,7 +529,7 @@ def _moodboard_conceptualist_prompt(variant: str) -> AgentPromptSpec:
     Postconditions:
         Returns an ``AgentPromptSpec`` whose opening interpolates
         ``variant.lower()`` and whose fields name the five
-        ``MoodBoardConceptOutput`` attributes.
+        ``MoodBoardConcept`` attributes.
     """
     assert isinstance(variant, str) and variant.strip(), "variant must be a non-empty string"
     return AgentPromptSpec(
@@ -567,7 +567,7 @@ def make_moodboard_conceptualist(variant: str) -> Agent:
         name=f"MoodBoardConceptualist_{variant}",
         description=f"Generates a {variant.lower()} visual direction moodboard concept.",
         system_prompt=render_agent_prompt(_moodboard_conceptualist_prompt(variant)),
-        structured_output=MoodBoardConceptOutput,
+        structured_output=MoodBoardConcept,
         agent_key=_PHASE3_AGENT_KEY,
     )
 
@@ -609,7 +609,7 @@ def make_converge_decider() -> Agent:
         name="converge_decider",
         description="Scores moodboard candidates and selects a winner.",
         system_prompt=render_agent_prompt(_CONVERGE_DECIDER_PROMPT),
-        structured_output=CreativeRefinementDecisionOutput,
+        structured_output=CreativeRefinementDecision,
         agent_key=_PHASE3_AGENT_KEY,
     )
 
@@ -819,7 +819,7 @@ def make_design_system_codifier() -> Agent:
         name="design_system_codifier",
         description="Codifies the design system: principles, tokens, component standards.",
         system_prompt=render_agent_prompt(_DESIGN_SYSTEM_CODIFIER_PROMPT),
-        structured_output=DesignSystemDefinitionOutput,
+        structured_output=DesignSystemDefinition,
         agent_key=_PHASE3_AGENT_KEY,
     )
 
