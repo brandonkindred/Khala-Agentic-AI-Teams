@@ -283,7 +283,7 @@ def test_render_removed_hunks_separates_multiple_hunks() -> None:
 
 def test_render_removed_hunks_empty_patch() -> None:
     assert render_removed_hunks("") == ""
-    assert render_removed_hunks(None) == ""  # type: ignore[arg-type]
+    assert render_removed_hunks(None) == ""
 
 
 def test_render_removed_hunks_no_gutter_unlike_render_annotated_hunks() -> None:

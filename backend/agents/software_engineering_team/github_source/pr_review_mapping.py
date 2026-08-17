@@ -331,7 +331,7 @@ def render_annotated_hunks(patch: str) -> str:
     )
 
 
-def render_removed_hunks(patch: str) -> str:
+def render_removed_hunks(patch: Optional[str]) -> str:
     """Render a file's diff hunks as old-file body text (the removed side).
 
     Preconditions:

@@ -818,12 +818,17 @@ class CodeReviewInput(BaseModel):
           every changed path; a partial overlay does not re-enable whole-file
           tail passes. Ignored when ``pre_numbered`` is False.
         - ``replaced_content`` is the before-image analogue of ``full_content``:
-          the pre-change bodies of the changed paths. Default ``None`` and
-          ignored by the review logic when absent (behaves exactly as today); no
-          pass consumes it yet. It is still folded into the submission-level cache
-          key via ``model_dump`` (see ``mapping._submission_fingerprint``), so a
-          verdict computed with a before-image is never served from a cache entry
-          computed without one.
+          pre-change text for the changed paths, but not guaranteed to be a
+          complete file body -- a caller deriving it purely from a unified
+          diff (e.g. ``api.pr_review._build_replaced_content``, which reuses
+          the diff's removed-hunk side with no extra fetch) supplies only the
+          hunk-scoped removed/context excerpt, omitting unchanged lines
+          outside a hunk. Default ``None`` and ignored by the review logic
+          when absent (behaves exactly as today); no pass consumes it yet. It
+          is still folded into the submission-level cache key via
+          ``model_dump`` (see ``mapping._submission_fingerprint``), so a
+          verdict computed with a before-image is never served from a cache
+          entry computed without one.
         - ``skip_tail_passes`` is honored by the in-process coordinator; the
           Temporal workflow path does not yet thread it through.
     """
@@ -843,12 +848,18 @@ class CodeReviewInput(BaseModel):
     )
     replaced_content: Optional[Dict[str, str]] = Field(
         default=None,
-        description="Optional before-image (pre-change) full bodies for changed paths: path -> the "
-        "file content this submission replaced. Analogous to full_content, which carries the "
-        "after-image. Default None; ignored by the review logic when absent (behaves exactly as "
-        "today). Carried through the submission-level cache key so a verdict computed with a "
-        "before-image is never served from a cache entry computed without one. Reserved for "
-        "before-image blast-radius / contract-change analysis; no pass consumes it yet.",
+        description="Optional before-image (pre-change) text for changed paths: path -> the file "
+        "content this submission replaced. Analogous to full_content, which carries the "
+        "after-image, but NOT guaranteed to be a complete file body -- a diff-derived caller "
+        "(e.g. the PR-review path, which reuses the diff's removed-hunk side with no extra "
+        "fetch) supplies only the hunk-scoped removed/context excerpt, omitting unchanged "
+        "lines outside a hunk and joining non-contiguous hunks with an ellipsis marker. A "
+        "future consumer must not assume completeness without checking how its caller "
+        "populated this field. Default None; ignored by the review logic when absent (behaves "
+        "exactly as today). Carried through the submission-level cache key so a verdict "
+        "computed with a before-image is never served from a cache entry computed without "
+        "one. Reserved for before-image blast-radius / contract-change analysis; no pass "
+        "consumes it yet.",
     )
     spec_content: str = Field(
         default="",
