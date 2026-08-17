@@ -29,10 +29,11 @@ persona field with `400` — edit the linked `AgentManifest` instead.
 `runtime/agent_builder.py`'s sandbox invoke path (`invoke_generated_agent`) binds this
 manifest at invoke time when the request **omits** a persona/state field: it resolves the
 manifest via the shim's trusted route id and fills `role` / `skills` / `capabilities` /
-`expertise` / the selected state's `system_prompt` from it, while a non-empty request field
-still wins for that invoke. The explicit-override refinement (distinguishing an
-explicitly-cleared empty list from an omitted key, and a request `system_prompt` full
-replacement) is a tracked sibling follow-up. See
+`expertise` / the selected state's `system_prompt` from it. Whether a field is "omitted" is
+a raw-body key-presence test, not a truthiness test — an explicitly-present request field,
+including an explicitly-cleared empty list/blank string, wins over the manifest default for
+that invoke only; a request-supplied `system_prompt` fully replaces the base prompt instead
+of composing with the persona fields. See
 [`system_design/adr/ADR-015-invoke-generated-agent-persona-state-precedence.md`](../../../../system_design/adr/ADR-015-invoke-generated-agent-persona-state-precedence.md)
 for the locked precedence contract.
 
