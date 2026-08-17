@@ -613,6 +613,26 @@ class CodeReviewWorkflow:
             # so the additive findings are deduped AND false-positive-checked
             # (see this gate's comment above for the bug this fixes and why
             # the gather above can't be skipped instead).
+            #
+            # Precondition, enforced rather than left comment-only:
+            # architecture_result/side_effect_result are only ever populated
+            # by the _MERGED_ARCHITECTURE_SIDE_EFFECT_PASS_PATCH True branch
+            # above -- the pre-merged-pass legacy branches (both the 3-slot
+            # gather and the fully-sequential pre-_CONCURRENT_TAIL_PASSES_PATCH
+            # path) assign differently-named locals and never touch these two.
+            # This gate is brand-new (no history has ever recorded its
+            # marker), so it only evaluates True for a live execution, and
+            # every live execution also takes the merged-pass branch -- but
+            # that coupling is otherwise implicit, and a future edit that
+            # decouples these two gates could silently reintroduce this PR's
+            # bug (architecture/side-effect findings dropped, not just
+            # unfiltered). workflow.patched() results are memoized per patch
+            # id, so re-checking the same id here is a cache read, not a new
+            # replay-order-sensitive event.
+            assert workflow.patched(_MERGED_ARCHITECTURE_SIDE_EFFECT_PASS_PATCH), (
+                "_REORDERED_TAIL_PASSES_PATCH requires the merged-pass branch "
+                "to have populated architecture_result/side_effect_result"
+            )
             combined = await workflow.execute_activity(
                 A.combine_findings_activity,
                 args=[review_input, [*issues, *architecture_result, *side_effect_result]],
