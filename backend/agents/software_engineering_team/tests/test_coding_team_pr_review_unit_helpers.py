@@ -254,8 +254,10 @@ class TestRunningSiblingOnCheckoutUnit:
 
 
 class _FakeFile:
-    def __init__(self, filename: str) -> None:
+    def __init__(self, filename: str, patch: str = "", status: str = "modified") -> None:
         self.filename = filename
+        self.patch = patch
+        self.status = status
 
 
 class TestInferReviewLanguageUnit:
@@ -664,6 +666,112 @@ class TestRunReviewerUnit:
         assert provider.calls[1]["files"] == {"b.py": "1: y = 2"}
         assert isinstance(result, pr_review._MergedReviewerOutput)
         assert result.issues == ["s", "h"]
+
+    def test_replaced_content_derived_from_patch_forwarded_to_every_attempt(
+        self, monkeypatch
+    ) -> None:
+        self._patch_collaborators(monkeypatch)
+        whole_output = _FakeOutput(["whole-issue"], "", "")
+        hunk_output = _FakeOutput(["hunk-issue"], "", "")
+        provider = _RecordingProvider([whole_output, hunk_output])
+        patch = "@@ -1,2 +1,1 @@\n keep\n-deleted line"
+        kwargs = _run_reviewer_kwargs(
+            files=[_FakeFile("a.py", patch=patch, status="modified")],
+            head_files={"a.py": "content"},
+            hunk_files={"b.py": "1: y = 2"},
+        )
+
+        pr_review._run_reviewer(provider, **kwargs)
+
+        assert len(provider.calls) == 2
+        expected = {"a.py": "keep\ndeleted line"}
+        assert provider.calls[0]["replaced_content"] == expected
+        assert provider.calls[1]["replaced_content"] == expected
+
+    def test_added_only_patch_omits_replaced_content(self, monkeypatch) -> None:
+        self._patch_collaborators(monkeypatch)
+        output = _FakeOutput(["issue"], "", "")
+        provider = _RecordingProvider([output])
+        # Pure insertion (new file): the hunk has no old-file lines at all, so
+        # the removed-side render is "" -- distinct from a hunk that carries
+        # context lines alongside an addition, which still has a removed side.
+        patch = "@@ -0,0 +1,2 @@\n+added1\n+added2"
+        kwargs = _run_reviewer_kwargs(
+            files=[_FakeFile("a.py", patch=patch, status="modified")],
+            head_files={"a.py": "content"},
+            hunk_files=None,
+        )
+
+        pr_review._run_reviewer(provider, **kwargs)
+
+        # A patch that only adds lines has no removed-side body: replaced_content
+        # is omitted from the call entirely rather than forwarded as {}.
+        assert "replaced_content" not in provider.calls[0]
+
+    def test_no_patch_default_files_omit_replaced_content(self, monkeypatch) -> None:
+        self._patch_collaborators(monkeypatch)
+        output = _FakeOutput(["issue"], "", "")
+        provider = _RecordingProvider([output])
+        kwargs = _run_reviewer_kwargs(head_files={"a.py": "content"}, hunk_files=None)
+
+        pr_review._run_reviewer(provider, **kwargs)
+
+        assert "replaced_content" not in provider.calls[0]
+
+    def test_replaced_content_forwarded_alongside_change_surface_and_hunk(
+        self, monkeypatch
+    ) -> None:
+        """The change-surface attempt replaces the whole-file attempt (see
+        test_surface_plus_hunk_files_two_prenumbred_calls), a distinct dispatch
+        branch from the whole-file/hunk pairing covered above -- replaced_content
+        must still reach both the surface call and the hunk call."""
+        self._patch_collaborators(monkeypatch)
+        surface_out = _FakeOutput(["s"], "s", "")
+        hunk_out = _FakeOutput(["h"], "", "h")
+        provider = _RecordingProvider([surface_out, hunk_out])
+        surface = ChangeSurface(blocks={"a.py": "1: a"})
+        patch_a = "@@ -1,2 +1,1 @@\n keep\n-deleted line"
+        patch_b = "@@ -1,1 +1,2 @@\n ctx\n+added"
+        kwargs = _run_reviewer_kwargs(
+            files=[
+                _FakeFile("a.py", patch=patch_a, status="modified"),
+                _FakeFile("b.py", patch=patch_b, status="modified"),
+            ],
+            head_files={"a.py": "a\n"},
+            hunk_files={"b.py": "1: y = 2"},
+            change_surface=surface,
+        )
+
+        result = pr_review._run_reviewer(provider, **kwargs)
+
+        assert len(provider.calls) == 2
+        assert provider.calls[0]["pre_numbered"] is True
+        assert provider.calls[0]["files"] == dict(surface.blocks)
+        assert provider.calls[1]["pre_numbered"] is True
+        assert provider.calls[1]["files"] == {"b.py": "1: y = 2"}
+        expected = {"a.py": "keep\ndeleted line", "b.py": "ctx"}
+        assert provider.calls[0]["replaced_content"] == expected
+        assert provider.calls[1]["replaced_content"] == expected
+        assert isinstance(result, pr_review._MergedReviewerOutput)
+        assert result.issues == ["s", "h"]
+
+    def test_removed_status_file_omits_replaced_content(self, monkeypatch) -> None:
+        """_build_replaced_content mirrors _build_review_code's eligibility
+        filter: a file whose status is "removed" is excluded even when its
+        patch has a non-empty removed-side body."""
+        self._patch_collaborators(monkeypatch)
+        output = _FakeOutput(["issue"], "", "")
+        provider = _RecordingProvider([output])
+        patch = "@@ -1,2 +0,0 @@\n-line1\n-line2"
+        kwargs = _run_reviewer_kwargs(
+            files=[_FakeFile("a.py", patch=patch, status="removed")],
+            head_files={"a.py": "content"},
+            hunk_files=None,
+        )
+
+        pr_review._run_reviewer(provider, **kwargs)
+
+        assert "replaced_content" not in provider.calls[0]
 
 
 # ---------------------------------------------------------------------------

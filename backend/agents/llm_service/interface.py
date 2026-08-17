@@ -513,6 +513,25 @@ class LLMClient(ABC):
         """
         return False
 
+    def supports_prompt_caching(self) -> bool:
+        """Whether this client's wire protocol supports provider-side prompt
+        caching — i.e. a ``CacheBreakpoint``-marked prefix (see
+        ``llm_service.cache_breakpoint``) can be emitted as a real
+        cache-control breakpoint on the outgoing request, as opposed to
+        being silently flattened to plain text.
+
+        This is a capability FLAG, not telemetry — it says nothing about
+        whether a given call actually hit the cache, only whether the wire
+        protocol has a cache-control mechanism at all.
+
+        Preconditions: none.
+        Postconditions: synchronous, makes no network call, never raises.
+            Returns ``False`` by default (every client that has not opted
+            in). Override in a client whose wire protocol supports cache
+            breakpoints.
+        """
+        return False
+
     def complete(
         self,
         prompt: str,
