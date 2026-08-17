@@ -24,12 +24,12 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-from typing import Any, Dict, Optional
+from typing import Dict, Optional
 
 from strands import Agent
 
 from llm_service import get_strands_model
-from llm_service.strands_model import resolve_strands_model
+from llm_service.strands_model import model_fingerprint, resolve_strands_model
 from shared.cache import get_shared_cache
 from shared.env_config import env_int
 from software_engineering_team.shared.persona_agent_base import run_structured_persona
@@ -88,39 +88,7 @@ def clear_review_cache() -> None:
     get_shared_cache(_review_cache_namespace()).clear()
 
 
-def _model_fingerprint(model: Any) -> str:
-    """Best-effort stable identifier for the resolved review model.
-
-    Mirrors ``code_review_agent.transcript.model_label`` /
-    ``code_review_agent.mapping._review_model_fingerprint``'s
-    attribute-probing tail (duplicated rather than imported — coupling
-    qa_agent to code_review_agent is out of scope, and this copy's output IS
-    hashed into a cache key, unlike ``model_label``'s purely cosmetic use).
-    Unlike ``_review_model_fingerprint``, this takes the already-resolved
-    Strands model (``self._model``) directly — no ``LLMClient``-to-model
-    resolution step is needed here.
-
-    Postconditions:
-        - Returns the first non-empty ``model_id``/``model_name``/``model``
-          string attribute found on ``model`` (or, for a ``dict``-shaped
-          ``.config``, the same three keys within it), else the type name.
-          Never raises. The value is identity-only — hashed into the cache
-          key, never published.
-    """
-    for attr in ("model_id", "model_name", "model"):
-        value = getattr(model, attr, None)
-        if isinstance(value, str) and value:
-            return value
-    config = getattr(model, "config", None)
-    if isinstance(config, dict):
-        for key in ("model_id", "model_name", "model"):
-            candidate = config.get(key)
-            if isinstance(candidate, str) and candidate:
-                return candidate
-    return type(model).__name__
-
-
-def _review_cache_key(input_data: QAInput, model_fingerprint: str) -> str:
+def _review_cache_key(input_data: QAInput, model_fp: str) -> str:
     """Hash of the whole QA input plus the resolved review model.
 
     The qa_agent analogue of ``code_review_agent.mapping._submission_
@@ -134,7 +102,11 @@ def _review_cache_key(input_data: QAInput, model_fingerprint: str) -> str:
 
     Preconditions:
         - ``input_data`` is a valid ``QAInput``.
-        - ``model_fingerprint`` is ``_model_fingerprint(self._model)``.
+        - ``model_fp`` is the value returned by
+          ``llm_service.strands_model.model_fingerprint(resolved_model)``,
+          where ``resolved_model`` is the Strands model this
+          ``QAExpertAgent`` instance uses for the review (its ``self._model``
+          — this is a free function, so there is no ``self`` here).
 
     Postconditions:
         - Returns a hex digest that changes whenever any input field or the
@@ -142,7 +114,7 @@ def _review_cache_key(input_data: QAInput, model_fingerprint: str) -> str:
           in a process, so a byte-identical resubmission is recognized.
     """
     payload = input_data.model_dump(mode="json")
-    payload["__model__"] = model_fingerprint
+    payload["__model__"] = model_fp
     body = json.dumps(payload, sort_keys=True)
     return hashlib.sha256(body.encode("utf-8")).hexdigest()
 
@@ -212,7 +184,7 @@ class QAExpertAgent:
         capacity = _review_cache_size()
         cache_key: Optional[str] = None
         if capacity > 0:
-            cache_key = _review_cache_key(input_data, _model_fingerprint(self._model))
+            cache_key = _review_cache_key(input_data, model_fingerprint(self._model))
             cache = get_shared_cache(_review_cache_namespace())
             # shared.cache is fail-open, but keep an explicit local guard so a
             # misbehaving backend / unexpected raise never aborts the review

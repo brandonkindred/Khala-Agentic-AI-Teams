@@ -79,7 +79,7 @@ def _clear_coordinator_caches() -> None:
 
 
 # Same dual-identity story as ``_COORDINATOR_IDENTITIES`` above, for
-# qa_agent's shared review-result cache (issue #6113).
+# qa_agent's shared review-result cache.
 _QA_AGENT_IDENTITIES = (
     "qa_agent.agent",
     "software_engineering_team.qa_agent.agent",

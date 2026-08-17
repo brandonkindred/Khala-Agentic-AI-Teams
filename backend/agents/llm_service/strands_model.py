@@ -96,6 +96,45 @@ def resolve_strands_model(
     return _get_strands_model(agent_key, response_format=response_format)
 
 
+def model_fingerprint(model: Any) -> str:
+    """Best-effort stable identifier for an already-resolved Strands model.
+
+    The canonical attribute-probing tail for turning a resolved Strands
+    ``Model`` into a short, stable identity string. ``qa_agent.agent.run``
+    uses this directly for its review-result cache key.
+    ``code_review_agent.transcript.model_label`` (cosmetic display) and
+    ``code_review_agent.mapping._review_model_fingerprint`` (cache-key
+    fingerprint, which additionally resolves a raw ``LLMClient`` via
+    ``resolve_code_review_model`` before probing) still carry their own copy
+    of this same tail; they are candidates to adopt this helper too, but that
+    migration is out of scope here. A caller holding an unresolved
+    ``llm``/``LLMClient`` handle should resolve it first (e.g. via
+    :func:`resolve_strands_model`) and pass the resolved model here.
+
+    Preconditions:
+        - ``model`` is a resolved Strands ``Model`` (or any object exposing
+          the same duck-typed attributes).
+    Postconditions:
+        - Returns the first non-empty ``model_id``/``model_name``/``model``
+          string attribute found on ``model`` (or, for a ``dict``-shaped
+          ``.config``, the same three keys within it), else
+          ``type(model).__name__``. Never raises. The value is identity-only
+          — safe to hash into a cache key or log for display, never a
+          secret.
+    """
+    for attr in ("model_id", "model_name", "model"):
+        value = getattr(model, attr, None)
+        if isinstance(value, str) and value:
+            return value
+    config = getattr(model, "config", None)
+    if isinstance(config, dict):
+        for key in ("model_id", "model_name", "model"):
+            candidate = config.get(key)
+            if isinstance(candidate, str) and candidate:
+                return candidate
+    return type(model).__name__
+
+
 def resolve_text_mode_strands_model(llm: Any) -> Any:
     """Convenience wrapper: ``resolve_strands_model(llm, response_format="text")``.
 

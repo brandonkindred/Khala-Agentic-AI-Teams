@@ -1,4 +1,4 @@
-"""Tests for QAExpertAgent's shared review-result cache (issue #6113).
+"""Tests for QAExpertAgent's shared review-result cache.
 
 Mirrors ``test_code_review_cache.py``'s conventions for the analogous
 code-review submission-level cache: a ``_CountingClient`` counts LLM
@@ -22,6 +22,7 @@ from qa_agent import QAExpertAgent, QAInput
 from qa_agent.models import QAOutput
 
 from llm_service.clients.dummy import DummyLLMClient
+from llm_service.strands_model import model_fingerprint
 from shared.cache import MemoryBackend, get_shared_cache, reset_shared_cache_state
 from shared.cache import factory as factory_mod
 
@@ -174,7 +175,7 @@ def test_fallback_result_is_never_cached(monkeypatch: pytest.MonkeyPatch) -> Non
     result = agent.run(input_data)
     assert result.approved is False
 
-    key = agent_mod._review_cache_key(input_data, agent_mod._model_fingerprint(agent._model))
+    key = agent_mod._review_cache_key(input_data, model_fingerprint(agent._model))
     cache = get_shared_cache(agent_mod._review_cache_namespace())
     assert cache.get(key) is None
 
