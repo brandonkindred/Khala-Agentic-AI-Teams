@@ -264,12 +264,11 @@ def _merge_phase2_fragments(node_result: Any, model_class: type[BaseModel]) -> O
 def _merge_phase4_fragments(node_result: Any, model_class: type[BaseModel]) -> Optional[BaseModel]:
     """Merge every Phase 4 specialist's ``structured_output`` into one phase output.
 
-    Phase 4 wraps nine parallel fan-out agents (plus the ``channel_compositor``
-    fan-in, not part of this merge) as a single top-level ``"phase4_channel"``
-    node (see ``graphs/phase4_channel.py``); the same nested-``MultiAgentResult``
-    recovery Phase 1 uses applies here. All nine specialists must be present
-    — a partial run must not silently validate as a complete
-    ``ChannelActivationOutput`` via field defaults.
+    Phase 4 wraps nine parallel fan-out agents as a single top-level
+    ``"phase4_channel"`` node (see ``graphs/phase4_channel.py``); the same
+    nested-``MultiAgentResult`` recovery Phase 1 uses applies here. All nine
+    specialists must be present — a partial run must not silently validate as
+    a complete ``ChannelActivationOutput`` via field defaults.
 
     Preconditions:
         ``node_result`` is the ``NodeResult`` for a single top-level graph node
@@ -310,15 +309,15 @@ class _PhaseSpec(NamedTuple):
             nodes).
         check_structured_output: Whether the single-agent fallback may accept
             the last agent's own ``structured_output`` as the phase output.
-            ``False`` only for Phase 2, where the last agent
-            (VoicePrinciplesDrafter) only ever emits its own fragment, and
-            subset-validating that against ``NarrativeMessagingOutput`` would
-            silently report a non-degraded output with every other field
-            defaulted empty. Phase 4 keeps this ``True``: unlike Phase 2,
-            ``channel_compositor`` still terminates the Phase 4 subgraph (not
-            removed until Step 2), and its own ``structured_output`` is
-            already a complete ``ChannelActivationOutput`` — a legitimate
-            fallback when ``merge_fn`` returns None.
+            ``False`` for Phase 2 and Phase 4, whose last-seen agent (Phase
+            2's VoicePrinciplesDrafter; Phase 4's nine parallel specialists
+            have no single "last" node) only ever emits its own fragment —
+            subset-validating that against the phase's full output model
+            would silently report a non-degraded output with every other
+            field defaulted empty. Both phases have no compositor, so
+            ``merge_fn`` is the only legitimate extraction path; when it
+            returns ``None`` the phase must degrade instead of accepting a
+            stray fragment.
     """
 
     builder_fn: Callable[[], Any]
@@ -354,6 +353,7 @@ _PHASE_SPEC: dict[BrandPhase, _PhaseSpec] = {
         "phase4_channel",
         ChannelActivationOutput,
         merge_fn=_merge_phase4_fragments,
+        check_structured_output=False,
     ),
     BrandPhase.GOVERNANCE: _PhaseSpec(build_phase5_graph, "phase5_governance", GovernanceOutput),
 }
@@ -873,11 +873,11 @@ class BrandingTeamOrchestrator:
         tool call to produce the payload and populates
         ``AgentResult.structured_output`` instead of the message's text blocks
         — so that's checked next, unless the spec sets
-        ``check_structured_output=False`` (Phase 2 only: a lone specialist's
-        own fragment must never be accepted as a complete phase output, since
-        subset validation against ``NarrativeMessagingOutput`` would succeed
-        via defaults). Agents without usable structured output fall back to
-        parsing the last text block.
+        ``check_structured_output=False`` (Phase 2 and Phase 4: a lone
+        specialist's own fragment must never be accepted as a complete phase
+        output, since subset validation against the phase's full output model
+        would succeed via defaults). Agents without usable structured output
+        fall back to parsing the last text block.
 
         Preconditions:
             - ``result`` is the Strands graph invocation result (or a test
