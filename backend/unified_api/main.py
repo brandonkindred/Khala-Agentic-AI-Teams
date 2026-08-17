@@ -639,8 +639,9 @@ def _stop_in_process_temporal_workers() -> None:
     Preconditions:
         - Safe to call when no workers are registered (no-op).
     Postconditions:
-        - :func:`shared.temporal.worker.stop_all_team_workers` has been invoked.
-          Failures are logged and swallowed. Never raises.
+        - An attempt to invoke :func:`shared.temporal.worker.stop_all_team_workers`
+          has been made. Import or runtime failures are logged and swallowed.
+          Never raises.
     """
     try:
         from shared.temporal.worker import stop_all_team_workers
