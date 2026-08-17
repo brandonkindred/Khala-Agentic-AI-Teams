@@ -2,7 +2,7 @@
 
 Exercises the four-team smoke matrix from the Phase 6 epic against a live stack:
 ``blogging.planner``, ``se.backend.api_openapi``, ``planning.intake``, and
-``branding.creative_director``. Verifies that the unified ``khala-agent-sandbox``
+``branding.design_system_codifier``. Verifies that the unified ``khala-agent-sandbox``
 image provisions one container per agent, persists a row to
 ``agent_console_runs``, exposes a loopback-only sandbox URL, and gets reaped
 after going idle.
@@ -95,7 +95,7 @@ SMOKE_MATRIX: list[tuple[str, str, dict[str, Any]]] = [
         },
     ),
     (
-        "branding.creative_director",
+        "branding.design_system_codifier",
         "branding",
         {
             "company_name": "Phase 6 Smoke Co",
@@ -211,7 +211,7 @@ async def test_cross_team_concurrency_uses_distinct_sandboxes() -> None:
     """Two agents from different teams launched in parallel get two containers
     with two distinct loopback ports."""
     a = ("blogging.planner", SMOKE_MATRIX[0][2])
-    b = ("branding.creative_director", SMOKE_MATRIX[3][2])
+    b = ("branding.design_system_codifier", SMOKE_MATRIX[3][2])
     async with httpx.AsyncClient(timeout=httpx.Timeout(INVOKE_TIMEOUT_S)) as client:
         ra, rb = await asyncio.gather(
             _invoke(client, a[0], a[1]),

@@ -59,13 +59,13 @@ flowchart TB
 
     P2 --> P3
 
-    subgraph P3 ["Phase 3 · Visual & Expressive Identity (Graph)"]
+    subgraph P3 ["Phase 3 · Visual & Expressive Identity (Graph, no compositor)"]
         direction TB
         P3diverge["MoodBoardConceptualist_Editorial/Minimalist/Bold"] --> P3conv[converge_decider]
         P3conv --> P3fan["logo_specifier, color_system_builder, typography_builder,
         iconography_director, photography_video_director,
-        voice_tone_builder, design_system_codifier"]
-        P3fan --> P3comp[visual_compositor]
+        voice_tone_builder, design_system_codifier
+        (seven parallel terminal nodes, Python-merged)"]
     end
 
     P3 --> P4
@@ -123,16 +123,11 @@ flowchart LR
     converge --> photo[photography_video_director]
     converge --> voice[voice_tone_builder]
     converge --> design[design_system_codifier]
-    logo --> compositor[visual_compositor]
-    color --> compositor
-    typo --> compositor
-    icon --> compositor
-    photo --> compositor
-    voice --> compositor
-    design --> compositor
 ```
 
 Three style-variant `MoodBoardConceptualist_{Editorial,Minimalist,Bold}` agents run in parallel and fan directly into `converge_decider` — the same direct fan-in shape as Phase 1's five specialists into `positioning_synthesizer`, with no intermediate collector node; Strands' Graph engine assembles the three completed `mood_board_candidates` fragments into `converge_decider`'s input once the whole diverge batch finishes. Agents use `structured_output=`, which stops Strands' agent loop after the structured payload is produced, so this is a Graph (not a Swarm) — the same lesson as Phase 2.
+
+The seven post-converge specialists are terminal nodes — there is no compositor. Their typed fragments, plus `converge_decider`'s own decision and the three moodboard candidates, are merged into `VisualIdentityOutput` in Python by the orchestrator's Phase-3 `merge_fn` (`_PHASE3_NODE_MERGE`), the same pattern Phase 4 and Phase 5 already use.
 
 Per-phase participating nodes. Node identifiers are the explicit `node_id` values passed to `builder.add_node(...)`:
 
@@ -140,7 +135,7 @@ Per-phase participating nodes. Node identifiers are the explicit `node_id` value
 |---|---|---|
 | 1 — Strategic Core | `Graph`, fan-out/fan-in | `discovery_auditor`, `purpose_vision_writer`, `values_articulator`, `audience_segmenter`, `differentiation_mapper` → `positioning_synthesizer` |
 | 2 — Narrative & Messaging | `Graph`, linear + carry-forward | `Storyteller` → `ArchetypeAnalyst` → `TaglineWriter` → `MessageMapper` → `PersonaBuilder` → `VoicePrinciplesDrafter` (single-predecessor chain; each `structured_output` inherits upstream fields) |
-| 3 — Visual & Expressive Identity | `Graph`, diverge fan-out + converge fan-out | `MoodBoardConceptualist_{Editorial,Minimalist,Bold}` → `converge_decider` → 7-way fan-out (`logo_specifier`, `color_system_builder`, `typography_builder`, `iconography_director`, `photography_video_director`, `voice_tone_builder`, `design_system_codifier`) → `visual_compositor` |
+| 3 — Visual & Expressive Identity | `Graph`, diverge fan-out + converge fan-out (no compositor) | `MoodBoardConceptualist_{Editorial,Minimalist,Bold}` → `converge_decider` → 7-way fan-out (`logo_specifier`, `color_system_builder`, `typography_builder`, `iconography_director`, `photography_video_director`, `voice_tone_builder`, `design_system_codifier`) (seven parallel terminal nodes; merged in Python via `_PHASE3_NODE_MERGE`) |
 | 4 — Channel Activation | `Graph`, pure fan-out (no compositor) | `brand_experience_principler`, `website_guide`, `social_guide`, `email_guide`, `events_guide`, `partnerships_guide`, `internal_guide`, `brand_architecture_builder`, `brand_in_action_illustrator` (nine parallel terminal nodes; merged in Python via `_PHASE4_NODE_MERGE`) |
 | 5 — Governance & Evolution | `Graph`, pure fan-out (no compositor) | `ownership_definer`, `approval_workflow_designer`, `asset_wiki_planner`, `training_planner`, `kpi_designer`, `evolution_framer`, `brand_rules_codifier` (seven parallel terminal nodes; merged in Python via `_PHASE5_NODE_MERGE`) |
 
@@ -225,11 +220,11 @@ Strands' agent loop after the structured payload is produced, so tool-based
 `handoff_to_agent` cannot sequence the diverge step. Three moodboard
 conceptualists fan out in parallel directly into `converge_decider` — no
 intermediate collector node; `converge_decider` then selects a winner before
-the seven specialists fan out into `visual_compositor`.
-
-`make_creative_director` still exists in `agents.py` and remains invokable
-standalone via Agent Console, but it no longer runs as part of the Phase 3
-pipeline.
+fanning out into the seven specialists. There is no compositor: the seven
+specialists are terminal nodes, and their typed fragments — plus
+`converge_decider`'s own decision and the three moodboard candidates — are
+merged into `VisualIdentityOutput` in Python by the orchestrator's Phase-3
+`merge_fn` (`_PHASE3_NODE_MERGE`), the same pattern Phase 4 and Phase 5 use.
 
 | Agent | Purpose | Output field(s) |
 |-------|---------|------------------|

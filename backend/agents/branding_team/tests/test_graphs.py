@@ -35,7 +35,6 @@ from branding_team.graphs.top_level import (
 from branding_team.models import (
     BrandingMission,
     BrandPhase,
-    VisualIdentityOutput,
 )
 from branding_team.tests.conftest import make_mission
 
@@ -84,7 +83,10 @@ def test_build_phase3_graph_wires_diverge_and_fan_out() -> None:
     sequencing cannot drive the moodboard conceptualists. There is no
     intermediate CreativeDirector collector node — the three conceptualists
     fan directly into converge_decider, the same shape as Phase 1's fan-in
-    into positioning_synthesizer.
+    into positioning_synthesizer. The seven post-converge specialists are
+    terminal nodes with no compositor — their typed fragments are merged into
+    ``VisualIdentityOutput`` in Python by the orchestrator's Phase-3
+    ``merge_fn``, not by an LLM fan-in node.
     """
     from branding_team.graphs.phase3_visual import (
         _PHASE3_CONCEPTUALIST_VARIANTS,
@@ -106,9 +108,11 @@ def test_build_phase3_graph_wires_diverge_and_fan_out() -> None:
     for conceptualist in conceptualists:
         assert (conceptualist, "converge_decider") in edges
 
+    assert "visual_compositor" not in node_ids
+    edge_sources = {frm for frm, _to in edges}
     for specialist in _PHASE3_SPECIALIST_FACTORIES:
         assert ("converge_decider", specialist) in edges
-        assert (specialist, "visual_compositor") in edges
+        assert specialist not in edge_sources, f"{specialist} must be terminal"
 
 
 def test_make_moodboard_conceptualist_rejects_blank_variant() -> None:
@@ -261,46 +265,15 @@ def test_phase5_prompts_drop_redundant_json_reminder() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Compositor (fan-in join) nodes — migrated to structured_output=
-# ---------------------------------------------------------------------------
-
-# The remaining phase-3 compositor is an inline ``build_agent()`` call in the
-# graph file (not an ``agents.py`` factory), so it is reached through the
-# built graph's node executor rather than a factory. It carries its own
-# ``structured_output=`` model instead of a prose "output valid JSON" reminder,
-# which forces Strands' typed tool call and removes the compositor's reliance on
-# the free-text ``_parse_model_from_text`` recovery path. Phase 4 and Phase 5 no
-# longer have a compositor (see ``test_build_phase4_graph_wires_pure_fan_out``
-# and ``test_build_phase5_graph_wires_pure_fan_out``).
-_COMPOSITOR_CASES = [
-    (build_phase3_graph, "visual_compositor", VisualIdentityOutput),
-]
-
-
-@pytest.mark.parametrize(
-    "build_graph,node_id,output_model",
-    _COMPOSITOR_CASES,
-    ids=[node_id for _build, node_id, _model in _COMPOSITOR_CASES],
-)
-def test_compositor_uses_structured_output_and_drops_json_reminder(
-    build_graph, node_id, output_model
-) -> None:
-    """Each fan-in compositor passes ``structured_output=`` and no longer names
-    a raw-JSON output format in its prose — the Pydantic schema is the contract.
-    """
-    graph = build_graph()
-    executor = graph.nodes[node_id].executor
-
-    # The Pydantic schema is wired as the agent's structured-output model
-    # (Strands stores the ``structured_output_model=`` ctor arg here)...
-    assert getattr(executor, "_default_structured_output_model", None) is output_model
-    # ...and the redundant "output valid JSON" prose instruction is gone.
-    assert "valid JSON" not in executor.system_prompt, node_id
-
-
-# ---------------------------------------------------------------------------
 # Top-level builder — each target_phase exercises a different gating branch
 # ---------------------------------------------------------------------------
+
+# No phase has a compositor node anymore — Phase 1's synthesizer, Phase 2's
+# linear chain, and Phase 3/4/5's pure fan-outs are all merged in Python by
+# the orchestrator's per-phase ``merge_fn`` (or, for Phase 1/2, their own
+# terminal/cumulative agent output). See ``test_build_phase3_graph_wires_diverge_and_fan_out``,
+# ``test_build_phase4_graph_wires_pure_fan_out``, and
+# ``test_build_phase5_graph_wires_pure_fan_out``.
 
 
 def test_default_graph_timeout_constants() -> None:

@@ -77,7 +77,6 @@ from .models import (
     IconographyOutput,
     LogoSuiteOutput,
     MessagingFrameworkOutput,
-    MoodBoardCandidatesOutput,
     MoodBoardConcept,
     OwnershipOutput,
     PersonaProfilesOutput,
@@ -468,36 +467,6 @@ def make_voice_principles_drafter() -> Agent:
 # --- Diverge fan-out agents ---
 
 
-_CREATIVE_DIRECTOR_PROMPT = AgentPromptSpec(
-    opening=(
-        "You are a Creative Director reviewing visual identity exploration. Using the three "
-        "moodboard concepts from Inputs from previous nodes, collect them into:"
-    ),
-    structured_output=MoodBoardCandidatesOutput,
-    closing="Do not pick a winner — converge_decider selects the winning direction.",
-)
-
-
-def make_creative_director() -> Agent:
-    """Build the Phase 3 Creative Director agent.
-
-    Postconditions:
-        Returns an ``Agent`` named ``CreativeDirector`` that collects the
-        moodboard concepts produced by the ``MoodBoardConceptualist_*``
-        Graph fan-out nodes into a unified ``MoodBoardCandidatesOutput``
-        list, preserving each concept's title, visual_direction,
-        color_story, typography_direction, and image_style. The agent does
-        not select a winner; ``converge_decider`` scores the candidates
-        and selects the winning direction.
-    """
-    return build_agent(
-        name="CreativeDirector",
-        description="Collects moodboard candidates from conceptualists into a unified list.",
-        system_prompt=render_agent_prompt(_CREATIVE_DIRECTOR_PROMPT),
-        structured_output=MoodBoardCandidatesOutput,
-    )
-
-
 def _moodboard_conceptualist_prompt(variant: str) -> AgentPromptSpec:
     """Build the MoodBoard Conceptualist prompt spec for one visual-direction variant.
 
@@ -530,8 +499,8 @@ def make_moodboard_conceptualist(variant: str) -> Agent:
         Returns an ``Agent`` named ``MoodBoardConceptualist_{variant}``
         whose prompt is specialized to ``variant`` and whose output is a
         moodboard concept (title, visual direction, color story,
-        typography direction, image style) for the ``CreativeDirector``
-        node in the Phase 3 Graph.
+        typography direction, image style) that fans directly into
+        ``converge_decider`` in the Phase 3 Graph.
     """
     assert isinstance(variant, str) and variant.strip(), "variant must be a non-empty string"
     return build_agent(

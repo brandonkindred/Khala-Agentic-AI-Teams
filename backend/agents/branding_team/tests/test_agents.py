@@ -35,7 +35,6 @@ from branding_team.agents import (
     make_brand_rules_codifier,
     make_color_system_builder,
     make_converge_decider,
-    make_creative_director,
     make_design_system_codifier,
     make_differentiation_mapper,
     make_discovery_auditor,
@@ -226,14 +225,6 @@ def _expected_moodboard_conceptualist_prompt(variant: str) -> str:
 _EXPECTED_MOODBOARD_EDITORIAL_PROMPT = _expected_moodboard_conceptualist_prompt("Editorial")
 _EXPECTED_MOODBOARD_MINIMALIST_PROMPT = _expected_moodboard_conceptualist_prompt("Minimalist")
 _EXPECTED_MOODBOARD_BOLD_PROMPT = _expected_moodboard_conceptualist_prompt("Bold")
-
-_EXPECTED_CREATIVE_DIRECTOR_PROMPT = (
-    "You are a Creative Director reviewing visual identity exploration. Using the three "
-    "moodboard concepts from Inputs from previous nodes, collect them into:\n"
-    "1. mood_board_candidates — preserve each concept (title, visual_direction, color_story, "
-    "typography_direction, image_style)\n"
-    "Do not pick a winner — converge_decider selects the winning direction."
-)
 
 _EXPECTED_CONVERGE_DECIDER_PROMPT = (
     "You are a Creative Convergence Decider. You receive moodboard candidates from the "
@@ -477,10 +468,6 @@ def test_moodboard_conceptualist_minimalist_prompt_matches_spec() -> None:
 
 def test_moodboard_conceptualist_bold_prompt_matches_spec() -> None:
     assert make_moodboard_conceptualist("Bold").system_prompt == _EXPECTED_MOODBOARD_BOLD_PROMPT
-
-
-def test_creative_director_prompt_matches_spec() -> None:
-    assert make_creative_director().system_prompt == _EXPECTED_CREATIVE_DIRECTOR_PROMPT
 
 
 def test_converge_decider_prompt_matches_spec() -> None:
@@ -777,7 +764,6 @@ _MIGRATED_SCHEMA_DERIVED_PROMPT_SPEC_NAMES: tuple[str, ...] = (
     "_DIFFERENTIATION_MAPPER_PROMPT",
     "_POSITIONING_SYNTHESIZER_PROMPT",
     "_STORYTELLER_PROMPT",
-    "_CREATIVE_DIRECTOR_PROMPT",
     "_CONVERGE_DECIDER_PROMPT",
     "_LOGO_SPECIFIER_PROMPT",
     "_COLOR_SYSTEM_BUILDER_PROMPT",
@@ -875,7 +861,6 @@ _SCHEMA_DERIVED_SPEC_TO_FACTORY: dict[str, Callable[[], Agent]] = {
     "_DIFFERENTIATION_MAPPER_PROMPT": make_differentiation_mapper,
     "_POSITIONING_SYNTHESIZER_PROMPT": make_positioning_synthesizer,
     "_STORYTELLER_PROMPT": make_storyteller,
-    "_CREATIVE_DIRECTOR_PROMPT": make_creative_director,
     "_CONVERGE_DECIDER_PROMPT": make_converge_decider,
     "_LOGO_SPECIFIER_PROMPT": make_logo_specifier,
     "_COLOR_SYSTEM_BUILDER_PROMPT": make_color_system_builder,

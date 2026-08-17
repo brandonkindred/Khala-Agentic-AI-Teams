@@ -97,6 +97,32 @@ _PHASE2_NODE_MERGE: dict[str, Optional[str]] = {
 }
 
 
+# Phase 3 fan-out node id -> the VisualIdentityOutput key its structured_output
+# nests under, or None to merge its fields in flat. The three
+# MoodBoardConceptualist_* variants each emit a single MoodBoardConcept, all
+# nesting under "mood_board_candidates" -- since that's a List field on
+# VisualIdentityOutput, _merge_named_fragments appends each one as a list
+# element, so all three survive the merge. converge_decider's
+# CreativeRefinementDecision nests under "creative_refinement" (its
+# default_factory merge target). Six of the seven post-converge specialists
+# already match VisualIdentityOutput field names 1:1 and merge flat;
+# design_system_codifier's DesignSystemDefinition nests under "design_system"
+# since its own fields don't exist at the top level.
+_PHASE3_NODE_MERGE: dict[str, Optional[str]] = {
+    "MoodBoardConceptualist_Editorial": "mood_board_candidates",
+    "MoodBoardConceptualist_Minimalist": "mood_board_candidates",
+    "MoodBoardConceptualist_Bold": "mood_board_candidates",
+    "converge_decider": "creative_refinement",
+    "logo_specifier": None,
+    "color_system_builder": None,
+    "typography_builder": None,
+    "iconography_director": None,
+    "photography_video_director": None,
+    "voice_tone_builder": None,
+    "design_system_codifier": "design_system",
+}
+
+
 # Phase 4 fan-out node id -> the ChannelActivationOutput key its
 # structured_output nests under, or None to merge its fields in flat. Three
 # specialists (brand_experience_principler, brand_architecture_builder,
@@ -333,6 +359,30 @@ def _merge_phase2_fragments(node_result: Any, model_class: type[BaseModel]) -> O
     )
 
 
+def _merge_phase3_fragments(node_result: Any, model_class: type[BaseModel]) -> Optional[BaseModel]:
+    """Merge every Phase 3 node's ``structured_output`` into one phase output.
+
+    Phase 3 wraps eleven agents (three moodboard conceptualists, converge_decider,
+    and seven post-converge specialists) as a single top-level ``"phase3_visual"``
+    node (see ``graphs/phase3_visual.py``); the same nested-``MultiAgentResult``
+    recovery Phase 1 and Phase 4/5 use applies here. All eleven must be present --
+    a partial run must not silently validate as a complete ``VisualIdentityOutput``
+    via field defaults.
+
+    Preconditions:
+        ``node_result`` is the ``NodeResult`` for a single top-level graph node
+        (may or may not wrap a nested multi-agent result).
+    Postconditions:
+        Returns a validated ``model_class`` instance merging every recognized
+        Phase 3 node's ``structured_output`` when all of ``_PHASE3_NODE_MERGE``'s
+        node ids were found -- the three moodboard conceptualists each contribute
+        one element of ``mood_board_candidates``; returns None when any node is
+        missing or the merged data fails validation -- same None contract as
+        ``_merge_phase1_fragments``.
+    """
+    return _merge_named_fragments(node_result, model_class, _PHASE3_NODE_MERGE, require_all=True)
+
+
 def _merge_phase4_fragments(node_result: Any, model_class: type[BaseModel]) -> Optional[BaseModel]:
     """Merge every Phase 4 specialist's ``structured_output`` into one phase output.
 
@@ -398,21 +448,21 @@ class _PhaseSpec(NamedTuple):
         model_cls: The phase's output model.
         merge_fn: When the phase's node wraps several named sub-agents whose
             fragments must be merged into one ``model_cls`` (Phase 1's fan-out,
-            Phase 2's sequential graph, Phase 4's and Phase 5's fan-out), the
-            merge function to try first. ``None`` for phases whose terminal
-            node's own output already is the complete phase output (Phase 3's
-            compositor node).
+            Phase 2's sequential graph, Phase 3's, Phase 4's, and Phase 5's
+            fan-out), the merge function to try first. ``None`` for phases
+            whose terminal node's own output already is the complete phase
+            output (Phase 1's positioning_synthesizer).
         check_structured_output: Whether the single-agent fallback may accept
             the last agent's own ``structured_output`` as the phase output.
-            ``False`` for Phase 2, Phase 4, and Phase 5, whose last-seen agent
-            (Phase 2's VoicePrinciplesDrafter; Phase 4's nine and Phase 5's
-            seven parallel specialists have no single "last" node) only ever
-            emits its own fragment — subset-validating that against the
-            phase's full output model would silently report a non-degraded
-            output with every other field defaulted empty. All three phases
-            have no compositor, so ``merge_fn`` is the only legitimate
-            extraction path; when it returns ``None`` the phase must degrade
-            instead of accepting a stray fragment.
+            ``False`` for Phase 2, Phase 3, Phase 4, and Phase 5, whose
+            last-seen agent (Phase 2's VoicePrinciplesDrafter; Phase 3's,
+            Phase 4's, and Phase 5's parallel specialists have no single
+            "last" node) only ever emits its own fragment — subset-validating
+            that against the phase's full output model would silently report
+            a non-degraded output with every other field defaulted empty.
+            None of these four phases have a compositor, so ``merge_fn`` is
+            the only legitimate extraction path; when it returns ``None`` the
+            phase must degrade instead of accepting a stray fragment.
     """
 
     builder_fn: Callable[[], Any]
@@ -441,7 +491,11 @@ _PHASE_SPEC: dict[BrandPhase, _PhaseSpec] = {
         check_structured_output=False,
     ),
     BrandPhase.VISUAL_IDENTITY: _PhaseSpec(
-        build_phase3_graph, "phase3_visual", VisualIdentityOutput
+        build_phase3_graph,
+        "phase3_visual",
+        VisualIdentityOutput,
+        merge_fn=_merge_phase3_fragments,
+        check_structured_output=False,
     ),
     BrandPhase.CHANNEL_ACTIVATION: _PhaseSpec(
         build_phase4_graph,
