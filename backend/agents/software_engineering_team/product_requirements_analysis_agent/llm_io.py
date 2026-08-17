@@ -21,7 +21,7 @@ from software_engineering_team.shared.json_utils import parse_json_object
 
 
 def parse_llm_json(raw: str) -> Optional[dict]:
-    """Parse JSON from LLM output via the shared recovery-ladder parser.
+    """Parse JSON from LLM output via the canonical recovery-ladder parser.
 
     Delegates to the canonical
     :func:`software_engineering_team.shared.json_utils.parse_json_object`
