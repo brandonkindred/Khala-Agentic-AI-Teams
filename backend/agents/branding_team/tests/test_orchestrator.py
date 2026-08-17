@@ -12,6 +12,7 @@ import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from pydantic import BaseModel
 
 from branding_team import (
     BrandingTeamOrchestrator,
@@ -1373,12 +1374,13 @@ def _channel_guide_output(channel: str) -> ChannelGuidelineOutput:
     )
 
 
-def test_extract_phase_output_merges_every_phase4_fragment() -> None:
-    """Phase 4 wraps nine fan-out agents as one top-level node; the six
-    *_guide specialists each emit a single ChannelGuidelineOutput that must
-    all survive as separate channel_guidelines list elements, not overwrite
-    one another the way a plain nest_under assignment would."""
-    channels = ["website", "social", "email", "events", "partnerships", "internal"]
+_PHASE4_CHANNELS = ["website", "social", "email", "events", "partnerships", "internal"]
+
+
+def _phase4_nested_node_result() -> MagicMock:
+    """A mock NodeResult wrapping all nine Phase-4 specialists' fragments,
+    shaped like the real nested MultiAgentResult.results Strands returns."""
+    channels = _PHASE4_CHANNELS
     nested_results = {
         "brand_experience_principler": _phase1_leaf_node(
             BrandExperiencePrinciplesOutput(
@@ -1449,6 +1451,25 @@ def test_extract_phase_output_merges_every_phase4_fragment() -> None:
     node_result.get_agent_results.return_value = [
         node.get_agent_results.return_value[0] for node in nested_results.values()
     ]
+    return node_result
+
+
+def _assert_every_field_populated(model: BaseModel) -> None:
+    """Fail with the offending field names if any field on ``model`` was left
+    at an empty/falsy value — used to prove a set of merged fragments
+    collectively covers every field on the target schema, so a future field
+    added without a producing specialist is caught automatically."""
+    empty = [name for name in type(model).model_fields if not getattr(model, name)]
+    assert not empty, f"{type(model).__name__} fields left empty: {empty}"
+
+
+def test_extract_phase_output_merges_every_phase4_fragment() -> None:
+    """Phase 4 wraps nine fan-out agents as one top-level node; the six
+    *_guide specialists each emit a single ChannelGuidelineOutput that must
+    all survive as separate channel_guidelines list elements, not overwrite
+    one another the way a plain nest_under assignment would."""
+    channels = _PHASE4_CHANNELS
+    node_result = _phase4_nested_node_result()
 
     mock_result = MagicMock()
     mock_result.result = {"phase4_channel": node_result}
@@ -1481,6 +1502,55 @@ def test_extract_phase_output_merges_every_phase4_fragment() -> None:
         "Support email",
         "Sales deck",
     ]
+
+
+def test_phase4_fragments_collectively_populate_every_output_field() -> None:
+    """Schema-coverage guard: the nine Phase-4 specialists' fragments must
+    collectively populate every field on ChannelActivationOutput, checked
+    generically against the model's own field list (not a hardcoded field
+    enumeration) so a field added later without a producing specialist fails
+    this test instead of silently shipping empty."""
+    mock_result = MagicMock()
+    mock_result.result = {"phase4_channel": _phase4_nested_node_result()}
+
+    output, degraded = BrandingTeamOrchestrator._extract_phase_output(
+        mock_result, "phase4_channel", ChannelActivationOutput
+    )
+
+    assert degraded is False
+    assert isinstance(output, ChannelActivationOutput)
+    _assert_every_field_populated(output)
+
+
+def test_full_run_phase4_not_degraded_with_nine_fragments() -> None:
+    """Phase 4's real runtime shape is nine separate specialist fragments,
+    not the single flat block _mock_graph_result's default gives every
+    phase (which never actually exercises _merge_phase4_fragments, since it
+    bails out unless node_result.result.results is a dict). Wire that real
+    shape through orchestrator.run() end-to-end and confirm the Python merge
+    keeps Phase 4 out of degraded_phases and fully populates its output."""
+    mock_result = _mock_graph_result(ALL_PHASES)
+    mock_result.result["phase4_channel"] = _phase4_nested_node_result()
+
+    async def mock_invoke_async(task, **kwargs):
+        return mock_result
+
+    with patch(
+        "branding_team.orchestrator.build_branding_graph",
+        return_value=MagicMock(invoke_async=AsyncMock(side_effect=mock_invoke_async)),
+    ):
+        orchestrator = BrandingTeamOrchestrator()
+        result = orchestrator.run(
+            mission=make_mission(
+                company_description="A strategic studio helping product teams ship cohesive digital experiences",
+                values=["clarity", "trust", "momentum"],
+            ),
+            human_review=HumanReview(approved=True),
+        )
+
+    assert result.degraded_phases == []
+    assert isinstance(result.channel_activation, ChannelActivationOutput)
+    _assert_every_field_populated(result.channel_activation)
 
 
 def test_merge_phase4_fragments_rejects_incomplete_specialist_set() -> None:
@@ -1663,3 +1733,223 @@ def test_gather_integrations_market_research_failure_returns_none() -> None:
         )
     assert snapshot is None
     assert design is None
+
+
+# ---------------------------------------------------------------------------
+# Extracted helper unit tests: _locate_node_result / _extract_from_single_agent
+# / _child_structured_output / _apply_fragment. These pin the small named
+# pieces that _extract_phase_output and _merge_named_fragments were split into,
+# so a regression localizes to the helper rather than the whole extractor.
+# ---------------------------------------------------------------------------
+
+
+def test_locate_node_result_returns_node_when_present() -> None:
+    """A well-formed result with the node id present yields that node result."""
+    from branding_team.orchestrator import _locate_node_result
+
+    node_result = MagicMock()
+    node_result.result = MagicMock()
+    mock_result = MagicMock()
+    mock_result.result = {"phase1_strategic_core": node_result}
+
+    assert _locate_node_result(mock_result, "phase1_strategic_core") is node_result
+
+
+def test_locate_node_result_missing_node_returns_none() -> None:
+    """A result mapping without the node id degrades to None, not KeyError."""
+    from branding_team.orchestrator import _locate_node_result
+
+    mock_result = MagicMock()
+    mock_result.result = {"other_node": MagicMock()}
+
+    assert _locate_node_result(mock_result, "phase1_strategic_core") is None
+
+
+def test_locate_node_result_non_mapping_result_returns_none() -> None:
+    """A top-level result that isn't a ``.get``-able mapping returns None."""
+    from branding_team.orchestrator import _locate_node_result
+
+    mock_result = MagicMock()
+    mock_result.result = object()  # no ``.get``
+
+    assert _locate_node_result(mock_result, "phase1_strategic_core") is None
+
+
+def test_locate_node_result_node_without_result_attr_returns_none() -> None:
+    """A node value lacking a ``.result`` wrapper returns None."""
+    from branding_team.orchestrator import _locate_node_result
+
+    class _NoResult:
+        pass
+
+    mock_result = MagicMock()
+    mock_result.result = {"phase1_strategic_core": _NoResult()}
+
+    assert _locate_node_result(mock_result, "phase1_strategic_core") is None
+
+
+def test_extract_from_single_agent_prefers_structured_output() -> None:
+    """The last agent's typed ``structured_output`` is validated and returned."""
+    from branding_team.orchestrator import _extract_from_single_agent
+
+    core = _full_strategic_core()
+    node = _phase1_leaf_node(core)
+
+    parsed = _extract_from_single_agent(node, StrategicCoreOutput, None)
+
+    assert isinstance(parsed, StrategicCoreOutput)
+    assert parsed.positioning_statement == core.positioning_statement
+
+
+def test_extract_from_single_agent_falls_back_to_text() -> None:
+    """With no usable structured output, the last text block is parsed."""
+    from branding_team.orchestrator import _extract_from_single_agent
+
+    core = _full_strategic_core()
+    agent_result = MagicMock()
+    agent_result.structured_output = None
+    agent_result.message = {"content": [{"text": core.model_dump_json()}]}
+    node = MagicMock()
+    node.get_agent_results.return_value = [agent_result]
+
+    parsed = _extract_from_single_agent(node, StrategicCoreOutput, None)
+
+    assert isinstance(parsed, StrategicCoreOutput)
+    assert parsed.brand_promise == core.brand_promise
+
+
+def test_extract_from_single_agent_skips_structured_when_spec_disallows() -> None:
+    """When ``spec.check_structured_output`` is False the structured field is
+    ignored and extraction falls through to text (here empty → None)."""
+    from branding_team.orchestrator import _extract_from_single_agent, _PhaseSpec
+
+    spec = _PhaseSpec(
+        builder_fn=lambda: None,
+        node_id="phase2_narrative",
+        model_cls=StrategicCoreOutput,
+        check_structured_output=False,
+    )
+    node = _phase1_leaf_node(_full_strategic_core())  # message content is empty
+
+    assert _extract_from_single_agent(node, StrategicCoreOutput, spec) is None
+
+
+def test_extract_from_single_agent_no_agent_results_returns_none() -> None:
+    """An empty ``get_agent_results()`` yields None (caller then degrades)."""
+    from branding_team.orchestrator import _extract_from_single_agent
+
+    node = MagicMock()
+    node.get_agent_results.return_value = []
+
+    assert _extract_from_single_agent(node, StrategicCoreOutput, None) is None
+
+
+def test_child_structured_output_valid_child() -> None:
+    """A child with a BaseModel structured_output returns that model."""
+    from branding_team.orchestrator import _child_structured_output
+
+    core = _full_strategic_core()
+    child = _phase1_leaf_node(core)
+
+    assert _child_structured_output(child) is core
+
+
+def test_child_structured_output_none_child_returns_none() -> None:
+    """A missing child id (None) is skipped, not dereferenced."""
+    from branding_team.orchestrator import _child_structured_output
+
+    assert _child_structured_output(None) is None
+
+
+def test_child_structured_output_without_get_agent_results_returns_none() -> None:
+    """A child lacking ``get_agent_results`` is skipped."""
+    from branding_team.orchestrator import _child_structured_output
+
+    class _Bare:
+        pass
+
+    assert _child_structured_output(_Bare()) is None
+
+
+def test_child_structured_output_empty_results_returns_none() -> None:
+    """A child whose ``get_agent_results()`` is empty is skipped."""
+    from branding_team.orchestrator import _child_structured_output
+
+    child = MagicMock()
+    child.get_agent_results.return_value = []
+
+    assert _child_structured_output(child) is None
+
+
+def test_child_structured_output_non_basemodel_returns_none() -> None:
+    """A child whose structured_output isn't a BaseModel is skipped."""
+    from branding_team.orchestrator import _child_structured_output
+
+    child = _phase1_leaf_node({"not": "a model"})
+
+    assert _child_structured_output(child) is None
+
+
+def test_apply_fragment_flat_last_writer_wins() -> None:
+    """Flat merge (no nest_under, no prefer_first) overwrites existing keys."""
+    from branding_team.orchestrator import _apply_fragment
+
+    merged = {"a": 1, "b": 2}
+    _apply_fragment(merged, {"b": 20, "c": 3}, None, prefer_first=False)
+
+    assert merged == {"a": 1, "b": 20, "c": 3}
+
+
+def test_apply_fragment_flat_prefer_first_keeps_existing() -> None:
+    """Flat merge with prefer_first fills only absent keys (first writer wins)."""
+    from branding_team.orchestrator import _apply_fragment
+
+    merged = {"a": 1, "b": 2}
+    _apply_fragment(merged, {"b": 20, "c": 3}, None, prefer_first=True)
+
+    assert merged == {"a": 1, "b": 2, "c": 3}
+
+
+def test_apply_fragment_nest_under_places_data() -> None:
+    """A nest_under key places the whole fragment under that key."""
+    from branding_team.orchestrator import _apply_fragment
+
+    merged: dict = {}
+    _apply_fragment(merged, {"x": 1}, "brand_discovery", prefer_first=False)
+
+    assert merged == {"brand_discovery": {"x": 1}}
+
+
+def test_apply_fragment_nest_under_prefer_first_skips_when_present() -> None:
+    """With prefer_first, a nest_under key already set is not overwritten."""
+    from branding_team.orchestrator import _apply_fragment
+
+    merged = {"brand_discovery": {"first": True}}
+    _apply_fragment(merged, {"second": True}, "brand_discovery", prefer_first=True)
+
+    assert merged == {"brand_discovery": {"first": True}}
+
+
+def test_apply_fragment_list_field_appends_each_fragment() -> None:
+    """A nest_under key naming a list field appends each fragment as one element
+    (Phase 4's channel_guidelines) rather than overwriting."""
+    from branding_team.orchestrator import _apply_fragment
+
+    list_fields = frozenset({"channel_guidelines"})
+    merged: dict = {}
+    _apply_fragment(
+        merged,
+        {"channel": "web"},
+        "channel_guidelines",
+        prefer_first=False,
+        list_fields=list_fields,
+    )
+    _apply_fragment(
+        merged,
+        {"channel": "social"},
+        "channel_guidelines",
+        prefer_first=False,
+        list_fields=list_fields,
+    )
+
+    assert merged == {"channel_guidelines": [{"channel": "web"}, {"channel": "social"}]}
