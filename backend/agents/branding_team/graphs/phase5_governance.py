@@ -1,7 +1,9 @@
-"""Phase 5 — Governance & Evolution graph (fan-out / fan-in).
+"""Phase 5 — Governance & Evolution graph (pure fan-out).
 
-Seven specialist agents run in parallel to produce governance fragments,
-then a Governance Compositor joins the results into a unified output.
+Seven specialist agents produce governance fragments in parallel. Each is a
+terminal node — there is no compositor; the orchestrator's Phase-5
+``merge_fn`` (``_merge_phase5_fragments``) assembles their typed fragments
+into a unified ``GovernanceOutput`` in Python.
 """
 
 from __future__ import annotations
@@ -17,59 +19,51 @@ from branding_team.agents import (
     make_ownership_definer,
     make_training_planner,
 )
-from branding_team.graphs.shared import build_agent, build_fan_out_fan_in
-from branding_team.models import GovernanceOutput
 
 
 def build_phase5_graph() -> Graph:
-    """Build the Phase 5 Governance fan-out/fan-in graph.
+    """Build the Phase 5 Governance pure fan-out graph.
 
-    Entry nodes (all run in parallel):
-        ownership_definer, approval_workflow_designer, asset_wiki_planner,
-        training_planner, kpi_designer, evolution_framer, brand_rules_codifier
+    Topology::
 
-    Join node:
-        governance_compositor — assembles every upstream fragment into a
-        single GovernanceOutput JSON document.
+        ownership_definer
+        approval_workflow_designer
+        asset_wiki_planner
+        training_planner
+        kpi_designer
+        evolution_framer
+        brand_rules_codifier
+
+    All seven nodes are both entry points and terminal nodes — they run in
+    parallel and have no edges between them. There is no fan-in node: the
+    orchestrator's Phase-5 ``merge_fn`` (``_merge_phase5_fragments``)
+    assembles their typed ``structured_output`` fragments into a single
+    ``GovernanceOutput`` deterministically in Python.
 
     Preconditions:
         None — the builder wires a fixed seven-agent factory set and takes no
         arguments.
     Postconditions:
-        Returns a built ``Graph`` whose seven specialist nodes are entry points
-        running in parallel and whose sole terminal node, ``governance_compositor``,
-        depends on all seven (fan-out / fan-in).
+        Returns a built ``Graph`` whose seven specialist nodes are all both
+        entry points and terminal nodes, running in parallel with no edges
+        between them. There is no fan-in node; the orchestrator's Phase-5
+        ``merge_fn`` (``_merge_phase5_fragments``) assembles their typed
+        ``structured_output`` fragments into a single ``GovernanceOutput``
+        outside the graph.
     """
     builder = GraphBuilder()
 
-    # ── Fan-in: governance compositor ───────────────────────────────
-    compositor_agent = build_agent(
-        name="governance_compositor",
-        system_prompt=(
-            "You are a Governance Compositor. Assemble all governance fragments from upstream agents "
-            "into a unified GovernanceOutput. Combine ownership model, decision authority, approval "
-            "workflows, agency briefing protocols, asset management guidance, training plan, brand "
-            "health KPIs, tracking methodology, review triggers, evolution framework, version control "
-            "cadence, brand guidelines list, and wiki backlog."
-        ),
-        description="Joins all governance fragments into a single GovernanceOutput document.",
-        structured_output=GovernanceOutput,
-    )
-    compositor = builder.add_node(compositor_agent, node_id="governance_compositor")
-
-    # ── Fan-out: parallel specialist nodes, wired into compositor ───
-    build_fan_out_fan_in(
-        builder,
-        [
-            ("ownership_definer", make_ownership_definer),
-            ("approval_workflow_designer", make_approval_workflow_designer),
-            ("asset_wiki_planner", make_asset_wiki_planner),
-            ("training_planner", make_training_planner),
-            ("kpi_designer", make_kpi_designer),
-            ("evolution_framer", make_evolution_framer),
-            ("brand_rules_codifier", make_brand_rules_codifier),
-        ],
-        compositor,
-    )
+    factories = {
+        "ownership_definer": make_ownership_definer,
+        "approval_workflow_designer": make_approval_workflow_designer,
+        "asset_wiki_planner": make_asset_wiki_planner,
+        "training_planner": make_training_planner,
+        "kpi_designer": make_kpi_designer,
+        "evolution_framer": make_evolution_framer,
+        "brand_rules_codifier": make_brand_rules_codifier,
+    }
+    for node_id, factory in factories.items():
+        builder.add_node(factory(), node_id=node_id)
+        builder.set_entry_point(node_id)
 
     return builder.build()

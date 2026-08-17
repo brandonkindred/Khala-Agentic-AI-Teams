@@ -579,14 +579,14 @@ def _start_agent_studio_temporal_worker() -> None:
     """Start the in-process Agent Studio Temporal worker.
 
     Agent Studio is an in-process team (mounted on this app, not a separate
-    ``team_service`` container). Gated on ``UNIFIED_API_AGENT_STUDIO_TEMPORAL_WORKER``
-    and on the team being enabled. Authoring CRUD (start conversation / send
-    message / clone / save) does not use Temporal: dispatch always calls
-    :class:`AgentStudioService` in-process, and the worker starter no-ops when
-    there are no authoring workflows to register. This helper always returns
-    ``None``. A ``False`` return from the starter is a fully-functional mode
-    (in-process CRUD), not a degraded state. Log-and-continue on failure,
-    matching the other lifespan startup steps.
+    ``team_service`` container). Gated on ``UNIFIED_API_AGENT_STUDIO_TEMPORAL_WORKER``,
+    on the team being enabled, and on Temporal being configured. Authoring CRUD
+    (start conversation / send message / clone / save) does not use Temporal:
+    dispatch always calls :class:`AgentStudioService` in-process, and the worker
+    starter no-ops when there are no authoring workflows to register. This
+    helper always returns ``None``. A ``False`` return from the starter is a
+    fully-functional mode (in-process CRUD), not a degraded state.
+    Log-and-continue on failure, matching the other lifespan startup steps.
 
     Preconditions:
         - ``TEAM_CONFIGS`` includes ``agent_studio``.
@@ -595,16 +595,26 @@ def _start_agent_studio_temporal_worker() -> None:
           ``UNIFIED_API_AGENT_STUDIO_TEMPORAL_WORKER`` is false.
         - Returns ``None`` and logs nothing (no worker started) when the
           ``agent_studio`` team is disabled in ``TEAM_CONFIGS``.
+        - Returns ``None`` without importing ``agent_platform.studio.temporal.worker``
+          and logs at INFO when Temporal is not configured
+          (``studio_temporal_enabled()`` is false) — the worker boot is skipped
+          entirely rather than calling a no-op starter.
         - Logs at INFO when a worker actually started, or when the starter
-          returns ``False`` (nothing to register, or Temporal unset) — Agent
-          Studio serves authoring requests in-process either way. Startup is
-          not aborted (that would take down every other team for one
-          in-process team's config).
+          returns ``False`` (nothing to register) — Agent Studio serves
+          authoring requests in-process either way. Startup is not aborted
+          (that would take down every other team for one in-process team's
+          config).
     """
     if not UNIFIED_API_AGENT_STUDIO_TEMPORAL_WORKER:
         logger.info("Agent Studio Temporal worker disabled (UNIFIED_API_AGENT_STUDIO_TEMPORAL_WORKER=false)")
         return
     if not TEAM_CONFIGS["agent_studio"].enabled:
+        return
+
+    from agent_platform.studio.temporal.dispatch import studio_temporal_enabled
+
+    if not studio_temporal_enabled():
+        logger.info("Agent Studio Temporal worker NOT started; Temporal is not configured (authoring is in-process).")
         return
     try:
         from agent_platform.studio.temporal.worker import start_agent_studio_temporal_worker_thread
