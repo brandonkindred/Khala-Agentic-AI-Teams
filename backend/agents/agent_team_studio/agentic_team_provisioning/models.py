@@ -301,13 +301,15 @@ class GeneratedAgentInvokeInput(BaseModel):
     is the schema the generated manifest's ``inputs`` points at.
 
     Manifest binding: when the request **omits** a persona field (``role`` /
-    ``skills`` / ``capabilities`` / ``expertise``) or the ``system_prompt`` for the
-    selected ``state``, the runtime binds the value from the agent's stored
-    ``AgentManifest`` — resolved through the shim's trusted, route-supplied agent id
-    (never a body-supplied one). A non-empty field in the body still wins for that
-    invoke. The remaining explicit-override refinement — distinguishing an
-    explicitly-cleared empty list from an omitted key, and a request-supplied
-    ``system_prompt`` full replacement — is the sibling follow-up. ``tools`` is
+    ``skills`` / ``capabilities`` / ``expertise``) or ``system_prompt``, the runtime
+    binds the value from the agent's stored ``AgentManifest`` — resolved through the
+    shim's trusted, route-supplied agent id (never a body-supplied one). Whether a
+    field is "omitted" is a **raw-body key-presence test**, not a truthiness test: an
+    explicitly-present field — including an explicitly-cleared empty list/blank
+    string — wins over the manifest default for that invoke only (never written
+    back). An explicit ``system_prompt`` is a **full replacement** of the base
+    prompt (persona fields are not spliced in a second time); a manifest-sourced
+    state prompt is composed with the resolved persona fields instead. ``tools`` is
     **inert at runtime**: the generated manifest declares ``cognition.tools = []``
     and tool brokering isn't wired for generated agents, so the runtime grants no
     tools regardless of this field (a caller cannot escalate to ``python`` /
@@ -327,6 +329,11 @@ class GeneratedAgentInvokeInput(BaseModel):
         default_factory=list, description="Inert at runtime — no tools are granted (see class doc)"
     )
     expertise: list[str] = Field(default_factory=list)
+    system_prompt: str = Field(
+        default="",
+        description="Full base-prompt replacement when present; binds from the selected "
+        "manifest state's system_prompt (composed with persona fields) when omitted.",
+    )
     state: str = Field(
         default="executing",
         description="Operating-state key selecting which manifest AgentStateSpec system "
