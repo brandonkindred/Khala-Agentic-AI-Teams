@@ -186,6 +186,7 @@ def _run_pass(
             batch_index=batch.index,
             total_batches=batch.total,
             is_partial=batch.is_partial,
+            replaced_content=input_data.replaced_content,
         )
 
     def _parse_batch_reply(raw: str) -> Tuple[List[CodeReviewIssue], List[CodeReviewIssue]]:
@@ -406,6 +407,7 @@ def _build_prompt(
     batch_index: Optional[int] = None,
     total_batches: Optional[int] = None,
     is_partial: bool = False,
+    replaced_content: Optional[dict] = None,
 ) -> str:
     """Render the single user prompt for one merged-pass LLM call.
 
@@ -423,6 +425,9 @@ def _build_prompt(
           batch (:attr:`~code_review_agent.submission_pass_runner.FileBatch.is_partial`),
           whose ``content_items`` is not a complete representation of
           everything ``batch_index``/``total_batches`` normally cover.
+        - ``replaced_content``, when given, is ``CodeReviewInput.replaced_content``
+          verbatim (path -> before-image text); not guaranteed to cover every
+          path, or to be a complete file body for the paths it does cover.
 
     Postconditions:
         - Omits the architecture section when ``arch_on`` is False.
@@ -434,6 +439,13 @@ def _build_prompt(
           ``None``) in full. When ``is_partial`` is True, the content section
           header renders a reduced-view recovery banner; otherwise, when
           ``total_batches`` is set (> 1), it names this batch's position.
+        - When ``side_on`` is True, for each path shown in this call, renders
+          a "Replaced (pre-change) content" block immediately after that
+          path's current-content block whenever ``replaced_content[path]`` is
+          present and non-empty. Never rendered when ``side_on`` is False
+          (the before-image is irrelevant to architecture-only analysis, and
+          consuming it is reserved for the side-effect half's mutation
+          sub-check) -- identical output to omitting the parameter entirely.
         - Ends with a prose-only closer (no JSON schema) per enabled half;
           disabled halves are told to stay empty in the tool-guidance line above.
     """
@@ -486,6 +498,14 @@ def _build_prompt(
         parts.append(fence)
         parts.append(content)
         parts.append(fence)
+        if side_on:
+            replaced = (replaced_content or {}).get(path)
+            if replaced:
+                replaced_fence = code_fence_for(replaced)
+                parts.append(f"### {path} — Replaced (pre-change) content ###")
+                parts.append(replaced_fence)
+                parts.append(replaced)
+                parts.append(replaced_fence)
     parts.append("")
 
     if arch_on and side_on:
