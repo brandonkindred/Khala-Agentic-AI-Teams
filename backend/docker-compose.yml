@@ -15,12 +15,6 @@ services:
       LLM_PROVIDER: ${LLM_PROVIDER:-ollama}
       LLM_BASE_URL: ${LLM_BASE_URL:-https://ollama.com}
       LLM_MODEL: ${LLM_MODEL:-deepseek-v4-pro:cloud}
-      LLM_MODEL_branding_strategic_core: ${LLM_MODEL_branding_strategic_core:-}
-      LLM_MODEL_branding_narrative_messaging: ${LLM_MODEL_branding_narrative_messaging:-}
-      LLM_MODEL_branding_visual_identity: ${LLM_MODEL_branding_visual_identity:-}
-      LLM_MODEL_branding_channel_activation: ${LLM_MODEL_branding_channel_activation:-}
-      LLM_MODEL_branding_governance: ${LLM_MODEL_branding_governance:-}
-      LLM_MODEL_branding_compositor: ${LLM_MODEL_branding_compositor:-}
       OLLAMA_API_KEY: ${OLLAMA_API_KEY:-}
       UNIFIED_API_TEAM_ASSISTANTS_ENABLED: ${UNIFIED_API_TEAM_ASSISTANTS_ENABLED:-true}
     extra_hosts:

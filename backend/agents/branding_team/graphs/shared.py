@@ -58,8 +58,16 @@ def phase_agent_key(phase: BrandPhase) -> str:
         ``"branding_strategic_core"`` for ``BrandPhase.STRATEGIC_CORE``).
         The result is a valid Python/shell identifier so
         ``LLM_MODEL_<agent_key>`` can be set in env files and Compose.
+        Raises ``ValueError`` rather than returning a key that would
+        violate that guarantee — the mechanical ``f"branding_{phase.value}"``
+        derivation has no other enforcement point, so a future ``BrandPhase``
+        value containing e.g. a hyphen or space is caught here instead of
+        silently producing an unexportable env var name.
     """
-    return f"branding_{phase.value}"
+    key = f"branding_{phase.value}"
+    if not key.isidentifier():
+        raise ValueError(f"phase_agent_key derived a non-shell-safe key {key!r} from {phase!r}")
+    return key
 
 
 # ---------------------------------------------------------------------------
