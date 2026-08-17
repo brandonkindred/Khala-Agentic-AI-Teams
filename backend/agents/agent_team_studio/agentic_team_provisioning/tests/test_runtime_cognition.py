@@ -92,6 +92,29 @@ def test_call_agent_with_cognition_renders_and_writes_back(fake_strands):
     assert writeback["events"][0]["agent_id"] == "agent-1"
 
 
+def test_call_agent_with_cognition_uses_base_prompt_verbatim(fake_strands):
+    # A caller-composed base_prompt is used as-is (no re-composition from fields);
+    # with no channel open, render_cognition_prompt leaves it unchanged.
+    text, writeback = agent_builder.call_agent_with_cognition(
+        "A", "role", ["s1"], [], [], [], "hello", base_prompt="PRECOMPOSED PROMPT"
+    )
+    assert text == "ok"
+    assert fake_strands.last_system_prompt == "PRECOMPOSED PROMPT"
+    # The persona fields were not spliced into the prompt a second time.
+    assert "specialist agent" not in fake_strands.last_system_prompt
+
+
+def test_call_agent_with_cognition_base_prompt_still_gets_cognition(fake_strands):
+    # A supplied base_prompt is still the base fed to render_cognition_prompt, so
+    # advisory rules are folded on top of it.
+    with runtime_channel({"rules": [_ADVISORY]}):
+        agent_builder.call_agent_with_cognition(
+            "A", "role", [], [], [], [], "hello", base_prompt="PRECOMPOSED"
+        )
+    assert fake_strands.last_system_prompt.startswith("PRECOMPOSED")
+    assert "Never reveal secrets." in fake_strands.last_system_prompt
+
+
 def test_call_agent_with_cognition_noop_without_channel(fake_strands):
     # No runtime_channel open → no steering, no writeback.
     text, writeback = agent_builder.call_agent_with_cognition(
@@ -101,6 +124,30 @@ def test_call_agent_with_cognition_noop_without_channel(fake_strands):
     assert writeback is None
     # The system prompt is exactly the base prompt (no guidance section).
     assert "Operating guidance" not in fake_strands.last_system_prompt
+
+
+def test_resolve_invoke_manifest_blank_id_returns_none():
+    # A falsy / whitespace id never touches the registry.
+    assert agent_builder._resolve_invoke_manifest(None) is None
+    assert agent_builder._resolve_invoke_manifest("") is None
+    assert agent_builder._resolve_invoke_manifest("   ") is None
+
+
+def test_manifest_state_prompt_empty_without_manifest_or_states():
+    assert agent_builder._manifest_state_prompt(None, "executing") == ""
+
+    class _NoStates:
+        states: list = []
+
+    assert agent_builder._manifest_state_prompt(_NoStates(), "executing") == ""
+
+
+def test_compose_base_prompt_without_state_is_generic_composer():
+    # No manifest → identical to build_system_prompt (no appended state text).
+    composed = agent_builder._compose_base_prompt(
+        "A", "role", ["s1"], [], ["dom"], None, "executing"
+    )
+    assert composed == agent_builder.build_system_prompt("A", "role", ["s1"], [], [], ["dom"])
 
 
 def test_read_cognition_context_degrades_when_package_absent(monkeypatch: pytest.MonkeyPatch):

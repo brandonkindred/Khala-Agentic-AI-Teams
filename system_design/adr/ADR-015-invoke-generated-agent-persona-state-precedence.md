@@ -1,8 +1,11 @@
 # ADR-015 — Persona/state override precedence contract for `invoke_generated_agent`
 
-- **Status**: Proposed — design-note only, no behavior change. Locks the contract the
-  runtime-binding implementation story (and its sibling contract-tests story) build
-  against.
+- **Status**: Accepted. The contract-tests story and the omit/default binding story have
+  landed — the runtime now binds manifest persona/state defaults when the request omits
+  them (per-field truthy fallback + manifest state-prompt composition, resolved through the
+  shim's trusted route id). The explicit-override refinement (raw-body presence check for
+  empty-list clearing, and the request `system_prompt` full-replacement field) is the
+  remaining sibling story. Locks the contract all three stories build against.
 - **Date**: 2026-08-12
 - **Owner**: Agent Team Studio / Agentic Team Provisioning
 - **Related**:
