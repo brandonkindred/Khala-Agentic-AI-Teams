@@ -142,17 +142,18 @@ def _max_findings_per_group() -> int:
 def _scope_parallelism() -> int:
     """Fan-out width for scope batches — the shared map-parallelism budget.
 
-    Reuses the coordinator's ``_map_parallelism`` (``CODE_REVIEW_MAP_PARALLELISM``
-    clamped by the process-global LLM gate) rather than adding a third
-    concurrency knob. Imported lazily to avoid an import cycle with the
-    coordinator.
+    Consumes the package's public ``chunking.map_parallelism`` accessor
+    (``CODE_REVIEW_MAP_PARALLELISM`` clamped by the process-global LLM gate)
+    rather than adding a third concurrency knob, so this pass depends on a stable
+    public API, not another module's private ``_map_parallelism`` symbol.
+    Imported lazily to keep module import light.
 
     Postconditions:
         - Returns an ``int >= 1``. Never raises.
     """
-    from .coordinator import _map_parallelism
+    from .chunking import map_parallelism
 
-    return _map_parallelism()
+    return map_parallelism()
 
 
 def _coerce_in_scope(value: Any) -> Optional[bool]:
@@ -309,6 +310,18 @@ def classify_scope(
     ``false_positive_filter``/``scope_filter``. This pass does not self-resolve a
     client; ``llm=None`` degrades to all-:data:`UNKNOWN` rather than reaching for
     a heavier ``code_review`` client of its own.
+
+    ``input_data`` (optional) supplies the PR task text and cited-file content
+    inlined into each batch's prompt; ``None`` omits that context.
+
+    ``max_findings_per_group`` overrides the per-file batch cap
+    (``CODE_REVIEW_SCOPE_MAX_FINDINGS_PER_GROUP``); ``None`` uses the
+    environment-configured default (:func:`_max_findings_per_group`). A value
+    below 1 is floored to 1 (see the flooring postcondition below).
+
+    ``max_workers`` overrides the parallel fan-out width; ``None`` uses the
+    shared ``CODE_REVIEW_MAP_PARALLELISM`` budget via :func:`_scope_parallelism`
+    (itself bounded by the number of batches). A value below 1 is floored to 1.
 
     Preconditions:
         - ``issues`` is a sequence of ``CodeReviewIssue``-like findings (each
