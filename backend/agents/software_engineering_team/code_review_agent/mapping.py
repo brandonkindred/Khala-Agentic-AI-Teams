@@ -72,6 +72,7 @@ from llm_service import (
     LLMTruncatedError,
     LLMUnreachableAfterRetriesError,
 )
+from llm_service.strands_model import model_fingerprint as _model_fingerprint
 from shared.cache import get_shared_cache
 from shared.concurrency import parallel_map
 from shared.env import env_flag_enabled
@@ -783,6 +784,12 @@ def _review_chunk_with_recovery(
 def _review_model_fingerprint(llm: LLMClient) -> str:
     """Best-effort stable identifier for the model chunk reviews will run on.
 
+    Resolves the raw ``LLMClient`` to a Strands model via
+    ``resolve_code_review_model``, then delegates the actual attribute
+    probing to ``llm_service.strands_model.model_fingerprint`` — this
+    function's own value-add over that shared helper is the client
+    resolution step and its fail-open fallback to the client's type name.
+
     Preconditions:
         - ``llm`` is the client that will be handed to ``ChunkReviewAgent``.
 
@@ -805,16 +812,7 @@ def _review_model_fingerprint(llm: LLMClient) -> str:
             exc_info=True,
         )
         return type(llm).__name__
-    for attr in ("model_id", "model_name", "model"):
-        value = getattr(model, attr, None)
-        if isinstance(value, str) and value:
-            return value
-    config = getattr(model, "config", None)
-    if isinstance(config, dict):
-        candidate = config.get("model_id") or config.get("model")
-        if isinstance(candidate, str) and candidate:
-            return candidate
-    return type(model).__name__
+    return _model_fingerprint(model)
 
 
 # Top-level symbol declarations whose rename/removal in one file can break a

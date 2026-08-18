@@ -13,6 +13,7 @@ import { MatDialog, MatDialogModule } from '@angular/material/dialog';
 import { MatIconModule } from '@angular/material/icon';
 import { MatProgressBarModule } from '@angular/material/progress-bar';
 import { MatTooltipModule } from '@angular/material/tooltip';
+import { Router } from '@angular/router';
 import { EMPTY, Subscription, catchError, interval, throwError, timeout } from 'rxjs';
 import { AgentStudioFacade } from '../../../services/agent-studio.facade';
 import { AgentStudioStateService } from '../../../services/agent-studio-state.service';
@@ -79,6 +80,15 @@ function humanizeStatus(status: string): string {
   );
 }
 
+/** Parse an ISO (or Date-parseable) timestamp to epoch ms; `null` if unusable. */
+function parseTimestampMs(value: unknown): number | null {
+  if (typeof value !== 'string' || value.trim() === '') {
+    return null;
+  }
+  const ms = Date.parse(value);
+  return Number.isFinite(ms) ? ms : null;
+}
+
 // Back-loop destinations as 0-based indices into STUDIO_STAGES
 // (build=0, test=1, compose=2, personas=3). Named so the back-loops don't carry
 // bare magic numbers; keep in sync with the STUDIO_STAGES order.
@@ -127,6 +137,7 @@ export class AgentStudioPersonaComponent implements OnInit {
   private readonly facade = inject(AgentStudioFacade);
   private readonly dialog = inject(MatDialog);
   private readonly destroyRef = inject(DestroyRef);
+  private readonly router = inject(Router);
 
   readonly mode = signal<StudioPersonaMode>('persona');
 
@@ -385,6 +396,12 @@ export class AgentStudioPersonaComponent implements OnInit {
     }
     this.loadTeam(teamId);
     this.loadPersonas();
+    // Resume a run that survived this component being destroyed (nested audit
+    // child or a Stage 3/2 back-loop). The id lives on the session store.
+    const liveRunId = this.state.personaLiveRunId();
+    if (liveRunId) {
+      this.startPolling(liveRunId);
+    }
   }
 
   /** Switch the Stage-4 sub-mode between 'manual' (chat/pipeline) and 'persona'. */
@@ -564,6 +581,23 @@ export class AgentStudioPersonaComponent implements OnInit {
   }
 
   /**
+   * Open the full audit view for the current persona run inside Studio.
+   *
+   * Preconditions: none (safe to call with no run).
+   * Postconditions: when `run()` is set, navigates to
+   *   `/agent-studio/persona-run/:runId` with that run's `run_id`. When `run()`
+   *   is null, does not navigate. A rejected navigation sets `error()` rather
+   *   than failing silently.
+   */
+  openFullAudit(): void {
+    const id = this.run()?.run_id;
+    if (!id) return;
+    this.router.navigate(['/agent-studio', 'persona-run', id]).catch(() => {
+      this.error.set('Could not open the full audit.');
+    });
+  }
+
+  /**
    * Cancel the in-flight founder run via the cancel endpoint. No-ops unless the
    * founder job is in progress and no stop is already pending.
    *
@@ -604,20 +638,25 @@ export class AgentStudioPersonaComponent implements OnInit {
   private startPolling(runId: string): void {
     this.stopPolling();
     this.activeRunId = runId;
+    const sameRun = this.state.personaLiveRunId() === runId;
+    const resumeMs = sameRun ? this.state.personaLiveRunStartedAtMs() : null;
+    if (!sameRun) {
+      this.state.setPersonaLiveRunEndedAtMs(null);
+    }
+    const startedAtMs = resumeMs ?? Date.now();
+    this.state.setPersonaLiveRunStartedAtMs(startedAtMs);
+    this.state.setPersonaLiveRunId(runId);
     this.run.set(null);
     // Clear the prior run's pipeline state so a new launch doesn't briefly show
     // the last run's step progress before the first pipeline read lands.
     this.pipelineRun.set(null);
     // A fresh run can't be mid-stop; clear a stale "Stopping…" from a prior run.
     this.cancelling.set(false);
-    this.elapsedSec.set(0);
-    this.elapsedSub = interval(1000)
-      .pipe(takeUntilDestroyed(this.destroyRef))
-      .subscribe(() => {
-        if (!this.runTerminal()) {
-          this.elapsedSec.update((s) => s + 1);
-        }
-      });
+    const endedAtMs = sameRun ? this.state.personaLiveRunEndedAtMs() : null;
+    this.elapsedSec.set(Math.max(0, Math.floor(((endedAtMs ?? Date.now()) - startedAtMs) / 1000)));
+    if (endedAtMs == null) {
+      this.startElapsedTicker();
+    }
     // pollWhile fetches once immediately (so the panel isn't blank for a full
     // poll interval), then every POLL_MS thereafter, until a terminal status is
     // reached. A transient getRunStatus error is caught here (banner + rethrow)
@@ -662,8 +701,93 @@ export class AgentStudioPersonaComponent implements OnInit {
       this.fetchPipelineRun(teamId, detail.se_job_id);
     }
     if (terminal) {
+      this.freezeElapsedAtTerminal(detail);
       this.stopPolling();
+    } else if (this.state.personaLiveRunEndedAtMs() != null) {
+      this.reseedElapsedAfterRestart();
     }
+  }
+
+  /**
+   * A run this session had frozen as terminal is running again (resume/restart
+   * on the same `run_id` from Testing Personas). Drop the stale end timestamp
+   * and start a new elapsed window from now.
+   *
+   * Preconditions: `personaLiveRunEndedAtMs()` is non-null and the latest
+   *   status for the active run is non-terminal.
+   * Postconditions: `personaLiveRunEndedAtMs()` is null,
+   *   `personaLiveRunStartedAtMs()` is `Date.now()`, `elapsedSec` is 0, and
+   *   the per-second ticker is running.
+   */
+  private reseedElapsedAfterRestart(): void {
+    this.state.setPersonaLiveRunEndedAtMs(null);
+    this.state.setPersonaLiveRunStartedAtMs(Date.now());
+    this.elapsedSec.set(0);
+    this.startElapsedTicker();
+  }
+
+  /**
+   * Start the per-second elapsed ticker if it is not already running.
+   *
+   * Preconditions: none.
+   * Postconditions: `elapsedSub` is subscribed; a second call is a no-op.
+   */
+  private startElapsedTicker(): void {
+    if (this.elapsedSub) {
+      return;
+    }
+    this.elapsedSub = interval(1000)
+      .pipe(takeUntilDestroyed(this.destroyRef))
+      .subscribe(() => {
+        if (!this.runTerminal()) {
+          this.elapsedSec.update((s) => s + 1);
+        }
+      });
+  }
+
+  /**
+   * Cap elapsed time at the run's completion rather than wall-clock since launch.
+   *
+   * Preconditions: `detail` is the active run and is terminal.
+   * Postconditions: if `personaLiveRunStartedAtMs()` is null, this is a no-op —
+   *   that can only happen if something cleared the session's live-run state
+   *   (e.g. `setTeamId` on a team change) since this poll was issued, meaning
+   *   `detail` belongs to an orphaned run that Stage 4 must not resurrect
+   *   timing for. Otherwise `personaLiveRunEndedAtMs` is set and `elapsedSec`
+   *   is `endedAt - startedAt` in seconds. When both `created_at` and
+   *   `updated_at` parse, both endpoints are taken from the payload so
+   *   elapsed is not a browser-clock start minus a server-clock end. If
+   *   `updated_at` is later than a previously stored end, this is a new
+   *   attempt that finished while unmounted; that attempt's start was never
+   *   observed, so `elapsedSec` is 0. If the payload timestamps are missing,
+   *   falls back to the client-observed end (`storedEnd` or `Date.now()`).
+   */
+  private freezeElapsedAtTerminal(detail: PersonaTestRunDetail): void {
+    let startedAt = this.state.personaLiveRunStartedAtMs();
+    if (startedAt == null) {
+      return;
+    }
+    const storedEnd = this.state.personaLiveRunEndedAtMs();
+    const payloadStart = parseTimestampMs(detail.created_at);
+    const payloadEnd = parseTimestampMs(detail.updated_at);
+    let endedAt: number;
+    if (payloadStart != null && payloadEnd != null) {
+      startedAt = payloadStart;
+      endedAt = payloadEnd;
+    } else {
+      endedAt = payloadEnd ?? storedEnd ?? Date.now();
+    }
+    // A later terminal timestamp than the one already frozen means a subsequent
+    // attempt completed while Stage 4 was unmounted. The persisted start belongs
+    // to the prior attempt; using it would include the idle gap between them.
+    if (storedEnd != null && endedAt > storedEnd) {
+      startedAt = endedAt;
+      this.state.setPersonaLiveRunStartedAtMs(endedAt);
+    } else if (payloadStart != null && payloadEnd != null) {
+      this.state.setPersonaLiveRunStartedAtMs(payloadStart);
+    }
+    this.state.setPersonaLiveRunEndedAtMs(endedAt);
+    this.elapsedSec.set(Math.max(0, Math.floor((endedAt - startedAt) / 1000)));
   }
 
   /**

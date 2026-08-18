@@ -1,0 +1,22 @@
+@switch (activeStageDef().key) {
+  @case ('build') {
+    <app-agent-studio-build-agent />
+  }
+  @case ('test') {
+    <app-agent-studio-test-agent />
+  }
+  @case ('compose') {
+    <app-agent-studio-compose-team />
+  }
+  @case ('personas') {
+    <app-agent-studio-persona />
+  }
+  @default {
+    <app-agent-studio-stage-placeholder
+      [title]="activeStageDef().label"
+      [blurb]="activeStageDef().blurb"
+      [icon]="activeStageDef().icon"
+      [handoff]="state.handoff()"
+    />
+  }
+}

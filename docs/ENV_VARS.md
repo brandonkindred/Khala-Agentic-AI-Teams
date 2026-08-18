@@ -381,16 +381,21 @@ registration entirely (no assistant sub-app is ever mounted, regardless of
 traffic) — team proxy routes and health checks are unaffected.
 
 ### UNIFIED_API_AGENT_STUDIO_TEMPORAL_WORKER
-Agent Studio Temporal worker toggle (default: true). When true and Temporal
-is configured (`TEMPORAL_ADDRESS` set), the unified-api `lifespan` calls the
-Agent Studio worker starter; that starter no-ops when there are no authoring
-workflows to register. When Temporal is not configured, the lifespan skips
-the call (and the `agent_platform.studio.temporal.worker` import) entirely
-rather than calling a no-op starter. Authoring CRUD (conversations / clone /
-save) always uses in-process `AgentStudioService` and does not require
-`agent-studio-queue` either way. Set this flag to `false`/`0`/`no` to skip
-the starter call regardless of Temporal configuration. Other teams' Temporal
-workers are unaffected.
+Agent Studio authoring CRUD (conversations / clone / save) is served by **direct
+dispatch**: a bounded in-process thread pool that calls the `AgentStudioService`
+singleton directly, with no Temporal workflow and no dependency on
+`agent-studio-queue`. This is the supported authoring path regardless of this
+flag or of Temporal configuration.
+
+This flag only toggles the legacy `agent-studio-queue` Temporal worker starter
+(default: true), a no-op left over from before authoring CRUD was demoted off
+Temporal. When true and Temporal is configured (`TEMPORAL_ADDRESS` set), the
+unified-api `lifespan` calls that starter, which no-ops because there are no
+authoring workflows left to register. When Temporal is not configured, the
+lifespan skips the call (and the `agent_platform.studio.temporal.worker`
+import) entirely rather than calling a no-op starter. Set this flag to
+`false`/`0`/`no` to skip the starter call regardless of Temporal configuration.
+Other teams' Temporal workers are unaffected.
 
 ### ENABLE_LOG_API
 Exposes HTTP log endpoint.
@@ -1341,6 +1346,30 @@ between 1 and 2 chunks. Every submission with 2+ chunks measured here shows a
 net reduction, growing toward the fixed-overhead floor as chunk count rises.
 This is descriptive data for a future decision on the default, not a
 recommendation to flip it (deliberately out of scope here).
+
+---
+
+## Software Engineering QA Review
+
+### QA_REVIEW_CACHE_SIZE
+Max entries in the shared QA review-result cache (`shared.cache`; owned by
+`qa_agent.agent.QAExpertAgent.run`). See
+[`software_engineering_team/README.md`](../backend/agents/software_engineering_team/README.md#caching-sharedcache--redis):
+the key hashes the whole `QAInput` — code, language, task description,
+architecture, build errors, request mode, acceptance criteria, tool results —
+plus the resolved review model in one shot, the same whole-input key shape as
+code review's `CODE_REVIEW_SUBMISSION_CACHE_SIZE` cache, so any reviewed-file
+byte change naturally busts the key with no explicit invalidation logic. A
+cache hit skips the LLM call entirely. Unlike that submission cache's
+approved-only rule, every genuine (non-fallback) result is cached regardless
+of `approved` — the same **chunk-level** caching *policy* as
+`CODE_REVIEW_CHUNK_OUTCOME_CACHE_SIZE` — since `QAExpertAgent.run()` is a
+single atomic call with no chunk/reduce pipeline to short-circuit; only a
+structured-output parse/model failure is never cached, so it is retried for
+real on the next call. Backend failures (Redis unavailable, corrupt entry)
+fail open to a miss/recompute, same as every other `shared.cache` consumer.
+Default `256`, floor `0` (`0` disables the cache — every call re-invokes the
+model).
 
 ---
 
