@@ -4,42 +4,25 @@ from __future__ import annotations
 
 from typing import Any, Dict
 
-from software_engineering_team.devops_team._agent_template import DevOpsSingleShotAgent
+from software_engineering_team.devops_team._agent_template import DevOpsSingleShotAgent, _as_bool
 
 from .models import DeploymentStrategyAgentInput, DeploymentStrategyAgentOutput
 from .prompts import DEPLOYMENT_STRATEGY_PROMPT
-
-
-def _as_bool(value: Any) -> bool:
-    """Coerce an LLM-provided flag to a strict boolean.
-
-    JSON booleans already parse to ``bool``; this guards the common schema drift
-    where a model emits the STRING ``"false"``/``"true"``. ``bool("false")`` is
-    True, so a naive cast would report alerting as configured when the model
-    said the opposite. Only a real ``True`` or an explicit true-like string
-    (``true``/``1``/``yes``, case-insensitive) counts.
-
-    Preconditions:
-        - ``value`` is arbitrary parsed-JSON content (bool, str, number, None, ...).
-    Postconditions:
-        - Returns a bool; anything not unambiguously true (including
-          ``"false"``/``"0"``/``"no"``/None/other strings/numbers) returns False.
-    """
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, str):
-        return value.strip().lower() in ("true", "1", "yes")
-    return False
 
 
 class DeploymentStrategyAgent(DevOpsSingleShotAgent):
     """Produce deployment strategy artifacts via a single structured LLM call.
 
     Invariants: instance state is limited to ``llm`` and ``_model`` from the
-    base; ``run`` is stateless across calls.
+    base. ``run`` is deterministic for identical inputs and the resolved
+    model: repeated identical calls may return a cached result and skip the
+    LLM. Cache reads/writes are fail-open and gated by ``CACHE_ENV_VAR``.
     """
 
     PROMPT = DEPLOYMENT_STRATEGY_PROMPT
+    CACHE_NAMESPACE = "devops:deploy_strategy:v1"
+    CACHE_ENV_VAR = "DEVOPS_DEPLOYMENT_STRATEGY_CACHE_SIZE"
+    OUTPUT_MODEL = DeploymentStrategyAgentOutput
 
     def build_context(self, input_data: DeploymentStrategyAgentInput) -> str:
         """Build the deployment prompt context from the task spec.
@@ -84,3 +67,8 @@ class DeploymentStrategyAgent(DevOpsSingleShotAgent):
             alerting_configured=_as_bool(data.get("alerting_configured")),
             summary=data.get("summary", ""),
         )
+
+
+def clear_review_cache() -> None:
+    """Drop every cached deployment strategy agent result. Intended for test teardown."""
+    DeploymentStrategyAgent.clear_cache()
