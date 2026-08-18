@@ -31,7 +31,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional, Sequence
 
 # The two-insert idiom is inlined (rather than delegating to
 # ``shared.app.paths.bootstrap_syspath``) because importing ``shared.app`` runs its
@@ -142,3 +142,44 @@ class SECodeEngineProvider:
             run_kwargs["repo_reader"] = repo_reader
             force_in_process = True
         return CodeReviewAgent(force_in_process=force_in_process).run(review_input, **run_kwargs)
+
+    def classify_issue_scope(
+        self,
+        findings: Sequence[Any],
+        changed_context: Optional[Dict[str, str]],
+        task_description: str,
+    ) -> List[Any]:
+        """Classify each finding in/out-of-scope, delegating to ``scope_classifier``.
+
+        Preconditions: ``findings`` is a sequence of ``CodeReviewIssue``-like
+            objects. ``changed_context`` is ``None``/empty or a non-empty
+            ``{path: content}`` mapping of current file content;
+            ``CodeReviewInput`` requires non-empty ``files``, so an empty
+            mapping is treated the same as ``None`` (no grounding context,
+            matching ``api.pr_review._tag_review_issues_for_scope``'s existing
+            ``if scope_files: input_data = CodeReviewInput(...)`` pattern).
+
+        Postconditions: returns ``scope_classifier.classify_scope(findings,
+            ...)`` unchanged — a list positionally aligned 1:1 with
+            ``findings``. Resolves the ``code_review_verify`` client itself so
+            callers need no SE or ``llm_service`` imports; a client-resolution
+            failure degrades to ``llm=None`` (all findings verdict to
+            "unknown"), preserving ``classify_scope``'s never-raises guarantee
+            at this boundary too.
+        """
+        from llm_service import get_client
+        from software_engineering_team.code_review_agent.models import CodeReviewInput
+        from software_engineering_team.code_review_agent.scope_classifier import classify_scope
+
+        input_data = None
+        if changed_context:
+            input_data = CodeReviewInput(
+                files=dict(changed_context), task_description=task_description
+            )
+
+        try:
+            llm = get_client("code_review_verify")
+        except Exception:  # noqa: BLE001 — never raise; classify_scope treats llm=None as UNKNOWN
+            llm = None
+
+        return classify_scope(findings, llm=llm, input_data=input_data)
