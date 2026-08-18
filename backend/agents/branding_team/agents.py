@@ -326,9 +326,10 @@ def make_archetype_analyst() -> Agent:
         Returns an ``Agent`` named ``ArchetypeAnalyst`` whose structured
         output is a ``BrandArchetypesOutput`` selecting brand archetypes
         (count bounded by ``BRAND_ARCHETYPES_MIN``/``BRAND_ARCHETYPES_MAX``)
-        with rationale and personality traits, carrying
-        forward the prior narrative fields unchanged. The agent is
-        routed through the ``branding_narrative_messaging`` agent_key tier.
+        with rationale and personality traits — its own field only, the
+        Storyteller fragment is merged in separately by the orchestrator.
+        The agent is routed through the ``branding_narrative_messaging``
+        agent_key tier.
     """
     return build_agent(
         name="ArchetypeAnalyst",
@@ -361,8 +362,9 @@ def make_tagline_writer() -> Agent:
 
     Postconditions:
         Returns an ``Agent`` named ``TaglineWriter`` whose structured
-        output is a ``TaglineOutput`` adding a tagline, tagline
-        rationale, and elevator pitches to the prior narrative fields.
+        output is a ``TaglineOutput`` containing a tagline, tagline
+        rationale, and elevator pitches — its own fields only, merged
+        with the other five specialists' fragments by the orchestrator.
         The agent is routed through the ``branding_narrative_messaging``
         agent_key tier.
     """
@@ -400,9 +402,10 @@ def make_message_mapper() -> Agent:
 
     Postconditions:
         Returns an ``Agent`` named ``MessageMapper`` whose structured
-        output is a ``MessagingFrameworkOutput`` adding a messaging
-        framework and per-segment audience message maps to the prior
-        narrative fields. The agent is routed through the
+        output is a ``MessagingFrameworkOutput`` containing a messaging
+        framework and per-segment audience message maps — its own fields
+        only, merged with the other five specialists' fragments by the
+        orchestrator. The agent is routed through the
         ``branding_narrative_messaging`` agent_key tier.
     """
     return build_agent(
@@ -435,9 +438,10 @@ def make_persona_builder() -> Agent:
 
     Postconditions:
         Returns an ``Agent`` named ``PersonaBuilder`` whose structured
-        output is a ``PersonaProfilesOutput`` adding persona profiles (count
-        bounded by ``PERSONA_PROFILES_MIN``/``PERSONA_PROFILES_MAX``) to the
-        prior narrative fields. The agent is routed through the
+        output is a ``PersonaProfilesOutput`` containing persona profiles
+        (count bounded by ``PERSONA_PROFILES_MIN``/``PERSONA_PROFILES_MAX``)
+        — its own field only, merged with the other five specialists'
+        fragments by the orchestrator. The agent is routed through the
         ``branding_narrative_messaging`` agent_key tier.
     """
     return build_agent(
@@ -478,11 +482,11 @@ def make_voice_principles_drafter() -> Agent:
 
     Postconditions:
         Returns an ``Agent`` named ``VoicePrinciplesDrafter`` whose
-        structured output is a ``WritingGuidelinesOutput`` adding voice
-        principles, style dos/don'ts, and an editorial quality bar to the
-        prior narrative fields — the final step in narrative development.
-        The agent is routed through the ``branding_narrative_messaging``
-        agent_key tier.
+        structured output is a ``WritingGuidelinesOutput`` containing voice
+        principles, style dos/don'ts, and an editorial quality bar — its own
+        field only, merged with the other five specialists' fragments by the
+        orchestrator. The final step in narrative development. The agent is
+        routed through the ``branding_narrative_messaging`` agent_key tier.
     """
     return build_agent(
         name="VoicePrinciplesDrafter",
