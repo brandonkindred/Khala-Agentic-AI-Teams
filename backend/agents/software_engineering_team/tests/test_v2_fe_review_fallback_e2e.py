@@ -108,6 +108,9 @@ class _PerFileScriptedClient(DummyLLMClient):
 
     Markers are matched on the reasoning ``complete`` prompt; the format
     ``complete_json`` wrap does not carry ``### path ###`` headers.
+
+    Like ``_ScriptedClient``, ``call_count`` tracks formatting-pass
+    (``complete_json``) calls, incremented unconditionally on every call.
     """
 
     def __init__(self, responses_by_marker: dict[str, dict[str, Any]]) -> None:
@@ -120,8 +123,6 @@ class _PerFileScriptedClient(DummyLLMClient):
     def complete(self, prompt: str, **kwargs: Any) -> str:
         if CODE_TO_REVIEW_HEADER not in prompt:
             return super().complete(prompt, **kwargs)
-        with self._lock:
-            self.call_count += 1
         for marker, response in self._responses_by_marker.items():
             if marker in prompt:
                 self._tls.pending = response
@@ -129,6 +130,8 @@ class _PerFileScriptedClient(DummyLLMClient):
         raise AssertionError(f"no scripted response matches prompt: {prompt[:200]!r}")
 
     def complete_json(self, prompt: str, **kwargs: Any) -> dict[str, Any]:
+        with self._lock:
+            self.call_count += 1
         pending = getattr(self._tls, "pending", None)
         if pending is not None:
             self._tls.pending = None
