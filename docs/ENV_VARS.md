@@ -1308,6 +1308,30 @@ recommendation to flip it (deliberately out of scope here).
 
 ---
 
+## Software Engineering QA Review
+
+### QA_REVIEW_CACHE_SIZE
+Max entries in the shared QA review-result cache (`shared.cache`; owned by
+`qa_agent.agent.QAExpertAgent.run`). See
+[`software_engineering_team/README.md`](../backend/agents/software_engineering_team/README.md#caching-sharedcache--redis):
+the key hashes the whole `QAInput` — code, language, task description,
+architecture, build errors, request mode, acceptance criteria, tool results —
+plus the resolved review model in one shot, the same whole-input key shape as
+code review's `CODE_REVIEW_SUBMISSION_CACHE_SIZE` cache, so any reviewed-file
+byte change naturally busts the key with no explicit invalidation logic. A
+cache hit skips the LLM call entirely. Unlike that submission cache's
+approved-only rule, every genuine (non-fallback) result is cached regardless
+of `approved` — the same **chunk-level** caching *policy* as
+`CODE_REVIEW_CHUNK_OUTCOME_CACHE_SIZE` — since `QAExpertAgent.run()` is a
+single atomic call with no chunk/reduce pipeline to short-circuit; only a
+structured-output parse/model failure is never cached, so it is retried for
+real on the next call. Backend failures (Redis unavailable, corrupt entry)
+fail open to a miss/recompute, same as every other `shared.cache` consumer.
+Default `256`, floor `0` (`0` disables the cache — every call re-invokes the
+model).
+
+---
+
 ## Shared Infrastructure and Storage
 
 ### SE_WORKSPACE_DIR
