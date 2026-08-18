@@ -29,7 +29,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-from typing import Callable, Optional, TypeVar
+from typing import Callable, Optional, Protocol, TypeVar
 
 from pydantic import BaseModel
 
@@ -38,6 +38,64 @@ from shared.env_config import env_int
 logger = logging.getLogger(__name__)
 
 TModel = TypeVar("TModel", bound=BaseModel)
+
+
+class _CacheBackend(Protocol):
+    """Structural shape this module needs from a ``shared.cache.SharedCache``.
+
+    A local ``Protocol`` (rather than importing ``SharedCache`` directly)
+    keeps this module's only coupling to the concrete cache implementation
+    a duck-typed one, while still letting mypy/pyright validate call sites
+    -- callers pass an already-resolved ``shared.cache.SharedCache``, which
+    satisfies this structurally with no explicit subclassing. Mirrors
+    ``shared.cache.SharedCache``'s own contract (see
+    ``shared/cache/interface.py``); this module only reads/writes opaque
+    bytes and never inspects ``clear``'s return value.
+    """
+
+    def get(self, key: str) -> Optional[bytes]:
+        """Return the cached payload for ``key``, or ``None`` on miss.
+
+        Preconditions:
+            - ``key`` is an opaque, non-empty string.
+        Postconditions:
+            - Returns the exact bytes previously ``set``, or ``None``. Never
+              raises for a backend outage (returns ``None`` instead).
+        """
+        ...
+
+    def set(self, key: str, value: bytes, *, max_entries: int) -> None:
+        """Store ``value`` under ``key``, evicting oldest entries past capacity.
+
+        Preconditions:
+            - ``max_entries`` >= 0. ``0`` means "do not store" (no-op).
+        Postconditions:
+            - On success the next ``get(key)`` returns ``value`` (until
+              eviction or TTL). Backend failures are swallowed (fail-open).
+        """
+        ...
+
+    def delete(self, key: str) -> None:
+        """Drop a single key (and any associated single-flight markers).
+
+        Preconditions:
+            - ``key`` is an opaque, non-empty string.
+        Postconditions:
+            - Subsequent ``get(key)`` misses until a new ``set``. Backend
+              failures are swallowed (fail-open).
+        """
+        ...
+
+    def clear(self) -> Optional[int]:
+        """Drop every entry in this namespace.
+
+        Preconditions:
+            - None.
+        Postconditions:
+            - Returns the number of entries removed on success, or ``None``
+              when a backend failure aborts the clear (Redis fail-open).
+        """
+        ...
 
 
 def cache_namespace_for(stem: str) -> str:
@@ -92,7 +150,7 @@ def build_model_cache_key(input_data: BaseModel, model_fp: str) -> str:
     return hashlib.sha256(body.encode("utf-8")).hexdigest()
 
 
-def clear_cache_namespace(label: str, resolve_cache: Callable[[], object]) -> None:
+def clear_cache_namespace(label: str, resolve_cache: Callable[[], _CacheBackend]) -> None:
     """Fail-open clear of a shared-cache namespace.
 
     Preconditions:
@@ -112,7 +170,7 @@ def clear_cache_namespace(label: str, resolve_cache: Callable[[], object]) -> No
         logger.warning("%s: cache clear failed", label, exc_info=True)
 
 
-def get_cached_model(label: str, cache: object, cache_key: str, output_model: type[TModel]) -> Optional[TModel]:
+def get_cached_model(label: str, cache: _CacheBackend, cache_key: str, output_model: type[TModel]) -> Optional[TModel]:
     """Look up ``cache_key`` in ``cache``, validating against ``output_model``.
 
     Preconditions:
@@ -148,7 +206,7 @@ def get_cached_model(label: str, cache: object, cache_key: str, output_model: ty
         return None
 
 
-def set_cached_model(label: str, cache: object, cache_key: str, result: BaseModel, *, capacity: int) -> None:
+def set_cached_model(label: str, cache: _CacheBackend, cache_key: str, result: BaseModel, *, capacity: int) -> None:
     """Write a genuine result back to the cache. Fail-open.
 
     Preconditions:
