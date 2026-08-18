@@ -1,10 +1,25 @@
-import { ChangeDetectionStrategy, Component, EventEmitter, Input, Output, inject, signal } from '@angular/core';
+import {
+  ChangeDetectionStrategy,
+  Component,
+  DestroyRef,
+  EventEmitter,
+  Input,
+  Output,
+  inject,
+  signal,
+} from '@angular/core';
+import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { DatePipe } from '@angular/common';
 import { MatButtonModule } from '@angular/material/button';
+import { MatDialog } from '@angular/material/dialog';
 import { MatIconModule } from '@angular/material/icon';
 import { MatMenuModule } from '@angular/material/menu';
 import { MatProgressSpinnerModule } from '@angular/material/progress-spinner';
-import { extractErrorDetail } from '../../../../core/error-handler.interceptor';
+import { extractErrorDetail } from '../../../../shared/extract-error-detail';
+import {
+  ConfirmDialogComponent,
+  type ConfirmDialogData,
+} from '../../../../shared/confirm-dialog/confirm-dialog.component';
 import { AgentStudioFacade } from '../../../../services/agent-studio.facade';
 import type { AgentStudioDraftSummary } from '../../../../models/agent-studio.model';
 
@@ -16,7 +31,8 @@ const PAGE_SIZE = 10;
  * a trailing "Show older" control, and emits `draftSelected` when a row is
  * picked — hydration itself is the shell's responsibility (it needs
  * `AgentStudioStateService` and a second façade call this menu has no reason to
- * know about).
+ * know about). Per-row delete emits `draftDeleted` for the shell to clear
+ * loaded state when the active draft is removed.
  */
 @Component({
   selector: 'app-load-draft-menu',
@@ -28,6 +44,8 @@ const PAGE_SIZE = 10;
 })
 export class LoadDraftMenuComponent {
   private readonly facade = inject(AgentStudioFacade);
+  private readonly dialog = inject(MatDialog);
+  private readonly destroyRef = inject(DestroyRef);
 
   /** Disables the trigger while the shell is mid-hydration from a prior selection. */
   @Input() busy = false;
@@ -35,20 +53,26 @@ export class LoadDraftMenuComponent {
   /** Emits the selected draft's id; this component performs no hydration itself. */
   @Output() readonly draftSelected = new EventEmitter<string>();
 
+  /** Emits the deleted draft's id after a successful DELETE; shell clears state if active. */
+  @Output() readonly draftDeleted = new EventEmitter<string>();
+
   readonly drafts = signal<AgentStudioDraftSummary[]>([]);
   readonly loading = signal(false);
   readonly error = signal<string | null>(null);
   readonly hasMore = signal(false);
+  /** Draft ids whose DELETE is in flight; disables that row's trigger while present. */
+  readonly deletingIds = signal<ReadonlySet<string>>(new Set());
   private nextOffset = 0;
-  /** Bumped on every `onOpened()`; lets a fetch from a since-reopened menu
-   *  recognize its response is stale and discard it instead of appending
-   *  duplicate rows / double-advancing the offset. */
+  /** Bumped on every `onOpened()` and after a successful delete so an
+   *  in-flight pagination fetch (whose offset was computed against the
+   *  pre-delete list) is discarded instead of appending a skipped/duplicated
+   *  boundary row. */
   private openToken = 0;
 
   /**
    * Wired to `<mat-menu (opened)>`. Always refetches page 1 rather than
-   * reusing a stale list, so a draft saved since the menu was last opened
-   * (or deleted, once #5914 lands) shows up correctly.
+   * reusing a stale list, so a draft saved or deleted since the menu was
+   * last opened shows up correctly.
    *
    * Preconditions: none.
    * Postconditions: `drafts()`/`hasMore()` reflect the first page; `loading()`
@@ -77,32 +101,113 @@ export class LoadDraftMenuComponent {
   }
 
   /**
-   * Select a draft row.
+   * Open (load) a draft row.
    *
    * Preconditions: `draftId` is a non-empty id from a rendered row.
    * Postconditions: `draftSelected` emits exactly once with `draftId`; no
    *   HTTP call is made by this component.
    */
-  select(draftId: string): void {
+  openDraft(draftId: string): void {
     this.draftSelected.emit(draftId);
+  }
+
+  /**
+   * Whether `draftId` currently has a DELETE in flight.
+   *
+   * Preconditions: none.
+   * Postconditions: true iff `confirmDelete` has started HTTP for `draftId`
+   *   that has not yet settled.
+   */
+  isDeleting(draftId: string): boolean {
+    return this.deletingIds().has(draftId);
+  }
+
+  /**
+   * Open the danger confirm, then DELETE the draft.
+   *
+   * Preconditions: `draft.draft_id` is a non-empty id from a rendered row.
+   * Postconditions: on confirm+success, that id is absent from `drafts()`,
+   *   `nextOffset` equals `drafts().length`, any in-flight Show-older fetch is
+   *   discarded (and the next page is refetched at the new offset when one
+   *   was pending), and `draftDeleted` emitted once. On cancel or failure,
+   *   `drafts()` unchanged and `draftDeleted` not emitted. A DELETE already
+   *   in flight for this id is a no-op; other ids remain independently
+   *   deletable.
+   */
+  confirmDelete(draft: AgentStudioDraftSummary): void {
+    if (this.isDeleting(draft.draft_id)) return;
+    const data: ConfirmDialogData = {
+      title: 'Delete this draft?',
+      message: `"${draft.name}" will be permanently deleted. This cannot be undone.`,
+      confirmLabel: 'Delete',
+      cancelLabel: 'Keep draft',
+      variant: 'danger',
+    };
+    this.dialog
+      .open<ConfirmDialogComponent, ConfirmDialogData, boolean>(ConfirmDialogComponent, { data })
+      .afterClosed()
+      .pipe(takeUntilDestroyed(this.destroyRef))
+      .subscribe((confirmed) => {
+        if (confirmed !== true) return;
+        this.deletingIds.update((ids) => new Set(ids).add(draft.draft_id));
+        this.facade
+          .deleteDraft(draft.draft_id)
+          .pipe(takeUntilDestroyed(this.destroyRef))
+          .subscribe({
+            next: () => {
+              this.drafts.update((rows) => rows.filter((row) => row.draft_id !== draft.draft_id));
+              this.deletingIds.update((ids) => {
+                const next = new Set(ids);
+                next.delete(draft.draft_id);
+                return next;
+              });
+              this.nextOffset = this.drafts().length;
+              const refetch = this.loading();
+              // Invalidate any in-flight "Show older" fetch: its offset was
+              // computed against the pre-delete list, so its response would
+              // append a skipped/duplicated boundary row. Bumping the token
+              // makes fetchPage discard that stale response on arrival.
+              this.openToken += 1;
+              if (refetch) {
+                this.fetchPage(this.openToken);
+              }
+              this.draftDeleted.emit(draft.draft_id);
+            },
+            error: () => {
+              this.deletingIds.update((ids) => {
+                const next = new Set(ids);
+                next.delete(draft.draft_id);
+                return next;
+              });
+              // The Delete click already closed this menu (Material closes
+              // the whole chain on any mat-menu-item click), so `error()` —
+              // rendered only inside this component's own template — would
+              // never reach the user. The global HTTP interceptor toasts
+              // instead; do not also set local error state here.
+            },
+          });
+      });
   }
 
   private fetchPage(token: number): void {
     this.loading.set(true);
     this.error.set(null);
-    this.facade.listDrafts(PAGE_SIZE, this.nextOffset).subscribe({
-      next: (rows) => {
-        if (token !== this.openToken) return;
-        this.drafts.update((existing) => [...existing, ...rows]);
-        this.hasMore.set(rows.length >= PAGE_SIZE);
-        this.nextOffset += rows.length;
-        this.loading.set(false);
-      },
-      error: (err) => {
-        if (token !== this.openToken) return;
-        this.loading.set(false);
-        this.error.set(extractErrorDetail(err, 'Failed to load drafts.'));
-      },
-    });
+    this.facade
+      .listDrafts(PAGE_SIZE, this.nextOffset)
+      .pipe(takeUntilDestroyed(this.destroyRef))
+      .subscribe({
+        next: (rows) => {
+          if (token !== this.openToken) return;
+          this.drafts.update((existing) => [...existing, ...rows]);
+          this.hasMore.set(rows.length >= PAGE_SIZE);
+          this.nextOffset += rows.length;
+          this.loading.set(false);
+        },
+        error: (err) => {
+          if (token !== this.openToken) return;
+          this.loading.set(false);
+          this.error.set(extractErrorDetail(err, 'Failed to load drafts.'));
+        },
+      });
   }
 }

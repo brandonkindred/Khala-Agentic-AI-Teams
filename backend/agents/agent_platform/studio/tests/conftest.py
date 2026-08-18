@@ -16,11 +16,11 @@ def _forbid_temporal_execute(monkeypatch: pytest.MonkeyPatch) -> None:
 
     Not autouse here: this guard is specific to the dispatch contract, not a
     suite-wide invariant, so a future non-CRUD test added to this directory
-    is not forced to opt out of it. Each dispatch test file
-    (``test_direct_dispatch.py``, ``test_temporal_enabled.py``,
-    ``test_temporal_worker_absent.py``) opts in with
+    is not forced to opt out of it. ``test_direct_dispatch.py`` opts in with
     ``pytestmark = pytest.mark.usefixtures("_forbid_temporal_execute")`` so
-    the guard is still defined once rather than re-implemented per file.
+    the guard is defined once here rather than re-implemented per file.
+    (``test_temporal_bootstrap.py`` covers a different invariant — the
+    workflows staying gone — and does not use this fixture.)
     """
 
     def _boom(*_a, **_k):
