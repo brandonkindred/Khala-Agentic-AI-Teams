@@ -261,6 +261,33 @@ describe('LoadDraftMenuComponent', () => {
       ]);
     });
 
+    it('confirmDelete discards a stale in-flight Show-older page error after refetching', () => {
+      openSpy.mockReturnValue({ afterClosed: () => of(true) } as unknown as ReturnType<MatDialog['open']>);
+      const fullPage = Array.from({ length: 10 }, (_, i) => summary(`d-${i}`, `n${i}`));
+      const stalePage = new Subject<AgentStudioDraftSummary[]>();
+      const listDrafts = vi
+        .fn()
+        .mockReturnValueOnce(of(fullPage))
+        .mockReturnValueOnce(stalePage.asObservable())
+        .mockReturnValueOnce(of([summary('d-10', 'n10')]));
+      const { fixture, facade } = configure(
+        listDrafts,
+        vi.fn().mockReturnValue(of({ draft_id: 'd-0', status: 'deleted' })),
+      );
+      fixture.componentInstance.onOpened();
+      fixture.componentInstance.loadMore();
+      fixture.componentInstance.confirmDelete(summary('d-0', 'n0'));
+      expect(facade.listDrafts).toHaveBeenLastCalledWith(10, 9);
+      stalePage.error(new Error('network error'));
+      // The stale page's error must not clobber the state the refetch already set.
+      expect(fixture.componentInstance.error()).toBeNull();
+      expect(fixture.componentInstance.loading()).toBe(false);
+      expect(fixture.componentInstance.drafts().map((d) => d.draft_id)).toEqual([
+        ...fullPage.slice(1).map((d) => d.draft_id),
+        'd-10',
+      ]);
+    });
+
     it('confirmDelete API failure leaves the row and does not emit draftDeleted (the global HTTP toast surfaces the error, not local error())', () => {
       openSpy.mockReturnValue({ afterClosed: () => of(true) } as unknown as ReturnType<MatDialog['open']>);
       const deleteDraft = vi.fn().mockReturnValue(throwError(() => ({ error: { detail: 'nope' } })));

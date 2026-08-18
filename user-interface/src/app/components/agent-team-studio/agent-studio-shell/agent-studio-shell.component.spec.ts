@@ -287,6 +287,24 @@ describe('AgentStudioShellComponent', () => {
       expect(component.state.registryAgentId()).toBe('reg-2');
     });
 
+    it('a superseded loadDraft call discards its late loadDraft error response', () => {
+      const firstDraft = new Subject<AgentStudioDraft>();
+      facade.loadDraft.mockReturnValueOnce(firstDraft.asObservable());
+      component.loadDraft('d-1'); // in flight, not yet resolved
+
+      facade.loadDraft.mockReturnValueOnce(of(draft({ registryAgentId: 'reg-2' })));
+      component.loadingDraft.set(false); // bypass the busy-guard, isolate the token guard
+      component.loadDraft('d-2'); // supersedes the first, resolves synchronously
+
+      // Simulate a third load now in flight so a wrongly-applied stale error
+      // (which would call loadingDraft.set(false)) is observable.
+      component.loadingDraft.set(true);
+      firstDraft.error(new Error('404'));
+      // The stale first response's error must not touch the newer load's state.
+      expect(component.state.registryAgentId()).toBe('reg-2');
+      expect(component.loadingDraft()).toBe(true);
+    });
+
     it('a superseded loadDraft call discards its late getProcess response', () => {
       facade.loadDraft.mockReturnValueOnce(
         of(draft({ teamId: 'team-1', processId: 'proc-1' })),
@@ -304,6 +322,25 @@ describe('AgentStudioShellComponent', () => {
       firstProcess.complete();
       // The stale getProcess response must not re-navigate the stepper.
       expect(component.state.activeStage()).toBe(1);
+    });
+
+    it('a superseded loadDraft call discards its late getProcess error response', () => {
+      facade.loadDraft.mockReturnValueOnce(of(draft({ teamId: 'team-1', processId: 'proc-1' })));
+      const firstProcess = new Subject<ProcessDefinition>();
+      agenticTeamApi.getProcess.mockReturnValueOnce(firstProcess.asObservable());
+      component.loadDraft('d-1'); // loadDraft resolves, getProcess left pending
+
+      facade.loadDraft.mockReturnValueOnce(of(draft({ registryAgentId: 'reg-2' })));
+      component.loadingDraft.set(false); // bypass the busy-guard, isolate the token guard
+      component.loadDraft('d-2'); // resolves synchronously to Stage 2
+
+      expect(component.state.activeStage()).toBe(1);
+      // Sentinel: a wrongly-applied stale error would clear this via
+      // setComposeProcessStatus(null) and re-navigate to Stage 3 (Compose).
+      component.state.setComposeProcessStatus('complete');
+      firstProcess.error(new Error('404'));
+      expect(component.state.activeStage()).toBe(1);
+      expect(component.state.composeProcessStatus()).toBe('complete');
     });
 
     it('the Load-draft menu is wired to loadDraft and reflects loadingDraft as busy', () => {
